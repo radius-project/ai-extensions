@@ -322,4 +322,29 @@ describe("resolveFixtureClusterTarget", () => {
       variable
     );
   });
+
+  it("accepts exact Azure resource-group and AKS name length limits", () => {
+    expect(
+      resolveFixtureClusterTarget(
+        `a${"b".repeat(89)}`,
+        `a${"b".repeat(61)}z`,
+        true
+      )
+    ).toEqual({
+      resourceGroup: `a${"b".repeat(89)}`,
+      clusterName: `a${"b".repeat(61)}z`
+    });
+  });
+
+  it.each([
+    ["resource group", `a${"b".repeat(90)}`, "cluster", "RESOURCE_GROUP"],
+    ["AKS cluster", "resource-group", `a${"b".repeat(62)}z`, "AKS_CLUSTER_NAME"]
+  ])(
+    "rejects a %s one character over its limit",
+    (_label, group, cluster, variable) => {
+      expect(() => resolveFixtureClusterTarget(group, cluster, true)).toThrow(
+        variable
+      );
+    }
+  );
 });

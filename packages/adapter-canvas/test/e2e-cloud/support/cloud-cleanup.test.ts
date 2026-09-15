@@ -6,6 +6,7 @@ import {
   selectExpiredFallbackBranches,
   selectExpiredFallbackPullRequests,
   selectExpiredServicePrincipals,
+  selectExpectedRoleAssignments,
   selectOpenPullRequestHeadRefs,
   selectTestResourceGroups
 } from "./cloud-cleanup.js";
@@ -262,10 +263,123 @@ describe("selectTestResourceGroups", () => {
     ).toEqual([]);
   });
 
+  it("never selects the configured shared resource group", () => {
+    expect(
+      selectTestResourceGroups(
+        [
+          {
+            name: "radtest-canvas-shared",
+            tags: {
+              "github-run-id": "1234",
+              "radius-canvas-e2e": "true"
+            }
+          },
+          {
+            name: "radtest-canvas-disposable",
+            tags: {
+              "github-run-id": "5678",
+              "radius-canvas-e2e": "true"
+            }
+          }
+        ],
+        "radtest-canvas",
+        "RADTEST-CANVAS-SHARED"
+      )
+    ).toEqual([{ name: "radtest-canvas-disposable", runId: "5678" }]);
+  });
+
   it("rejects an unreadable listing", () => {
     expect(() => selectTestResourceGroups({}, "radtest-canvas")).toThrow(
       "did not return a JSON array"
     );
+  });
+});
+
+describe("selectExpectedRoleAssignments", () => {
+  const scope = "/subscriptions/sub/resourceGroups/shared";
+  const clusterScope = `${scope}/providers/Microsoft.ContainerService/managedClusters/aks`;
+  const expected = [
+    { roleDefinitionName: "Contributor", scope },
+    {
+      roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin",
+      scope: clusterScope
+    }
+  ];
+
+  it("selects only allowlisted assignments for the exact principal", () => {
+    expect(
+      selectExpectedRoleAssignments(
+        [
+          {
+            id: "assignment-1",
+            principalId: "SP-1",
+            roleDefinitionName: "Contributor",
+            scope
+          },
+          {
+            id: "assignment-2",
+            principalId: "sp-1",
+            roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin",
+            scope: clusterScope
+          },
+          {
+            id: "baseline",
+            principalId: "cluster-identity",
+            roleDefinitionName: "Contributor",
+            scope
+          }
+        ],
+        "sp-1",
+        expected
+      )
+    ).toEqual([
+      {
+        id: "assignment-1",
+        roleDefinitionName: "Contributor",
+        scope
+      },
+      {
+        id: "assignment-2",
+        roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin",
+        scope: clusterScope
+      }
+    ]);
+  });
+
+  it("refuses an unexpected role for the target principal", () => {
+    expect(() =>
+      selectExpectedRoleAssignments(
+        [
+          {
+            id: "assignment-owner",
+            principalId: "sp-1",
+            roleDefinitionName: "Owner",
+            scope
+          }
+        ],
+        "sp-1",
+        expected
+      )
+    ).toThrow(/Refusing to delete unexpected role assignment "Owner"/);
+  });
+
+  it.each([
+    ["missing principal", "", "service-principal id"],
+    [
+      "malformed assignment",
+      "sp-1",
+      "did not include id, roleDefinitionName, and scope"
+    ]
+  ])("rejects %s input", (_label, principalId, message) => {
+    expect(() =>
+      selectExpectedRoleAssignments(
+        principalId ?
+          [{ id: "", principalId, roleDefinitionName: "Contributor", scope }]
+        : [],
+        principalId,
+        expected
+      )
+    ).toThrow(message);
   });
 });
 

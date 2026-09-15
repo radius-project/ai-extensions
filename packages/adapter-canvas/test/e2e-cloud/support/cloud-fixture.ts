@@ -142,6 +142,11 @@ export interface CloudFixture {
   ): Promise<readonly KubernetesWorkload[]>;
   /** Reports whether the application namespace exists on the target cluster. */
   namespaceExists(namespace: string): Promise<boolean>;
+  /** Registers the exact application target that fixture reclamation may remove. */
+  registerApplicationCleanupTarget(
+    application: string,
+    namespace: string
+  ): void;
   /**
    * Best-effort removal of product-created state left behind by this run.
    *
@@ -403,28 +408,50 @@ export async function createCloudFixture(
         `az aks create ${clusterName}`
       );
     } else {
-      const actualLocation = expectSuccess(
-        await commands.runAz([
-          "aks",
-          "show",
-          "--resource-group",
-          resourceGroup,
-          "--name",
-          clusterName,
-          "--subscription",
-          subscriptionId,
-          "--query",
-          "location",
-          "--output",
-          "tsv"
-        ]),
-        `az aks show ${clusterName}`
-      )
-        .stdout.trim()
-        .toLowerCase();
+      const context = `az aks show ${clusterName}`;
+      const cluster = parseJsonObject(
+        expectSuccess(
+          await commands.runAz([
+            "aks",
+            "show",
+            "--resource-group",
+            resourceGroup,
+            "--name",
+            clusterName,
+            "--subscription",
+            subscriptionId,
+            "--query",
+            "{location:location,provisioningState:provisioningState,powerState:powerState.code}",
+            "--output",
+            "json"
+          ]),
+          context
+        ),
+        context
+      );
+      const actualLocation =
+        typeof cluster.location === "string" ?
+          cluster.location.trim().toLowerCase()
+        : "";
+      const provisioningState =
+        typeof cluster.provisioningState === "string" ?
+          cluster.provisioningState.trim()
+        : "";
+      const powerState =
+        typeof cluster.powerState === "string" ? cluster.powerState.trim() : "";
       if (!actualLocation)
         throw new Error(
           `The precreated AKS cluster ${resourceGroup}/${clusterName} did not report a location.`
+        );
+      if (provisioningState !== "Succeeded")
+        throw new Error(
+          `The precreated AKS cluster ${resourceGroup}/${clusterName} is not ready: ` +
+            `provisioning state is "${provisioningState || "(missing)"}", expected "Succeeded".`
+        );
+      if (powerState !== "Running")
+        throw new Error(
+          `The precreated AKS cluster ${resourceGroup}/${clusterName} is not runnable: ` +
+            `power state is "${powerState || "(missing)"}", expected "Running".`
         );
       if (options.location !== undefined && actualLocation !== location)
         throw new Error(
@@ -589,6 +616,10 @@ export async function createCloudFixture(
    */
   const observedPresent = new Set<string>();
   const observedCredentialApps = new Map<string, AppRegistrationRecord>();
+  const applicationCleanupTargets = new Map<
+    string,
+    { application: string; namespace: string }
+  >();
   const APP_REGISTRATION_KEY = "app-registration";
   const GITHUB_ENVIRONMENT_KEY = "github-environment";
   const roleAssignmentKey = (principalId: string) =>
@@ -635,7 +666,8 @@ export async function createCloudFixture(
         baselineSha,
         environmentName,
         expectedAppName,
-        roleAssignmentScopes,
+        roleAssignmentScopes:
+          ownsInfrastructure ? roleAssignmentScopes : undefined,
         statePackage
       });
       if (findings.length === 0) return;
@@ -972,12 +1004,31 @@ export async function createCloudFixture(
       );
     },
 
+    registerApplicationCleanupTarget(application, namespace) {
+      const requiredApplication = requireValue(
+        application,
+        "An application name is required to register Kubernetes cleanup."
+      );
+      const requiredNamespace = requireValue(
+        namespace,
+        "A namespace is required to register Kubernetes cleanup."
+      );
+      applicationCleanupTargets.set(
+        `${requiredNamespace}\n${requiredApplication}`,
+        {
+          application: requiredApplication,
+          namespace: requiredNamespace
+        }
+      );
+    },
+
     async readApplicationWorkloads(application, namespace) {
       const workloads = await listWorkloads(application, namespace);
       return workloads === "no-namespace" ? [] : workloads;
     },
 
     async assertApplicationWorkloadsPresent(application, namespace) {
+      fixture.registerApplicationCleanupTarget(application, namespace);
       let lastSeen: readonly KubernetesWorkload[] | "no-namespace" = [];
       return pollForValue({
         ports,
@@ -1049,6 +1100,34 @@ export async function createCloudFixture(
         }
       };
 
+      for (const target of applicationCleanupTargets.values())
+        await attempt(
+          `Kubernetes workloads for ${target.application} in ${target.namespace}`,
+          async () => {
+            const kubeconfig = await clusterKubeconfig(assertionTimeoutMs);
+            const result = await commands.runKubectl(
+              [
+                "--kubeconfig",
+                kubeconfig,
+                "delete",
+                "all",
+                "--namespace",
+                target.namespace,
+                "--selector",
+                radiusApplicationSelector(target.application),
+                "--ignore-not-found=true",
+                "--wait=true"
+              ],
+              assertionTimeoutMs
+            );
+            if (result.code !== 0 && !isMissingNamespace(result))
+              expectSuccess(
+                result,
+                `kubectl delete all -n ${target.namespace}`
+              );
+          }
+        );
+
       // Delete service principals explicitly before applications. Application
       // deletion normally cascades, but an orphaned principal can survive after
       // its application is already gone and would otherwise wedge every later
@@ -1060,7 +1139,71 @@ export async function createCloudFixture(
         failures.push(`list service principals: ${describeError(error)}`);
         return [] as Array<{ objectId: string }>;
       });
-      for (const principal of principals)
+      for (const principal of principals) {
+        let assignments: RoleAssignmentRecord[];
+        try {
+          assignments = await listRoleAssignmentsAtScopes(
+            commands,
+            roleAssignmentScopes,
+            assertionTimeoutMs,
+            ports.now
+          );
+        } catch (error) {
+          failures.push(
+            `list role assignments for service principal ${principal.objectId}: ${describeError(error)}`
+          );
+          continue;
+        }
+        const principalAssignments = assignments.filter(
+          (assignment) =>
+            assignment.principalId.toLowerCase() ===
+            principal.objectId.toLowerCase()
+        );
+        const unexpected = principalAssignments.filter(
+          (assignment) =>
+            !requiredRoleAssignments.some(
+              (expected) =>
+                assignment.scope.toLowerCase() ===
+                  expected.scope.toLowerCase() &&
+                assignment.roleDefinitionName.toLowerCase() ===
+                  expected.roleDefinitionName.toLowerCase()
+            )
+        );
+        if (unexpected.length > 0) {
+          failures.push(
+            `refuse service principal ${principal.objectId}: unexpected role assignment(s): ${unexpected
+              .map(
+                (assignment) =>
+                  `"${assignment.roleDefinitionName}" at ${assignment.scope}`
+              )
+              .join(", ")}`
+          );
+          continue;
+        }
+        let assignmentDeletionFailed = false;
+        for (const assignment of principalAssignments) {
+          try {
+            expectSuccess(
+              await commands.runAz([
+                "role",
+                "assignment",
+                "delete",
+                "--ids",
+                assignment.id,
+                "--output",
+                "none"
+              ]),
+              `az role assignment delete ${assignment.id}`
+            );
+            reclaimed.push(`role assignment ${assignment.id}`);
+          } catch (error) {
+            assignmentDeletionFailed = true;
+            failures.push(
+              `role assignment ${assignment.id}: ${describeError(error)}`
+            );
+          }
+        }
+        if (assignmentDeletionFailed) continue;
         await attempt(`service principal ${principal.objectId}`, async () => {
           expectSuccess(
             await commands.runAz([
@@ -1075,6 +1218,7 @@ export async function createCloudFixture(
             `az ad sp delete ${principal.objectId}`
           );
         });
+      }
 
       const apps = await listAppRegistrations(commands, expectedAppName).catch(
         (error: unknown) => {
@@ -1276,7 +1420,7 @@ interface LeakProbeInput {
   readonly baselineSha: string;
   readonly environmentName: string;
   readonly expectedAppName: string;
-  readonly roleAssignmentScopes: readonly string[];
+  readonly roleAssignmentScopes?: readonly string[];
   readonly statePackage: string;
 }
 
@@ -1355,14 +1499,16 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
 
   // Azure's --scope filter applies atScope(), so query both exact scopes the
   // product writes instead of assuming the resource-group query includes AKS.
-  const assignments = await listRoleAssignments(
-    commands,
-    input.roleAssignmentScopes
-  );
-  for (const assignment of assignments)
-    findings.push(
-      `role assignment "${assignment.roleDefinitionName}" for principal ${assignment.principalId} at ${assignment.scope}`
+  if (input.roleAssignmentScopes) {
+    const assignments = await listRoleAssignments(
+      commands,
+      input.roleAssignmentScopes
     );
+    for (const assignment of assignments)
+      findings.push(
+        `role assignment "${assignment.roleDefinitionName}" for principal ${assignment.principalId} at ${assignment.scope}`
+      );
+  }
 
   const environment = await commands.runGh([
     "api",

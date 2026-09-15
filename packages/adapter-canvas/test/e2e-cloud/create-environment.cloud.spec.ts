@@ -678,6 +678,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         KUBERNETES_NAMESPACE,
         deployedApplication
       );
+      cloud.registerApplicationCleanupTarget(
+        deployedApplication,
+        deployedNamespace
+      );
 
       await page
         .locator("#deploy-app-select")

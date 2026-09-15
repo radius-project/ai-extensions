@@ -21,6 +21,17 @@ interface CleanupResourceGroup {
   readonly runId: string;
 }
 
+export interface CleanupRoleAssignment {
+  readonly id: string;
+  readonly roleDefinitionName: string;
+  readonly scope: string;
+}
+
+export interface ExpectedRoleAssignment {
+  readonly roleDefinitionName: string;
+  readonly scope: string;
+}
+
 const ISO_INSTANT_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,7}))?Z$/;
 const GENERATED_FALLBACK_BRANCH_PATTERN =
@@ -229,8 +240,10 @@ export function selectExpiredEnvironments(
 
 export function selectTestResourceGroups(
   payload: unknown,
-  prefix: string
+  prefix: string,
+  excludedResourceGroup?: string
 ): CleanupResourceGroup[] {
+  const excluded = excludedResourceGroup?.trim().toLowerCase();
   const groups: CleanupResourceGroup[] = [];
   for (const entry of requireArray(payload, "Azure resource groups")) {
     const item = asRecord(entry);
@@ -239,12 +252,56 @@ export function selectTestResourceGroups(
     if (
       typeof item?.name === "string" &&
       item.name.startsWith(prefix) &&
+      item.name.toLowerCase() !== excluded &&
       tags?.["radius-canvas-e2e"] === "true" &&
       /^\d+$/.test(runId)
     )
       groups.push({ name: item.name, runId });
   }
   return groups;
+}
+
+export function selectExpectedRoleAssignments(
+  payload: unknown,
+  principalId: string,
+  expected: readonly ExpectedRoleAssignment[]
+): CleanupRoleAssignment[] {
+  const normalizedPrincipalId = principalId.trim().toLowerCase();
+  if (!normalizedPrincipalId)
+    throw new Error("A service-principal id is required for RBAC cleanup.");
+  const expectedKeys = new Set(
+    expected.map(
+      (assignment) =>
+        `${assignment.scope.toLowerCase()}\n${assignment.roleDefinitionName.toLowerCase()}`
+    )
+  );
+  const assignments: CleanupRoleAssignment[] = [];
+  for (const [index, entry] of requireArray(
+    payload,
+    "Azure role assignments"
+  ).entries()) {
+    const item = asRecord(entry);
+    if (
+      requireString(item?.principalId).toLowerCase() !== normalizedPrincipalId
+    )
+      continue;
+    const assignment = {
+      id: requireString(item?.id),
+      roleDefinitionName: requireString(item?.roleDefinitionName),
+      scope: requireString(item?.scope)
+    };
+    if (!assignment.id || !assignment.roleDefinitionName || !assignment.scope)
+      throw new Error(
+        `Azure role assignment ${index} did not include id, roleDefinitionName, and scope.`
+      );
+    const key = `${assignment.scope.toLowerCase()}\n${assignment.roleDefinitionName.toLowerCase()}`;
+    if (!expectedKeys.has(key))
+      throw new Error(
+        `Refusing to delete unexpected role assignment "${assignment.roleDefinitionName}" at ${assignment.scope} for principal ${principalId}.`
+      );
+    assignments.push(assignment);
+  }
+  return assignments;
 }
 
 export function selectExpiredFallbackPullRequests(

@@ -34,6 +34,8 @@ const RESOURCE_GROUP = `radtest-canvas-${UNIQUE_ID}`;
 const CLUSTER = `aks-${UNIQUE_ID}`;
 const SHARED_RESOURCE_GROUP = "ai_extensions_test";
 const SHARED_CLUSTER = "ai_extensions_aks";
+const SHARED_SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${SHARED_RESOURCE_GROUP}`;
+const SHARED_CLUSTER_SCOPE = `${SHARED_SCOPE}/providers/Microsoft.ContainerService/managedClusters/${SHARED_CLUSTER}`;
 const ENVIRONMENT = `radtest-${UNIQUE_ID}`;
 const SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}`;
 const CLUSTER_SCOPE = `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`;
@@ -86,6 +88,14 @@ const FIC_LIST: readonly string[] = [
   "list"
 ];
 const ROLE_LIST: readonly string[] = ["role", "assignment", "list"];
+
+function clusterState(
+  location = "centralus",
+  provisioningState = "Succeeded",
+  powerState = "Running"
+): string {
+  return JSON.stringify({ location, provisioningState, powerState });
+}
 
 function roleAssignment(
   principalId = "sp-1",
@@ -333,7 +343,7 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: ["aks", "show"],
-            respond: { stdout: "centralus\n" }
+            respond: { stdout: clusterState() }
           }
         ],
         {},
@@ -349,7 +359,8 @@ describe("createCloudFixture", () => {
       expect(fixture.location).toBe("centralus");
       expect(fake.commands.commandLines("az")).toEqual([
         `aks show --resource-group ${SHARED_RESOURCE_GROUP} --name ${SHARED_CLUSTER} ` +
-          `--subscription ${SUBSCRIPTION} --query location --output tsv`
+          `--subscription ${SUBSCRIPTION} ` +
+          "--query {location:location,provisioningState:provisioningState,powerState:powerState.code} --output json"
       ]);
 
       await fixture.dispose();
@@ -363,7 +374,7 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: ["aks", "show"],
-            respond: { stdout: "CentralUS\n" }
+            respond: { stdout: clusterState("CentralUS") }
           }
         ],
         {},
@@ -395,7 +406,7 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: ["aks", "show"],
-            respond: { stdout: "eastus\n" }
+            respond: { stdout: clusterState("eastus") }
           }
         ],
         {},
@@ -425,7 +436,7 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: ["aks", "show"],
-            respond: { stdout: " \n" }
+            respond: { stdout: clusterState("") }
           }
         ],
         {},
@@ -436,6 +447,71 @@ describe("createCloudFixture", () => {
       );
 
       await expect(attempt).rejects.toThrow("did not report a location");
+    });
+
+    it.each([
+      [
+        "provisioning",
+        clusterState("centralus", "Updating"),
+        /provisioning state is "Updating"/
+      ],
+      [
+        "power",
+        clusterState("centralus", "Succeeded", "Stopped"),
+        /power state is "Stopped"/
+      ],
+      [
+        "missing provisioning",
+        JSON.stringify({ location: "centralus", powerState: "Running" }),
+        /provisioning state is "\(missing\)"/
+      ],
+      [
+        "missing power",
+        JSON.stringify({
+          location: "centralus",
+          provisioningState: "Succeeded"
+        }),
+        /power state is "\(missing\)"/
+      ]
+    ])(
+      "rejects a precreated cluster with an invalid %s state",
+      async (_label, stdout, message) => {
+        const { attempt } = expectConstructionToFail(
+          [
+            {
+              tool: "az",
+              match: ["aks", "show"],
+              respond: { stdout }
+            }
+          ],
+          {},
+          {
+            resourceGroup: SHARED_RESOURCE_GROUP,
+            clusterName: SHARED_CLUSTER
+          }
+        );
+
+        await expect(attempt).rejects.toThrow(message);
+      }
+    );
+
+    it("rejects malformed precreated cluster state", async () => {
+      const { attempt } = expectConstructionToFail(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: "not json" }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(attempt).rejects.toThrow(/not valid JSON/);
     });
 
     it("releases the lease when the precreated cluster cannot be read", async () => {
@@ -935,6 +1011,44 @@ describe("createCloudFixture", () => {
           )}`
         )
       );
+    });
+
+    it("allows unrelated baseline role assignments on a shared cluster", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          },
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                roleAssignment(
+                  "cluster-identity",
+                  "Network Contributor",
+                  "baseline-assignment",
+                  SHARED_SCOPE
+                )
+              ])
+            }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      expect(
+        fake.commands
+          .commandLines("az")
+          .some((line) => line.startsWith("role assignment list"))
+      ).toBe(false);
     });
 
     it("names an unnamed role definition rather than failing to report it", async () => {
@@ -2637,6 +2751,290 @@ describe("createCloudFixture", () => {
       ]);
       expect(fake.commands.commandLines("az")).toContain(
         "ad sp delete --id orphan-sp --output none"
+      );
+    });
+
+    it("deletes only the expected role assignments before deleting the product service principal", async () => {
+      const contributor = roleAssignment(
+        "sp-1",
+        "Contributor",
+        "assignment-contributor",
+        SHARED_SCOPE
+      );
+      const locks = roleAssignment(
+        "sp-1",
+        "Locks Contributor",
+        "assignment-locks",
+        SHARED_SCOPE
+      );
+      const clusterAdmin = roleAssignment(
+        "sp-1",
+        "Azure Kubernetes Service RBAC Cluster Admin",
+        "assignment-cluster",
+        SHARED_CLUSTER_SCOPE
+      );
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          },
+          {
+            tool: "az",
+            match: SP_LIST,
+            respond: { stdout: '[{"id":"sp-1"}]' }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SHARED_SCOPE],
+            respond: { stdout: JSON.stringify([contributor, locks]) }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SHARED_CLUSTER_SCOPE],
+            respond: { stdout: JSON.stringify([clusterAdmin]) }
+          },
+          {
+            tool: "az",
+            match: ["role", "assignment", "delete"],
+            respond: {}
+          },
+          { tool: "az", match: ["ad", "sp", "delete"], respond: {} }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "role assignment assignment-contributor",
+        "role assignment assignment-locks",
+        "role assignment assignment-cluster",
+        "service principal sp-1"
+      ]);
+      const az = fake.commands.commandLines("az");
+      expect(az).toContain(
+        "role assignment delete --ids assignment-contributor --output none"
+      );
+      expect(az).toContain(
+        "role assignment delete --ids assignment-locks --output none"
+      );
+      expect(az).toContain(
+        "role assignment delete --ids assignment-cluster --output none"
+      );
+      expect(
+        az.indexOf("ad sp delete --id sp-1 --output none")
+      ).toBeGreaterThan(
+        az.indexOf(
+          "role assignment delete --ids assignment-cluster --output none"
+        )
+      );
+    });
+
+    it("refuses to delete a service principal carrying an unexpected shared-scope role", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          },
+          {
+            tool: "az",
+            match: SP_LIST,
+            respond: { stdout: '[{"id":"sp-1"}]' }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SHARED_SCOPE],
+            respond: {
+              stdout: JSON.stringify([
+                roleAssignment(
+                  "sp-1",
+                  "Owner",
+                  "assignment-owner",
+                  SHARED_SCOPE
+                )
+              ])
+            }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /refuse service principal sp-1: unexpected role assignment\(s\): "Owner"/
+      );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad sp delete --id sp-1 --output none"
+      );
+      expect(
+        fake.commands
+          .commandLines("az")
+          .some((line) => line.startsWith("role assignment delete"))
+      ).toBe(false);
+    });
+
+    it("does not delete the service principal when an expected role assignment cannot be removed", async () => {
+      const contributor = roleAssignment(
+        "sp-1",
+        "Contributor",
+        "assignment-contributor",
+        SHARED_SCOPE
+      );
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          },
+          {
+            tool: "az",
+            match: SP_LIST,
+            respond: { stdout: '[{"id":"sp-1"}]' }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SHARED_SCOPE],
+            respond: { stdout: JSON.stringify([contributor]) }
+          },
+          failing("az", ["role", "assignment", "delete"], "AuthorizationFailed")
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /role assignment assignment-contributor: .*AuthorizationFailed/
+      );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad sp delete --id sp-1 --output none"
+      );
+    });
+
+    it("deletes only the registered application workloads from the shared namespace", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {}
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "Kubernetes workloads for demo in default-demo"
+      ]);
+      expect(fake.commands.commandLines("kubectl")).toEqual([
+        `--kubeconfig ${WORKSPACE}/kubeconfig delete all --namespace default-demo ` +
+          "--selector radapp.io/application=demo --ignore-not-found=true --wait=true"
+      ]);
+    });
+
+    it("treats an already-missing application namespace as reclaimed", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {
+            code: 1,
+            stderr:
+              'Error from server (NotFound): namespaces "default-demo" not found'
+          }
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "Kubernetes workloads for demo in default-demo"
+      ]);
+    });
+
+    it("keeps targeted workload reclamation idempotent", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {},
+          times: 2
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await fixture.reclaimLeakedProductArtifacts();
+      await fixture.reclaimLeakedProductArtifacts();
+
+      expect(fake.commands.commandLines("kubectl")).toHaveLength(2);
+      expect(
+        fake.commands
+          .commandLines("az")
+          .filter((line) => line.includes("get-credentials"))
+      ).toHaveLength(1);
+    });
+
+    it.each([
+      ["application", "", "default-demo", "application name"],
+      ["namespace", "demo", " ", "namespace"]
+    ])(
+      "rejects an empty cleanup %s",
+      async (_label, application, namespace, message) => {
+        const { fixture } = await createHarness();
+
+        expect(() =>
+          fixture.registerApplicationCleanupTarget(application, namespace)
+        ).toThrow(message);
+      }
+    );
+
+    it("reports targeted workload cleanup failure and continues reclaiming other artifacts", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        failing("kubectl", ["delete", "all"], "namespace unavailable"),
+        {
+          tool: "gh",
+          match: ["api", MATCHING_REFS_PATH],
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
+        },
+        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes workloads for demo in default-demo: .*namespace unavailable.*Reclaimed before failing: branch radius\/setup-a/s
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
     });
 

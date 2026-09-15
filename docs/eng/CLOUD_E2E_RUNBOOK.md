@@ -79,7 +79,7 @@ The product is not implicated. Establish that, then decide whether to re-run or 
 
 A previous run did not clean up, so this one refused to start rather than asserting against someone else's leftovers. This is the failure the clean-slate probe exists to produce, and it is working correctly when you see it.
 
-The cleanup workflow reclaims product-created Entra and GitHub state automatically, twice daily. It also retains the legacy sweep for tagged per-run resource groups created by older workflow revisions. It never deletes the configured shared resource group or AKS cluster. **Run it by hand rather than deleting things yourself**:
+The cleanup workflow reclaims product-created Entra, Azure RBAC, and GitHub state automatically, twice daily. It also retains the legacy sweep for tagged per-run resource groups created by older workflow revisions. The sweep explicitly excludes `AIEXT_CLOUD_E2E_RESOURCE_GROUP`, even if that group later matches the legacy prefix and tags. It never deletes the configured shared resource group or AKS cluster. **Run it by hand rather than deleting things yourself**:
 
 ```bash
 gh workflow run cloud-e2e-cleanup.yml --repo radius-project/ai-extensions
@@ -104,9 +104,9 @@ gh api "repos/<fixture>/git/ref/heads/<default-branch>" --jq .object.sha
 
 Two boundaries worth knowing before you go looking for a gap:
 
-- **The shared AKS cluster is fixture scaffolding, not disposable test output.** CI verifies the configured cluster and uses it for discovery and deployment, but neither fixture teardown nor scheduled cleanup deletes it. The legacy resource-group sweep only matches groups with the `radtest-canvas` prefix and `radius-canvas-e2e=true` tag.
+- **The shared AKS cluster is fixture scaffolding, not disposable test output.** CI requires the cluster to report provisioning state `Succeeded` and power state `Running`, then uses it for discovery and deployment. Neither fixture teardown nor scheduled cleanup deletes it. Reclamation deletes only Kubernetes deployments and pods carrying this run's Radius application label; it does not delete the namespace or unrelated workloads.
 - **The Entra application is repository-scoped, not run-scoped.** The product derives its name from the repository alone, with no per-run uniqueness. That is why both workflows share one `concurrency` group with `cancel-in-progress: false`: two concurrent runs would contend for one Entra object, and a cancelled run strands cloud state that turns into tomorrow's leaked-state failure.
-- **Product deletion and fixture reclamation own different artifacts.** Deployment deletion preserves the GitHub Environment, its variables, the repository-scoped Entra application, its federated credentials, and its role assignments so the environment can deploy again. Final environment deletion removes the GitHub Environment and its per-environment federated credentials, as implemented by `radius-project/ai-extensions#398`, while deliberately retaining the shared Entra application and role assignments. After assertions, `reclaimLeakedProductArtifacts()` removes those retained shared artifacts as expected and remains a safety net for product-owned state left by an interrupted or failed run.
+- **Product deletion and fixture reclamation own different artifacts.** Deployment deletion preserves the GitHub Environment, its variables, the repository-scoped Entra application, its federated credentials, and its role assignments so the environment can deploy again. Final environment deletion removes the GitHub Environment and its per-environment federated credentials, as implemented by `radius-project/ai-extensions#398`, while deliberately retaining the shared Entra application and role assignments. After assertions, `reclaimLeakedProductArtifacts()` removes only the three expected assignments for the product-created service principal at the configured resource-group and AKS scopes. An unexpected role fails cleanup for manual investigation instead of being deleted.
 
 ## When a run is cancelled
 
@@ -123,7 +123,7 @@ The workflow reads these repository Actions variables:
 | `AIEXT_CLOUD_E2E_RESOURCE_GROUP`     | `ai_extensions_test`                   | Selects the precreated resource group             |
 | `AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME`   | `ai_extensions_aks`                    | Selects the precreated AKS cluster                |
 
-The fixture repository is pinned by [`FIXTURE_BASELINE_SHA`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts). CI requires both cluster variables, verifies the cluster through `az aks show`, and fails before the product journey if either value is absent, malformed, inaccessible, or in a different location. Local runs may omit both variables to provision disposable infrastructure in the developer's own subscription.
+The fixture repository is pinned by [`FIXTURE_BASELINE_SHA`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts). CI requires both cluster variables, verifies the cluster through `az aks show`, and fails before the product journey if either value is absent, malformed, inaccessible, in a different location, not fully provisioned, or stopped. Local runs may omit both variables to provision disposable infrastructure in the developer's own subscription.
 
 The dedicated Cloud E2E GitHub App must remain installed only on the fixture repository with `actions: write`, `administration: read`, `contents: write`, `deployments: read`, `environments: write`, `pull_requests: write`, `secrets: write`, `variables: write`, and `workflows: write`. Store its client ID and private key as `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
 

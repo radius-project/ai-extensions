@@ -174,6 +174,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RESOURCE_GROUP_PREFIX: ${{ steps.pin.outputs.resource-group-prefix }}
+          SHARED_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         shell: bash
         run: |
@@ -187,16 +188,18 @@ jobs:
             -o json >"$groups"
 
           node --input-type=module - \
-            "$groups" "$RESOURCE_GROUP_PREFIX" "$test_groups" <<'NODE'
+            "$groups" "$RESOURCE_GROUP_PREFIX" "$SHARED_RESOURCE_GROUP" "$test_groups" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [groupsFile, prefix, testGroupsFile] = process.argv.slice(2);
+          const [groupsFile, prefix, sharedResourceGroup, testGroupsFile] = process.argv.slice(2);
           const { selectTestResourceGroups } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
           );
           const groups = JSON.parse(await readFile(groupsFile, "utf8"));
           await writeFile(
             testGroupsFile,
-            JSON.stringify(selectTestResourceGroups(groups, prefix))
+            JSON.stringify(
+              selectTestResourceGroups(groups, prefix, sharedResourceGroup)
+            )
           );
           NODE
 
@@ -241,8 +244,11 @@ jobs:
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
         env:
           APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
+          AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -298,9 +304,66 @@ jobs:
           NODE
 
           principals_purged=0
+          assignments_purged=0
           failures=()
           while read -r id; do
             [[ -n "$id" ]] || continue
+            resource_group_scope="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
+            cluster_scope="$resource_group_scope/providers/Microsoft.ContainerService/managedClusters/$AKS_CLUSTER_NAME"
+            resource_group_assignments="$RUNNER_TEMP/resource-group-role-assignments-$id.json"
+            cluster_assignments="$RUNNER_TEMP/cluster-role-assignments-$id.json"
+            assignments="$RUNNER_TEMP/role-assignments-$id.json"
+            selected_assignments="$RUNNER_TEMP/selected-role-assignments-$id.json"
+
+            if ! az role assignment list \
+                --scope "$resource_group_scope" \
+                --query '[].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}' \
+                -o json >"$resource_group_assignments" ||
+              ! az role assignment list \
+                --scope "$cluster_scope" \
+                --query '[].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}' \
+                -o json >"$cluster_assignments"; then
+              failures+=("list role assignments for service principal $id")
+              continue
+            fi
+            jq -s 'add' "$resource_group_assignments" "$cluster_assignments" >"$assignments"
+            if ! node --input-type=module - \
+                "$assignments" "$id" "$resource_group_scope" "$cluster_scope" "$selected_assignments" <<'NODE'
+            import { readFile, writeFile } from "node:fs/promises";
+            const [assignmentsFile, principalId, resourceGroupScope, clusterScope, selectedFile] =
+              process.argv.slice(2);
+            const { selectExpectedRoleAssignments } = await import(
+              "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+            );
+            const assignments = JSON.parse(await readFile(assignmentsFile, "utf8"));
+            const selected = selectExpectedRoleAssignments(assignments, principalId, [
+              { roleDefinitionName: "Contributor", scope: resourceGroupScope },
+              { roleDefinitionName: "Locks Contributor", scope: resourceGroupScope },
+              {
+                roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin",
+                scope: clusterScope
+              }
+            ]);
+            await writeFile(selectedFile, JSON.stringify(selected));
+            NODE
+            then
+              failures+=("validate role assignments for service principal $id")
+              continue
+            fi
+
+            assignment_failure=0
+            while read -r assignment_id; do
+              [[ -n "$assignment_id" ]] || continue
+              if ! az role assignment delete --ids "$assignment_id" --output none; then
+                failures+=("delete role assignment $assignment_id")
+                assignment_failure=1
+                continue
+              fi
+              assignments_purged=$((assignments_purged + 1))
+            done < <(jq -r '.[].id' "$selected_assignments")
+            if (( assignment_failure != 0 )); then
+              continue
+            fi
             echo "Deleting leaked service principal $APPLICATION_NAME ($id), created before $cutoff."
             if ! az ad sp delete --id "$id"; then
               failures+=("delete service principal $id")
@@ -321,6 +384,7 @@ jobs:
           done < <(jq -r '.[].id' "$expired_applications")
 
           echo "- Entra service principals purged: $principals_purged" >>"$GITHUB_STEP_SUMMARY"
+          echo "- Azure role assignments purged: $assignments_purged" >>"$GITHUB_STEP_SUMMARY"
           echo "- Entra applications purged: $applications_purged" >>"$GITHUB_STEP_SUMMARY"
           if (( ${#failures[@]} > 0 )); then
             printf 'Entra cleanup failures:\n' >&2

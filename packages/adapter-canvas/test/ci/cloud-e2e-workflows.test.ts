@@ -421,6 +421,32 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(token?.with?.["permission-environments"]).toBe("write");
   });
 
+  it("removes only allowlisted assignments before deleting leaked service principals", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge).find((step) =>
+      step.run?.includes("selectExpectedRoleAssignments")
+    );
+    const script = purge?.run ?? "";
+
+    expect(purge?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(purge?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(script).toContain("selectExpectedRoleAssignments");
+    expect(script).toContain(
+      'roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin"'
+    );
+    expect(script).toContain(
+      'az role assignment delete --ids "$assignment_id"'
+    );
+    expect(script.indexOf("az role assignment delete")).toBeLessThan(
+      script.indexOf("az ad sp delete")
+    );
+    expect(script).toContain("assignment_failure");
+  });
+
   it("deletes tagged resource groups the suite creates without waiting for age", async () => {
     // The shared Radius purge job remains a safety net, but this workflow owns
     // test leaks first. The fixture tag is what stops a prefix match from
@@ -436,11 +462,17 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(purge?.env?.RESOURCE_GROUP_PREFIX).toBe(
       "${{ steps.pin.outputs.resource-group-prefix }}"
     );
+    expect(purge?.env?.SHARED_RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
     expect(purge?.env?.GH_TOKEN).toBe("${{ github.token }}");
     expect(purge?.env?.SUBSCRIPTION_ID).toBe(
       "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
     );
     expect(script).toContain("starts_with(name, '$RESOURCE_GROUP_PREFIX')");
+    expect(script).toContain(
+      "selectTestResourceGroups(groups, prefix, sharedResourceGroup)"
+    );
     expect(script).toContain('--subscription "$SUBSCRIPTION_ID"');
     expect(script).not.toContain("MAX_AGE_HOURS hours ago");
     expect(script).toContain("gh run view");
