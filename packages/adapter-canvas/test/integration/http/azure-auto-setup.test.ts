@@ -4,14 +4,25 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import {
   addLegacyStep,
+  canDismissOperation,
+  canResumeInput,
   createOperation,
+  dismissOperation,
+  finish,
   fromPersistedOperation,
+  INPUT_REQUIRED_STATE,
+  isTerminalState,
   requireInput,
   resumeAfterInput,
+  toClientView,
   toPersistedOperation
 } from "../../../src/operations.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "../../../src/server/routes/azure-auto-setup-application.js";
 import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
+import {
+  createOperationsStatusRoutes,
+  type OperationActionRecord
+} from "../../../src/server/routes/operations-status.js";
 import { buildRadiusAppProvenanceTags } from "../../../src/azure-oidc.js";
 import { deterministicProviderUuid } from "../../../src/server/services/provider-mutation-recovery.js";
 import type {
@@ -21,6 +32,7 @@ import type {
   AzureAutoSetupOperation
 } from "../../../src/server/routes/azure-auto-setup-types.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
+import type { RouteHandlerRegistry } from "../../../src/server/route-table.js";
 import {
   createAzureAutoSetupTestDependencies,
   type FakeCallerIdentity
@@ -43,9 +55,13 @@ afterEach(async () => {
 
 function start(
   dependencies: AzureAutoSetupDependencies,
-  unmatchedCalls: string[] = []
+  unmatchedCalls: string[] = [],
+  additionalRoutes: RouteHandlerRegistry = {}
 ): void {
-  const routes = createTestRouteTable(createAzureAutoSetupRoutes(dependencies));
+  const routes = createTestRouteTable({
+    ...createAzureAutoSetupRoutes(dependencies),
+    ...additionalRoutes
+  });
   container = createCanvasServer({
     createHttpServer: (handler) => createServer(handler),
     createRequestHandler: ({ instanceId, instances, markActivity }) =>
@@ -54,6 +70,7 @@ function start(
         instances,
         routes,
         markActivity,
+        validateBrowserMutation: () => true,
         handleUnmatchedRequest: (request, response) => {
           unmatchedCalls.push(request.url || "");
           response.writeHead(404);
@@ -104,13 +121,19 @@ const CREATE_BODY = {
 async function successfulSetup(
   createApp: boolean,
   caller: FakeCallerIdentity = { type: "user" },
-  options: { requireSmrPrompt?: boolean } = {}
+  options: {
+    requireSmrPrompt?: boolean;
+    liveDrift?: "caller" | "oidc";
+    publicResume?: boolean;
+  } = {}
 ) {
   const unmatchedCalls: string[] = [];
   const azCalls: string[] = [];
   const githubCalls: string[] = [];
   const ownerObjectId =
     caller.type === "servicePrincipal" ? SP_OBJECT_ID : OBJECT_ID;
+  let callerReads = 0;
+  let repositoryReads = 0;
   let credentialContents = "";
   let operation: AzureAutoSetupOperation =
     options.requireSmrPrompt ?
@@ -129,7 +152,24 @@ async function successfulSetup(
         steps: [] as Array<{ label: string }>
       };
   operation.currentStage = "authorize_identity";
+  if (options.publicResume) {
+    const request = {
+      azure: {
+        ...CREATE_BODY,
+        serviceManagementReference: ""
+      }
+    };
+    Object.assign(operation, {
+      request,
+      resumeRequest: structuredClone(request)
+    });
+  }
   let persistedOperation: ReturnType<typeof toPersistedOperation> | null = null;
+  let scheduledPersistedOperation: ReturnType<
+    typeof toPersistedOperation
+  > | null = null;
+  let baseUrl = "";
+  let scheduledAttempt: Promise<Response> | null = null;
   const requiredTags = buildRadiusAppProvenanceTags({
     repo: "octo/app",
     environment: "dev",
@@ -176,7 +216,15 @@ async function successfulSetup(
       return { code: 0, stdout: APP_ID, stderr: "" };
     }
     if (caller.type === "user" && line.startsWith("ad signed-in-user show ")) {
-      return { code: 0, stdout: ownerObjectId, stderr: "" };
+      callerReads += 1;
+      return {
+        code: 0,
+        stdout:
+          options.liveDrift === "caller" && callerReads === 2 ?
+            "77777777-7777-7777-7777-777777777777"
+          : ownerObjectId,
+        stderr: ""
+      };
     }
     if (
       caller.type === "servicePrincipal" &&
@@ -257,12 +305,13 @@ async function successfulSetup(
       runGitHubJson: async (path) => {
         githubCalls.push(path);
         if (path === "/repos/octo/app") {
+          repositoryReads += 1;
           return {
             ok: true,
             status: 200,
             json: {
               full_name: "octo/app",
-              id: 5,
+              id: options.liveDrift === "oidc" && repositoryReads === 2 ? 6 : 5,
               owner: { id: 7 }
             }
           };
@@ -302,16 +351,90 @@ async function successfulSetup(
     },
     sleep: async () => {}
   });
-  start(dependencies, unmatchedCalls);
+  const operationRoutes =
+    options.publicResume ?
+      createOperationsStatusRoutes(
+        {
+          latest: () => null,
+          latestAny: () => null,
+          get: () => operation,
+          toClientView,
+          productVersion: () => "test",
+          now: () => Date.now()
+        },
+        {
+          isValidRepoSlug: () => true,
+          isResourceGroupName: () => true,
+          isAksClusterName: () => true,
+          isKubernetesNamespace: () => true,
+          isUuid: () => true,
+          buildStages: () => [],
+          createOperation: () => ({ ...operation }),
+          claimSelectionHandle: () => {
+            throw new Error("operation creation is not expected");
+          },
+          startConflict: () => null,
+          startOperation: () => {
+            throw new Error("operation creation is not expected");
+          },
+          persistOperations: () => dependencies.operations.persist(),
+          finish,
+          scheduleEnvironmentOperation: () => {
+            throw new Error("operation creation is not expected");
+          },
+          errorMessage: (error) =>
+            error instanceof Error ? error.message : String(error)
+        },
+        {
+          getOperation: () => operation as OperationActionRecord,
+          canResumeInput,
+          resumeAfterInput,
+          requireInput,
+          finish,
+          isTerminalState,
+          canDismissOperation,
+          dismissOperation,
+          persistOperations: () => dependencies.operations.persist(),
+          toClientView,
+          scheduleEnvironmentOperation: (_instanceId, scheduledOperation) => {
+            scheduledPersistedOperation =
+              toPersistedOperation(scheduledOperation);
+            const request = scheduledOperation.request as {
+              azure: Record<string, unknown>;
+            };
+            scheduledAttempt = fetch(`${baseUrl}/api/azure-auto-setup`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Radius-Server-Owned": "token-a"
+              },
+              body: JSON.stringify({
+                ...CREATE_BODY,
+                ...request.azure,
+                operationId: scheduledOperation.operationId
+              })
+            });
+            return true;
+          },
+          errorMessage: (error) =>
+            error instanceof Error ? error.message : String(error),
+          inputRequiredState: INPUT_REQUIRED_STATE
+        }
+      )
+    : {};
+  start(dependencies, unmatchedCalls, operationRoutes);
+  const running = await entry();
+  baseUrl = running.baseUrl;
   return {
     get operation() {
       return operation;
     },
-    running: await entry(),
+    running,
     unmatchedCalls,
     azCalls,
     githubCalls,
     persistedOperation: () => persistedOperation,
+    scheduledPersistedOperation: () => scheduledPersistedOperation,
     restorePersistedOperation: () => {
       if (!persistedOperation) {
         throw new Error("No Azure setup operation was persisted.");
@@ -320,6 +443,12 @@ async function successfulSetup(
         persistedOperation
       ) as AzureAutoSetupOperation;
       return operation;
+    },
+    scheduledAttempt: () => {
+      if (!scheduledAttempt) {
+        throw new Error("The public resume route did not schedule setup.");
+      }
+      return scheduledAttempt;
     }
   };
 }
@@ -576,18 +705,179 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     ).toHaveLength(1);
     expect(
       setup.azCalls.filter((line) => line === "account show --output json")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(
       setup.azCalls.filter((line) => line.startsWith("ad app list "))
     ).toHaveLength(1);
     expect(
       setup.azCalls.filter((line) => line.startsWith("ad signed-in-user show "))
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(
       setup.githubCalls.filter((path) => path === "/repos/octo/app")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(setup.operation.azureAppCreateContinuation).toBeUndefined();
     expect(setup.unmatchedCalls).toEqual([]);
+  });
+
+  it.each(["caller", "oidc"] as const)(
+    "falls back over real loopback HTTP when live %s context changes during the SMR prompt",
+    async (liveDrift) => {
+      const setup = await successfulSetup(
+        true,
+        { type: "user" },
+        { requireSmrPrompt: true, liveDrift }
+      );
+      const first = await fetch(
+        `${setup.running.baseUrl}/api/azure-auto-setup`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Server-Owned": "token-a"
+          },
+          body: JSON.stringify(CREATE_BODY)
+        }
+      );
+      expect(first.status).toBe(400);
+
+      setup.restorePersistedOperation();
+      resumeAfterInput(setup.operation);
+      const second = await fetch(
+        `${setup.running.baseUrl}/api/azure-auto-setup`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Server-Owned": "token-a"
+          },
+          body: JSON.stringify({
+            ...CREATE_BODY,
+            operationId: "op_http_smr",
+            serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+          })
+        }
+      );
+
+      expect(second.status).toBe(200);
+      expect(
+        setup.azCalls.filter((line) => line.startsWith("account set "))
+      ).toHaveLength(2);
+      expect(
+        setup.azCalls.filter((line) => line.startsWith("ad app list "))
+      ).toHaveLength(2);
+      expect(
+        setup.githubCalls.filter((path) => path === "/repos/octo/app")
+      ).toHaveLength(liveDrift === "oidc" ? 3 : 2);
+    }
+  );
+
+  it("revalidates a service-principal caller before direct SMR resume", async () => {
+    const setup = await successfulSetup(
+      true,
+      { type: "servicePrincipal", name: SP_APP_ID },
+      { requireSmrPrompt: true }
+    );
+    const first = await fetch(`${setup.running.baseUrl}/api/azure-auto-setup`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Server-Owned": "token-a"
+      },
+      body: JSON.stringify(CREATE_BODY)
+    });
+    expect(first.status).toBe(400);
+    setup.restorePersistedOperation();
+    resumeAfterInput(setup.operation);
+
+    const second = await fetch(
+      `${setup.running.baseUrl}/api/azure-auto-setup`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Server-Owned": "token-a"
+        },
+        body: JSON.stringify({
+          ...CREATE_BODY,
+          operationId: "op_http_smr",
+          serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+        })
+      }
+    );
+
+    expect(second.status).toBe(200);
+    expect(
+      setup.azCalls.filter(
+        (line) => line === `ad sp show --id ${SP_APP_ID} --query id -o tsv`
+      )
+    ).toHaveLength(2);
+    expect(
+      setup.azCalls.filter((line) => line.startsWith("ad app list "))
+    ).toHaveLength(1);
+  });
+
+  it("accepts the public SMR answer and schedules app creation with the persisted operation", async () => {
+    const setup = await successfulSetup(
+      true,
+      { type: "user" },
+      { requireSmrPrompt: true, publicResume: true }
+    );
+    const first = await fetch(`${setup.running.baseUrl}/api/azure-auto-setup`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Radius-Server-Owned": "token-a"
+      },
+      body: JSON.stringify(CREATE_BODY)
+    });
+    expect(first.status).toBe(400);
+    setup.restorePersistedOperation();
+
+    const resumed = await fetch(
+      `${setup.running.baseUrl}/api/operations/op_http_smr/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          checkpoint: "azure-service-management-reference",
+          repo: "octo/app",
+          environment: "dev",
+          provider: "azure",
+          serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+        })
+      }
+    );
+
+    expect(resumed.status).toBe(202);
+    expect(await resumed.json()).toEqual({
+      operationId: "op_http_smr",
+      statusUrl: "/api/operations/op_http_smr"
+    });
+    expect(setup.scheduledPersistedOperation()).toMatchObject({
+      operationId: "op_http_smr",
+      state: "running",
+      azureAppCreateContinuation: {
+        acceptedPrompt: {
+          code: "service-management-reference-required",
+          checkpoint: "azure-service-management-reference"
+        }
+      }
+    });
+    const scheduled = await setup.scheduledAttempt();
+    expect(scheduled.status).toBe(200);
+    expect(await scheduled.json()).toMatchObject({
+      success: true,
+      operationId: "op_http_smr",
+      appName: "radius-deploy-octo-app",
+      clientId: APP_ID
+    });
+    expect(
+      setup.azCalls.filter((line) =>
+        line.startsWith(`ad app create --display-name radius-deploy-octo-app`)
+      )
+    ).toHaveLength(2);
+    expect(setup.operation.operationId).toBe("op_http_smr");
+    expect(setup.operation.azureAppCreateContinuation).toBeUndefined();
   });
 
   it("creates and owns the app registration when the CLI is a service principal", async () => {

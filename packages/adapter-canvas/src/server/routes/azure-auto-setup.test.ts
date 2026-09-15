@@ -34,6 +34,19 @@ const USER_ID = "44444444-4444-4444-4444-444444444444";
 const SMR = "99999999-9999-9999-9999-999999999999";
 const AZURE_USER = { type: "user", name: "dev@contoso.com" };
 
+type LiveContextDrift =
+  | "subscription"
+  | "tenant"
+  | "caller"
+  | "caller-error"
+  | "caller-identity"
+  | "caller-invalid"
+  | "account-error"
+  | "account-invalid"
+  | "repository"
+  | "oidc"
+  | "oidc-error";
+
 describe("Azure account identity parsing", () => {
   it("accepts the subscription and tenant GUIDs Azure reports", () => {
     expect(
@@ -843,7 +856,8 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     mutateContinuation?: (
       operation: AzureAutoSetupOperation,
       continuation: AzureAppCreateContinuation
-    ) => void
+    ) => void,
+    liveDrift?: LiveContextDrift
   ) {
     const operation = createOperation({
       operationId: "op_smr_resume",
@@ -857,6 +871,10 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     let verifyCalls = 0;
     let repoPreflightCalls = 0;
     let packagePreflightCalls = 0;
+    let accountReads = 0;
+    let callerReads = 0;
+    let repositoryReads = 0;
+    let oidcReads = 0;
     const selectedExecutor = {
       ...successfulSelectedGhExecutor(),
       verifyIdentity: async () => {
@@ -878,17 +896,32 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       runGitHubJson: async (path) => {
         githubCalls.push(path);
         if (path === "/repos/octo/app") {
+          repositoryReads += 1;
+          if (liveDrift === "oidc-error" && repositoryReads === 2) {
+            return { ok: false, status: 403, json: null };
+          }
           return {
             ok: true,
             status: 200,
             json: {
               full_name: "octo/app",
-              id: 5,
+              id: liveDrift === "repository" && repositoryReads === 2 ? 6 : 5,
               owner: { id: 7 }
             }
           };
         }
         if (path === "/repos/octo/app/actions/oidc/customization/sub") {
+          oidcReads += 1;
+          if (liveDrift === "oidc" && oidcReads === 2) {
+            return {
+              ok: true,
+              status: 200,
+              json: {
+                use_default: false,
+                include_claim_keys: ["repo", "context"]
+              }
+            };
+          }
           return { ok: false, status: 404, json: null };
         }
         if (
@@ -905,12 +938,28 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
           return { code: 0, stdout: "", stderr: "" };
         }
         if (line === "account show --output json") {
+          accountReads += 1;
+          if (liveDrift === "account-error" && accountReads === 2) {
+            return { code: 1, stdout: "", stderr: "login unavailable" };
+          }
+          if (liveDrift === "account-invalid" && accountReads === 2) {
+            return { code: 0, stdout: "{", stderr: "" };
+          }
           return {
             code: 0,
             stdout: JSON.stringify({
-              id: SUBSCRIPTION,
-              tenantId: TENANT,
-              user: AZURE_USER
+              id:
+                liveDrift === "subscription" && accountReads === 2 ?
+                  "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                : SUBSCRIPTION,
+              tenantId:
+                liveDrift === "tenant" && accountReads === 2 ?
+                  "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+                : TENANT,
+              user:
+                liveDrift === "caller-identity" && accountReads === 2 ?
+                  { type: "servicePrincipal", name: APP_ID }
+                : AZURE_USER
             }),
             stderr: ""
           };
@@ -919,7 +968,20 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
           return { code: 0, stdout: "[]", stderr: "" };
         }
         if (line.startsWith("ad signed-in-user show ")) {
-          return { code: 0, stdout: USER_ID, stderr: "" };
+          callerReads += 1;
+          if (liveDrift === "caller-error" && callerReads === 2) {
+            return { code: 1, stdout: "", stderr: "caller unavailable" };
+          }
+          return {
+            code: 0,
+            stdout:
+              liveDrift === "caller" && callerReads === 2 ?
+                "cccccccc-cccc-cccc-cccc-cccccccccccc"
+              : liveDrift === "caller-invalid" && callerReads === 2 ?
+                "not-an-object-id"
+              : USER_ID,
+            stderr: ""
+          };
         }
         if (line.startsWith("ad app create ")) {
           return line.includes("--service-management-reference") ?
@@ -990,7 +1052,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
     expect(result.second.status).toBe(400);
     expect(result.secondBody).toMatchObject({ code: "app-create-failed" });
-    expect(result.verifyCalls).toBe(1);
+    expect(result.verifyCalls).toBe(2);
     expect(result.repoPreflightCalls).toBe(1);
     expect(result.packagePreflightCalls).toBe(1);
     expect(
@@ -998,7 +1060,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     ).toHaveLength(1);
     expect(
       result.azCalls.filter((line) => line === "account show --output json")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(
       result.azCalls.filter((line) => line.startsWith("ad app list "))
     ).toHaveLength(1);
@@ -1006,12 +1068,43 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       result.azCalls.filter((line) =>
         line.startsWith("ad signed-in-user show ")
       )
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(
       result.githubCalls.filter((path) => path === "/repos/octo/app")
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(result.operation.azureAppCreateContinuation).toBeUndefined();
   });
+
+  it.each([
+    "subscription",
+    "tenant",
+    "caller",
+    "caller-error",
+    "caller-identity",
+    "caller-invalid",
+    "account-error",
+    "account-invalid",
+    "repository",
+    "oidc",
+    "oidc-error"
+  ] as const)(
+    "falls back through the full safety path when live %s context drifts",
+    async (liveDrift) => {
+      const result = await smrResumeJourney(undefined, liveDrift);
+
+      expect(result.second.status).toBe(400);
+      expect(result.secondBody).toMatchObject({ code: "app-create-failed" });
+      expect(result.verifyCalls).toBe(2);
+      expect(result.repoPreflightCalls).toBe(2);
+      expect(result.packagePreflightCalls).toBe(2);
+      expect(
+        result.azCalls.filter((line) => line.startsWith("account set "))
+      ).toHaveLength(2);
+      expect(
+        result.azCalls.filter((line) => line.startsWith("ad app list "))
+      ).toHaveLength(2);
+    }
+  );
 
   const fallbackMutations: Array<
     [

@@ -1,5 +1,8 @@
 import { buildEnvironmentSuffix } from "@radius-project/core";
+import { isDeepStrictEqual } from "node:util";
 import {
+  buildServicePrincipalObjectIdArgs,
+  buildSignedInUserObjectIdArgs,
   isAksClusterName,
   isResourceGroupName,
   isUuid,
@@ -11,6 +14,7 @@ import type {
   CallerIdentity,
   ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 import {
   createAzureAppCreateContinuation,
   matchAzureAppCreateContinuation,
@@ -27,6 +31,7 @@ import {
 import { configureAzureAutoSetupCredentials } from "./azure-auto-setup-credentials.js";
 import type {
   AzureAutoSetupDependencies,
+  AzureAutoSetupExternalPort,
   AzureAutoSetupOperation,
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
@@ -70,6 +75,66 @@ export function parseAzureAccountIdentity(
     };
   } catch {
     return null;
+  }
+}
+
+async function continuationMatchesLiveContext(
+  continuation: AzureAppCreateContinuation,
+  targetRepo: string,
+  environment: string,
+  external: AzureAutoSetupExternalPort,
+  selectedExecutor: SelectedGhExecutor
+): Promise<boolean> {
+  const accountResult = await external.runAz([
+    "account",
+    "show",
+    "--output",
+    "json"
+  ]);
+  if (accountResult.code !== 0 && accountResult.code !== "0") return false;
+  const account = parseAzureAccountIdentity(accountResult.stdout);
+  if (
+    !account ||
+    account.subscriptionId.toLowerCase() !==
+      continuation.resolved.subscriptionId ||
+    account.tenantId.toLowerCase() !== continuation.resolved.tenantId ||
+    !isDeepStrictEqual(
+      account.callerIdentity,
+      continuation.resolved.callerIdentity
+    ) ||
+    account.callerIdentity.kind === "unsupported"
+  ) {
+    return false;
+  }
+
+  const callerResult = await external.runAz(
+    account.callerIdentity.kind === "servicePrincipal" ?
+      buildServicePrincipalObjectIdArgs({
+        appId: account.callerIdentity.appId
+      })
+    : buildSignedInUserObjectIdArgs()
+  );
+  const callerObjectId = callerResult.stdout.trim().toLowerCase();
+  if (
+    (callerResult.code !== 0 && callerResult.code !== "0") ||
+    !isUuid(callerObjectId) ||
+    callerObjectId !== continuation.resolved.callerObjectId
+  ) {
+    return false;
+  }
+
+  try {
+    const oidcSuffix = buildEnvironmentSuffix(environment);
+    const oidc = await resolveOidcSubject(
+      { targetRepo, envName: environment, suffix: oidcSuffix },
+      (apiPath) => external.runGitHubJson(apiPath, selectedExecutor)
+    );
+    return (
+      oidcSuffix === continuation.resolved.oidcSuffix &&
+      isDeepStrictEqual(oidc, continuation.resolved.oidc)
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -525,8 +590,18 @@ export async function handleAzureAutoSetup(
       );
       dependencies.operations.setAzureAppCreateContinuation(operation, null);
     }
-    if (!appCreateContinuation) {
-      await selectedExecutor.verifyIdentity();
+    await selectedExecutor.verifyIdentity();
+    if (
+      appCreateContinuation &&
+      !(await continuationMatchesLiveContext(
+        appCreateContinuation,
+        targetRepo,
+        environment,
+        dependencies.external,
+        selectedExecutor
+      ))
+    ) {
+      appCreateContinuation = null;
     }
 
     const activeOperation = operation;
