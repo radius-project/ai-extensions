@@ -365,6 +365,88 @@ describe("createAppModelHandoff", () => {
     expect(sent[0].prompt).toContain("instanceId `radius-app`");
   });
 
+  it("fences a two-branch diff handoff with one token recorded under each branch", async () => {
+    const state: CanvasState = { canvasInstanceId: "radius-app" };
+    const { handOff, sent } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", { status: "missing" }),
+        feat: modelStatus("a/b", "feat", { status: "missing" })
+      }
+    });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["main", "feat"],
+      page: "graph-diff",
+      state
+    });
+
+    const token = state.appModelAttemptTokens?.["a/b::main"];
+    expect(token).toBeTruthy();
+    expect(state.appModelAttemptTokens?.["a/b::feat"]).toBe(token);
+    expect(state.appModelAttemptGeneration).toBe(1);
+    expect(sent[0].prompt).toContain("radius_report_modeling_failure");
+    expect(sent[0].prompt).toContain(`attemptToken \`${token}\``);
+    expect(sent[0].prompt).toContain("(`main`, `feat`) — one call per branch");
+  });
+
+  it("withdraws both diff branch tokens when the handoff cannot be delivered", async () => {
+    const state: CanvasState = { canvasInstanceId: "radius-app" };
+    const { handOff } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", { status: "missing" }),
+        feat: modelStatus("a/b", "feat", { status: "missing" })
+      },
+      send: async () => {
+        throw new Error("session closed");
+      }
+    });
+
+    await expect(
+      handOff({
+        repo: "a/b",
+        branches: ["main", "feat"],
+        page: "graph-diff",
+        state
+      })
+    ).rejects.toThrow("session closed");
+
+    expect(state.appModelAttemptTokens?.["a/b::main"]).toBeUndefined();
+    expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeUndefined();
+  });
+
+  it("leaves a superseding attempt's tokens in place when an older diff send fails", async () => {
+    const state: CanvasState = { canvasInstanceId: "radius-app" };
+    const { handOff } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", { status: "missing" }),
+        feat: modelStatus("a/b", "feat", { status: "missing" })
+      },
+      send: async () => {
+        // A newer attempt claimed both branches while this send was in flight.
+        state.appModelAttemptTokens = {
+          "a/b::main": "newer-attempt",
+          "a/b::feat": "newer-attempt"
+        };
+        throw new Error("session closed");
+      }
+    });
+
+    await expect(
+      handOff({
+        repo: "a/b",
+        branches: ["main", "feat"],
+        page: "graph-diff",
+        state
+      })
+    ).rejects.toThrow("session closed");
+
+    expect(state.appModelAttemptTokens).toEqual({
+      "a/b::main": "newer-attempt",
+      "a/b::feat": "newer-attempt"
+    });
+  });
+
   it("re-reads the model before speaking, because a run can start and finish inside the window", async () => {
     const statuses: Record<string, AppModelStatus> = {
       feat: modelStatus("a/b", "feat", { status: "missing" })

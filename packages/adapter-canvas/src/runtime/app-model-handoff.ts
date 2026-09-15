@@ -309,16 +309,23 @@ export function createAppModelHandoff(
         return;
       }
 
+      // One token per attempt, recorded under every branch the attempt covers.
+      // A diff hands off two branches at once and deliberately reuses this
+      // single-branch fencing protocol — an attempt token and a recorded
+      // failure are always keyed `repo::branch` — rather than gaining a second,
+      // two-branch protocol that could disagree with the first.
       const attemptToken =
-        state && state.canvasInstanceId && targets.length === 1 ?
+        state && state.canvasInstanceId ?
           `${state.canvasInstanceId}::attempt-${(state.appModelAttemptGeneration ?? 0) + 1}`
         : undefined;
       if (state && attemptToken) {
         state.appModelAttemptGeneration =
           (state.appModelAttemptGeneration ?? 0) + 1;
         state.appModelAttemptTokens ??= {};
-        state.appModelAttemptTokens[appModelTargetKey(repo, targets[0])] =
-          attemptToken;
+        for (const branch of targets) {
+          state.appModelAttemptTokens[appModelTargetKey(repo, branch)] =
+            attemptToken;
+        }
       }
       try {
         await deps.send(
@@ -331,21 +338,19 @@ export function createAppModelHandoff(
               {
                 attemptToken,
                 instanceId: state.canvasInstanceId,
-                branch: targets[0]
+                branches: targets
               }
             : undefined
           )
         );
       } catch (sendError) {
-        if (
-          state &&
-          attemptToken &&
-          state.appModelAttemptTokens?.[appModelTargetKey(repo, targets[0])] ===
-            attemptToken
-        ) {
-          delete state.appModelAttemptTokens[
-            appModelTargetKey(repo, targets[0])
-          ];
+        if (state && attemptToken) {
+          for (const branch of targets) {
+            const tokenKey = appModelTargetKey(repo, branch);
+            if (state.appModelAttemptTokens?.[tokenKey] === attemptToken) {
+              delete state.appModelAttemptTokens[tokenKey];
+            }
+          }
         }
         releaseReservation();
         throw sendError;

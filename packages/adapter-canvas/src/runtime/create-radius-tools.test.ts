@@ -615,6 +615,22 @@ describe("TL-11: radius_report_modeling_failure", () => {
     });
   });
 
+  it("also releases the two-branch diff claim that covers the failed branch", async () => {
+    const { tools, missingModelHandoffs } = await currentAttempt();
+    const diffClaim = missingModelHandoffs.claim(
+      "acme/widgets::release,main",
+      "missing-model-key"
+    );
+    expect(diffClaim).not.toBeNull();
+    missingModelHandoffs.markDelivered(diffClaim!);
+
+    await findTool(tools, "radius_report_modeling_failure").handler(report);
+
+    expect(
+      missingModelHandoffs.current("acme/widgets::release,main")
+    ).toBeNull();
+  });
+
   it("leaves an unrelated target's claim alone when a failure is recorded", async () => {
     const { tools, missingModelHandoffs } = await currentAttempt();
     const other = missingModelHandoffs.claim(

@@ -152,7 +152,7 @@ describe("appBicepHandoffPrompt", () => {
       {
         attemptToken: "attempt-7",
         instanceId: "app-graph",
-        branch: "feat"
+        branches: ["feat"]
       }
     );
 
@@ -162,6 +162,32 @@ describe("appBicepHandoffPrompt", () => {
     expect(msg).toContain("branch `feat`");
     expect(msg).toContain("attemptToken `attempt-7`");
     expect(msg).toContain("Do not report transient failures");
+  });
+
+  it("asks a two-branch diff attempt to report each branch it could not model", () => {
+    const msg = appBicepHandoffPrompt(
+      "acme/widgets",
+      "graph-diff",
+      ["main", "feat"],
+      "app-graph",
+      {
+        attemptToken: "attempt-7",
+        instanceId: "app-graph",
+        branches: ["main", "feat"]
+      }
+    );
+
+    expect(msg).toContain("radius_report_modeling_failure");
+    expect(msg).toContain("attemptToken `attempt-7`");
+    expect(msg).toContain(
+      "branch set to each branch it could not model (`main`, `feat`) — one call per branch"
+    );
+    expect(msg).not.toContain("branch `main`,");
+  });
+
+  it("omits the failure-report instruction when no attempt was fenced", () => {
+    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    expect(msg).not.toContain("radius_report_modeling_failure");
   });
 
   it("names multiple branches when given several", () => {

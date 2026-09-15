@@ -57,6 +57,13 @@ const MISSING_ENTRY_PAYLOAD = {
 const GENERATING_APP_BICEP_MESSAGE =
   "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
 
+// The terminal text every view shows once modeling has permanently failed. An
+// explicit Canvas refresh is the only retry path, because the failure is fenced
+// by the attempt token that produced it and only a refresh mints a new one.
+function appModelAuthoringFailureDetail(error: string): string {
+  return `Application model generation stopped: ${error} Fix the reported issue, then refresh the Radius Canvas to try modeling again.`;
+}
+
 // `bare` responses are written without a `Content-Type` header, exactly as the
 // legacy branches wrote them: the missing-entry 503 on all three routes, and
 // load-graph's pre-compile 409. Every other response sets the header first.
@@ -541,7 +548,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       branch
     );
     if (authoringFailure) {
-      const detail = `Application model generation stopped: ${authoringFailure.error} Fix the reported issue, then refresh the Radius Canvas to try modeling again.`;
+      const detail = appModelAuthoringFailureDetail(authoringFailure.error);
       reportRefusal(detail);
       return json(200, {
         error: detail,
@@ -1314,6 +1321,33 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
+        // An explicit refresh is the retry path the failure text names, so it
+        // clears BOTH sides: the user is asking for the whole comparison again,
+        // and leaving either side fenced would end the retry immediately.
+        if (data.restartWait === true) {
+          clearAppModelAuthoringFailure(state, repo, data.base);
+          clearAppModelAuthoringFailure(state, repo, data.head);
+        }
+        // A permanent failure on EITHER side ends the diff's wait. Both sides
+        // are missing to have reached here, and both models are produced by the
+        // one handoff that just failed permanently, so a failure recorded
+        // against either branch says the comparison's request failed. Waiting
+        // for both to be reported would also be self-defeating: the next render
+        // would hand off again, mint fresh tokens for both branches, and
+        // invalidate the failure already on record — the loop this closes.
+        const authoringFailure =
+          appModelAuthoringFailure(state, repo, data.base) ??
+          appModelAuthoringFailure(state, repo, data.head);
+        if (authoringFailure) {
+          const detail = appModelAuthoringFailureDetail(authoringFailure.error);
+          addEvent("creating_model", "failed", detail);
+          return json(200, {
+            error: detail,
+            modelingFailed: true,
+            appModelAuthoringFailed: true,
+            repo
+          });
+        }
         const diffRefusal = await diffAppBicepRefusalReason(
           entry,
           repo,
@@ -1341,6 +1375,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           needsAppBicep: true,
           repo
         });
+      }
+      // A model that arrived retires the failure recorded for its own branch,
+      // exactly as the single-branch routes do for theirs.
+      if (baseSelection.content) {
+        clearAppModelAuthoringFailure(state, repo, data.base);
+      }
+      if (headSelection.content) {
+        clearAppModelAuthoringFailure(state, repo, data.head);
       }
       if (modelCreationIsRunning(progressHandle.record)) {
         addEvent(

@@ -196,14 +196,13 @@ export function createRadiusTools(
           error: failure
         };
         // The run this claim belongs to just ended, so the claim can only
-        // suppress the retry the failure message tells the user to make. Its
-        // target key matches this one exactly: a claim is keyed
-        // `repo::branches.join(",")`, and an attempt token is only minted for a
-        // single branch, so a recordable failure always names one branch.
-        // Without this release the explicit refresh clears the failure, asks for
-        // a handoff, and is dropped by the dead run's claim until it expires.
-        const claim = missingModelHandoffs.current(target);
-        if (claim) missingModelHandoffs.release(claim);
+        // suppress the retry the failure message tells the user to make. A diff
+        // claim is keyed `repo::base,head` while this failure is keyed
+        // `repo::branch`, so releasing by branch — not by exact target — is what
+        // frees both the single-branch claim and the diff claim that covers it.
+        // Without this the explicit refresh clears the failure, asks for a
+        // handoff, and is dropped by the dead run's claim until it expires.
+        missingModelHandoffs.releaseForBranch(repo, branch);
         modelingActivity.release({ repo, branch });
         return { recorded: true };
       }

@@ -105,6 +105,34 @@ describe("createMissingModelHandoffClaims", () => {
     expect(claims.owns(newOwner)).toBe(true);
   });
 
+  it("releases every claim covering a branch, including the two-branch diff claim", () => {
+    const { claims } = harness();
+    const single = claims.claim("a/b::feat", "missing");
+    const diff = claims.claim("a/b::main,feat", "missing");
+    const unrelated = claims.claim("a/b::release", "missing");
+    const otherRepo = claims.claim("c/d::feat", "missing");
+    if (!single || !diff || !unrelated || !otherRepo) {
+      throw new Error("expected every claim");
+    }
+
+    claims.releaseForBranch("a/b", "feat");
+
+    expect(claims.current("a/b::feat")).toBeNull();
+    expect(claims.current("a/b::main,feat")).toBeNull();
+    expect(claims.current("a/b::release")).toBe(unrelated);
+    expect(claims.current("c/d::feat")).toBe(otherRepo);
+  });
+
+  it("does not release a claim whose branch merely shares a prefix", () => {
+    const { claims } = harness();
+    const owner = claims.claim("a/b::feature-x", "missing");
+    if (!owner) throw new Error("expected claim");
+
+    claims.releaseForBranch("a/b", "feature");
+
+    expect(claims.current("a/b::feature-x")).toBe(owner);
+  });
+
   it("keeps the claim store bounded while preserving the newest targets", () => {
     const { claims } = harness();
     for (let index = 0; index < 101; index += 1) {
