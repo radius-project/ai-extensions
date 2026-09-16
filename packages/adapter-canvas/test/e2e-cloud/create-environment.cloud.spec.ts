@@ -58,8 +58,8 @@ import {
   DEPLOYMENT_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
-  refreshProcessGitHubToken,
-  takeGitHubAppTokenConfig
+  readPlaywrightGitHubAppTokenConfig,
+  refreshProcessGitHubToken
 } from "./support/github-app-token.js";
 import {
   classifyWorkflowPublication,
@@ -115,6 +115,7 @@ import {
 import {
   describeUnprovisionedFixtureRepository,
   isFixtureRepositoryProvisioned,
+  resolveFixtureClusterTarget,
   resolveFixtureLocation
 } from "./support/fixture-repository.js";
 
@@ -125,7 +126,7 @@ const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
 const githubPackagesUser = process.env.GH_PACKAGES_USER?.trim() ?? "";
-const githubAppTokenConfig = takeGitHubAppTokenConfig();
+const githubAppTokenConfig = readPlaywrightGitHubAppTokenConfig();
 
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKFLOW_QUIESCENCE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -329,6 +330,11 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       throw new Error(
         "GH_PACKAGES_USER is required for the cloud lifecycle journey."
       );
+    const clusterTarget = resolveFixtureClusterTarget(
+      process.env.AIEXT_CLOUD_E2E_RESOURCE_GROUP,
+      process.env.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME,
+      process.env.CI === "true"
+    );
     fixture = await createCloudFixture({
       subscriptionId,
       // CI publishes the region; locally it is absent and the fixture's own
@@ -337,6 +343,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       location: resolveFixtureLocation(
         process.env.AIEXT_CLOUD_E2E_AZURE_LOCATION
       ),
+      resourceGroup: clusterTarget?.resourceGroup,
+      clusterName: clusterTarget?.clusterName,
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
@@ -570,7 +578,6 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             subscriptionId: cloud.subscriptionId,
             resourceGroup: cloud.resourceGroup,
             cluster: cloud.clusterName,
-            location: cloud.location,
             namespace: KUBERNETES_NAMESPACE
           }
         })
@@ -669,6 +676,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       deployedNamespace = applicationNamespace(
         KUBERNETES_NAMESPACE,
         deployedApplication
+      );
+      cloud.registerApplicationCleanupTarget(
+        deployedApplication,
+        deployedNamespace
       );
 
       await page

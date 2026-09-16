@@ -32,6 +32,10 @@ const NOW = new Date("2026-08-29T12:34:56.000Z");
 
 const RESOURCE_GROUP = `radtest-canvas-${UNIQUE_ID}`;
 const CLUSTER = `aks-${UNIQUE_ID}`;
+const SHARED_RESOURCE_GROUP = "ai_extensions_test";
+const SHARED_CLUSTER = "ai_extensions_aks";
+const SHARED_SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${SHARED_RESOURCE_GROUP}`;
+const SHARED_CLUSTER_SCOPE = `${SHARED_SCOPE}/providers/Microsoft.ContainerService/managedClusters/${SHARED_CLUSTER}`;
 const ENVIRONMENT = `radtest-${UNIQUE_ID}`;
 const SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}`;
 const CLUSTER_SCOPE = `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`;
@@ -53,6 +57,20 @@ const PACKAGE_PATH =
   "orgs/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
 const USER_PACKAGE_PATH =
   "users/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
+const DELETE_RUN_LIST: readonly string[] = [
+  "run",
+  "list",
+  "--repo",
+  REPOSITORY,
+  "--workflow",
+  "delete-application.yml",
+  "--event",
+  "workflow_dispatch",
+  "--limit",
+  "100",
+  "--json",
+  "databaseId"
+];
 
 const pullPages = (...pages: readonly unknown[][]): string =>
   JSON.stringify(pages);
@@ -84,6 +102,14 @@ const FIC_LIST: readonly string[] = [
   "list"
 ];
 const ROLE_LIST: readonly string[] = ["role", "assignment", "list"];
+
+function clusterState(
+  location = "centralus",
+  provisioningState = "Succeeded",
+  powerState = "Running"
+): string {
+  return JSON.stringify({ location, provisioningState, powerState });
+}
 
 function roleAssignment(
   principalId = "sp-1",
@@ -158,6 +184,37 @@ function baselineStubs(): FakeCommandStub[] {
     { tool: "az", match: ["group", "delete"], respond: {} },
     { tool: "gh", match: ["repo", "clone"], respond: {} },
     { tool: "git", match: ["reset", "--hard"], respond: {} },
+    {
+      tool: "gh",
+      match: DELETE_RUN_LIST,
+      respond: { stdout: '[{"databaseId":10}]' },
+      times: 1
+    },
+    {
+      tool: "gh",
+      match: DELETE_RUN_LIST,
+      respond: { stdout: '[{"databaseId":11},{"databaseId":10}]' },
+      times: 2
+    },
+    {
+      tool: "gh",
+      match: DELETE_RUN_LIST,
+      respond: {
+        stdout: '[{"databaseId":12},{"databaseId":11},{"databaseId":10}]'
+      }
+    },
+    {
+      tool: "gh",
+      match: ["workflow", "run", "delete-application.yml"],
+      respond: {}
+    },
+    {
+      tool: "gh",
+      match: ["run", "view"],
+      respond: {
+        stdout: '{"status":"completed","conclusion":"success"}'
+      }
+    },
     { tool: "az", match: APP_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: SP_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } },
@@ -323,6 +380,199 @@ describe("createCloudFixture", () => {
         args: ["reset", "--hard", BASELINE],
         cwd: WORKSPACE
       });
+    });
+
+    it("uses a precreated cluster without creating or deleting its infrastructure", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER,
+          location: "centralus"
+        }
+      );
+
+      expect(fixture.resourceGroup).toBe(SHARED_RESOURCE_GROUP);
+      expect(fixture.clusterName).toBe(SHARED_CLUSTER);
+      expect(fixture.location).toBe("centralus");
+      expect(fake.commands.commandLines("az")).toEqual([
+        `aks show --resource-group ${SHARED_RESOURCE_GROUP} --name ${SHARED_CLUSTER} ` +
+          `--subscription ${SUBSCRIPTION} ` +
+          "--query {location:location,provisioningState:provisioningState,powerState:powerState.code} --output json"
+      ]);
+
+      await fixture.dispose();
+
+      expect(fake.commands.commandLines("az")).toHaveLength(1);
+    });
+
+    it("uses the precreated cluster's location when no expected location is configured", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState("CentralUS") }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      expect(fixture.location).toBe("centralus");
+    });
+
+    it("rejects a partial precreated cluster target before acquiring the lease", async () => {
+      const fake = createFakeFixturePorts({ stubs: baselineStubs() });
+
+      await expect(
+        createCloudFixture({
+          subscriptionId: SUBSCRIPTION,
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          ports: fake.ports
+        })
+      ).rejects.toThrow("must be supplied together");
+      expect(fake.commands.calls).toEqual([]);
+    });
+
+    it("rejects a precreated cluster in a different configured location", async () => {
+      const { fake, attempt } = expectConstructionToFail(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState("eastus") }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER,
+          location: "centralus"
+        }
+      );
+
+      await expect(attempt).rejects.toThrow(
+        'is in "eastus", but AIEXT_CLOUD_E2E_AZURE_LOCATION is "centralus"'
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE ${LEASE_REF_PATH}`
+      );
+      expect(
+        fake.commands
+          .commandLines("az")
+          .some((command) => command.includes("group delete"))
+      ).toBe(false);
+    });
+
+    it("fails when the precreated cluster does not report its location", async () => {
+      const { attempt } = expectConstructionToFail(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState("") }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(attempt).rejects.toThrow("did not report a location");
+    });
+
+    it.each([
+      [
+        "provisioning",
+        clusterState("centralus", "Updating"),
+        /provisioning state is "Updating"/
+      ],
+      [
+        "power",
+        clusterState("centralus", "Succeeded", "Stopped"),
+        /power state is "Stopped"/
+      ],
+      [
+        "missing provisioning",
+        JSON.stringify({ location: "centralus", powerState: "Running" }),
+        /provisioning state is "\(missing\)"/
+      ],
+      [
+        "missing power",
+        JSON.stringify({
+          location: "centralus",
+          provisioningState: "Succeeded"
+        }),
+        /power state is "\(missing\)"/
+      ]
+    ])(
+      "rejects a precreated cluster with an invalid %s state",
+      async (_label, stdout, message) => {
+        const { attempt } = expectConstructionToFail(
+          [
+            {
+              tool: "az",
+              match: ["aks", "show"],
+              respond: { stdout }
+            }
+          ],
+          {},
+          {
+            resourceGroup: SHARED_RESOURCE_GROUP,
+            clusterName: SHARED_CLUSTER
+          }
+        );
+
+        await expect(attempt).rejects.toThrow(message);
+      }
+    );
+
+    it("rejects malformed precreated cluster state", async () => {
+      const { attempt } = expectConstructionToFail(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: "not json" }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(attempt).rejects.toThrow(/not valid JSON/);
+    });
+
+    it("releases the lease when the precreated cluster cannot be read", async () => {
+      const { fake, attempt } = expectConstructionToFail(
+        [failing("az", ["aks", "show"], "ResourceNotFound")],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(attempt).rejects.toThrow("ResourceNotFound");
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE ${LEASE_REF_PATH}`
+      );
     });
 
     it("tags the group so scheduled cleanup can identify a crashed run's group", async () => {
@@ -670,7 +920,7 @@ describe("createCloudFixture", () => {
         `ad app list --filter ${EXACT_NAME_FILTER} --query [].{appId:appId,id:id,displayName:displayName} -o json`
       );
       expect(lines).toContain(
-        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id} -o json`
+        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id,appId:appId} -o json`
       );
       expect(lines.some((line) => line.includes("--display-name"))).toBe(false);
       expect(lines.some((line) => line.includes(`--scope ${SCOPE}`))).toBe(
@@ -806,6 +1056,44 @@ describe("createCloudFixture", () => {
           )}`
         )
       );
+    });
+
+    it("allows unrelated baseline role assignments on a shared cluster", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          },
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                roleAssignment(
+                  "cluster-identity",
+                  "Network Contributor",
+                  "baseline-assignment",
+                  SHARED_SCOPE
+                )
+              ])
+            }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      expect(
+        fake.commands
+          .commandLines("az")
+          .some((line) => line.startsWith("role assignment list"))
+      ).toBe(false);
     });
 
     it("names an unnamed role definition rather than failing to report it", async () => {
@@ -2389,9 +2677,8 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"sp-1"}]' }
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
         },
-        { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
         {
           tool: "az",
           match: APP_LIST,
@@ -2401,6 +2688,7 @@ describe("createCloudFixture", () => {
             ])
           }
         },
+        { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
         { tool: "az", match: ["ad", "app", "delete"], respond: {} },
         {
           tool: "gh",
@@ -2471,6 +2759,7 @@ describe("createCloudFixture", () => {
       expect(lines).toContain(
         `api --method PATCH repos/${REPOSITORY}/pulls/7 -f state=closed`
       );
+
       expect(lines).toContain(
         `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true`
       );
@@ -2493,6 +2782,50 @@ describe("createCloudFixture", () => {
       );
     });
 
+    it("accepts Entra artifacts that disappeared before deletion", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: SP_LIST,
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
+        },
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        },
+        {
+          tool: "az",
+          match: ["ad", "sp", "delete"],
+          respond: {
+            code: 1,
+            stderr:
+              "ERROR: Resource 'ServicePrincipal_sp-1' does not exist or one of its queried reference-property objects are not present."
+          }
+        },
+        {
+          tool: "az",
+          match: ["ad", "app", "delete"],
+          respond: {
+            code: 1,
+            stderr:
+              "ERROR: Resource 'Application_obj-1' does not exist or one of its queried reference-property objects are not present."
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
+        expect.arrayContaining([
+          "service principal sp-1",
+          "app registration app-1"
+        ])
+      );
+    });
+
     it("reclaims an orphaned service principal when no application remains", async () => {
       const { fixture, fake } = await createHarness([
         {
@@ -2509,6 +2842,359 @@ describe("createCloudFixture", () => {
       expect(fake.commands.commandLines("az")).toContain(
         "ad sp delete --id orphan-sp --output none"
       );
+    });
+
+    it("deletes only the expected role assignments before deleting the product service principal", async () => {
+      const contributor = roleAssignment(
+        "sp-1",
+        "Contributor",
+        "assignment-contributor",
+        SHARED_SCOPE
+      );
+      const locks = roleAssignment(
+        "sp-1",
+        "Locks Contributor",
+        "assignment-locks",
+        SHARED_SCOPE
+      );
+      const clusterAdmin = roleAssignment(
+        "sp-1",
+        "Azure Kubernetes Service RBAC Cluster Admin",
+        "assignment-cluster",
+        SHARED_CLUSTER_SCOPE
+      );
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          },
+          {
+            tool: "az",
+            match: SP_LIST,
+            respond: { stdout: '[{"id":"sp-1"}]' }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SHARED_SCOPE],
+            respond: { stdout: JSON.stringify([contributor, locks]) }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SHARED_CLUSTER_SCOPE],
+            respond: { stdout: JSON.stringify([clusterAdmin]) }
+          },
+          {
+            tool: "az",
+            match: ["role", "assignment", "delete"],
+            respond: {}
+          },
+          { tool: "az", match: ["ad", "sp", "delete"], respond: {} }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "role assignment assignment-contributor",
+        "role assignment assignment-locks",
+        "role assignment assignment-cluster",
+        "service principal sp-1"
+      ]);
+      const az = fake.commands.commandLines("az");
+      expect(az).toContain(
+        "role assignment delete --ids assignment-contributor --output none"
+      );
+      expect(az).toContain(
+        "role assignment delete --ids assignment-locks --output none"
+      );
+      expect(az).toContain(
+        "role assignment delete --ids assignment-cluster --output none"
+      );
+      expect(
+        az.indexOf("ad sp delete --id sp-1 --output none")
+      ).toBeGreaterThan(
+        az.indexOf(
+          "role assignment delete --ids assignment-cluster --output none"
+        )
+      );
+    });
+
+    it("refuses to delete a service principal carrying an unexpected shared-scope role", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          },
+          {
+            tool: "az",
+            match: SP_LIST,
+            respond: { stdout: '[{"id":"sp-1","appId":"client-1"}]' }
+          },
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                {
+                  id: "app-1",
+                  appId: "client-1",
+                  displayName: APP_NAME
+                }
+              ])
+            }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SHARED_SCOPE],
+            respond: {
+              stdout: JSON.stringify([
+                roleAssignment(
+                  "sp-1",
+                  "Owner",
+                  "assignment-owner",
+                  SHARED_SCOPE
+                )
+              ])
+            }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /refuse service principal sp-1: unexpected role assignment\(s\): "Owner"/
+      );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad sp delete --id sp-1 --output none"
+      );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad app delete --id app-1 --output none"
+      );
+      expect(
+        fake.commands
+          .commandLines("az")
+          .some((line) => line.startsWith("role assignment delete"))
+      ).toBe(false);
+    });
+
+    it("does not delete the service principal when an expected role assignment cannot be removed", async () => {
+      const contributor = roleAssignment(
+        "sp-1",
+        "Contributor",
+        "assignment-contributor",
+        SHARED_SCOPE
+      );
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: clusterState() }
+          },
+          {
+            tool: "az",
+            match: SP_LIST,
+            respond: { stdout: '[{"id":"sp-1","appId":"client-1"}]' }
+          },
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                {
+                  id: "app-1",
+                  appId: "client-1",
+                  displayName: APP_NAME
+                }
+              ])
+            }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SHARED_SCOPE],
+            respond: { stdout: JSON.stringify([contributor]) }
+          },
+          failing("az", ["role", "assignment", "delete"], "AuthorizationFailed")
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /role assignment assignment-contributor: .*AuthorizationFailed/
+      );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad sp delete --id sp-1 --output none"
+      );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad app delete --id app-1 --output none"
+      );
+    });
+
+    it("deletes only the registered application workloads from the shared namespace", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {}
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        `Radius application demo in ${ENVIRONMENT}`,
+        "Kubernetes workloads for demo in default-demo"
+      ]);
+      expect(fake.commands.commandLines("kubectl")).toEqual([
+        `--kubeconfig ${WORKSPACE}/kubeconfig delete all --namespace default-demo ` +
+          "--selector radapp.io/application=demo --ignore-not-found=true --wait=true"
+      ]);
+      const calls = fake.commands.calls.map(
+        ({ tool, args }) => `${tool} ${args.join(" ")}`
+      );
+      expect(
+        calls.findIndex((line) => line.startsWith("gh run view "))
+      ).toBeLessThan(calls.findIndex((line) => line.startsWith("kubectl ")));
+    });
+
+    it("treats an already-missing application namespace as reclaimed", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {
+            code: 1,
+            stderr:
+              'Error from server (NotFound): namespaces "default-demo" not found'
+          }
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        `Radius application demo in ${ENVIRONMENT}`,
+        "Kubernetes workloads for demo in default-demo"
+      ]);
+    });
+
+    it("keeps targeted workload reclamation idempotent", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {},
+          times: 2
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await fixture.reclaimLeakedProductArtifacts();
+      await fixture.reclaimLeakedProductArtifacts();
+
+      expect(fake.commands.commandLines("kubectl")).toHaveLength(2);
+      expect(
+        fake.commands
+          .commandLines("az")
+          .filter((line) => line.includes("get-credentials"))
+      ).toHaveLength(1);
+    });
+
+    it.each([
+      ["application", "", "default-demo", "application name"],
+      ["namespace", "demo", " ", "namespace"]
+    ])(
+      "rejects an empty cleanup %s",
+      async (_label, application, namespace, message) => {
+        const { fixture } = await createHarness();
+
+        expect(() =>
+          fixture.registerApplicationCleanupTarget(application, namespace)
+        ).toThrow(message);
+      }
+    );
+
+    it("reports targeted workload cleanup failure and continues reclaiming other artifacts", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        failing("kubectl", ["delete", "all"], "namespace unavailable"),
+        {
+          tool: "gh",
+          match: ["api", MATCHING_REFS_PATH],
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
+        },
+        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes workloads for demo in default-demo: .*namespace unavailable.*Reclaimed before failing: Radius application demo in radtest-run0000000a, branch radius\/setup-a/s
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
+      );
+    });
+
+    it("preserves recovery inputs when Radius application deletion fails", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: ["run", "view"],
+          respond: {
+            stdout: '{"status":"completed","conclusion":"failure"}'
+          }
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /preserving its identity, GitHub Environment, state package, and repository workflows for recovery/
+      );
+
+      const gh = fake.commands.commandLines("gh");
+      expect(gh).toContain(
+        `workflow run delete-application.yml --repo ${REPOSITORY} --ref ${BRANCH} -f environment=${ENVIRONMENT} -f application=demo`
+      );
+      expect(gh.some((line) => line.includes(ENVIRONMENT_PATH))).toBe(false);
+      expect(gh.some((line) => line.includes(PACKAGE_PATH))).toBe(false);
+      expect(gh.some((line) => line.includes(MATCHING_REFS_PATH))).toBe(false);
+      expect(fake.commands.commandLines("az")).not.toContain(
+        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id,appId:appId} -o json`
+      );
+      expect(fake.commands.commandLines("kubectl")).toEqual([]);
     });
 
     it("closes an open pull request even when its branch is already gone", async () => {
@@ -2657,12 +3343,12 @@ describe("createCloudFixture", () => {
       );
     });
 
-    it("records a stuck service principal and continues reclaiming applications", async () => {
-      const { fixture } = await createHarness([
+    it("preserves a parent application when its service principal cannot be deleted", async () => {
+      const { fixture, fake } = await createHarness([
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"sp-1"}]' }
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
         },
         failing("az", ["ad", "sp", "delete"], "principal is locked"),
         {
@@ -2678,7 +3364,10 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /service principal sp-1: .*principal is locked.*Reclaimed before failing: app registration app-1/s
+        /service principal sp-1: .*principal is locked.*preserve app registration app-1/s
+      );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad app delete --id obj-1 --output none"
       );
     });
 
@@ -2753,8 +3442,8 @@ describe("createCloudFixture", () => {
       );
     });
 
-    it("refuses to delete a package with no repository link", async () => {
-      const { fixture } = await createHarness([
+    it("refuses to delete a package that is not linked to the fixture repository", async () => {
+      const { fixture, fake } = await createHarness([
         {
           tool: "gh-package",
           match: ["api", PACKAGE_PATH],
@@ -2765,8 +3454,13 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /it is not linked to "fixture-owner\/fixture-repo"/
+        /refuse GHCR state package .* it is not linked to a repository/
       );
+      expect(
+        fake.commands
+          .commandLines("gh-package")
+          .some((line) => line.includes("--method DELETE"))
+      ).toBe(false);
     });
 
     it("records a failing GHCR state package deletion", async () => {

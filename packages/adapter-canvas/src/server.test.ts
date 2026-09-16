@@ -58,9 +58,11 @@ import {
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
   DEPLOY_CLOUD_AUTH_DRIFT_KIND,
-  DEPLOY_RUN_UNCONFIRMED_KIND
+  DEPLOY_RUN_UNCONFIRMED_KIND,
+  preflightRepoAdmin
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
+import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
   createOperation,
   finish,
@@ -249,6 +251,41 @@ describe("preflightGhcrPackageWriteAccess", () => {
       "'/Applications/GitHub Copilot/gh' auth login -h github.com -s read:packages -s write:packages"
     );
     expect(result.error).toContain("Install GitHub CLI system-wide.");
+  });
+
+  it("uses the selected executor's dedicated package credential and scopes", async () => {
+    const run = async () => ({ code: 0, stdout: "", stderr: "" });
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => {
+        throw new Error("global package credential must not be loaded");
+      },
+      async () => {
+        throw new Error("global identity must not be loaded");
+      },
+      {
+        login: "radius-cloud-e2e[bot]",
+        credentialSource: "injected",
+        requiresKeyringSwitch: false,
+        scopes: [],
+        run,
+        runOrThrow: run,
+        verifyIdentity: async () => {},
+        packageCredentials: () => ({
+          token: "package-token",
+          username: "package-publisher",
+          source: "injected-token",
+          scopes: ["read:packages", "write:packages"]
+        }),
+        redact: (value) => value,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected GHCR preflight to pass");
+    expect(result.login).toBe("package-publisher");
+    expect(result.credentials.token).toBe("package-token");
   });
 
   it("fails closed when the package credential username is blank", async () => {
@@ -6211,4 +6248,95 @@ describe("deploy failures that may leave a run in flight", () => {
   //     `server/services/deploy-dispatch.test.ts`
   // A confirmed workflow failure is deliberately excluded from that set — it is
   // the only kind a repair may act on.
+});
+
+describe("GitHub App repository preflight", () => {
+  function appExecutor(
+    responses: Record<string, { code: number; stdout: string; stderr: string }>
+  ) {
+    const calls: string[] = [];
+    const run = async (args: string[]) => {
+      const path = args[1] || "";
+      calls.push(path);
+      return (
+        responses[path] || {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Not Found (HTTP 404)"
+        }
+      );
+    };
+    const executor = {
+      login: "radius-cloud-e2e[bot]",
+      credentialSource: "injected" as const,
+      requiresKeyringSwitch: false,
+      scopes: [] as string[],
+      run,
+      runOrThrow: run,
+      verifyIdentity: async () => {},
+      packageCredentials: () => ({
+        token: "package-token",
+        username: "package-publisher",
+        source: "injected-token" as const
+      }),
+      redact: (value: string) => value,
+      errorMessage: (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
+    };
+    return { executor, calls };
+  }
+
+  const REPO_OK = {
+    code: 0,
+    stdout: JSON.stringify({ permissions: { admin: false } }),
+    stderr: ""
+  };
+
+  const PROBES_OK = Object.fromEntries(
+    gitHubAppAccessProbePaths("octo/app").map((path) => [
+      path,
+      { code: 0, stdout: "[]", stderr: "" }
+    ])
+  );
+
+  it("clears an installation that can read every resource it will configure", async () => {
+    const { executor, calls } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      ...PROBES_OK
+    });
+
+    await expect(preflightRepoAdmin("octo/app", executor)).resolves.toBe("");
+    for (const path of gitHubAppAccessProbePaths("octo/app"))
+      expect(calls).toContain(path);
+  });
+
+  it("blocks an installation missing a permission a later probe reads", async () => {
+    const { executor } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      ...PROBES_OK,
+      "repos/octo/app/actions/variables": {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Resource not accessible by integration (HTTP 403)"
+      }
+    });
+
+    const message = await preflightRepoAdmin("octo/app", executor);
+    expect(message).toContain("radius-cloud-e2e[bot]");
+    expect(message).toContain("cannot exercise its Variables permission");
+  });
+
+  it("stays silent when a probe fails ambiguously", async () => {
+    const { executor } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      ...PROBES_OK,
+      "repos/octo/app/environments": {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Bad Gateway (HTTP 502)"
+      }
+    });
+
+    await expect(preflightRepoAdmin("octo/app", executor)).resolves.toBe("");
+  });
 });

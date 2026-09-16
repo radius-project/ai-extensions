@@ -228,8 +228,8 @@ describe("cloud-e2e.yml", () => {
   });
 
   it("isolates package credentials while using OIDC and an installation token", async () => {
-    // No stored bearer token exists to leak: both access credentials are minted
-    // per run and expire with it. The App signing key remains a masked secret.
+    // Azure and repository access credentials are minted per run and expire
+    // with it. The App signing key and package PAT remain masked secrets.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
@@ -240,32 +240,44 @@ describe("cloud-e2e.yml", () => {
       step.run?.includes("test:cloud")
     );
     expect(run?.env).toMatchObject({
+      AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}",
+      AIEXT_CLOUD_E2E_AZURE_LOCATION:
+        "${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}",
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
         "${{ steps.fixture.outputs.full-name }}",
+      AIEXT_CLOUD_E2E_RESOURCE_GROUP:
+        "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}",
       CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
       CLOUD_E2E_BOT_INSTALLATION_ID:
         "${{ steps.app-token.outputs.installation-id }}",
       CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
-      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}",
+      GH_PACKAGES_TOKEN: "${{ secrets.GH_RAD_CI_BOT_PAT }}",
       GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_PACKAGES_USER }}"
     });
     expect(run?.env?.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
     expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
   });
 
-  it("requests every permission needed by workflow publication and secure deployment", async () => {
-    // Missing workflows permission hard-fails publication. Secure Bicep
-    // parameters also require the product to reconcile RADIUS_DEPLOY_PARAMS as
-    // an Environment secret before dispatch.
+  it("inherits the fixture-scoped App grants so actions variables remain available", async () => {
+    // The pinned token action cannot express the App's actions_variables
+    // permission. Passing any permission inputs would narrow the token and
+    // silently remove that grant, so the token must inherit the installation's
+    // already-reviewed permission union.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const token = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
     );
-    expect(token?.with?.["permission-actions"]).toBe("write");
-    expect(token?.with?.["permission-deployments"]).toBe("read");
-    expect(token?.with?.["permission-workflows"]).toBe("write");
-    expect(token?.with?.["permission-environments"]).toBe("write");
-    expect(token?.with?.["permission-secrets"]).toBe("write");
+    expect(token?.with).toMatchObject({
+      "client-id": "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      owner: "${{ steps.fixture.outputs.owner }}",
+      repositories: "${{ steps.fixture.outputs.name }}"
+    });
+    expect(
+      Object.keys(token?.with ?? {}).filter((key) =>
+        key.startsWith("permission-")
+      )
+    ).toEqual([]);
   });
 
   it("stages and uploads one predictable diagnostics tree whether or not the run failed", async () => {
@@ -399,6 +411,125 @@ describe("cloud-e2e.yml", () => {
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
+  it("requests Actions write access for Radius cleanup dispatch without package write", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const token = steps(workflow.jobs?.purge).find((step) =>
+      step.uses?.startsWith("actions/create-github-app-token@")
+    );
+
+    expect(token?.with?.["permission-actions"]).toBe("write");
+    expect(token?.with?.["permission-environments"]).toBe("write");
+    // cloud-e2e.yml mints its journey token with no permission inputs, so any
+    // grant added to this installation widens that token too.
+    expect(token?.with?.["permission-packages"]).toBeUndefined();
+  });
+
+  it("deletes legacy resource groups only after the Radius applications on them", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const radiusIndex = purge.findIndex(
+      (step) =>
+        step.name === "Delete stale Radius applications before recovery state"
+    );
+    const legacyIndex = purge.findIndex((step) =>
+      step.run?.includes("selectTestResourceGroups")
+    );
+
+    expect(radiusIndex).toBeGreaterThanOrEqual(0);
+    expect(legacyIndex).toBeGreaterThan(radiusIndex);
+    expect(purge[legacyIndex]?.if).toContain(
+      "steps.radius-app-cleanup.outcome == 'success'"
+    );
+  });
+
+  it("deletes stale Radius applications before recovery inputs", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const radiusCleanup = purge.find(
+      (step) =>
+        step.name === "Delete stale Radius applications before recovery state"
+    );
+    const protectedSteps = purge.filter((step) =>
+      [
+        "Purge stale Entra identities",
+        "Purge stale GHCR deployment state",
+        "Purge stale GitHub environments",
+        "Purge stale fallback pull requests and branches",
+        "Reset an idle fixture repository to the pinned baseline"
+      ].includes(step.name ?? "")
+    );
+
+    expect(radiusCleanup?.run).toContain(
+      "gh workflow run delete-application.yml"
+    );
+    expect(radiusCleanup?.run).toContain('gh run watch "$run_id"');
+    for (const step of protectedSteps)
+      expect(step.if).toContain(
+        "steps.radius-app-cleanup.outcome == 'success'"
+      );
+  });
+
+  it("deletes only fixture-linked private GHCR state after Radius cleanup", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const stateCleanup = steps(workflow.jobs?.purge).find(
+      (step) => step.name === "Purge stale GHCR deployment state"
+    );
+    const script = stateCleanup?.run ?? "";
+
+    expect(stateCleanup?.if).toContain(
+      "steps.radius-app-cleanup.outcome == 'success'"
+    );
+    expect(stateCleanup?.env?.GH_PACKAGES_TOKEN).toBe(
+      "${{ secrets.GH_RAD_CI_BOT_PAT }}"
+    );
+    expect(script).toContain("stateRegistryForEnvironment");
+    expect(script).toContain(
+      '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
+    );
+    expect(script).toContain(
+      '[[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]'
+    );
+    expect(script).toContain(
+      'GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"'
+    );
+  });
+
+  it("removes only allowlisted assignments before deleting leaked service principals", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge).find((step) =>
+      step.run?.includes("selectExpectedRoleAssignments")
+    );
+    const script = purge?.run ?? "";
+
+    expect(purge?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(purge?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(script).toContain("selectExpectedRoleAssignments");
+    expect(script).toContain(
+      'roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin"'
+    );
+    expect(script).toContain(
+      'az role assignment delete --ids "$assignment_id"'
+    );
+    expect(script.indexOf("az role assignment delete")).toBeLessThan(
+      script.indexOf("az ad sp delete")
+    );
+    expect(script).toContain("assignment_failure");
+    expect(script).toContain("blocked-application-ids.txt");
+    expect(script).toContain(
+      "preserve application $id because service principal cleanup"
+    );
+    // Deleting an application cascade-deletes its principal, so a principal the
+    // age filter never selected must block its parent rather than ride along.
+    expect(script).toContain("selectAppIdsWithUnprocessedServicePrincipals");
+    expect(script).toContain(
+      "preserve appId $unprocessed_app_id because a matching service principal was not a deletion candidate"
+    );
+  });
+
   it("deletes tagged resource groups the suite creates without waiting for age", async () => {
     // The shared Radius purge job remains a safety net, but this workflow owns
     // test leaks first. The fixture tag is what stops a prefix match from
@@ -414,11 +545,17 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(purge?.env?.RESOURCE_GROUP_PREFIX).toBe(
       "${{ steps.pin.outputs.resource-group-prefix }}"
     );
+    expect(purge?.env?.SHARED_RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
     expect(purge?.env?.GH_TOKEN).toBe("${{ github.token }}");
     expect(purge?.env?.SUBSCRIPTION_ID).toBe(
       "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
     );
     expect(script).toContain("starts_with(name, '$RESOURCE_GROUP_PREFIX')");
+    expect(script).toContain(
+      "selectTestResourceGroups(groups, prefix, sharedResourceGroup)"
+    );
     expect(script).toContain('--subscription "$SUBSCRIPTION_ID"');
     expect(script).not.toContain("MAX_AGE_HOURS hours ago");
     expect(script).toContain("gh run view");

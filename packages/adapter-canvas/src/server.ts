@@ -39,6 +39,11 @@ import {
 } from "./gh-command-display.js";
 import { resolveGhCommandPresentation } from "./gh-command-resolution.js";
 import {
+  describeMissingGitHubAppAccess,
+  GITHUB_APP_ACCESS_PROBES,
+  isGitHubAppBotLogin
+} from "./github-app-installation.js";
+import {
   sharedCredentials,
   cloudCredential,
   listCredentialProfiles,
@@ -4938,16 +4943,18 @@ export async function finalizeSetupFailure(
 // non-JSON body, or an unparseable status — is treated as ambiguous and returns
 // '' so the preflight never silently misdirects; the real op then surfaces the
 // true error. GitHub still enforces permissions server-side regardless.
-async function preflightRepoAdmin(
+export async function preflightRepoAdmin(
   repo: string,
   executor?: SelectedGhExecutor,
   ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): Promise<string> {
-  let login = "";
   const runJson = (path: string) =>
     executor ? selectedGhApiJson(executor, path) : ghApiJson(path);
   const who = await runJson("user");
-  if (who.ok) login = optionalString(record(who.json).login);
+  const login =
+    who.ok ? optionalString(record(who.json).login)
+    : executor ? executor.login
+    : (await getGitHubIdentity()).actingLogin;
   let readFailed = false,
     permissions = null;
   const res = await runJson(`repos/${repo}`);
@@ -4958,6 +4965,21 @@ async function preflightRepoAdmin(
     readFailed = true;
   } else {
     return ""; // ambiguous/transient — don't block or mislead; let the real op surface the true error
+  }
+  if (isGitHubAppBotLogin(login)) {
+    // Same reasoning as the readiness service: an installation token's granted
+    // permissions are not readable back, so prove access against the resource
+    // setup is about to mutate instead of trusting the `[bot]` login. Keep the
+    // ambiguity rule above -- only an explicit denial blocks.
+    if (readFailed) return describeMissingGitHubAppAccess(login, repo);
+    for (const probe of GITHUB_APP_ACCESS_PROBES) {
+      const result = await runJson(probe.path(repo));
+      if (result.ok) continue;
+      if (result.status === 403 || result.status === 404)
+        return describeMissingGitHubAppAccess(login, repo, probe.permission);
+      return ""; // ambiguous/transient on this probe — do not block
+    }
+    return "";
   }
   return explainRepoAccessForEnvSetup(
     {
@@ -5041,35 +5063,36 @@ export async function preflightGhcrPackageWriteAccess(
 
   let ghPkgIdentity: GhcrPackageIdentity;
   try {
-    ghPkgIdentity =
-      selectedExecutor ?
-        {
-          actingLogin: selectedExecutor.login,
-          displayLogin: selectedExecutor.login,
-          mismatch: false,
-          actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
-          actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
-          // The selected executor *is* the credential GHCR writes will use, so
-          // the packages fields describe it directly rather than whichever
-          // account happens to be active in the CLI.
-          packagesLogin: selectedExecutor.login,
-          packagesHasWrite: selectedExecutor.scopes.includes("write:packages"),
-          packagesCredentialSource:
-            selectedExecutor.credentialSource === "keyring" ?
-              "keyring"
-            : "injected-token",
-          reason: "selected-account-executor",
-          accounts: [
-            {
-              login: selectedExecutor.login,
-              hasWorkflow: selectedExecutor.scopes.includes("workflow"),
-              hasPackages: selectedExecutor.scopes.includes("write:packages"),
-              switchable: selectedExecutor.credentialSource === "keyring",
-              acting: true
-            }
-          ]
-        }
-      : await loadIdentity();
+    if (selectedExecutor) {
+      const packageHasWrite =
+        packageCredentials.scopes?.includes("write:packages") ??
+        (packageCredentials.username === selectedExecutor.login &&
+          selectedExecutor.scopes.includes("write:packages"));
+      ghPkgIdentity = {
+        actingLogin: selectedExecutor.login,
+        displayLogin: selectedExecutor.login,
+        mismatch: false,
+        actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
+        actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
+        packagesLogin: packageCredentials.username,
+        packagesHasWrite: packageHasWrite,
+        packagesCredentialSource: packageCredentials.source,
+        reason: "selected-account-executor",
+        accounts: [
+          {
+            login: packageCredentials.username,
+            hasWorkflow:
+              packageCredentials.username === selectedExecutor.login &&
+              selectedExecutor.scopes.includes("workflow"),
+            hasPackages: packageHasWrite,
+            switchable: packageCredentials.source === "keyring",
+            acting: packageCredentials.username === selectedExecutor.login
+          }
+        ]
+      };
+    } else {
+      ghPkgIdentity = await loadIdentity();
+    }
   } catch (e) {
     return {
       ok: false,

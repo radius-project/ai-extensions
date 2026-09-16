@@ -90,10 +90,12 @@ describe("required workflow and variable inventories", () => {
     ]);
     expect(REQUIRED_LIFECYCLE_WORKFLOWS).toEqual([
       ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
-      ...REQUIRED_DEPLOY_WORKFLOWS,
-      ...REQUIRED_DELETE_WORKFLOWS,
-      DELETE_ENV_DISPATCHER_FILE,
-      DELETE_ENV_AZURE_FILE
+      ...[
+        ...REQUIRED_DEPLOY_WORKFLOWS,
+        ...REQUIRED_DELETE_WORKFLOWS,
+        DELETE_ENV_DISPATCHER_FILE,
+        DELETE_ENV_AZURE_FILE
+      ].map((file) => `.github/workflows/${file}`)
     ]);
   });
 
@@ -1047,11 +1049,11 @@ describe("findSurvivingArtifactProblems", () => {
 
   it("refuses to claim survival without a stage-one variable value", () => {
     const expectedVariables = new Map(survivingInput().expectedVariables);
-    expectedVariables.delete("AZURE_LOCATION");
+    expectedVariables.delete("AZURE_RESOURCE_GROUP");
     expect(
       findSurvivingArtifactProblems(survivingInput({ expectedVariables }))
     ).toEqual([
-      "Stage one did not record environment variable AZURE_LOCATION, so its survival cannot be proved."
+      "Stage one did not record environment variable AZURE_RESOURCE_GROUP, so its survival cannot be proved."
     ]);
   });
 
