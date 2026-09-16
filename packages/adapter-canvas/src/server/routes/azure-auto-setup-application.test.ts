@@ -2513,6 +2513,17 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
   });
 
+  it("accepts string zero exit codes from tag assignment and verification", async () => {
+    const { test } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      tagPatches: [command({ code: "0" })],
+      tagShows: [command({ code: "0", stdout: JSON.stringify(requiredTags) })]
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+  });
+
   it("reconciles an interrupted owner add against the service principal object id", async () => {
     let ownerAdds = 0;
     const test = harness({

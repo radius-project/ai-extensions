@@ -1091,7 +1091,7 @@ export async function resolveAzureAutoSetupApplication({
             };
         if (!(await checkpoint("after-app-registration-tag-update")))
           return null;
-        if (tagPatch.code !== 0) {
+        if (tagPatch.code !== 0 && tagPatch.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to apply Radius provenance tags to the new App Registration: " +
               tagPatch.stderr,
@@ -1102,7 +1102,7 @@ export async function resolveAzureAutoSetupApplication({
         }
         steps.push("Verifying Radius provenance tags...");
         const tagShow = await readCreatedAppTags(clientId, provenanceTags);
-        if (tagShow.code !== 0) {
+        if (tagShow.code !== 0 && tagShow.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to read the App Registration tags after update: " +
               tagShow.stderr,
