@@ -3442,19 +3442,60 @@ describe("createCloudFixture", () => {
       );
     });
 
-    it("refuses to delete a package with no repository link", async () => {
-      const { fixture } = await createHarness([
+    it("deletes an unlinked package through immutable provenance verification", async () => {
+      const deleted: Array<{ repository: string; registry: string }> = [];
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "gh-package",
+            match: ["api", PACKAGE_PATH],
+            respond: {
+              stdout: JSON.stringify({ visibility: "private" })
+            }
+          }
+        ],
+        {},
         {
-          tool: "gh-package",
-          match: ["api", PACKAGE_PATH],
-          respond: {
-            stdout: JSON.stringify({ visibility: "private" })
+          deleteUnlinkedStatePackage: async (repository, registry) => {
+            deleted.push({ repository, registry });
           }
         }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        `GHCR state package ${STATE_PACKAGE}`
+      );
+      expect(deleted).toEqual([
+        { repository: REPOSITORY, registry: STATE_PACKAGE }
       ]);
+      expect(
+        fake.commands
+          .commandLines("gh-package")
+          .some((line) => line.includes("--method DELETE"))
+      ).toBe(false);
+    });
+
+    it("records a failing immutable-provenance deletion", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "gh-package",
+            match: ["api", PACKAGE_PATH],
+            respond: {
+              stdout: JSON.stringify({ visibility: "private" })
+            }
+          }
+        ],
+        {},
+        {
+          deleteUnlinkedStatePackage: async () => {
+            throw new Error("bootstrap manifest changed");
+          }
+        }
+      );
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /it is not linked to "fixture-owner\/fixture-repo"/
+        /GHCR state package .*bootstrap manifest changed/
       );
     });
 

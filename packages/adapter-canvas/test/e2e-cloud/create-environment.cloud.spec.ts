@@ -578,7 +578,6 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             subscriptionId: cloud.subscriptionId,
             resourceGroup: cloud.resourceGroup,
             cluster: cloud.clusterName,
-            location: cloud.location,
             namespace: KUBERNETES_NAMESPACE
           }
         })

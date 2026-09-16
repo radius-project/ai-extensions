@@ -337,7 +337,7 @@ Keeping GitHub's default OIDC subject means the product creates the immutable re
 
 #### What the product writes into the GitHub Environment
 
-Stage one asserts these, so they are recorded here rather than rediscovered per layer. [`applyProviderConfiguration()`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-publisher.ts) writes seven variables: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_AKS_CLUSTER_NAME`, `AZURE_LOCATION`, and `KUBERNETES_NAMESPACE`.
+Stage one asserts these, so they are recorded here rather than rediscovered per layer. [`applyProviderConfiguration()`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-publisher.ts) writes the six values supplied by the Azure environment form: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_AKS_CLUSTER_NAME`, and `KUBERNETES_NAMESPACE`. `AIEXT_CLOUD_E2E_AZURE_LOCATION` validates the shared cluster before the journey starts; the deployment workflows do not consume an `AZURE_LOCATION` environment variable, so the lifecycle does not require one.
 
 The cluster variable is `AZURE_AKS_CLUSTER_NAME`, not `AKS_CLUSTER_NAME`. The shorter name is an easy assumption to write and a live run is the only thing that would catch it, which is precisely the feedback this tier is slowest to give.
 

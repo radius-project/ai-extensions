@@ -1047,11 +1047,11 @@ describe("findSurvivingArtifactProblems", () => {
 
   it("refuses to claim survival without a stage-one variable value", () => {
     const expectedVariables = new Map(survivingInput().expectedVariables);
-    expectedVariables.delete("AZURE_LOCATION");
+    expectedVariables.delete("AZURE_RESOURCE_GROUP");
     expect(
       findSurvivingArtifactProblems(survivingInput({ expectedVariables }))
     ).toEqual([
-      "Stage one did not record environment variable AZURE_LOCATION, so its survival cannot be proved."
+      "Stage one did not record environment variable AZURE_RESOURCE_GROUP, so its survival cannot be proved."
     ]);
   });
 
