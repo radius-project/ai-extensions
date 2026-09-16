@@ -38,7 +38,11 @@ import {
   presentRemediation
 } from "./gh-command-display.js";
 import { resolveGhCommandPresentation } from "./gh-command-resolution.js";
-import { isGitHubAppBotLogin } from "./github-app-installation.js";
+import {
+  describeMissingGitHubAppAccess,
+  gitHubAppAccessProbePath,
+  isGitHubAppBotLogin
+} from "./github-app-installation.js";
 import {
   sharedCredentials,
   cloudCredential,
@@ -4939,7 +4943,7 @@ export async function finalizeSetupFailure(
 // non-JSON body, or an unparseable status — is treated as ambiguous and returns
 // '' so the preflight never silently misdirects; the real op then surfaces the
 // true error. GitHub still enforces permissions server-side regardless.
-async function preflightRepoAdmin(
+export async function preflightRepoAdmin(
   repo: string,
   executor?: SelectedGhExecutor,
   ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
@@ -4962,7 +4966,18 @@ async function preflightRepoAdmin(
   } else {
     return ""; // ambiguous/transient — don't block or mislead; let the real op surface the true error
   }
-  if (isGitHubAppBotLogin(login)) return "";
+  if (isGitHubAppBotLogin(login)) {
+    // Same reasoning as the readiness service: an installation token's granted
+    // permissions are not readable back, so prove access against the resource
+    // setup is about to mutate instead of trusting the `[bot]` login. Keep the
+    // ambiguity rule above -- only an explicit denial blocks.
+    if (readFailed) return describeMissingGitHubAppAccess(login, repo);
+    const probe = await runJson(gitHubAppAccessProbePath(repo));
+    if (probe.ok) return "";
+    if (probe.status === 403 || probe.status === 404)
+      return describeMissingGitHubAppAccess(login, repo);
+    return "";
+  }
   return explainRepoAccessForEnvSetup(
     {
       repo,

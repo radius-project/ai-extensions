@@ -58,7 +58,8 @@ import {
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
   DEPLOY_CLOUD_AUTH_DRIFT_KIND,
-  DEPLOY_RUN_UNCONFIRMED_KIND
+  DEPLOY_RUN_UNCONFIRMED_KIND,
+  preflightRepoAdmin
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import {
@@ -6246,4 +6247,89 @@ describe("deploy failures that may leave a run in flight", () => {
   //     `server/services/deploy-dispatch.test.ts`
   // A confirmed workflow failure is deliberately excluded from that set — it is
   // the only kind a repair may act on.
+});
+
+describe("GitHub App repository preflight", () => {
+  function appExecutor(
+    responses: Record<string, { code: number; stdout: string; stderr: string }>
+  ) {
+    const calls: string[] = [];
+    const run = async (args: string[]) => {
+      const path = args[1] || "";
+      calls.push(path);
+      return (
+        responses[path] || {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Not Found (HTTP 404)"
+        }
+      );
+    };
+    const executor = {
+      login: "radius-cloud-e2e[bot]",
+      credentialSource: "injected" as const,
+      requiresKeyringSwitch: false,
+      scopes: [] as string[],
+      run,
+      runOrThrow: run,
+      verifyIdentity: async () => {},
+      packageCredentials: () => ({
+        token: "package-token",
+        username: "package-publisher",
+        source: "injected-token" as const
+      }),
+      redact: (value: string) => value,
+      errorMessage: (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
+    };
+    return { executor, calls };
+  }
+
+  const REPO_OK = {
+    code: 0,
+    stdout: JSON.stringify({ permissions: { admin: false } }),
+    stderr: ""
+  };
+
+  it("clears an installation that can read the environments it will configure", async () => {
+    const { executor, calls } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      "repos/octo/app/environments": {
+        code: 0,
+        stdout: JSON.stringify({ total_count: 0, environments: [] }),
+        stderr: ""
+      }
+    });
+
+    await expect(preflightRepoAdmin("octo/app", executor)).resolves.toBe("");
+    expect(calls).toContain("repos/octo/app/environments");
+  });
+
+  it("blocks an installation whose environments access is denied", async () => {
+    const { executor } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      "repos/octo/app/environments": {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Resource not accessible by integration (HTTP 403)"
+      }
+    });
+
+    const message = await preflightRepoAdmin("octo/app", executor);
+    expect(message).toContain("radius-cloud-e2e[bot]");
+    expect(message).toContain("Environments");
+  });
+
+  it("stays silent when the environments probe fails ambiguously", async () => {
+    const { executor } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      "repos/octo/app/environments": {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Bad Gateway (HTTP 502)"
+      }
+    });
+
+    await expect(preflightRepoAdmin("octo/app", executor)).resolves.toBe("");
+  });
 });

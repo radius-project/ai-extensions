@@ -6,7 +6,11 @@ import {
   presentedRemediationView,
   type GhCommandPresentation
 } from "../../gh-command-display.js";
-import { isGitHubAppBotLogin } from "../../github-app-installation.js";
+import {
+  describeMissingGitHubAppAccess,
+  gitHubAppAccessProbePath,
+  isGitHubAppBotLogin
+} from "../../github-app-installation.js";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountRestoration
@@ -310,6 +314,7 @@ async function inspectRepository(
   repository: GitHubReadinessCheck;
   environment: GitHubReadinessCheck;
   ready: boolean;
+  appVerified: boolean;
 }> {
   const response = await executor.run(["api", `repos/${repo}`], {
     timeout: 15000
@@ -319,7 +324,12 @@ async function inspectRepository(
       (response.stderr || response.stdout).trim() ||
       `@${executor.login} could not access ${repo}.`;
     const check = errorCheck(detail);
-    return { repository: check, environment: check, ready: false };
+    return {
+      repository: check,
+      environment: check,
+      ready: false,
+      appVerified: false
+    };
   }
   let parsed: RepositoryResponse;
   try {
@@ -328,17 +338,42 @@ async function inspectRepository(
     const check = errorCheck(
       "GitHub returned an invalid repository permission response."
     );
-    return { repository: check, environment: check, ready: false };
+    return {
+      repository: check,
+      environment: check,
+      ready: false,
+      appVerified: false
+    };
   }
   if (isGitHubAppBotLogin(executor.login)) {
+    // An installation token maps its granular permissions onto `push`/`pull`
+    // rather than `admin`, so the repository response above cannot answer this.
+    // Probe the environments resource instead of inferring capability from the
+    // `[bot]` login, which no misconfigured installation could ever fail.
+    const probe = await executor.run(["api", gitHubAppAccessProbePath(repo)], {
+      timeout: 15000
+    });
+    if (probe.code !== 0) {
+      const detail =
+        (probe.stderr || probe.stdout).trim() ||
+        describeMissingGitHubAppAccess(executor.login, repo);
+      const check = errorCheck(detail);
+      return {
+        repository: check,
+        environment: check,
+        ready: false,
+        appVerified: false
+      };
+    }
     return {
       repository: readyCheck(
         `@${executor.login} can configure ${repo} through its GitHub App installation.`
       ),
       environment: readyCheck(
-        `@${executor.login} can configure GitHub Environments for ${repo}.`
+        `@${executor.login} can read deployment environments for ${repo}; GitHub enforces the installation's write permission when the environment is created.`
       ),
-      ready: true
+      ready: true,
+      appVerified: true
     };
   }
   const canAdmin = parsed.permissions?.admin === true;
@@ -350,7 +385,8 @@ async function inspectRepository(
       environment: failedCheck(
         `@${executor.login} cannot configure GitHub Environments for ${repo}.`
       ),
-      ready: false
+      ready: false,
+      appVerified: false
     };
   }
   return {
@@ -358,7 +394,8 @@ async function inspectRepository(
     environment: readyCheck(
       `@${executor.login} can configure GitHub Environments for ${repo}.`
     ),
-    ready: true
+    ready: true,
+    appVerified: false
   };
 }
 
@@ -380,9 +417,11 @@ export function createGitHubAccountReadinessService(
           { instanceId },
           async (executor) => {
             const repository = await inspectRepository(executor, repo);
+            // Installation tokens report no OAuth scopes, so workflow access
+            // rides on the verified installation probe rather than on the login
+            // shape: a probe failure must not still claim workflow access.
             const workflowReady =
-              hasScope(executor, "workflow") ||
-              isGitHubAppBotLogin(executor.login);
+              hasScope(executor, "workflow") || repository.appVerified;
             const packageCredentials = executor.packageCredentials();
             const hasPackagesScope =
               packageCredentials.scopes?.includes("write:packages") ??

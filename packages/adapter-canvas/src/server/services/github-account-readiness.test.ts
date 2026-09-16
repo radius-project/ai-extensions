@@ -118,6 +118,13 @@ describe("GitHub account readiness", () => {
           stderr: ""
         };
       }
+      if (args[1] === "repos/octo/app/environments") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ total_count: 0, environments: [] }),
+          stderr: ""
+        };
+      }
       throw new Error(`unexpected gh call: ${args.join(" ")}`);
     };
     const executor: SelectedGhExecutor = {
@@ -194,6 +201,55 @@ describe("GitHub account readiness", () => {
       state: "error",
       detail: "gh: Not Found (HTTP 404)"
     });
+  });
+
+  it("rejects a GitHub App installation whose granted permissions cannot configure environments", async () => {
+    const login = "radius-cloud-e2e[bot]";
+    const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
+      if (args[1] === "repos/octo/app") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ permissions: { admin: false } }),
+          stderr: ""
+        };
+      }
+      return {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Resource not accessible by integration (HTTP 403)"
+      };
+    };
+    const executor: SelectedGhExecutor = {
+      ...selectedExecutor({ login }),
+      credentialSource: "injected",
+      requiresKeyringSwitch: false,
+      scopes: [],
+      run,
+      runOrThrow: run,
+      packageCredentials: () => ({
+        username: "package-publisher",
+        token: "synthetic-package-credential",
+        source: "injected-token",
+        scopes: ["write:packages"]
+      })
+    };
+    const service = readinessService(coordinator(executor));
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks.environment).toEqual({
+      state: "error",
+      detail: "gh: Resource not accessible by integration (HTTP 403)"
+    });
+    // The login still looks like a bot, so an unverified installation must not
+    // keep claiming workflow access on the strength of its name alone.
+    expect(result.checks.workflow.state).toBe("missing");
   });
 
   it("verifies and restores a mocked inactive keyring account", async () => {
