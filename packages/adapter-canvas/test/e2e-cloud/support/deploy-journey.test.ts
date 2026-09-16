@@ -90,10 +90,12 @@ describe("required workflow and variable inventories", () => {
     ]);
     expect(REQUIRED_LIFECYCLE_WORKFLOWS).toEqual([
       ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
-      ...REQUIRED_DEPLOY_WORKFLOWS,
-      ...REQUIRED_DELETE_WORKFLOWS,
-      DELETE_ENV_DISPATCHER_FILE,
-      DELETE_ENV_AZURE_FILE
+      ...[
+        ...REQUIRED_DEPLOY_WORKFLOWS,
+        ...REQUIRED_DELETE_WORKFLOWS,
+        DELETE_ENV_DISPATCHER_FILE,
+        DELETE_ENV_AZURE_FILE
+      ].map((file) => `.github/workflows/${file}`)
     ]);
   });
 

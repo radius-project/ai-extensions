@@ -52,10 +52,12 @@ export const DELETE_ENVIRONMENT_WORKFLOW = DELETE_ENV_DISPATCHER_FILE;
 /** Every workflow the complete lifecycle requires before its first dispatch. */
 export const REQUIRED_LIFECYCLE_WORKFLOWS: readonly string[] = [
   ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
-  ...REQUIRED_DEPLOY_WORKFLOWS,
-  ...REQUIRED_DELETE_WORKFLOWS,
-  DELETE_ENV_DISPATCHER_FILE,
-  DELETE_ENV_AZURE_FILE
+  ...[
+    ...REQUIRED_DEPLOY_WORKFLOWS,
+    ...REQUIRED_DELETE_WORKFLOWS,
+    DELETE_ENV_DISPATCHER_FILE,
+    DELETE_ENV_AZURE_FILE
+  ].map((file) => `.github/workflows/${file}`)
 ];
 
 /**
