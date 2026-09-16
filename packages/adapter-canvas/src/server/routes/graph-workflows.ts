@@ -1269,21 +1269,24 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         data.restartWait === true
       );
       activeProgressHandle = progressHandle;
+      // True while this request is still the comparison on screen. A selector
+      // change starts a newer request that owns the progress record and the
+      // source-reference token; anything this one writes afterwards — progress
+      // events, authoring-failure state, a handoff — would belong to a
+      // comparison the user already left.
+      const isCurrentRequest = (): boolean =>
+        isCurrentGraphProgress(state, progressHandle) &&
+        dependencies.isCurrentSourceRefToken(
+          state,
+          "diff",
+          sourceRefContext?.token || ""
+        );
       const addEvent = (
         stage: GraphBuildStage,
         eventState: GraphBuildEvent["state"],
         detail: string
       ): void => {
-        if (
-          !isCurrentGraphProgress(state, progressHandle) ||
-          !dependencies.isCurrentSourceRefToken(
-            state,
-            "diff",
-            sourceRefContext?.token || ""
-          )
-        ) {
-          return;
-        }
+        if (!isCurrentRequest()) return;
         appendGraphEvent(progressHandle.record, stage, eventState, detail);
       };
       sourceRefContext = dependencies.prepareSourceRefResources(entry, "diff", {
@@ -1310,6 +1313,22 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         pipeline.selectAppBicep(entry, repo, data.head)
       ]);
 
+      // The selections were awaited, so a newer comparison may now own the
+      // fencing state for these branches. Writing to it from here would clear
+      // or overwrite that comparison's attempt and could either reject its
+      // legitimate failure report as stale or promote an abandoned handoff.
+      if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
+
+      // An explicit refresh is the retry path the failure text names, so it
+      // clears BOTH sides: the user is asking for the whole comparison again,
+      // and leaving either side fenced would end the retry immediately. This
+      // runs before the both-missing check so a refresh still unfences the
+      // missing side of a half-modeled comparison.
+      if (data.restartWait === true) {
+        clearAppModelAuthoringFailure(state, repo, data.base);
+        clearAppModelAuthoringFailure(state, repo, data.head);
+      }
+
       if (!baseSelection.content && !headSelection.content) {
         addEvent(
           "checking_model",
@@ -1321,13 +1340,6 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
-        // An explicit refresh is the retry path the failure text names, so it
-        // clears BOTH sides: the user is asking for the whole comparison again,
-        // and leaving either side fenced would end the retry immediately.
-        if (data.restartWait === true) {
-          clearAppModelAuthoringFailure(state, repo, data.base);
-          clearAppModelAuthoringFailure(state, repo, data.head);
-        }
         // A permanent failure on EITHER side ends the diff's wait. Both sides
         // are missing to have reached here, and both models are produced by the
         // one handoff that just failed permanently, so a failure recorded
@@ -1362,6 +1374,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             repo
           });
         }
+        // Re-checked after the refusal probe: the handoff mints the attempt
+        // tokens that fence both branches, so a superseded request must not
+        // start one and overwrite the current comparison's attempt.
+        if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
         dependencies.triggerAppBicepHandoff(
           entry,
           repo,

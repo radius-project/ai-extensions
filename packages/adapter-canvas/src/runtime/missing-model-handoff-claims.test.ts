@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   createMissingModelHandoffClaims,
-  MISSING_MODEL_HANDOFF_CLAIM_TTL_MS
+  MISSING_MODEL_HANDOFF_CLAIM_TTL_MS,
+  missingModelHandoffTarget
 } from "./missing-model-handoff-claims.js";
 
 function harness() {
@@ -14,6 +15,14 @@ function harness() {
     }
   };
 }
+
+describe("missingModelHandoffTarget", () => {
+  it("encodes a branch set so a comma in a branch name stays unambiguous", () => {
+    expect(missingModelHandoffTarget("a/b", ["main", "feat"])).not.toBe(
+      missingModelHandoffTarget("a/b", ["main,feat"])
+    );
+  });
+});
 
 describe("createMissingModelHandoffClaims", () => {
   it("allows only one active owner for the same target and situation", () => {
@@ -107,30 +116,59 @@ describe("createMissingModelHandoffClaims", () => {
 
   it("releases every claim covering a branch, including the two-branch diff claim", () => {
     const { claims } = harness();
-    const single = claims.claim("a/b::feat", "missing");
-    const diff = claims.claim("a/b::main,feat", "missing");
-    const unrelated = claims.claim("a/b::release", "missing");
-    const otherRepo = claims.claim("c/d::feat", "missing");
+    const singleTarget = missingModelHandoffTarget("a/b", ["feat"]);
+    const diffTarget = missingModelHandoffTarget("a/b", ["main", "feat"]);
+    const unrelatedTarget = missingModelHandoffTarget("a/b", ["release"]);
+    const otherRepoTarget = missingModelHandoffTarget("c/d", ["feat"]);
+    const single = claims.claim(singleTarget, "missing");
+    const diff = claims.claim(diffTarget, "missing");
+    const unrelated = claims.claim(unrelatedTarget, "missing");
+    const otherRepo = claims.claim(otherRepoTarget, "missing");
     if (!single || !diff || !unrelated || !otherRepo) {
       throw new Error("expected every claim");
     }
 
     claims.releaseForBranch("a/b", "feat");
 
-    expect(claims.current("a/b::feat")).toBeNull();
-    expect(claims.current("a/b::main,feat")).toBeNull();
-    expect(claims.current("a/b::release")).toBe(unrelated);
-    expect(claims.current("c/d::feat")).toBe(otherRepo);
+    expect(claims.current(singleTarget)).toBeNull();
+    expect(claims.current(diffTarget)).toBeNull();
+    expect(claims.current(unrelatedTarget)).toBe(unrelated);
+    expect(claims.current(otherRepoTarget)).toBe(otherRepo);
   });
 
   it("does not release a claim whose branch merely shares a prefix", () => {
     const { claims } = harness();
-    const owner = claims.claim("a/b::feature-x", "missing");
+    const target = missingModelHandoffTarget("a/b", ["feature-x"]);
+    const owner = claims.claim(target, "missing");
     if (!owner) throw new Error("expected claim");
 
     claims.releaseForBranch("a/b", "feature");
 
-    expect(claims.current("a/b::feature-x")).toBe(owner);
+    expect(claims.current(target)).toBe(owner);
+  });
+
+  // A comma is legal in a git branch name, so encoding branch sets with one
+  // made `a,b` ambiguous between a single branch and a two-branch diff.
+  it("releases a single-branch claim whose branch name contains a comma", () => {
+    const { claims } = harness();
+    const target = missingModelHandoffTarget("a/b", ["feature,one"]);
+    if (!claims.claim(target, "missing")) throw new Error("expected claim");
+
+    claims.releaseForBranch("a/b", "feature,one");
+
+    expect(claims.current(target)).toBeNull();
+  });
+
+  it("leaves a comma-containing branch claimed when one of its halves is reported", () => {
+    const { claims } = harness();
+    const target = missingModelHandoffTarget("a/b", ["feature,one"]);
+    const owner = claims.claim(target, "missing");
+    if (!owner) throw new Error("expected claim");
+
+    claims.releaseForBranch("a/b", "feature");
+    claims.releaseForBranch("a/b", "one");
+
+    expect(claims.current(target)).toBe(owner);
   });
 
   it("keeps the claim store bounded while preserving the newest targets", () => {

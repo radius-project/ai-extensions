@@ -26,6 +26,7 @@ import type { CanvasState } from "../shared.js";
 import type { GraphProgressView } from "../shared.js";
 import type { AppSourceEvaluation } from "@radius-project/core";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
+import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { appModelTargetKey } from "../app-model-authoring-failure.js";
 
@@ -133,8 +134,7 @@ export function appModelHandoffKey(
 export function createAppModelHandoff(
   deps: AppModelHandoffDependencies
 ): AppModelHandoff {
-  const targetKey = (repo: string, branches: ReadonlyArray<string>): string =>
-    `${repo}::${branches.join(",")}`;
+  const targetKey = missingModelHandoffTarget;
 
   // Polls for an in-flight modeling run across the grace window. Answers true
   // as soon as one is observed, so the common case where the agent starts

@@ -4,7 +4,10 @@ import {
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
-import { createMissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
+import {
+  createMissingModelHandoffClaims,
+  missingModelHandoffTarget
+} from "./missing-model-handoff-claims.js";
 import {
   createFakeDependencies,
   createFakeSession
@@ -617,8 +620,12 @@ describe("TL-11: radius_report_modeling_failure", () => {
 
   it("also releases the two-branch diff claim that covers the failed branch", async () => {
     const { tools, missingModelHandoffs } = await currentAttempt();
+    const diffTarget = missingModelHandoffTarget("acme/widgets", [
+      "release",
+      "main"
+    ]);
     const diffClaim = missingModelHandoffs.claim(
-      "acme/widgets::release,main",
+      diffTarget,
       "missing-model-key"
     );
     expect(diffClaim).not.toBeNull();
@@ -626,9 +633,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
 
     await findTool(tools, "radius_report_modeling_failure").handler(report);
 
-    expect(
-      missingModelHandoffs.current("acme/widgets::release,main")
-    ).toBeNull();
+    expect(missingModelHandoffs.current(diffTarget)).toBeNull();
   });
 
   it("leaves an unrelated target's claim alone when a failure is recorded", async () => {

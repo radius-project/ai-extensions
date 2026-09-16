@@ -2088,6 +2088,69 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs).toHaveLength(1);
     });
 
+    // The clearing sits ahead of the both-missing check so a half-modeled
+    // comparison still unfences its missing side; leaving that fence standing
+    // would make the next comparison terminal the moment the modeled side
+    // stopped carrying content.
+    it("clears the still-missing side's failure on an explicit refresh when the other side has a model", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::feature/x": {
+          attemptToken: "attempt-1",
+          error: "head failed"
+        }
+      };
+      harness.state.appModelAttemptTokens = {
+        "octo/app::feature/x": "attempt-1"
+      };
+
+      await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+      );
+
+      expect(harness.state.appModelFailures).toEqual({});
+      expect(harness.state.appModelAttemptTokens).toEqual({});
+    });
+
+    it("leaves fencing state alone when a newer comparison supersedes the request", async () => {
+      let harness!: Harness;
+      harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        },
+        afterSelect: () => {
+          prepareSourceRefResources(harness.entry, "diff", {
+            repo: "octo/app",
+            baseBranch: "main",
+            headBranch: "feature/y"
+          });
+        }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": { attemptToken: "attempt-1", error: "base failed" }
+      };
+      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+
+      const outcome = await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+      );
+
+      expect(outcome.status).toBe(409);
+      expect(outcome.payload).toEqual({ stale: true });
+      expect(harness.state.appModelFailures).toEqual({
+        "octo/app::main": { attemptToken: "attempt-1", error: "base failed" }
+      });
+      expect(harness.handoffs).toEqual([]);
+    });
+
     it.each([
       ["base", "main", "feature/x"],
       ["head", "feature/x", "main"]

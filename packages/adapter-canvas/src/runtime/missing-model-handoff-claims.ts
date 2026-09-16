@@ -11,6 +11,20 @@ export interface MissingModelHandoffClaim {
   readonly key: string;
 }
 
+// Branches are joined with a character `git check-ref-format` rejects, so the
+// encoding stays reversible: a comma is legal in a branch name, which made
+// `a,b` ambiguous between one branch and a two-branch diff.
+const BRANCH_SEPARATOR = ":";
+
+// The single encoder for claim targets. Decoding lives beside it in
+// `releaseForBranch` so the two can never drift apart.
+export function missingModelHandoffTarget(
+  repo: string,
+  branches: ReadonlyArray<string>
+): string {
+  return `${repo}::${branches.join(BRANCH_SEPARATOR)}`;
+}
+
 export interface MissingModelHandoffClaims {
   current(target: string): MissingModelHandoffClaim | null;
   claim(
@@ -22,10 +36,10 @@ export interface MissingModelHandoffClaims {
   markDelivered(claim: MissingModelHandoffClaim): void;
   release(claim: MissingModelHandoffClaim): void;
   // Releases every claim whose target covers this repo+branch, including the
-  // two-branch diff claim `repo::base,head`. A diff mints one attempt token per
-  // branch under the single-branch key, so a failure recorded against one side
-  // has to free the diff's claim as well — otherwise the refresh the failure
-  // message tells the user to make is dropped until the claim's TTL expires.
+  // two-branch diff claim. A diff mints one attempt token per branch under the
+  // single-branch key, so a failure recorded against one side has to free the
+  // diff's claim as well — otherwise the refresh the failure message tells the
+  // user to make is dropped until the claim's TTL expires.
   releaseForBranch(repo: string, branch: string): void;
 }
 
@@ -110,7 +124,8 @@ export function createMissingModelHandoffClaims(
       const prefix = `${repo}::`;
       for (const target of [...entries.keys()]) {
         if (!target.startsWith(prefix)) continue;
-        if (!target.slice(prefix.length).split(",").includes(branch)) continue;
+        const branches = target.slice(prefix.length).split(BRANCH_SEPARATOR);
+        if (!branches.includes(branch)) continue;
         entries.delete(target);
       }
     }
