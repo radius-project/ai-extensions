@@ -1014,10 +1014,39 @@ export async function resolveAzureAutoSetupApplication({
             persist: operations.persist,
             beforeMutation: () =>
               stopBoundary("before-app-registration-tag-update"),
-            mutate: () =>
-              runAz(
-                buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
-              ),
+            mutate: async () => {
+              let result: AzureAutoSetupCommandResult = {
+                code: 1,
+                stdout: "",
+                stderr: "App Registration tag update was not attempted."
+              };
+              for (
+                let attempt = 1;
+                attempt <= APP_PROPAGATION_ATTEMPTS;
+                attempt++
+              ) {
+                result = await runAz(
+                  buildAppTagPatchArgs({
+                    appId: clientId,
+                    tags: provenanceTags
+                  })
+                );
+                if (result.code === 0 || result.code === "0") break;
+                if (
+                  !isReplicationLagError(result.stderr || result.stdout) ||
+                  attempt >= APP_PROPAGATION_ATTEMPTS
+                ) {
+                  break;
+                }
+                const delay = azureRetryDelayMs(
+                  result.stderr || result.stdout,
+                  2000 * attempt
+                );
+                if (delay === null) break;
+                await dependencies.sleep(delay);
+              }
+              return result;
+            },
             accept: (result) => result,
             reconcile: async () => {
               const shown = await readCreatedAppTags(clientId, provenanceTags);

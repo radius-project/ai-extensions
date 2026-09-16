@@ -1932,6 +1932,7 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
       ownerAdds?: AzureAutoSetupCommandResult[];
       ownerList?: AzureAutoSetupCommandResult;
       ownerLists?: AzureAutoSetupCommandResult[];
+      tagPatches?: AzureAutoSetupCommandResult[];
       tagShows?: AzureAutoSetupCommandResult[];
       sleep?: AzureAutoSetupApplicationInput["dependencies"]["sleep"];
     } = {}
@@ -1966,7 +1967,8 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
             overrides.ownerList ??
             command({ stdout: ownerObjectId })
           );
-        if (line.startsWith("rest --method PATCH ")) return command();
+        if (line.startsWith("rest --method PATCH "))
+          return overrides.tagPatches?.shift() ?? command();
         if (line.startsWith("ad app show ") && line.includes("--query tags"))
           return (
             overrides.tagShows?.shift() ??
@@ -2087,6 +2089,31 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
         (line) =>
           line.startsWith("ad app show ") && line.includes("--query tags")
       )
+    ).toHaveLength(2);
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("retries provenance tag mutation while the new App Registration propagates", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      tagPatches: [
+        command({
+          code: 1,
+          stderr:
+            'ERROR: Not Found({"error":{"code":"Request_ResourceNotFound","message":"Resource \'app-id\' does not exist or one of its queried reference-property objects are not present."}})'
+        }),
+        command()
+      ],
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+    expect(
+      azCalls.filter((line) => line.startsWith("rest --method PATCH "))
     ).toHaveLength(2);
     expect(sleeps).toEqual([2000]);
   });
