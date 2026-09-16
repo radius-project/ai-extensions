@@ -59,21 +59,6 @@ None of the following is needed for Azure parity, so none is in scope.
 - Editing a saved credential profile is out, since profiles are create-and-delete on Azure too. Region is the field most likely to justify changing that, and it changes for both clouds at once or not at all.
 - Long-lived AWS access keys as a credential option are out. They regress the Azure baseline, which stores no cloud secrets.
 
-### Scope
-
-The first release is Scenarios 1, 2, and 3 end to end: a developer can onboard with a new or existing IAM role, deploy, and tear down without leaving the canvas.
-
-- An AWS credential profile verified against the developer's own CLI session.
-- Environment creation over discovered EKS clusters, namespaces, VPCs, and subnets.
-- A deploy role Radius creates for the repository during environment creation, or a role the developer supplies instead.
-- A published, versioned AWS recipe pack covering every Tier 1 resource type and the shared Kubernetes types.
-- Automatic AWS custom resource-type generation when the built-in catalog has no matching type.
-- Deploy, an application graph showing real AWS types with console links, and deletion of both the deployment and the environment.
-
-Deferred to a later release:
-
-- Wiring applications to backing services through IRSA.
-
 ### User scenarios
 
 **MVP**
