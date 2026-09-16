@@ -411,7 +411,7 @@ describe("cloud-e2e.yml", () => {
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
-  it("requests Actions write access for Radius cleanup dispatch", async () => {
+  it("requests Actions write access for Radius cleanup dispatch without package write", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const token = steps(workflow.jobs?.purge).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
@@ -419,7 +419,27 @@ describe("cloud-e2e-cleanup.yml", () => {
 
     expect(token?.with?.["permission-actions"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
-    expect(token?.with?.["permission-packages"]).toBe("write");
+    // cloud-e2e.yml mints its journey token with no permission inputs, so any
+    // grant added to this installation widens that token too.
+    expect(token?.with?.["permission-packages"]).toBeUndefined();
+  });
+
+  it("deletes legacy resource groups only after the Radius applications on them", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const radiusIndex = purge.findIndex(
+      (step) =>
+        step.name === "Delete stale Radius applications before recovery state"
+    );
+    const legacyIndex = purge.findIndex((step) =>
+      step.run?.includes("selectTestResourceGroups")
+    );
+
+    expect(radiusIndex).toBeGreaterThanOrEqual(0);
+    expect(legacyIndex).toBeGreaterThan(radiusIndex);
+    expect(purge[legacyIndex]?.if).toContain(
+      "steps.radius-app-cleanup.outcome == 'success'"
+    );
   });
 
   it("deletes stale Radius applications before recovery inputs", async () => {
@@ -459,6 +479,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(stateCleanup?.if).toContain(
       "steps.radius-app-cleanup.outcome == 'success'"
     );
+    expect(stateCleanup?.env?.GH_PACKAGES_TOKEN).toBe(
+      "${{ secrets.GH_RAD_CI_BOT_PAT }}"
+    );
     expect(script).toContain("stateRegistryForEnvironment");
     expect(script).toContain(
       '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
@@ -466,7 +489,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain(
       '[[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]'
     );
-    expect(script).toContain('gh api --method DELETE "$package_path"');
+    expect(script).toContain(
+      'GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"'
+    );
   });
 
   it("removes only allowlisted assignments before deleting leaked service principals", async () => {
@@ -496,6 +521,12 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("blocked-application-ids.txt");
     expect(script).toContain(
       "preserve application $id because service principal cleanup"
+    );
+    // Deleting an application cascade-deletes its principal, so a principal the
+    // age filter never selected must block its parent rather than ride along.
+    expect(script).toContain("selectAppIdsWithUnprocessedServicePrincipals");
+    expect(script).toContain(
+      "preserve appId $unprocessed_app_id because a matching service principal was not a deletion candidate"
     );
   });
 

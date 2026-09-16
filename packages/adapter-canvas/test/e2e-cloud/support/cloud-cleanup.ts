@@ -213,6 +213,43 @@ export function selectExpiredServicePrincipals(
   return principals;
 }
 
+/**
+ * The appIds whose application must not be deleted because a matching service
+ * principal was never selected for deletion.
+ *
+ * `selectExpiredServicePrincipals` deliberately excludes a principal whose own
+ * creation time is newer than the cutoff or was not returned by Graph. Deleting
+ * the parent application anyway cascade-deletes that principal, which strands
+ * its role assignments with no object left to match them against. Fail closed
+ * on the raw inventory rather than on the selection.
+ */
+export function selectAppIdsWithUnprocessedServicePrincipals(
+  payload: unknown,
+  displayName: string,
+  applicationAppIds: readonly string[],
+  selectedPrincipals: readonly CleanupServicePrincipal[]
+): string[] {
+  const candidateAppIds = new Set(applicationAppIds);
+  const selectedIds = new Set(selectedPrincipals.map((entry) => entry.id));
+  const blocked = new Set<string>();
+  for (const entry of requireArray(
+    payload,
+    "Microsoft Graph service principals"
+  )) {
+    const item = asRecord(entry);
+    if (
+      item?.displayName === displayName &&
+      typeof item.id === "string" &&
+      item.id !== "" &&
+      typeof item.appId === "string" &&
+      candidateAppIds.has(item.appId) &&
+      !selectedIds.has(item.id)
+    )
+      blocked.add(item.appId);
+  }
+  return [...blocked];
+}
+
 export function selectExpiredEnvironments(
   payload: unknown,
   prefix: string,

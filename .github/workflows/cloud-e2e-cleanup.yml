@@ -165,78 +165,7 @@ jobs:
           permission-actions: write
           permission-contents: write
           permission-environments: write
-          permission-packages: write
           permission-pull-requests: write
-
-      # Older revisions created per-run resource groups carrying both the
-      # fixture prefix and a fixture-owned tag. Retain their bounded cleanup,
-      # but never target the configured shared cluster resource group.
-      - name: Purge legacy Azure resource groups created by the suite
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RESOURCE_GROUP_PREFIX: ${{ steps.pin.outputs.resource-group-prefix }}
-          SHARED_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
-          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          groups="$RUNNER_TEMP/resource-groups.json"
-          test_groups="$RUNNER_TEMP/test-resource-groups.json"
-
-          az group list \
-            --subscription "$SUBSCRIPTION_ID" \
-            --query "[?starts_with(name, '$RESOURCE_GROUP_PREFIX')].{name:name,tags:tags}" \
-            -o json >"$groups"
-
-          node --input-type=module - \
-            "$groups" "$RESOURCE_GROUP_PREFIX" "$SHARED_RESOURCE_GROUP" "$test_groups" <<'NODE'
-          import { readFile, writeFile } from "node:fs/promises";
-          const [groupsFile, prefix, sharedResourceGroup, testGroupsFile] = process.argv.slice(2);
-          const { selectTestResourceGroups } = await import(
-            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
-          );
-          const groups = JSON.parse(await readFile(groupsFile, "utf8"));
-          await writeFile(
-            testGroupsFile,
-            JSON.stringify(
-              selectTestResourceGroups(groups, prefix, sharedResourceGroup)
-            )
-          );
-          NODE
-
-          purged=0
-          failures=()
-          while IFS=$'\t' read -r name run_id; do
-            [[ -n "$name" && -n "$run_id" ]] || continue
-            if ! status="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status --jq .status)"; then
-              echo "::warning::Could not verify whether workflow run $run_id for resource group $name is terminal; leaving it alone."
-              failures+=("verify run $run_id for $name")
-              continue
-            fi
-            if [[ "$status" != "completed" ]]; then
-              echo "Leaving resource group $name because workflow run $run_id is $status."
-              continue
-            fi
-            echo "Deleting test-created resource group $name from completed workflow run $run_id."
-            if ! az group delete \
-                --name "$name" \
-                --subscription "$SUBSCRIPTION_ID" \
-                --yes \
-                --no-wait \
-                --output none; then
-              failures+=("delete resource group $name")
-              continue
-            fi
-            purged=$((purged + 1))
-          done < <(jq -r '.[] | [.name, .runId] | @tsv' "$test_groups")
-
-          echo "- Azure resource groups purged: $purged" >>"$GITHUB_STEP_SUMMARY"
-          if (( ${#failures[@]} > 0 )); then
-            printf 'Resource-group cleanup failures:\n' >&2
-            printf '  - %s\n' "${failures[@]}" >&2
-            exit 1
-          fi
 
       - name: Delete stale Radius applications before recovery state
         id: radius-app-cleanup
@@ -337,10 +266,90 @@ jobs:
             exit 1
           fi
 
+      # Older revisions created per-run resource groups carrying both the
+      # fixture prefix and a fixture-owned tag. Retain their bounded cleanup,
+      # but never target the configured shared cluster resource group.
+      #
+      # This runs after the Radius deletion above, not before it. A legacy group
+      # can still hold the AKS cluster an older environment deploys to, and
+      # deleting it first makes `delete-application.yml` fail while fetching
+      # cluster credentials - which would then block every recovery-state step
+      # gated on that dispatch succeeding.
+      - name: Purge legacy Azure resource groups created by the suite
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESOURCE_GROUP_PREFIX: ${{ steps.pin.outputs.resource-group-prefix }}
+          SHARED_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          groups="$RUNNER_TEMP/resource-groups.json"
+          test_groups="$RUNNER_TEMP/test-resource-groups.json"
+
+          az group list \
+            --subscription "$SUBSCRIPTION_ID" \
+            --query "[?starts_with(name, '$RESOURCE_GROUP_PREFIX')].{name:name,tags:tags}" \
+            -o json >"$groups"
+
+          node --input-type=module - \
+            "$groups" "$RESOURCE_GROUP_PREFIX" "$SHARED_RESOURCE_GROUP" "$test_groups" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [groupsFile, prefix, sharedResourceGroup, testGroupsFile] = process.argv.slice(2);
+          const { selectTestResourceGroups } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const groups = JSON.parse(await readFile(groupsFile, "utf8"));
+          await writeFile(
+            testGroupsFile,
+            JSON.stringify(
+              selectTestResourceGroups(groups, prefix, sharedResourceGroup)
+            )
+          );
+          NODE
+
+          purged=0
+          failures=()
+          while IFS=$'\t' read -r name run_id; do
+            [[ -n "$name" && -n "$run_id" ]] || continue
+            if ! status="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status --jq .status)"; then
+              echo "::warning::Could not verify whether workflow run $run_id for resource group $name is terminal; leaving it alone."
+              failures+=("verify run $run_id for $name")
+              continue
+            fi
+            if [[ "$status" != "completed" ]]; then
+              echo "Leaving resource group $name because workflow run $run_id is $status."
+              continue
+            fi
+            echo "Deleting test-created resource group $name from completed workflow run $run_id."
+            if ! az group delete \
+                --name "$name" \
+                --subscription "$SUBSCRIPTION_ID" \
+                --yes \
+                --no-wait \
+                --output none; then
+              failures+=("delete resource group $name")
+              continue
+            fi
+            purged=$((purged + 1))
+          done < <(jq -r '.[] | [.name, .runId] | @tsv' "$test_groups")
+
+          echo "- Azure resource groups purged: $purged" >>"$GITHUB_STEP_SUMMARY"
+          if (( ${#failures[@]} > 0 )); then
+            printf 'Resource-group cleanup failures:\n' >&2
+            printf '  - %s\n' "${failures[@]}" >&2
+            exit 1
+          fi
+      # The package credential is deliberately separate from the installation
+      # token. cloud-e2e.yml mints its journey token without permission inputs,
+      # so it inherits the App's whole installation grant - granting the App
+      # Packages write here would hand package-write to the journey token too.
       - name: Purge stale GHCR deployment state
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
           FIXTURE_OWNER: ${{ steps.pin.outputs.owner }}
           ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
@@ -385,7 +394,7 @@ jobs:
             )"
             package_path="orgs/$FIXTURE_OWNER/packages/container/$package_name"
             package="$RUNNER_TEMP/state-package-$environment.json"
-            if ! gh api "$package_path" >"$package" 2>"$package.stderr"; then
+            if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api "$package_path" >"$package" 2>"$package.stderr"; then
               if grep -q "HTTP 404" "$package.stderr"; then
                 continue
               fi
@@ -402,7 +411,7 @@ jobs:
               failures+=("refuse GHCR package $package_name linked to ${linked_repository:-no repository}")
               continue
             fi
-            if ! gh api --method DELETE "$package_path"; then
+            if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"; then
               failures+=("delete GHCR package $package_name for $environment")
               continue
             fi
@@ -437,6 +446,7 @@ jobs:
           applications="$RUNNER_TEMP/applications.json"
           expired_principals="$RUNNER_TEMP/expired-service-principals.json"
           expired_applications="$RUNNER_TEMP/expired-applications.json"
+          unprocessed_app_ids="$RUNNER_TEMP/unprocessed-application-ids.txt"
 
           # Graph returns service-principal creation time only when selected.
           # Without it, fail-closed age selection would safely but permanently
@@ -452,11 +462,11 @@ jobs:
 
           node --input-type=module - \
             "$principals" "$applications" "$cutoff" "$APPLICATION_NAME" "$FIXTURE_REPOSITORY" "$ENVIRONMENT_PREFIX" \
-            "$expired_principals" "$expired_applications" <<'NODE'
+            "$expired_principals" "$expired_applications" "$unprocessed_app_ids" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [principalsFile, applicationsFile, cutoff, displayName, repository, environmentPrefix, expiredPrincipalsFile, expiredApplicationsFile] =
+          const [principalsFile, applicationsFile, cutoff, displayName, repository, environmentPrefix, expiredPrincipalsFile, expiredApplicationsFile, unprocessedAppIdsFile] =
             process.argv.slice(2);
-          const { selectExpiredApplications, selectExpiredServicePrincipals } = await import(
+          const { selectAppIdsWithUnprocessedServicePrincipals, selectExpiredApplications, selectExpiredServicePrincipals } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
           );
           const [principals, applications] = await Promise.all(
@@ -477,9 +487,16 @@ jobs:
             expiredApplications.map((application) => application.appId),
             cutoff
           );
+          const unprocessedAppIds = selectAppIdsWithUnprocessedServicePrincipals(
+            principals,
+            displayName,
+            expiredApplications.map((application) => application.appId),
+            expiredPrincipals
+          );
           await Promise.all([
             writeFile(expiredPrincipalsFile, JSON.stringify(expiredPrincipals)),
-            writeFile(expiredApplicationsFile, JSON.stringify(expiredApplications))
+            writeFile(expiredApplicationsFile, JSON.stringify(expiredApplications)),
+            writeFile(unprocessedAppIdsFile, unprocessedAppIds.join("\n"))
           ]);
           NODE
 
@@ -487,7 +504,14 @@ jobs:
           assignments_purged=0
           failures=()
           blocked_app_ids="$RUNNER_TEMP/blocked-application-ids.txt"
-          : >"$blocked_app_ids"
+          # Deleting an application cascade-deletes its service principal, so an
+          # application whose principal was never a deletion candidate starts
+          # blocked rather than being silently taken with it.
+          grep -v '^$' "$unprocessed_app_ids" >"$blocked_app_ids" || : >"$blocked_app_ids"
+          while read -r unprocessed_app_id; do
+            [[ -n "$unprocessed_app_id" ]] || continue
+            failures+=("preserve appId $unprocessed_app_id because a matching service principal was not a deletion candidate")
+          done <"$blocked_app_ids"
           while IFS=$'\t' read -r id app_id; do
             [[ -n "$id" && -n "$app_id" ]] || continue
             resource_group_scope="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"

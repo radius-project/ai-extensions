@@ -6,6 +6,7 @@ import {
   selectExpiredFallbackBranches,
   selectExpiredFallbackPullRequests,
   selectExpiredServicePrincipals,
+  selectAppIdsWithUnprocessedServicePrincipals,
   selectExpectedRoleAssignments,
   selectOpenPullRequestHeadRefs,
   selectTestResourceGroups
@@ -154,6 +155,80 @@ describe("selectExpiredServicePrincipals", () => {
         CUTOFF
       )
     ).toEqual([{ id: "principal-old", appId: "client-old" }]);
+  });
+});
+
+describe("selectAppIdsWithUnprocessedServicePrincipals", () => {
+  const principals = [
+    {
+      id: "principal-old",
+      appId: "client-old",
+      displayName: APP,
+      createdDateTime: OLD
+    },
+    {
+      id: "principal-new",
+      appId: "client-old",
+      displayName: APP,
+      createdDateTime: NEW
+    }
+  ];
+
+  it("blocks an application whose matching principal was not selected", () => {
+    expect(
+      selectAppIdsWithUnprocessedServicePrincipals(
+        principals,
+        APP,
+        ["client-old"],
+        [{ id: "principal-old", appId: "client-old" }]
+      )
+    ).toEqual(["client-old"]);
+  });
+
+  it("blocks an application whose principal has no usable creation time", () => {
+    expect(
+      selectAppIdsWithUnprocessedServicePrincipals(
+        [{ id: "principal-undated", appId: "client-old", displayName: APP }],
+        APP,
+        ["client-old"],
+        []
+      )
+    ).toEqual(["client-old"]);
+  });
+
+  it("does not block when every matching principal was selected", () => {
+    expect(
+      selectAppIdsWithUnprocessedServicePrincipals(
+        [principals[0]],
+        APP,
+        ["client-old"],
+        [{ id: "principal-old", appId: "client-old" }]
+      )
+    ).toEqual([]);
+  });
+
+  it("ignores principals belonging to another application or display name", () => {
+    expect(
+      selectAppIdsWithUnprocessedServicePrincipals(
+        [
+          { id: "other-app", appId: "client-other", displayName: APP },
+          {
+            id: "other-name",
+            appId: "client-old",
+            displayName: "unrelated-app"
+          }
+        ],
+        APP,
+        ["client-old"],
+        []
+      )
+    ).toEqual([]);
+  });
+
+  it("rejects a non-array service principal response", () => {
+    expect(() =>
+      selectAppIdsWithUnprocessedServicePrincipals(null, APP, [], [])
+    ).toThrow("Microsoft Graph service principals");
   });
 });
 
