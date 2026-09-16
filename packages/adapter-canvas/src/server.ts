@@ -40,7 +40,7 @@ import {
 import { resolveGhCommandPresentation } from "./gh-command-resolution.js";
 import {
   describeMissingGitHubAppAccess,
-  gitHubAppAccessProbePath,
+  GITHUB_APP_ACCESS_PROBES,
   isGitHubAppBotLogin
 } from "./github-app-installation.js";
 import {
@@ -4972,10 +4972,13 @@ export async function preflightRepoAdmin(
     // setup is about to mutate instead of trusting the `[bot]` login. Keep the
     // ambiguity rule above -- only an explicit denial blocks.
     if (readFailed) return describeMissingGitHubAppAccess(login, repo);
-    const probe = await runJson(gitHubAppAccessProbePath(repo));
-    if (probe.ok) return "";
-    if (probe.status === 403 || probe.status === 404)
-      return describeMissingGitHubAppAccess(login, repo);
+    for (const probe of GITHUB_APP_ACCESS_PROBES) {
+      const result = await runJson(probe.path(repo));
+      if (result.ok) continue;
+      if (result.status === 403 || result.status === 404)
+        return describeMissingGitHubAppAccess(login, repo, probe.permission);
+      return ""; // ambiguous/transient on this probe — do not block
+    }
     return "";
   }
   return explainRepoAccessForEnvSetup(

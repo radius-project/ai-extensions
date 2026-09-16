@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   describeMissingGitHubAppAccess,
-  gitHubAppAccessProbePath,
+  GITHUB_APP_ACCESS_PROBES,
+  gitHubAppAccessProbePaths,
   isGitHubAppBotLogin,
   isGitHubAppUserEndpointFailure
 } from "./github-app-installation.js";
@@ -42,19 +43,63 @@ describe("GitHub App installation identity", () => {
     );
   });
 
-  it("probes the deployment environments the setup flow goes on to configure", () => {
-    expect(gitHubAppAccessProbePath("octo/app")).toBe(
-      "repos/octo/app/environments"
+  it("probes one resource for every permission category the setup flow writes", () => {
+    expect(gitHubAppAccessProbePaths("octo/app")).toEqual([
+      "repos/octo/app/actions/permissions",
+      "repos/octo/app/environments",
+      "repos/octo/app/actions/secrets",
+      "repos/octo/app/actions/variables",
+      "repos/octo/app/commits?per_page=1",
+      "repos/octo/app/pulls?per_page=1"
+    ]);
+  });
+
+  it("probes every permission it names as verifiable", () => {
+    const probed = new Set(
+      GITHUB_APP_ACCESS_PROBES.map((probe) => probe.permission)
+    );
+    expect(probed).toEqual(
+      new Set([
+        "Administration",
+        "Environments",
+        "Secrets",
+        "Variables",
+        "Contents",
+        "Pull requests"
+      ])
     );
   });
 
-  it("names the installation and the permissions the repository is missing", () => {
+  it("names the installation and the complete permission union it needs", () => {
     const detail = describeMissingGitHubAppAccess(
       "radius-cloud-e2e[bot]",
       "octo/app"
     );
     expect(detail).toContain("radius-cloud-e2e[bot]");
     expect(detail).toContain("octo/app");
-    expect(detail).toContain("Environments");
+    // Naming only the probed permissions would send an operator back for a
+    // second failure at the first unmentioned mutation.
+    for (const permission of [
+      "Actions (write)",
+      "Administration (write)",
+      "Contents (write)",
+      "Deployments (read)",
+      "Environments (write)",
+      "Pull requests (write)",
+      "Secrets (write)",
+      "Variables (write)",
+      "Workflows (write)"
+    ])
+      expect(detail).toContain(permission);
+  });
+
+  it("names the specific permission when one probe identified the failure", () => {
+    expect(
+      describeMissingGitHubAppAccess(
+        "radius-cloud-e2e[bot]",
+        "octo/app",
+        "Secrets"
+      )
+    ).toContain("cannot exercise its Secrets permission on octo/app");
   });
 });

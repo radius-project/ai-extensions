@@ -8,7 +8,7 @@ import {
 } from "../../gh-command-display.js";
 import {
   describeMissingGitHubAppAccess,
-  gitHubAppAccessProbePath,
+  GITHUB_APP_ACCESS_PROBES,
   isGitHubAppBotLogin
 } from "../../github-app-installation.js";
 import type {
@@ -346,26 +346,28 @@ async function inspectRepository(
   if (isGitHubAppBotLogin(executor.login)) {
     // An installation token maps its granular permissions onto `push`/`pull`
     // rather than `admin`, so the repository response above cannot answer this.
-    // Probe the environments resource instead of inferring capability from the
-    // `[bot]` login, which no misconfigured installation could ever fail.
-    const probe = await executor.run(["api", gitHubAppAccessProbePath(repo)], {
-      timeout: 15000
-    });
-    if (probe.code !== 0) {
-      const detail =
-        (probe.stderr || probe.stdout).trim() ||
-        describeMissingGitHubAppAccess(executor.login, repo);
-      const check = errorCheck(detail);
-      return {
-        repository: check,
-        environment: check,
-        ready: false,
-        appVerified: false
-      };
+    // Probe every permission category this setup path writes, because they are
+    // granted independently: an installation with Actions alone can list
+    // environments and still fail to create one.
+    for (const probe of GITHUB_APP_ACCESS_PROBES) {
+      const result = await executor.run(["api", probe.path(repo)], {
+        timeout: 15000
+      });
+      if (result.code !== 0) {
+        const check = errorCheck(
+          describeMissingGitHubAppAccess(executor.login, repo, probe.permission)
+        );
+        return {
+          repository: check,
+          environment: check,
+          ready: false,
+          appVerified: false
+        };
+      }
     }
     return {
       repository: readyCheck(
-        `@${executor.login} can configure ${repo} through its GitHub App installation.`
+        `@${executor.login} holds every repository permission Radius can verify for ${repo} through its GitHub App installation.`
       ),
       environment: readyCheck(
         `@${executor.login} can read deployment environments for ${repo}; GitHub enforces the installation's write permission when the environment is created.`

@@ -62,6 +62,7 @@ import {
   preflightRepoAdmin
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
+import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
   createOperation,
   finish,
@@ -6291,24 +6292,29 @@ describe("GitHub App repository preflight", () => {
     stderr: ""
   };
 
-  it("clears an installation that can read the environments it will configure", async () => {
+  const PROBES_OK = Object.fromEntries(
+    gitHubAppAccessProbePaths("octo/app").map((path) => [
+      path,
+      { code: 0, stdout: "[]", stderr: "" }
+    ])
+  );
+
+  it("clears an installation that can read every resource it will configure", async () => {
     const { executor, calls } = appExecutor({
       "repos/octo/app": REPO_OK,
-      "repos/octo/app/environments": {
-        code: 0,
-        stdout: JSON.stringify({ total_count: 0, environments: [] }),
-        stderr: ""
-      }
+      ...PROBES_OK
     });
 
     await expect(preflightRepoAdmin("octo/app", executor)).resolves.toBe("");
-    expect(calls).toContain("repos/octo/app/environments");
+    for (const path of gitHubAppAccessProbePaths("octo/app"))
+      expect(calls).toContain(path);
   });
 
-  it("blocks an installation whose environments access is denied", async () => {
+  it("blocks an installation missing a permission a later probe reads", async () => {
     const { executor } = appExecutor({
       "repos/octo/app": REPO_OK,
-      "repos/octo/app/environments": {
+      ...PROBES_OK,
+      "repos/octo/app/actions/variables": {
         code: 1,
         stdout: "",
         stderr: "gh: Resource not accessible by integration (HTTP 403)"
@@ -6317,12 +6323,13 @@ describe("GitHub App repository preflight", () => {
 
     const message = await preflightRepoAdmin("octo/app", executor);
     expect(message).toContain("radius-cloud-e2e[bot]");
-    expect(message).toContain("Environments");
+    expect(message).toContain("cannot exercise its Variables permission");
   });
 
-  it("stays silent when the environments probe fails ambiguously", async () => {
+  it("stays silent when a probe fails ambiguously", async () => {
     const { executor } = appExecutor({
       "repos/octo/app": REPO_OK,
+      ...PROBES_OK,
       "repos/octo/app/environments": {
         code: 1,
         stdout: "",

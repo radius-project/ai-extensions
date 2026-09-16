@@ -6,6 +6,7 @@ import {
 } from "./github-account-readiness.js";
 import { createGitHubAccountCoordinator } from "./github-account-coordinator.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
+import { gitHubAppAccessProbePaths } from "../../github-app-installation.js";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountLeaseResult
@@ -110,6 +111,7 @@ describe("GitHub account readiness", () => {
 
   it("accepts a GitHub App installation with setup permissions and a separate package credential", async () => {
     const login = "radius-cloud-e2e[bot]";
+    const probed: string[] = [];
     const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
       if (args[1] === "repos/octo/app") {
         return {
@@ -118,12 +120,9 @@ describe("GitHub account readiness", () => {
           stderr: ""
         };
       }
-      if (args[1] === "repos/octo/app/environments") {
-        return {
-          code: 0,
-          stdout: JSON.stringify({ total_count: 0, environments: [] }),
-          stderr: ""
-        };
+      if (gitHubAppAccessProbePaths("octo/app").includes(args[1] ?? "")) {
+        probed.push(args[1] ?? "");
+        return { code: 0, stdout: "[]", stderr: "" };
       }
       throw new Error(`unexpected gh call: ${args.join(" ")}`);
     };
@@ -164,6 +163,7 @@ describe("GitHub account readiness", () => {
         packages: { state: "ready" }
       }
     });
+    expect(probed).toEqual(gitHubAppAccessProbePaths("octo/app"));
   });
 
   it("does not infer GitHub App repository access when the token cannot read the repository", async () => {
@@ -203,8 +203,10 @@ describe("GitHub account readiness", () => {
     });
   });
 
-  it("rejects a GitHub App installation whose granted permissions cannot configure environments", async () => {
+  it("rejects a GitHub App installation granted only the permission the first probe reads", async () => {
     const login = "radius-cloud-e2e[bot]";
+    // Exactly the misconfiguration a single environments probe would pass: the
+    // installation can read Actions resources but was never granted Secrets.
     const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
       if (args[1] === "repos/octo/app") {
         return {
@@ -213,11 +215,14 @@ describe("GitHub account readiness", () => {
           stderr: ""
         };
       }
-      return {
-        code: 1,
-        stdout: "",
-        stderr: "gh: Resource not accessible by integration (HTTP 403)"
-      };
+      if (args[1] === "repos/octo/app/actions/secrets") {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Resource not accessible by integration (HTTP 403)"
+        };
+      }
+      return { code: 0, stdout: "[]", stderr: "" };
     };
     const executor: SelectedGhExecutor = {
       ...selectedExecutor({ login }),
@@ -243,10 +248,10 @@ describe("GitHub account readiness", () => {
     });
 
     expect(result.ready).toBe(false);
-    expect(result.checks.environment).toEqual({
-      state: "error",
-      detail: "gh: Resource not accessible by integration (HTTP 403)"
-    });
+    expect(result.checks.environment.state).toBe("error");
+    expect(result.checks.environment.detail).toContain(
+      "cannot exercise its Secrets permission on octo/app"
+    );
     // The login still looks like a bot, so an unverified installation must not
     // keep claiming workflow access on the strength of its name alone.
     expect(result.checks.workflow.state).toBe("missing");
