@@ -18,7 +18,7 @@ Create a GitHub Environment configured with the cloud credentials and private GH
 
 ## Flow
 
-The canvas drives a short wizard per provider: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the user's stored GitHub CLI credential, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, conflicting repository link, or provenance failure stops setup before verification or automatic deployment.
+The canvas drives a short wizard per provider: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the user's stored GitHub CLI credential, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification or automatic deployment.
 
 ### AWS
 
@@ -108,7 +108,7 @@ The OIDC trust must already exist on the cloud side before the workflow can auth
 - **"Workflow dispatch accepted, but no new run appeared after 30s"** — usually means GitHub hasn't indexed the just-pushed workflow yet. The extension already retries dispatch with backoff; if it still fails, check the Actions tab in the browser.
 - **Azure OIDC fails with `AADSTS70021: No matching federated identity record found`** — the federated credential subject on the AAD app doesn't match. Subject must be exactly `repo:<owner>/<repo>:environment:<env-name>`.
 - **AWS OIDC fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`** — IAM role trust policy missing or wrong audience. Audience should be `sts.amazonaws.com`, condition on `token.actions.githubusercontent.com:sub == repo:<owner>/<repo>:environment:<env-name>`.
-- **GHCR package bootstrap fails** — refresh the stored `gh` credential with `read:packages` and `write:packages`. The extension pushes a harmless retained minimal OCI image with the `org.opencontainers.image.source` label and matching manifest annotation, then requires the package to be private/internal and verifies that exact immutable bootstrap manifest before accepting or deleting it. If GitHub reports a canonical repository link, it must also match the target repository. It never uses a public repository's `GITHUB_TOKEN` to create the package because that can make the package public.
+- **GHCR package bootstrap fails** — refresh the stored `gh` credential with `read:packages` and `write:packages`. The extension pushes a harmless retained `bootstrap` artifact with an `org.opencontainers.image.source` annotation, then requires the package to be private/internal and linked to the target repository. It never uses a public repository's `GITHUB_TOKEN` to create the package because that can make the package public.
 
 ## Verifying after creation
 

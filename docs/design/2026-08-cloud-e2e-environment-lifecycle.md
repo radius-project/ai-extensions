@@ -272,8 +272,6 @@ Nothing else. In particular the baseline carries no `.github/workflows/` — pub
 
 The fixture repository also needs **no** pre-provisioned GHCR state package, which is worth stating because it is an easy and unsatisfiable thing to add to a prerequisites list. [`stateRegistryForEnvironment`](../../packages/core/src/workflows/state.ts) derives the state repository per environment as `{repo}-radius-state-{env-slug}-{hash}`, hashing the owner, repository, and environment name together — so for a per-run environment the package name does not exist until the run creates it. GHCR brings a repository into being on first push, and the verify step this extension substitutes probes push *permission* by starting a blob upload and requiring HTTP 202 ([`configureVerifyGhcrProbe`](../../packages/adapter-canvas/src/infra.ts)), which is non-destructive and succeeds for a repository that does not yet exist.
 
-The package publisher is a classic PAT rather than the fixture repository's `GITHUB_TOKEN`. GHCR stores the `org.opencontainers.image.source` label from that publication but may leave the Packages API's canonical `repository` field empty, including for a private repository the publisher can read. The lifecycle therefore does not mistake that optional field for ownership proof. It requires private/internal visibility, rejects any conflicting canonical link, and verifies the exact immutable `bootstrap` OCI manifest Radius publishes for the fixture repository before accepting or deleting the package.
-
 ##### Repository settings
 
 Two facts drive most of these. The clean-slate probe compares the default-branch head against the pinned SHA, and it treats **any** open pull request as a leak — `pulls?state=open`, unfiltered by author or branch.
