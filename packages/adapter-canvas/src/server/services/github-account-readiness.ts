@@ -211,20 +211,18 @@ export async function probeGhcrPackageWriteAccess(
     if (!cleanup.ok && cleanup.status !== 404 && cleanup.status !== 405) {
       return {
         ok: true,
-        detail:
-          "GitHub Packages accepted push authorization. The empty upload session could not be cancelled and will expire without creating a package artifact."
+        detail: `GitHub Packages accepted push authorization from @${credentials.username}. The empty upload session could not be cancelled and will expire without creating a package artifact.`
       };
     }
   } catch {
     return {
       ok: true,
-      detail:
-        "GitHub Packages accepted push authorization. The empty upload session could not be cancelled and will expire without creating a package artifact."
+      detail: `GitHub Packages accepted push authorization from @${credentials.username}. The empty upload session could not be cancelled and will expire without creating a package artifact.`
     };
   }
   return {
     ok: true,
-    detail: "GitHub Packages accepted push authorization for the state package."
+    detail: `GitHub Packages accepted push authorization for the state package from @${credentials.username}. The deploy workflow's own token is checked separately when credentials are verified.`
   };
 }
 

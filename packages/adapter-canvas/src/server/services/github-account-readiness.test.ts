@@ -671,7 +671,7 @@ describe("GHCR package access probe", () => {
     expect(result).toEqual({
       ok: true,
       detail:
-        "GitHub Packages accepted push authorization for the state package."
+        "GitHub Packages accepted push authorization for the state package from @octocat. The deploy workflow's own token is checked separately when credentials are verified."
     });
     expect(requests[0]?.url).toContain(
       "repository%3Aocto%2Fapp-radius-state-dev-"
@@ -825,7 +825,7 @@ describe("GHCR package access probe", () => {
       expect(result).toEqual({
         ok: true,
         detail:
-          "GitHub Packages accepted push authorization. The empty upload session could not be cancelled and will expire without creating a package artifact."
+          "GitHub Packages accepted push authorization from @octocat. The empty upload session could not be cancelled and will expire without creating a package artifact."
       });
     }
   );
@@ -857,7 +857,7 @@ describe("GHCR package access probe", () => {
     expect(result).toEqual({
       ok: true,
       detail:
-        "GitHub Packages accepted push authorization for the state package."
+        "GitHub Packages accepted push authorization for the state package from @octocat. The deploy workflow's own token is checked separately when credentials are verified."
     });
   });
 
