@@ -81,6 +81,7 @@ import {
   runCleanupSteps,
   selectFallbackBranches,
   selectFallbackPullRequests,
+  waitForWorkflowPublication,
   workflowFallbackBranchPrefix
 } from "./support/create-environment-journey.js";
 import {
@@ -583,40 +584,42 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         })
       ).toEqual([]);
 
-      const publication = classifyWorkflowPublication({
-        defaultBranchPaths: readWorkflowDirectory(
-          await ports.commands.runGh([
-            "api",
-            `repos/${cloud.repository}/contents/${WORKFLOW_DIRECTORY}?ref=${cloud.defaultBranch}`
-          ]),
-          "gh api the default branch's workflow directory"
-        ),
-        fallbackBranches: selectFallbackBranches(
-          await runGh(
-            ports.commands,
-            [
+      const publication = await waitForWorkflowPublication(async () =>
+        classifyWorkflowPublication({
+          defaultBranchPaths: readWorkflowDirectory(
+            await ports.commands.runGh([
               "api",
-              `repos/${cloud.repository}/git/matching-refs/heads/${workflowFallbackBranchPrefix(cloud.environmentName)}`
-            ],
-            "gh api this environment's workflow fallback branches"
+              `repos/${cloud.repository}/contents/${WORKFLOW_DIRECTORY}?ref=${cloud.defaultBranch}`
+            ]),
+            "gh api the default branch's workflow directory"
           ),
-          cloud.environmentName
-        ),
-        openPullRequests: selectFallbackPullRequests(
-          await runGh(
-            ports.commands,
-            [
-              "api",
-              "--paginate",
-              "--slurp",
-              `repos/${cloud.repository}/pulls?state=open&per_page=100`
-            ],
-            "gh api the repository's open pull requests"
+          fallbackBranches: selectFallbackBranches(
+            await runGh(
+              ports.commands,
+              [
+                "api",
+                `repos/${cloud.repository}/git/matching-refs/heads/${workflowFallbackBranchPrefix(cloud.environmentName)}`
+              ],
+              "gh api this environment's workflow fallback branches"
+            ),
+            cloud.environmentName
           ),
-          cloud.environmentName
-        ),
-        requiredPaths: REQUIRED_LIFECYCLE_WORKFLOWS
-      });
+          openPullRequests: selectFallbackPullRequests(
+            await runGh(
+              ports.commands,
+              [
+                "api",
+                "--paginate",
+                "--slurp",
+                `repos/${cloud.repository}/pulls?state=open&per_page=100`
+              ],
+              "gh api the repository's open pull requests"
+            ),
+            cloud.environmentName
+          ),
+          requiredPaths: REQUIRED_LIFECYCLE_WORKFLOWS
+        })
+      );
       expect(
         publication.outcome,
         describeWorkflowPublication(publication, {

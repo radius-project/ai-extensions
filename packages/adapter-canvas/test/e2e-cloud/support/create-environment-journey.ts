@@ -357,6 +357,43 @@ export function classifyWorkflowPublication(
   return { outcome: "committed", paths: [...required] };
 }
 
+export interface WorkflowPublicationWaitOptions {
+  readonly attempts?: number;
+  readonly delayMs?: number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+}
+
+/**
+ * Wait for GitHub's directory listing to observe all workflow commits.
+ *
+ * The Contents API can briefly return an earlier tree after several workflow
+ * files are committed in sequence. A pull-request fallback is authoritative and
+ * must still fail immediately; only a missing-file result is eventually
+ * consistent.
+ */
+export async function waitForWorkflowPublication(
+  read: () => Promise<WorkflowPublication>,
+  options: WorkflowPublicationWaitOptions = {}
+): Promise<WorkflowPublication> {
+  const attempts = options.attempts ?? 6;
+  const delayMs = options.delayMs ?? 2_000;
+  const sleep =
+    options.sleep ??
+    ((milliseconds: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+
+  let publication = await read();
+  for (
+    let attempt = 1;
+    publication.outcome === "missing" && attempt < attempts;
+    attempt += 1
+  ) {
+    await sleep(delayMs);
+    publication = await read();
+  }
+  return publication;
+}
+
 export interface WorkflowPublicationContext {
   readonly repository: string;
   readonly defaultBranch: string;
