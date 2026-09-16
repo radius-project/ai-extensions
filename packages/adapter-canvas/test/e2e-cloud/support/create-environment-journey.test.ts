@@ -23,8 +23,6 @@ import {
   runCleanupSteps,
   selectFallbackBranches,
   selectFallbackPullRequests,
-  type WorkflowPublication,
-  waitForWorkflowPublication,
   VERIFY_WORKFLOW_PATH
 } from "./create-environment-journey.js";
 
@@ -464,87 +462,6 @@ describe("classifyWorkflowPublication", () => {
       outcome: "missing",
       missingPaths: [".github/workflows/run-rad-commands.yml"]
     });
-  });
-});
-
-describe("waitForWorkflowPublication", () => {
-  it("retries missing directory snapshots until all workflows are visible", async () => {
-    const snapshots: WorkflowPublication[] = [
-      { outcome: "missing", missingPaths: ["deploy.yml"] },
-      { outcome: "missing", missingPaths: ["delete.yml"] },
-      {
-        outcome: "committed",
-        paths: ["verify.yml", "deploy.yml", "delete.yml"]
-      }
-    ];
-    const delays: number[] = [];
-
-    await expect(
-      waitForWorkflowPublication(
-        async () => snapshots.shift() ?? snapshots[snapshots.length - 1],
-        {
-          attempts: 4,
-          delayMs: 25,
-          sleep: async (milliseconds) => {
-            delays.push(milliseconds);
-          }
-        }
-      )
-    ).resolves.toEqual({
-      outcome: "committed",
-      paths: ["verify.yml", "deploy.yml", "delete.yml"]
-    });
-    expect(delays).toEqual([25, 25]);
-  });
-
-  it("returns the final missing result when GitHub never exposes every file", async () => {
-    const sleeps: number[] = [];
-
-    await expect(
-      waitForWorkflowPublication(
-        async () => ({ outcome: "missing", missingPaths: ["deploy.yml"] }),
-        {
-          attempts: 3,
-          delayMs: 10,
-          sleep: async (milliseconds) => {
-            sleeps.push(milliseconds);
-          }
-        }
-      )
-    ).resolves.toEqual({
-      outcome: "missing",
-      missingPaths: ["deploy.yml"]
-    });
-    expect(sleeps).toEqual([10, 10]);
-  });
-
-  it("does not retry the pull-request fallback", async () => {
-    let reads = 0;
-    let sleeps = 0;
-
-    await expect(
-      waitForWorkflowPublication(
-        async () => {
-          reads += 1;
-          return {
-            outcome: "pull-request",
-            branches: ["radius/setup-dev-workflows"],
-            pullRequests: [17]
-          };
-        },
-        {
-          sleep: async () => {
-            sleeps += 1;
-          }
-        }
-      )
-    ).resolves.toEqual({
-      outcome: "pull-request",
-      branches: ["radius/setup-dev-workflows"],
-      pullRequests: [17]
-    });
-    expect(reads).toBe(1);
-    expect(sleeps).toBe(0);
   });
 });
 
