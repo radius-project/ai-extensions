@@ -71,6 +71,43 @@ function digest(bytes: Buffer): string {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+function expectedBootstrapManifest(repository = "acme/app"): BootstrapManifest {
+  const source = `https://github.com/${repository}`;
+  const configBytes = Buffer.from(
+    JSON.stringify({
+      architecture: "amd64",
+      os: "linux",
+      config: {
+        Labels: {
+          "org.opencontainers.image.source": source
+        }
+      },
+      rootfs: {
+        type: "layers",
+        diff_ids: []
+      },
+      history: [
+        {
+          created: "1970-01-01T00:00:00Z",
+          created_by: BOOTSTRAP_CONTENT,
+          empty_layer: true
+        }
+      ]
+    })
+  );
+  return {
+    config: {
+      mediaType: "application/vnd.oci.image.config.v1+json",
+      digest: digest(configBytes),
+      size: configBytes.byteLength
+    },
+    layers: [],
+    annotations: {
+      "org.opencontainers.image.source": source
+    }
+  };
+}
+
 function json(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
     status: init.status ?? 200,
@@ -358,7 +395,8 @@ function createDeletionHarness({
   deleteStatus = 204,
   packageReadStatus = 200,
   disappearAfterReads = 0,
-  commitThenThrow = false
+  commitThenThrow = false,
+  bootstrapManifest = expectedBootstrapManifest()
 }: {
   accountType?: string;
   metadata?: unknown;
@@ -366,6 +404,7 @@ function createDeletionHarness({
   packageReadStatus?: number;
   disappearAfterReads?: number;
   commitThenThrow?: boolean;
+  bootstrapManifest?: BootstrapManifest | null;
 } = {}) {
   const calls: FetchCall[] = [];
   let deleted = false;
@@ -379,6 +418,30 @@ function createDeletionHarness({
       headers: options.headers || {},
       signal: options.signal
     });
+    if (url.origin === "https://registry.test" && url.pathname === "/v2/") {
+      return new Response("", {
+        status: 401,
+        headers: {
+          "WWW-Authenticate":
+            "Bear" + 'er realm="https://registry.test/token",service="ghcr.io"'
+        }
+      });
+    }
+    if (url.origin === "https://registry.test" && url.pathname === "/token") {
+      return json({ token: "registry-bearer" });
+    }
+    if (
+      url.origin === "https://registry.test" &&
+      url.pathname.endsWith("/manifests/bootstrap")
+    ) {
+      return bootstrapManifest ?
+          json({
+            schemaVersion: 2,
+            mediaType: "application/vnd.oci.image.manifest.v1+json",
+            ...bootstrapManifest
+          })
+        : json({}, { status: 404 });
+    }
     if (url.pathname === "/users/acme") return json({ type: accountType });
     if (!url.pathname.includes("/packages/container/")) {
       throw new Error(`Unexpected request: ${method} ${url}`);
@@ -412,6 +475,7 @@ const deleteOptions = {
     scopes: ["read:packages", "delete:packages"]
   },
   apiBaseUrl: "https://api.test",
+  registryOrigin: "https://registry.test",
   sleep: async () => {}
 };
 
@@ -436,6 +500,9 @@ test("deletes a validated user-owned state package and confirms absence", async 
         "GET",
         "/users/acme/packages/container/app-radius-state-dev-123456789abc"
       ],
+      ["GET", "/v2/"],
+      ["GET", "/token"],
+      ["GET", "/v2/acme/app-radius-state-dev-123456789abc/manifests/bootstrap"],
       [
         "DELETE",
         "/users/acme/packages/container/app-radius-state-dev-123456789abc"
@@ -450,6 +517,38 @@ test("deletes a validated user-owned state package and confirms absence", async 
     harness.calls
       .filter((call) => new URL(call.url).pathname.includes("/packages/"))
       .every((call) => call.headers["X-GitHub-Api-Version"] === "2022-11-28")
+  );
+});
+
+test("deletes an unlinked package with exact immutable bootstrap provenance", async () => {
+  const harness = createDeletionHarness({
+    metadata: { visibility: "private", repository: null }
+  });
+
+  const result = await deleteGHCRStatePackage({
+    ...deleteOptions,
+    fetchImpl: harness.fetchImpl
+  });
+
+  assert.equal(result.outcome, "deleted");
+});
+
+test("refuses an unlinked package with mismatched bootstrap provenance", async () => {
+  const harness = createDeletionHarness({
+    metadata: { visibility: "private", repository: null },
+    bootstrapManifest: expectedBootstrapManifest("other/app")
+  });
+
+  await assert.rejects(
+    deleteGHCRStatePackage({
+      ...deleteOptions,
+      fetchImpl: harness.fetchImpl
+    }),
+    /does not carry the immutable bootstrap provenance/
+  );
+  assert.equal(
+    harness.calls.some((call) => call.method === "DELETE"),
+    false
   );
 });
 
@@ -665,7 +764,6 @@ test("refuses to delete an unsafe or mismatched package", async () => {
   for (const metadata of [
     { visibility: "public", repository: { full_name: "acme/app" } },
     { visibility: "private", repository: { full_name: "other/app" } },
-    { visibility: "private", repository: null },
     {}
   ]) {
     const harness = createDeletionHarness({ metadata });
@@ -1508,17 +1606,16 @@ test("rejects a package linked to another repository before uploading", async ()
   );
 });
 
-test("rejects a package whose source annotation never creates repository linkage", async () => {
+test("accepts immutable bootstrap provenance when GitHub omits repository linkage", async () => {
   const harness = createHarness({ finalRepository: null });
 
-  await assert.rejects(
-    bootstrapGHCRStatePackage({
-      ...baseOptions,
-      fetchImpl: harness.fetchImpl,
-      metadataAttempts: 2
-    }),
-    /not linked to "acme\/app"/
-  );
+  const result = await bootstrapGHCRStatePackage({
+    ...baseOptions,
+    fetchImpl: harness.fetchImpl,
+    metadataAttempts: 2
+  });
+
+  assert.equal(result.visibility, "private");
 });
 
 test("reports package-scope guidance when GHCR rejects token exchange", async () => {

@@ -80,6 +80,14 @@ interface BootstrapManifestOptions {
   targetRepository: string;
 }
 
+interface BootstrapManifestDocument {
+  schemaVersion: number;
+  mediaType: string;
+  config: OciDescriptor;
+  layers: OciDescriptor[];
+  annotations: Record<string, string>;
+}
+
 type CredentialLoader = () => Promise<GhCredentials>;
 type KeyringCommand = (args: string[]) => Promise<string>;
 
@@ -104,6 +112,7 @@ export interface DeleteGhcrOptions {
   credentials?: GhCredentials;
   runKeyringCommand?: (args: string[]) => Promise<string>;
   fetchImpl?: FetchImplementation;
+  registryOrigin?: string;
   apiBaseUrl?: string;
   sleep?: (milliseconds: number) => Promise<void>;
   confirmationAttempts?: number;
@@ -624,13 +633,10 @@ async function pushBlob({
   );
 }
 
-async function pushBootstrapManifest({
-  requests,
-  registryOrigin,
-  repositoryPath,
-  bearerToken,
-  targetRepository
-}: BootstrapManifestOptions): Promise<void> {
+function createBootstrapManifest(targetRepository: string): {
+  configBytes: Buffer;
+  manifest: BootstrapManifestDocument;
+} {
   const sourceRepository = `https://github.com/${targetRepository}`;
   const configBytes = Buffer.from(
     JSON.stringify({
@@ -664,6 +670,38 @@ async function pushBootstrapManifest({
       "org.opencontainers.image.source": sourceRepository
     }
   };
+  return { configBytes, manifest };
+}
+
+function matchesBootstrapManifest(
+  value: unknown,
+  expected: BootstrapManifestDocument
+): boolean {
+  if (!isRecord(value)) return false;
+  const annotations = isRecord(value.annotations) ? value.annotations : {};
+  const source =
+    typeof annotations["org.opencontainers.image.source"] === "string" ?
+      annotations["org.opencontainers.image.source"].toLowerCase()
+    : "";
+  return (
+    value.schemaVersion === expected.schemaVersion &&
+    value.mediaType === expected.mediaType &&
+    value.artifactType === undefined &&
+    JSON.stringify(value.config) === JSON.stringify(expected.config) &&
+    JSON.stringify(value.layers) === JSON.stringify(expected.layers) &&
+    source ===
+      expected.annotations["org.opencontainers.image.source"].toLowerCase()
+  );
+}
+
+async function pushBootstrapManifest({
+  requests,
+  registryOrigin,
+  repositoryPath,
+  bearerToken,
+  targetRepository
+}: BootstrapManifestOptions): Promise<void> {
+  const { configBytes, manifest } = createBootstrapManifest(targetRepository);
   const manifestBytes = Buffer.from(JSON.stringify(manifest));
   const manifestDigest = sha256(manifestBytes);
 
@@ -704,27 +742,9 @@ async function pushBootstrapManifest({
     } catch {
       return "conflict";
     }
-    if (!isRecord(legacyBody)) return "conflict";
-    const annotations =
-      isRecord(legacyBody.annotations) ? legacyBody.annotations : {};
-    const legacySource =
-      typeof annotations["org.opencontainers.image.source"] === "string" ?
-        annotations["org.opencontainers.image.source"].toLowerCase()
-      : "";
-    const expectedSource =
-      manifest.annotations["org.opencontainers.image.source"].toLowerCase();
-    return (
-        legacyBody.schemaVersion === manifest.schemaVersion &&
-          legacyBody.mediaType === manifest.mediaType &&
-          legacyBody.artifactType === undefined &&
-          JSON.stringify(legacyBody.config) ===
-            JSON.stringify(manifest.config) &&
-          JSON.stringify(legacyBody.layers) ===
-            JSON.stringify(manifest.layers) &&
-          legacySource === expectedSource
-      ) ?
-        "exact"
-      : "conflict";
+    return matchesBootstrapManifest(legacyBody, manifest) ? "exact" : (
+        "conflict"
+      );
   };
 
   const initialState = await readManifest();
@@ -741,7 +761,7 @@ async function pushBootstrapManifest({
     repositoryPath,
     bearerToken,
     bytes: configBytes,
-    digest: config.digest
+    digest: manifest.config.digest
   });
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -796,6 +816,39 @@ async function pushBootstrapManifest({
   throw new Error(
     "GHCR bootstrap manifest remained absent after reconciliation."
   );
+}
+
+async function requireBootstrapProvenance({
+  requests,
+  registryOrigin,
+  repositoryPath,
+  bearerToken,
+  targetRepository
+}: BootstrapManifestOptions): Promise<void> {
+  const response = await registryFetch(
+    requests,
+    registryOrigin,
+    bearerToken,
+    `/v2/${registryPath(repositoryPath)}/manifests/${BOOTSTRAP_TAG}`,
+    { headers: { Accept: OCI_MANIFEST_MEDIA_TYPE } }
+  );
+  if (response.status !== 200) {
+    throw new Error(
+      `GHCR bootstrap provenance could not be read (HTTP ${response.status})${await responseDetail(response)}`
+    );
+  }
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error("GHCR bootstrap provenance returned invalid JSON.");
+  }
+  const expected = createBootstrapManifest(targetRepository).manifest;
+  if (!matchesBootstrapManifest(value, expected)) {
+    throw new Error(
+      `GHCR state package does not carry the immutable bootstrap provenance for "${targetRepository}".`
+    );
+  }
 }
 
 const GITHUB_NOT_FOUND = Symbol("github-not-found");
@@ -1046,7 +1099,6 @@ export async function bootstrapGHCRStatePackage({
     targetRepository: canonicalTargetRepository
   });
 
-  let metadata: GitHubPackageMetadata | null = null;
   for (let attempt = 0; attempt < metadataAttempts; attempt++) {
     const value = await githubJson(
       requests,
@@ -1055,13 +1107,21 @@ export async function bootstrapGHCRStatePackage({
       true,
       ghCommandPresentation
     );
-    metadata = value === GITHUB_NOT_FOUND ? null : parsePackageMetadata(value);
-    // validatePackage fails fast on public visibility and on a wrong repository
-    // link; a not-yet-propagated (missing) link returns false so we keep retrying.
-    if (
-      metadata &&
-      validatePackage(metadata, canonicalTargetRepository, true)
-    ) {
+    const metadata =
+      value === GITHUB_NOT_FOUND ? null : parsePackageMetadata(value);
+    if (metadata) {
+      // GitHub records source labels for PAT-published images without always
+      // populating the package API's canonical repository field. A conflicting
+      // link still fails, while the immutable bootstrap manifest proves the
+      // intended repository when the field is absent.
+      validatePackage(metadata, canonicalTargetRepository, true);
+      await requireBootstrapProvenance({
+        requests,
+        registryOrigin: parsed.registryOrigin,
+        repositoryPath: parsed.repositoryPath,
+        bearerToken,
+        targetRepository: canonicalTargetRepository
+      });
       return {
         registry,
         bootstrapTag: BOOTSTRAP_TAG,
@@ -1073,17 +1133,9 @@ export async function bootstrapGHCRStatePackage({
     }
   }
 
-  if (!metadata) {
-    throw new Error(
-      `GHCR state package "${registry}" was not visible through the GitHub Packages API after bootstrap.`
-    );
-  }
-  validatePackage(metadata, canonicalTargetRepository);
-  return {
-    registry,
-    bootstrapTag: BOOTSTRAP_TAG,
-    visibility: metadata.visibility
-  };
+  throw new Error(
+    `GHCR state package "${registry}" was not visible through the GitHub Packages API after bootstrap.`
+  );
 }
 
 export async function deleteGHCRStatePackage({
@@ -1092,6 +1144,7 @@ export async function deleteGHCRStatePackage({
   credentials,
   runKeyringCommand,
   fetchImpl = globalThis.fetch,
+  registryOrigin,
   apiBaseUrl = "https://api.github.com",
   sleep = (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -1132,7 +1185,7 @@ export async function deleteGHCRStatePackage({
     operation: "deletion",
     credentialSource: auth.source
   };
-  const parsed = parseRegistry(registry);
+  const parsed = parseRegistry(registry, registryOrigin);
   const endpoint = await packageEndpoint({
     requests,
     apiBaseUrl: apiBaseUrl.replace(/\/+$/, ""),
@@ -1160,10 +1213,28 @@ export async function deleteGHCRStatePackage({
     }
     return { outcome: "not_found", registry };
   }
+  const canonicalTargetRepository = targetRepository.toLowerCase();
   validatePackage(
     parsePackageMetadata(existingValue),
-    targetRepository.toLowerCase()
+    canonicalTargetRepository,
+    true
   );
+  const bearerToken = await getRegistryBearerToken({
+    requests,
+    registryOrigin: parsed.registryOrigin,
+    repositoryPath: parsed.repositoryPath,
+    username: auth.username,
+    token: auth.token,
+    scope: "pull",
+    ghCommandPresentation
+  });
+  await requireBootstrapProvenance({
+    requests,
+    registryOrigin: parsed.registryOrigin,
+    repositoryPath: parsed.repositoryPath,
+    bearerToken,
+    targetRepository: canonicalTargetRepository
+  });
 
   let deletionError: unknown = null;
   try {
@@ -1207,7 +1278,8 @@ export async function deleteGHCRStatePackage({
     }
     validatePackage(
       parsePackageMetadata(value),
-      targetRepository.toLowerCase()
+      canonicalTargetRepository,
+      true
     );
     if (attempt + 1 < confirmationAttempts) {
       await sleepWithinBudget(requests, Math.min(500 * 2 ** attempt, 4000));
