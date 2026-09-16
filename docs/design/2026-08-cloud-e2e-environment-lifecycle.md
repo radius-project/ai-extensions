@@ -474,7 +474,7 @@ This tier deliberately breaks a rule stated for every change in [the test plan](
 
 ## Compatibility (optional)
 
-No product compatibility impact: no production code changes, so nothing reaches users.
+The lifecycle work itself changes no product behavior. Running it against real Azure and GitHub did surface three product defects that this work fixes, and those fixes do reach users: the Entra application setup no longer treats a string `"0"` exit code from the tag read as a failure, GitHub App readiness now proves every repository permission the setup flow writes instead of only environments access, and a denied probe names the specific missing permission. All three are backward compatible — they correct false failures and previously missing diagnostics rather than changing a supported contract.
 
 Existing tests are unaffected because `mode` defaults to `"fake"` and every current suite omits it.
 
