@@ -20,7 +20,6 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   stateRegistryForEnvironment
 } from "@radius-project/core";
-import { deleteGHCRStatePackage } from "../../../src/ghcr.js";
 import {
   describeError,
   expectSuccess,
@@ -190,10 +189,6 @@ export interface CloudFixtureOptions {
   readonly githubRunId?: string;
   readonly assertionTimeoutMs?: number;
   readonly assertionPollIntervalMs?: number;
-  readonly deleteUnlinkedStatePackage?: (
-    repository: string,
-    registry: string
-  ) => Promise<void>;
 }
 
 const DEFAULT_LOCATION = "westus3";
@@ -253,27 +248,6 @@ export async function createCloudFixture(
     options.assertionPollIntervalMs ?? DEFAULT_ASSERTION_POLL_INTERVAL_MS,
     "Assertion poll interval"
   );
-  const deleteUnlinkedStatePackage =
-    options.deleteUnlinkedStatePackage ??
-    (async (targetRepository: string, registry: string) => {
-      const token = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
-      const username = process.env.GH_PACKAGES_USER?.trim() ?? "";
-      if (!token || !username)
-        throw new Error(
-          "GH_PACKAGES_TOKEN and GH_PACKAGES_USER are required to verify and delete an unlinked GHCR state package."
-        );
-      await deleteGHCRStatePackage({
-        targetRepository,
-        registry,
-        credentials: {
-          token,
-          username,
-          source: "injected-token",
-          scopes: ["read:packages", "delete:packages"]
-        }
-      });
-    });
-
   const uniqueId = shortenUniqueId(ports.newUniqueId());
   const configuredResourceGroup = options.resourceGroup?.trim() || undefined;
   const configuredClusterName = options.clusterName?.trim() || undefined;
@@ -1444,10 +1418,6 @@ export async function createCloudFixture(
           failures.push(
             `refuse GHCR state package ${statePackage}: ${packageSafetyError}`
           );
-        } else if (!packageRecord.linkedRepository) {
-          await attempt(`GHCR state package ${statePackage}`, () =>
-            deleteUnlinkedStatePackage(repository, statePackage)
-          );
         } else {
           await attempt(`GHCR state package ${statePackage}`, async () => {
             expectSuccess(
@@ -1793,10 +1763,12 @@ function validateStatePackageForDeletion(
     statePackage.visibility !== "internal"
   )
     return `visibility is "${statePackage.visibility || "unknown"}", not private or internal`;
-  if (
-    statePackage.linkedRepository &&
-    statePackage.linkedRepository.toLowerCase() !== repository.toLowerCase()
-  )
+  if (!statePackage.linkedRepository)
+    return (
+      "it is not linked to a repository, so its provenance cannot be proven " +
+      `(expected "${repository}")`
+    );
+  if (statePackage.linkedRepository.toLowerCase() !== repository.toLowerCase())
     return `it is linked to "${statePackage.linkedRepository}", not "${repository}"`;
   return null;
 }

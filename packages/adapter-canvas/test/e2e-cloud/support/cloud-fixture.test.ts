@@ -3442,61 +3442,25 @@ describe("createCloudFixture", () => {
       );
     });
 
-    it("deletes an unlinked package through immutable provenance verification", async () => {
-      const deleted: Array<{ repository: string; registry: string }> = [];
-      const { fixture, fake } = await createHarness(
-        [
-          {
-            tool: "gh-package",
-            match: ["api", PACKAGE_PATH],
-            respond: {
-              stdout: JSON.stringify({ visibility: "private" })
-            }
-          }
-        ],
-        {},
+    it("refuses to delete a package that is not linked to the fixture repository", async () => {
+      const { fixture, fake } = await createHarness([
         {
-          deleteUnlinkedStatePackage: async (repository, registry) => {
-            deleted.push({ repository, registry });
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({ visibility: "private" })
           }
         }
-      );
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
-        `GHCR state package ${STATE_PACKAGE}`
-      );
-      expect(deleted).toEqual([
-        { repository: REPOSITORY, registry: STATE_PACKAGE }
       ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /refuse GHCR state package .* it is not linked to a repository/
+      );
       expect(
         fake.commands
           .commandLines("gh-package")
           .some((line) => line.includes("--method DELETE"))
       ).toBe(false);
-    });
-
-    it("records a failing immutable-provenance deletion", async () => {
-      const { fixture } = await createHarness(
-        [
-          {
-            tool: "gh-package",
-            match: ["api", PACKAGE_PATH],
-            respond: {
-              stdout: JSON.stringify({ visibility: "private" })
-            }
-          }
-        ],
-        {},
-        {
-          deleteUnlinkedStatePackage: async () => {
-            throw new Error("bootstrap manifest changed");
-          }
-        }
-      );
-
-      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /GHCR state package .*bootstrap manifest changed/
-      );
     });
 
     it("records a failing GHCR state package deletion", async () => {
