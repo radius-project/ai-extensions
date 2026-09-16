@@ -1,4 +1,4 @@
-# AWS support for the Radius Canvas extension: functional spec
+# Functional Spec : AWS support for the Radius Canvas extension
 
 - **Author**: Reshma Abdul Rahim (@reshrahim)
 - **Date**: 2026-09
