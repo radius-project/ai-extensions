@@ -173,9 +173,9 @@ The canvas asks for a refresh when an existing model is stale: its branch has mo
 
 ### Renaming a backing resource in a deployed application
 
-A model generated before backing-resource names were application-scoped names its stores after the engine alone (`'postgres'`), and refreshing or repairing it renames them. That is not a free correction. On the next deploy Radius sees the old resource removed from the application and runs its Recipe's delete path, which **destroys the backing resource and the data in it**, then provisions a new empty one under the new name.
+Renaming a backing resource is not a free correction. On the next deploy Radius sees the old resource removed from the application and runs its Recipe's delete path, which **destroys the backing resource and the data in it**, then provisions a new empty one under the new name. A renamed application does this to every backing resource at once, because their names are derived from it.
 
-So before writing a model whose backing resources would be renamed, say so: name each resource whose name changes, state that its data does not survive the next deploy, and regenerate only after the user agrees. This is the same conversation as a manually edited model, and it applies even when the canvas reported the model as plainly stale. If the user declines, leave the existing model in place. Do not author an unscoped name into a new model to avoid the conversation — the checker rejects it, and the collision it causes is the failure being fixed.
+So before regenerating a model whose backing resources would be renamed, say so: name each resource whose name changes, state that its data does not survive the next deploy, and regenerate only after the user agrees. This is the same conversation as a manually edited model, and it applies even when the canvas reported the model as plainly stale. If the user declines, leave the existing model in place.
 
 ## Deterministic Naming Rules
 
