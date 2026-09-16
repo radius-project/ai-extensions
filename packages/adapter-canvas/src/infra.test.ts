@@ -640,7 +640,10 @@ describe("GHCR verification probe", () => {
     const workflow = configureVerifyGhcrProbe(
       "steps:\n  - name: Verify GHCR package push permission\n    uses: action\n  - name: Summary\n    run: echo done\n"
     );
-    expect(workflow).toContain("secrets.GITHUB_TOKEN");
+    expect(workflow).toContain(
+      "secrets.RADIUS_GHCR_TOKEN || secrets.GITHUB_TOKEN"
+    );
+    expect(workflow).toContain("secrets.RADIUS_GHCR_USERNAME || github.actor");
     expect(workflow).toContain("/blobs/uploads/");
     expect(workflow).toContain('status}" != "202"');
     expect(workflow).toContain("| node -e");

@@ -93,8 +93,8 @@ jobs:
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.RADIUS_GHCR_USERNAME || github.actor }}
+          password: ${{ secrets.RADIUS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Get target cluster kubeconfig
         run: |
@@ -374,8 +374,8 @@ jobs:
           namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
           rad-commands: ${{ inputs.rad_commands || vars.RADIUS_RAD_COMMANDS }}
           deploy-params: ${{ secrets.RADIUS_DEPLOY_PARAMS }}
-          registry-username: ${{ github.actor }}
-          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          registry-username: ${{ secrets.RADIUS_GHCR_USERNAME || github.actor }}
+          registry-password: ${{ secrets.RADIUS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
           build-arch-mode: ${{ env.TARGET_CLUSTER_ARCH_MODE }}
           build-fallback-platforms: ${{ env.TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS }}
           azure-oidc-token-refresh: "${{ vars.AZURE_CLIENT_ID != '' }}"

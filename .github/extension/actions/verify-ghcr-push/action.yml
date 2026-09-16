@@ -18,8 +18,12 @@ inputs:
     required: false
     default: ""
   github-token:
-    description: A token with packages:write for the state package (typically secrets.GITHUB_TOKEN).
+    description: A token with packages:write for the state package.
     required: true
+  github-username:
+    description: The GitHub login that owns the supplied package token.
+    required: false
+    default: ${{ github.actor }}
 
 runs:
   using: composite
@@ -27,7 +31,7 @@ runs:
     - name: Verify GHCR package push permission
       shell: bash
       env:
-        GH_ACTOR: ${{ github.actor }}
+        GHCR_USERNAME: ${{ inputs.github-username }}
         GH_TOKEN: ${{ inputs.github-token }}
         STATE_REGISTRY: ${{ inputs.state-registry }}
       run: |
@@ -49,9 +53,9 @@ runs:
         esac
 
         repo_path="${STATE_REGISTRY#ghcr.io/}"
-        echo "Checking push permission for ghcr.io/${repo_path} as ${GH_ACTOR}..."
+        echo "Checking push permission for ghcr.io/${repo_path} as ${GHCR_USERNAME}..."
 
-        if ! response=$(curl -fsS -u "${GH_ACTOR}:${GH_TOKEN}" \
+        if ! response=$(curl -fsS -u "${GHCR_USERNAME}:${GH_TOKEN}" \
           "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo_path}:pull,push"); then
           echo "::error::Could not reach the GHCR token endpoint for ghcr.io/${repo_path} (the request failed or was rejected). Confirm the package exists and the workflow token can read it."
           exit 1
@@ -78,7 +82,7 @@ runs:
           echo "GHCR_PUSH_CHECK=ok" >> "$GITHUB_ENV"
         elif [ "${status}" = "401" ] || [ "${status}" = "403" ]; then
           echo "GHCR_PUSH_CHECK=failed" >> "$GITHUB_ENV"
-          echo "::error::The workflow's GITHUB_TOKEN cannot push to the Radius state package ghcr.io/${repo_path}. GHCR does not grant this by default. In the package's settings, give this repository's Actions workflows the 'Write' role (Package settings → Manage Actions access → add repository), or link the package to the repository, then re-run this workflow."
+          echo "::error::The selected workflow credential cannot push to the Radius state package ghcr.io/${repo_path}. Set the RADIUS_GHCR_TOKEN and RADIUS_GHCR_USERNAME environment secrets to the package credential that created it, or give this repository's Actions workflows the 'Write' role in the package settings, then re-run this workflow."
           exit 1
         else
           echo "::error::GHCR push-permission probe for ghcr.io/${repo_path} returned HTTP ${status}; this does not prove whether push access is allowed."
