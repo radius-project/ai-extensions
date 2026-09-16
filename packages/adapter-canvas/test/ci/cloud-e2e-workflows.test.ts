@@ -257,24 +257,6 @@ describe("cloud-e2e.yml", () => {
     });
     expect(run?.env?.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
     expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
-
-    const configurePackageCredentials = steps(
-      workflow.jobs?.["cloud-e2e"]
-    ).find(
-      (step) => step.name === "Configure fixture GHCR workflow credentials"
-    );
-    expect(configurePackageCredentials?.env).toMatchObject({
-      FIXTURE_REPOSITORY: "${{ steps.fixture.outputs.full-name }}",
-      GH_TOKEN: "${{ steps.app-token.outputs.token }}",
-      PACKAGE_TOKEN: "${{ secrets.GH_RAD_CI_BOT_PAT }}",
-      PACKAGE_USERNAME: "${{ secrets.CLOUD_E2E_PACKAGES_USER }}"
-    });
-    expect(configurePackageCredentials?.run).toContain(
-      "gh secret set RADIUS_GHCR_TOKEN"
-    );
-    expect(configurePackageCredentials?.run).toContain(
-      "gh secret set RADIUS_GHCR_USERNAME"
-    );
   });
 
   it("inherits the fixture-scoped App grants so actions variables remain available", async () => {

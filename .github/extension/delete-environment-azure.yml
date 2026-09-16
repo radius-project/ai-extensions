@@ -95,8 +95,8 @@ jobs:
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
-          username: ${{ secrets.RADIUS_GHCR_USERNAME || github.actor }}
-          password: ${{ secrets.RADIUS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Get target cluster kubeconfig
         run: |

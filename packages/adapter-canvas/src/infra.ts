@@ -291,10 +291,7 @@ function assertTrustedGeneratedWorkflow(
           isMapping(step) &&
           step.name === "Verify GHCR package push permission" &&
           isMapping(step.env) &&
-          step.env.GHCR_USERNAME ===
-            "${{ secrets.RADIUS_GHCR_USERNAME || github.actor }}" &&
-          step.env.GHCR_TOKEN ===
-            "${{ secrets.RADIUS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}" &&
+          step.env.GHCR_TOKEN === "${{ secrets.GITHUB_TOKEN }}" &&
           typeof step.run === "string" &&
           step.run.includes("/blobs/uploads/")
       )
@@ -488,14 +485,14 @@ export function configureVerifyGhcrProbe(workflow: string): string {
   const replacement = `${indent}- name: Verify GHCR package push permission
 ${indent}  shell: bash
 ${indent}  env:
-${indent}    GHCR_USERNAME: \${{ secrets.RADIUS_GHCR_USERNAME || github.actor }}
-${indent}    GHCR_TOKEN: \${{ secrets.RADIUS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+${indent}    GH_ACTOR: \${{ github.actor }}
+${indent}    GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
 ${indent}    STATE_REGISTRY: \${{ vars.RADIUS_STATE_REGISTRY }}
 ${indent}  run: |
 ${indent}    set -euo pipefail
 ${indent}    curl() { command curl --connect-timeout 10 --max-time 30 "$@"; }
 ${indent}    repo_path="\${STATE_REGISTRY#ghcr.io/}"
-${indent}    bearer="$(curl -fsS -u "\${GHCR_USERNAME}:\${GHCR_TOKEN}" "https://ghcr.io/token?service=ghcr.io&scope=repository:\${repo_path}:pull,push" | node -e 'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).token || ""));')"
+${indent}    bearer="$(curl -fsS -u "\${GH_ACTOR}:\${GHCR_TOKEN}" "https://ghcr.io/token?service=ghcr.io&scope=repository:\${repo_path}:pull,push" | node -e 'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).token || ""));')"
 ${indent}    if [[ -z "\${bearer}" ]]; then
 ${indent}      echo "::error::Could not obtain a GHCR token for \${STATE_REGISTRY}."
 ${indent}      exit 1

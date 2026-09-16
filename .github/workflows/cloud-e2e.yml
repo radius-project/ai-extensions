@@ -201,26 +201,6 @@ jobs:
           owner: ${{ steps.fixture.outputs.owner }}
           repositories: ${{ steps.fixture.outputs.name }}
 
-      # The package is bootstrapped with the dedicated package publisher rather
-      # than the fixture repository's GITHUB_TOKEN. GHCR may retain the OCI
-      # source metadata without granting that repository's Actions token write
-      # access, so publish the same credential under the generic secret names
-      # consumed by generated Radius workflows.
-      - name: Configure fixture GHCR workflow credentials
-        if: steps.fixture.outputs.configured == 'true'
-        env:
-          FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PACKAGE_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
-          PACKAGE_USERNAME: ${{ secrets.CLOUD_E2E_PACKAGES_USER }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf '%s' "$PACKAGE_TOKEN" |
-            gh secret set RADIUS_GHCR_TOKEN --repo "$FIXTURE_REPOSITORY"
-          printf '%s' "$PACKAGE_USERNAME" |
-            gh secret set RADIUS_GHCR_USERNAME --repo "$FIXTURE_REPOSITORY"
-
       - name: Run the cloud create-environment journey
         if: steps.fixture.outputs.configured == 'true'
         working-directory: packages/adapter-canvas

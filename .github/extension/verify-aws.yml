@@ -47,8 +47,7 @@ jobs:
         uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}
         with:
           state-registry: ${{ vars.RADIUS_STATE_REGISTRY }}
-          github-username: ${{ secrets.RADIUS_GHCR_USERNAME || github.actor }}
-          github-token: ${{ secrets.RADIUS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         run: |
