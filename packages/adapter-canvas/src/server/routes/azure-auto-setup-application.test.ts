@@ -2377,6 +2377,89 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     );
   });
 
+  it("stops verifying owner propagation at the bounded attempt limit", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      // A successful read that never lists the owner is the shape replication
+      // lag takes once the app exists, so the only thing that can end this loop
+      // is the attempt bound.
+      ownerList: command({ stdout: USER_ID }),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad app owner list "))
+    ).toHaveLength(6);
+    expect(sleeps).toEqual([2000, 4000, 6000, 8000, 10000]);
+    expect(test.failures[0]).toMatchObject({ code: "app-owner-verify-failed" });
+  });
+
+  it("does not retry owner verification after an authorization failure", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      ownerList: command({
+        code: 1,
+        stderr: "ERROR: HTTP 403 Authorization_RequestDenied"
+      }),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad app owner list "))
+    ).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+    // A denied read is a lookup failure, distinct from the verify failure a
+    // successful read that omits the owner produces.
+    expect(test.failures[0]).toMatchObject({ code: "app-owner-lookup-failed" });
+  });
+
+  it("does not retry the owner mutation when propagation requests an excessive delay", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      ownerAdd: command({
+        code: 1,
+        stderr:
+          "ERROR: Resource 'app-id' does not exist or one of its queried reference-property objects are not present.\nRetry-After: 11"
+      }),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad app owner add "))
+    ).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+    expect(test.failures[0]).toMatchObject({ code: "app-owner-add-failed" });
+  });
+
+  it("stops verifying tag propagation at the bounded attempt limit", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      tagShows: Array.from({ length: 6 }, () => command({ stdout: "[]" })),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter(
+        (line) =>
+          line.startsWith("ad app show ") && line.includes("--query tags")
+      )
+    ).toHaveLength(6);
+    expect(sleeps).toEqual([2000, 4000, 6000, 8000, 10000]);
+    expect(test.failures[0]).toMatchObject({ code: "app-tag-verify-failed" });
+  });
+
   it("rolls back when the owner add is denied for a service principal", async () => {
     const { test } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
       ownerAdd: command({
