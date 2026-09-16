@@ -20,7 +20,6 @@ inputs:
   environment:
     description: Name of the GitHub deploy environment this run targets.
     required: true
-
 outputs:
   state-restored:
     description: >-
@@ -92,26 +91,16 @@ runs:
         echo "state-restored=true" >> "$GITHUB_OUTPUT"
 
         # Choose the resource group the environment and application deploy into,
-        # *after* the restore and *before* any `rad deploy`. `rad startup`
-        # replaces the control-plane database wholesale (`pg_dump --clean
-        # --if-exists`), so a group created before it is dropped when the restored
-        # snapshot lacks it -- and `rad deploy` creates a `default` group of its
-        # own to hold the built-in recipe pack, so reading the list afterwards
-        # would no longer show what the restore produced.
+        # *after* the restore. `rad startup` replaces the control-plane database
+        # wholesale (`pg_dump --clean --if-exists`), so a group created before it
+        # is dropped when the restored snapshot lacks it.
         #
         # The group is part of the Radius resource ID a Recipe derives the
         # provisioned cloud resource's name from, and that ID carries no
-        # environment identity, so deploying every environment into `default` made
-        # two environments backed by one Azure scope resolve to the same cloud
-        # resource. resource-group.sh derives a group from the repository and
-        # environment for a new environment, and keeps `default` for one that
-        # already has resources there -- moving those would orphan them and
-        # provision empty replacements. It fails closed to `default` when the
-        # listing cannot be read.
-        GROUPS_STATUS=ok
-        GROUPS_JSON="$(rad group list -o json 2>/dev/null)" || GROUPS_STATUS=failed
-        RESOURCE_GROUP="$(printf '%s' "$GROUPS_JSON" |
-          bash "$GITHUB_ACTION_PATH/resource-group.sh" "$REPOSITORY" "$ENVIRONMENT" "$GROUPS_STATUS")"
+        # environment identity, so a fixed group would make two environments
+        # backed by one cloud scope resolve to the same cloud resource.
+        # resource-group.sh keys it to the repository and environment instead.
+        RESOURCE_GROUP="$(bash "$GITHUB_ACTION_PATH/resource-group.sh" "$REPOSITORY" "$ENVIRONMENT")"
         echo "Deploying into Radius resource group '$RESOURCE_GROUP'."
         echo "resource-group=$RESOURCE_GROUP" >> "$GITHUB_OUTPUT"
 

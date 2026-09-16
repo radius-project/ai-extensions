@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Tests for resource-group.sh (the Radius resource group selector) and for the
+# Tests for resource-group.sh (the Radius resource group derivation) and for the
 # action/workflow wiring that feeds it.
 
 set -euo pipefail
@@ -18,32 +18,28 @@ fail() {
     exit 1
 }
 
-# assert_group REPOSITORY ENVIRONMENT STATUS GROUPS_JSON EXPECTED
-assert_group() {
-    local repository="$1" environment="$2" status="$3" groups="$4" expected="$5"
+derived_for() {
+    bash "${SCRIPT}" "$1" "$2"
+}
+
+# assert_derived REPOSITORY ENVIRONMENT EXPECTED
+assert_derived() {
     local actual
-    actual="$(printf '%s' "${groups}" | bash "${SCRIPT}" "${repository}" "${environment}" "${status}")"
-    if [[ "${actual}" != "${expected}" ]]; then
-        fail "select('${repository}','${environment}','${status}') = '${actual}', expected '${expected}'"
+    actual="$(derived_for "$1" "$2")"
+    if [[ "${actual}" != "$3" ]]; then
+        fail "derive('$1','$2') = '${actual}', expected '$3'"
     fi
 }
 
-# assert_derived REPOSITORY ENVIRONMENT EXPECTED -- the name chosen when the
-# restore produced no groups at all.
-assert_derived() {
-    assert_group "$1" "$2" "ok" "[]" "$3"
-}
-
-derived_for() {
-    printf '%s' "[]" | bash "${SCRIPT}" "$1" "$2" "ok"
-}
-
 readonly REPO="radius-project/samples"
-readonly LEGACY="default"
 
-# --- Derivation: shape, charset, and stability ------------------------------
-# The server accepts `^[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?$` up to 63 characters
-# for any Radius resource name, so every derived name must satisfy it.
+# --- Every derived name must be a legal Radius resource name ----------------
+# The server accepts `^[A-Za-z]([-A-Za-z0-9]*[A-Za-z0-9])?$` up to 63 characters,
+# which is stricter than `rad group create`'s own client-side check: that one
+# allows underscores and parentheses the server then rejects. So the derivation
+# is asserted against the server rule, on inputs chosen to attack each clause --
+# leading digit, trailing/leading separator, underscores, non-ASCII, nothing
+# sluggable at all, and past the length budget.
 assert_valid_name() {
     local name="$1" context="$2"
     [[ ${#name} -le 63 ]] || fail "${context}: '${name}' is ${#name} characters, over the 63 limit"
@@ -64,101 +60,62 @@ for environment in \
     "ünïcødé" \
     "..." \
     "a-very-long-environment-name-that-comfortably-exceeds-the-fifty-character-readable-budget"; do
-    name="$(derived_for "${REPO}" "${environment}")"
-    assert_valid_name "${name}" "environment '${environment}'"
+    assert_valid_name "$(derived_for "${REPO}" "${environment}")" "environment '${environment}'"
 done
 
-# A name with nothing sluggable still derives a valid, non-empty group.
-assert_derived "${REPO}" "..." "env-63d4890d"
-
-# Readable names keep the environment visible.
+# --- The readable part stays readable ---------------------------------------
 assert_derived "${REPO}" "dev" "env-dev-de35ce62"
 assert_derived "${REPO}" "Chatbot-env" "env-chatbot-env-e5e1efcb"
-# Case and separator normalization collapse to the same slug, and the hash of
-# the exact input is what keeps the two groups apart.
+# Nothing sluggable: the hash alone still identifies the environment.
+assert_derived "${REPO}" "..." "env-63d4890d"
+
+# --- Distinctness: what the slug cannot separate, the hash must -------------
+# Case and separator normalization collapse these to one slug.
 [[ "$(derived_for "${REPO}" "Chatbot-env")" != "$(derived_for "${REPO}" "chatbot env")" ]] ||
     fail "environments that differ only by case/separators must not share a group"
 
-# Derivation is stable: the same inputs must produce the same group on every run,
-# or a redeploy would provision replacements beside the existing resources.
-[[ "$(derived_for "${REPO}" "dev")" == "$(derived_for "${REPO}" "dev")" ]] ||
-    fail "derivation must be deterministic"
-
-# The repository is part of the hash, because two repositories can name an
-# environment `dev` and back it with the same Azure scope.
+# The repository is in the hash, because two repositories can each name an
+# environment `dev` and back both with the same cloud scope.
 [[ "$(derived_for "${REPO}" "dev")" != "$(derived_for "radius-project/other" "dev")" ]] ||
     fail "the same environment name in two repositories must not share a group"
 
-# Two long environment names that truncate to the same slug stay distinct.
+# Two long names that truncate to the same 50-character slug stay distinct,
+# because the hash is taken over the untruncated input.
 LONG_A="an-environment-name-long-enough-to-be-truncated-before-alpha"
 LONG_B="an-environment-name-long-enough-to-be-truncated-before-beta"
 [[ "$(derived_for "${REPO}" "${LONG_A}")" != "$(derived_for "${REPO}" "${LONG_B}")" ]] ||
     fail "environments whose slugs truncate identically must not share a group"
 
-# --- Selection: which group an actual run uses ------------------------------
-DEV_GROUP="$(derived_for "${REPO}" "dev")"
-readonly DEV_GROUP
-
-# 1. A fresh environment: `rad startup` restored nothing, so use the derived
-#    group. This is the only case that changes behavior for a new environment.
-assert_group "${REPO}" "dev" "ok" "[]" "${DEV_GROUP}"
-
-# 2. An environment deployed before this change keeps its resources where they
-#    are. Moving it would orphan them and provision empty replacements.
-assert_group "${REPO}" "dev" "ok" '[{"name":"default"}]' "${LEGACY}"
-
-# 3. Second and later runs of a migrated environment. `rad deploy` creates
-#    `default` for the built-in recipe pack, so `default` is present here too --
-#    the derived group must still win, or every environment would drift back.
-assert_group "${REPO}" "dev" "ok" \
-    "[{\"name\":\"default\"},{\"name\":\"${DEV_GROUP}\"}]" "${DEV_GROUP}"
-# Order in the listing must not decide it.
-assert_group "${REPO}" "dev" "ok" \
-    "[{\"name\":\"${DEV_GROUP}\"},{\"name\":\"default\"}]" "${DEV_GROUP}"
-
-# 4. Another environment's group in the listing is not this environment's.
-assert_group "${REPO}" "dev" "ok" \
-    "[{\"name\":\"$(derived_for "${REPO}" "prod")\"}]" "${DEV_GROUP}"
-
-# --- Selection: failing closed ----------------------------------------------
-# Every unusable answer resolves to `default`, never to the derived group:
-# guessing wrong for an existing environment strands its resources, while
-# guessing wrong for a new one only leaves the pre-existing collision in place.
-assert_group "${REPO}" "dev" "failed" "" "${LEGACY}"
-assert_group "${REPO}" "dev" "" "" "${LEGACY}"
-assert_group "${REPO}" "dev" "ok" "not json" "${LEGACY}"
-assert_group "${REPO}" "dev" "ok" "" "${LEGACY}"
-assert_group "${REPO}" "dev" "ok" '{"error":"unauthorized"}' "${LEGACY}"
-# A listing whose entries carry no name is an answer this cannot read.
-assert_group "${REPO}" "dev" "ok" '[{"id":"/planes/radius/local/resourcegroups/default"}]' "${LEGACY}"
-# An empty list is readable, and it means the restore produced nothing.
-assert_group "${REPO}" "dev" "ok" "[]" "${DEV_GROUP}"
+# --- Stability --------------------------------------------------------------
+# A redeploy must land in the group the last deploy used. If derivation drifted,
+# every run would provision replacements beside the existing resources.
+[[ "$(derived_for "${REPO}" "dev")" == "$(derived_for "${REPO}" "dev")" ]] ||
+    fail "derivation must be deterministic"
 
 # --- Argument validation ----------------------------------------------------
+# Deriving from a missing input would silently key every environment the same
+# way, which is the collision this exists to prevent.
 assert_rejects() {
-    if printf '%s' "[]" | bash "${SCRIPT}" "$@" >/dev/null 2>&1; then
+    if bash "${SCRIPT}" "$@" >/dev/null 2>&1; then
         fail "expected rejection for args: $*"
     fi
 }
 
 assert_rejects
 assert_rejects "${REPO}"
-assert_rejects "" "dev" "ok"
-assert_rejects "${REPO}" "" "ok"
+assert_rejects "" "dev"
+assert_rejects "${REPO}" ""
 
-# --- Wiring: the action must use the script, not a literal group ------------
+# --- Wiring: the action must derive the group, never hardcode one -----------
 if ! grep -q "resource-group.sh" "${ACTION}"; then
-    fail "restore-state/action.yml must select the group with resource-group.sh"
+    fail "restore-state/action.yml must derive the group with resource-group.sh"
 fi
-if grep -qE 'rad group (create|switch) default' "${ACTION}"; then
-    fail "restore-state/action.yml must not hardcode the \`default\` group"
-fi
-if ! grep -q 'rad group list -o json' "${ACTION}"; then
-    fail "restore-state/action.yml must read the restored groups with \`rad group list -o json\`"
+if grep -qE 'rad group (create|switch) [a-z]' "${ACTION}"; then
+    fail "restore-state/action.yml must not hardcode a resource group name"
 fi
 
-# Every caller must pass the repository and environment the selection is keyed
-# on; a missing input would silently fall back to a different group.
+# Every caller must pass the repository and environment the derivation is keyed
+# on; a missing input would fail the run rather than silently share a group.
 for workflow in \
     "${EXTENSION}/run-rad-commands-azure.yml" \
     "${EXTENSION}/run-rad-commands-aws.yml" \
