@@ -614,9 +614,66 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     expect(script).toContain("changed before release");
     expect(script).toContain('gh api -X DELETE "$lease_write_path"');
+    // lastIndexOf, not indexOf: the failure-path trap defined at the top of the
+    // script also releases the lease, so the final occurrence is the normal
+    // release that must follow the branch reset.
     expect(script.indexOf("gh api -X PATCH")).toBeLessThan(
-      script.indexOf('gh api -X DELETE "$lease_write_path"')
+      script.lastIndexOf('gh api -X DELETE "$lease_write_path"')
     );
+  });
+
+  it("survives a read-after-write lag instead of dying while holding the lease", async () => {
+    // A ref read issued immediately after creating that ref can 404 on a stale
+    // replica. Under `set -e` an unretried read aborts the step between
+    // acquiring and releasing the mutex, so the lease outlives the run and
+    // every Cloud E2E run fails until the next scheduled cleanup reclaims it.
+    //
+    // These are structural assertions only: they pin the wiring in place but
+    // cannot tell a working retry from a broken one. The behavior itself is
+    // executed against stubbed `gh`/`node`/`sleep` in
+    // build/scripts/cloud-e2e-lease_test.sh, which is what actually fails when
+    // one of these paths regresses.
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const reset = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name === "Reset the fixture default branch under the shared lease"
+    );
+    const script = reset?.run ?? "";
+
+    expect(script).toContain("read_lease_sha()");
+    // Both post-write verifications must go through the retry, never a bare read.
+    expect(script).not.toContain(
+      'verify_lease_sha="$(gh api "$lease_read_path" --jq .object.sha)"'
+    );
+    expect(
+      script.match(/verify_lease_sha="\$\(read_lease_sha\)"/g)?.length
+    ).toBe(2);
+
+    // Failing anywhere while holding the lease must still release it. Anchored
+    // so a commented-out trap cannot satisfy the assertion.
+    expect(script).toMatch(/^\s*trap release_orphaned_lease EXIT\s*$/m);
+    expect(script).toContain(
+      "Released $LEASE_REF after cleanup failed while holding it."
+    );
+    // Both acquisition paths - reclaiming an abandoned lease and creating a new
+    // one - must mark ownership, or the trap silently skips the release.
+    expect(script.match(/^\s*lease_held_by_us=1\s*$/gm)?.length).toBe(2);
+    // The release must stay guarded so a concurrent owner is never deleted.
+    expect(script).toContain('"$current" != "$held_lease_sha"');
+    // A create that reports failure may still have landed. Ownership is settled
+    // by comparing the ref against this run's own lease commit, never by the
+    // mere existence of a ref.
+    expect(script).toContain('"$created_lease_sha" != "$held_lease_sha"');
+  });
+
+  it("runs the lease behavior suite in CI", async () => {
+    // The structural assertions above are only a tripwire; the executable
+    // coverage lives in a shell suite. If it stops being wired into a workflow
+    // it stops running, and nothing else would notice.
+    const selftests = await readWorkflow("extension-selftests.yml");
+
+    expect(selftests).toContain("build/scripts/cloud-e2e-lease_test.sh");
+    expect(selftests).toContain("build/scripts/cloud-e2e-lease*.sh");
   });
 
   it("matches environments by the prefix the suite actually applies", async () => {
@@ -738,5 +795,50 @@ describe("cloud-e2e-cleanup.yml", () => {
     const raw = await readWorkflow(CLEANUP_WORKFLOW);
     expect(raw).toContain("AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY");
     expect(raw).toContain("Refusing to purge against an ambiguous scope");
+  });
+});
+
+describe.each(WORKFLOWS)("%s - shell scripts parse", (file) => {
+  it("terminates every heredoc at column zero", async () => {
+    // `<<'TAG'` requires the terminator to start at column 0 of the script.
+    // YAML block scalars strip only the block's base indentation, so a
+    // terminator indented to match the surrounding bash nesting survives review
+    // and passes YAML and actionlint, then makes bash swallow the rest of the
+    // script as heredoc body: "unexpected EOF". The step cannot run at all, and
+    // nothing before this test caught it - a purge step shipped broken and
+    // silently stopped reclaiming leaked cloud state.
+    const workflow = await parseWorkflow(file);
+    const offenders: string[] = [];
+
+    for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+      for (const step of steps(job)) {
+        if (typeof step.run !== "string") continue;
+        const lines = step.run.split("\n");
+
+        lines.forEach((line, index) => {
+          // `<<-` is excluded deliberately: it strips leading tabs, so an
+          // indented terminator is legal there.
+          const opened = /<<'([A-Za-z_][A-Za-z0-9_]*)'/.exec(line);
+          if (!opened || line.includes("<<-")) return;
+          const tag = opened[1];
+          const nextOpen = lines.findIndex(
+            (candidate, candidateIndex) =>
+              candidateIndex > index &&
+              /<<'([A-Za-z_][A-Za-z0-9_]*)'/.test(candidate) &&
+              !candidate.includes("<<-")
+          );
+          const terminated = lines
+            .slice(index + 1, nextOpen === -1 ? undefined : nextOpen)
+            .some((candidate) => candidate === tag);
+          if (!terminated) {
+            offenders.push(
+              `${file} ${jobName} > ${step.name ?? "(unnamed)"}: <<'${tag}' opened on script line ${index + 1}`
+            );
+          }
+        });
+      }
+    }
+
+    expect(offenders).toEqual([]);
   });
 });

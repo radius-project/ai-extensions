@@ -35,7 +35,8 @@ describe("normalizeCommandResult", () => {
     expect(normalizeCommandResult(null, "ok\n", "")).toEqual({
       code: 0,
       stdout: "ok\n",
-      stderr: ""
+      stderr: "",
+      timedOut: false
     });
   });
 
@@ -53,7 +54,8 @@ describe("normalizeCommandResult", () => {
     expect(outcome).toEqual({
       code: 1,
       stdout: "",
-      stderr: "spawn az ENOENT"
+      stderr: "spawn az ENOENT",
+      timedOut: false
     });
     expect(() => expectSuccess(outcome, "az account show")).toThrow(
       "az account show failed with exit code 1: spawn az ENOENT"
@@ -70,8 +72,39 @@ describe("normalizeCommandResult", () => {
     ).toEqual({
       code: 1,
       stdout: "",
-      stderr: "Command timed out after 900000ms"
+      stderr: "Command timed out after 900000ms",
+      timedOut: true
     });
+  });
+
+  // A command killed by its own timeout is reported by `execFile` as `killed`
+  // with a `null` exit code and nothing on either stream — indistinguishable by
+  // code and output alone from a command that failed on its own terms and had
+  // nothing to say. A caller can only treat the two differently if the
+  // difference is recorded here.
+  it("records a killed command as a timeout", () => {
+    expect(
+      normalizeCommandResult(
+        {
+          code: null,
+          killed: true,
+          message: "Command failed: kubectl get deployments"
+        },
+        "",
+        ""
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "Command failed: kubectl get deployments",
+      timedOut: true
+    });
+  });
+
+  it("does not record an ordinary non-zero exit as a timeout", () => {
+    expect(
+      normalizeCommandResult({ code: 1, killed: false }, "", "boom").timedOut
+    ).toBe(false);
   });
 
   it("does not replace captured stderr with the spawn diagnostic", () => {
@@ -84,7 +117,8 @@ describe("normalizeCommandResult", () => {
     ).toEqual({
       code: 1,
       stdout: "",
-      stderr: "specific stderr"
+      stderr: "specific stderr",
+      timedOut: false
     });
   });
 
@@ -98,7 +132,8 @@ describe("normalizeCommandResult", () => {
     ).toEqual({
       code: 1,
       stdout: "specific stdout",
-      stderr: ""
+      stderr: "",
+      timedOut: false
     });
   });
 
@@ -106,7 +141,8 @@ describe("normalizeCommandResult", () => {
     expect(normalizeCommandResult({ code: "ENOENT" }, "", "")).toEqual({
       code: 1,
       stdout: "",
-      stderr: ""
+      stderr: "",
+      timedOut: false
     });
   });
 
@@ -125,7 +161,8 @@ describe("normalizeCommandResult", () => {
     expect(normalizeCommandResult(null, undefined, undefined)).toEqual({
       code: 0,
       stdout: "",
-      stderr: ""
+      stderr: "",
+      timedOut: false
     });
   });
 
@@ -145,7 +182,8 @@ describe("normalizeCommandResult", () => {
       ).toEqual({
         code: 1,
         stdout: "accessToken=[REDACTED]",
-        stderr: "failure: [REDACTED]"
+        stderr: "failure: [REDACTED]",
+        timedOut: false
       });
     });
 
@@ -160,7 +198,8 @@ describe("normalizeCommandResult", () => {
       ).toEqual({
         code: 0,
         stdout: '{"subscriptionId":"00000000-0000-0000-0000-000000000001"}',
-        stderr: ""
+        stderr: "",
+        timedOut: false
       });
     });
   });
@@ -465,7 +504,8 @@ describe("createNodeCloudFixturePorts", () => {
     ).toEqual({
       code: 1,
       stdout: "stdout [REDACTED]",
-      stderr: "stderr [REDACTED]"
+      stderr: "stderr [REDACTED]",
+      timedOut: false
     });
   });
 
