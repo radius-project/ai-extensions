@@ -80,7 +80,7 @@ None of the following is needed for Azure parity, so none is in scope.
 
 ## User experience
 
-This is the specification of what an AWS developer sees, in the order they meet it.
+A developer arrives with source code in a repository and no environment. What follows is every screen between that and a running application on AWS, in the order they meet them.
 
 1. **Model the application** — turn what is in the repository into an application definition.
 2. **Connect an AWS account** — create and verify a credential profile.
@@ -123,7 +123,7 @@ The fallback and its label are defined for both clouds, not for AWS alone. Azure
 
 ### Step 2 · Connect an AWS account
 
-Cloud accounts are managed on the **Credentials** sub-tab, described as `Configure and manage the credentials needed to connect to your cloud account. Each environment requires credentials to deploy infrastructure.` Profiles are listed as `Profile Name | Provider | Status | Actions`, and each row offers **Create Env** and **Delete Profile**. An AWS profile shows the account's alias there, as an Azure profile shows the subscription's name, so the list reads as names rather than digits. The same form is reachable from step 1 of the New Environment wizard, with identical fields and only the footer buttons differing.
+An environment has to deploy into some AWS account, in some region, and Radius has to know the developer can actually sign in to it. That is what a credential profile records. Cloud accounts are managed on the **Credentials** sub-tab, described as `Configure and manage the credentials needed to connect to your cloud account. Each environment requires credentials to deploy infrastructure.` Profiles are listed as `Profile Name | Provider | Status | Actions`, and each row offers **Create Env** and **Delete Profile**. An AWS profile shows the account's alias there, as an Azure profile shows the subscription's name, so the list reads as names rather than digits. The same form is reachable from step 1 of the New Environment wizard, with identical fields and only the footer buttons differing.
 
 Choosing **AWS** reveals the AWS panel, which asks for two values — **Account ID** and **Region** — just as the Azure panel asks for a tenant and a subscription:
 
@@ -137,7 +137,7 @@ Saving unlocks only once both the cloud session and GitHub Packages access are v
 
 ### Step 3 · Create an environment
 
-Environment creation is a two-step wizard of its own. Wizard step 1, `Cloud credentials`, is provider-neutral: the developer selects a verified profile from the **Credential profile** menu, or creates one inline.
+An environment is the deployment target: the cluster the application runs on, the network its services sit in, and the identity allowed to create them. Creating one is a two-step wizard of its own. Wizard step 1, `Cloud credentials`, is provider-neutral: the developer selects a verified profile from the **Credential profile** menu, or creates one inline.
 
 Wizard step 2, `Environment`, has four sections. Sections 1 and 2 are identical across clouds; sections 3 and 4 are AWS-specific.
 
@@ -185,7 +185,7 @@ A developer with `dev` in `us-west-2` who adds `staging` in `us-east-1` finds bo
 
 #### Section 4 · Infrastructure
 
-Section 4 reports what discovery found, as `Found 1 cluster(s), 16 VPC(s)`, and offers **↻ Refresh**. Cluster, namespace, VPC, and subnet selectors populate from the profile's account and region, and each accepts a typed value instead.
+The environment needs somewhere to run and a network its services can reach. Section 4 reports what discovery found, as `Found 1 cluster(s), 16 VPC(s)`, and offers **↻ Refresh**. Cluster, namespace, VPC, and subnet selectors populate from the profile's account and region, and each accepts a typed value instead.
 
 **EKS Cluster**, **Namespace**, **VPC**, and **Subnets** are all required. The namespace field carries `A namespace backs one environment. Pick one that no other environment on this cluster uses.`
 
@@ -238,7 +238,7 @@ Failures reuse the established pattern: a summary card titled `Setup didn’t fi
 
 ### Step 4 · Review the application graph
 
-The application graph presents `Modeled`, `Planned`, `Deployed`, and `Diff` views, and the type on a node depends on which one. `Modeled` shows the Radius type the developer declared — `Radius.Data/mySqlDatabases` — the same on either cloud. `Planned` and `Deployed` show what the recipe resolves that to, per resource type rather than by a single rule: a database backed by Amazon RDS appears as `aws_db_instance`, a cache backed by ElastiCache or a stream backed by MSK as its own AWS type. Azure behaves the same way, showing `Microsoft.DBforMySQL/flexibleServers`. The graph is therefore where an application stops being portable in the abstract and becomes a specific set of AWS resources.
+Before deploying, a developer wants to know what will be created in their AWS account; afterwards, what is actually running there. The application graph answers both, through `Modeled`, `Planned`, `Deployed`, and `Diff` views, and the type on a node depends on which one. `Modeled` shows the Radius type the developer declared — `Radius.Data/mySqlDatabases` — the same on either cloud. `Planned` and `Deployed` show what the recipe resolves that to, per resource type rather than by a single rule: a database backed by Amazon RDS appears as `aws_db_instance`, a cache backed by ElastiCache or a stream backed by MSK as its own AWS type. Azure behaves the same way, showing `Microsoft.DBforMySQL/flexibleServers`. The graph is therefore where an application stops being portable in the abstract and becomes a specific set of AWS resources.
 
 A recipe that provisions several AWS resources — an RDS instance alongside its subnet group and security group — shows the one the application depends on, and the rest appear in the node's details rather than as siblings. Every recipe names which of its resources that is, including a generated one.
 
@@ -268,7 +268,7 @@ The renderer, the icon set, and the `Diff` views are provider-neutral and need n
 
 ### Step 5 · Deploy
 
-Deployment is provider-neutral. The developer deploys from the application view, sees `Deploying <app> to environment <env>` with `Track progress in the deployments list below.`, and tracks the run in the deployments list, where each row offers `Monitor Graph`, `View Run`, and `Delete Deployment`.
+Deploying is the same act on either cloud. The developer deploys from the application view, sees `Deploying <app> to environment <env>` with `Track progress in the deployments list below.`, and tracks the run in the deployments list, where each row offers `Monitor Graph`, `View Run`, and `Delete Deployment`.
 
 On success the log closes with `🎉 Deployment complete! Application deployed to AWS.` followed by `Click on deployed resources to view them in the AWS Console.`
 
@@ -321,7 +321,7 @@ The shared Kubernetes set is `Radius.Compute/containers`, `containerImages`, `pe
 
 ### Step 6 · Delete
 
-Deleting a deployment uses the existing three-step confirmation — intent, acknowledged effects, and typing `<app>/<environment>` to confirm — preceded by a list of resources to be deleted. It is provider-neutral and unchanged, and benefits from the same accurate resource types as the graph. Where resources are left in a non-terminal state, force delete remains available with its existing warning about orphaned external resources.
+A developer tearing down work needs to know what leaves their AWS account and what stays behind. Deleting a deployment uses the existing three-step confirmation — intent, acknowledged effects, and typing `<app>/<environment>` to confirm — preceded by a list of resources to be deleted. It is provider-neutral and unchanged, and benefits from the same accurate resource types as the graph. Where resources are left in a non-terminal state, force delete remains available with its existing warning about orphaned external resources.
 
 Deleting an environment states the AWS consequences before the developer confirms. It names the cluster the environment is removed from, the trust removed from the role, any region or cluster access no remaining environment needs, and whether the role itself is deleted or retained. If applications remain in the environment, deletion is blocked and names the applications the developer deletes first.
 
