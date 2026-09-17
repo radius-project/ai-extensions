@@ -455,7 +455,50 @@ export function radiusApplicationSelector(application: string): string {
   ).toLowerCase()}`;
 }
 
+/**
+ * The Kubernetes kinds Radius renders for an application.
+ *
+ * Presence and absence are asserted over the same set on purpose. Listing
+ * fewer kinds on the delete side would let a delete that removed the Deployment
+ * but stranded its Service or autoscaler report success, and cleanup already
+ * reclaims all of them - so the assertion would be weaker than the sweep that
+ * backs it.
+ */
+export const RADIUS_WORKLOAD_KINDS = [
+  "deployments",
+  "statefulsets",
+  "daemonsets",
+  "services",
+  "horizontalpodautoscalers"
+] as const;
+
+/** The `kubectl get` argument covering every rendered kind. */
+export const RADIUS_WORKLOAD_RESOURCES = RADIUS_WORKLOAD_KINDS.join(",");
+
+/**
+ * The same set plus pods, for asserting a delete removed everything.
+ *
+ * A pod outliving its owner is a delete that half-finished, which is exactly
+ * what the absence assertion exists to catch.
+ */
+export const RADIUS_RENDERED_RESOURCES = [
+  ...RADIUS_WORKLOAD_KINDS,
+  "pods"
+].join(",");
+
+// A Service or autoscaler has no replicas to become available, so readiness
+// for those kinds is existence. Treating them as replica-bearing would fail a
+// healthy deploy; an unrecognized kind stays replica-bearing so a new rendered
+// kind is asserted rather than waved through.
+const NON_REPLICA_KINDS = new Set([
+  "Service",
+  "HorizontalPodAutoscaler",
+  "Secret",
+  "ConfigMap"
+]);
+
 export interface KubernetesWorkload {
+  readonly kind: string;
   readonly name: string;
   readonly application: string;
   readonly desiredReplicas: number;
@@ -465,6 +508,7 @@ export interface KubernetesWorkload {
 export function isKubernetesWorkloadReady(
   workload: KubernetesWorkload
 ): boolean {
+  if (NON_REPLICA_KINDS.has(workload.kind)) return true;
   return (
     workload.desiredReplicas > 0 &&
     workload.availableReplicas >= workload.desiredReplicas
@@ -472,11 +516,15 @@ export function isKubernetesWorkloadReady(
 }
 
 /**
- * Narrows `kubectl get deployments -o json`.
+ * Narrows `kubectl get <kinds> -o json`.
  *
  * A malformed body throws. Reading it as "no workloads" would make stage two
  * report a failed deploy and stage three report a successful delete, from the
  * very same unreadable answer.
+ *
+ * A DaemonSet carries its counts on `status` rather than `spec.replicas`, so
+ * its own fields are read; otherwise it would look like a workload desiring
+ * zero replicas and never be asserted at all.
  */
 export function readKubernetesWorkloads(
   payload: unknown
@@ -502,11 +550,18 @@ export function readKubernetesWorkloads(
     const application = labels?.[RADIUS_APPLICATION_LABEL];
     const spec = asRecord(item.spec);
     const status = asRecord(item.status);
+    const kind = typeof item.kind === "string" ? item.kind.trim() : "";
+    const daemonSet = kind === "DaemonSet";
     return {
+      kind,
       name: name.trim(),
       application: typeof application === "string" ? application : "",
-      desiredReplicas: countOf(spec?.replicas),
-      availableReplicas: countOf(status?.availableReplicas)
+      desiredReplicas: countOf(
+        daemonSet ? status?.desiredNumberScheduled : spec?.replicas
+      ),
+      availableReplicas: countOf(
+        daemonSet ? status?.numberAvailable : status?.availableReplicas
+      )
     };
   });
 }
