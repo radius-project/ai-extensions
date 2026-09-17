@@ -1427,7 +1427,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     );
     await harness.settleMonitor();
     expect(activeDeploymentMutation(state)).toBeUndefined();
-    expect(harness.handoffs).toEqual(["panel-a"]);
+    expect(harness.handoffs).toEqual([]);
   });
 
   it("resolves the repo default branch when the request names none", async () => {
@@ -1699,9 +1699,8 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     expect(state.deployLogs).toEqual([
       "❌ Deploy monitor stopped unexpectedly: monitor exploded"
     ]);
-    // Cleanup still runs on the failure path: handoff attempted once, and the
-    // reservation released.
-    expect(harness.handoffs).toEqual(["panel-a"]);
+    // Cleanup releases the reservation without starting agent repair.
+    expect(harness.handoffs).toEqual([]);
     expect(activeDeploymentMutation(state)).toBeUndefined();
   });
 

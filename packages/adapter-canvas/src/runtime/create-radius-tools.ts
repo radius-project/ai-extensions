@@ -14,6 +14,7 @@ import {
 } from "@radius-project/core";
 import { errorMessage, optionalString } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
+import { lifecycleDeployTool } from "./lifecycle-deploy-tools.js";
 import { readCommittedGraphDiff, canvasResources } from "./graph-reader.js";
 import {
   failedGraphDiffResult,
@@ -385,6 +386,12 @@ export function createRadiusTools(
     {
       ...declarationByName.get("radius_deploy")!,
       handler: async (args: ToolArgs = {}) => {
+        const canonical = await lifecycleDeployTool(
+          deps.lifecycle,
+          "start",
+          args
+        );
+        if (canonical !== undefined) return canonical;
         try {
           const deployArgs = args as DeployToolArgs;
           const entry = deps.deployTools.selectDeployEntry(
@@ -431,6 +438,12 @@ export function createRadiusTools(
     {
       ...declarationByName.get("radius_deploy_status")!,
       handler: async (args: ToolArgs = {}) => {
+        const canonical = await lifecycleDeployTool(
+          deps.lifecycle,
+          "status",
+          args
+        );
+        if (canonical !== undefined) return canonical;
         try {
           const entry = deps.deployTools.selectDeployEntry(
             deps.servers,

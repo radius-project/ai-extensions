@@ -32,7 +32,7 @@ export function initializeDeployResultPage(
     if (pending) return;
     pending = true;
     button.disabled = true;
-    button.textContent = "Resetting…";
+    button.textContent = "Resetting view…";
     if (status) status.style.display = "none";
     void context.net
       .fetch(DEPLOY_RESET_PATH, {

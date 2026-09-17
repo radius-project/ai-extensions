@@ -180,7 +180,22 @@ describe("T001 pre-lifecycle compatibility baseline", () => {
     const dispatchInputs = source.getIn(["on", "workflow_dispatch", "inputs"]);
     expect(
       isNode(dispatchInputs) ? dispatchInputs.toJSON() : dispatchInputs
-    ).toEqual(WORKFLOW_BASELINE.dispatchInputs);
+    ).toMatchObject(WORKFLOW_BASELINE.dispatchInputs);
+    const lifecycleInputs = [
+      "lifecycle_version",
+      "lifecycle_operation",
+      "operation_id",
+      "attempt_id",
+      "expected_commit"
+    ];
+    for (const name of lifecycleInputs) {
+      expect(
+        source.getIn(["on", "workflow_dispatch", "inputs", name, "required"])
+      ).toBe(false);
+      expect(
+        source.getIn(["on", "workflow_dispatch", "inputs", name, "default"])
+      ).toBe("");
+    }
 
     const generated = generateDeployWorkflow(
       "dev",
@@ -199,12 +214,17 @@ describe("T001 pre-lifecycle compatibility baseline", () => {
       expect(isNode(forwarded) ? forwarded.toJSON() : forwarded).toEqual({
         environment: "${{ inputs.environment || 'dev' }}",
         image: "${{ inputs.image }}",
-        rad_commands: "${{ inputs.rad_commands }}"
+        rad_commands: "${{ inputs.rad_commands }}",
+        ...Object.fromEntries(
+          lifecycleInputs.map((name) => [name, `\${{ inputs.${name} }}`])
+        )
       });
       const workflow = parseDocument(generated[file]);
       expect(workflow.errors).toEqual([]);
       const callInputs = workflow.getIn(["on", "workflow_call", "inputs"]);
-      expect(isNode(callInputs) ? callInputs.toJSON() : callInputs).toEqual({
+      expect(
+        isNode(callInputs) ? callInputs.toJSON() : callInputs
+      ).toMatchObject({
         environment: {
           description: "GitHub Environment name",
           type: "string",
@@ -216,6 +236,14 @@ describe("T001 pre-lifecycle compatibility baseline", () => {
           type: "string"
         }
       });
+      for (const name of lifecycleInputs) {
+        expect(
+          workflow.getIn(["on", "workflow_call", "inputs", name, "required"])
+        ).toBe(false);
+        expect(
+          workflow.getIn(["on", "workflow_call", "inputs", name, "default"])
+        ).toBe("");
+      }
       const concurrency = workflow.get("concurrency");
       expect(isNode(concurrency) ? concurrency.toJSON() : concurrency).toEqual(
         WORKFLOW_BASELINE.concurrency

@@ -32,3 +32,8 @@ export type {
   SourceManifestInput,
   SourcePolicyCancellation
 } from "./source.js";
+export * from "./contracts/execution.js";
+export * from "./deployment-policy.js";
+export * from "./deployment.js";
+export * from "./operation-reads.js";
+export * from "./execution-result.js";

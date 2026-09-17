@@ -170,6 +170,14 @@ radius_publish_live_progress_once() {
         --argjson runId "${GITHUB_RUN_ID:-0}" \
         --argjson sequence "${sequence}" \
         --arg updatedAt "${updated_at}" \
+        --arg lifecycleVersion "${LIFECYCLE_VERSION:-}" \
+        --arg operationId "${OPERATION_ID:-}" \
+        --arg attemptId "${ATTEMPT_ID:-}" \
+        --arg operation "${LIFECYCLE_OPERATION:-}" \
+        --arg repo "${GITHUB_REPOSITORY:-}" \
+        --arg expectedCommit "${EXPECTED_COMMIT:-}" \
+        --arg actualCommit "${GITHUB_SHA:-}" \
+        --arg runAttempt "${GITHUB_RUN_ATTEMPT:-}" \
         '{
             schemaVersion: 1,
             application: $application,
@@ -179,7 +187,13 @@ radius_publish_live_progress_once() {
             updatedAt: $updatedAt,
             state: "in_progress",
             resources: $resources
-        }' >"${progress_file}"
+        } | if $lifecycleVersion == "1" then
+          .schemaVersion=2 | .operationId=$operationId | .attemptId=$attemptId |
+          .operation=$operation | .repo=$repo | .expectedCommit=$expectedCommit |
+          .actualCommit=$actualCommit | .runAttempt=($runAttempt|tonumber) |
+          .diagnosticsRedacted=true |
+          .resources |= map(.message="Resource diagnostic withheld.")
+        else . end' >"${progress_file}"
 
     if output=$("${RADIUS_PROGRESS_NODE:-node}" \
         "${RADIUS_PROGRESS_UPLOADER}" \
@@ -192,7 +206,9 @@ radius_publish_live_progress_once() {
         echo "Published live deployment progress sequence ${sequence}."
     else
         echo "::warning::Live deployment progress upload failed; deployment will continue."
-        [[ -z "${output}" ]] || echo "${output}"
+        if [[ "${LIFECYCLE_VERSION:-}" != "1" && -n "${output}" ]]; then
+            echo "${output}"
+        fi
     fi
 }
 

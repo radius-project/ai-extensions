@@ -35,6 +35,7 @@ export type DeployWorkflowTemplateVars = Record<string, string>;
 
 export interface DeployWorkflowOptions {
   templateVars?: DeployWorkflowTemplateVars;
+  lifecycle?: { operation: "deployment.start"; application: string };
 }
 
 // Build a GitHub Actions expression that reads an override repository variable
@@ -98,8 +99,44 @@ export function generateDeployWorkflow(
     ...(options.templateVars || {}),
     ENV: env,
     APP_FILE: appFile,
+    LIFECYCLE_APPLICATION: options.lifecycle?.application ?? "",
     RADIUS_REF
   };
+  if (options.lifecycle) {
+    if (
+      options.lifecycle.operation !== "deployment.start" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.lifecycle.application)
+    )
+      throw new Error("Invalid reviewed lifecycle deployment intent.");
+    for (const file of [
+      DEPLOY_DISPATCHER_FILE,
+      DEPLOY_AZURE_FILE,
+      DEPLOY_AWS_FILE
+    ]) {
+      const body = pick(file);
+      const lines = body.split(/\r?\n/);
+      const start = lines.findIndex((line) => line === "on:");
+      let end = start + 1;
+      while (
+        end < lines.length &&
+        (!lines[end].trim() || /^[ \t]/.test(lines[end]))
+      )
+        end++;
+      const declarations = lines.slice(start + 1, end).join("\n");
+      for (const input of [
+        "lifecycle_version",
+        "lifecycle_operation",
+        "operation_id",
+        "attempt_id",
+        "expected_commit"
+      ]) {
+        if (!new RegExp(`^      ${input}:`, "m").test(declarations))
+          throw new Error(
+            `Deploy template "${file}" does not support lifecycle v1.`
+          );
+      }
+    }
+  }
   const fill = (file: string): string => fillTemplate(pick(file), templateVars);
   const files: DeployWorkflowFiles = {
     [DEPLOY_DISPATCHER_FILE]: fill(DEPLOY_DISPATCHER_FILE),

@@ -1,12 +1,12 @@
 # Validation Quickstart
 
-This guide records the implementation checkpoints completed through T050. Source, evidence, and host limitations are explicit below. No T051+ deployment, configuration, or deletion implementation is claimed.
+This guide records the completed checkpoints through T067 and the runnable deployment/observation acceptance scenarios. No T068+ configuration, repair, cancellation-control, or deletion implementation is claimed.
 
 ## Implemented Foundation and Limits
 
 The core lifecycle package publishes versioned schemas for all 21 operation variants, source-expectation policy, operation/action state, and the dispatcher. The shared adapter provides strict validators and authorized source snapshots. The App registers the additive `radius_lifecycle` tool without requiring a Canvas, retains existing tools/routes, and includes routing guards and a bridge to legacy setup/deletion records.
 
-The App registers `capabilities.get`, `application.list`, `application.inspect`, `environment.list`, `environment.inspect`, `graph.get`, and `graph.diff` alongside the foundation's `operation.respond` handler. Discovery uses fresh trusted authorization, GET-only GitHub reads, and confined current-worktree capture. Other lifecycle operations remain unavailable. The production binding still does not fabricate host approval or agent-assignment verification; a public approval claim cannot grant authority. Guarded action success is verified with injected trusted contexts, not claimed as real-host qualification. Source-capture limitations are documented in [data-model.md](data-model.md#source-snapshot-and-definition).
+The App registers `capabilities.get`, `application.list`, `application.inspect`, `environment.list`, `environment.inspect`, `graph.get`, and `graph.diff` alongside the foundation's `operation.respond` handler and session-owned `operation.get`/`operation.list` readers. Discovery uses fresh trusted authorization, GET-only GitHub reads, and confined current-worktree capture. Deployment registration requires injected trusted execution dependencies; the production binding does not fabricate host approval or agent-assignment verification. A public approval claim cannot grant authority. Guarded action success is verified with injected trusted contexts, not claimed as real-host qualification. Source-capture limitations are documented in [data-model.md](data-model.md#source-snapshot-and-definition).
 
 Authored inspection returns source and definition evidence without requiring a graph or environment. Environment inspection retains partial configuration and explicitly unavailable recipe observations without fabricating an empty registration list. Deployed evidence requires an explicit environment and application-correlated GitHub metadata; uncorrelated metadata is unavailable, not proof of current Radius state.
 
@@ -62,9 +62,49 @@ The later full-feature conformance file remains a planned deliverable:
 corepack pnpm --filter @radius-project/adapter-canvas exec vitest run test\integration\runtime\lifecycle-conformance.test.ts
 ```
 
-Expected future outcome: the real production runtime composition, with a fake SDK session and controlled external ports, performs the acceptance sequence without opening a Canvas or starting a loopback server. This full-feature file is not part of the current T018-T038 scope.
+Expected future outcome: the real production runtime composition, with a fake SDK session and controlled external ports, performs the acceptance sequence without opening a Canvas or starting a loopback server. This full-feature file remains deferred; use the checkpoint-specific fixtures below.
 
 ## End-to-End Acceptance Scenarios
+
+### Runnable Panel-Free Deployment and Observation
+
+Run the actual core, shared execution adapter, runtime binding, retained tools, and loopback HTTP boundary with controlled external ports:
+
+```powershell
+npm exec --yes --package=pnpm@11.19.0 -- pnpm exec vitest run packages\core\src\lifecycle\deployment.test.ts packages\core\src\lifecycle\execution-result.test.ts packages\core\src\lifecycle\operation-reads.test.ts packages\adapter-shared\src\lifecycle\workflow-execution.test.ts packages\adapter-shared\src\lifecycle\execution-evidence.test.ts packages\adapter-canvas\test\integration\runtime\lifecycle-deployment.test.ts packages\adapter-canvas\test\integration\http\lifecycle-deployment.test.ts packages\adapter-canvas\src\runtime\lifecycle-deploy-tools.test.ts --maxWorkers=2
+```
+
+The supported-host fixture supplies a trusted source-bound authorization port, captured published source, the actual reviewed workflow templates, and controlled workflow observations. It uses the real composed lifecycle services rather than an unavailable handler. It does not qualify the current Copilot SDK as a trusted approval host and never dispatches a live GitHub workflow.
+
+Expected outcomes:
+
+- One accepted deployment creates an operation and attempt before exactly one dispatch. A timeout or transport exception remains unconfirmed and does not permit a second dispatch with the same preparation.
+- Exact operation, attempt, repository, environment, application, source commit, workflow, run ID, and run attempt determine correlation. A newer unrelated run is not a substitute; zero or multiple matches remain uncertain.
+- Confirmed success requires matching final evidence for checkout, restore, command, state-save, and cleanup as well as successful workflow conclusion. State-save failure is failed, not deployed success. Workflow failure or cancellation remains authoritative even when the final artifact is absent.
+- Missing or foreign final artifacts cannot establish success; independently confirmed workflow failure or cancellation remains known. Resource progress has a separate sequence stream and cannot establish final command or operation success.
+- Each success, save-failure, missing-artifact, foreign-artifact, cancellation, and timeout case performs **100 reads with zero repairs, zero additional dispatches, and no source mutation**. Retained status works without a panel and continues reading a known canonical operation after writer rollback.
+- Operation listing exposes only authorized session-owned records and scope-bound pagination. It does not promise durable history or reconstruction after restart.
+
+Run the shipped shell helpers from Bash:
+
+```bash
+bash .github/extension/actions/lifecycle-evidence/evidence_test.sh
+bash .github/extension/actions/deploy-progress/progress_test.sh
+```
+
+These tests check the actual restore/save/cleanup blocks with fake commands, distinguish their exits, preserve command failure while attempting save after successful restore, and verify progress identity, monotonic sequences, interruption, and diagnostic withholding. Canonical deployment does not create environments, change recipe registrations, prepare shared Gateway infrastructure, or inject unreviewed deployment parameters; those prerequisites must already be configured.
+
+The current SDK has no trusted source-bound approval seam. Canonical mutation remains explicitly unavailable there, while existing legacy deployment remains available. Public approval references are identifiers, not authority. An accepted canonical mutation never falls back to legacy execution. Status polling only observes; a failure notice does not authorize an agent repair, source publication, or redeployment.
+
+#### Deployment Checkpoint Gate
+
+The final same-source gate passes **12,909 Node tests with 47 intentional skips**, static type/lint/format checks, unchanged coverage floors, build, **18 built-extension tests**, **33 component tests**, **78 Chromium cases with zero retries**, and **16 Windows process tests**. Extension self-tests pass all **13 discovered shell suites**, both contrib policy/verifier checks, shellcheck over **25 scripts**, and **6 uploader tests** with an unchanged rebuilt bundle.
+
+Qualification used Node 24.13.1, pnpm 11.19.0, isolated non-root Linux dependencies/Git metadata, and the pinned Playwright image. The complete Node coverage command used `vitest run --maxWorkers=2 --coverage --coverage.reportOnFailure`: bounded concurrency resolved an earlier unrelated compiler-process timeout without extending test budgets, lowering thresholds, or accepting retry-only passes. The source archive SHA-256 is `2C0149679831B6D167498AFCADFDCF2432AE894A93AF70C85B143E0D9CAA6A47`; only checkpoint documentation/checkmarks changed after qualification.
+
+The eleven new lifecycle/phase modules have 100% statements, branches, functions, and lines. Exact counts and the existing composition-root instrumentation limitation are recorded in [conformance.md](contracts/conformance.md). Logs and per-file source identities are retained under `.artifacts/t067-*`. No live workflow or infrastructure deployment was triggered, no personal credentials were used, and the shared worktree was not committed, pushed, or submitted as a pull request.
+
+An additional Windows artifact run passes 17 of 18 assertions. Its unchanged graph-read smoke expects `CAPABILITY_UNAVAILABLE` but receives `INVALID_REQUEST`; the same failure was reproduced from an isolated archive of baseline commit `7d2c4c903175e708a709ee2684337f07413c5385`. That pre-existing platform limitation was not changed in this slice. The required Linux artifact gate passes all 18 assertions, and the final local Windows build is retained.
 
 ### Runnable Panel-Free Discovery
 
@@ -182,9 +222,9 @@ For canonical operations, registry-dependent models, unsafe Windows cache config
 
 The final checkpoint passes 12,639 Linux Node assertions with 47 intentional skips, static checks, coverage floors, build, 18 built-extension assertions, 30 component tests, 75 Chromium cases without retries, and 16 dedicated Windows process assertions. The CLI suite passes 30 executable cases on Windows. The new verification functions and retained generation helper have complete changed-function coverage; existing invariant-only exceptions remain recorded in the conformance inventory. No real-host or live-cloud qualification is implied.
 
-### Remaining Full-Feature Scenarios
+### Cross-Checkpoint Acceptance Scenarios
 
-These broader scenarios are not claimed as implemented by the current checkpoint.
+Discovery, graph, authoring/validation, and deployment/observation are covered within the supported-host and source limitations above. Configuration, explicit repair, cancellation control, and deletion remain later slices. The following scenarios describe cumulative acceptance, not a claim that those later slices are complete.
 
 Use the fixture families in [conformance.md](contracts/conformance.md), with identities and state transitions from [data-model.md](data-model.md). Exercise these sequences through the actual App binding, not test-only service entry points:
 

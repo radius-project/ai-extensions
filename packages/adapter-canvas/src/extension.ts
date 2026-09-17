@@ -259,6 +259,7 @@ const dependencies: RadiusExtensionDependencies = {
   getOrCreateServer: async (instanceId, page) => {
     const entry = await getOrCreateServer(instanceId, page);
     entry.graphLifecycle = lifecycle;
+    entry.deploymentLifecycle = lifecycle;
     return entry;
   },
   getLastWebviewActivityAt,

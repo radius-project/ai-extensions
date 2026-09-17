@@ -46,8 +46,13 @@ import {
   type KnownLifecycleOperation,
   type LifecycleRoutingFamily
 } from "./lifecycle-routing.js";
+import {
+  createLifecycleDeploymentRegistrations,
+  type LifecycleDeploymentDependencies
+} from "./lifecycle-deployment.js";
 
 export interface LifecycleBindingDependencies {
+  readonly deployment?: LifecycleDeploymentDependencies;
   readonly definitions?: LifecycleDefinitionDependencies;
   readonly discovery?: LifecycleDiscoveryDependencies;
   readonly graphs?: Omit<LifecycleGraphDependencies, "identity" | "clock">;
@@ -157,11 +162,24 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
       readers: ["legacy", "lifecycle"],
       controllers: ["legacy", "lifecycle"]
     });
+  const deployment = createLifecycleDeploymentRegistrations({
+    ...deps,
+    identity: deps.authority,
+    registry,
+    routing
+  });
+  if (deps.deployment)
+    routing.transition("deployment", {
+      writer: "lifecycle",
+      readers: ["legacy", "lifecycle"],
+      controllers: ["legacy", "lifecycle"]
+    });
   const discovery = createLifecycleDiscoveryRegistrations({
     ...deps,
     capabilities: [
       ...(graphs ? graphCapabilities : []),
-      ...(definitions?.capabilities ?? [])
+      ...(definitions?.capabilities ?? []),
+      ...deployment.capabilities
     ]
   });
   const service = createLifecycleService({
@@ -173,6 +191,7 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
       ...discovery.registrations,
       ...(graphs?.registrations ?? []),
       ...(definitions?.registrations ?? []),
+      ...deployment.registrations,
       registerLifecycleOperation(
         "operation.respond",
         { actions },

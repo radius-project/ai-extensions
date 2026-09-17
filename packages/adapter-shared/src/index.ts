@@ -70,3 +70,5 @@ export * from "./lifecycle/recipe-evidence.js";
 export * from "./lifecycle/graph-execution.js";
 export * from "./lifecycle/definition-validation.js";
 export * from "./lifecycle/definition-promotion.js";
+export * from "./lifecycle/execution-evidence.js";
+export * from "./lifecycle/workflow-execution.js";

@@ -27,6 +27,9 @@ runs:
       env:
         STATE_RESTORED: ${{ inputs.state-restored }}
       run: |
+        if [ -n "${RADIUS_LIFECYCLE_HELPER:-}" ]; then
+          source "$RADIUS_LIFECYCLE_HELPER"
+        fi
         # Only persist state when `rad startup` successfully restored it earlier in
         # this run (signalled by the restore-state action's `state-restored` output,
         # passed in as STATE_RESTORED). If the workflow failed before startup ran,
@@ -37,12 +40,20 @@ runs:
         # lost. This relies on restore-state and teardown running in the SAME job.
         # It does not manage the cluster; the cleanup step tears k3d down afterwards.
         if [ "${STATE_RESTORED}" != "true" ]; then
+          if [ -n "${RADIUS_LIFECYCLE_FILE:-}" ]; then
+            lifecycle_record commands skipped "" "Restore did not succeed"
+            lifecycle_record stateSave skipped "" "Restore did not succeed"
+          fi
           echo "::warning title=Radius state not persisted::rad startup did not restore state in this run (state-restored='${STATE_RESTORED}'); skipping rad shutdown to preserve the existing state archive."
           exit 0
         fi
         git config --global user.email "radius-deploy@users.noreply.github.com"
         git config --global user.name "radius-deploy"
-        rad shutdown
+        if [ -n "${RADIUS_LIFECYCLE_HELPER:-}" ]; then
+          lifecycle_run stateSave rad shutdown
+        else
+          rad shutdown
+        fi
 
     - name: Show application status
       if: always()
@@ -77,4 +88,10 @@ runs:
     - name: Cleanup control plane cluster
       if: always()
       shell: bash
-      run: k3d cluster delete radius-cp || true
+      run: |
+        if [ -n "${RADIUS_LIFECYCLE_HELPER:-}" ]; then
+          source "$RADIUS_LIFECYCLE_HELPER"
+          lifecycle_run cleanup k3d cluster delete radius-cp
+        else
+          k3d cluster delete radius-cp
+        fi

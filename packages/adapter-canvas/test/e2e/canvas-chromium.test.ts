@@ -3306,6 +3306,58 @@ test.describe("Radius Canvas in Chromium", () => {
     );
   });
 
+  for (const outcome of ["unconfirmed", "cancelled", "failed"]) {
+    test(`announces ${outcome} deployment phases and permits keyboard dismissal without repair @safety`, async ({
+      page,
+      canvas
+    }) => {
+      let dispatches = 0;
+      await page.route("**/api/deploy", async (route) => {
+        dispatches++;
+        await route.fulfill({ json: { ok: true } });
+      });
+      await page.route("**/api/deploy-status", async (route) => {
+        await route.fulfill({
+          json: {
+            status: outcome,
+            repairing: false,
+            error: outcome === "failed" ? "State save failed." : "",
+            phases: [
+              {
+                phase: "state-save",
+                status: outcome === "failed" ? "failed" : "unknown"
+              }
+            ],
+            handoff: { state: "idle", pending: false }
+          }
+        });
+      });
+      await gotoCanvas(page, canvas, "deploying");
+      const deploy = page.locator("#deploy-now-btn:not([disabled])");
+      await expect(deploy).toHaveText("Deploy");
+      await deploy.press("Enter");
+      await expect(page.locator("#deploy-progress-title")).toContainText(
+        outcome
+      );
+      await expect(page.locator("#deploy-progress-title")).toHaveAttribute(
+        "aria-live",
+        "polite"
+      );
+      await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+        "State save:"
+      );
+      await expect(page.locator("#deploy-fail-repair-note")).not.toContainText(
+        "will repair"
+      );
+      await expectNoWcagViolations(page);
+      const back = page.locator("#deploy-fail-back");
+      await back.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#deploy-progress-modal")).toBeHidden();
+      expect(dispatches).toBe(1);
+    });
+  }
+
   test("opens destructive deployment confirmation with keyboard focus and returns focus on Escape @safety", async ({
     page,
     canvas

@@ -57,7 +57,8 @@ function deployLandingView(state: CanvasState): string {
   <button id="deploy-now-btn" class="rad-btn rad-btn--primary" style="margin:0;" disabled>Deploy</button>
 </div>
 
-<div id="deploy-inline-status" class="rad-inline" style="display:none; margin:0 0 14px; padding:10px 14px; border-radius:8px; font-size:14px;"></div>
+<div id="deploy-inline-status" class="rad-inline" role="status" aria-live="polite" style="display:none; margin:0 0 14px; padding:10px 14px; border-radius:8px; font-size:14px;"></div>
+<p class="rad-lede">Status reads only observe. An unconfirmed outcome is not a successful deployment, and polling never starts repair or redeployment.</p>
 
 <div class="rad-table-wrap">
   <table class="rad-table">
@@ -74,7 +75,7 @@ function deployLandingView(state: CanvasState): string {
     <div id="deploy-progress-spinner" class="rad-spinner-lg" aria-hidden="true"></div>
     <div id="deploy-progress-failicon" style="display:none; flex:none; font-size:26px; line-height:1;" aria-hidden="true">❌</div>
     <div style="min-width:0; flex:1;">
-      <div id="deploy-progress-title" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;"></div>
+      <div id="deploy-progress-title" role="status" aria-live="polite" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;"></div>
       <div id="deploy-progress-subtitle" style="font-size:13px; color:var(--rad-text-secondary);">This may take a few minutes…</div>
       <div id="deploy-progress-fail-actions" style="display:none; margin-top:16px;">
         <button id="deploy-fail-back" class="rad-btn rad-btn--neutral" style="margin:0;">Back to Deployments</button>

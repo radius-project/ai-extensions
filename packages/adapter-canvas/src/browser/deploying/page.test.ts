@@ -2447,6 +2447,103 @@ describe("deploy flow", () => {
     expect(page.progressSubtitle.innerHTML).not.toContain("margin-top:10px");
   });
 
+  it.each(["unconfirmed", "cancelled"])(
+    "announces %s with truthful phase detail and no automatic repair",
+    async (status) => {
+      const page = fixture();
+      init(page);
+      await flushPromises();
+      page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          status,
+          phases: [{ phase: "state-save", status: "unknown" }],
+          handoff: { pending: false, state: "idle" }
+        })
+      );
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+      expect(page.progressTitle.textContent).toContain(status);
+      expect(page.progressSubtitle.textContent).toContain(
+        "State save: unknown"
+      );
+      expect(page.failRepairNote.textContent).not.toContain("will repair");
+    }
+  );
+
+  it.each(["unconfirmed", "cancelled"])(
+    "handles %s when phase announcement elements are absent",
+    async (status) => {
+      const page = fixture({ withProgressModal: false });
+      init(page);
+      await flushPromises();
+      page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({ status })
+      );
+      page.deployBtn.dispatch("click");
+      await flushPromises();
+      page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+      await flushPromises();
+      expect(page.deployBtn.disabled).toBe(false);
+    }
+  );
+
+  it("preserves confirmed workflow failure when detailed results are unavailable", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "RESULT_UNAVAILABLE",
+        error: "Workflow failed; detailed phase evidence is unavailable."
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.progressTitle.innerHTML).toContain("failed");
+    expect(page.progressTitle.textContent ?? "").not.toContain("unconfirmed");
+  });
+
+  it("does not invent phase results for an unstructured observation", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () => jsonResponse(null));
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.progressSubtitle.textContent ?? "").not.toContain(
+      "State save:"
+    );
+  });
+
+  it("keeps an uncertain outcome truthful while observing an existing pending handoff", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "unconfirmed",
+        handoff: { pending: true, state: "pending" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.progressTitle.textContent).toContain("unconfirmed");
+  });
+
   it("shows a generic failure with the run link and repair note while repairing", async () => {
     const page = fixture();
     init(page);
@@ -2471,7 +2568,9 @@ describe("deploy flow", () => {
     expect(page.progressSubtitle.innerHTML).toContain(
       "https://example.test/run/9"
     );
-    expect(page.failRepairNote.textContent).toContain("Copilot is analyzing");
+    expect(page.failRepairNote.textContent).toContain(
+      "An explicitly requested repair is active"
+    );
     expect(page.deployBtn.disabled).toBe(false);
 
     // A generic failure has no branch to push, so no run-command callout is
@@ -3395,6 +3494,29 @@ describe("resuming a redirected deployment", () => {
     expect(page.progressTitle.innerHTML).toContain("failed");
     expect(page.progressSubtitle.innerHTML).toContain("resume failed");
   });
+
+  it.each(["unconfirmed", "cancelled"])(
+    "resumes a matching %s observation without redispatching",
+    async (status) => {
+      const page = fixture({ search: "?application=app&environment=dev" });
+      page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+        jsonResponse({
+          active: false,
+          status,
+          attempt: { targetRepo: "octo/app", environment: "dev" },
+          phases: [{ phase: "state-save", status: "unknown" }]
+        })
+      );
+      init(page);
+      await flushPromises();
+      page.browser.clock.tick(RESUME_POLL_MS);
+      await flushPromises();
+      expect(page.progressTitle.textContent).toContain(status);
+      expect(
+        page.browser.net.calls.filter((call) => call.url === DEPLOY_PATH)
+      ).toEqual([]);
+    }
+  );
 
   it("ignores a terminal status from a different attempt", async () => {
     const page = fixture({ search: "?application=app&environment=dev" });

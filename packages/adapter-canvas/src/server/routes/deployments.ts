@@ -1,4 +1,6 @@
 import type { CanvasState } from "../../shared.js";
+import type { LifecycleBinding } from "../../runtime/create-lifecycle-binding.js";
+import { createLifecycleDeploymentHttp } from "../services/lifecycle-deployment.js";
 import type {
   LegacyDiscoveryReader,
   LegacyDiscoverySession
@@ -91,6 +93,7 @@ export interface DeploymentDispatchLease {
 // substitution cannot express.
 export interface DeploymentsInstanceEntry {
   state: CanvasState;
+  deploymentLifecycle?: LifecycleBinding;
 }
 
 export interface DeploymentsDependencies {
@@ -217,10 +220,7 @@ function deployContextBranch(
   );
 }
 
-// Deploy progress poll. Answers 200 unconditionally — the webview polls this
-// every 1.5s and treats a non-200 as a transport failure — and is also where a
-// failed deploy is handed to the agent for repair, because every failure path
-// converges here.
+// Status only observes. A failure notice is not authority to start repair.
 //
 // The projection below uses `||`, not `??`, and that is load-bearing wherever a
 // falsy-but-present value is reachable: `deployStatus: ""` must report
@@ -229,12 +229,29 @@ function deployContextBranch(
 // 0` is `0 ?? 0`), `deployedGraph`, `deployAttempt`, `deployRepairing` (`false
 // || false`), and `entry?.state || {}` (state is always an object), so mutating
 // those four to `??` produces surviving, equivalent mutants.
-export function handleDeployStatus(
+export async function handleDeployStatus(
   context: CanvasRequestContext,
-  dependencies: DeploymentsDependencies
-): void {
+  dependencies: Pick<
+    DeploymentsDependencies,
+    | "readInstanceEntry"
+    | "triggerDeployRepairHandoff"
+    | "triggerDeployFailureNotice"
+    | "deployHandoffStatus"
+  >
+): Promise<void> {
   const { response, url } = context;
   const entry = dependencies.readInstanceEntry(context.instanceId);
+  if (entry?.deploymentLifecycle && entry.state.lifecycleDeploymentId) {
+    const service = createLifecycleDeploymentHttp({
+      binding: entry.deploymentLifecycle,
+      state: entry.state,
+      resolveApplication: async () => {
+        throw new Error("Status must not resolve deployment source.");
+      }
+    });
+    context.json(200, await service.status());
+    return;
+  }
   const resources =
     entry?.state?.deployingResources || entry?.state?.plannedResources || [];
   const logs = entry?.state?.deployLogs || [];
@@ -251,13 +268,7 @@ export function handleDeployStatus(
   const deployRunUrl = entry?.state?.deployRunUrl || null;
   const attempt = entry?.state?.deployAttempt || null;
   const active = status === "in_progress";
-  // The handoff trigger runs first and short-circuits the rest of the chain, so
-  // a freshly-opened repair loop reports `repairing` on the very same poll that
-  // opened it rather than one poll later.
-  const repairing =
-    dependencies.triggerDeployRepairHandoff(entry, context.instanceId) ||
-    entry?.state?.deployRepairing ||
-    false;
+  const repairing = entry?.state?.deployRepairing || false;
   // Relay a run-unconfirmed failure to chat too. Kept separate from `repairing`
   // above: this failure is reported, not repaired, so it must not light up the
   // "analyzing and will repair and redeploy" UI note.
@@ -923,9 +934,26 @@ export async function handleAbandonDeployment(
 // belongs to that service, because none of it is an HTTP decision.
 export async function handleDeploy(
   context: CanvasRequestContext,
-  dependencies: DeploymentsDependencies
+  dependencies: Pick<
+    DeploymentsDependencies,
+    "readInstanceEntry" | "resolveRepoAppName" | "deployRequest"
+  >
 ): Promise<void> {
   const body = await context.readTextBody();
+  const entry = dependencies.readInstanceEntry(context.instanceId);
+  if (
+    entry?.deploymentLifecycle?.routing.selection("deployment").writer ===
+    "lifecycle"
+  ) {
+    const service = createLifecycleDeploymentHttp({
+      binding: entry.deploymentLifecycle,
+      state: entry.state,
+      resolveApplication: dependencies.resolveRepoAppName
+    });
+    const result = await service.start(body);
+    context.json(result.status, result.body);
+    return;
+  }
   const result = await dependencies.deployRequest.deploy({
     instanceId: context.instanceId,
     body
@@ -934,10 +962,8 @@ export async function handleDeploy(
 }
 
 // The ambient deploy chip's read-only source. Deliberately NOT served from
-// `/api/deploy-status`: that route drives the repair handoff and the failure
-// notice as a side effect of being polled, and the chip polls from every page
-// in the canvas. Reusing it would let a graph page open a repair loop simply by
-// being open. This handler only reads state, and reports the few fields a
+// `/api/deploy-status`: that route includes a pure failure notice and detailed
+// phase evidence. This handler only reads state, and reports the few fields a
 // notification needs rather than the resource list and log buffer.
 export function handleDeployNotification(
   context: CanvasRequestContext,

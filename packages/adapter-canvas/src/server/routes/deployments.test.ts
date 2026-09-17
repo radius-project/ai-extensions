@@ -728,7 +728,7 @@ describe("deployments routes (SU-06)", () => {
       });
     });
 
-    it("reports repairing on the very poll that opens the repair loop", () => {
+    it("never opens a repair loop from a status poll", () => {
       const state: CanvasState = { deployStatus: "failed" };
       const seen: (DeploymentsInstanceEntry | undefined)[] = [];
       const { recording, context: ctx } = context("GET", "/api/deploy-status");
@@ -744,10 +744,8 @@ describe("deployments routes (SU-06)", () => {
         })
       );
 
-      expect(JSON.parse(recording.body).repairing).toBe(true);
-      // The trigger receives the live entry, not the request context's `{}`
-      // snapshot, because it has to mutate handoff bookkeeping on it.
-      expect(seen).toEqual([{ state }]);
+      expect(JSON.parse(recording.body).repairing).toBe(false);
+      expect(seen).toEqual([]);
     });
 
     it("relays a run-unconfirmed failure to chat without marking the poll as repairing", () => {
@@ -1325,6 +1323,7 @@ describe("deployments routes (SU-06)", () => {
       await handleDeploy(
         ctx,
         dependencies({
+          readInstanceEntry: () => undefined,
           deployRequest: {
             deploy: (input) => {
               calls.push(input);
@@ -1364,6 +1363,7 @@ describe("deployments routes (SU-06)", () => {
       await handleDeploy(
         ctx,
         dependencies({
+          readInstanceEntry: () => undefined,
           deployRequest: { deploy: () => Promise.resolve({ status, body }) }
         })
       );
@@ -1379,6 +1379,7 @@ describe("deployments routes (SU-06)", () => {
       await handleDeploy(
         ctx,
         dependencies({
+          readInstanceEntry: () => undefined,
           deployRequest: {
             deploy: ({ body }) => {
               bodies.push(body);

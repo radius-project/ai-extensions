@@ -162,6 +162,9 @@ runs:
         # pipefail so a failed `rad` whose output is piped through `tee` is detected
         # via PIPESTATUS rather than masked by tee's exit code.
         set -o pipefail
+        if [ -n "${RADIUS_LIFECYCLE_HELPER:-}" ]; then
+          source "$RADIUS_LIFECYCLE_HELPER"
+        fi
         # shellcheck source=.github/extension/actions/deploy-progress/progress.sh
         source "$(dirname "$GITHUB_ACTION_PATH")/deploy-progress/progress.sh"
         RADIUS_PROGRESS_UPLOADER="$(dirname "$GITHUB_ACTION_PATH")/deploy-progress/artifact-uploader/dist/index.js"
@@ -203,6 +206,7 @@ runs:
         }
 
         cleanup() {
+          local command_exit=$?
           if [ -n "$OIDC_REFRESH_PID" ]; then
             kill "$OIDC_REFRESH_PID" 2>/dev/null || true
             wait "$OIDC_REFRESH_PID" 2>/dev/null || true
@@ -210,6 +214,15 @@ runs:
           stop_live_deploy_progress || true
           radius_clear_artifact_runtime
           write_result
+          if [ -n "${RADIUS_LIFECYCLE_FILE:-}" ]; then
+            if [ "$OVERALL_OUTCOME" = "succeeded" ] && [ "$command_exit" = 0 ]; then
+              lifecycle_record commands succeeded 0 "Command exited"
+            elif [ "$OVERALL_OUTCOME" = "interrupted" ]; then
+              lifecycle_record commands unknown "" "Runner interrupted"
+            else
+              lifecycle_record commands failed "$OVERALL_EXIT" "Command exited"
+            fi
+          fi
         }
         trap cleanup EXIT
 
@@ -406,6 +419,9 @@ runs:
               # recorded command string (only the non-secret `$cmd` is recorded).
               # shellcheck disable=SC2086
               read -ra CMD_ARGV <<< "$cmd"
+              if [[ "${LIFECYCLE_VERSION:-}" == "1" ]]; then
+                CMD_ARGV=(deploy "$APP_FILE" --environment "$ENVIRONMENT" --application "$LIFECYCLE_APPLICATION")
+              fi
               EXTRA_PARAMS=()
               # The image, application, and registry parameters belong to the app
               # only. `rad deploy` rejects unknown parameters, so a custom command
@@ -447,6 +463,7 @@ runs:
                 printf '%s' "$t"
               }
               if [ "$(normalize_target "$DEPLOY_TARGET")" = "$(normalize_target "$APP_FILE")" ]; then
+                if [[ "${LIFECYCLE_VERSION:-}" != "1" ]]; then
                 if ! load_declared_app_params "$APP_FILE"; then
                   OVERALL_OUTCOME="command_failed"
                   OVERALL_EXIT=1
@@ -461,24 +478,31 @@ runs:
                     EXTRA_PARAMS+=(--parameters "$_pname=$_pval")
                   done < <(printf '%s' "$DEPLOY_PARAMS_JSON" | jq -r 'keys_unsorted[]' 2>/dev/null)
                 fi
+                fi
                 start_live_deploy_progress "$APP_FILE" "$ENVIRONMENT"
               fi
-              if ! record "$idx" "$cmd" rad "${CMD_ARGV[@]}" "${EXTRA_PARAMS[@]}"; then
+              if record "$idx" "$cmd" rad "${CMD_ARGV[@]}" "${EXTRA_PARAMS[@]}"; then
+                :
+              else
+                command_exit=$?
                 stop_live_deploy_progress || true
                 OVERALL_OUTCOME="command_failed"
-                OVERALL_EXIT=1
+                OVERALL_EXIT="$command_exit"
                 echo "Command failed: rad $cmd" >&2
-                exit 1
+                exit "$command_exit"
               fi
               stop_live_deploy_progress || true
             else
               # Intentional word-split: the command string carries its own args.
               # shellcheck disable=SC2086
-              if ! record "$idx" "$cmd" rad $cmd; then
+              if record "$idx" "$cmd" rad $cmd; then
+                :
+              else
+                command_exit=$?
                 OVERALL_OUTCOME="command_failed"
-                OVERALL_EXIT=1
+                OVERALL_EXIT="$command_exit"
                 echo "Command failed: rad $cmd" >&2
-                exit 1
+                exit "$command_exit"
               fi
             fi
             idx=$((idx + 1))

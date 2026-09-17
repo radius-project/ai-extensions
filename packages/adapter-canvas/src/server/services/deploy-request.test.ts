@@ -883,7 +883,7 @@ describe("deploy request background monitor ownership", () => {
 
     await control.settle();
 
-    expect(handoffs).toEqual(["panel-a"]);
+    expect(handoffs).toEqual([]);
     expect(released).toEqual(["acme/widgets"]);
   });
 
@@ -1041,7 +1041,7 @@ describe("deploy request background monitor ownership", () => {
     await control.settle(new Error("monitor exploded"));
 
     expect(state.deployStatus).toBe("in_progress");
-    expect(handoffs).toEqual(["panel-a"]);
+    expect(handoffs).toEqual([]);
     expect(released).toBe(1);
   });
 });

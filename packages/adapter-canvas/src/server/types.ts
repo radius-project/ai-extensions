@@ -9,4 +9,6 @@ export interface CanvasServerEntry {
   page: string;
   state: CanvasState;
   graphLifecycle?: GraphLifecycleReader;
+  deploymentLifecycle?: LifecycleBinding;
 }
+import type { LifecycleBinding } from "../runtime/create-lifecycle-binding.js";

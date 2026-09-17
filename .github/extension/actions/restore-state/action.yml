@@ -62,7 +62,12 @@ runs:
         # so that any git operation rad performs has one available.
         git config --global user.email "radius-deploy@users.noreply.github.com"
         git config --global user.name "radius-deploy"
-        rad startup
+        if [ -n "${RADIUS_LIFECYCLE_HELPER:-}" ]; then
+          source "$RADIUS_LIFECYCLE_HELPER"
+          lifecycle_run restore rad startup
+        else
+          rad startup
+        fi
 
         # Record that the control-plane databases were successfully restored, for
         # the teardown action to gate `rad shutdown` on (see the `state-restored`

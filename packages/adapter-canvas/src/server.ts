@@ -2597,10 +2597,8 @@ export function triggerDeployRepairHandoff(
       const exhausted =
         (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
       state.deployHandoffState = exhausted ? "failed" : "retryable";
-      // Retry from the server too. /api/deploy-status also retries, but only
-      // while the webview polls it, so a transient delivery failure would
-      // otherwise strand the handoff as retryable with budget left over -
-      // exactly the unmounted-panel case this trigger exists to cover.
+      // Retain bounded delivery retries for an explicitly initiated handoff.
+      // Status reads never initiate or retry agent work.
       if (exhausted) return;
       const timer = setTimeout(() => {
         // The backoff is another window for a new deploy to start, and that

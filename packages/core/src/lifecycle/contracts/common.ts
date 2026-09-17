@@ -486,7 +486,14 @@ export const phaseOutcomeSchema = {
       ]
     },
     status: {
-      enum: ["succeeded", "failed", "skipped", "cancelled", "unknown"]
+      enum: [
+        "succeeded",
+        "failed",
+        "skipped",
+        "cancelled",
+        "unknown",
+        "not_applicable"
+      ]
     },
     reason: textSchema,
     exitCode: { type: "integer" }
@@ -658,7 +665,14 @@ export const operationRecordSchema = {
           additionalProperties: false,
           properties: {
             kind: { const: "execution" },
-            phases: { type: "array", maxItems: 6, items: phaseOutcomeSchema }
+            phases: { type: "array", maxItems: 6, items: phaseOutcomeSchema },
+            primaryFailure: lifecycleErrorSchema,
+            additionalFailures: {
+              type: "array",
+              maxItems: 10,
+              items: lifecycleErrorSchema
+            },
+            diagnostics: diagnosticsSchema
           },
           required: ["kind", "phases"]
         }

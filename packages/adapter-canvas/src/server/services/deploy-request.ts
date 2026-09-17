@@ -408,14 +408,8 @@ export function createDeployRequestService(
             }
           })
           .finally(() => {
-            // The monitor owns every terminal transition of this deploy, so
-            // firing here makes the repair loop independent of the webview.
-            // The /api/deploy-status route keeps its own call as a fallback,
-            // and triggerDeployRepairHandoff is idempotent per repair loop.
-            dependencies.triggerDeployRepairHandoff(entry, instanceId);
-            // Same reasoning for the informational notice: a run-unconfirmed
-            // failure is relayed once from here regardless of whether the panel
-            // is still polling. Idempotent per attempt, like the handoff.
+            // Monitoring may report an outcome, but it never authorizes a
+            // repair. Retain the idempotent informational notice only.
             dependencies.triggerDeployFailureNotice(entry, instanceId);
             // Hold the repo/environment reservation for the whole deploy, not
             // merely until the background monitor starts.

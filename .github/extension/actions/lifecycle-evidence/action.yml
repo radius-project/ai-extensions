@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+name: Radius - Initialize lifecycle evidence
+description: Validate exact source and initialize pessimistic versioned lifecycle evidence.
+runs:
+  using: composite
+  steps:
+    - name: Validate lifecycle checkout
+      shell: bash
+      run: |
+        source "$GITHUB_ACTION_PATH/evidence.sh"
+        lifecycle_initialize
+        printf 'RADIUS_LIFECYCLE_HELPER=%s\n' "$GITHUB_ACTION_PATH/evidence.sh" >> "$GITHUB_ENV"

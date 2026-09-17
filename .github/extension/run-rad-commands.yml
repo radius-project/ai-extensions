@@ -9,18 +9,39 @@
 # steps. This is the run-rad-commands action in the two-action Repo Radius model
 # (the other being verify-cloud-auth).
 name: Radius - Run rad Commands
+run-name: ${{ inputs.lifecycle_version != '' && format('Radius lifecycle {0} {1} {2} {3} {4}', inputs.lifecycle_operation, inputs.operation_id, inputs.attempt_id, inputs.environment, inputs.expected_commit) || 'Radius - Run rad Commands' }}
 
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'GitHub Environment name'
+        description: "GitHub Environment name"
         required: true
-        default: '{{ENV}}'
-      image:
-        description: 'Container image passed only when the application template declares the image parameter'
+        default: "{{ENV}}"
+      lifecycle_version:
+        description: "Execution contract version; omit all lifecycle inputs for legacy execution."
         required: false
-        default: ''
+        default: ""
+      lifecycle_operation:
+        description: "Reviewed lifecycle operation."
+        required: false
+        default: ""
+      operation_id:
+        description: "Lifecycle operation identity."
+        required: false
+        default: ""
+      attempt_id:
+        description: "Lifecycle attempt identity."
+        required: false
+        default: ""
+      expected_commit:
+        description: "Exact approved published commit."
+        required: false
+        default: ""
+      image:
+        description: "Container image passed only when the application template declares the image parameter"
+        required: false
+        default: ""
       rad_commands:
         # The Repo Radius dispatch contract. A single rad CLI command string, or a
         # JSON-encoded array of command strings run in order, with the `rad` prefix
@@ -30,9 +51,9 @@ on:
         # not supported. The caller must include any flags a command needs.
         # Each command is validated against the allowed-command set before anything
         # runs. When empty, the workflow runs its default `rad deploy` of the app file.
-        description: 'rad CLI command string, or JSON array of command strings (rad prefix omitted; split on whitespace, so arguments with spaces are not supported). Overrides the default deploy.'
+        description: "rad CLI command string, or JSON array of command strings (rad prefix omitted; split on whitespace, so arguments with spaces are not supported). Overrides the default deploy."
         required: false
-        default: ''
+        default: ""
 permissions:
   id-token: write
   contents: write
@@ -72,6 +93,11 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       image: ${{ inputs.image }}
       rad_commands: ${{ inputs.rad_commands }}
+      lifecycle_version: ${{ inputs.lifecycle_version }}
+      lifecycle_operation: ${{ inputs.lifecycle_operation }}
+      operation_id: ${{ inputs.operation_id }}
+      attempt_id: ${{ inputs.attempt_id }}
+      expected_commit: ${{ inputs.expected_commit }}
     secrets: inherit
 
   aws:
@@ -83,4 +109,9 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       image: ${{ inputs.image }}
       rad_commands: ${{ inputs.rad_commands }}
+      lifecycle_version: ${{ inputs.lifecycle_version }}
+      lifecycle_operation: ${{ inputs.lifecycle_operation }}
+      operation_id: ${{ inputs.operation_id }}
+      attempt_id: ${{ inputs.attempt_id }}
+      expected_commit: ${{ inputs.expected_commit }}
     secrets: inherit

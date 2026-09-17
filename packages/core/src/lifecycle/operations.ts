@@ -11,7 +11,6 @@ import {
   portFailure,
   portForbidden,
   portSuccess,
-  portUnavailable,
   type PortResult
 } from "./errors.js";
 import type {
@@ -269,7 +268,8 @@ export function reduceOperation(
     phases.some((phase) => phase.status === "failed");
   const cancelled = run.conclusion === "cancelled";
   if (
-    !complete ||
+    (event.state === "succeeded" && !complete) ||
+    attempt.observation.quality !== "current" ||
     !(event.state === "succeeded" ? success
     : event.state === "failed" ? failed
     : cancelled)
@@ -308,6 +308,10 @@ export function createSessionOperationRegistry(deps: {
   const records = new Map<
     string,
     { principalRef: string; value: VersionedOperation }
+  >();
+  const cursors = new Map<
+    string,
+    { principalRef: string; target: ReadonlyData<Target>; offset: number }
   >();
   let closed = false;
   const observation = () => ({
@@ -456,26 +460,49 @@ export function createSessionOperationRegistry(deps: {
     async list(scope, pagination, control) {
       const stopped = gate(control);
       if (stopped) return stopped;
-      if (pagination.continuationToken)
-        return portUnavailable("CAPABILITY_UNAVAILABLE", {
-          quality: "unknown",
-          completeness: "unavailable",
-          evidence: "session",
-          limitation: "Session registry continuation tokens are not supported."
-        });
-      const items = [...records.values()].filter((entry) =>
-        accessible(scope, entry)
+      const cursor =
+        pagination.continuationToken ?
+          cursors.get(pagination.continuationToken)
+        : undefined;
+      if (
+        pagination.continuationToken &&
+        (!cursor ||
+          cursor.principalRef !== scope.principalRef ||
+          !sameLifecycleData(cursor.target, scope.target))
+      )
+        return portFailure("INVALID_REQUEST");
+      const items = [...records.values()].filter(
+        (entry) =>
+          entry.principalRef === scope.principalRef &&
+          scope.target.repo.toLowerCase() ===
+            entry.value.operation.target.repo.toLowerCase() &&
+          (scope.target.environment === undefined ||
+            scope.target.environment ===
+              entry.value.operation.target.environment) &&
+          (scope.target.application === undefined ||
+            scope.target.application ===
+              entry.value.operation.target.application)
       );
       const limit = pagination.pageSize ?? 100;
       if (!Number.isInteger(limit) || limit < 1 || limit > 100)
         return portFailure("INVALID_REQUEST");
+      const offset = cursor?.offset ?? 0;
+      const continuationToken =
+        items.length > offset + limit ? deps.ids.next("revision") : undefined;
+      if (continuationToken)
+        cursors.set(continuationToken, {
+          principalRef: scope.principalRef,
+          target: structuredClone(scope.target),
+          offset: offset + limit
+        });
       return portSuccess({
         target: scope.target,
         items: structuredClone(
-          items.slice(0, limit).map((entry) => entry.value)
+          items.slice(offset, offset + limit).map((entry) => entry.value)
         ),
+        ...(continuationToken ? { continuationToken } : {}),
         observation:
-          items.length > limit ?
+          items.length > offset + limit ?
             {
               ...observation(),
               completeness: "partial",

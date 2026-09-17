@@ -44,7 +44,7 @@ describe("initializeDeployResultPage", () => {
     browser.button.dispatch("click");
     browser.button.dispatch("click");
     expect(browser.button.disabled).toBe(true);
-    expect(browser.button.textContent).toBe("Resetting…");
+    expect(browser.button.textContent).toBe("Resetting view…");
     await flushPromises();
 
     expect(browser.net.calls).toHaveLength(1);

@@ -6,6 +6,7 @@
 // module per the Radius Canvas re-architecture.
 
 import { remediationView } from "@radius-project/core/remediations";
+import { executionPhaseSummary } from "./execution-phases.js";
 import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
 import { deletionInventoryResources } from "../deletion-inventory.js";
@@ -137,6 +138,7 @@ interface DeployStatusPayload {
 }
 
 interface DeployFailureDetails {
+  status: "failed" | "unconfirmed" | "cancelled";
   app: string;
   environment: string;
   errorText: string;
@@ -211,7 +213,12 @@ function parseDeployStatus(payload: unknown): DeployStatusPayload {
   const attempt = readRecord(payload, "attempt");
   return {
     status: readString(payload, "status"),
-    error: readString(payload, "error"),
+    error: [
+      readString(payload, "error"),
+      executionPhaseSummary(isRecord(payload) ? payload.phases : undefined)
+    ]
+      .filter(Boolean)
+      .join("\n"),
     deployRunUrl: readString(payload, "deployRunUrl"),
     errorKind: readString(payload, "errorKind"),
     errorBranch: readString(payload, "errorBranch"),
@@ -989,7 +996,16 @@ export function initializeDeployingPage(
   const showDeployFailed = (details: DeployFailureDetails): void => {
     if (progressSpinner) progressSpinner.style.display = "none";
     if (progressFailIcon) progressFailIcon.style.display = "";
-    if (details.errorKind === "branch-not-pushed") {
+    if (details.status === "unconfirmed") {
+      if (progressTitle)
+        progressTitle.textContent = "Deployment outcome unconfirmed";
+      if (progressSubtitle)
+        progressSubtitle.textContent = `Execution may have started. Observe the existing operation; do not repeat deployment until its outcome is known.\n${details.errorText}`;
+    } else if (details.status === "cancelled") {
+      if (progressTitle) progressTitle.textContent = "Deployment cancelled";
+      if (progressSubtitle)
+        progressSubtitle.textContent = `The workflow was cancelled. Any completed changes may remain; inspect phase details before requesting another deployment.\n${details.errorText}`;
+    } else if (details.errorKind === "branch-not-pushed") {
       const branchName = details.errorBranch || "your branch";
       if (progressTitle) progressTitle.innerHTML = "Branch not pushed yet";
       if (progressSubtitle) {
@@ -1074,7 +1090,7 @@ export function initializeDeployingPage(
       let note = "";
       if (details.repairing) {
         note =
-          "Copilot is analyzing the failure and will repair and redeploy if the app model caused it — follow along in the chat.";
+          "An explicitly requested repair is active. Publication and redeployment require separate approval.";
       } else if (state === "pending" || state === "retryable") {
         note = "Handing this failure to Copilot…";
       } else if (state === "failed") {
@@ -1182,8 +1198,14 @@ export function initializeDeployingPage(
           }
           entry.cancel(poll);
           overrides.delete(key);
-          if (status.status === "failed" && sameAttempt) {
+          if (
+            (status.status === "failed" ||
+              status.status === "unconfirmed" ||
+              status.status === "cancelled") &&
+            sameAttempt
+          ) {
             showDeployFailed({
+              status: status.status,
               app,
               environment,
               errorText: status.error,
@@ -1341,7 +1363,11 @@ export function initializeDeployingPage(
             );
             scheduleAutoHide();
           }
-          if (status.status === "failed") {
+          if (
+            status.status === "failed" ||
+            status.status === "unconfirmed" ||
+            status.status === "cancelled"
+          ) {
             startNotified = true;
             cancelAutoHide();
             // Delivery of the repair handoff is asynchronous; keep polling
@@ -1352,6 +1378,7 @@ export function initializeDeployingPage(
             ) {
               failedPolls++;
               showDeployFailed({
+                status: status.status,
                 app,
                 environment,
                 errorText: status.error,
@@ -1367,6 +1394,7 @@ export function initializeDeployingPage(
             entry.cancel(wfPoll);
             overrides.delete(key);
             showDeployFailed({
+              status: status.status,
               app,
               environment,
               errorText: status.error,

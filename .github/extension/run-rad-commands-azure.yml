@@ -14,20 +14,40 @@ name: Radius - Run rad Commands (Azure)
 on:
   workflow_call:
     inputs:
+      lifecycle_version:
+        type: string
+        required: false
+        default: ""
+      lifecycle_operation:
+        type: string
+        required: false
+        default: ""
+      operation_id:
+        type: string
+        required: false
+        default: ""
+      attempt_id:
+        type: string
+        required: false
+        default: ""
+      expected_commit:
+        type: string
+        required: false
+        default: ""
       environment:
-        description: 'GitHub Environment name'
+        description: "GitHub Environment name"
         type: string
         required: true
       image:
-        description: 'Container image passed only when the application template declares the image parameter'
+        description: "Container image passed only when the application template declares the image parameter"
         type: string
         required: false
-        default: ''
+        default: ""
       rad_commands:
-        description: 'rad CLI command string, or JSON array of command strings (rad prefix omitted; split on whitespace, so arguments with spaces are not supported). Overrides the default deploy.'
+        description: "rad CLI command string, or JSON array of command strings (rad prefix omitted; split on whitespace, so arguments with spaces are not supported). Overrides the default deploy."
         type: string
         required: false
-        default: ''
+        default: ""
 
 permissions:
   id-token: write
@@ -39,8 +59,15 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  LIFECYCLE_VERSION: ${{ inputs.lifecycle_version }}
+  LIFECYCLE_OPERATION: ${{ inputs.lifecycle_operation }}
+  OPERATION_ID: ${{ inputs.operation_id }}
+  ATTEMPT_ID: ${{ inputs.attempt_id }}
+  EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+  LIFECYCLE_APPLICATION: "{{LIFECYCLE_APPLICATION}}"
+  RAD_COMMANDS: ${{ inputs.rad_commands }}
   ENVIRONMENT: ${{ inputs.environment }}
-  APP_FILE: '{{APP_FILE}}'
+  APP_FILE: "{{APP_FILE}}"
   APP_IMAGE: ${{ inputs.image || github.sha || 'latest' }}
   # Target-cluster architecture-aware container image builds. Rendered by the
   # Radius extension: TARGET_CLUSTER_ARCH_MODE -> ${{ vars.RADIUS_BUILD_ARCH_MODE
@@ -72,6 +99,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize lifecycle evidence
+        uses: radius-project/ai-extensions/.github/extension/actions/lifecycle-evidence@{{RADIUS_REF}}
 
       - name: Azure Login (OIDC)
         if: ${{ vars.AZURE_CLIENT_ID != '' }}
@@ -219,6 +249,7 @@ jobs:
           echo "✅ Cloud credentials registered with Radius."
 
       - name: Create Radius environment and recipe pack
+        if: ${{ inputs.lifecycle_version == '' }}
         run: |
           # load-contrib-catalog exports the catalog and generic accessors from
           # the same Radius ref as this generated workflow.
@@ -345,12 +376,14 @@ jobs:
           echo "✅ Environment '$ENVIRONMENT' created with recipe pack."
 
       - name: Apply custom recipe packs
+        if: ${{ inputs.lifecycle_version == '' }}
         uses: radius-project/ai-extensions/.github/extension/actions/apply-custom-recipe-packs@{{RADIUS_REF}}
         with:
           environment: ${{ inputs.environment }}
           app-file: ${{ env.APP_FILE }}
 
       - name: Ensure routes Gateway infrastructure
+        if: inputs.lifecycle_version == ''
         uses: radius-project/ai-extensions/.github/extension/actions/manage-routes-gateway@{{RADIUS_REF}}
         with:
           mode: ensure
@@ -372,8 +405,8 @@ jobs:
           app-file: ${{ env.APP_FILE }}
           app-image: ${{ env.APP_IMAGE }}
           namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
-          rad-commands: ${{ inputs.rad_commands || vars.RADIUS_RAD_COMMANDS }}
-          deploy-params: ${{ secrets.RADIUS_DEPLOY_PARAMS }}
+          rad-commands: ${{ inputs.lifecycle_version == '' && (inputs.rad_commands || vars.RADIUS_RAD_COMMANDS) || '' }}
+          deploy-params: ${{ inputs.lifecycle_version == '' && secrets.RADIUS_DEPLOY_PARAMS || '' }}
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
           build-arch-mode: ${{ env.TARGET_CLUSTER_ARCH_MODE }}
@@ -396,3 +429,7 @@ jobs:
         uses: radius-project/ai-extensions/.github/extension/actions/teardown@{{RADIUS_REF}}
         with:
           state-restored: ${{ steps.restore-state.outputs.state-restored }}
+
+      - name: Publish final lifecycle result
+        if: ${{ always() && env.RADIUS_LIFECYCLE_FILE != '' }}
+        uses: radius-project/ai-extensions/.github/extension/actions/publish-lifecycle-result@{{RADIUS_REF}}

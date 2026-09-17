@@ -457,7 +457,12 @@ describe("panel-free lifecycle binding", () => {
         .capabilities()
         .filter((item) => item.available)
         .map((item) => item.operation)
-    ).toEqual(["capabilities.get", "operation.respond"]);
+    ).toEqual([
+      "capabilities.get",
+      "operation.get",
+      "operation.list",
+      "operation.respond"
+    ]);
     expect(
       await binding.execute({
         operation: "capabilities.get",

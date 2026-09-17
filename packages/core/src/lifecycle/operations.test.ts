@@ -432,7 +432,7 @@ describe("session operation registry", () => {
     ).toMatchObject({ status: "failed" });
     expect(
       await registry.list(listing, { continuationToken: "cursor" }, control)
-    ).toMatchObject({ status: "unavailable" });
+    ).toMatchObject({ status: "failed", error: { code: "INVALID_REQUEST" } });
   });
 });
 

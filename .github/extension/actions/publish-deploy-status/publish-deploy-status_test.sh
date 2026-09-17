@@ -26,11 +26,9 @@ readonly PROGRESS_HELPER="${SCRIPT_DIR}/../deploy-progress/progress.sh"
 
 TEST_ROOT="$(mktemp -d)"
 readonly TEST_ROOT
-# Where the action lands when RUNNER_TEMP is unset. Fixed by the action, so it
-# cannot be sandboxed; it is the action's own scratch directory and is removed
-# on exit.
-readonly FALLBACK_STATUS_DIR="/tmp/radius-deploy-status"
-trap 'rm -rf "${TEST_ROOT}" "${FALLBACK_STATUS_DIR}"' EXIT
+# Keep the literal fallback inside this test's owned filesystem boundary.
+readonly FALLBACK_STATUS_DIR="${TEST_ROOT}/fallback/radius-deploy-status"
+trap 'rm -rf "${TEST_ROOT}"' EXIT
 
 fail() {
     echo "FAIL: $*" >&2
@@ -66,7 +64,7 @@ readonly MESSY_APP_FILE="${TEST_ROOT}/messy-name.bicep"
 # is a literal scalar, so dedenting its lines reproduces it exactly.
 # ---------------------------------------------------------------------------
 extract_action_body() {
-    python3 - "${ACTION_FILE}" "${BODY_SCRIPT}" <<'PYTHON'
+    python3 - "${ACTION_FILE}" "${BODY_SCRIPT}" "${TEST_ROOT}/fallback" <<'PYTHON'
 import re
 import sys
 
@@ -94,7 +92,12 @@ while body and not body[-1]:
 if not body:
     sys.exit("extracted an empty run: block")
 
-open(out_file, "w", encoding="utf-8").write("\n".join(body) + "\n")
+script = "\n".join(body) + "\n"
+if script.count("/tmp}/radius-deploy-status") != 1:
+    sys.exit("expected exactly one status directory fallback")
+script = script.replace("/tmp}/radius-deploy-status",
+                        sys.argv[3] + "}/radius-deploy-status")
+open(out_file, "w", encoding="utf-8").write(script)
 PYTHON
 }
 
@@ -720,13 +723,9 @@ assert_status_dir_contains_exactly "${EXPECTED_STATUS_FILES}"
 # is the only reason the fallback exists, and without it `set -u` aborts the
 # step with an unbound variable before anything is generated.
 #
-# This scenario deliberately writes to the real /tmp/radius-deploy-status and
-# cannot be sandboxed: the fallback path is fixed by the action, so pointing
-# RUNNER_TEMP anywhere would stop exercising the fallback and make this control
-# vacuous - it would then pass even against a step that had lost the `:-`
-# default. A static grep for the default has the same flaw. Leave it as is; the
-# directory is the action's own scratch space, the action `rm -rf`s it at the
-# start of every run, and the trap above removes it here.
+# Extraction substitutes only the literal fallback path, retaining the shell
+# parameter expansion. RUNNER_TEMP remains unset: losing the `:-` default still
+# fails this executable control, without touching another process's files.
 # ---------------------------------------------------------------------------
 reset_environment
 rm -rf "${FALLBACK_STATUS_DIR}"

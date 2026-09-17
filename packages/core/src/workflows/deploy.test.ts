@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
+import { readFileSync } from "node:fs";
 import {
   DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS,
   DEFAULT_TARGET_CLUSTER_ARCH_MODE,
@@ -76,6 +77,81 @@ jobs:
       - uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `
 };
+
+describe("reviewed lifecycle deployment generation", () => {
+  const templates = Object.fromEntries(
+    [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE].map((file) => [
+      file,
+      readFileSync(
+        new URL(`../../../../.github/extension/${file}`, import.meta.url),
+        "utf8"
+      )
+    ])
+  );
+  it("generates the canonical producer with reserved application identity and pinned source references", () => {
+    const generated = generateDeployWorkflow(
+      "dev",
+      ".radius/app.bicep",
+      templates,
+      {
+        lifecycle: { operation: "deployment.start", application: "app" },
+        templateVars: { LIFECYCLE_APPLICATION: "unreviewed-override" }
+      }
+    );
+    for (const [file, body] of Object.entries(generated)) {
+      expect(() => parseYaml(body)).not.toThrow();
+      expect(body).not.toContain("{{RADIUS_REF}}");
+      expect(body).not.toContain("unreviewed-override");
+      if (file !== DEPLOY_DISPATCHER_FILE) {
+        expect(body).toMatch(/LIFECYCLE_APPLICATION: ['"]app['"]/);
+        expect(body).toContain(`actions/lifecycle-evidence@${RADIUS_REF}`);
+        expect(body).toContain(
+          `actions/publish-lifecycle-result@${RADIUS_REF}`
+        );
+      }
+    }
+  });
+  it.each([DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE])(
+    "rejects missing or partial version support in %s",
+    (file) => {
+      const missing = { ...templates };
+      delete missing[file];
+      const options = {
+        lifecycle: {
+          operation: "deployment.start" as const,
+          application: "app"
+        }
+      };
+      expect(() =>
+        generateDeployWorkflow("dev", ".radius/app.bicep", missing, options)
+      ).toThrow();
+      expect(() =>
+        generateDeployWorkflow(
+          "dev",
+          ".radius/app.bicep",
+          {
+            ...templates,
+            [file]: templates[file].replace(
+              "      attempt_id:",
+              "      incomplete_attempt:"
+            )
+          },
+          options
+        )
+      ).toThrow("does not support lifecycle v1");
+    }
+  );
+  it("refuses unsafe application identity rather than interpolating it into workflow text", () => {
+    expect(() =>
+      generateDeployWorkflow("dev", ".radius/app.bicep", templates, {
+        lifecycle: {
+          operation: "deployment.start",
+          application: "app' injected"
+        }
+      })
+    ).toThrow("Invalid reviewed lifecycle");
+  });
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();

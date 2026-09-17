@@ -4,8 +4,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-TEST_ROOT="$(mktemp -d)"
+TEST_ROOT="${PWD}/.artifacts/deploy-progress-test-$$"
 readonly TEST_ROOT
+mkdir -p "${PWD}/.artifacts"
+mkdir "${TEST_ROOT}"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
 
 fail() {
@@ -230,6 +232,28 @@ segment_cap="$(radius_deploy_identity_segment "$(printf 'a%.0s' {1..120})")"
 # Segments that the joined artifact name cannot distinguish must stay distinct.
 [[ "$(radius_deploy_identity_segment 'prod')" != "$(radius_deploy_identity_segment 'prod-billing')" ]] ||
     fail "distinct environments must not collapse onto one segment"
+
+export LIFECYCLE_VERSION=1 LIFECYCLE_OPERATION=deployment.start
+export OPERATION_ID=operation-1 ATTEMPT_ID=attempt-1 GITHUB_REPOSITORY=owner/repo
+export EXPECTED_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export GITHUB_SHA="${EXPECTED_COMMIT}" GITHUB_RUN_ATTEMPT=2
+write_response "Cancelled"
+radius_publish_live_progress_once "todo" "dev" "radius-deploy-status-dev-todo"
+jq -e '
+    .schemaVersion == 2 and .operationId == "operation-1" and .attemptId == "attempt-1"
+    and .operation == "deployment.start" and .repo == "owner/repo"
+    and .expectedCommit == .actualCommit and .runAttempt == 2
+    and .state == "in_progress" and .resources[0].status == "failed"
+    and .diagnosticsRedacted == true and .resources[0].message == "Resource diagnostic withheld."
+' "${progress_file}" >/dev/null || fail "canonical progress identity or redaction changed"
+canonical_sequence=$(radius_last_live_sequence)
+write_response "Succeeded"
+radius_publish_live_progress_once "todo" "dev" "radius-deploy-status-dev-todo"
+[[ "$(radius_last_live_sequence)" == "$((canonical_sequence + 1))" ]] ||
+    fail "canonical progress sequence did not advance"
+jq -e '.state == "in_progress" and .resources[0].status == "success"' "${progress_file}" \
+    >/dev/null || fail "resource success must not establish operation success"
+unset LIFECYCLE_VERSION LIFECYCLE_OPERATION OPERATION_ID ATTEMPT_ID EXPECTED_COMMIT
 
 radius_clear_artifact_runtime
 [[ ! -f "${runtime_file}" ]] || fail "artifact runtime file was not removed"
