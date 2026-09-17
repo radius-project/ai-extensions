@@ -453,7 +453,9 @@ describe("cloud-e2e-cleanup.yml", () => {
       [
         "Purge stale Entra identities",
         "Purge stale GHCR deployment state",
-        "Purge stale GitHub environments",
+        "Purge orphaned GHCR deployment state",
+        "Reclaim leaked Radius workloads from the shared cluster",
+        "Purge stale GitHub Environments",
         "Purge stale fallback pull requests and branches",
         "Reset an idle fixture repository to the pinned baseline"
       ].includes(step.name ?? "")
@@ -492,6 +494,69 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain(
       'GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"'
     );
+  });
+
+  it("sweeps orphaned GHCR state before the environments that name it are deleted", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const orphanIndex = purge.findIndex(
+      (step) => step.name === "Purge orphaned GHCR deployment state"
+    );
+    const environmentIndex = purge.findIndex((step) =>
+      step.run?.includes("selectExpiredEnvironments")
+    );
+    const orphanCleanup = purge[orphanIndex];
+    const script = orphanCleanup?.run ?? "";
+
+    expect(orphanIndex).toBeGreaterThanOrEqual(0);
+    expect(environmentIndex).toBeGreaterThanOrEqual(0);
+    expect(orphanCleanup?.if).toContain(
+      "steps.radius-app-cleanup.outcome == 'success'"
+    );
+    expect(orphanCleanup?.env?.GH_PACKAGES_TOKEN).toBe(
+      "${{ secrets.GH_RAD_CI_BOT_PAT }}"
+    );
+    expect(script).toContain("selectOrphanedStatePackages");
+    expect(script).toContain("stateRegistryPrefix");
+    expect(script).toContain(
+      '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
+    );
+    expect(script).toContain(
+      '[[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]'
+    );
+    // Sweeping after the environment purge would strand no packages, it would
+    // report every one of them as orphaned.
+    expect(
+      purge.findIndex((step) =>
+        step.name?.startsWith("Purge stale GitHub Environments")
+      )
+    ).toBeGreaterThan(orphanIndex);
+  });
+
+  it("reclaims leaked cluster workloads with credentials for the shared cluster", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const clusterCleanup = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name === "Reclaim leaked Radius workloads from the shared cluster"
+    );
+    const script = clusterCleanup?.run ?? "";
+
+    expect(clusterCleanup?.if).toContain(
+      "steps.azure-login.outcome == 'success'"
+    );
+    expect(clusterCleanup?.if).toContain(
+      "steps.radius-app-cleanup.outcome == 'success'"
+    );
+    expect(clusterCleanup?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(clusterCleanup?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(script).toContain("az aks get-credentials");
+    expect(script).toContain("--selector radapp.io/environment");
+    expect(script).toContain("selectLeakedClusterWorkloads");
+    expect(script).toContain('kubectl delete "${kind,,}/$name"');
   });
 
   it("removes only allowlisted assignments before deleting leaked service principals", async () => {

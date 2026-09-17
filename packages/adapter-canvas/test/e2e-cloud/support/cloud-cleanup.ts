@@ -40,6 +40,12 @@ const GENERATED_FALLBACK_BRANCH_PATTERN =
 const RADIUS_MANAGED_APP_TAG = "radius-managed";
 const RADIUS_REPO_APP_TAG_PREFIX = "radius-repo:";
 const RADIUS_ENVIRONMENT_APP_TAG_PREFIX = "radius-environment:";
+const RADIUS_ENVIRONMENT_LABEL = "radapp.io/environment";
+const SYSTEM_NAMESPACES = new Set([
+  "kube-system",
+  "kube-public",
+  "kube-node-lease"
+]);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ?
@@ -396,4 +402,106 @@ export function selectExpiredFallbackBranches(
       branches.push(ref);
   }
   return branches;
+}
+
+/**
+ * GHCR state packages that no live environment can account for.
+ *
+ * Every other state sweep walks the fixture's GitHub Environments and derives
+ * the package name from each one, so it can only ever see state whose
+ * environment still exists. A journey deletes its environment during teardown
+ * and can then fail before deleting the package, which leaves state that no
+ * environment-driven sweep will ever reach again. Selecting by name closes that
+ * gap.
+ *
+ * `livePackageNames` is the set derived from environments that are still
+ * present and still inside the age threshold, so a package belonging to a run
+ * that is mid-flight is never a candidate. A package with no readable
+ * `updated_at` is skipped rather than deleted: an unparseable timestamp must
+ * fail towards keeping data.
+ */
+export function selectOrphanedStatePackages(
+  payload: unknown,
+  prefix: string,
+  livePackageNames: readonly string[],
+  cutoff: string
+): string[] {
+  if (!prefix.trim())
+    throw new Error(
+      "A state package prefix is required to select orphaned packages."
+    );
+  const cutoffMilliseconds = requireCutoff(cutoff);
+  const live = new Set(livePackageNames);
+  const names: string[] = [];
+  for (const entry of flattenPages(payload, "GHCR packages")) {
+    const item = asRecord(entry);
+    const name = requireString(item?.name);
+    if (
+      name.startsWith(prefix) &&
+      !live.has(name) &&
+      expired(item?.updated_at, cutoffMilliseconds)
+    )
+      names.push(name);
+  }
+  return names;
+}
+
+export interface LeakedClusterWorkload {
+  readonly kind: string;
+  readonly name: string;
+  readonly namespace: string;
+  readonly environment: string;
+}
+
+/**
+ * Radius-rendered objects on the shared cluster whose environment is gone.
+ *
+ * Deleting the Radius application is meant to remove these, and when that
+ * fails, nothing else does: no sweep reads the cluster, so a rendered workload
+ * outlives its run indefinitely and keeps consuming shared capacity. Worse, a
+ * later run rendering the same application reuses the same object, so a single
+ * leak silently absorbs every subsequent run instead of showing up as a new
+ * one.
+ *
+ * Selection is by the environment label rather than by age. A reused object
+ * carries the label of the most recent run to render it, so an object whose
+ * environment is still live belongs to work that may still be in flight, while
+ * an object naming an environment that no longer exists cannot belong to
+ * anyone. System namespaces are refused outright; nothing this suite creates
+ * belongs in one, so a match there means the label is being misread.
+ */
+export function selectLeakedClusterWorkloads(
+  payload: unknown,
+  environmentPrefix: string,
+  liveEnvironments: readonly string[]
+): LeakedClusterWorkload[] {
+  if (!environmentPrefix.trim())
+    throw new Error(
+      "An environment prefix is required to select leaked cluster workloads."
+    );
+  const live = new Set(liveEnvironments);
+  const items = asRecord(payload)?.items;
+  const leaked: LeakedClusterWorkload[] = [];
+  for (const entry of requireArray(items, "Kubernetes objects")) {
+    const item = asRecord(entry);
+    const metadata = asRecord(item?.metadata);
+    const labels = asRecord(metadata?.labels);
+    const environment = requireString(labels?.[RADIUS_ENVIRONMENT_LABEL]);
+    if (!environment.startsWith(environmentPrefix) || live.has(environment))
+      continue;
+
+    const kind = requireString(item?.kind);
+    const name = requireString(metadata?.name);
+    const namespace = requireString(metadata?.namespace);
+    if (!kind || !name || !namespace)
+      throw new Error(
+        `Kubernetes object labelled for environment "${environment}" is missing a kind, name or namespace.`
+      );
+    if (SYSTEM_NAMESPACES.has(namespace))
+      throw new Error(
+        `Refusing to reclaim ${kind} "${name}" from system namespace "${namespace}".`
+      );
+    leaked.push({ kind, name, namespace, environment });
+  }
+  return leaked;
 }

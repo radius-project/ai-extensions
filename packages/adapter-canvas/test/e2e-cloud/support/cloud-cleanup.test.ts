@@ -8,7 +8,9 @@ import {
   selectExpiredServicePrincipals,
   selectAppIdsWithUnprocessedServicePrincipals,
   selectExpectedRoleAssignments,
+  selectLeakedClusterWorkloads,
   selectOpenPullRequestHeadRefs,
+  selectOrphanedStatePackages,
   selectTestResourceGroups
 } from "./cloud-cleanup.js";
 
@@ -609,3 +611,213 @@ function pull({
     }
   };
 }
+
+describe("selectOrphanedStatePackages", () => {
+  const prefix = "ai-extensions-fixture-radius-state-";
+  const cutoff = "2026-09-17T12:00:00Z";
+  const stale = "2026-09-17T07:54:10Z";
+  const fresh = "2026-09-17T17:30:33Z";
+
+  it("selects a package whose environment no longer exists", () => {
+    // The leak this exists for: teardown deleted the environment, then failed
+    // before deleting the package, so no environment-driven sweep can see it.
+    const packages = [
+      [{ name: `${prefix}radtest-6fe9780807f4-53cf5e`, updated_at: stale }]
+    ];
+
+    expect(selectOrphanedStatePackages(packages, prefix, [], cutoff)).toEqual([
+      `${prefix}radtest-6fe9780807f4-53cf5e`
+    ]);
+  });
+
+  it("leaves a package a live environment still claims", () => {
+    const name = `${prefix}radtest-6fe9780807f4-53cf5e`;
+    const packages = [[{ name, updated_at: stale }]];
+
+    expect(
+      selectOrphanedStatePackages(packages, prefix, [name], cutoff)
+    ).toEqual([]);
+  });
+
+  it("leaves a package that is younger than the cutoff", () => {
+    // A run in flight writes state before its environment ages out of the
+    // window; deleting it would break the run that is using it.
+    const packages = [
+      [{ name: `${prefix}radtest-f471e24d92f0-181627`, updated_at: fresh }]
+    ];
+
+    expect(selectOrphanedStatePackages(packages, prefix, [], cutoff)).toEqual(
+      []
+    );
+  });
+
+  it("ignores packages outside the fixture's state prefix", () => {
+    const packages = [
+      [
+        { name: "radius-project-canvas", updated_at: stale },
+        {
+          name: "some-other-repo-radius-state-radtest-1-aaaa",
+          updated_at: stale
+        }
+      ]
+    ];
+
+    expect(selectOrphanedStatePackages(packages, prefix, [], cutoff)).toEqual(
+      []
+    );
+  });
+
+  it("keeps a package whose timestamp cannot be read", () => {
+    // An unreadable timestamp must fail towards keeping data, never towards
+    // deleting state that might still be in use.
+    const packages = [
+      [
+        { name: `${prefix}radtest-1-aaaa`, updated_at: "not-a-timestamp" },
+        { name: `${prefix}radtest-2-bbbb` }
+      ]
+    ];
+
+    expect(selectOrphanedStatePackages(packages, prefix, [], cutoff)).toEqual(
+      []
+    );
+  });
+
+  it("flattens paginated pages", () => {
+    const packages = [
+      [{ name: `${prefix}radtest-1-aaaa`, updated_at: stale }],
+      [{ name: `${prefix}radtest-2-bbbb`, updated_at: stale }]
+    ];
+
+    expect(selectOrphanedStatePackages(packages, prefix, [], cutoff)).toEqual([
+      `${prefix}radtest-1-aaaa`,
+      `${prefix}radtest-2-bbbb`
+    ]);
+  });
+
+  it("refuses an empty prefix rather than matching every package", () => {
+    expect(() => selectOrphanedStatePackages([], "  ", [], cutoff)).toThrow(
+      /state package prefix is required/
+    );
+  });
+
+  it("refuses a payload that is not an array", () => {
+    expect(() =>
+      selectOrphanedStatePackages({ packages: [] }, prefix, [], cutoff)
+    ).toThrow(/GHCR packages did not return a JSON array/);
+  });
+});
+
+describe("selectLeakedClusterWorkloads", () => {
+  const prefix = "radtest-";
+  const workload = (
+    kind: string,
+    name: string,
+    namespace: string,
+    environment: string
+  ) => ({
+    kind,
+    metadata: {
+      name,
+      namespace,
+      labels: {
+        "radapp.io/application": "cloud-e2e",
+        "radapp.io/environment": environment
+      }
+    }
+  });
+
+  it("selects a workload whose environment is gone", () => {
+    // Observed leak: a Deployment left running for 14 hours after its
+    // environment was deleted, reused by every later run.
+    const payload = {
+      items: [
+        workload("Deployment", "sleeper", "default", "radtest-f471e24d92f0")
+      ]
+    };
+
+    expect(selectLeakedClusterWorkloads(payload, prefix, [])).toEqual([
+      {
+        kind: "Deployment",
+        name: "sleeper",
+        namespace: "default",
+        environment: "radtest-f471e24d92f0"
+      }
+    ]);
+  });
+
+  it("leaves a workload whose environment is still live", () => {
+    // A reused object carries the label of the newest run to render it, so a
+    // live environment means the run may still be in flight.
+    const payload = {
+      items: [workload("Deployment", "sleeper", "default", "radtest-live")]
+    };
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, ["radtest-live"])
+    ).toEqual([]);
+  });
+
+  it("ignores objects that carry no fixture environment label", () => {
+    const payload = {
+      items: [
+        workload("Deployment", "someone-else", "default", "prod-environment"),
+        { kind: "Deployment", metadata: { name: "bare", namespace: "default" } }
+      ]
+    };
+
+    expect(selectLeakedClusterWorkloads(payload, prefix, [])).toEqual([]);
+  });
+
+  it("collects every kind the sweep is given", () => {
+    const payload = {
+      items: [
+        workload("Deployment", "sleeper", "default", "radtest-1"),
+        workload("HorizontalPodAutoscaler", "sleeper", "default", "radtest-1"),
+        workload("Service", "sleeper", "default", "radtest-1")
+      ]
+    };
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, []).map((item) => item.kind)
+    ).toEqual(["Deployment", "HorizontalPodAutoscaler", "Service"]);
+  });
+
+  it("refuses to reclaim anything from a system namespace", () => {
+    // Nothing this suite creates belongs in kube-system, so a match there means
+    // the label is being misread and deleting would be destructive.
+    const payload = {
+      items: [workload("Deployment", "coredns", "kube-system", "radtest-1")]
+    };
+
+    expect(() => selectLeakedClusterWorkloads(payload, prefix, [])).toThrow(
+      /Refusing to reclaim Deployment "coredns" from system namespace/
+    );
+  });
+
+  it("refuses an object that is missing its identity", () => {
+    const payload = {
+      items: [
+        {
+          kind: "Deployment",
+          metadata: { labels: { "radapp.io/environment": "radtest-1" } }
+        }
+      ]
+    };
+
+    expect(() => selectLeakedClusterWorkloads(payload, prefix, [])).toThrow(
+      /is missing a kind, name or namespace/
+    );
+  });
+
+  it("refuses an empty prefix rather than matching every environment", () => {
+    expect(() => selectLeakedClusterWorkloads({ items: [] }, " ", [])).toThrow(
+      /environment prefix is required/
+    );
+  });
+
+  it("refuses a payload that is not a kubectl list", () => {
+    expect(() => selectLeakedClusterWorkloads([], prefix, [])).toThrow(
+      /Kubernetes objects did not return a JSON array/
+    );
+  });
+});

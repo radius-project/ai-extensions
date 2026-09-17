@@ -63,7 +63,39 @@ export function stateRegistryForEnvironment(
   const identity =
     `${repositoryParts[0].toLowerCase()}/${repositoryParts[1].toLowerCase()}` +
     `\0${environmentName.toLowerCase()}`;
-  const packageName = `${repository}-radius-state-${environmentSlug}-${registrySuffix(identity)}`;
+  const packageName = `${stateRegistryPrefix(targetRepository)}${environmentSlug}-${registrySuffix(identity)}`;
 
   return `${GHCR_HOST}/${owner}/${packageName}`;
+}
+
+/**
+ * Returns the GHCR package-name prefix shared by every state package this
+ * repository writes.
+ *
+ * Cleanup has to recognise a state package by name alone. Its other sweeps
+ * walk the target's GitHub Environments to find what to delete, which stops
+ * working the moment an environment is removed before its package is, and the
+ * package then becomes unreachable state that nothing reclaims. Deriving the
+ * prefix here rather than restating it in a workflow keeps the sweep and the
+ * writer above from drifting apart.
+ */
+export function stateRegistryPrefix(targetRepository: string): string {
+  const repositoryParts = targetRepository.trim().split("/");
+  if (
+    repositoryParts.length !== 2 ||
+    repositoryParts.some((part) => !part.trim())
+  ) {
+    throw new Error(
+      `Invalid repository "${targetRepository}": expected owner/repo.`
+    );
+  }
+
+  const repository = slug(repositoryParts[1], MAX_REPOSITORY_SLUG_LENGTH);
+  if (!repository) {
+    throw new Error(
+      "Repository and environment names must contain an ASCII letter or number to configure GHCR state storage."
+    );
+  }
+
+  return `${repository}-radius-state-`;
 }

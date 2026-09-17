@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
-  stateRegistryForEnvironment
+  stateRegistryForEnvironment,
+  stateRegistryPrefix
 } from "./state.js";
 
 describe("stateRegistryForEnvironment", () => {
@@ -103,5 +104,38 @@ describe("stateRegistryForEnvironment", () => {
     );
 
     expect(registry.split("/")[1].endsWith("-")).toBe(false);
+  });
+});
+
+describe("stateRegistryPrefix", () => {
+  it("prefixes every package name the writer produces", () => {
+    // The sweep recognises state by this prefix alone, so it must stay exactly
+    // what stateRegistryForEnvironment writes or orphaned state goes unseen.
+    const prefix = stateRegistryPrefix("radius-project/ai-extensions-fixture");
+    const registry = stateRegistryForEnvironment(
+      "radius-project/ai-extensions-fixture",
+      "radtest-6fe9780807f4"
+    );
+
+    expect(prefix).toBe("ai-extensions-fixture-radius-state-");
+    expect(registry.split("/").at(-1)).toMatch(
+      new RegExp(`^${prefix}radtest-6fe9780807f4-[a-f0-9]{12}$`)
+    );
+  });
+
+  it("sanitizes the repository the same way the registry does", () => {
+    expect(stateRegistryPrefix("Acme/My-App")).toBe("my-app-radius-state-");
+  });
+
+  it("rejects a repository that is not owner/repo", () => {
+    expect(() => stateRegistryPrefix("ai-extensions")).toThrow(
+      /expected owner\/repo/
+    );
+  });
+
+  it("rejects a repository with no usable characters", () => {
+    expect(() => stateRegistryPrefix("acme/---")).toThrow(
+      /must contain an ASCII letter or number/
+    );
   });
 });

@@ -425,6 +425,202 @@ jobs:
             exit 1
           fi
 
+      # The step above can only reach a package it can name, and it names them
+      # by walking the fixture's environments. Once an environment is deleted -
+      # by the step below, by the suite's own teardown, or by hand - the twelve
+      # hex characters the package name ends in are unrecoverable, so the
+      # package becomes permanently invisible to every environment-driven sweep.
+      #
+      # This lists the organisation's packages instead and keeps the ones some
+      # surviving environment still claims. It must stay ahead of the
+      # environment purge: run it afterwards and every package looks orphaned.
+      - name: Purge orphaned GHCR deployment state
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          FIXTURE_OWNER: ${{ steps.pin.outputs.owner }}
+          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          environments="$RUNNER_TEMP/orphan-state-environments.json"
+          live_packages="$RUNNER_TEMP/orphan-state-live-packages.txt"
+          packages="$RUNNER_TEMP/orphan-state-packages.json"
+          orphans="$RUNNER_TEMP/orphan-state-orphans.json"
+          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
+
+          : >"$live_packages"
+          while read -r environment; do
+            [[ -n "$environment" ]] || continue
+            FIXTURE_REPOSITORY="$FIXTURE_REPOSITORY" ENVIRONMENT="$environment" \
+              node --input-type=module -e '
+                const { stateRegistryForEnvironment } = await import(
+                  "./packages/core/src/workflows/state.ts"
+                );
+                const registry = stateRegistryForEnvironment(
+                  process.env.FIXTURE_REPOSITORY,
+                  process.env.ENVIRONMENT
+                );
+                process.stdout.write(registry.split("/").at(-1) + "\n");
+              ' >>"$live_packages"
+          done < <(jq -r --arg prefix "$ENVIRONMENT_PREFIX" \
+            '.[].environments[]?.name | select(startswith($prefix))' "$environments")
+
+          package_prefix="$(
+            FIXTURE_REPOSITORY="$FIXTURE_REPOSITORY" \
+              node --input-type=module -e '
+                const { stateRegistryPrefix } = await import(
+                  "./packages/core/src/workflows/state.ts"
+                );
+                process.stdout.write(stateRegistryPrefix(process.env.FIXTURE_REPOSITORY));
+              '
+          )"
+          GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --paginate --slurp \
+            "orgs/$FIXTURE_OWNER/packages?package_type=container" >"$packages"
+
+          node --input-type=module - \
+            "$packages" "$package_prefix" "$live_packages" "$cutoff" "$orphans" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [packagesFile, prefix, livePackagesFile, cutoff, outputFile] =
+            process.argv.slice(2);
+          const { selectOrphanedStatePackages } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const packages = JSON.parse(await readFile(packagesFile, "utf8"));
+          const live = (await readFile(livePackagesFile, "utf8"))
+            .split("\n")
+            .map((name) => name.trim())
+            .filter(Boolean);
+          await writeFile(
+            outputFile,
+            JSON.stringify(
+              selectOrphanedStatePackages(packages, prefix, live, cutoff)
+            )
+          );
+          NODE
+
+          deleted=0
+          failures=()
+          while read -r package_name; do
+            [[ -n "$package_name" ]] || continue
+            package_path="orgs/$FIXTURE_OWNER/packages/container/$package_name"
+            package="$RUNNER_TEMP/orphan-state-$package_name.json"
+            if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api "$package_path" >"$package" 2>"$package.stderr"; then
+              if grep -q "HTTP 404" "$package.stderr"; then
+                continue
+              fi
+              failures+=("inspect orphaned GHCR package $package_name")
+              continue
+            fi
+            visibility="$(jq -r '.visibility // ""' "$package")"
+            linked_repository="$(jq -r '.repository.full_name // ""' "$package")"
+            if [[ "$visibility" != "private" && "$visibility" != "internal" ]]; then
+              failures+=("refuse GHCR package $package_name with visibility ${visibility:-unknown}")
+              continue
+            fi
+            if [[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]; then
+              failures+=("refuse GHCR package $package_name linked to ${linked_repository:-no repository}")
+              continue
+            fi
+            if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"; then
+              failures+=("delete orphaned GHCR package $package_name")
+              continue
+            fi
+            deleted=$((deleted + 1))
+          done < <(jq -r '.[]' "$orphans")
+
+          echo "- Orphaned GHCR state packages deleted: $deleted" >>"$GITHUB_STEP_SUMMARY"
+          if (( ${#failures[@]} > 0 )); then
+            printf 'Orphaned GHCR state cleanup failures:\n' >&2
+            printf '  - %s\n' "${failures[@]}" >&2
+            exit 1
+          fi
+
+      # Deleting the Radius application is what removes the workloads it
+      # rendered, and when that fails nothing else looks at the cluster at all.
+      # A leaked workload then survives indefinitely, and because a later run
+      # renders the same application into the same namespace under the same
+      # name, it rolls the leaked object rather than creating its own - so one
+      # leak quietly absorbs every subsequent run instead of being noticed.
+      #
+      # Objects are matched by their environment label, not by age: the label
+      # names the last run to render them, so anything naming an environment
+      # that no longer exists cannot belong to work still in flight.
+      - name: Reclaim leaked Radius workloads from the shared cluster
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.azure-login.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
+          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          environments="$RUNNER_TEMP/cluster-cleanup-environments.json"
+          live_environments="$RUNNER_TEMP/cluster-cleanup-live-environments.txt"
+          objects="$RUNNER_TEMP/cluster-cleanup-objects.json"
+          leaked="$RUNNER_TEMP/cluster-cleanup-leaked.json"
+          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
+          jq -r --arg prefix "$ENVIRONMENT_PREFIX" \
+            '.[].environments[]?.name | select(startswith($prefix))' \
+            "$environments" >"$live_environments"
+
+          az aks get-credentials \
+            --subscription "$SUBSCRIPTION_ID" \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$AKS_CLUSTER_NAME" \
+            --overwrite-existing \
+            --only-show-errors
+          kubectl get \
+            deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
+            --all-namespaces \
+            --selector radapp.io/environment \
+            --output json >"$objects"
+
+          node --input-type=module - \
+            "$objects" "$ENVIRONMENT_PREFIX" "$live_environments" "$leaked" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [objectsFile, prefix, liveEnvironmentsFile, outputFile] =
+            process.argv.slice(2);
+          const { selectLeakedClusterWorkloads } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const objects = JSON.parse(await readFile(objectsFile, "utf8"));
+          const live = (await readFile(liveEnvironmentsFile, "utf8"))
+            .split("\n")
+            .map((name) => name.trim())
+            .filter(Boolean);
+          await writeFile(
+            outputFile,
+            JSON.stringify(selectLeakedClusterWorkloads(objects, prefix, live))
+          );
+          NODE
+
+          deleted=0
+          failures=()
+          while IFS=$'\t' read -r kind name namespace environment; do
+            [[ -n "$kind" ]] || continue
+            if ! kubectl delete "${kind,,}/$name" \
+                --namespace "$namespace" \
+                --ignore-not-found; then
+              failures+=("delete $kind $namespace/$name leaked by $environment")
+              continue
+            fi
+            deleted=$((deleted + 1))
+          done < <(jq -r '.[] | [.kind, .name, .namespace, .environment] | @tsv' "$leaked")
+
+          echo "- Leaked cluster workloads reclaimed: $deleted" >>"$GITHUB_STEP_SUMMARY"
+          if (( ${#failures[@]} > 0 )); then
+            printf 'Cluster workload cleanup failures:\n' >&2
+            printf '  - %s\n' "${failures[@]}" >&2
+            exit 1
+          fi
+
       # Both object types are matched by the exact display name the product
       # derives from the fixture repository, never by prefix. Service principals
       # go first because deleting an application can leave an orphaned principal
