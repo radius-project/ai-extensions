@@ -710,6 +710,14 @@ export function initializeEnvironmentPage(
       profile: queryValue(context.nav.search, "profile")
     });
   }
+  for (const tab of context.dom.all(
+    context.dom.document,
+    "#env-subtabs .rad-subtab"
+  )) {
+    if (tab.getAttribute("data-subtab") === "environments") {
+      scope.on(tab, "click", () => operations.resumeProgress());
+    }
+  }
   operations.resumeProgress();
 
   return () => {

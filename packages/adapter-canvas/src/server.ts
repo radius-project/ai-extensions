@@ -14,6 +14,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+import { createVerificationSafety } from "./server/services/verification-safety.js";
 import {
   buildRemediation,
   fetchBicepFromRepo,
@@ -744,6 +745,8 @@ function scheduleEnvironmentOperationForInstance(
 // projection, and per-instance scheduling seams they invoke.
 const operationsStatusRoutes = createOperationsStatusRoutes(
   {
+    lifecycle: (instanceId) =>
+      canvasServer.instances.get(instanceId)?.environmentLifecycle,
     latest: (repo) => operations.latest(repo),
     latestAny: () => operations.latestAny(),
     get: (operationId) => operations.get(operationId),
@@ -752,6 +755,8 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     now: () => Date.now()
   },
   {
+    lifecycle: (instanceId) =>
+      canvasServer.instances.get(instanceId)?.environmentLifecycle,
     isValidRepoSlug,
     isResourceGroupName,
     isAksClusterName,
@@ -822,6 +827,8 @@ function requiredVerificationWorkflowContext(op: {
 }
 
 const operationsControlRoutes = createOperationsControlRoutes({
+  lifecycle: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.environmentLifecycle,
   get: (operationId) => operations.get(operationId),
   acquireForRetry: (op) => operations.acquireForRetry(op),
   persistOperations: () => operations.persist(),
@@ -1457,6 +1464,8 @@ const namespaceClaimsFor = (operationId: string) => {
 // `randomUUID()` held by that instance's request coordinator, and this route is
 // reachable only through the internal loopback POST that carries it.
 const createEnvironmentRoutes = createCreateEnvironmentRoutes({
+  lifecycle: (instanceId) =>
+    canvasServer.instances.get(instanceId)?.environmentLifecycle,
   ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isServerOwnedRequest: (instanceId, request) =>
     instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
@@ -5927,6 +5936,10 @@ export function createInstanceRequestCoordinator(
     const operation = operations.get(operationId);
     if (!operation) return;
     await runSelectedVerificationRetry(operation, commandId, {
+      verificationSafety: createVerificationSafety({
+        fetchFile: selectedFetchFileFromRepo,
+        fetchFileResult: selectedFetchFileFromRepoResult
+      }),
       createExecutor: (login) =>
         githubAccountCoordinator.createReadOnlyExecutor(login),
       registerExecutor: (id, executor) => {

@@ -45,6 +45,11 @@ import {
 } from "../../operations.js";
 import { errorMessage } from "../../runtime/util.js";
 import type { OperationRecord } from "./operations-status.js";
+import type { LifecycleBinding } from "../../runtime/create-lifecycle-binding.js";
+import {
+  createLifecycleEnvironmentHttp,
+  lifecycleSetupOperation
+} from "../services/lifecycle-environments.js";
 
 // Cooperative controls for an environment operation: stop, the two forward
 // commands (continue a deliberate stop, retry a failed continuation), rollback
@@ -133,6 +138,7 @@ export type RepositoryLockResult =
   { ok: true } | { ok: false; conflict: { operationId: string } };
 
 export interface OperationsControlDependencies {
+  lifecycle?(instanceId: string): LifecycleBinding | undefined;
   get(operationId: string): OperationRecord | null;
   // Takes the repository lock back for a retry of a record that already owns
   // it. A different live attempt wins, which is what keeps a retry from running
@@ -1207,10 +1213,37 @@ async function runCommandRoute(
  * rather than the setup retry wearing a different label: the customer has not
  * retried anything yet, and the record should say which decision they made.
  */
-export function handleContinueOperation(
+export async function handleContinueOperation(
   context: CanvasRequestContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
+  const lifecycle = dependencies.lifecycle?.(context.instanceId);
+  const operationId = decodeSegment(
+    templatePathParameters(CONTINUE_OPERATION_ROUTE, context.pathname)
+      ?.operationId ?? ""
+  );
+  if (
+    lifecycle &&
+    operationId &&
+    lifecycleSetupOperation(lifecycle, operationId)
+  ) {
+    let input: unknown;
+    try {
+      input = JSON.parse(await context.readTextBody());
+    } catch {
+      sendJson(context, 400, {
+        error: "Invalid JSON body.",
+        code: "invalid-json"
+      });
+      return;
+    }
+    const result = await createLifecycleEnvironmentHttp(lifecycle).respond(
+      operationId,
+      input
+    );
+    sendJson(context, result.status, result.body);
+    return;
+  }
   return runCommandRoute(
     context,
     dependencies,

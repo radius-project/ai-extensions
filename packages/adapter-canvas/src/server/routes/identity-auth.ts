@@ -110,23 +110,19 @@ export async function handleVerifyAzureLogin(
     // NOTE: we intentionally do NOT run `az login` here. Interactive
     // login opens a browser/device-code flow that blocks indefinitely
     // and would hang this server. Instead we verify the user's existing
-    // Azure CLI session (and optionally switch subscription). If there
+    // Azure CLI session without switching subscription. If there
     // is no session, the canvas can ask Copilot to start device-code login.
-    if (subscriptionId) {
-      try {
-        await dependencies.runCommand(
-          "az",
-          ["account", "set", "--subscription", subscriptionId],
-          { timeout: AZ_TIMEOUT }
-        );
-      } catch (e) {}
-    }
-
     let acct;
     try {
       const acctJson = await dependencies.runCommand(
         "az",
-        ["account", "show", "-o", "json"],
+        [
+          "account",
+          "show",
+          ...(subscriptionId ? ["--subscription", subscriptionId] : []),
+          "-o",
+          "json"
+        ],
         { timeout: AZ_TIMEOUT }
       );
       acct = JSON.parse(acctJson);

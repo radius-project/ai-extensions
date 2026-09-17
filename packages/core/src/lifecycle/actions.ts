@@ -93,7 +93,11 @@ export function createActionService(deps: {
     responder: ActionResponder,
     continuation: ActionContinuation,
     control: RequestControl
-  ): Promise<PortResult<VersionedOperation>> {
+  ): Promise<
+    PortResult<
+      VersionedOperation & { readonly action: ReadonlyData<RequiredAction> }
+    >
+  > {
     if (closed) return portCancelled("session_shutdown");
     if (
       typeof continuation?.revalidate !== "function" ||
@@ -135,8 +139,11 @@ export function createActionService(deps: {
       },
       control
     );
-    if (result.status !== "ok") bindings.delete(action.actionId);
-    return result;
+    if (result.status !== "ok") {
+      bindings.delete(action.actionId);
+      return result;
+    }
+    return portSuccess({ ...result.value, action: structuredClone(action) });
   }
 
   async function respond(

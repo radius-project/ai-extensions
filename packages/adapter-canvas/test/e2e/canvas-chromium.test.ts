@@ -20,6 +20,7 @@ import {
 } from "./support/canvas-harness.js";
 import type { Locator, Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+import { createEnvironmentFixture } from "../support/lifecycle-environments.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
@@ -59,6 +60,183 @@ const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
 const DIFF_BASE_BRANCH = "main";
+
+async function startLifecycleSetup(
+  page: Page,
+  canvas: CanvasHarness,
+  input: unknown
+): Promise<void> {
+  const nonce = canvas.entry.state.browserMutationNonce;
+  if (typeof nonce !== "string")
+    throw new Error("Missing browser mutation binding");
+  const status = await page.evaluate(
+    async ({ nonce, input }) => {
+      const response = await fetch("/api/operations", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": nonce
+        },
+        body: JSON.stringify(input)
+      });
+      return response.status;
+    },
+    { nonce, input }
+  );
+  expect(status).toBe(202);
+}
+
+for (const provider of ["azure", "aws"] as const) {
+  test(`critical journey: ${provider} configuration resumes through keyboard actions without deployment`, async ({
+    page,
+    canvas
+  }) => {
+    await seed(canvas);
+    const fixture = await createEnvironmentFixture(provider, REPOSITORY);
+    canvas.entry.environmentLifecycle = fixture.binding;
+    try {
+      await gotoCanvas(page, canvas, "environment");
+      await startLifecycleSetup(page, canvas, {
+        ...fixture.target,
+        configuration: fixture.configuration
+      });
+      const operationId =
+        fixture.binding.registry.knownOperations()[0].operationId;
+      await page
+        .getByRole("link", { name: "Credentials", exact: true })
+        .click();
+      await page
+        .locator("#env-subtabs")
+        .getByRole("link", { name: "Environments", exact: true })
+        .click();
+      const continuation = page.getByRole("button", {
+        name: "Continue configuration",
+        exact: true
+      });
+      await expect(continuation).toBeVisible();
+      expect(fixture.binding.registry.knownOperations()[0].operationId).toBe(
+        operationId
+      );
+      expect(fixture.state.exists).toBe(false);
+      await expectNoWcagViolations(page);
+      await continuation.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#env-progress-panel")).toContainText(
+        "No application deployment was started"
+      );
+      await expect(page.locator("#env-progress-title")).toBeFocused();
+      fixture.state.variables.set("KUBERNETES_NAMESPACE", "retained-namespace");
+      const patch =
+        provider === "azure" ?
+          { provider, settings: { location: "eastus" } }
+        : { provider, settings: { region: "us-west-2" } };
+      await startLifecycleSetup(page, canvas, { ...fixture.target, patch });
+      await gotoCanvas(page, canvas, "environment");
+      await expect(continuation).toBeVisible();
+      await continuation.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#env-progress-panel")).toContainText(
+        "No application deployment was started"
+      );
+      expect(fixture.state.variables.get("KUBERNETES_NAMESPACE")).toBe(
+        "retained-namespace"
+      );
+      expect(fixture.state.protections.requiredReviewers).toBe(true);
+      expect(
+        canvas.requests.filter((request) => request.path === "/api/deploy")
+      ).toEqual([]);
+      await expectNoWcagViolations(page);
+    } finally {
+      delete canvas.entry.environmentLifecycle;
+      await fixture.close();
+    }
+  });
+}
+
+test("critical journey: credential action verifies identity without claiming environment creation", async ({
+  page,
+  canvas
+}) => {
+  await seed(canvas);
+  const fixture = await createEnvironmentFixture("azure", REPOSITORY);
+  canvas.entry.environmentLifecycle = fixture.binding;
+  try {
+    fixture.state.authenticated = false;
+    await gotoCanvas(page, canvas, "credentials");
+    await startLifecycleSetup(page, canvas, {
+      ...fixture.target,
+      provider: "azure",
+      credentialIntent: "authenticate"
+    });
+    await gotoCanvas(page, canvas, "environment");
+    const authenticate = page.getByRole("button", {
+      name: "Authenticate and verify",
+      exact: true
+    });
+    await expect(authenticate).toBeVisible();
+    expect(fixture.state.calls).not.toContain("authenticate");
+    await authenticate.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#env-progress-panel")).toContainText(
+      "Credential configuration completed and was verified"
+    );
+    expect(
+      fixture.state.calls.filter((call) => call === "authenticate")
+    ).toHaveLength(1);
+    expect(fixture.state.exists).toBe(false);
+    expect(
+      canvas.requests.filter((request) => request.path === "/api/deploy")
+    ).toEqual([]);
+    await expectNoWcagViolations(page);
+  } finally {
+    delete canvas.entry.environmentLifecycle;
+    await fixture.close();
+  }
+});
+
+test("critical journey: partial configuration preserves changes and reports failure after navigation", async ({
+  page,
+  canvas
+}) => {
+  await seed(canvas);
+  const fixture = await createEnvironmentFixture("azure", REPOSITORY);
+  canvas.entry.environmentLifecycle = fixture.binding;
+  try {
+    fixture.state.failure = "workflows";
+    await gotoCanvas(page, canvas, "environment");
+    await startLifecycleSetup(page, canvas, {
+      ...fixture.target,
+      configuration: fixture.configuration
+    });
+    await page.reload();
+    const continuation = page.getByRole("button", {
+      name: "Continue configuration",
+      exact: true
+    });
+    await continuation.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#env-progress-panel")).toContainText(
+      "Configuration did not complete"
+    );
+    await expect(page.locator("#env-progress-panel")).toContainText(
+      "No automatic rollback or deployment was started"
+    );
+    expect(fixture.state.exists).toBe(true);
+    const mutations = [...fixture.state.calls];
+    await page.reload();
+    await expect(page.locator("#env-progress-panel")).toContainText(
+      "Configuration did not complete"
+    );
+    expect(fixture.state.calls).toEqual(mutations);
+    expect(
+      canvas.requests.filter((request) => request.path === "/api/deploy")
+    ).toEqual([]);
+    await expectNoWcagViolations(page);
+  } finally {
+    delete canvas.entry.environmentLifecycle;
+    await fixture.close();
+  }
+});
 
 async function stubPageStateGraphRequests(page: Page): Promise<void> {
   await page.route("**/api/discover-branches", async (route) => {
@@ -2214,6 +2392,14 @@ test.describe("Radius Canvas in Chromium", () => {
           JSON.stringify(["account", "show", "-o", "json"])
     );
     if (azAccount) {
+      azAccount.args = [
+        "account",
+        "show",
+        "--subscription",
+        PROFILE_SUBSCRIPTION_ID,
+        "-o",
+        "json"
+      ];
       azAccount.exitCode = 1;
       azAccount.stdout = "";
       azAccount.stderr = `AADSTS: ${PLACEHOLDER_SECRET}`;
@@ -2256,16 +2442,21 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     expect(verifyPayload).not.toContain(PLACEHOLDER_SECRET);
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
-    // Any `az` call would satisfy expectCliInvoked, including the unmodeled
-    // `az account set` the route makes first and swallows. Pin the command that
-    // actually produces the secret-shaped stderr under test.
+    // Pin the read-only scoped command that produces the diagnostic under test.
     await expect
       .poll(async () =>
         (await canvas.cliCalls()).some(
           (call) =>
             call.tool === "az" &&
             JSON.stringify(call.args) ===
-              JSON.stringify(["account", "show", "-o", "json"])
+              JSON.stringify([
+                "account",
+                "show",
+                "--subscription",
+                PROFILE_SUBSCRIPTION_ID,
+                "-o",
+                "json"
+              ])
         )
       )
       .toBe(true);
@@ -2697,6 +2888,29 @@ test.describe("Radius Canvas in Chromium", () => {
     const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
     const scenario = defaultFakeCliScenario();
     scenario.commands.push(
+      {
+        tool: "gh",
+        args: ["api", `/repos/${REPOSITORY}`, "--jq", ".default_branch"],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: "main"
+      },
+      ...[
+        ["radius-verify-credentials.yml", VERIFICATION_WORKFLOW_CONTENT],
+        ["run-rad-commands.yml", "on:\n  workflow_dispatch:\njobs: {}\n"],
+        ["radius-deploy.yml", null]
+      ].map(([file, content]): FakeCliCommand => ({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=main`,
+          "--jq",
+          ".content"
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        ...(content === null ?
+          { exitCode: 1, stderr: "gh: Not Found (HTTP 404)" }
+        : { stdout: Buffer.from(content).toString("base64") })
+      })),
       {
         tool: "gh",
         args: [

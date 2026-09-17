@@ -342,6 +342,54 @@ async function openWithProfile(
 }
 
 describe("initializeEnvironmentPage", () => {
+  it("resumes a newly accepted setup operation when returning from the Credentials tab", async () => {
+    const page = fixture();
+    for (const id of [
+      "env-progress-title",
+      "env-progress-commands",
+      "env-progress-command-buttons",
+      "env-progress-command-note"
+    ]) {
+      const element = createFakeElement(id);
+      page.elements[id] = element;
+      page.browser.document.add(element);
+    }
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    page.browser.net.handle(`${OPERATIONS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        operation: {
+          operationId: "configuration-op",
+          kind: "lifecycle_environment",
+          state: "action_required",
+          terminalState: "action_required",
+          summary: "Review configuration",
+          actions: [
+            {
+              id: "configuration-action",
+              kind: "lifecycle.configure",
+              label: "Continue configuration",
+              path: "/api/operations/configuration-op/continue"
+            }
+          ]
+        }
+      })
+    );
+    page.elements["credentials-subtab"].dispatch("click");
+    page.elements["environment-subtab"].dispatch("click");
+    await flushPromises();
+    expect(page.elements["env-progress-title"].textContent).toBe(
+      "Review configuration"
+    );
+    expect(page.elements["env-progress-command-buttons"].children).toHaveLength(
+      1
+    );
+    const calls = page.browser.net.calls.length;
+    teardown();
+    page.elements["environment-subtab"].dispatch("click");
+    await flushPromises();
+    expect(page.browser.net.calls).toHaveLength(calls);
+  });
   it("does nothing outside the environment page", () => {
     const browser = createFakeBrowser();
     const teardown = initializeEnvironmentPage(browser.context);

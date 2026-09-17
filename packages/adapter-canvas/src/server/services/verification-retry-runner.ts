@@ -32,6 +32,10 @@ export interface VerificationRetryRunnerDependencies {
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   registerExecutor(operationId: string, executor: SelectedGhExecutor): void;
   unregisterExecutor(operationId: string): void;
+  verificationSafety(
+    executor: SelectedGhExecutor,
+    repo: string
+  ): Promise<string | null>;
   stopBoundary(input: VerificationRetryStopBoundaryInput): Promise<boolean>;
   buildDispatchArgs(input: {
     workflowFile: string;
@@ -337,6 +341,28 @@ export async function runVerificationRetry(
       reusePreviousMutation ?
         previousMutationTarget
       : `${repo}:${workflow}:${ref}:${environment}:${commandId}`;
+    if (!reusePreviousMutation) {
+      const refusal = await dependencies.verificationSafety(executor, repo);
+      if (refusal) {
+        dependencies.setCommandState(
+          operation,
+          commandId,
+          "finished",
+          "verification-safety-required"
+        );
+        dependencies.finish(operation, "failed_partial", {
+          failure: {
+            code: "verification-safety-required",
+            stage: dependencies.stageVerify,
+            message: `Credential verification was not dispatched: ${refusal}`,
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await dependencies.persist(operation);
+        return;
+      }
+    }
     const trackingDeadline =
       dependencies.now() + VERIFICATION_TRACKING_WINDOW_MS;
 

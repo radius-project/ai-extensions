@@ -667,7 +667,17 @@ function parsePreview(
   };
 }
 
-function parseActions(value: unknown): OperationAction[] {
+function isLifecycleAction(kind: string): boolean {
+  return kind === "lifecycle.authenticate" || kind === "lifecycle.configure";
+}
+
+function isLifecycleConfiguration(op: OperationRecord): boolean {
+  return (
+    op.kind === "lifecycle_credentials" || op.kind === "lifecycle_environment"
+  );
+}
+
+function parseActions(value: unknown, operationId: string): OperationAction[] {
   if (!Array.isArray(value)) return [];
   const actions: OperationAction[] = [];
   for (const entry of value) {
@@ -677,8 +687,16 @@ function parseActions(value: unknown): OperationAction[] {
     // than rendered as a button that can only fail.
     if (path === "") continue;
     const kind = readString(entry, "kind");
+    const id = readString(entry, "id");
+    if (
+      kind.startsWith("lifecycle.") &&
+      (!isLifecycleAction(kind) ||
+        id === "" ||
+        path !== `${operationUrl(operationId)}/continue`)
+    )
+      continue;
     actions.push({
-      id: readString(entry, "id"),
+      id,
       kind,
       label: readString(entry, "label"),
       description: readString(entry, "description"),
@@ -818,7 +836,7 @@ function parseOperationRecord(
     steps: parseStageList(raw["steps"]),
     failure: parseFailure(raw["failure"], ghCommandPresentation),
     cleanup: parseCleanup(raw["cleanup"]),
-    actions: parseActions(raw["actions"]),
+    actions: parseActions(raw["actions"], readString(raw, "operationId")),
     guidance: parseGuidance(raw["guidance"]),
     headline: parseHeadline(raw["headline"]),
     activeCommandKind: readString(raw, "activeCommandKind"),
@@ -1069,6 +1087,7 @@ function commandStatusText(action: OperationAction): string {
 function isSuccessfulSetup(op: OperationRecord | null): boolean {
   return (
     op !== null &&
+    !isLifecycleConfiguration(op) &&
     (op.terminalState === "succeeded" ||
       op.terminalState === "succeeded_with_warnings") &&
     op.actions.length === 0
@@ -1355,6 +1374,22 @@ export function initializeEnvironmentOperations(
     }
 
     const cleanup = op.cleanup;
+    if (isLifecycleConfiguration(op)) {
+      messageEl.textContent = op.failure?.message || op.summary;
+      const titleEl = dom.byId(PROGRESS_IDS.failureTitle);
+      if (titleEl) titleEl.textContent = "Configuration did not complete";
+      cleanupEl.textContent =
+        "Completed configuration phases remain recorded. No automatic rollback or deployment was started.";
+      retryEl.textContent = "";
+      renderFailureCommand(null);
+      setFailureList(
+        [],
+        dom.byId(PROGRESS_IDS.cleanupWarningsList),
+        dom.byId(PROGRESS_IDS.cleanupWarningsBlock)
+      );
+      card.style.display = "";
+      return;
+    }
     if (op.kind === "delete") {
       messageEl.textContent =
         op.failure && op.failure.message !== "" ?
@@ -2056,6 +2091,11 @@ export function initializeEnvironmentOperations(
     const commandIsActive = (): boolean =>
       scope.active && commandSession === session;
     setCommandError("");
+    if (isLifecycleAction(action.kind)) {
+      const heading = dom.byId(PROGRESS_IDS.title) ?? panel;
+      heading.setAttribute("tabindex", "-1");
+      context.focus.focus(heading);
+    }
     setCommandBusy(true);
     setCommandStatus(commandStatusText(action));
     void fetchTracked(action.path, {
@@ -2064,7 +2104,10 @@ export function initializeEnvironmentOperations(
         "Content-Type": "application/json",
         "X-Radius-Mutation-Nonce": options.mutationNonce || ""
       },
-      body: "{}"
+      body:
+        isLifecycleAction(action.kind) ?
+          JSON.stringify({ actionId: action.id, choice: "continue" })
+        : "{}"
     })
       .then((response) =>
         response
@@ -2251,7 +2294,12 @@ export function initializeEnvironmentOperations(
         return;
       }
       const fallback =
-        container.style.display === "none" ?
+        (
+          container.style.display === "none" ||
+          (op !== null &&
+            isLifecycleConfiguration(op) &&
+            rowActions.length === 0)
+        ) ?
           (dom.byId(PROGRESS_IDS.title) ?? panel)
         : container;
       fallback.setAttribute("tabindex", "-1");
@@ -2470,6 +2518,18 @@ export function initializeEnvironmentOperations(
     // expired input prompt resolves straight to its terminal record).
     setPanelActive(false);
     resetSubmitButton();
+    if (isLifecycleConfiguration(op)) {
+      hideErrorBanner();
+      deps.showSetupWarnings([]);
+      if (
+        op.terminalState === "failed" ||
+        op.terminalState === "failed_partial"
+      ) {
+        deps.showError(op.failure?.message || op.summary);
+      }
+      if (op.kind === "lifecycle_environment") deps.reloadEnvironmentsTable();
+      return;
+    }
     // A setup the customer exited has no outcome to announce: the panel closes,
     // the failure banner it replaced comes down, and the table is reloaded
     // because the server has just finished removing what this attempt created.

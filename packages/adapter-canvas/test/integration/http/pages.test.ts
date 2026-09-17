@@ -15,6 +15,7 @@ import { plannedGraphPage } from "../../../src/pages/planned-graph-page.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { CanvasState } from "../../../src/shared.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
+import { ENVIRONMENT_PAGE_STATE_ID } from "../../../src/pages/browser-state-ids.js";
 import { pageStateCases } from "../../support/pages/page-state-cases.js";
 import { readBrowserPageState } from "../../support/pages/browser-state.js";
 import {
@@ -53,6 +54,31 @@ afterAll(async () => {
 });
 
 describe("canvas pages over real loopback HTTP", () => {
+  it("preserves setup navigation and mutation state without embedding action authority in the page", async () => {
+    resetState({
+      contextRepo: "owner/repo",
+      contextBranch: "feature/setup",
+      browserMutationNonce: "fixture-nonce"
+    });
+    for (const page of ["credentials", "environment"]) {
+      const response = await get(`/?page=${page}`);
+      expect(response.status).toBe(200);
+      expect(response.body).toContain('id="environment-setup-scope"');
+      expect(response.body).toContain(
+        "deployment requires separate authorization"
+      );
+      expect(
+        readBrowserPageState(response.body, ENVIRONMENT_PAGE_STATE_ID)
+      ).toEqual({
+        repo: "owner/repo",
+        branch: "feature/setup",
+        activeSubtab: page === "credentials" ? "credentials" : "environments",
+        mutationNonce: "fixture-nonce"
+      });
+      expect(response.body).toContain(browserEntryMarker("environment-page"));
+    }
+    await get("/?page=graph");
+  });
   it("binds the loopback interface and answers the default page as HTML", async () => {
     resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
     const url = new URL(entry.baseUrl);

@@ -107,6 +107,7 @@ function runnerDependencies(
     run: overrides.run || defaultRun(journal)
   });
   const base: VerificationRetryRunnerDependencies = {
+    verificationSafety: async () => null,
     createExecutor: () => Promise.resolve(executor),
     registerExecutor: (operationId) => {
       journal.registered.push(operationId);
@@ -192,6 +193,21 @@ function runnerDependencies(
 }
 
 describe("selected-account verification retry runner", () => {
+  it("refuses verification that could chain deployment without dispatching", async () => {
+    const target = operation();
+    const dependencies = runnerDependencies({
+      verificationSafety: async () =>
+        "The deploy workflow still auto-runs after verification."
+    });
+    await runVerificationRetry(target, "cmd-1", dependencies);
+    expect(
+      dependencies.journal.calls.filter((entry) => entry.args[0] === "workflow")
+    ).toEqual([]);
+    expect(dependencies.journal.monitored).toEqual([]);
+    expect(target.state).toBe("failed_partial");
+    expect(JSON.stringify(target.failure)).toContain("was not dispatched");
+  });
+
   it("honors Stop before starting a new verification dispatch", async () => {
     const target = operation();
     const dependencies = runnerDependencies({

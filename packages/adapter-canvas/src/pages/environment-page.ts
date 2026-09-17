@@ -86,6 +86,8 @@ ${browserScriptTag("deploy-result-page")}`
   }">Credentials</a>
 </nav>
 
+<p id="environment-setup-scope" class="rad-lede">Environment setup and credential configuration do not deploy an application. Review requested user actions in the Environments tab; deployment requires separate authorization.</p>
+
 ${environmentsPaneMarkup({
   activeSubtab,
   envName,

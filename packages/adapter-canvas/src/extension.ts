@@ -142,6 +142,8 @@ function errorMessage(error: unknown): string {
 
 const execFileAsync = promisify(execFile);
 
+import { createCanvasLifecycleCredentials } from "./runtime/lifecycle-credentials.js";
+
 // ─── Production dependency wiring ────────────────────────────────────────────
 const sessionHolder = createSessionHolder();
 const lifecycleHostBinding: HostCallerBinding = {
@@ -221,6 +223,19 @@ const lifecycle = createLifecycleBinding({
   clock: lifecycleClock,
   hostBinding: lifecycleBinding,
   authority: lifecycleAuthority,
+  credentials: createCanvasLifecycleCredentials({
+    authority: lifecycleAuthority,
+    hostBinding: lifecycleBinding,
+    clock: lifecycleClock,
+    runCommand: (command, args, control) => {
+      const abort = new AbortController();
+      const unsubscribe = control.cancellation.onAbort(() => abort.abort());
+      return runCommand(command, args, {
+        timeout: 15_000,
+        signal: abort.signal
+      }).finally(unsubscribe);
+    }
+  }),
   ...discoveryContext,
   definitions: {
     source: discoveryContext.source,
@@ -260,6 +275,7 @@ const dependencies: RadiusExtensionDependencies = {
     const entry = await getOrCreateServer(instanceId, page);
     entry.graphLifecycle = lifecycle;
     entry.deploymentLifecycle = lifecycle;
+    entry.environmentLifecycle = lifecycle;
     return entry;
   },
   getLastWebviewActivityAt,

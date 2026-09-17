@@ -116,7 +116,7 @@ async function fixture(
   if (action.status !== "ok") throw new Error("Fixture action failed");
   const input = {
     operationId: operation.operationId,
-    actionId: action.value.operation.actions[0].actionId,
+    actionId: action.value.action.actionId,
     response: { kind: "user.decision" as const, choice: "approve" }
   };
   const scope: AuthorizedScope<"operation.respond"> = {

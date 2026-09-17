@@ -61,6 +61,11 @@ import {
 } from "../../verification-plan.js";
 import type { WorkflowFileReadResult } from "../../verification-plan.js";
 import { LEGACY_DEPLOY_WORKFLOW_FILE } from "../../infra.js";
+import type { LifecycleBinding } from "../../runtime/create-lifecycle-binding.js";
+import {
+  createLifecycleEnvironmentHttp,
+  isLifecycleSetupInput
+} from "../services/lifecycle-environments.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -81,6 +86,7 @@ export interface CreateEnvironmentInstanceEntry {
 
 export interface CreateEnvironmentDependencies
   extends AdmissionPorts, WorkflowScopeGhRunnerPorts {
+  lifecycle?(instanceId: string): LifecycleBinding | undefined;
   ghCommandPresentation?: GhCommandPresentation;
   // --- request scope ---
   // Evaluated per request against this instance's server-owned token. Never a
@@ -257,6 +263,11 @@ export interface CreateEnvironmentDependencies
     defaultBranch: string;
     prState: { branch: string; base: string } | null;
     pullRequestUrl: string;
+    fetchFileResult?: (
+      repo: string,
+      path: string,
+      branch: string
+    ) => Promise<WorkflowFileReadResult>;
     fetchFile: (
       repo: string,
       path: string,
@@ -343,6 +354,41 @@ export async function handleCreateEnvironment(
     ((args: string[]) => Promise<CreateEnvironmentCommandResult>) | null = null;
   try {
     const data: CreateEnvironmentRequestData = JSON.parse(body);
+    const lifecycle = dependencies.lifecycle?.(context.instanceId);
+    const canonical = isLifecycleSetupInput(data);
+    const lifecycleWriter =
+      lifecycle?.routing.selection("environment").writer === "lifecycle";
+    if (
+      canonical ||
+      (lifecycleWriter &&
+        !(
+          typeof data.operationId === "string" &&
+          dependencies.getOperation(data.operationId)
+        ))
+    ) {
+      const result =
+        lifecycle ?
+          await createLifecycleEnvironmentHttp(lifecycle).start(data)
+        : {
+            status: 503,
+            body: {
+              error: "Canonical setup is unavailable in this host.",
+              code: "CAPABILITY_UNAVAILABLE"
+            }
+          };
+      respond(
+        result.status === 202 ? 200 : result.status,
+        result.status === 202 ?
+          {
+            ...result.body,
+            success: true,
+            actionRequired: true,
+            state: "action_required"
+          }
+        : result.body
+      );
+      return;
+    }
     const admission = await admitCreateEnvironmentRequest(data, dependencies);
     if (admission.outcome === "refused") {
       op = admission.operation;
@@ -1211,7 +1257,14 @@ export async function handleCreateEnvironment(
         automaticPolicy.state === "enabled" ||
         automaticPolicy.reason === "verify-present",
       fetchFile: (repo, path, branch) =>
-        dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor)
+        dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor),
+      fetchFileResult: (repo, path, branch) =>
+        dependencies.fetchFileFromRepoResult(
+          repo,
+          path,
+          branch,
+          selectedExecutor
+        )
     });
     if (verifyPlan.pullRequestUrl) pullRequestUrl = verifyPlan.pullRequestUrl;
     if (verifyPlan.trigger === "none") {

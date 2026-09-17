@@ -37,3 +37,7 @@ export * from "./deployment-policy.js";
 export * from "./deployment.js";
 export * from "./operation-reads.js";
 export * from "./execution-result.js";
+export * from "./credentials.js";
+export * from "./environments.js";
+export * from "./environment-configuration.js";
+export { configurationAuthorizationIntent } from "./configuration-authority.js";

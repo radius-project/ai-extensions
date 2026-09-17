@@ -29,6 +29,31 @@ ${
 `;
 
 describe("workflow parsing", () => {
+  it("does not treat an unavailable legacy content read as confirmed workflow absence", async () => {
+    expect(
+      await planCredentialVerification({
+        targetRepo: "fixture/repository",
+        defaultBranch: "main",
+        prState: null,
+        fetchFile: async () => null
+      })
+    ).toMatchObject({ shouldDispatch: false, trigger: "none" });
+  });
+  it("does not authorize deployment when verifying credentials on the default branch", async () => {
+    const plan = await planCredentialVerification({
+      targetRepo: "fixture/repository",
+      defaultBranch: "main",
+      prState: null,
+      fetchFile: async (_repo, path) =>
+        path.endsWith("run-rad-commands.yml") ?
+          dispatcher("dev")
+        : "on:\n  workflow_dispatch:\n"
+    });
+    expect(plan.shouldDispatch).toBe(false);
+    expect(plan.trigger).toBe("none");
+    expect(plan.skipReason).toContain("deploy");
+  });
+
   it("detects only a top-level workflow_run trigger", () => {
     expect(hasWorkflowRunTrigger(dispatcher("dev"))).toBe(true);
     expect(hasWorkflowRunTrigger(dispatcher("dev", false))).toBe(false);
@@ -200,7 +225,14 @@ describe("workflow parsing", () => {
 describe("credential verification planning", () => {
   const base = {
     targetRepo: "octo/app",
-    defaultBranch: "main"
+    defaultBranch: "main",
+    fetchFileResult: async (
+      _repo: string,
+      path: string
+    ): Promise<WorkflowFileReadResult> =>
+      path.endsWith("radius-deploy.yml") ?
+        { content: null, error: null, status: 404 }
+      : { content: dispatcher("dev", false), error: null, status: 200 }
   };
 
   it("dispatches directly when there is no PR fallback", async () => {
@@ -217,7 +249,7 @@ describe("credential verification planning", () => {
     expect(plan.supportsOperationMarker).toBe(true);
   });
 
-  it("uses the confirmed non-main branch when the direct workflow cannot be read", async () => {
+  it("retains the confirmed non-main branch but does not dispatch an unreadable verification workflow", async () => {
     // Assuming support would send `-f radius_operation` to a workflow that may
     // not declare it, and GitHub answers that with a 422 the journal reads as a
     // conclusive refusal, failing setup for the wrong stated reason.
@@ -227,7 +259,7 @@ describe("credential verification planning", () => {
       prState: null,
       fetchFile: async () => null
     });
-    expect(plan.shouldDispatch).toBe(true);
+    expect(plan.shouldDispatch).toBe(false);
     expect(plan.ref).toBe("trunk");
     expect(plan.defaultBranch).toBe("trunk");
     expect(plan.supportsOperationMarker).toBe(false);

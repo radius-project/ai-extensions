@@ -126,6 +126,15 @@ function uncertain(
 
 export type OperationEvent =
   | {
+      readonly kind: "configuration_updated";
+      readonly state: "running" | "succeeded" | "failed";
+      readonly observation: ReadonlyData<Observation>;
+      readonly result: ReadonlyData<
+        Extract<OperationRecord["result"], { kind: "configuration" }>
+      >;
+      readonly error?: ReadonlyData<OperationRecord["error"]>;
+    }
+  | {
       readonly kind: "definition_completed";
       readonly state: "succeeded" | "failed" | "cancelled";
       readonly observation: ReadonlyData<Observation>;
@@ -156,6 +165,46 @@ export function reduceOperation(
   operation: ReadonlyData<OperationRecord>,
   event: OperationEvent
 ): PortResult<ReadonlyData<OperationRecord>> {
+  if (event.kind === "configuration_updated") {
+    const required =
+      operation.operation === "credentials.configure" ?
+        ["identity"]
+      : ["identity", "environment", "workflows", "recipes"];
+    if (
+      ![
+        "credentials.configure",
+        "environment.create",
+        "environment.configure"
+      ].includes(operation.operation) ||
+      isTerminalOperation(operation) ||
+      operation.cancellationRequestedAt ||
+      !operation.actions.some(
+        (action) => action.responder === "user" && action.status === "accepted"
+      ) ||
+      new Set(event.result.phases.map((phase) => phase.phase)).size !==
+        event.result.phases.length ||
+      event.result.phases.some((phase) => !required.includes(phase.phase)) ||
+      (event.state === "succeeded" &&
+        (event.error ||
+          !event.result.identityRef ||
+          event.observation.quality !== "current" ||
+          event.observation.completeness !== "complete" ||
+          required.some(
+            (name) =>
+              !event.result.phases.some(
+                (phase) => phase.phase === name && phase.status === "succeeded"
+              )
+          )))
+    )
+      return portFailure("PRECONDITION_FAILED");
+    return portSuccess({
+      ...operation,
+      state: event.state,
+      observation: event.observation,
+      result: event.result,
+      ...(event.error ? { error: event.error } : {})
+    });
+  }
   if (event.kind === "definition_completed") {
     if (
       operation.operation !== "definition.author" ||
@@ -404,6 +453,16 @@ export function createSessionOperationRegistry(deps: {
         state: next.state,
         observation: next.observation,
         ...(next.result?.kind === "definition" ? { result: next.result } : {}),
+        ...(next.error ? { error: next.error } : {})
+      });
+      return reduced.status === "ok" && sameLifecycleData(reduced.value, next);
+    }
+    if (next.result?.kind === "configuration" && next.state !== "cancelled") {
+      const reduced = reduceOperation(previous, {
+        kind: "configuration_updated",
+        state: next.state,
+        observation: next.observation,
+        result: next.result,
         ...(next.error ? { error: next.error } : {})
       });
       return reduced.status === "ok" && sameLifecycleData(reduced.value, next);

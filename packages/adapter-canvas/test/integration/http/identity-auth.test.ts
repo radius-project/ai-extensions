@@ -28,7 +28,13 @@ function start(): Harness {
   const harness: Harness = {
     calls: [],
     commands: {
-      [`az account set --subscription ${SUBSCRIPTION}`]: "",
+      [`az account show --subscription ${SUBSCRIPTION} -o json`]:
+        JSON.stringify({
+          tenantId: TENANT_A,
+          id: SUBSCRIPTION,
+          name: "Fixture Subscription",
+          user: { name: "fixture-user@example.com" }
+        }),
       "az account show -o json": JSON.stringify({
         tenantId: TENANT_A,
         id: SUBSCRIPTION,
@@ -133,8 +139,7 @@ describe("identity-auth real-loopback HIT (RF-02)", () => {
       subscriptionName: "Fixture Subscription"
     });
     expect(harness.calls).toEqual([
-      `run(az account set --subscription ${SUBSCRIPTION})`,
-      "run(az account show -o json)"
+      `run(az account show --subscription ${SUBSCRIPTION} -o json)`
     ]);
 
     const mismatch = await post(

@@ -50,8 +50,15 @@ import {
   createLifecycleDeploymentRegistrations,
   type LifecycleDeploymentDependencies
 } from "./lifecycle-deployment.js";
+import {
+  createLifecycleEnvironmentRegistrations,
+  type LifecycleEnvironmentDependencies
+} from "./lifecycle-environments.js";
+import type { LifecycleCredentialDependencies } from "./lifecycle-credentials.js";
 
 export interface LifecycleBindingDependencies {
+  readonly credentials?: LifecycleCredentialDependencies;
+  readonly environmentConfiguration?: LifecycleEnvironmentDependencies;
   readonly deployment?: LifecycleDeploymentDependencies;
   readonly definitions?: LifecycleDefinitionDependencies;
   readonly discovery?: LifecycleDiscoveryDependencies;
@@ -168,6 +175,29 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
     registry,
     routing
   });
+  const hasLegacySetupInProgress = () =>
+    deps
+      .knownLegacyOperations()
+      .some(
+        (operation) =>
+          operation.family === "environment" &&
+          operation.owner === "legacy" &&
+          operation.needsControl
+      );
+  const environments = createLifecycleEnvironmentRegistrations({
+    ...deps,
+    identity: deps.authority,
+    registry,
+    actions,
+    routing,
+    hasLegacySetupInProgress
+  });
+  if (deps.environmentConfiguration)
+    routing.transition("environment", {
+      writer: "lifecycle",
+      readers: ["legacy", "lifecycle"],
+      controllers: ["legacy", "lifecycle"]
+    });
   if (deps.deployment)
     routing.transition("deployment", {
       writer: "lifecycle",
@@ -179,7 +209,8 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
     capabilities: [
       ...(graphs ? graphCapabilities : []),
       ...(definitions?.capabilities ?? []),
-      ...deployment.capabilities
+      ...deployment.capabilities,
+      ...environments.capabilities
     ]
   });
   const service = createLifecycleService({
@@ -192,6 +223,7 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
       ...(graphs?.registrations ?? []),
       ...(definitions?.registrations ?? []),
       ...deployment.registrations,
+      ...environments.registrations,
       registerLifecycleOperation(
         "operation.respond",
         { actions },
@@ -394,6 +426,7 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
     actions,
     routing,
     capabilities: service.capabilities,
+    hasLegacySetupInProgress,
     hasActiveOperations: () =>
       !closed && (activeRequests > 0 || registry.hasActiveOperations()),
     async close() {

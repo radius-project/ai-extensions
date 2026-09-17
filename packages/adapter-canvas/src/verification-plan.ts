@@ -130,7 +130,8 @@ export async function planCredentialVerification({
   dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
   automaticPushEnabled = false,
   branchVerificationAllowed = true,
-  fetchFile
+  fetchFile,
+  fetchFileResult
 }: {
   targetRepo: string;
   defaultBranch: string;
@@ -141,6 +142,11 @@ export async function planCredentialVerification({
   automaticPushEnabled?: boolean;
   branchVerificationAllowed?: boolean;
   fetchFile: FetchFile;
+  fetchFileResult?: (
+    repo: string,
+    path: string,
+    branch: string
+  ) => Promise<WorkflowFileReadResult>;
 }): Promise<CredentialVerificationPlan> {
   if (!prState) {
     // The dispatch runs against the default branch here, so the workflow that
@@ -154,13 +160,38 @@ export async function planCredentialVerification({
       verifyWorkflowPath,
       defaultBranch
     );
+    const readSafety = async (path: string): Promise<WorkflowFileReadResult> =>
+      fetchFileResult ?
+        fetchFileResult(targetRepo, path, defaultBranch)
+      : {
+          content: (await fetchFile(targetRepo, path, defaultBranch)) ?? null,
+          error: null,
+          status: null
+        };
+    const [dispatcher, legacyDeploy] = await Promise.all([
+      readSafety(dispatcherWorkflowPath),
+      readSafety(".github/workflows/radius-deploy.yml")
+    ]);
+    const safety = automaticBranchVerificationPolicy({
+      verify: { content: null, error: null, status: 404 },
+      dispatcher,
+      legacyDeploy
+    });
+    const shouldDispatch =
+      safety.state === "enabled" &&
+      typeof directWorkflow === "string" &&
+      directWorkflow.trim() !== "";
     return {
-      shouldDispatch: true,
-      trigger: "workflow_dispatch",
+      shouldDispatch,
+      trigger: shouldDispatch ? "workflow_dispatch" : "none",
       ref: defaultBranch,
       defaultBranch,
       pullRequestUrl: "",
-      skipReason: "",
+      skipReason:
+        shouldDispatch ? "" : (
+          automaticBranchVerificationPolicyMessage(safety) ||
+          "The credential verification workflow is unavailable; setup did not authorize deployment."
+        ),
       supportsOperationMarker: hasVerificationOperationMarker(directWorkflow)
     };
   }

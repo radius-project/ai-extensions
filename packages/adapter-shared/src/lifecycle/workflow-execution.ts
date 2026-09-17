@@ -21,6 +21,7 @@ import {
   type WorkflowRunIdentity
 } from "@radius-project/core/lifecycle";
 import { createExecutionEvidenceReader } from "./execution-evidence.js";
+import { qualifiedLifecycleWorkflowAssets } from "./workflow-qualification.js";
 
 export interface WorkflowQualification {
   readonly repo: string;
@@ -96,11 +97,6 @@ export function createWorkflowExecution(
       evidence: "workflow"
     });
   function qualified(input: WorkflowPreparation, value: WorkflowQualification) {
-    const files = [
-      "run-rad-commands.yml",
-      "run-rad-commands-azure.yml",
-      "run-rad-commands-aws.yml"
-    ];
     return (
       input.intent.operation === "deployment.start" &&
       value.repo === input.correlation.target.repo &&
@@ -108,37 +104,8 @@ export function createWorkflowExecution(
       value.application === input.correlation.target.application &&
       value.definition === input.intent.target.definition &&
       value.commit === input.source.commit &&
-      value.executionVersion === 1 &&
       value.protections === "verified" &&
-      value.workflow === ".github/workflows/run-rad-commands.yml" &&
-      /^[a-f0-9]{40}$/.test(value.producerRef) &&
-      files.every(
-        (file) =>
-          !!value.selectedFiles[file] &&
-          value.selectedFiles[file] === value.reviewedFiles[file]
-      ) &&
-      ["run-rad-commands-azure.yml", "run-rad-commands-aws.yml"].every(
-        (file) =>
-          value.selectedFiles[file].includes(
-            `actions/lifecycle-evidence@${value.producerRef}`
-          ) &&
-          value.selectedFiles[file].includes(
-            `actions/publish-lifecycle-result@${value.producerRef}`
-          ) &&
-          [
-            "lifecycle-evidence/action.yml",
-            "lifecycle-evidence/evidence.sh",
-            "run-rad-commands/action.yml",
-            "restore-state/action.yml",
-            "teardown/action.yml",
-            "publish-lifecycle-result/action.yml",
-            "deploy-progress/progress.sh"
-          ].every(
-            (file) =>
-              !!value.producerFiles[file] &&
-              value.producerFiles[file] === value.reviewedProducerFiles[file]
-          )
-      )
+      qualifiedLifecycleWorkflowAssets(value)
     );
   }
   async function read<T>(

@@ -41,6 +41,8 @@ import type {
   GhcrPreflightResult
 } from "../../../src/server/routes/create-environment-types.js";
 import type { WorkflowFileReadResult } from "../../../src/verification-plan.js";
+import type { LifecycleBinding } from "../../../src/runtime/create-lifecycle-binding.js";
+import { createEnvironmentFixture } from "../../support/lifecycle-environments.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -60,6 +62,7 @@ interface GhRule {
 }
 
 interface Script {
+  lifecycle?: LifecycleBinding;
   ghCommandPresentation?: GhCommandPresentation;
   gh?: GhRule[];
   runListResults?: Array<Partial<CreateEnvironmentCommandResult>>;
@@ -491,6 +494,7 @@ function start(script: Script = {}): Harness {
   const entry: CreateEnvironmentInstanceEntry = { state };
 
   const dependencies: CreateEnvironmentDependencies = {
+    lifecycle: () => script.lifecycle,
     ghCommandPresentation: script.ghCommandPresentation,
     // --- request scope: read per request, exactly as server.ts does ---
     isServerOwnedRequest: (_instanceId, request) =>
@@ -953,6 +957,87 @@ function ghCallsExcludingNamespaceClaimLookup(
 }
 
 describe("create-environment real-loopback HIT: the server-owned gate", () => {
+  it.each([
+    "available",
+    "missing",
+    "revoked",
+    "legacy-shaped",
+    "legacy-without-id"
+  ] as const)(
+    "retains the server-owned canonical setup contract when %s",
+    async (scenario) => {
+      const fixture = await createEnvironmentFixture();
+      try {
+        const harness = start({
+          lifecycle: scenario === "missing" ? undefined : fixture.binding
+        });
+        fixture.state.trusted = scenario !== "revoked";
+        const body =
+          scenario === "legacy-shaped" || scenario === "legacy-without-id" ?
+            {
+              ...fixture.target,
+              ...(scenario === "legacy-shaped" ?
+                { operationId: "unknown-legacy-operation" }
+              : {})
+            }
+          : { ...fixture.target, configuration: fixture.configuration };
+        expect((await post(body, { serverOwned: false })).status).toBe(403);
+        expect(fixture.binding.registry.knownOperations()).toHaveLength(0);
+        const response = await post(body);
+        expect(response.status).toBe(
+          scenario === "available" ? 200
+          : scenario === "missing" ? 503
+          : scenario === "revoked" ? 403
+          : 400
+        );
+        if (scenario === "available")
+          expect(await response.json()).toMatchObject({
+            success: true,
+            actionRequired: true,
+            state: "action_required",
+            operationId: expect.any(String)
+          });
+        expect(harness.journal).toEqual([]);
+        expect(fixture.state.exists).toBe(false);
+      } finally {
+        await fixture.close();
+      }
+    }
+  );
+
+  it("retains an existing durable legacy workflow continuation with the canonical writer selected", async () => {
+    const fixture = await createEnvironmentFixture();
+    try {
+      const harness = start({
+        lifecycle: fixture.binding,
+        preparedEnvironment: {
+          requestedName: "dev",
+          canonicalName: "dev",
+          state: "reused"
+        },
+        azureCredential: () => ({ clientId: "c", tenantId: "t" }),
+        gh: recoveredVerifyWorkflowRules()
+      });
+      prepareVerifyWorkflowRecovery(harness.operation);
+      const response = await post({
+        repo: "octo/app",
+        environment: "dev",
+        operationEnvironment: "dev",
+        operationId: "op-http"
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        success: true,
+        verifySkipped: true,
+        verifyRunUrl: ""
+      });
+      expect(fixture.binding.registry.knownOperations()).toHaveLength(0);
+      expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("refuses a request that arrives without the server-owned token", async () => {
     const harness = start();
 

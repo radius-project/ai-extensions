@@ -78,10 +78,10 @@ const NOT_A_GUID = "x&calc";
 // Load-bearing fixture values used by the route behavior cases.
 const USER_NAME = "fixture-user@example.com";
 const SUBSCRIPTION_NAME = "Fixture Subscription";
-const SWITCH_KEY = `az account set --subscription ${SUBSCRIPTION}`;
+const SCOPED_ACCOUNT_SHOW_KEY = `az account show --subscription ${SUBSCRIPTION} -o json`;
 const ACCOUNT_SHOW_KEY = "az account show -o json";
 const AWS_IDENTITY_KEY = "aws sts get-caller-identity --output json";
-const SWITCH_FAILURE = "no such subscription";
+const SUBSCRIPTION_FAILURE = "no such subscription";
 const NO_SESSION_ERROR = "Please run az login";
 const CLI_MISSING_ERROR = "spawn az ENOENT";
 const AWS_CLI_MISSING_ERROR = "spawn aws ENOENT";
@@ -132,7 +132,7 @@ function commandLine(command: string, args: string[]): string {
 }
 
 const DEFAULT_COMMANDS: Record<string, string | Error> = {
-  [SWITCH_KEY]: "",
+  [SCOPED_ACCOUNT_SHOW_KEY]: JSON.stringify(AZ_ACCOUNT),
   [ACCOUNT_SHOW_KEY]: JSON.stringify(AZ_ACCOUNT),
   [AWS_IDENTITY_KEY]: JSON.stringify(AWS_IDENTITY)
 };
@@ -291,13 +291,36 @@ describe("identity-auth routes (SU-08)", () => {
       subscriptionId: SUBSCRIPTION,
       subscriptionName: "Fixture Subscription"
     });
-    // The subscription switch precedes the account read, and both use the
-    // 10s timeout the legacy branch passed.
+    // Verification scopes the read without changing the active CLI account.
     expect(calls.log).toEqual([
       `azureCredentialIdValidationError(${TENANT_A}|${SUBSCRIPTION})`,
-      `runCommand(az account set --subscription ${SUBSCRIPTION}|10000)`,
-      "runCommand(az account show -o json|10000)"
+      `runCommand(${SCOPED_ACCOUNT_SHOW_KEY}|10000)`
     ]);
+  });
+
+  it("inspects the requested subscription without selecting or authenticating an account", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      commands: {
+        [`az account show --subscription ${SUBSCRIPTION} -o json`]:
+          JSON.stringify(AZ_ACCOUNT)
+      }
+    });
+    const response = await run(
+      "/api/verify-azure-login",
+      JSON.stringify({ tenantId: TENANT_A, subscriptionId: SUBSCRIPTION }),
+      handleVerifyAzureLogin,
+      deps
+    );
+    expect(JSON.parse(response.body)).toMatchObject({
+      success: true,
+      subscriptionId: SUBSCRIPTION
+    });
+    expect(
+      calls.log.some(
+        (call) => call.includes("account set") || call.includes("az login")
+      )
+    ).toBe(false);
   });
 
   it("never runs az login", async () => {
@@ -332,11 +355,11 @@ describe("identity-auth routes (SU-08)", () => {
     ]);
   });
 
-  it("continues when the subscription switch fails", async () => {
+  it("does not verify a different active account when the requested subscription is unavailable", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       commands: {
-        [SWITCH_KEY]: new Error(SWITCH_FAILURE)
+        [SCOPED_ACCOUNT_SHOW_KEY]: new Error(SUBSCRIPTION_FAILURE)
       }
     });
     const recording = await run(
@@ -346,7 +369,13 @@ describe("identity-auth routes (SU-08)", () => {
       deps
     );
     expect(recording.status).toBe(200);
-    expect(JSON.parse(recording.body)).toHaveProperty("success", true);
+    expect(JSON.parse(recording.body)).toHaveProperty(
+      "code",
+      "az-login-required"
+    );
+    expect(calls.log).not.toContain(
+      "runCommand(az account show -o json|10000)"
+    );
   });
 
   it("reports a missing Azure CLI with its own code", async () => {

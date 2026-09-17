@@ -2970,6 +2970,139 @@ describe("operation commands", () => {
     return controller;
   }
 
+  it.each(["lifecycle.authenticate", "lifecycle.configure"])(
+    "sends the outstanding identity for %s without a deployment request",
+    async (kind) => {
+      const browser = setup();
+      const deps = createDeps();
+      const action = {
+        id: "action-1",
+        kind,
+        label: "Continue configuration",
+        path: "/api/operations/op-1/continue"
+      };
+      await pressCommand(
+        browser,
+        () =>
+          jsonResponse(
+            op({
+              kind: "lifecycle_credentials",
+              state: "succeeded",
+              terminalState: "succeeded",
+              summary:
+                "Credential configuration completed. No application deployment was started."
+            })
+          ),
+        { action, deps: deps.deps }
+      );
+      expect(browser.net.calls.map((call) => call.url)).toEqual([action.path]);
+      expect(browser.net.calls[0].init?.body).toBe(
+        JSON.stringify({ actionId: action.id, choice: "continue" })
+      );
+      expect(deps.successBanners).toEqual([]);
+      expect(deps.actionRequired).toEqual([]);
+    }
+  );
+
+  it.each([
+    {
+      id: "",
+      kind: "lifecycle.configure",
+      path: "/api/operations/op-1/continue"
+    },
+    {
+      id: "action-1",
+      kind: "lifecycle.configure",
+      path: "/api/operations/op-2/continue"
+    },
+    {
+      id: "action-1",
+      kind: "lifecycle.configure",
+      path: "https://example.invalid/continue"
+    },
+    {
+      id: "action-1",
+      kind: "lifecycle.unsupported",
+      path: "/api/operations/op-1/continue"
+    }
+  ])("does not render an unbound lifecycle control: %j", (action) => {
+    const browser = setup();
+    renderActions(browser, [action]);
+    expect(buttons(browser)).toHaveLength(0);
+  });
+
+  it.each(["action_required", "unconfirmed"])(
+    "resumes %s configuration without legacy PR or success guidance",
+    async (state) => {
+      const browser = setup();
+      const deps = createDeps();
+      browser.net.handle(operationsUrl(), () =>
+        jsonResponse(
+          op({
+            kind: "lifecycle_environment",
+            state,
+            terminalState: "action_required",
+            summary:
+              "Configuration needs attention. No application deployment is authorized."
+          })
+        )
+      );
+      const controller = controllerFor(browser, { deps: deps.deps });
+      controller?.resumeProgress();
+      await flushPromises();
+      expect(deps.actionRequired).toEqual([]);
+      expect(deps.successBanners).toEqual([]);
+      expect(browser.els[PROGRESS_IDS.title].textContent).toContain(
+        "Configuration needs attention"
+      );
+    }
+  );
+
+  it.each([
+    { state: "failed", message: "Identity changed.", missingTitle: false },
+    { state: "failed_partial", message: "", missingTitle: true },
+    { state: "failed", message: undefined, missingTitle: false }
+  ])(
+    "renders configuration $state with truthful retained evidence",
+    async ({ state, message, missingTitle }) => {
+      const browser = setupWithout(
+        missingTitle ? [PROGRESS_IDS.failureTitle, PROGRESS_IDS.title] : []
+      );
+      const deps = createDeps();
+      await pressCommand(
+        browser,
+        () =>
+          jsonResponse(
+            op({
+              kind: "lifecycle_environment",
+              state,
+              terminalState: state,
+              summary: "Configuration incomplete.",
+              failure: message === undefined ? null : { message }
+            })
+          ),
+        {
+          action: {
+            id: "action-1",
+            kind: "lifecycle.configure",
+            path: "/api/operations/op-1/continue"
+          },
+          deps: deps.deps
+        }
+      );
+      expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toContain(
+        "No automatic rollback or deployment"
+      );
+      expect(deps.errors).toEqual([message || "Configuration incomplete."]);
+      expect(deps.successBanners).toEqual([]);
+      expect(deps.actionRequired).toEqual([]);
+      expect(deps.reloadCount).toBe(1);
+      expect(browser.net.calls.map((call) => call.url)).toEqual([
+        "/api/operations/op-1/continue"
+      ]);
+    }
+  );
+
   it("renders exactly the actions the server projected", () => {
     const browser = setup();
     renderActions(browser, [
@@ -3215,6 +3348,29 @@ describe("operation commands", () => {
       "-1"
     );
     expect(browser.els[PROGRESS_IDS.commands].focusCount).toBe(1);
+  });
+
+  it("retains a visible configuration region when its focused action becomes pending", () => {
+    const browser = setup();
+    const action = {
+      id: "action",
+      kind: "lifecycle.configure",
+      path: "/api/operations/op-1/continue"
+    };
+    const controller = renderActions(browser, [action], {
+      kind: "lifecycle_environment"
+    });
+    browser.document.activeElement = buttons(browser)[0];
+    controller?.renderProgress(
+      record({
+        kind: "lifecycle_environment",
+        actions: [{ ...action, pending: true }]
+      })
+    );
+    expect(browser.els[PROGRESS_IDS.commands].focusCount).toBe(1);
+    expect(browser.els[PROGRESS_IDS.commands].getAttribute("tabindex")).toBe(
+      "-1"
+    );
   });
 
   it("moves focus to the visible heading when polling hides the command region", () => {

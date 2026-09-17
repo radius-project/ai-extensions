@@ -72,3 +72,5 @@ export * from "./lifecycle/definition-validation.js";
 export * from "./lifecycle/definition-promotion.js";
 export * from "./lifecycle/execution-evidence.js";
 export * from "./lifecycle/workflow-execution.js";
+export * from "./lifecycle/workflow-qualification.js";
+export * from "./lifecycle/environment-configuration.js";

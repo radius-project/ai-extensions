@@ -66,7 +66,7 @@ T010 is implemented through a context-owned `SourceReadAdapter`, with separate f
 
 **Completed foundation**: T001-T017 are implemented and verified.
 
-**Completed scope**: T001-T067 are complete, including the deployment and observation slice authorized on 2026-09-16. Implementation stops at this checkpoint; T068-T116 remain outside the authorized implementation scope.
+**Completed scope**: T001-T078 are complete. The user authorized T068-T078 on 2026-09-17, and the environment and credential setup checkpoint passed its same-source quality, boundary, browser, and artifact gates. Implementation stops here; T079-T116 remain outside the authorized implementation scope.
 
 The final integrated snapshot passes frozen dependency restoration, typecheck, lint, formatting, the full Linux Node coverage gate (11,433 passed, 34 skipped), build, 17 built-extension assertions, 16 Windows process assertions, 30 browser component tests, and 73 Chromium cases with zero retry-only passes. Coverage floors are unchanged. Operations, actions, service, authorization, binding, and routing have 100% measured coverage. Additional invariant defenses remain unexecuted in `declarations.ts:219,225` because the fixed catalog supplies object targets with required arrays, and in `lifecycle-setup-store.ts:72,85` because the existing client-view/action projectors construct their own validated descriptors; malformed public messages cannot reach those branches.
 
@@ -214,20 +214,20 @@ The 40 Linux skips comprise 21 Windows-only cases, two Darwin-only cases, 16 exi
 
 ### Tests for User Story 4
 
-- [ ] T068 [P] [US4] Add credential/environment service cases in `packages/core/src/lifecycle/credentials.test.ts` and `environments.test.ts` for inspection without login, explicit authentication, unsupported providers, partial configuration, identity failure, and no implicit deploy.
-- [ ] T069 [P] [US4] Add setup/configuration runtime and HTTP cases in `packages/adapter-canvas/test/integration/runtime/lifecycle-environments.test.ts` and `packages/adapter-canvas/test/integration/http/lifecycle-environments.test.ts`, preserving current workflow-publishing, profile, and protected-environment behavior.
+- [x] T068 [P] [US4] Add credential/environment service cases in `packages/core/src/lifecycle/credentials.test.ts` and `environments.test.ts` for inspection without login, explicit authentication, unsupported providers, partial configuration, identity failure, and no implicit deploy.
+- [x] T069 [P] [US4] Add setup/configuration runtime and HTTP cases in `packages/adapter-canvas/test/integration/runtime/lifecycle-environments.test.ts` and `packages/adapter-canvas/test/integration/http/lifecycle-environments.test.ts`, preserving current workflow-publishing, profile, and protected-environment behavior.
 
 ### Implementation for User Story 4
 
-- [ ] T070 [US4] Implement `credentials.inspect`/`credentials.configure` in `packages/core/src/lifecycle/credentials.ts`; keep inspection read-only, request explicit user authentication through the action engine, and verify actual identity rather than accept claimed completion.
-- [ ] T071 [US4] Bind scoped credential operations in `packages/adapter-canvas/src/runtime/lifecycle-credentials.ts` with `lifecycle-credentials.test.ts`, reusing GitHub/cloud credential helpers while preventing raw secret values in public results, prompts, graphs, and diagnostics.
-- [ ] T072 [US4] Implement `environment.create` in `packages/core/src/lifecycle/environments.ts`, with current permission/approval checks, provider capability validation, identity references, recipe registrations, and explicit partial/prerequisite outcomes.
-- [ ] T073 [US4] Implement `environment.configure` in `packages/core/src/lifecycle/environment-configuration.ts` with `environment-configuration.test.ts`; validate explicit patches, preserve omitted fields, and reject implicit application deployment or provider substitution.
-- [ ] T074 [US4] Extract reusable environment execution/publishing in `packages/adapter-shared/src/lifecycle/environment-configuration.ts` with collocated tests, injecting existing publishers and typed workflow intent; ensure legacy verification continuation cannot bypass separate deployment authorization.
-- [ ] T075 [US4] Route setup/credential/environment compatibility paths through services in `packages/adapter-canvas/src/server/routes/create-environment.ts` and owning identity/environment route handlers identified by `packages/adapter-canvas/src/server/route-table.ts`, preserving request/status/stream contracts and existing durable setup control.
-- [ ] T076 [US4] Wire required authentication/configuration actions into `packages/adapter-canvas/src/pages/environment-page.ts` and `packages/adapter-canvas/src/browser/environment/operations.ts` with collocated and HTTP state tests; preserve focus, serialization, navigation, and explicit continuation.
-- [ ] T077 [US4] Add create/configure/error/resume scenarios to `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts` with controlled identity/workflow ports, automated accessibility, and keyboard coverage; assert configuration produces no deployment call.
-- [ ] T078 [US4] Complete environment unit/runtime/HTTP, affected component/Chromium, and built-extension evidence; update setup validation instructions in `specs/001-frontend-neutral-radius/quickstart.md` without claiming Azure/AWS feature parity.
+- [x] T070 [US4] Implement `credentials.inspect`/`credentials.configure` in `packages/core/src/lifecycle/credentials.ts`; keep inspection read-only, request explicit user authentication through the action engine, and verify actual identity rather than accept claimed completion.
+- [x] T071 [US4] Bind scoped credential operations in `packages/adapter-canvas/src/runtime/lifecycle-credentials.ts` with `lifecycle-credentials.test.ts`, reusing GitHub/cloud credential helpers while preventing raw secret values in public results, prompts, graphs, and diagnostics.
+- [x] T072 [US4] Implement `environment.create` in `packages/core/src/lifecycle/environments.ts`, with current permission/approval checks, provider capability validation, identity references, recipe registrations, and explicit partial/prerequisite outcomes.
+- [x] T073 [US4] Implement `environment.configure` in `packages/core/src/lifecycle/environment-configuration.ts` with `environment-configuration.test.ts`; validate explicit patches, preserve omitted fields, and reject implicit application deployment or provider substitution.
+- [x] T074 [US4] Extract reusable environment execution/publishing in `packages/adapter-shared/src/lifecycle/environment-configuration.ts` with collocated tests, injecting existing publishers and typed workflow intent; ensure legacy verification continuation cannot bypass separate deployment authorization.
+- [x] T075 [US4] Route setup/credential/environment compatibility paths through services in `packages/adapter-canvas/src/server/routes/create-environment.ts` and owning identity/environment route handlers identified by `packages/adapter-canvas/src/server/route-table.ts`, preserving request/status/stream contracts and existing durable setup control.
+- [x] T076 [US4] Wire required authentication/configuration actions into `packages/adapter-canvas/src/pages/environment-page.ts` and `packages/adapter-canvas/src/browser/environment/operations.ts` with collocated and HTTP state tests; preserve focus, serialization, navigation, and explicit continuation.
+- [x] T077 [US4] Add create/configure/error/resume scenarios to `packages/adapter-canvas/test/e2e/canvas-chromium.test.ts` with controlled identity/workflow ports, automated accessibility, and keyboard coverage; assert configuration produces no deployment call.
+- [x] T078 [US4] Complete environment unit/runtime/HTTP, affected component/Chromium, and built-extension evidence; update setup validation instructions in `specs/001-frontend-neutral-radius/quickstart.md` without claiming Azure/AWS feature parity.
 
 **Checkpoint**: Users can prepare environments independently of deploying applications, with identity actions and partial failures visible.
 

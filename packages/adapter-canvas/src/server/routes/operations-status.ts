@@ -1,4 +1,10 @@
 import type { CanvasRequestContext } from "../request-context.js";
+import type { LifecycleBinding } from "../../runtime/create-lifecycle-binding.js";
+import {
+  createLifecycleEnvironmentHttp,
+  isLifecycleSetupInput,
+  lifecycleSetupOperation
+} from "../services/lifecycle-environments.js";
 import { KUBERNETES_NAMESPACE_ERROR } from "@radius-project/core";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import { setupStartConflictResponse } from "./operation-start-conflict.js";
@@ -24,6 +30,7 @@ import {
 // handle: each is a single function, and the test fakes throw on anything a
 // given route is not supposed to reach.
 export interface OperationsStatusDependencies {
+  lifecycle?(instanceId: string): LifecycleBinding | undefined;
   latest(repo: string): unknown;
   latestAny(): unknown;
   get(operationId: string): unknown;
@@ -78,6 +85,7 @@ export type OperationStartConflict = Extract<
 // under one interface keeps the composition root readable without turning any
 // of them into a broad port object.
 export interface CreateOperationDependencies {
+  lifecycle?(instanceId: string): LifecycleBinding | undefined;
   // Pure guards and factories. Injected rather than imported so the module
   // spawns nothing and the boundary of what this route can reach stays visible.
   isValidRepoSlug(value: unknown): boolean;
@@ -250,8 +258,20 @@ async function finishSchedulingFailure(
 export function handleLatestOperation(
   context: CanvasRequestContext,
   dependencies: OperationsStatusDependencies
-): void {
+): void | Promise<void> {
   const repo = context.url.searchParams.get("repo") || "";
+  const lifecycle = dependencies.lifecycle?.(context.instanceId);
+  const canonical =
+    lifecycle && lifecycleSetupOperation(lifecycle, undefined, repo);
+  if (canonical && !lifecycle.hasLegacySetupInProgress())
+    return createLifecycleEnvironmentHttp(lifecycle)
+      .status(canonical.operationId)
+      .then((result) => {
+        context.response.setHeader("Content-Type", "application/json");
+        context.response.setHeader("Cache-Control", "no-store");
+        context.response.writeHead(result.status);
+        context.response.end(JSON.stringify(result.body));
+      });
   // No repo in hand means "the operation that matters right now": the status
   // chip renders on every page and only some pages know their repository.
   const record = repo ? dependencies.latest(repo) : dependencies.latestAny();
@@ -268,7 +288,7 @@ export function handleLatestOperation(
 export function handleOperationById(
   context: CanvasRequestContext,
   dependencies: OperationsStatusDependencies
-): void {
+): void | Promise<void> {
   // `decodeURIComponent` throws a URIError on a malformed escape such as
   // `/api/operations/%`, which Node's URL parser leaves intact in the pathname.
   // The throw propagates out of the handler exactly as it did from the legacy
@@ -280,6 +300,16 @@ export function handleOperationById(
   const operationId = decodeURIComponent(
     context.pathname.slice(OPERATIONS_PREFIX.length)
   );
+  const lifecycle = dependencies.lifecycle?.(context.instanceId);
+  if (lifecycle && lifecycleSetupOperation(lifecycle, operationId))
+    return createLifecycleEnvironmentHttp(lifecycle)
+      .status(operationId)
+      .then((result) => {
+        context.response.setHeader("Content-Type", "application/json");
+        context.response.setHeader("Cache-Control", "no-store");
+        context.response.writeHead(result.status);
+        context.response.end(JSON.stringify(result.body));
+      });
   const record = dependencies.get(operationId);
   context.response.setHeader("Content-Type", "application/json");
   context.response.setHeader("Cache-Control", "no-store");
@@ -451,6 +481,28 @@ export async function handleCreateOperation(
       error: "Invalid JSON body.",
       code: "invalid-json"
     });
+    return;
+  }
+  const lifecycle = dependencies.lifecycle?.(context.instanceId);
+  if (
+    isLifecycleSetupInput(data) ||
+    lifecycle?.routing.selection("environment").writer === "lifecycle"
+  ) {
+    const result =
+      lifecycle ?
+        await createLifecycleEnvironmentHttp(lifecycle).start(data)
+      : {
+          status: 503,
+          body: {
+            error: "Canonical setup is unavailable in this host.",
+            code: "CAPABILITY_UNAVAILABLE"
+          }
+        };
+    context.response.setHeader("Content-Type", "application/json");
+    if ("statusUrl" in result.body)
+      context.response.setHeader("Location", result.body.statusUrl);
+    context.response.writeHead(result.status);
+    context.response.end(JSON.stringify(result.body));
     return;
   }
   const repo = String(data.repo || "");

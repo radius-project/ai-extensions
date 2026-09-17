@@ -75,6 +75,7 @@ export type AuthorizationRequest<
       readonly source?: ReadonlyData<ResolvedSource>;
       readonly operationId?: string;
       readonly approvalRef?: string;
+      readonly configuration?: ConfigurationAuthorizationIntent;
     }
   : never;
 /** The identity adapter must revalidate this reference at each privileged boundary. */
@@ -88,6 +89,7 @@ export type AuthorizedScope<O extends LifecycleOperation = LifecycleOperation> =
       readonly source?: ReadonlyData<ResolvedSource>;
       readonly operationId?: string;
       readonly approvalRef?: string;
+      readonly configuration?: ConfigurationAuthorizationIntent;
     }
   : never;
 export interface IdentityObservation {
@@ -318,6 +320,29 @@ export type EnvironmentChange =
       readonly operation: "environment.configure";
       readonly patch: ReadonlyData<EnvironmentConfigurationPatch>;
     };
+export type ConfigurationAuthorizationIntent =
+  | EnvironmentChange
+  | {
+      readonly operation: "credentials.configure";
+      readonly input: ReadonlyData<
+        LifecycleRequestFor<"credentials.configure">["input"]
+      >;
+    };
+export interface EnvironmentConfigurationPlan {
+  readonly target: EnvironmentSelection;
+  readonly change: EnvironmentChange;
+  readonly configuration: ReadonlyData<EnvironmentConfiguration>;
+  readonly expected: EnvironmentInspection | null;
+}
+export interface EnvironmentConfigurationReceipt {
+  readonly state: "succeeded" | "failed" | "running";
+  readonly inspection?: EnvironmentInspection;
+  readonly observation: ReadonlyData<Observation>;
+  readonly phases: ReadonlyData<
+    Extract<OperationRecord["result"], { kind: "configuration" }>["phases"]
+  >;
+  readonly error?: ReadonlyData<OperationRecord["error"]>;
+}
 export interface DeployedApplication {
   readonly target: ApplicationSelection;
   readonly evidence: ReadonlyData<
@@ -366,9 +391,9 @@ export interface EnvironmentAccessPort {
   /** Applies only the declared environment changes; never initiates application deployment. */
   configure(
     scope: AuthorizedScope<"environment.create" | "environment.configure">,
-    change: EnvironmentChange,
+    plan: EnvironmentConfigurationPlan,
     control: RequestControl
-  ): Promise<PortResult<EnvironmentInspection>>;
+  ): Promise<PortResult<EnvironmentConfigurationReceipt>>;
   planDeletion(
     scope: AuthorizedScope<DeletionOperation>,
     previousPlanRef: string | undefined,

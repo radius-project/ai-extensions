@@ -98,6 +98,7 @@ export const providerSchema = {
   type: "string",
   enum: ["azure", "aws"]
 } as const;
+export type Provider = (typeof providerSchema.enum)[number];
 export const diagnosticSchema = {
   type: "object",
   additionalProperties: false,
@@ -626,6 +627,33 @@ export const deletionPlanSchema = {
 } as const;
 export type DeletionPlan = FromSchema<typeof deletionPlanSchema>;
 
+export const configurationResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    kind: { const: "configuration" },
+    identityRef: handleSchema,
+    provider: providerSchema,
+    phases: {
+      type: "array",
+      minItems: 1,
+      maxItems: 4,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          phase: { enum: ["identity", "environment", "workflows", "recipes"] },
+          status: { enum: ["succeeded", "failed", "skipped", "unknown"] },
+          reason: textSchema
+        },
+        required: ["phase", "status", "reason"]
+      }
+    }
+  },
+  required: ["kind", "phases"]
+} as const;
+export type ConfigurationResult = FromSchema<typeof configurationResultSchema>;
+
 export const operationRecordSchema = {
   ...DRAFT_07,
   type: "object",
@@ -645,6 +673,7 @@ export const operationRecordSchema = {
     error: lifecycleErrorSchema,
     result: {
       oneOf: [
+        configurationResultSchema,
         {
           type: "object",
           additionalProperties: false,

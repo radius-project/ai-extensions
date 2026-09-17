@@ -35,6 +35,22 @@ function markupClasses(html: string): Set<string> {
 }
 
 describe("environmentPage", () => {
+  it("distinguishes setup actions from separately authorized deployment", () => {
+    const html = environmentPage({
+      contextRepo: "owner/repo",
+      browserMutationNonce: "fixture-nonce"
+    });
+    expect(html).toContain('id="environment-setup-scope"');
+    expect(html).toContain(
+      "credential configuration do not deploy an application"
+    );
+    expect(html).toContain(
+      "Review requested user actions in the Environments tab"
+    );
+    expect(readBrowserPageState(html, ENVIRONMENT_PAGE_STATE_ID)).toMatchObject(
+      { repo: "owner/repo", mutationNonce: "fixture-nonce" }
+    );
+  });
   it("renders both environment and credential panes with the environments tab active", () => {
     const html = environmentPage({
       contextRepo: "octo/app",

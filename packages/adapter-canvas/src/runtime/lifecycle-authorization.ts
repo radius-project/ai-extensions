@@ -5,6 +5,7 @@ import {
   portUnavailable,
   verifySourceExpectation,
   sameLifecycleData,
+  configurationAuthorizationIntent,
   type AuthorizationRequest,
   type AuthorizedScope,
   type CallerContext,
@@ -107,6 +108,7 @@ export function createCanvasLifecycleAuthority(deps: {
         ![
           "operation.respond",
           "capabilities.get",
+          "credentials.inspect",
           "application.list",
           "application.inspect",
           "environment.list",
@@ -234,6 +236,9 @@ export function createLifecycleAuthorization(authority: LifecycleAuthority) {
       caller,
       operation: request.operation,
       target: request.target,
+      ...(configurationAuthorizationIntent(request) ?
+        { configuration: configurationAuthorizationIntent(request) }
+      : {}),
       ...("operationId" in request.input ?
         { operationId: request.input.operationId }
       : {}),
@@ -251,6 +256,7 @@ export function createLifecycleAuthorization(authority: LifecycleAuthority) {
         scope.operation !== request.operation ||
         !sameTarget(scope.target, request.target) ||
         scope.operationId !== input.operationId ||
+        !sameLifecycleData(scope.configuration, input.configuration) ||
         !sameLifecycleData(scope.source, source)
       ) {
         return portForbidden();
