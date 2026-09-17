@@ -947,6 +947,8 @@ describe("runRadAppGraph artifact completion", () => {
     const bicepFile = path.join(binDir, "app.bicep");
     const saved = path.join(binDir, ".radius", "app-graph.json");
     fs.writeFileSync(bicepFile, "resource app {}");
+    fs.mkdirSync(path.dirname(saved), { recursive: true });
+    fs.writeFileSync(saved, sentinel);
 
     const failure = await runRadAppGraph(bicepFile, {
       radPath: bin,
@@ -956,6 +958,22 @@ describe("runRadAppGraph artifact completion", () => {
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).not.toContain(sentinel);
     expect(fs.existsSync(saved)).toBe(false);
+  }, 10000);
+
+  it("fails before graph generation when an existing artifact cannot be removed", async () => {
+    const bicepFile = path.join(binDir, "app.bicep");
+    const saved = path.join(binDir, ".radius", "app-graph.json");
+    fs.writeFileSync(bicepFile, "resource app {}");
+    fs.mkdirSync(saved, { recursive: true });
+
+    await expect(
+      runRadAppGraph(bicepFile, {
+        radPath: bin,
+        saveGraphJsonTo: saved
+      })
+    ).rejects.toThrow(
+      "Cannot safely replace the existing application graph artifact."
+    );
   }, 10000);
 
   it("does not expose malformed graph content through the parse failure", async () => {

@@ -678,7 +678,7 @@ describe("applicationGraphToResources — icon resolution", () => {
           ]
         })
       ).toThrow(
-        "Canvas refused to save or render Secret resource because its graph data was not redacted."
+        "Secret resource cannot be projected because its graph data was not redacted."
       );
     });
 

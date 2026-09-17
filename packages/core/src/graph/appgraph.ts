@@ -56,7 +56,7 @@ function assertSecretDataIsRedacted(resource: Record<string, unknown>): void {
       ` "${resource.name}"`
     : "";
   throw new Error(
-    `Canvas refused to save or render Secret resource${name} because its graph data was not redacted. Supply Secret data through secure inputs or schema-supported references; do not place plaintext values in the application model.`
+    `Secret resource${name} cannot be projected because its graph data was not redacted. Supply Secret data through secure inputs or schema-supported references; do not place plaintext values in the application model.`
   );
 }
 

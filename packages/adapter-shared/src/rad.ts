@@ -1148,8 +1148,9 @@ export async function resolveRadForGraph({
  * use `--preview`, which switches rad to the deployed-application API path.
  *
  * When `saveGraphJsonTo` is an absolute path, a safety-projected app-graph.json
- * is copied there (parent directories created as needed) so unknown property
- * bags and graph-visible Secret data never reach the workspace artifact.
+ * replaces any existing artifact (parent directories created as needed) so
+ * unknown property bags and graph-visible Secret data never reach or remain in
+ * the workspace artifact.
  *
  * The returned value is the same safety-projected payload. The original CLI
  * artifact exists only inside the throwaway working directory.
@@ -1166,6 +1167,16 @@ export async function runRadAppGraph(
     exitCloseGraceMs = 2000
   }: RunRadAppGraphOptions = {}
 ): Promise<unknown> {
+  if (saveGraphJsonTo && path.isAbsolute(saveGraphJsonTo)) {
+    try {
+      fs.rmSync(saveGraphJsonTo, { force: true });
+    } catch (error) {
+      throw new Error(
+        "Cannot safely replace the existing application graph artifact.",
+        { cause: error }
+      );
+    }
+  }
   const radPath = providedRadPath || (await resolveRadForGraph({ log }));
   await ensureManagedBicep(radPath, { log, timeout });
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
@@ -1314,10 +1325,9 @@ export async function runRadAppGraph(
       throw new Error("rad app graph produced invalid graph JSON.");
     }
     const appGraph = projectSafeApplicationGraph(parsed);
-    const safeJson = JSON.stringify(appGraph, null, 2);
     if (saveGraphJsonTo) {
       if (path.isAbsolute(saveGraphJsonTo))
-        saveGraphJson(saveGraphJsonTo, safeJson, log);
+        saveGraphJson(saveGraphJsonTo, JSON.stringify(appGraph, null, 2), log);
       else
         log(
           `Warning: saveGraphJsonTo must be an absolute path; ignoring: ${saveGraphJsonTo}`
