@@ -453,8 +453,6 @@ describe("cloud-e2e-cleanup.yml", () => {
       [
         "Purge stale Entra identities",
         "Purge stale GHCR deployment state",
-        "Purge orphaned GHCR deployment state",
-        "Reclaim leaked Radius workloads from the shared cluster",
         "Purge stale GitHub Environments",
         "Purge stale fallback pull requests and branches",
         "Reset an idle fixture repository to the pinned baseline"
@@ -510,9 +508,9 @@ describe("cloud-e2e-cleanup.yml", () => {
 
     expect(orphanIndex).toBeGreaterThanOrEqual(0);
     expect(environmentIndex).toBeGreaterThanOrEqual(0);
-    expect(orphanCleanup?.if).toContain(
-      "steps.radius-app-cleanup.outcome == 'success'"
-    );
+    // A failed application delete is one of the ways state is orphaned, so
+    // gating recovery on it would skip exactly the runs that need it.
+    expect(orphanCleanup?.if).not.toContain("steps.radius-app-cleanup");
     expect(orphanCleanup?.env?.GH_PACKAGES_TOKEN).toBe(
       "${{ secrets.GH_RAD_CI_BOT_PAT }}"
     );
@@ -544,8 +542,10 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(clusterCleanup?.if).toContain(
       "steps.azure-login.outcome == 'success'"
     );
-    expect(clusterCleanup?.if).toContain(
-      "steps.radius-app-cleanup.outcome == 'success'"
+    // A workload is stranded here precisely when that delete fails.
+    expect(clusterCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    expect(clusterCleanup?.env?.FIXTURE_APPLICATION).toBe(
+      "${{ steps.pin.outputs.fixture-application }}"
     );
     expect(clusterCleanup?.env?.AKS_CLUSTER_NAME).toBe(
       "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"

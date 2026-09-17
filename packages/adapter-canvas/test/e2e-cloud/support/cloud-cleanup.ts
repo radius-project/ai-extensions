@@ -41,11 +41,18 @@ const RADIUS_MANAGED_APP_TAG = "radius-managed";
 const RADIUS_REPO_APP_TAG_PREFIX = "radius-repo:";
 const RADIUS_ENVIRONMENT_APP_TAG_PREFIX = "radius-environment:";
 const RADIUS_ENVIRONMENT_LABEL = "radapp.io/environment";
+const RADIUS_APPLICATION_LABEL = "radapp.io/application";
+// `radius-system` holds the control plane this suite installs, so an object
+// mislabelled into it must be refused rather than reclaimed.
 const SYSTEM_NAMESPACES = new Set([
   "kube-system",
   "kube-public",
-  "kube-node-lease"
+  "kube-node-lease",
+  "radius-system"
 ]);
+// The writer appends the environment slug and twelve hex characters of the
+// environment identity, so a package sharing only the prefix is not state.
+const STATE_PACKAGE_SUFFIX = /^[a-z0-9-]+-[0-9a-f]{12}$/;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ?
@@ -438,6 +445,7 @@ export function selectOrphanedStatePackages(
     const name = requireString(item?.name);
     if (
       name.startsWith(prefix) &&
+      STATE_PACKAGE_SUFFIX.test(name.slice(prefix.length)) &&
       !live.has(name) &&
       expired(item?.updated_at, cutoffMilliseconds)
     )
@@ -467,17 +475,25 @@ export interface LeakedClusterWorkload {
  * carries the label of the most recent run to render it, so an object whose
  * environment is still live belongs to work that may still be in flight, while
  * an object naming an environment that no longer exists cannot belong to
- * anyone. System namespaces are refused outright; nothing this suite creates
- * belongs in one, so a match there means the label is being misread.
+ * anyone. The fixture application must be named exactly as well: the sweep is
+ * only entitled to the workloads this suite renders, and a stale environment
+ * label alone does not make someone else's object ours. System namespaces are
+ * refused outright; nothing this suite creates belongs in one, so a match there
+ * means the label is being misread.
  */
 export function selectLeakedClusterWorkloads(
   payload: unknown,
   environmentPrefix: string,
+  application: string,
   liveEnvironments: readonly string[]
 ): LeakedClusterWorkload[] {
   if (!environmentPrefix.trim())
     throw new Error(
       "An environment prefix is required to select leaked cluster workloads."
+    );
+  if (!application.trim())
+    throw new Error(
+      "An application name is required to select leaked cluster workloads."
     );
   const live = new Set(liveEnvironments);
   const items = asRecord(payload)?.items;
@@ -488,6 +504,8 @@ export function selectLeakedClusterWorkloads(
     const labels = asRecord(metadata?.labels);
     const environment = requireString(labels?.[RADIUS_ENVIRONMENT_LABEL]);
     if (!environment.startsWith(environmentPrefix) || live.has(environment))
+      continue;
+    if (requireString(labels?.[RADIUS_APPLICATION_LABEL]) !== application)
       continue;
 
     const kind = requireString(item?.kind);

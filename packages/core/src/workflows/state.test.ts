@@ -131,6 +131,11 @@ describe("stateRegistryPrefix", () => {
     expect(() => stateRegistryPrefix("ai-extensions")).toThrow(
       /expected owner\/repo/
     );
+    expect(() => stateRegistryPrefix("/repo")).toThrow(/expected owner\/repo/);
+    expect(() => stateRegistryPrefix("owner/")).toThrow(/expected owner\/repo/);
+    expect(() => stateRegistryPrefix("acme/app/extra")).toThrow(
+      /expected owner\/repo/
+    );
   });
 
   it("rejects a repository with no usable characters", () => {

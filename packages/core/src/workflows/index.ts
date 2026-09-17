@@ -16,7 +16,8 @@ export type {
 export {
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
-  stateRegistryForEnvironment
+  stateRegistryForEnvironment,
+  stateRegistryPrefix
 } from "./state.js";
 export {
   generateDeleteWorkflow,

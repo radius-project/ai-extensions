@@ -434,8 +434,14 @@ jobs:
       # This lists the organisation's packages instead and keeps the ones some
       # surviving environment still claims. It must stay ahead of the
       # environment purge: run it afterwards and every package looks orphaned.
+      #
+      # Unlike the step above it is deliberately not gated on the Radius
+      # application delete succeeding. That delete failing is one of the ways
+      # state is orphaned in the first place, and the live-environment check is
+      # already the safety boundary: an application still mid-delete has an
+      # environment, so its package is claimed and never a candidate.
       - name: Purge orphaned GHCR deployment state
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
@@ -548,13 +554,21 @@ jobs:
       #
       # Objects are matched by their environment label, not by age: the label
       # names the last run to render them, so anything naming an environment
-      # that no longer exists cannot belong to work still in flight.
+      # that no longer exists cannot belong to work still in flight. The
+      # fixture application must be named exactly as well - a stale environment
+      # label alone does not make somebody else's object ours to delete.
+      #
+      # This is not gated on the Radius application delete succeeding, because
+      # that failing is precisely what strands a workload here. An application
+      # still mid-delete has an environment, so its objects are live and are
+      # never candidates.
       - name: Reclaim leaked Radius workloads from the shared cluster
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.azure-login.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.azure-login.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+          FIXTURE_APPLICATION: ${{ steps.pin.outputs.fixture-application }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
           RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -583,9 +597,9 @@ jobs:
             --output json >"$objects"
 
           node --input-type=module - \
-            "$objects" "$ENVIRONMENT_PREFIX" "$live_environments" "$leaked" <<'NODE'
+            "$objects" "$ENVIRONMENT_PREFIX" "$FIXTURE_APPLICATION" "$live_environments" "$leaked" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [objectsFile, prefix, liveEnvironmentsFile, outputFile] =
+          const [objectsFile, prefix, application, liveEnvironmentsFile, outputFile] =
             process.argv.slice(2);
           const { selectLeakedClusterWorkloads } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
@@ -597,7 +611,9 @@ jobs:
             .filter(Boolean);
           await writeFile(
             outputFile,
-            JSON.stringify(selectLeakedClusterWorkloads(objects, prefix, live))
+            JSON.stringify(
+              selectLeakedClusterWorkloads(objects, prefix, application, live)
+            )
           );
           NODE
 
