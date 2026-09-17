@@ -21,6 +21,7 @@ import {
   stateRegistryForEnvironment
 } from "@radius-project/core";
 import {
+  CloudCommandError,
   describeError,
   expectSuccess,
   isGitHubApiNotFound,
@@ -568,11 +569,7 @@ export async function createCloudFixture(
     );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
-      throw new Error(
-        `${context} failed with exit code ${result.code}: ${(
-          result.stderr || result.stdout
-        ).trim()}`
-      );
+      throw new CloudCommandError(context, result);
     }
     return readKubernetesWorkloads(parseJsonObject(result, context));
   };
@@ -607,11 +604,7 @@ export async function createCloudFixture(
     );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
-      throw new Error(
-        `${context} failed with exit code ${result.code}: ${(
-          result.stderr || result.stdout
-        ).trim()}`
-      );
+      throw new CloudCommandError(context, result);
     }
     return readKubernetesResourceNames(parseJsonObject(result, context));
   };
@@ -1097,11 +1090,7 @@ export async function createCloudFixture(
       ]);
       if (result.code === 0) return true;
       if (isMissingNamespace(result)) return false;
-      throw new Error(
-        `${context} failed with exit code ${result.code}: ${(
-          result.stderr || result.stdout
-        ).trim()}`
-      );
+      throw new CloudCommandError(context, result);
     },
 
     registerApplicationCleanupTarget(application, namespace) {
@@ -1596,10 +1585,16 @@ async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
       // attempt before the deadline is killed mid-flight and reports an exit
       // code with no output at all. Raising that as a probe failure would
       // replace the timeout diagnostic — which names the workloads and their
-      // replica counts — with a bare "failed with exit code 1". A probe that
-      // fails while budget remains is still a genuine failure and still
-      // raises, so a broken cluster is not waited out.
-      if (!expired() || error instanceof AssertionDeadlineExpired) throw error;
+      // replica counts — with a bare "failed with exit code 1".
+      //
+      // Only a command the port saw killed by its own timeout is translated,
+      // and only once the deadline has already passed. Every other failure
+      // raises verbatim however late it arrives: a probe that genuinely found
+      // something wrong — a duplicate app registration, a rejected credential
+      // — must keep saying so rather than be reported as "timed out waiting",
+      // which would describe a state nothing observed.
+      if (!expired() || !(error instanceof CloudCommandError && error.timedOut))
+        throw error;
       throw new Error(options.timeoutMessage(), { cause: error });
     }
     if (value !== undefined) return value;
@@ -1609,14 +1604,6 @@ async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
   }
 }
 
-/**
- * Refusing to start a command because the budget is already gone, as opposed
- * to a command that was killed part-way through it. The poll reports this one
- * verbatim: it names the exact step that ran out, which its own timeout
- * message could not.
- */
-class AssertionDeadlineExpired extends Error {}
-
 function remainingCommandTimeout(
   deadline: number,
   now: () => Date,
@@ -1624,9 +1611,7 @@ function remainingCommandTimeout(
 ): number {
   const remaining = deadline - now().getTime();
   if (remaining <= 0)
-    throw new AssertionDeadlineExpired(
-      `${context} exhausted its assertion deadline.`
-    );
+    throw new Error(`${context} exhausted its assertion deadline.`);
   return remaining;
 }
 

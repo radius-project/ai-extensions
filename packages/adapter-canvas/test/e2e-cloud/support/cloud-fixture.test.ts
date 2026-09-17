@@ -4106,10 +4106,11 @@ describe("createCloudFixture", () => {
     });
 
     // The probe runs kubectl with whatever budget the poll has left, so the
-    // last attempt before the deadline is killed mid-flight: execFile reports a
-    // non-zero exit with both streams empty and only its own "Command failed"
-    // message. Raising that as a probe failure replaced the timeout diagnostic
-    // with a bare exit code, which is what made a real run unexplainable.
+    // last attempt before the deadline is killed mid-flight: the port reports
+    // the kill with both streams empty and only execFile's own "Command
+    // failed" message. Raising that as a probe failure replaced the timeout
+    // diagnostic with a bare exit code, which is what made a real run
+    // unexplainable.
     it("reports a probe killed by its own deadline as the assertion timeout", async () => {
       let clock = NOW.getTime();
       const { fixture } = await createHarness(
@@ -4129,7 +4130,8 @@ describe("createCloudFixture", () => {
               return {
                 code: 1,
                 stdout: "",
-                stderr: "Command failed: kubectl --kubeconfig /tmp/k get"
+                stderr: "Command failed: kubectl --kubeconfig /tmp/k get",
+                timedOut: true
               };
             }
           }
@@ -4163,6 +4165,60 @@ describe("createCloudFixture", () => {
       expect((failure?.cause as Error | undefined)?.message).toMatch(
         /failed with exit code 1/
       );
+    });
+
+    // The counterpart: a probe that failed on its own terms says what it found
+    // however late it arrives. Reporting it as "timed out waiting" would name
+    // a state nothing observed and hide the real failure.
+    it("reports a probe failure that crosses the deadline verbatim", async () => {
+      let clock = NOW.getTime();
+      const { fixture } = await createHarness(
+        [
+          credentials(),
+          {
+            tool: "kubectl",
+            match: ["get", "deployments"],
+            respond: { stdout: workloadsJson(["demo-frontend", 0]) },
+            times: 1
+          },
+          {
+            tool: "kubectl",
+            match: ["get", "deployments"],
+            respond: () => {
+              clock += 2000;
+              return {
+                code: 1,
+                stdout: "",
+                stderr:
+                  "Unable to connect to the server: x509: certificate signed by unknown authority"
+              };
+            }
+          }
+        ],
+        {
+          makeWorkspaceDir: (prefix) =>
+            Promise.resolve(prefix.includes("kube") ? KUBE_DIR : WORKSPACE),
+          readNow: () => new Date(clock),
+          wait: (milliseconds) => {
+            clock += milliseconds;
+            return Promise.resolve();
+          }
+        },
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      const failure = await fixture
+        .assertApplicationWorkloadsPresent(APP, NAMESPACE)
+        .then(
+          () => undefined,
+          (error: unknown) => error as Error
+        );
+
+      expect(failure?.message).toMatch(
+        /kubectl get deployments -n radius-demo failed with exit code 1: Unable to connect to the server: x509/
+      );
+      expect(failure?.message).not.toMatch(/are not ready/);
+      expect(failure?.cause).toBeUndefined();
     });
 
     it("reports a listing failure written to stdout rather than stderr", async () => {
