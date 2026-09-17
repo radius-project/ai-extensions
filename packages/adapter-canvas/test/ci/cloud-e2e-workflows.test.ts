@@ -740,3 +740,48 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(raw).toContain("Refusing to purge against an ambiguous scope");
   });
 });
+
+describe.each(WORKFLOWS)("%s - shell scripts parse", (file) => {
+  it("terminates every heredoc at column zero", async () => {
+    // `<<'TAG'` requires the terminator to start at column 0 of the script.
+    // YAML block scalars strip only the block's base indentation, so a
+    // terminator indented to match the surrounding bash nesting survives review
+    // and passes YAML and actionlint, then makes bash swallow the rest of the
+    // script as heredoc body: "unexpected EOF". The step cannot run at all, and
+    // nothing before this test caught it - a purge step shipped broken and
+    // silently stopped reclaiming leaked cloud state.
+    const workflow = await parseWorkflow(file);
+    const offenders: string[] = [];
+
+    for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+      for (const step of steps(job)) {
+        if (typeof step.run !== "string") continue;
+        const lines = step.run.split("\n");
+
+        lines.forEach((line, index) => {
+          // `<<-` is excluded deliberately: it strips leading tabs, so an
+          // indented terminator is legal there.
+          const opened = /<<'([A-Za-z_][A-Za-z0-9_]*)'/.exec(line);
+          if (!opened || line.includes("<<-")) return;
+          const tag = opened[1];
+          const nextOpen = lines.findIndex(
+            (candidate, candidateIndex) =>
+              candidateIndex > index &&
+              /<<'([A-Za-z_][A-Za-z0-9_]*)'/.test(candidate) &&
+              !candidate.includes("<<-")
+          );
+          const terminated = lines
+            .slice(index + 1, nextOpen === -1 ? undefined : nextOpen)
+            .some((candidate) => candidate === tag);
+          if (!terminated) {
+            offenders.push(
+              `${file} ${jobName} > ${step.name ?? "(unnamed)"}: <<'${tag}' opened on script line ${index + 1}`
+            );
+          }
+        });
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+});
