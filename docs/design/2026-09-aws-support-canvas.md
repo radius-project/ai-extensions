@@ -149,17 +149,19 @@ Section 2, `Connect GitHub to a cloud`, is unchanged from Azure and states the m
 
 #### Section 3 · Deploy identity
 
-Section 3 names the identity the environment will use, as Azure's equivalent names the app registration; the lead-in follows the provider — `The IAM role GitHub Actions assumes to deploy — over OIDC, no stored secrets.` It is one labeled field, **IAM role**, above help text stating the terms: Radius creates the role in the developer's account, trusts this repository and environment over OIDC, grants it permission to manage AWS resources in the selected region, and grants it administrative access to the target cluster. For an existing role, those same changes are previewed and applied without transferring ownership of the role to Radius.
+This section settles three things: what the developer is granting, who decides which identity is used, and how far that identity reaches.
+
+**What is granted.** Section 3 names the identity the environment will use, as Azure's equivalent names the app registration; the lead-in follows the provider — `The IAM role GitHub Actions assumes to deploy — over OIDC, no stored secrets.` It is one labeled field, **IAM role**, above help text stating the terms: Radius creates the role in the developer's account, trusts this repository and environment over OIDC, grants it permission to manage AWS resources in the selected region, and grants it administrative access to the target cluster. For an existing role, those same changes are previewed and applied without transferring ownership of the role to Radius.
 
 The developer is told what that reaches before they agree to it, because a role that provisions databases and queues on their behalf is not a detail to discover later. The role can create and manage resources across AWS services in its region, not only the ones this application declares; its cluster access is administrative over the whole cluster rather than the environment's namespace; and a few AWS services are global, so a region restriction does not bound them. Each additional environment widens this — another region, another cluster — and the confirmation says so at the time.
 
-The default is a new role proposed as `radius-deploy-<owner>-<repo>`. The name is editable and a typed name is never overwritten — the field re-proposes only while it is empty or still holds the previous proposal. Because the name carries the repository and not the environment, editing the environment name leaves the role name alone.
+**Who decides.** The default is a new role proposed as `radius-deploy-<owner>-<repo>`. The name is editable and a typed name is never overwritten — the field re-proposes only while it is empty or still holds the previous proposal. Because the name carries the repository and not the environment, editing the environment name leaves the role name alone.
 
 The developer can instead pick an existing role from the profile's account. The picker lists roles the signed-in identity can inspect, identifies the repositories each already trusts, and pins the choice by ARN rather than by its editable name. Selecting a role is explicit consent to add this repository and environment to its trust, grant the AWS permissions the environment needs, and grant access to the selected EKS cluster; the canvas shows those changes before confirmation, and stops on any the signed-in identity cannot make, providing the action for the role's owner. Choosing a role disables the name field and is reversible until the environment is created.
 
 *Selection, not name, authorizes reuse.* Typing the name of a role that already exists is never consent to modify it. Azure sets the precedent: it stops setup rather than rewriting an app registration encountered only because its name collides, and offers a `use an existing application…` link that pins the chosen one, disables the name field, is reversible through `Use a per-repo identity instead`, and warns that `Sharing one identity across repositories means every wired repository can use its Azure permissions. Only do this for repos that belong to the same product.` AWS applies the same rule to IAM roles.
 
-**How far one role reaches.**
+**How far it reaches.**
 
 | Cloud     | Deploy identity  | Belongs to | Environments are separated by         |
 |-----------|------------------|------------|---------------------------------------|
