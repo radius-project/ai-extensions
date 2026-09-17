@@ -592,6 +592,71 @@ jobs:
             exit 1
           fi
 
+      # A recipe provisions real Azure resources - the suite's Postgres becomes
+      # a flexible server - into whichever resource group the environment
+      # names. A per-run `radtest-*` group is reclaimed by deleting the group,
+      # but this one holds the cluster and must survive, so its contents
+      # outlive their run instead. Radius tags none of them, so there is no
+      # identity to match on; what makes them reclaimable is that this group
+      # exists only to run this suite.
+      #
+      # Age is not consulted, for the same reason the per-run groups are
+      # deleted on sight: the shared concurrency group means this never runs
+      # beside a journey, so anything here belongs to one that has finished.
+      # The cluster itself is refused, and the selector refuses the whole group
+      # if the configured cluster is not in it.
+      - name: Reclaim Azure resources left in the shared resource group
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
+        env:
+          AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
+          RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          resources="$RUNNER_TEMP/group-cleanup-resources.json"
+          reclaimable="$RUNNER_TEMP/group-cleanup-reclaimable.json"
+
+          az resource list \
+            --subscription "$SUBSCRIPTION_ID" \
+            --resource-group "$RESOURCE_GROUP" \
+            --only-show-errors \
+            --output json >"$resources"
+
+          node --input-type=module - \
+            "$resources" "$AKS_CLUSTER_NAME" "$reclaimable" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [resourcesFile, clusterName, outputFile] = process.argv.slice(2);
+          const { selectReclaimableGroupResources } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const resources = JSON.parse(await readFile(resourcesFile, "utf8"));
+          await writeFile(
+            outputFile,
+            JSON.stringify(
+              selectReclaimableGroupResources(resources, clusterName)
+            )
+          );
+          NODE
+
+          deleted=0
+          failures=()
+          while IFS=$'\t' read -r id name type; do
+            [[ -n "$id" ]] || continue
+            if ! az resource delete --ids "$id" --only-show-errors; then
+              failures+=("delete $type $name")
+              continue
+            fi
+            deleted=$((deleted + 1))
+          done < <(jq -r '.[] | [.id, .name, .type] | @tsv' "$reclaimable")
+
+          echo "- Azure resources reclaimed from $RESOURCE_GROUP: $deleted" >>"$GITHUB_STEP_SUMMARY"
+          if (( ${#failures[@]} > 0 )); then
+            printf 'Shared resource group cleanup failures:\n' >&2
+            printf '  - %s\n' "${failures[@]}" >&2
+            exit 1
+          fi
+
       # Both object types are matched by the exact display name the product
       # derives from the fixture repository, never by prefix. Service principals
       # go first because deleting an application can leave an orphaned principal

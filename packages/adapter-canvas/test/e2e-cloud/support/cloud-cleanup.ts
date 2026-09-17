@@ -53,6 +53,8 @@ const SYSTEM_NAMESPACES = new Set([
 // The writer appends the environment slug and twelve hex characters of the
 // environment identity, so a package sharing only the prefix is not state.
 const STATE_PACKAGE_SUFFIX = /^[a-z0-9-]+-[0-9a-f]{12}$/;
+// Azure reports resource types in mixed case, so comparisons are lowercased.
+const MANAGED_CLUSTER_TYPE = "microsoft.containerservice/managedclusters";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ?
@@ -452,6 +454,67 @@ export function selectStaleStatePackages(
       names.push(name);
   }
   return names;
+}
+
+export interface ReclaimableGroupResource {
+  readonly id: string;
+  readonly name: string;
+  readonly type: string;
+}
+
+/**
+ * Everything in the shared resource group except the cluster itself.
+ *
+ * A recipe provisions real Azure resources - the suite's Postgres becomes a
+ * flexible server - into whichever resource group the environment names. When
+ * that is a per-run `radtest-*` group, deleting the group reclaims them. When
+ * it is the long-lived group that holds the cluster, nothing does: Radius tags
+ * none of them, so no sweep can tell one apart from an unrelated resource, and
+ * a failed application delete strands it there indefinitely.
+ *
+ * This group exists only to run the Cloud E2E suite, so its contents are
+ * reclaimed wholesale rather than identified individually. Age is not consulted
+ * for the same reason the per-run groups are deleted on sight: the shared
+ * concurrency group means a purge never runs beside a journey, so anything
+ * still here is left over from one that has already finished.
+ *
+ * The cluster is refused, and so is every other managed cluster, since deleting
+ * one would strand its node resource group and break every later run. The
+ * configured cluster must actually be present: a group without it is not the
+ * group this sweep was pointed at, and emptying it would destroy something
+ * nobody intended.
+ */
+export function selectReclaimableGroupResources(
+  payload: unknown,
+  clusterName: string
+): ReclaimableGroupResource[] {
+  if (!clusterName.trim())
+    throw new Error(
+      "A cluster name is required to select reclaimable resource group contents."
+    );
+  const reclaimable: ReclaimableGroupResource[] = [];
+  let clusterFound = false;
+  for (const entry of requireArray(payload, "Azure resources")) {
+    const item = asRecord(entry);
+    const id = requireString(item?.id);
+    const name = requireString(item?.name);
+    const type = requireString(item?.type);
+    if (!id || !name || !type)
+      throw new Error(
+        "An Azure resource in the shared resource group is missing an id, name or type."
+      );
+    if (type.toLowerCase() === MANAGED_CLUSTER_TYPE) {
+      if (name === clusterName) clusterFound = true;
+      continue;
+    }
+    reclaimable.push({ id, name, type });
+  }
+  if (!clusterFound)
+    throw new Error(
+      `The resource group does not contain cluster "${clusterName}", so it is not the shared Cloud E2E ` +
+        "group; refusing to delete any of its contents."
+    );
+  return reclaimable;
 }
 
 export interface LeakedClusterWorkload {

@@ -9,6 +9,7 @@ import {
   selectAppIdsWithUnprocessedServicePrincipals,
   selectExpectedRoleAssignments,
   selectLeakedClusterWorkloads,
+  selectReclaimableGroupResources,
   selectOpenPullRequestHeadRefs,
   selectStaleStatePackages,
   selectTestResourceGroups
@@ -926,5 +927,92 @@ describe("selectLeakedClusterWorkloads", () => {
     expect(() =>
       selectLeakedClusterWorkloads([], prefix, application, cutoff)
     ).toThrow(/Kubernetes objects did not return a JSON array/);
+  });
+});
+
+describe("selectReclaimableGroupResources", () => {
+  const cluster = "ai_extensions_aks";
+  const clusterResource = {
+    id: "/subscriptions/s/resourceGroups/g/providers/Microsoft.ContainerService/managedClusters/ai_extensions_aks",
+    name: cluster,
+    type: "Microsoft.ContainerService/managedClusters"
+  };
+  const postgres = {
+    id: "/subscriptions/s/resourceGroups/g/providers/Microsoft.DBforPostgreSQL/flexibleServers/pgsql-8278c35f7a31c8f7",
+    name: "pgsql-8278c35f7a31c8f7",
+    type: "Microsoft.DBforPostgreSQL/flexibleServers"
+  };
+
+  it("reclaims a recipe-created resource the application delete left behind", () => {
+    expect(
+      selectReclaimableGroupResources([clusterResource, postgres], cluster)
+    ).toEqual([{ id: postgres.id, name: postgres.name, type: postgres.type }]);
+  });
+
+  it("keeps the cluster the suite deploys to", () => {
+    expect(selectReclaimableGroupResources([clusterResource], cluster)).toEqual(
+      []
+    );
+  });
+
+  it("keeps a managed cluster it was not pointed at, rather than stranding its node group", () => {
+    const other = {
+      id: "/subscriptions/s/resourceGroups/g/providers/Microsoft.ContainerService/managedClusters/other",
+      name: "other",
+      type: "Microsoft.ContainerService/managedClusters"
+    };
+    expect(
+      selectReclaimableGroupResources([clusterResource, other], cluster)
+    ).toEqual([]);
+  });
+
+  it("matches the cluster type however Azure cases it", () => {
+    expect(
+      selectReclaimableGroupResources(
+        [
+          {
+            ...clusterResource,
+            type: "microsoft.containerservice/managedClusters"
+          }
+        ],
+        cluster
+      )
+    ).toEqual([]);
+  });
+
+  it("refuses a group that does not hold the configured cluster", () => {
+    expect(() => selectReclaimableGroupResources([postgres], cluster)).toThrow(
+      /does not contain cluster "ai_extensions_aks"/
+    );
+  });
+
+  it("refuses an empty group, which cannot be the shared one", () => {
+    expect(() => selectReclaimableGroupResources([], cluster)).toThrow(
+      /refusing to delete any of its contents/
+    );
+  });
+
+  it("refuses a resource missing an id, name or type", () => {
+    expect(() =>
+      selectReclaimableGroupResources(
+        [clusterResource, { ...postgres, id: "" }],
+        cluster
+      )
+    ).toThrow(/missing an id, name or type/);
+  });
+
+  it("refuses a payload that is not a resource list", () => {
+    expect(() =>
+      selectReclaimableGroupResources({ value: [] }, cluster)
+    ).toThrow(/Azure resources did not return a JSON array/);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["whitespace", "   "]
+  ])("refuses a %s cluster name", (_label, name) => {
+    expect(() =>
+      selectReclaimableGroupResources([clusterResource], name)
+    ).toThrow(/A cluster name is required/);
   });
 });

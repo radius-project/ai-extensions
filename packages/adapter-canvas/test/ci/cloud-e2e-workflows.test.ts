@@ -553,6 +553,33 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain('kubectl delete "${kind,,}/$name"');
   });
 
+  it("empties the shared resource group of everything but the cluster", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const groupCleanup = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name ===
+        "Reclaim Azure resources left in the shared resource group"
+    );
+    const script = groupCleanup?.run ?? "";
+
+    expect(groupCleanup?.if).toContain(
+      "steps.azure-login.outcome == 'success'"
+    );
+    // A recipe-created resource is stranded here precisely when that fails.
+    expect(groupCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    expect(groupCleanup?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(groupCleanup?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(script).toContain("az resource list \\");
+    expect(script).toContain("selectReclaimableGroupResources");
+    expect(script).toContain('az resource delete --ids "$id"');
+    // Nothing here is tagged, so age cannot be what qualifies a resource.
+    expect(script).not.toContain("MAX_AGE_HOURS");
+  });
+
   it("removes only allowlisted assignments before deleting leaked service principals", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
