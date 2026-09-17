@@ -59,6 +59,12 @@ function deployLandingView(state: CanvasState): string {
 
 <div id="deploy-inline-status" class="rad-inline" role="status" aria-live="polite" style="display:none; margin:0 0 14px; padding:10px 14px; border-radius:8px; font-size:14px;"></div>
 <p class="rad-lede">Status reads only observe. An unconfirmed outcome is not a successful deployment, and polling never starts repair or redeployment.</p>
+<section id="lifecycle-controls" class="rad-card" aria-label="Explicit lifecycle controls" style="display:none;">
+  <p id="lifecycle-control-status" role="status" aria-live="polite"></p>
+  <button id="lifecycle-repair" type="button" class="rad-btn rad-btn--neutral" style="display:none;">Request bounded repair</button>
+  <button id="lifecycle-cancel" type="button" class="rad-btn rad-btn--neutral" style="display:none;">Request cancellation</button>
+  <p>Repair does not publish or redeploy. Cancellation does not roll back infrastructure; final state and cleanup must be observed separately.</p>
+</section>
 
 <div class="rad-table-wrap">
   <table class="rad-table">
@@ -136,6 +142,12 @@ ${confirmDialogMarkup()}
 ${renderPageState(DEPLOYING_PAGE_STATE_ID, {
   repo: ctxRepo,
   branch: ctxBranch,
+  ...((
+    typeof state.lifecycleDeploymentId === "string" &&
+    state.lifecycleDeploymentId
+  ) ?
+    { lifecycleOperationId: state.lifecycleDeploymentId }
+  : {}),
   mutationNonce:
     typeof state.browserMutationNonce === "string" ?
       state.browserMutationNonce

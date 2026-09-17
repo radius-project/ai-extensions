@@ -34,7 +34,7 @@ export interface DefinitionAuthoringSourcePort extends Pick<
 > {
   /** Captures expected absence only for explicit first-model authoring. */
   captureForAuthoring(
-    scope: AuthorizedScope<"definition.author">,
+    scope: AuthorizedScope<"definition.author" | "operation.repair">,
     selection: SourceSelection,
     control: RequestControl
   ): Promise<ReadResult<SourceCapture>>;

@@ -15,7 +15,10 @@ import { plannedGraphPage } from "../../../src/pages/planned-graph-page.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { CanvasState } from "../../../src/shared.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
-import { ENVIRONMENT_PAGE_STATE_ID } from "../../../src/pages/browser-state-ids.js";
+import {
+  DEPLOYING_PAGE_STATE_ID,
+  ENVIRONMENT_PAGE_STATE_ID
+} from "../../../src/pages/browser-state-ids.js";
 import { pageStateCases } from "../../support/pages/page-state-cases.js";
 import { readBrowserPageState } from "../../support/pages/browser-state.js";
 import {
@@ -54,6 +57,28 @@ afterAll(async () => {
 });
 
 describe("canvas pages over real loopback HTTP", () => {
+  it.each(["operation-1", HOSTILE_STATE])(
+    "serves the inert lifecycle control identity %s and stable controls",
+    async (lifecycleDeploymentId) => {
+      resetState({ contextRepo: "owner/repo", lifecycleDeploymentId });
+      const response = await get("/?page=deploying");
+      expect(response.status).toBe(200);
+      expect(
+        readBrowserPageState(response.body, DEPLOYING_PAGE_STATE_ID)
+      ).toMatchObject({
+        lifecycleOperationId: lifecycleDeploymentId
+      });
+      for (const id of [
+        "lifecycle-controls",
+        "lifecycle-control-status",
+        "lifecycle-repair",
+        "lifecycle-cancel"
+      ])
+        expect(response.body).toContain(`id="${id}"`);
+      expectSafeInlineScripts(response.body);
+      await get("/?page=graph");
+    }
+  );
   it("preserves setup navigation and mutation state without embedding action authority in the page", async () => {
     resetState({
       contextRepo: "owner/repo",

@@ -2995,6 +2995,7 @@ describe("operation commands", () => {
           ),
         { action, deps: deps.deps }
       );
+
       expect(browser.net.calls.map((call) => call.url)).toEqual([action.path]);
       expect(browser.net.calls[0].init?.body).toBe(
         JSON.stringify({ actionId: action.id, choice: "continue" })
@@ -3004,6 +3005,68 @@ describe("operation commands", () => {
     }
   );
 
+  it.each([
+    "accepted",
+    "refused",
+    "missing-id",
+    "foreign-observation",
+    "missing-observation"
+  ] as const)(
+    "tracks only an actually accepted linked repair (%s)",
+    async (mode) => {
+      const browser = setup();
+      const deps = createDeps();
+      const action = {
+        id: "repair-op-1",
+        kind: "lifecycle.repair",
+        path: "/api/operations/op-1/retry/repair"
+      };
+      browser.net.handle("/api/operations/linked", () =>
+        jsonResponse({
+          operation:
+            mode === "missing-observation" ? null : (
+              {
+                ...record(),
+                operationId:
+                  mode === "foreign-observation" ? "foreign" : "linked",
+                kind: "lifecycle_operation",
+                state: "failed",
+                terminalState: "failed",
+                summary: "Linked repair failed.",
+                actions: []
+              }
+            )
+        })
+      );
+      const controller = await pressCommand(
+        browser,
+        () =>
+          jsonResponse(
+            mode === "missing-id" ?
+              {}
+            : { operationId: "linked", error: "Refused." },
+            mode !== "refused"
+          ),
+        { action, deps: deps.deps }
+      );
+      expect(browser.net.calls.map((call) => call.url)).toEqual(
+        mode !== "refused" && mode !== "missing-id" ?
+          [action.path, "/api/operations/linked"]
+        : [action.path]
+      );
+      if (mode === "accepted") {
+        expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toContain(
+          "No automatic repair"
+        );
+        expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
+          "Operation did not complete"
+        );
+      }
+      expect(deps.successBanners).toEqual([]);
+      expect(deps.actionRequired).toEqual([]);
+      controller?.teardown();
+    }
+  );
   it.each([
     {
       id: "",

@@ -28,11 +28,13 @@ import {
 } from "./errors.js";
 import {
   createOperationRecord,
+  createExecutionAttempt,
   sameLifecycleData,
   type OperationEvent
 } from "./operations.js";
 import type {
   AgentAssistancePort,
+  AgentDelivery,
   AuthorizationRequest,
   AuthorizedScope,
   CallerContext,
@@ -46,6 +48,7 @@ import type {
   StagingArea,
   VersionedOperation
 } from "./ports.js";
+import type { RepairPlan } from "./repair.js";
 import {
   compareEffectiveInputManifests,
   validateSourceSelection,
@@ -64,23 +67,30 @@ export interface DefinitionAuthoringDependencies {
   readonly actions: Pick<ReturnType<typeof createActionService>, "create">;
   readonly identity: {
     authorize(
-      request: AuthorizationRequest<"definition.author">,
+      request: AuthorizationRequest<"definition.author" | "operation.repair">,
       control: RequestControl
-    ): Promise<PortResult<AuthorizedScope<"definition.author">>>;
+    ): Promise<
+      PortResult<AuthorizedScope<"definition.author" | "operation.repair">>
+    >;
   };
-  readonly agent: Pick<AgentAssistancePort, "assign" | "authenticateOutcome">;
+  readonly agent: Pick<AgentAssistancePort, "assign" | "authenticateOutcome"> &
+    Partial<Pick<AgentAssistancePort, "cancel">>;
   readonly ids: IdPort;
   readonly clock: Pick<ClockPort, "now">;
 }
 interface OwnedAuthoring {
+  cancellationRequested: boolean;
+  readonly cancellationListeners: Set<() => void>;
   readonly snapshot: SourceSnapshot;
-  readonly scope: AuthorizedScope<"definition.author">;
+  readonly scope: AuthorizedScope<"definition.author" | "operation.repair">;
   readonly caller: CallerContext;
   readonly operationId: string;
   readonly policy: ValidationPolicy;
   staging?: StagingArea;
   proposal?: SourceSnapshot;
   record?: VersionedOperation;
+  readonly repair?: RepairPlan;
+  delivery?: AgentDelivery;
 }
 export function createDefinitionAuthoring(
   deps: DefinitionAuthoringDependencies
@@ -158,12 +168,12 @@ export function createDefinitionAuthoring(
     if (stopped(control)) return portCancelled("request_cancelled");
     const result = await deps.identity.authorize(
       {
+        ...item.scope,
         caller: item.caller,
-        operation: "definition.author",
-        target: item.scope.target,
         source: item.snapshot.provenance,
         operationId: item.operationId,
-        approvalRef: item.scope.approvalRef
+        approvalRef: item.scope.approvalRef,
+        ...(item.repair ? { repairPolicy: item.repair.policy } : {})
       },
       control
     );
@@ -171,12 +181,14 @@ export function createDefinitionAuthoring(
     if (stopped(control)) return portCancelled("request_cancelled");
     if (
       !result.value.authorizationRef ||
-      result.value.operation !== "definition.author" ||
+      result.value.operation !== item.scope.operation ||
       result.value.principalRef !== item.caller.principalRef ||
       result.value.operationId !== item.operationId ||
       result.value.approvalRef !== item.scope.approvalRef ||
       !sameLifecycleData(result.value.target, item.scope.target) ||
-      !sameLifecycleData(result.value.source, item.snapshot.provenance)
+      !sameLifecycleData(result.value.source, item.snapshot.provenance) ||
+      (item.repair &&
+        !sameLifecycleData(result.value.repairPolicy, item.repair.policy))
     )
       return portForbidden();
     return result;
@@ -348,7 +360,32 @@ export function createDefinitionAuthoring(
       Extract<OperationEvent, { kind: "definition_completed" }>
     >;
     try {
-      result = await finish(item, context);
+      const original = context.control;
+      const control =
+        (
+          context.response.kind === "agent.outcome" &&
+          context.response.status !== "completed"
+        ) ?
+          original
+        : {
+            ...original,
+            cancellation: {
+              get aborted() {
+                return (
+                  item.cancellationRequested || original.cancellation.aborted
+                );
+              },
+              onAbort(listener: () => void) {
+                item.cancellationListeners.add(listener);
+                const unsubscribe = original.cancellation.onAbort(listener);
+                return () => {
+                  item.cancellationListeners.delete(listener);
+                  unsubscribe();
+                };
+              }
+            }
+          };
+      result = await finish(item, { ...context, control });
     } catch {
       result = unavailable();
     }
@@ -360,6 +397,16 @@ export function createDefinitionAuthoring(
         released.error
       );
     if (result.status === "ok") return result;
+    if (result.status === "cancelled" && item.cancellationRequested)
+      return portSuccess({
+        kind: "definition_completed",
+        state: "cancelled",
+        observation: {
+          ...observation(),
+          limitation:
+            "Local continuation stopped after cancellation. No publication, redeployment or remote workflow cancellation is inferred."
+        }
+      });
     return completed(
       result.status === "cancelled" ? "cancelled" : "failed",
       undefined,
@@ -430,14 +477,37 @@ export function createDefinitionAuthoring(
       });
     const authorized = await authority(item, control);
     if (authorized.status !== "ok") return authorized;
-    const record = createOperationRecord(
+    const base = createOperationRecord(
       { ids: { next: () => item.operationId }, clock: deps.clock },
       {
-        operation: "definition.author",
+        operation: item.scope.operation,
         target,
         source: item.snapshot.provenance
       }
     );
+    const record =
+      item.repair ?
+        {
+          ...base,
+          repairsOperationId: item.repair.failed.operationId,
+          ...(item.repair.failed.attempts.at(-1) ?
+            { repairsAttemptId: item.repair.failed.attempts.at(-1)?.attemptId }
+          : {}),
+          repairPolicy: item.repair.policy,
+          attempts: [
+            {
+              ...createExecutionAttempt(deps.ids, base),
+              repairsOperationId: item.repair.failed.operationId,
+              ...(item.repair.failed.attempts.at(-1) ?
+                {
+                  repairsAttemptId:
+                    item.repair.failed.attempts.at(-1)?.attemptId
+                }
+              : {})
+            }
+          ]
+        }
+      : base;
     const created = await deps.registry.create(
       authorized.value,
       record,
@@ -450,7 +520,8 @@ export function createDefinitionAuthoring(
       authorized.value,
       latest,
       {
-        kind: "agent.author_definition",
+        kind:
+          item.repair ? "agent.repair_definition" : "agent.author_definition",
         responder: "agent",
         message:
           "Author the definition in the operation-owned staging area; do not publish or deploy.",
@@ -489,7 +560,7 @@ export function createDefinitionAuthoring(
     if (action.status !== "ok") return action;
     latest = action.value;
     item.record = latest;
-    const assignedAction = latest.operation.actions.at(-1);
+    const assignedAction = action.value.action;
     if (!assignedAction || assignedAction.responder !== "agent")
       return portFailure("EVIDENCE_MISMATCH");
     const staging = await deps.source.prepareStaging(
@@ -512,12 +583,25 @@ export function createDefinitionAuthoring(
     if (stopped(control)) return portCancelled("request_cancelled");
     const delivery = await deps.agent.assign(
       authorized.value,
-      {
-        operation: "definition.author",
-        action: assignedAction,
-        staging: item.staging,
-        intent
-      },
+      item.repair ?
+        {
+          operation: "operation.repair",
+          action: assignedAction,
+          staging: item.staging,
+          failedOperationId: item.repair.failed.operationId,
+          ...(item.repair.failed.attempts.at(-1) ?
+            { failedAttemptId: item.repair.failed.attempts.at(-1)?.attemptId }
+          : {}),
+          failure:
+            item.repair.failed.error ?? lifecycleError("VALIDATION_FAILED"),
+          policy: item.repair.policy
+        }
+      : {
+          operation: "definition.author",
+          action: assignedAction,
+          staging: item.staging,
+          intent
+        },
       control
     );
     if (delivery.status !== "ok") return delivery;
@@ -527,6 +611,7 @@ export function createDefinitionAuthoring(
       delivery.value.actionId !== assignedAction.actionId
     )
       return portFailure("EVIDENCE_MISMATCH");
+    item.delivery = delivery.value;
     const current = await deps.registry.get(
       authorized.value,
       item.operationId,
@@ -538,11 +623,12 @@ export function createDefinitionAuthoring(
       : current;
   }
   async function author(
-    scope: AuthorizedScope<"definition.author">,
+    scope: AuthorizedScope<"definition.author" | "operation.repair">,
     caller: CallerContext,
     target: SourceSelection,
     intent: ReadonlyData<LifecycleRequestFor<"definition.author">["input"]>,
-    control: RequestControl
+    control: RequestControl,
+    repair?: RepairPlan
   ): Promise<PortResult<ReadonlyData<OperationRecord>>> {
     if (stopped(control)) return portCancelled("request_cancelled");
     if (target.source.kind !== "workspace" || !caller.agentBindingRef)
@@ -577,13 +663,17 @@ export function createDefinitionAuthoring(
           completeness: "unavailable",
           evidence: "source"
         });
+      const operationId = deps.ids.next("operation");
       item = {
         // Source snapshots are adapter-owned capabilities, not cloneable DTOs.
         snapshot: captured.value.snapshot,
-        scope: structuredClone(scope),
+        cancellationRequested: false,
+        cancellationListeners: new Set(),
+        scope: { ...structuredClone(scope), operationId },
         caller: { ...caller },
-        operationId: deps.ids.next("operation"),
-        policy: createValidationPolicy("authoring", intent.provider)
+        operationId,
+        policy: createValidationPolicy("authoring", intent.provider),
+        ...(repair ? { repair } : {})
       };
       owned.add(item);
       const expected = verifySourceExpectation(
@@ -638,6 +728,51 @@ export function createDefinitionAuthoring(
   return {
     author(...args: Parameters<typeof author>) {
       return track(author(...args));
+    },
+    repair(
+      scope: AuthorizedScope<"operation.repair">,
+      caller: CallerContext,
+      plan: RepairPlan,
+      control: RequestControl,
+      provider: "azure" | "aws"
+    ) {
+      return track(
+        author(
+          scope,
+          caller,
+          plan.target,
+          {
+            intent:
+              "Repair only the approved staged definition; never publish or deploy.",
+            provider
+          },
+          control,
+          plan
+        )
+      );
+    },
+    async cancel(
+      scope: AuthorizedScope<"operation.cancel">,
+      operationId: string,
+      control: RequestControl
+    ) {
+      const item = [...owned].find(
+        (candidate) => candidate.operationId === operationId
+      );
+      if (!item || !item.delivery || !deps.agent.cancel) return unavailable();
+      item.cancellationRequested = true;
+      for (const listener of item.cancellationListeners) {
+        try {
+          listener();
+        } catch {
+          /* One callback cannot prevent cancellation of the remaining owned work. */
+        }
+      }
+      const receipt = await deps.agent.cancel(scope, item.delivery, control);
+      if (receipt.status !== "ok" || receipt.value.status !== "confirmed")
+        return receipt;
+      const released = await cleanup(item);
+      return released.status === "ok" ? receipt : released;
     },
     async close(): Promise<PortResult<void>> {
       closed = true;

@@ -61,6 +61,198 @@ const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
 const DIFF_BASE_BRANCH = "main";
 
+for (const kind of ["repair", "cancel", "refused", "exhausted"] as const) {
+  test(`critical journey: explicit lifecycle ${kind} remains keyboard accessible and observation never repeats it`, async ({
+    page,
+    canvas
+  }) => {
+    await seed(canvas);
+    canvas.entry.state.lifecycleDeploymentId = "control-original";
+    let mutations = 0;
+    let accepted = false;
+    let releaseResponse: (() => void) | undefined;
+    const responseReady = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    if (!releaseResponse) throw new Error("Missing controlled response gate");
+    page.once("close", releaseResponse);
+    const suffix = kind === "cancel" ? "cancel-workflow" : "retry/repair";
+    await page.route(/\/api\/operations\/control-/, async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() === "POST") {
+        expect(pathname).toBe(`/api/operations/control-original/${suffix}`);
+        expect(request.headers()["x-radius-mutation-nonce"]).toBe(
+          canvas.entry.state.browserMutationNonce
+        );
+        expect(request.postDataJSON()).toEqual(
+          kind === "cancel" ?
+            {}
+          : { repairPolicy: { mode: "manual", maxAttempts: 5 } }
+        );
+        mutations++;
+        accepted = kind === "repair" || kind === "cancel";
+        await responseReady;
+        await route.fulfill({
+          status: accepted ? 202 : 409,
+          json:
+            accepted ?
+              {
+                operationId:
+                  kind === "repair" ? "control-linked" : "control-original"
+              }
+            : {
+                error: "Control cannot continue.",
+                ...(kind === "exhausted" ?
+                  { code: "REPAIR_LIMIT_REACHED" }
+                : {})
+              }
+        });
+        return;
+      }
+      expect(request.method()).toBe("GET");
+      expect([
+        "/api/operations/control-original",
+        "/api/operations/control-linked"
+      ]).toContain(pathname);
+      const operationId = pathname.split("/").at(-1);
+      await route.fulfill({
+        json: {
+          operation: {
+            operationId,
+            summary:
+              accepted ?
+                "Explicit request recorded. Termination, publication and redeployment are not inferred."
+              : "Failed operation retained; review explicit controls.",
+            actions:
+              accepted ?
+                []
+              : [
+                  {
+                    id: "control-action",
+                    kind:
+                      kind === "cancel" ? "lifecycle.cancel" : (
+                        "lifecycle.repair"
+                      ),
+                    path: `/api/operations/control-original/${suffix}`
+                  }
+                ]
+          }
+        }
+      });
+    });
+    await gotoCanvas(page, canvas, "deploying");
+    const button = page.getByRole("button", {
+      name:
+        kind === "cancel" ? "Request cancellation" : "Request bounded repair",
+      exact: true
+    });
+    await expect(button).toBeVisible();
+    expect(mutations).toBe(0);
+    await expectNoWcagViolations(page);
+    await button.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#lifecycle-control-status")).toBeFocused();
+    await expect(button).toBeDisabled();
+    expect(mutations).toBe(1);
+    releaseResponse();
+    await expect(page.locator("#lifecycle-control-status")).toContainText(
+      kind === "exhausted" ? "budget is exhausted"
+      : kind === "refused" ? "could not be confirmed"
+      : "Explicit request recorded"
+    );
+    expect(mutations).toBe(1);
+    await expectNoWcagViolations(page);
+    await gotoCanvas(page, canvas, "environment");
+    await gotoCanvas(page, canvas, "deploying");
+    await page.evaluate(async () => {
+      for (let index = 0; index < 100; index++)
+        await fetch("/api/operations/control-original");
+    });
+    expect(mutations).toBe(1);
+  });
+}
+
+test("critical journey: environment repair follows its linked identity without implicit deployment", async ({
+  page,
+  canvas
+}) => {
+  await seed(canvas);
+  let mutations = 0;
+  let linkedReads = 0;
+  await page.route(/\/api\/operations(?:[/?]|$)/, async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "POST") {
+      expect(path).toBe("/api/operations/environment-original/retry/repair");
+      expect(request.postDataJSON()).toEqual({
+        repairPolicy: { mode: "manual", maxAttempts: 5 }
+      });
+      mutations++;
+      await route.fulfill({
+        status: 202,
+        json: { operationId: "environment-linked" }
+      });
+      return;
+    }
+    expect(request.method()).toBe("GET");
+    const linked = path === "/api/operations/environment-linked";
+    if (linked) linkedReads++;
+    await route.fulfill({
+      json: {
+        operation: {
+          operationId: linked ? "environment-linked" : "environment-original",
+          kind: "lifecycle_operation",
+          state: "failed",
+          terminalState: "failed",
+          environment: "fixture-environment",
+          provider: "azure",
+          summary:
+            linked ?
+              "Linked repair failed; original failure retained."
+            : "Original execution failed.",
+          stages: [],
+          steps: [],
+          actions:
+            linked ?
+              []
+            : [
+                {
+                  id: "repair-original",
+                  kind: "lifecycle.repair",
+                  label: "Request bounded repair",
+                  path: "/api/operations/environment-original/retry/repair"
+                }
+              ]
+        }
+      }
+    });
+  });
+  await gotoCanvas(page, canvas, "environment");
+  const button = page.getByRole("button", {
+    name: "Request bounded repair",
+    exact: true
+  });
+  await expect(button).toBeVisible();
+  expect(mutations).toBe(0);
+  await expectNoWcagViolations(page);
+  await button.focus();
+  await page.keyboard.press("Enter");
+  await expect(
+    page
+      .getByText("Linked repair failed; original failure retained.", {
+        exact: true
+      })
+      .first()
+  ).toBeVisible();
+  expect(linkedReads).toBe(1);
+  expect(mutations).toBe(1);
+  await expectNoWcagViolations(page);
+  await gotoCanvas(page, canvas, "deploying");
+  await gotoCanvas(page, canvas, "environment");
+  expect(mutations).toBe(1);
+});
+
 async function startLifecycleSetup(
   page: Page,
   canvas: CanvasHarness,

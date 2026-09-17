@@ -2,10 +2,27 @@ import { describe, expect, it } from "vitest";
 import {
   managedBicepEnv,
   RadProcessError,
-  radSpawnOptions
+  radSpawnOptions,
+  spawnRad
 } from "./rad-process.mjs";
 
 describe("rad process spawn policy", () => {
+  it("fences a cancelled lifecycle invocation before launching even an invalid executable", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      spawnRad("unavailable-owned-executable", [], {
+        signal: controller.signal,
+        inheritEnv: false,
+        ...(process.platform === "win32" ?
+          { env: { SystemRoot: process.env.SystemRoot } }
+        : {})
+      })
+    ).rejects.toMatchObject({
+      name: "AbortError",
+      message: "Process cancelled."
+    });
+  });
   it.each(["win32", "linux", "darwin"] as const)(
     "keeps ignored stdin and piped output while choosing the %s cleanup boundary",
     (platform) => {

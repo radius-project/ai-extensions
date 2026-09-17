@@ -15,7 +15,10 @@ function initialize(context: BrowserContext): BrowserTeardown {
   return initializeDeployingPage(context, {
     repo: readString(state, "repo"),
     branch: readString(state, "branch"),
-    mutationNonce: readString(state, "mutationNonce")
+    mutationNonce: readString(state, "mutationNonce"),
+    ...(readString(state, "lifecycleOperationId") ?
+      { lifecycleOperationId: readString(state, "lifecycleOperationId") }
+    : {})
   });
 }
 

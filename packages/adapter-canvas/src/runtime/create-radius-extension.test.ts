@@ -569,6 +569,30 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     expect(sent.displayPrompt).not.toContain("radius_deploy_status");
   });
 
+  it("refuses a legacy agent handoff when canonical deployment owns the writer", async () => {
+    const f = setup();
+    const session = createFakeSession();
+    f.ext.attachSession(session);
+    f.deps.lifecycle.routing.transition("deployment", {
+      writer: "lifecycle",
+      readers: ["legacy", "lifecycle"],
+      controllers: ["legacy", "lifecycle"]
+    });
+    const handoff = f.capturedHostCallbacks.deployRepairHandoff;
+    if (!handoff) throw new Error("Missing repair callback");
+    await expect(
+      handoff({
+        repo: "owner/repo",
+        branch: "feature",
+        error: "Validation failed.",
+        deployRunUrl: "https://github.com/owner/repo/actions/runs/42",
+        attemptId: "attempt",
+        instanceId: "panel"
+      })
+    ).rejects.toThrow("explicitly authorized operation.repair");
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
   it("registers a deploy-failure notice that reports a run-unconfirmed failure without a repair prompt", async () => {
     const { ext, capturedHostCallbacks } = setup();
     const session = createFakeSession();

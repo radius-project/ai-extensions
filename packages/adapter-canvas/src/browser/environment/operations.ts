@@ -18,6 +18,10 @@ import {
   type GhCommandPresentation
 } from "../../gh-command-display.js";
 import { beginEntry } from "../lifecycle.js";
+import {
+  isLifecycleAction,
+  lifecycleControlRequest
+} from "../lifecycle-controls.js";
 import { formatElapsed, stageGlyph } from "../progress-format.js";
 import {
   isRecord,
@@ -667,14 +671,12 @@ function parsePreview(
   };
 }
 
-function isLifecycleAction(kind: string): boolean {
-  return kind === "lifecycle.authenticate" || kind === "lifecycle.configure";
-}
-
-function isLifecycleConfiguration(op: OperationRecord): boolean {
-  return (
-    op.kind === "lifecycle_credentials" || op.kind === "lifecycle_environment"
-  );
+function isLifecycleOperation(op: OperationRecord): boolean {
+  return [
+    "lifecycle_credentials",
+    "lifecycle_environment",
+    "lifecycle_operation"
+  ].includes(op.kind);
 }
 
 function parseActions(value: unknown, operationId: string): OperationAction[] {
@@ -692,7 +694,7 @@ function parseActions(value: unknown, operationId: string): OperationAction[] {
       kind.startsWith("lifecycle.") &&
       (!isLifecycleAction(kind) ||
         id === "" ||
-        path !== `${operationUrl(operationId)}/continue`)
+        !lifecycleControlRequest(operationId, { kind, id, path }))
     )
       continue;
     actions.push({
@@ -1087,7 +1089,7 @@ function commandStatusText(action: OperationAction): string {
 function isSuccessfulSetup(op: OperationRecord | null): boolean {
   return (
     op !== null &&
-    !isLifecycleConfiguration(op) &&
+    !isLifecycleOperation(op) &&
     (op.terminalState === "succeeded" ||
       op.terminalState === "succeeded_with_warnings") &&
     op.actions.length === 0
@@ -1374,12 +1376,18 @@ export function initializeEnvironmentOperations(
     }
 
     const cleanup = op.cleanup;
-    if (isLifecycleConfiguration(op)) {
+    if (isLifecycleOperation(op)) {
       messageEl.textContent = op.failure?.message || op.summary;
       const titleEl = dom.byId(PROGRESS_IDS.failureTitle);
-      if (titleEl) titleEl.textContent = "Configuration did not complete";
+      if (titleEl)
+        titleEl.textContent =
+          op.kind === "lifecycle_operation" ?
+            "Operation did not complete"
+          : "Configuration did not complete";
       cleanupEl.textContent =
-        "Completed configuration phases remain recorded. No automatic rollback or deployment was started.";
+        op.kind === "lifecycle_operation" ?
+          "Recorded execution phases remain visible. No automatic repair, deployment or rollback was started."
+        : "Completed configuration phases remain recorded. No automatic rollback or deployment was started.";
       retryEl.textContent = "";
       renderFailureCommand(null);
       setFailureList(
@@ -2106,7 +2114,7 @@ export function initializeEnvironmentOperations(
       },
       body:
         isLifecycleAction(action.kind) ?
-          JSON.stringify({ actionId: action.id, choice: "continue" })
+          lifecycleControlRequest(op.operationId, action)?.body
         : "{}"
     })
       .then((response) =>
@@ -2129,6 +2137,22 @@ export function initializeEnvironmentOperations(
           return;
         }
         if (updated) renderProgress(updated);
+        if (action.kind === "lifecycle.repair") {
+          const acceptedId = readString(result.payload, "operationId");
+          if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(acceptedId)) {
+            setCommandStatus("");
+            setCommandError(COMMAND_UNREACHABLE_MESSAGE);
+            focusPanel();
+            return;
+          }
+          trackProgress(
+            op.environment,
+            op.provider,
+            applyOperationTerminal,
+            acceptedId
+          );
+          return;
+        }
         // A cleaning command that the server accepted supersedes the failure
         // the page is still reporting: the banner comes down now rather than
         // when the rollback ends, and the listing is refreshed because the
@@ -2296,9 +2320,7 @@ export function initializeEnvironmentOperations(
       const fallback =
         (
           container.style.display === "none" ||
-          (op !== null &&
-            isLifecycleConfiguration(op) &&
-            rowActions.length === 0)
+          (op !== null && isLifecycleOperation(op) && rowActions.length === 0)
         ) ?
           (dom.byId(PROGRESS_IDS.title) ?? panel)
         : container;
@@ -2518,7 +2540,7 @@ export function initializeEnvironmentOperations(
     // expired input prompt resolves straight to its terminal record).
     setPanelActive(false);
     resetSubmitButton();
-    if (isLifecycleConfiguration(op)) {
+    if (isLifecycleOperation(op)) {
       hideErrorBanner();
       deps.showSetupWarnings([]);
       if (
@@ -2604,7 +2626,8 @@ export function initializeEnvironmentOperations(
   function trackProgress(
     environment: string,
     provider: string,
-    onTerminal: (op: OperationRecord) => void = applyTerminal
+    onTerminal: (op: OperationRecord) => void = applyTerminal,
+    initialOperationId = ""
   ): void {
     stopProgress();
     session += 1;
@@ -2612,7 +2635,7 @@ export function initializeEnvironmentOperations(
     setCommandBusy(false);
     let startedAtMs = context.clock.now();
     let observedOperation = false;
-    let operationId = "";
+    let operationId = initialOperationId;
     let verifyDispatchedAtMs = 0;
     let promptingRequestedAt = "";
     const elapsedEl = dom.byId(PROGRESS_IDS.elapsed);
@@ -2889,16 +2912,28 @@ export function initializeEnvironmentOperations(
     }
 
     function tick(): void {
-      void fetchTracked(operationsByRepoUrl(repo))
+      void fetchTracked(
+        initialOperationId ?
+          operationUrl(initialOperationId)
+        : operationsByRepoUrl(repo)
+      )
         .then((response) => response.json())
         .then((payload) => {
           if (!active()) return;
           const op = parseResponse(payload);
+          if (
+            initialOperationId &&
+            (!op || op.operationId !== initialOperationId)
+          ) {
+            scheduleTick(POLL_RETRY_MS);
+            return;
+          }
           // The registry retains the latest terminal operation for this
           // repository. During the short gap before a new POST registers,
           // that record belongs to the previous environment and must not
           // replace the optimistic panel for the setup just requested.
           if (
+            !initialOperationId &&
             !observedOperation &&
             op &&
             (op.environment !== environment || op.terminalState !== null)

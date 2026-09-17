@@ -55,6 +55,7 @@ export interface PageStateById {
   };
   [DEPLOYING_PAGE_STATE_ID]: RepositoryPageState & {
     mutationNonce: string;
+    lifecycleOperationId?: string;
   };
   [ENVIRONMENT_PAGE_STATE_ID]: RepositoryPageState & {
     activeSubtab: "credentials" | "environments";

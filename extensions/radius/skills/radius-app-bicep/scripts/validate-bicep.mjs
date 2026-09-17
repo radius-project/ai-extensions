@@ -1122,6 +1122,12 @@ function main() {
     console.error(brokenRecordMessage(run.file, ""));
     return 1;
   }
+  if (run.record.lifecycleManaged === true) {
+    console.error(
+      "Canonical staging is coordinator-owned. Return the staged proposal through the assigned action; only explicit linked repair may consume another cycle."
+    );
+    return 1;
+  }
 
   // Refused before the compiler is spawned: once the budget is spent there is
   // nothing more to learn from another identical failure, and compiling anyway

@@ -178,6 +178,7 @@ describe("compiled page entry API contracts", () => {
       [
         "/api/run-remediation",
         "/api/delete-conflict",
+        "/api/operations",
         "/api/discover-branches",
         "/api/list-applications",
         "/api/list-environments",

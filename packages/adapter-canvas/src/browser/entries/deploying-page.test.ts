@@ -18,16 +18,20 @@ describe("deploying page browser entry", () => {
     );
   });
 
-  it("reads the serialized page identity before delegating initialization", () => {
-    const browser = createFakeBrowserScope();
-    const state = createFakeElement(DEPLOYING_PAGE_STATE_ID);
-    state.textContent = JSON.stringify({
-      repo: "octo/app",
-      branch: "feature/x"
-    });
-    browser.document.add(state);
+  it.each([undefined, "operation-1", 42])(
+    "reads and narrows serialized lifecycle identity %s before initialization",
+    (lifecycleOperationId) => {
+      const browser = createFakeBrowserScope();
+      const state = createFakeElement(DEPLOYING_PAGE_STATE_ID);
+      state.textContent = JSON.stringify({
+        repo: "octo/app",
+        branch: "feature/x",
+        lifecycleOperationId
+      });
+      browser.document.add(state);
 
-    expect(() => installDeployingPageEntry(browser.scope)).not.toThrow();
-    expect(browser.net.calls).toHaveLength(0);
-  });
+      expect(() => installDeployingPageEntry(browser.scope)).not.toThrow();
+      expect(browser.net.calls).toHaveLength(0);
+    }
+  );
 });

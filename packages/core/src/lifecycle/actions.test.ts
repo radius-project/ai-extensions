@@ -139,6 +139,45 @@ async function fixture(
 }
 
 describe("guarded outstanding actions", () => {
+  it("does not accept a user continuation or a substituted outcome after cancellation", async () => {
+    const f = await fixture();
+    const current = await f.registry.get(
+      f.scope,
+      f.operation.operationId,
+      f.control
+    );
+    if (current.status !== "ok") throw new Error("Missing operation");
+    await f.registry.compareAndSwap(
+      f.scope,
+      {
+        operationId: f.operation.operationId,
+        expectedRevision: current.value.revision,
+        replacement: {
+          ...current.value.operation,
+          cancellationRequestedAt: now
+        }
+      },
+      f.control
+    );
+    for (const response of [
+      f.input.response,
+      {
+        kind: "agent.outcome" as const,
+        status: "failed" as const,
+        diagnostics: []
+      }
+    ]) {
+      expect(
+        await f.service.respond(
+          f.scope,
+          caller,
+          { ...f.input, response },
+          f.control
+        )
+      ).toMatchObject({ error: { code: "ACTION_NOT_OUTSTANDING" } });
+    }
+    expect(f.calls()).toBe(0);
+  });
   it("verifies declared approval handles and permitted identity input independently", async () => {
     const f = await fixture({
       permittedInput: ["approvalRef", "identityRef"],

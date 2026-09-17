@@ -296,6 +296,162 @@ function fixture() {
   };
 }
 describe("guarded definition authoring", () => {
+  it("refuses cancellation without an owned assignment or cancellation capability", async () => {
+    const f = fixture();
+    const cancelScope = { ...scope, operation: "operation.cancel" as const };
+    expect(
+      await f.service.cancel(cancelScope, "missing", f.control)
+    ).toMatchObject({ status: "unavailable" });
+    const pending = await f.start();
+    expect(
+      await f.service.cancel(
+        cancelScope,
+        pending.operation.operationId,
+        f.control
+      )
+    ).toMatchObject({ status: "unavailable" });
+    await f.service.close();
+  });
+  it("preserves staging cleanup failure instead of claiming confirmed local cancellation", async () => {
+    const f = fixture();
+    f.deps.agent.cancel = async () =>
+      portSuccess({
+        status: "confirmed",
+        requestedAt: "2026-09-15T00:00:00Z",
+        observation: {
+          quality: "current",
+          completeness: "partial",
+          evidence: "session"
+        }
+      });
+    const pending = await f.start();
+    vi.mocked(f.source.releaseStaging).mockResolvedValueOnce(
+      portFailure("PRECONDITION_FAILED")
+    );
+    expect(
+      await f.service.cancel(
+        { ...scope, operation: "operation.cancel" },
+        pending.operation.operationId,
+        f.control
+      )
+    ).toMatchObject({ error: { code: "PRECONDITION_FAILED" } });
+    expect(f.source.promote).not.toHaveBeenCalled();
+    await f.service.close();
+  });
+  it.each(["completed", "failed", "cancelled"] as const)(
+    "retains authenticated %s evidence after a requested cancellation without promoting",
+    async (status) => {
+      const f = fixture();
+      f.deps.agent.cancel = async () =>
+        portSuccess({
+          status: "requested",
+          requestedAt: "2026-09-15T00:00:00Z",
+          observation: {
+            quality: "unknown",
+            completeness: "partial",
+            evidence: "session"
+          }
+        });
+      const pending = await f.start();
+      const cancelScope = { ...scope, operation: "operation.cancel" as const };
+      const current = await f.registry.get(
+        cancelScope,
+        pending.operation.operationId,
+        f.control
+      );
+      if (current.status !== "ok") throw new Error("Missing pending operation");
+      await f.registry.compareAndSwap(
+        cancelScope,
+        {
+          operationId: pending.operation.operationId,
+          expectedRevision: current.value.revision,
+          replacement: {
+            ...current.value.operation,
+            cancellationRequestedAt: "2026-09-15T00:00:00Z"
+          }
+        },
+        f.control
+      );
+      await f.service.cancel(
+        cancelScope,
+        pending.operation.operationId,
+        f.control
+      );
+      const result = await pending.respond(
+        status === "completed" ?
+          {
+            kind: "agent.outcome",
+            status,
+            stagedOutputRefs: ["staging/app.bicep"]
+          }
+        : { kind: "agent.outcome", status, diagnostics: [] }
+      );
+      expect(result).toMatchObject({
+        status: "ok",
+        value: { state: status === "failed" ? "failed" : "cancelled" }
+      });
+      expect(f.validator.validate).not.toHaveBeenCalled();
+      expect(f.source.promote).not.toHaveBeenCalled();
+      expect(f.source.releaseStaging).toHaveBeenCalledOnce();
+      expect(await pending.respond()).toMatchObject({
+        error: { code: "ACTION_NOT_OUTSTANDING" }
+      });
+    }
+  );
+  it("cancels owned validation callbacks without promoting or claiming remote cancellation", async () => {
+    const f = fixture();
+    const entered = deferred();
+    let cancellationObserved = false;
+    f.deps.agent.cancel = async () =>
+      portSuccess({
+        status: "requested",
+        requestedAt: "2026-09-15T00:00:00Z",
+        observation: {
+          quality: "unknown",
+          completeness: "partial",
+          evidence: "session"
+        }
+      });
+    vi.mocked(f.validator.validate).mockImplementation(
+      async (_input, control) => {
+        const removeBrokenCallback = control.cancellation.onAbort(() => {
+          throw new Error("One owned callback failed");
+        });
+        await new Promise<void>((resolve) => {
+          const unsubscribe = control.cancellation.onAbort(() => {
+            cancellationObserved = control.cancellation.aborted;
+            unsubscribe();
+            removeBrokenCallback();
+            resolve();
+          });
+          entered.resolve();
+        });
+        return portCancelled("request_cancelled");
+      }
+    );
+    const pending = await f.start();
+    const response = pending.respond();
+    await entered.promise;
+    expect(
+      await f.service.cancel(
+        { ...scope, operation: "operation.cancel" },
+        pending.operation.operationId,
+        f.control
+      )
+    ).toMatchObject({ value: { status: "requested" } });
+    expect(await response).toMatchObject({
+      status: "ok",
+      value: {
+        state: "cancelled",
+        observation: {
+          limitation: expect.stringContaining("remote workflow cancellation")
+        }
+      }
+    });
+    expect(cancellationObserved).toBe(true);
+    expect(f.source.promote).not.toHaveBeenCalled();
+    expect(f.source.releaseStaging).toHaveBeenCalledOnce();
+  });
   const absent = () =>
     portAbsent({
       quality: "current",
@@ -345,7 +501,10 @@ describe("guarded definition authoring", () => {
           actionId: started.action.actionId
         })
       }),
-      f.control
+      expect.objectContaining({
+        requestId: f.control.requestId,
+        cancellation: expect.objectContaining({ aborted: false })
+      })
     );
     expect(f.validator.validate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -357,7 +516,10 @@ describe("guarded definition authoring", () => {
         }),
         snapshot: expect.objectContaining({ snapshotRef: "proposal" })
       }),
-      f.control
+      expect.objectContaining({
+        requestId: f.control.requestId,
+        cancellation: expect.objectContaining({ aborted: false })
+      })
     );
     expect(await started.respond()).toMatchObject({
       error: { code: "ACTION_NOT_OUTSTANDING" }
@@ -823,8 +985,10 @@ describe("guarded definition authoring", () => {
     "source"
   ] as const)("rechecks current authorization %s", async (field) => {
     const f = fixture();
-    f.authorize.mockImplementation(async (request) =>
-      portSuccess({
+    f.authorize.mockImplementation(async (request) => {
+      if (request.operation !== "definition.author")
+        throw new Error("Unexpected repair authorization.");
+      return portSuccess({
         ...request,
         authorizationRef: field === "authorizationRef" ? "" : "renewed",
         principalRef: field === "principalRef" ? "other" : caller.principalRef,
@@ -838,8 +1002,8 @@ describe("guarded definition authoring", () => {
           field === "source" ?
             { ...snapshot.provenance, fingerprint: proposalFingerprint }
           : request.source
-      })
-    );
+      });
+    });
     expect(await f.author()).toMatchObject({ status: "forbidden" });
     expect(f.source.prepareStaging).not.toHaveBeenCalled();
     expect(f.source.releaseSnapshot).toHaveBeenCalledOnce();

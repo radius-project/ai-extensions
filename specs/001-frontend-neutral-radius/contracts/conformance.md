@@ -90,7 +90,7 @@ Remaining guards in otherwise covered modules protect invariants guaranteed by t
 
 ## Deployment and Observation Checkpoint
 
-T051-T067 are complete with the runnable acceptance and same-source gate evidence recorded in `quickstart.md`. Configuration has its own completed checkpoint below; later repair, cancellation-control, and deletion work remains excluded.
+T051-T067 are complete with the runnable acceptance and same-source gate evidence recorded in `quickstart.md`. Those results exclude the subsequent configuration and repair/cancellation checkpoints documented below; deletion remains excluded.
 
 - Core deployment accepts only a published definition with matching repository, environment, application, revision, and fresh trusted source-bound approval. The public approval reference conveys no authority. Canonical execution uses reviewed argument vectors, not caller shell text, and requires a preconfigured environment.
 - The shared workflow binding verifies the selected dispatcher and both provider templates, immutable producer identity and audited producer bytes, and current protection evidence before consuming a one-shot dispatch preparation. Generic transport failures remain unconfirmed. Only bounded observation retries are permitted; reconciliation requires the exact operation, attempt, workflow, source, target, and initial run attempt.
@@ -107,7 +107,7 @@ The eleven new lifecycle, execution-schema, and phase-summary modules have compl
 
 ## Environment and Credential Checkpoint
 
-T068–T078 are complete with the same-source gates and runnable acceptance recorded in `quickstart.md`. T079 and later controls remain excluded.
+T068–T078 are complete with the same-source gates and runnable acceptance recorded in `quickstart.md`. Those results exclude the subsequent repair/cancellation checkpoint documented below.
 
 - Core credential inspection is noninteractive and read-only. Native Azure inspection uses account-show with an explicit subscription when requested instead of changing the active account. Native AWS inspection reads caller identity. Public canonical evidence contains repository-scoped opaque identity references, not raw provider identity payloads or provider diagnostics.
 - Credential configuration and environment create/configure use the existing action engine and registry. Continuation rechecks current identity, the exact trusted configuration intent, target, operation identity, approval reference where supplied, and the original environment/protection baseline. A caller's approval string alone supplies no authority. Failed or duplicate responses do not repeat configuration.
@@ -128,6 +128,32 @@ The remaining new-module paths are structural producer invariants, not deferred 
 - `adapter-canvas/src/server/services/lifecycle-environments.ts:136-144,156-157,192-193` rejects a mismatched successful operation type or missing accepted operation ID. The real typed dispatcher and its response schemas prevent those successful envelopes. Actual core failures, unavailable hosts, invalid HTTP bodies, declined authority and duplicate continuations run through composed runtime/loopback tests.
 
 One changed route guard remains outside those new-module totals: `adapter-canvas/src/server/routes/operations-control.ts:1222-1223` handles an absent continuation path-template match, which the owning route table prevents before invoking the handler. Existing composition-root instrumentation exceptions also remain; built-extension smoke and the real Chromium selected-account journey exercise the new wiring. No fabricated internal result, module mock, test-only hook or ignored executable line was added to force these paths.
+
+## Response, Repair, and Cancellation Checkpoint
+
+T079–T089 are complete with the following implementation and executable acceptance boundaries. Final same-source qualification is recorded in `quickstart.md` and `.artifacts/t089-closeout-evidence.json`; T090 onward remains excluded.
+
+- Core repair preserves the failed original, creates a linked operation/attempt, and admits at most one active repair per family. Five cycles is the shared ceiling, including repeated requests against the original and inherited stricter policies. Manual policy is the default; an explicit automatic policy advances only from the existing authenticated response engine after renewed source/target approval.
+- The guarded authoring pipeline handles repair proposals without publication or deployment ports. Canonical staging refuses standalone agent compiler loops, so a new staging directory cannot buy another independent six-compile budget. The real runtime fixture counts at most six coordinator compilations across the initial proposal and five linked repairs.
+- Trusted agent assignment, staged-output identity, responder role, live approval and source are checked before continuation. Proven non-delivery allows bounded retries of the same handoff receipt; unknown delivery does not. Session shutdown fences local continuations; panel closure only ends observation.
+- Cancellation addresses a known operation and exact workflow/run/attempt. Requests, independent terminal conclusions, state-save and cleanup remain distinct. Authenticated agent terminal evidence can finish a requested cancellation, but owned local cancellation fences proposal validation and promotion. Missing new artifacts retain previously known phase outcomes. A completion race cannot be rewritten as successful cancellation, and no rollback is implied.
+- Existing operation status/control route owners preserve their HTTP shapes, origin/nonce checks and durable legacy setup controls. Only equivalent canonical actions are translated. Unsupported stop/rollback/exit semantics fail explicitly. Accepted canonical work cannot fall back to a legacy writer or App repair handoff.
+- Shared browser controls use serialized page state and the existing operation view. Accepted repair follows the exact linked operation; missing or foreign observations never fall back to the latest repository operation. Refused acceptance does not start tracking. Component and Chromium cases cover explicit actions, surfaced refusal, navigation, keyboard focus and accessibility. Owning runtime/HTTP matrices retain the 100-read guarantee with zero new agent work or mutation.
+- The current SDK has no trusted approval/agent-attestation seam. Native canonical repair remains unavailable, without disabling separately authorized legacy authoring/deployment controls. These fixtures do not establish actual-host or live-cloud qualification, and they add no durable restart-history guarantee.
+
+### Response and Control Coverage
+
+The five new modules (`core/lifecycle/repair.ts`, `core/lifecycle/cancellation.ts`, `adapter-canvas/runtime/lifecycle-controls.ts`, `adapter-canvas/server/services/lifecycle-controls-http.ts`, and `adapter-canvas/browser/lifecycle-controls.ts`) have 316/316 statements, 370/371 branches, 46/46 functions, and 284/284 lines covered. Four modules are fully covered; cancellation retains one structural branch. Changed reachable paths in the existing action/authoring pipeline, workflow cancellation, authenticated agent binding, route owners, and browser controls are covered. No coverage ignores or reduced floors were added.
+
+Three changed guards cannot be reached through the real producers:
+
+- `core/src/lifecycle/cancellation.ts:195–199` handles an absent operation after cancellation reservation. The session registry never deletes individual records; shutdown returns cancellation, not absence.
+- `core/src/lifecycle/operations.ts:535` handles a repair ancestor missing during family traversal. Admission requires that ancestor to exist, and the registry never removes individual ancestors.
+- `core/src/lifecycle/authoring.ts:596` provides a missing-error fallback for a failed repair parent. The repair service requires the original failure error before constructing that linked authoring plan.
+
+Earlier producer-invariant guards remain as described in Coverage Limitations and Environment Coverage; the authoring guards previously at lines 208 and 494 are now at lines 220 and 565. These exceptions are not untested failure scenarios or claims of complete unrelated legacy coverage. Meaningful tests cover revoked authority, transport failure, delivery uncertainty, post-observation cancellation races, callback failure, staging cleanup failure, terminal evidence after an unconfirmed request, and no promotion after cancellation. The composition root still uses built-extension smoke rather than in-process unit instrumentation.
+
+The shipped `promote-app-model.mjs` and `validate-bicep.mjs` scripts are not included in those V8 module totals. Their actual staging marker and canonical standalone-compile refusal run through the shared promotion and executable runtime fixtures; the Linux composed runtime additionally proves six coordinator compilations across the initial proposal and five repairs. Packaged-guidance assertions complement those executable checks rather than substituting for them.
 
 ## Test Placement and Execution
 

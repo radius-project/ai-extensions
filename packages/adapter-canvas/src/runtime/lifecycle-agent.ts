@@ -59,6 +59,11 @@ export interface TrustedLifecycleAgentHost {
     },
     control: RequestControl
   ): Promise<PortResult<void>>;
+  /** Authoritative receipt reconciliation; only proven non-delivery permits a bounded resend. */
+  deliveryStatus?(
+    receipt: LifecycleAgentReceipt,
+    control: RequestControl
+  ): Promise<PortResult<"not_delivered" | "delivered" | "unknown">>;
   /** Verifies actual host outcome evidence, not a caller-set source or completion field.
    * Identical verification must work before and after core atomically consumes the action.
    */
@@ -92,6 +97,7 @@ interface OwnedAssignment {
   receipt?: LifecycleAgentReceipt;
   delivered: boolean;
   cancelled: boolean;
+  cancellationRequested: boolean;
   outcome?: AgentOutcome;
 }
 
@@ -118,8 +124,13 @@ function validAssignment(
 ): boolean {
   const { action, staging } = work;
   return (
-    scope.operation === "definition.author" &&
-    work.operation === "definition.author" &&
+    scope.operation === work.operation &&
+    (work.operation === "definition.author" ||
+      (opaque(work.failedOperationId) &&
+        work.failedOperationId !== action.operationId &&
+        Number.isInteger(work.policy.maxAttempts) &&
+        work.policy.maxAttempts > 0 &&
+        work.policy.maxAttempts <= 5)) &&
     !!scope.authorizationRef &&
     !!scope.approvalRef &&
     !!scope.principalRef &&
@@ -129,7 +140,10 @@ function validAssignment(
     scope.operationId === action.operationId &&
     action.operationId === staging.operationId &&
     action.actionId === staging.actionId &&
-    action.kind === "agent.author_definition" &&
+    action.kind ===
+      (work.operation === "definition.author" ?
+        "agent.author_definition"
+      : "agent.repair_definition") &&
     action.responder === "agent" &&
     action.response.kind === "agent.outcome" &&
     action.status === "outstanding" &&
@@ -240,7 +254,8 @@ export function createLifecycleAgent(
           scope,
           assignment,
           delivered: false,
-          cancelled: false
+          cancelled: false,
+          cancellationRequested: false
         };
         // Reserve before the first await. Uncertain issuance/dispatch is never retried.
         owned.set(assignment.action.actionId, item);
@@ -252,7 +267,7 @@ export function createLifecycleAgent(
         const current = () =>
           stopped(control) ??
           ((
-            !item.cancelled &&
+            !item.cancellationRequested &&
             matchesBinding(receipt, binding) &&
             matchesBinding(receipt, host.binding()) &&
             receipt.principalRef === scope.principalRef &&
@@ -293,27 +308,55 @@ export function createLifecycleAgent(
         invalid = current();
         if (invalid) return invalid;
         if (ready.status !== "ok") return ready;
-        let sent: PortResult<void>;
-        try {
-          sent = await host.dispatch(
+        let sent: PortResult<void> = portFailure("DISPATCH_UNCONFIRMED");
+        for (let deliveryAttempt = 0; deliveryAttempt < 3; deliveryAttempt++) {
+          try {
+            sent = await host.dispatch(
+              receipt,
+              {
+                assignment,
+                skill: skill.value,
+                stagingLocation: location.value
+              },
+              control
+            );
+          } catch {
+            sent = portFailure("DISPATCH_UNCONFIRMED", {
+              diagnostics: [
+                {
+                  message:
+                    "Host assignment dispatch threw; delivery is unconfirmed.",
+                  truncated: false
+                }
+              ]
+            });
+          }
+          invalid = current();
+          if (invalid) return invalid;
+          if (
+            sent.status === "ok" ||
+            sent.status === "cancelled" ||
+            !host.deliveryStatus
+          )
+            break;
+          const delivery = await host.deliveryStatus(receipt, control);
+          invalid = current();
+          if (invalid) return invalid;
+          if (delivery.status !== "ok" || delivery.value === "unknown") break;
+          if (delivery.value === "delivered") {
+            sent = portSuccess(undefined);
+            break;
+          }
+          if (deliveryAttempt === 2) break;
+          const renewed = await host.verifyAssignment(
             receipt,
-            {
-              assignment,
-              skill: skill.value,
-              stagingLocation: location.value
-            },
+            scope,
+            assignment,
             control
           );
-        } catch {
-          sent = portFailure("DISPATCH_UNCONFIRMED", {
-            diagnostics: [
-              {
-                message:
-                  "Host assignment dispatch threw; delivery is unconfirmed.",
-                truncated: false
-              }
-            ]
-          });
+          invalid = current();
+          if (invalid) return invalid;
+          if (renewed.status !== "ok") return renewed;
         }
         invalid = current();
         if (invalid) return invalid;
@@ -411,16 +454,18 @@ export function createLifecycleAgent(
           !sameLifecycleData(scope.source, item.scope.source)
         )
           return portForbidden();
-        if (item.cancelled) return portFailure("ACTION_NOT_OUTSTANDING");
-        item.cancelled = true;
+        if (item.cancellationRequested)
+          return portFailure("ACTION_NOT_OUTSTANDING");
+        item.cancellationRequested = true;
         const result = await host.cancel(
           structuredClone(scope),
           receipt,
           control
         );
-        return matchesBinding(receipt, host.binding()) ? result : (
-            portForbidden()
-          );
+        if (!matchesBinding(receipt, host.binding())) return portForbidden();
+        if (result.status === "ok" && result.value.status === "confirmed")
+          item.cancelled = true;
+        return result;
       });
     },
     close() {

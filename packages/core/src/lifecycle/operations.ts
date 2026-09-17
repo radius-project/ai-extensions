@@ -207,7 +207,9 @@ export function reduceOperation(
   }
   if (event.kind === "definition_completed") {
     if (
-      operation.operation !== "definition.author" ||
+      !["definition.author", "operation.repair"].includes(
+        operation.operation
+      ) ||
       isTerminalOperation(operation) ||
       (event.state === "succeeded" &&
         (!event.result ||
@@ -447,7 +449,7 @@ export function createSessionOperationRegistry(deps: {
   ) {
     if (!isTerminalOperation(next) || isTerminalOperation(previous))
       return true;
-    if (next.operation === "definition.author") {
+    if (["definition.author", "operation.repair"].includes(next.operation)) {
       const reduced = reduceOperation(previous, {
         kind: "definition_completed",
         state: next.state,
@@ -505,6 +507,57 @@ export function createSessionOperationRegistry(deps: {
         return portFailure("PRECONDITION_FAILED");
       if (operation.state !== "queued")
         return portFailure("PRECONDITION_FAILED");
+      if (operation.operation === "operation.repair") {
+        const parentId = operation.repairsOperationId;
+        const parent = parentId ? records.get(parentId) : undefined;
+        if (
+          !parent ||
+          parent.principalRef !== scope.principalRef ||
+          !matchesOperationTarget(
+            {
+              repo: operation.target.repo,
+              environment: operation.target.environment,
+              application: operation.target.application,
+              definition: operation.target.definition
+            },
+            parent.value.operation.target
+          ) ||
+          parent.value.operation.state !== "failed" ||
+          !operation.repairPolicy ||
+          operation.repairsAttemptId !==
+            parent.value.operation.attempts.at(-1)?.attemptId
+        )
+          return portFailure("PRECONDITION_FAILED");
+        const rootOf = (record: ReadonlyData<OperationRecord>): string => {
+          let current = record;
+          while (current.repairsOperationId) {
+            const previous = records.get(current.repairsOperationId);
+            if (!previous) break;
+            current = previous.value.operation;
+          }
+          return current.operationId;
+        };
+        const root = rootOf(parent.value.operation);
+        const family = [...records.values()]
+          .map((entry) => entry.value.operation)
+          .filter((record) => rootOf(record) === root);
+        const repairs = family.filter(
+          (record) => record.operation === "operation.repair"
+        );
+        const maximum = Math.min(
+          5,
+          operation.repairPolicy.maxAttempts,
+          ...family.map((record) => record.repairPolicy?.maxAttempts ?? 5)
+        );
+        if (
+          !Number.isInteger(maximum) ||
+          maximum < 0 ||
+          repairs.length >= maximum
+        )
+          return portFailure("REPAIR_LIMIT_REACHED");
+        if (repairs.some((record) => !isTerminalOperation(record)))
+          return portFailure("PRECONDITION_FAILED");
+      }
       return store(scope, operation);
     },
     async get(scope, operationId, control) {
@@ -585,6 +638,7 @@ export function createSessionOperationRegistry(deps: {
         next.operation !== previous.operation ||
         next.repairsOperationId !== previous.repairsOperationId ||
         next.repairsAttemptId !== previous.repairsAttemptId ||
+        !sameLifecycleData(next.repairPolicy, previous.repairPolicy) ||
         (previous.cancellationRequestedAt !== undefined &&
           next.cancellationRequestedAt !== previous.cancellationRequestedAt) ||
         !sameLifecycleData(next.target, previous.target) ||

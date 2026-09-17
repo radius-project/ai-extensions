@@ -76,6 +76,7 @@ export type AuthorizationRequest<
       readonly operationId?: string;
       readonly approvalRef?: string;
       readonly configuration?: ConfigurationAuthorizationIntent;
+      readonly repairPolicy?: ReadonlyData<RepairPolicy>;
     }
   : never;
 /** The identity adapter must revalidate this reference at each privileged boundary. */
@@ -90,6 +91,7 @@ export type AuthorizedScope<O extends LifecycleOperation = LifecycleOperation> =
       readonly operationId?: string;
       readonly approvalRef?: string;
       readonly configuration?: ConfigurationAuthorizationIntent;
+      readonly repairPolicy?: ReadonlyData<RepairPolicy>;
     }
   : never;
 export interface IdentityObservation {

@@ -83,6 +83,47 @@ function evidenceFixture() {
   return { identity, observation, evidence, operation };
 }
 
+it("retains known state-save and cleanup outcomes when cancellation has no new final artifact", () => {
+  const f = evidenceFixture();
+  const phases = [
+    {
+      phase: "state-save" as const,
+      status: "failed" as const,
+      exitCode: 1,
+      reason: "Known state save failure."
+    },
+    {
+      phase: "cleanup" as const,
+      status: "succeeded" as const,
+      exitCode: 0,
+      reason: "Owned cleanup completed."
+    }
+  ];
+  const operation = {
+    ...f.operation,
+    attempts: f.operation.attempts.map((attempt) => ({ ...attempt, phases }))
+  };
+  expect(
+    reduceExecutionObservation(operation, f.identity, {
+      identity: f.identity,
+      conclusion: "cancelled",
+      observation: f.observation,
+      evidence: portUnavailable("RESULT_UNAVAILABLE", {
+        quality: "unknown",
+        completeness: "unavailable",
+        evidence: "workflow"
+      })
+    })
+  ).toMatchObject({
+    status: "ok",
+    value: {
+      state: "cancelled",
+      attempts: [{ phases }],
+      result: { kind: "execution", phases }
+    }
+  });
+});
+
 for (const quality of ["current", "stale", "unknown"] as const) {
   for (const conclusion of [
     "success",

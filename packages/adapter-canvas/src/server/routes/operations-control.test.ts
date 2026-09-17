@@ -1,6 +1,11 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
+import { createOperationRecord } from "@radius-project/core/lifecycle";
+import {
+  authorizeFixture,
+  createLifecycleFixture
+} from "../../../test/support/lifecycle.js";
 import { createRequestContext } from "../request-context.js";
 import {
   createOperationsControlRoutes,
@@ -238,6 +243,43 @@ function retryableDeletion(): OperationFixture {
 }
 
 describe("the route registry", () => {
+  it("routes canonical controls without invoking the legacy writer", async () => {
+    const f = createLifecycleFixture();
+    const target = {
+      repo: "owner/repo",
+      definition: ".radius/app.bicep",
+      source: f.source
+    };
+    const owner = authorizeFixture({
+      caller: f.caller,
+      operation: "definition.author",
+      target
+    });
+    const operation = createOperationRecord(f.ports, {
+      operation: "definition.author",
+      target
+    });
+    await f.binding.registry.create(owner, operation, {
+      requestId: "register",
+      cancellation: { aborted: false, onAbort: () => () => {} }
+    });
+    try {
+      const routes = createOperationsControlRoutes(
+        dependencies({ lifecycle: () => f.binding })
+      );
+      const out = recorder();
+      await routes[`POST ${STOP_OPERATION_ROUTE}`](
+        postContext(
+          `/api/operations/${operation.operationId}/stop`,
+          out.response
+        )
+      );
+      expect(out.recording.status).toBe(409);
+      expect(out.payload().code).toBe("PRECONDITION_FAILED");
+    } finally {
+      await f.binding.close();
+    }
+  });
   it("claims exactly the six declared control routes", () => {
     const registry = createOperationsControlRoutes(dependencies());
     expect(Object.keys(registry).sort()).toEqual(

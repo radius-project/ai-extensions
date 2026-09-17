@@ -348,7 +348,9 @@ export async function createAuthoringBoundaryFixture(
           portSuccess(undefined)
         : portForbidden()
       ),
-      cancel: vi.fn(async () => reject("unexpected remote cancellation"))
+      cancel: vi.fn<TrustedLifecycleAgentHost["cancel"]>(async () =>
+        reject("unexpected remote cancellation")
+      )
     };
     const agent = createLifecycleAgent({
       ...(options.trustedHost ? { host } : {}),
@@ -363,11 +365,20 @@ export async function createAuthoringBoundaryFixture(
         resolveCaller: async () => portSuccess(currentCaller),
         authorize: async (request) => {
           authorizations.push(request);
-          if (request.operation === "definition.author" && !approved)
+          if (
+            ["definition.author", "operation.repair"].includes(
+              request.operation
+            ) &&
+            !approved
+          )
             return portForbidden();
           return portSuccess({
             ...authorizeFixture(request),
-            ...(request.operation === "definition.author" ?
+            ...((
+              ["definition.author", "operation.repair"].includes(
+                request.operation
+              )
+            ) ?
               { approvalRef: "fixture-approval" }
             : {})
           });
@@ -401,7 +412,15 @@ export async function createAuthoringBoundaryFixture(
       definitions: {
         source,
         validator,
-        ...(options.trustedHost ? { authoring: { source, agent } } : {})
+        ...(options.trustedHost ?
+          {
+            authoring: {
+              source,
+              agent,
+              repairProvider: async () => portSuccess("azure" as const)
+            }
+          }
+        : {})
       }
     });
     return {
@@ -442,6 +461,11 @@ export async function createAuthoringBoundaryFixture(
             response: outcome
           }
         };
+      },
+      attest(actionId: string, outcome: AgentOutcome) {
+        if (!receipts.has(actionId))
+          throw new Error("Cannot attest an unassigned action.");
+        outcomes.set(actionId, outcome);
       },
       async expectUnchanged() {
         for (const [path, text] of inputs)

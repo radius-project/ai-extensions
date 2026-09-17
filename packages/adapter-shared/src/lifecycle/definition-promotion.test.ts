@@ -101,6 +101,14 @@ const scope: AuthorizedScope<"definition.author"> = {
   authorizationRef: "authorization",
   approvalRef: "approval"
 };
+it("marks canonical staging as coordinator-owned so agent compiler loops cannot reset the linked budget", async () => {
+  const f = await prepared();
+  const record: unknown = JSON.parse(
+    await readFile(join(f.location, "run.json"), "utf8")
+  );
+  expect(record).toMatchObject({ lifecycleManaged: true });
+});
+
 beforeEach(async () => {
   root = join(process.cwd(), ".artifacts", `authoring-${randomUUID()}`);
   await mkdir(join(root, "workspace"), { recursive: true });

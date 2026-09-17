@@ -175,7 +175,13 @@ export function createActionService(deps: {
       !action ||
       action.status !== "outstanding" ||
       isTerminalOperation(operation) ||
-      operation.cancellationRequestedAt
+      (operation.cancellationRequestedAt &&
+        !(
+          input.response.kind === "agent.outcome" &&
+          ["definition.author", "operation.repair"].includes(
+            operation.operation
+          )
+        ))
     )
       return portFailure("ACTION_NOT_OUTSTANDING");
     if (

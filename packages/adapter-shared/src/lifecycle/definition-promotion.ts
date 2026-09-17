@@ -55,7 +55,11 @@ export interface PromotionBaseline {
 }
 /** Inject the shipped promote-app-model.mjs exports, not another filesystem writer. */
 export interface DefinitionPromotionMachinery {
-  beginStagedRun(options: { radiusDir: string; runId: string }): string;
+  beginStagedRun(options: {
+    radiusDir: string;
+    runId: string;
+    lifecycleManaged?: true;
+  }): string;
   promoteStagedRun(options: {
     radiusDir: string;
     stagingDir: string;
@@ -80,14 +84,14 @@ export interface DefinitionPromotionAdapter
   ): Promise<PortResult<string>>;
 }
 interface Original {
-  readonly scope: AuthorizedScope<"definition.author">;
+  readonly scope: AuthorizedScope<"definition.author" | "operation.repair">;
   readonly root: string;
   readonly baseline: Readonly<Record<string, string | null>>;
 }
 interface OwnedStaging {
   readonly area: StagingArea;
   readonly original: Original;
-  readonly scope: AuthorizedScope<"definition.author">;
+  readonly scope: AuthorizedScope<"definition.author" | "operation.repair">;
   readonly directory: string;
   readonly active: Set<Promise<unknown>>;
   outputs?: StagedOutputs;
@@ -222,7 +226,7 @@ export function createDefinitionPromotionAdapter(
     checkSourceCancellation(control.cancellation);
     if (closed) throw new SourceAccessFault(portCancelled("session_shutdown"));
     if (
-      scope.operation !== "definition.author" ||
+      !["definition.author", "operation.repair"].includes(scope.operation) ||
       !scope.authorizationRef ||
       scope.principalRef !== record.scope.principalRef ||
       scope.approvalRef !== record.scope.approvalRef ||
@@ -321,7 +325,7 @@ export function createDefinitionPromotionAdapter(
       const original = originals.get(binding.snapshot);
       if (
         !original ||
-        scope.operation !== "definition.author" ||
+        !["definition.author", "operation.repair"].includes(scope.operation) ||
         !scope.approvalRef ||
         scope.principalRef !== original.scope.principalRef ||
         scope.approvalRef !== original.scope.approvalRef ||
@@ -339,7 +343,8 @@ export function createDefinitionPromotionAdapter(
         throw new SourceAccessFault(portFailure("PRECONDITION_FAILED"));
       const directory = machinery.beginStagedRun({
         radiusDir: join(original.root, ".radius"),
-        runId: stagingRef
+        runId: stagingRef,
+        lifecycleManaged: true
       });
       const area = Object.freeze({ stagingRef, ...binding });
       staging.set(area, {

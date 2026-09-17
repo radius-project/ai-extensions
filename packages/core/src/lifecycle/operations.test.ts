@@ -86,6 +86,72 @@ function fixture() {
 }
 
 describe("session operation registry", () => {
+  it.each([
+    "missing-link",
+    "missing-parent",
+    "foreign-owner",
+    "wrong-target",
+    "running-parent",
+    "missing-policy",
+    "wrong-attempt"
+  ] as const)(
+    "rejects a repair with %s before admitting another operation",
+    async (mode) => {
+      const f = fixture();
+      const created = await f.registry.create(scope, f.operation, control);
+      if (created.status !== "ok") throw new Error("Missing parent");
+      if (mode !== "running-parent")
+        await f.registry.compareAndSwap(
+          scope,
+          {
+            operationId: f.operation.operationId,
+            expectedRevision: created.value.revision,
+            replacement: {
+              ...f.operation,
+              state: "failed",
+              error: lifecycleError("VALIDATION_FAILED")
+            }
+          },
+          control
+        );
+      const target = {
+        ...scope.target,
+        ...(mode === "wrong-target" ? { environment: "other" } : {})
+      };
+      const repair = {
+        ...createOperationRecord(f.deps, {
+          operation: "operation.repair",
+          target
+        }),
+        ...(mode === "missing-link" ?
+          {}
+        : {
+            repairsOperationId:
+              mode === "missing-parent" ? "missing" : f.operation.operationId
+          }),
+        repairsAttemptId:
+          mode === "wrong-attempt" ? "other" : (
+            f.operation.attempts[0].attemptId
+          ),
+        ...(mode === "missing-policy" ?
+          {}
+        : { repairPolicy: { mode: "manual" as const, maxAttempts: 5 } })
+      };
+      expect(
+        await f.registry.create(
+          {
+            ...scope,
+            operation: "operation.repair",
+            target,
+            ...(mode === "foreign-owner" ? { principalRef: "other" } : {})
+          },
+          repair,
+          control
+        )
+      ).toMatchObject({ error: { code: "PRECONDITION_FAILED" } });
+      expect(f.registry.knownOperations()).toHaveLength(1);
+    }
+  );
   it("never clears a known cancellation request through a later revision", async () => {
     const { registry, operation } = fixture();
     const pending = {

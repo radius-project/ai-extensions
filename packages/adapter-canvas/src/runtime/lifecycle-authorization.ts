@@ -236,6 +236,9 @@ export function createLifecycleAuthorization(authority: LifecycleAuthority) {
       caller,
       operation: request.operation,
       target: request.target,
+      ...(request.operation === "operation.repair" ?
+        { repairPolicy: request.input.repairPolicy }
+      : {}),
       ...(configurationAuthorizationIntent(request) ?
         { configuration: configurationAuthorizationIntent(request) }
       : {}),
@@ -257,6 +260,7 @@ export function createLifecycleAuthorization(authority: LifecycleAuthority) {
         !sameTarget(scope.target, request.target) ||
         scope.operationId !== input.operationId ||
         !sameLifecycleData(scope.configuration, input.configuration) ||
+        !sameLifecycleData(scope.repairPolicy, input.repairPolicy) ||
         !sameLifecycleData(scope.source, source)
       ) {
         return portForbidden();

@@ -113,10 +113,10 @@ const outcome: AgentOutcome = {
   stagedOutputRefs: ["staging/app.bicep"]
 };
 const cancellation: CancellationReceipt = {
-  status: "requested",
+  status: "confirmed",
   requestedAt: "2026-09-16T00:00:00Z",
   observation: {
-    quality: "unknown",
+    quality: "current",
     completeness: "partial",
     evidence: "session"
   }
@@ -190,6 +190,116 @@ function deferred<T>() {
 }
 
 describe("lifecycle agent bridge", () => {
+  it.each(["delivery-read", "renewed-approval"] as const)(
+    "fences cancellation during %s instead of sending another handoff",
+    async (stage) => {
+      const f = fixture();
+      f.host.dispatch.mockResolvedValue(portFailure("DISPATCH_UNCONFIRMED"));
+      const deliveryStatus = vi.fn<
+        NonNullable<TrustedLifecycleAgentHost["deliveryStatus"]>
+      >(async () => {
+        if (stage === "delivery-read") f.signal.aborted = true;
+        return portSuccess("not_delivered");
+      });
+      let verifications = 0;
+      f.host.verifyAssignment.mockImplementation(async () => {
+        verifications++;
+        if (stage === "renewed-approval" && verifications === 3)
+          f.signal.aborted = true;
+        return portSuccess(undefined);
+      });
+      const agent = createLifecycleAgent({
+        host: { ...f.host, deliveryStatus },
+        discoverSkill: f.discoverSkill,
+        stagingLocation: f.stagingLocation
+      });
+      expect(await agent.assign(scope, assignment, f.control)).toMatchObject({
+        status: "cancelled"
+      });
+      expect(f.host.dispatch).toHaveBeenCalledOnce();
+      agent.close();
+    }
+  );
+  it.each(["not_delivered", "delivered", "unknown"] as const)(
+    "bounds handoff delivery retries using authoritative %s evidence, not new repair cycles",
+    async (status) => {
+      const f = fixture();
+      f.host.dispatch.mockResolvedValue(portFailure("DISPATCH_UNCONFIRMED"));
+      const deliveryStatus = vi.fn(async () => portSuccess(status));
+      const agent = createLifecycleAgent({
+        host: { ...f.host, deliveryStatus },
+        discoverSkill: f.discoverSkill,
+        stagingLocation: f.stagingLocation
+      });
+      const result = await agent.assign(scope, assignment, f.control);
+      expect(result.status).toBe(status === "delivered" ? "ok" : "failed");
+      expect(f.host.issueAssignment).toHaveBeenCalledOnce();
+      expect(f.host.dispatch).toHaveBeenCalledTimes(
+        status === "not_delivered" ? 3 : 1
+      );
+      for (const [issued, work] of f.host.dispatch.mock.calls) {
+        expect(issued).toEqual(receipt);
+        expect(work.assignment.action.operationId).toBe("operation");
+        expect(work.assignment.action.actionId).toBe("action");
+      }
+      expect(await agent.assign(scope, assignment, f.control)).toMatchObject({
+        error: { code: "ACTION_NOT_OUTSTANDING" }
+      });
+    }
+  );
+  it("revalidates authority before a proven-undelivered handoff retry", async () => {
+    const f = fixture();
+    f.host.dispatch.mockResolvedValue(portFailure("DISPATCH_UNCONFIRMED"));
+    const agent = createLifecycleAgent({
+      host: {
+        ...f.host,
+        deliveryStatus: async () => {
+          f.host.verifyAssignment.mockResolvedValue(portForbidden());
+          return portSuccess("not_delivered");
+        }
+      },
+      discoverSkill: f.discoverSkill,
+      stagingLocation: f.stagingLocation
+    });
+    expect(await agent.assign(scope, assignment, f.control)).toMatchObject({
+      status: "forbidden"
+    });
+    expect(f.host.dispatch).toHaveBeenCalledOnce();
+  });
+  it("delivers an authorized repair against its own source without granting publication", async () => {
+    const f = fixture();
+    const repair: AgentAssignment = {
+      operation: "operation.repair",
+      action: { ...assignment.action, kind: "agent.repair_definition" },
+      staging: assignment.staging,
+      failedOperationId: "failed-operation",
+      failedAttemptId: "failed-attempt",
+      failure: {
+        code: "VALIDATION_FAILED",
+        message: "The approved definition failed validation.",
+        retryable: false
+      },
+      policy: { mode: "manual", maxAttempts: 5 }
+    };
+    expect(
+      await f.agent.assign(
+        { ...scope, operation: "operation.repair" },
+        repair,
+        f.control
+      )
+    ).toEqual(portSuccess(delivery));
+    expect(f.host.dispatch).toHaveBeenCalledOnce();
+    expect(f.host.dispatch.mock.calls[0]?.[1].assignment).toEqual(repair);
+    expect(
+      await f.agent.authenticateOutcome(
+        caller,
+        repair.action,
+        outcome,
+        f.control
+      )
+    ).toMatchObject({ status: "ok" });
+  });
+
   it("checks source expectations against the exact snapshot before consulting the host", async () => {
     const f = fixture();
     const changedTarget = {
@@ -371,6 +481,27 @@ describe("lifecycle agent bridge", () => {
     f.host.verifyAssignment.mockResolvedValue(portForbidden());
     expect(await f.authenticate()).toEqual(portForbidden());
     expect(f.host.verifyOutcome).not.toHaveBeenCalled();
+  });
+
+  it("allows authenticated terminal evidence after an unconfirmed cancellation request without sending cancellation twice", async () => {
+    const f = fixture();
+    await f.assign();
+    f.host.cancel.mockResolvedValue(
+      portSuccess({ ...cancellation, status: "requested" })
+    );
+    expect(await f.cancel()).toMatchObject({
+      status: "ok",
+      value: { status: "requested" }
+    });
+    expect(await f.authenticate()).toMatchObject({
+      status: "ok",
+      value: { outcome }
+    });
+    expect(await f.cancel()).toMatchObject({
+      status: "failed",
+      error: { code: "ACTION_NOT_OUTSTANDING" }
+    });
+    expect(f.host.cancel).toHaveBeenCalledOnce();
   });
 
   it("fences outcomes on cancellation and shutdown without reporting remote rollback", async () => {

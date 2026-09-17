@@ -55,6 +55,7 @@ import {
   type LifecycleEnvironmentDependencies
 } from "./lifecycle-environments.js";
 import type { LifecycleCredentialDependencies } from "./lifecycle-credentials.js";
+import { createLifecycleControlRegistrations } from "./lifecycle-controls.js";
 
 export interface LifecycleBindingDependencies {
   readonly credentials?: LifecycleCredentialDependencies;
@@ -125,7 +126,8 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
       ...registry.knownOperations().map((operation) => {
         const prefix = operation.operation.split(".")[0];
         const family: LifecycleRoutingFamily =
-          (
+          operation.operation === "operation.repair" ? "definition"
+          : (
             prefix === "definition" ||
             prefix === "application" ||
             prefix === "deployment"
@@ -204,13 +206,25 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
       readers: ["legacy", "lifecycle"],
       controllers: ["legacy", "lifecycle"]
     });
+  const controls = createLifecycleControlRegistrations({
+    registry,
+    clock: deps.clock,
+    identity: deps.authority,
+    routing,
+    ...(definitions?.authoring ? { authoring: definitions.authoring } : {}),
+    ...(deps.definitions?.authoring?.repairProvider ?
+      { repairProvider: deps.definitions.authoring.repairProvider }
+    : {}),
+    ...(deps.deployment ? { workflow: deps.deployment.workflow } : {})
+  });
   const discovery = createLifecycleDiscoveryRegistrations({
     ...deps,
     capabilities: [
       ...(graphs ? graphCapabilities : []),
       ...(definitions?.capabilities ?? []),
       ...deployment.capabilities,
-      ...environments.capabilities
+      ...environments.capabilities,
+      ...controls.capabilities
     ]
   });
   const service = createLifecycleService({
@@ -224,6 +238,7 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
       ...(definitions?.registrations ?? []),
       ...deployment.registrations,
       ...environments.registrations,
+      ...controls.registrations,
       registerLifecycleOperation(
         "operation.respond",
         { actions },
@@ -235,6 +250,11 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
             request.input,
             context.control
           );
+          if (result.status === "ok")
+            await controls.afterResponse(
+              result.value.operationId,
+              context.control
+            );
           return result.status === "ok" ?
               {
                 apiVersion: LIFECYCLE_API_VERSION,
@@ -433,6 +453,7 @@ export function createLifecycleBinding(deps: LifecycleBindingDependencies) {
       if (cleanup) return cleanup;
       if (!closed) {
         closed = true;
+        controls.close();
         actions.close();
         graphs?.close();
       }

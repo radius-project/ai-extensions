@@ -47,6 +47,10 @@ import { errorMessage } from "../../runtime/util.js";
 import type { OperationRecord } from "./operations-status.js";
 import type { LifecycleBinding } from "../../runtime/create-lifecycle-binding.js";
 import {
+  createLifecycleControlsHttp,
+  lifecycleControlledOperation
+} from "../services/lifecycle-controls-http.js";
+import {
   createLifecycleEnvironmentHttp,
   lifecycleSetupOperation
 } from "../services/lifecycle-environments.js";
@@ -1340,7 +1344,30 @@ export function createOperationsControlRoutes(
     const previous = operationMutations.get(operationId) ?? Promise.resolve();
     const current = previous
       .catch(() => {})
-      .then(() => handler(context, dependencies));
+      .then(async () => {
+        const lifecycle = dependencies.lifecycle?.(context.instanceId);
+        if (lifecycle && lifecycleControlledOperation(lifecycle, operationId)) {
+          let input: unknown;
+          try {
+            input = JSON.parse(await context.readTextBody());
+          } catch {
+            sendJson(context, 400, {
+              error: "Invalid JSON body.",
+              code: "invalid-json"
+            });
+            return;
+          }
+          const command = context.pathname.split("/").slice(4).join("/");
+          const result = await createLifecycleControlsHttp(lifecycle).control(
+            operationId,
+            command,
+            input
+          );
+          sendJson(context, result.status, result.body);
+          return;
+        }
+        await handler(context, dependencies);
+      });
     operationMutations.set(operationId, current);
     return current.finally(() => {
       if (operationMutations.get(operationId) === current) {

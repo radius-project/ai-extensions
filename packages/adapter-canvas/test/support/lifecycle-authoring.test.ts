@@ -12,6 +12,13 @@ it("owns isolated fixture roots and fails on unmodeled host work", async () => {
     expect(first.root).not.toBe(second.root);
     expect(await first.selection()).toEqual(await second.selection());
     expect(() => first.response("foreign-action")).toThrow("No dispatched");
+    expect(() =>
+      first.attest("foreign-action", {
+        kind: "agent.outcome",
+        status: "failed",
+        diagnostics: []
+      })
+    ).toThrow("Cannot attest an unassigned action");
     expect(() => first.reject("unmodeled")).toThrow(
       "Unmodeled authoring boundary"
     );

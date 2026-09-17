@@ -49,7 +49,7 @@ export function reduceExecutionObservation(
     (!sameLifecycleData(suppliedEvidence.identity, identity) ||
       suppliedEvidence.actualCommit !== identity.expectedCommit);
   const evidence = invalid ? undefined : suppliedEvidence;
-  const phases = evidence?.phases ?? [];
+  const phases = evidence?.phases ?? known.phases;
   const conflict =
     observed.conclusion === "success" &&
     phases.some(

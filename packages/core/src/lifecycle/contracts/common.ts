@@ -668,6 +668,15 @@ export const operationRecordSchema = {
     attempts: { type: "array", maxItems: 6, items: executionAttemptSchema },
     actions: { type: "array", maxItems: 100, items: requiredActionSchema },
     cancellationRequestedAt: timestampSchema,
+    repairPolicy: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        mode: { enum: ["manual", "automatic"] },
+        maxAttempts: { type: "integer", minimum: 0, maximum: 5 }
+      },
+      required: ["mode", "maxAttempts"]
+    },
     repairsOperationId: handleSchema,
     repairsAttemptId: handleSchema,
     error: lifecycleErrorSchema,

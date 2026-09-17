@@ -1,6 +1,10 @@
 import type { CanvasRequestContext } from "../request-context.js";
 import type { LifecycleBinding } from "../../runtime/create-lifecycle-binding.js";
 import {
+  createLifecycleControlsHttp,
+  lifecycleControlledOperation
+} from "../services/lifecycle-controls-http.js";
+import {
   createLifecycleEnvironmentHttp,
   isLifecycleSetupInput,
   lifecycleSetupOperation
@@ -301,6 +305,15 @@ export function handleOperationById(
     context.pathname.slice(OPERATIONS_PREFIX.length)
   );
   const lifecycle = dependencies.lifecycle?.(context.instanceId);
+  if (lifecycle && lifecycleControlledOperation(lifecycle, operationId))
+    return createLifecycleControlsHttp(lifecycle)
+      .status(operationId)
+      .then((result) => {
+        context.response.setHeader("Content-Type", "application/json");
+        context.response.setHeader("Cache-Control", "no-store");
+        context.response.writeHead(result.status);
+        context.response.end(JSON.stringify(result.body));
+      });
   if (lifecycle && lifecycleSetupOperation(lifecycle, operationId))
     return createLifecycleEnvironmentHttp(lifecycle)
       .status(operationId)

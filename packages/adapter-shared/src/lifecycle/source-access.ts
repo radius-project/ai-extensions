@@ -119,7 +119,7 @@ export interface SourceReadAdapter extends Pick<
 /** Adapter-private capabilities; never serialize locations or accept caller-created snapshots. */
 export interface SourceAuthoringReadAdapter extends SourceReadAdapter {
   captureForAuthoring(
-    scope: AuthorizedScope<"definition.author">,
+    scope: AuthorizedScope<"definition.author" | "operation.repair">,
     selection: SourceSelection,
     control: RequestControl
   ): Promise<ReadResult<SourceCapture>>;
@@ -353,7 +353,9 @@ export function createSourceReadAdapter(
         const location = await authorized(scope, selection, control);
         if (
           authoring &&
-          (scope.operation !== "definition.author" ||
+          (!["definition.author", "operation.repair"].includes(
+            scope.operation
+          ) ||
             location.kind !== "workspace")
         )
           throw new SourceAccessFault(portForbidden());
@@ -577,7 +579,9 @@ export function createSourceReadAdapter(
         !record ||
         record.snapshot !== snapshot ||
         record.releasing ||
-        record.scope.operation !== "definition.author"
+        !["definition.author", "operation.repair"].includes(
+          record.scope.operation
+        )
       )
         throw new SourceAccessFault(sourceUnavailable());
       const location = await authorized(

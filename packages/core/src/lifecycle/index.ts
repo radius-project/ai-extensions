@@ -41,3 +41,9 @@ export * from "./credentials.js";
 export * from "./environments.js";
 export * from "./environment-configuration.js";
 export { configurationAuthorizationIntent } from "./configuration-authority.js";
+export {
+  createRepair,
+  type RepairPlan,
+  type RepairExecutor
+} from "./repair.js";
+export { createCancellation } from "./cancellation.js";

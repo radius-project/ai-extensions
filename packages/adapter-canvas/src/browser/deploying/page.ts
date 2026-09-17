@@ -20,6 +20,7 @@ import {
 import { escapeBrowserHtml } from "../html.js";
 import { isRecord, readBoolean, readRecord, readString } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
+import { createLifecycleControls } from "../lifecycle-controls.js";
 import { queryValue } from "../query.js";
 import { DEPLOYING_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
@@ -98,6 +99,7 @@ export function workflowRunLink(runUrl: string): string {
 }
 
 export interface DeployingPageOptions {
+  lifecycleOperationId?: string;
   repo: string;
   /** Nonce for mutating requests; run-command hand-off is rejected without it. */
   mutationNonce: string;
@@ -390,6 +392,13 @@ export function initializeDeployingPage(
 
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
+  const lifecycleControls = createLifecycleControls(
+    context,
+    options.mutationNonce
+  );
+  entry.onTeardown(() => lifecycleControls.teardown());
+  if (options.lifecycleOperationId)
+    lifecycleControls.observe(options.lifecycleOperationId);
 
   let providers: Record<string, string> = {};
   let environmentStatuses: Record<string, string> = {};
@@ -1181,6 +1190,10 @@ export function initializeDeployingPage(
         .then((payload) => {
           if (!entry.active) return;
           const status = parseDeployStatus(payload);
+          lifecycleControls.observe(
+            readString(payload, "operationId"),
+            status.status
+          );
           const sameAttempt =
             (status.attempt.targetRepo === "" ||
               status.attempt.targetRepo === options.repo) &&
@@ -1333,6 +1346,10 @@ export function initializeDeployingPage(
         .then((payload) => {
           if (!entry.active) return;
           const status = parseDeployStatus(payload);
+          lifecycleControls.observe(
+            readString(payload, "operationId"),
+            status.status
+          );
           const sameAttempt =
             (status.attempt.targetRepo === "" ||
               status.attempt.targetRepo === options.repo) &&

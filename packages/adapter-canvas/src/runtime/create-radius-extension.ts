@@ -240,14 +240,21 @@ export function createRadiusExtension(
       handOffAppModel({ repo, branches, page, progressView, state })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
-    ({ repo, branch, error, deployRunUrl, attemptId }) =>
-      deps.session.get().send(
+    ({ repo, branch, error, deployRunUrl, attemptId }) => {
+      if (deps.lifecycle.routing.selection("deployment").writer === "lifecycle")
+        return Promise.reject(
+          new Error(
+            "Canonical repair requires an explicitly authorized operation.repair request; legacy handoff cannot replace it."
+          )
+        );
+      return deps.session.get().send(
         deployRepairHandoffMessage(repo, branch, {
           error,
           deployRunUrl,
           attemptId
         })
-      )
+      );
+    }
   );
   // The informational sibling of the repair handoff: a deploy whose run could
   // not be confirmed is relayed to chat as a report, never as a repair loop.

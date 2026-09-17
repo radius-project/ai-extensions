@@ -9,6 +9,25 @@ import { readBrowserPageState } from "../../test/support/pages/browser-state.js"
 import { deployingPage } from "./deploying-page.js";
 
 describe("deployingPage", () => {
+  it.each(["operation-1", HOSTILE_STATE])(
+    "serializes the exact lifecycle identity inertly: %s",
+    (lifecycleDeploymentId) => {
+      const html = deployingPage({
+        contextRepo: "octo/app",
+        lifecycleDeploymentId
+      });
+      expect(readBrowserPageState(html, DEPLOYING_PAGE_STATE_ID)).toMatchObject(
+        {
+          lifecycleOperationId: lifecycleDeploymentId
+        }
+      );
+      expect(html).toContain('id="lifecycle-controls"');
+      expect(html).toContain('id="lifecycle-repair"');
+      expect(html).toContain('id="lifecycle-cancel"');
+      expect(html).toContain('id="lifecycle-control-status"');
+      expectSafeInlineScripts(html);
+    }
+  );
   it("renders the stable deployment controls and destructive dialog", () => {
     const html = deployingPage({
       contextRepo: "octo/app",

@@ -51,11 +51,21 @@ Use them like this:
 
 ### Repair loop calls must carry the attempt ID
 
-When an explicitly authorized legacy repair supplies an `attemptId`, that ID identifies **one deploy attempt**, not the canvas panel, because a panel is reused by the next deploy. Status polling never initiates repair. Canonical repair is capability-gated and is not implemented by the deployment/observation checkpoint.
+When an explicitly authorized legacy repair supplies an `attemptId`, that ID identifies **one deploy attempt**, not the canvas panel, because a panel is reused by the next deploy. Status polling never initiates repair. Canonical repair uses a distinct linked operation and attempt; it never restarts or rewrites the failed original.
 
 - Pass `attemptId` to both tools for every call in that repair loop.
 - Do not pass `repo`, `environment`, `branch`, `provider`, or `appFile` alongside it: the attempt already pins those, and a mismatch is rejected.
 - If a tool reports the attempt is no longer active, a newer deploy replaced it. Stop and ask the user which deploy to repair instead of retrying against another one.
+
+### Explicit lifecycle repair and cancellation
+
+Use `radius_lifecycle` with `operation.repair` only after the user authorizes repair of the identified failed operation and the host establishes current source-bound approval. Supply the failed `operationId`, the approved workspace source, and an explicit finite `repairPolicy`; manual repair is the default. Five cycles is the shared maximum across linked attempts, including repairs requested again against the original failure. A smaller limit remains binding. `REPAIR_LIMIT_REACHED` means stop: creating another request or choosing the original failure does not reset the budget.
+
+An agent may respond only to its assigned `agent.repair_definition` action. Return authenticated staged-output references through `operation.respond`; do not claim that a chat message or user decision is agent attestation. Completion still requires validation and guarded promotion against unchanged inputs. Handoff delivery can be retried only after the trusted host proves non-delivery; bounded retries retain the same operation, action, and delivery receipt and do not consume a new repair cycle.
+
+For cancellation, use `operation.cancel` for the exact known operation. A received request does not prove a workflow stopped. Continue reading the same operation for independent workflow, state-save, and cleanup evidence. Closing a panel stops browser observation, not the accepted workflow. Stop, continue, cancel-workflow, rollback, and exit retain distinct meanings; cancellation is never permission to tear down infrastructure.
+
+The current native SDK still lacks trusted source-bound approval and authenticated agent-outcome support, so canonical repair remains unavailable there. Do not bypass that refusal with a legacy handoff or fabricate approval. Supported injected-host tests are not native-host qualification. Ordinary status reads and informational failure notices never initiate repair.
 
 ### Push the repair before redeploying
 

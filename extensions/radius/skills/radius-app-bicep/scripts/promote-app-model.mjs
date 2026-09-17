@@ -570,10 +570,15 @@ function createPromotionOperations(dependencies) {
   // --- begin -----------------------------------------------------------------
 
   /**
-   * @param {{radiusDir: string, runId?: string, staleAfterMs?: number}} options
+   * @param {{radiusDir: string, runId?: string, staleAfterMs?: number, lifecycleManaged?: true}} options
    * @returns {string}
    */
-  function beginStagedRun({ radiusDir, runId = "", staleAfterMs }) {
+  function beginStagedRun({
+    radiusDir,
+    runId = "",
+    staleAfterMs,
+    lifecycleManaged
+  }) {
     assertSafePath(radiusDir, true);
     radiusDir = path.resolve(radiusDir);
     assertSafePath(radiusDir, true);
@@ -619,6 +624,7 @@ function createPromotionOperations(dependencies) {
     // forgets to pass it along or passes the wrong one.
     const record = {
       version: 2,
+      ...(lifecycleManaged ? { lifecycleManaged: true } : {}),
       runId: dirName.slice(STAGING_DIR_PREFIX.length),
       startedAt: new Date().toISOString(),
       baseline: managedFileHashes(radiusDir, managedFilesFor(radiusDir)),

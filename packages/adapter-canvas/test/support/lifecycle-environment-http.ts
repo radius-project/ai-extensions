@@ -78,11 +78,23 @@ export async function createEnvironmentHttpFixture(
   options: { lifecycleAvailable?: boolean } = {}
 ) {
   const fixture = await createEnvironmentFixture(provider);
-  const routes = createTestRouteTable(
-    createLifecycleSetupRoutes(
-      options.lifecycleAvailable === false ? undefined : fixture.binding
-    )
+  const server = await createLifecycleHttpServer(
+    options.lifecycleAvailable === false ? undefined : fixture.binding
   );
+  return {
+    ...fixture,
+    ...server,
+    close: async () => {
+      await server.close();
+      await fixture.close();
+    }
+  };
+}
+
+export async function createLifecycleHttpServer(
+  binding: LifecycleBinding | undefined
+) {
+  const routes = createTestRouteTable(createLifecycleSetupRoutes(binding));
   const nonce = "fixture-browser-nonce";
   const container = createCanvasServer({
     createHttpServer: (handler) => createServer(handler),
@@ -117,7 +129,6 @@ export async function createEnvironmentHttpFixture(
     "X-Radius-Mutation-Nonce": nonce
   };
   return {
-    ...fixture,
     url: entry.baseUrl,
     headers,
     post: (path: string, value: unknown) =>
@@ -128,7 +139,6 @@ export async function createEnvironmentHttpFixture(
       }),
     close: async () => {
       await container.stopAll();
-      await fixture.close();
     }
   };
 }

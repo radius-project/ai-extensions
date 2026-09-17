@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import {
   portCancelled,
+  portAbsent,
   portFailure,
   portSuccess,
   portUnavailable,
@@ -136,6 +137,212 @@ function fixture() {
     adapter: createWorkflowExecution(deps)
   };
 }
+it.each([
+  "already-aborted",
+  "absent-observation",
+  "failed-observation",
+  "abort-observation",
+  "abort-command",
+  "failed-command"
+] as const)(
+  "retains %s cancellation uncertainty without another command",
+  async (mode) => {
+    const f = fixture();
+    const signal = {
+      aborted: mode === "already-aborted",
+      onAbort: () => () => {}
+    };
+    const control = { ...f.control, cancellation: signal };
+    vi.mocked(f.deps.observation).mockImplementation(async () => {
+      if (mode === "absent-observation")
+        return portAbsent({
+          quality: "current",
+          completeness: "complete",
+          evidence: "workflow",
+          observedAt: f.deps.clock.now()
+        });
+      if (mode === "failed-observation")
+        return portFailure("PRECONDITION_FAILED");
+      if (mode === "abort-observation") signal.aborted = true;
+      return portSuccess({ identity: f.identity, conclusion: "in_progress" });
+    });
+    const cancelRun = vi.fn(async () => {
+      if (mode === "abort-command") signal.aborted = true;
+      return mode === "failed-command" ?
+          portFailure("PRECONDITION_FAILED")
+        : portSuccess(undefined);
+    });
+    const adapter = createWorkflowExecution({ ...f.deps, cancelRun });
+    const result = await adapter.cancel(
+      { ...f.scope, operation: "operation.cancel", operationId: "operation" },
+      f.identity,
+      control
+    );
+    expect(result.status).toBe(
+      mode.includes("abort") ? "cancelled"
+      : mode === "absent-observation" ? "unavailable"
+      : "failed"
+    );
+    expect(cancelRun).toHaveBeenCalledTimes(mode.endsWith("command") ? 1 : 0);
+    expect(f.deps.dispatch).not.toHaveBeenCalled();
+  }
+);
+it("requests cancellation of the exact authorized run without claiming confirmation", async () => {
+  const f = fixture();
+  vi.mocked(f.deps.observation).mockResolvedValue(
+    portSuccess({ identity: f.identity, conclusion: "in_progress" })
+  );
+  const cancelRun = vi.fn(async () => portSuccess(undefined));
+  const adapter = createWorkflowExecution({ ...f.deps, cancelRun });
+  const result = await adapter.cancel(
+    { ...f.scope, operation: "operation.cancel", operationId: "operation" },
+    f.identity,
+    f.control
+  );
+  expect(result).toMatchObject({
+    status: "ok",
+    value: { status: "requested" }
+  });
+
+  expect(cancelRun).toHaveBeenCalledWith(
+    ["run", "cancel", "123", "--repo", "owner/repo"],
+    f.control
+  );
+  expect(f.deps.dispatch).not.toHaveBeenCalled();
+});
+
+it("fences cancellation arriving between completed observation and the cancel command", async () => {
+  const f = fixture();
+  const signal = { aborted: false, onAbort: () => () => {} };
+  type Observed = Awaited<
+    ReturnType<WorkflowExecutionDependencies["observation"]>
+  >;
+  let resolve: ((value: Observed) => void) | undefined;
+  const observed = new Promise<Observed>((done) => {
+    resolve = done;
+  });
+  if (!resolve) throw new Error("Missing observation gate");
+  vi.mocked(f.deps.observation).mockImplementation(() => observed);
+  const cancelRun = vi.fn(async () => portSuccess(undefined));
+  const adapter = createWorkflowExecution({ ...f.deps, cancelRun });
+  const pending = adapter.cancel(
+    { ...f.scope, operation: "operation.cancel", operationId: "operation" },
+    f.identity,
+    { ...f.control, cancellation: signal }
+  );
+  const cancelAfterRead = observed.then(() => {
+    signal.aborted = true;
+  });
+  resolve(portSuccess({ identity: f.identity, conclusion: "in_progress" }));
+  await cancelAfterRead;
+  expect(await pending).toMatchObject({ status: "cancelled" });
+  expect(cancelRun).not.toHaveBeenCalled();
+});
+
+it.each([
+  "success",
+  "failure",
+  "cancelled",
+  "timed_out",
+  "skipped",
+  "unknown"
+] as const)(
+  "does not send a cancellation for an independently observed %s run",
+  async (conclusion) => {
+    const f = fixture();
+    vi.mocked(f.deps.observation).mockResolvedValue(
+      portSuccess({ identity: f.identity, conclusion })
+    );
+    const cancelRun = vi.fn(async () => portSuccess(undefined));
+    const adapter = createWorkflowExecution({ ...f.deps, cancelRun });
+    const result = await adapter.cancel(
+      { ...f.scope, operation: "operation.cancel", operationId: "operation" },
+      f.identity,
+      f.control
+    );
+    expect(result).toMatchObject(
+      conclusion === "unknown" ?
+        { status: "unavailable" }
+      : {
+          status: "ok",
+          value: {
+            status:
+              conclusion === "cancelled" ? "confirmed" : "already_completed"
+          }
+        }
+    );
+    expect(cancelRun).not.toHaveBeenCalled();
+  }
+);
+it.each(["operation", "target", "run", "commit", "attempt", "scope"] as const)(
+  "refuses mismatched %s cancellation authority before sending a command",
+  async (field) => {
+    const f = fixture();
+    const identity = {
+      ...f.identity,
+      target: { ...f.identity.target },
+      run: { ...f.identity.run }
+    };
+    const scope = {
+      ...f.scope,
+      operation: "operation.cancel" as const,
+      operationId: "operation"
+    };
+    if (field === "operation") scope.operationId = "other";
+    if (field === "scope") scope.authorizationRef = "";
+    if (field === "target") identity.target.environment = "other";
+    if (field === "run") identity.run.runId = "latest";
+    if (field === "commit") identity.run.commit = "c".repeat(40);
+    if (field === "attempt") identity.run.runAttempt = 0;
+    const cancelRun = vi.fn(async () => portSuccess(undefined));
+    expect(
+      await createWorkflowExecution({ ...f.deps, cancelRun }).cancel(
+        scope,
+        identity,
+        f.control
+      )
+    ).toMatchObject({ status: "failed" });
+    expect(cancelRun).not.toHaveBeenCalled();
+  }
+);
+it("refuses a run-attempt race rather than cancelling the replacement", async () => {
+  const f = fixture();
+  vi.mocked(f.deps.observation).mockResolvedValue(
+    portSuccess({
+      identity: {
+        ...f.identity,
+        run: { ...f.identity.run, runAttempt: f.identity.run.runAttempt + 1 }
+      },
+      conclusion: "in_progress"
+    })
+  );
+  const cancelRun = vi.fn(async () => portSuccess(undefined));
+  expect(
+    await createWorkflowExecution({ ...f.deps, cancelRun }).cancel(
+      { ...f.scope, operation: "operation.cancel", operationId: "operation" },
+      f.identity,
+      f.control
+    )
+  ).toMatchObject({ status: "failed", error: { code: "EVIDENCE_MISMATCH" } });
+  expect(cancelRun).not.toHaveBeenCalled();
+});
+it("does not retry an uncertain cancellation command", async () => {
+  const f = fixture();
+  vi.mocked(f.deps.observation).mockResolvedValue(
+    portSuccess({ identity: f.identity, conclusion: "in_progress" })
+  );
+  const cancelRun = vi.fn(async () => {
+    throw new Error("Transport unavailable");
+  });
+  expect(
+    await createWorkflowExecution({ ...f.deps, cancelRun }).cancel(
+      { ...f.scope, operation: "operation.cancel", operationId: "operation" },
+      f.identity,
+      f.control
+    )
+  ).toMatchObject({ status: "unavailable" });
+  expect(cancelRun).toHaveBeenCalledOnce();
+});
 it.each(["success", "timeout", "exception", "rejected", "nonzero"] as const)(
   "dispatches exactly once when delivery is %s",
   async (mode) => {

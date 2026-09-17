@@ -274,6 +274,40 @@ async function confirmDeleteDialog(
 }
 
 describe("initializeDeployingPage guards and lifecycle", () => {
+  it("observes the serialized lifecycle operation without initiating a control", async () => {
+    const page = fixture();
+    const status = createFakeElement("lifecycle-control-status");
+    for (const element of [
+      createFakeElement("lifecycle-controls"),
+      status,
+      createFakeInput("lifecycle-repair"),
+      createFakeInput("lifecycle-cancel")
+    ])
+      page.browser.document.add(element);
+    page.browser.net.handle("/api/operations/known-operation", () =>
+      jsonResponse({
+        operation: {
+          operationId: "known-operation",
+          summary: "Known execution failed.",
+          actions: []
+        }
+      })
+    );
+    const teardown = initializeDeployingPage(page.browser.context, {
+      repo: page.repo,
+      branch: page.branch,
+      mutationNonce: "test-nonce",
+      lifecycleOperationId: "known-operation"
+    });
+    await flushPromises();
+    expect(status.textContent).toBe("Known execution failed.");
+    expect(
+      page.browser.net.calls.filter(
+        (call) => call.init?.method === "POST" && call.url !== BRANCHES_PATH
+      )
+    ).toEqual([]);
+    teardown();
+  });
   it("returns NOOP_TEARDOWN when any required element is missing", () => {
     const required = [
       "deploy-now-btn",

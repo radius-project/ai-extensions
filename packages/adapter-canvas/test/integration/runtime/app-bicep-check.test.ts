@@ -1953,6 +1953,21 @@ function stagedRun(directory: string, repair?: unknown): void {
 }
 
 describe("repair budget", () => {
+  it("refuses an independent agent compile in coordinator-owned canonical staging without changing its budget", () => {
+    const directory = temporaryDirectory();
+    const repair = { attempts: 3, fingerprint: "prior-failure" };
+    writeRunRecord(directory, {
+      version: 2,
+      runId: "canonical",
+      lifecycleManaged: true,
+      repair
+    });
+    const env = fakeBicep(directory, sarif([]), 0);
+    const result = runChecker(directory, env);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Canonical staging is coordinator-owned/u);
+    assert.deepEqual(readRepair(directory), repair);
+  });
   it("compiles and counts the first attempt of a staged run", () => {
     const directory = temporaryDirectory();
     stagedRun(directory);

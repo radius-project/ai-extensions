@@ -791,12 +791,14 @@ describe("P0-C built Radius extension artifact", () => {
       "trusted operation/action/staging handoff",
       "authenticated `operation.respond`",
       "Never supply `approved: true`",
-      "Never invoke standalone begin, seal, promotion, or abort commands for that operation",
+      "Never invoke standalone begin, compile, seal, promotion, or abort commands for that operation",
+      "The coordinator validates the actual staged bytes once per accepted proposal",
+      "a new staging directory does not reset the shared five-cycle ceiling",
       "Never manufacture `validatedOutputs`",
       "An origin hash alone is insufficient",
       "six compiles",
-      "`--validate-json`",
-      "each agent compile still counts",
+      "including read-only checker modes intended for the coordinator",
+      "An agent's completed outcome is a proposal, not proof of validation or promotion",
       "advisory classifications are fixed before execution",
       "Every compiler, type, source, secret, runtime, reference, and recipe warning is required",
       "cannot complete a lifecycle action",
@@ -825,6 +827,19 @@ describe("P0-C built Radius extension artifact", () => {
     expect(graph).not.toContain(
       "PR-diff-preview views render straight from the on-disk"
     );
+    const deployment = readFileSync(
+      join(DIST, "skills", "radius-deploy", "SKILL.md"),
+      "utf8"
+    );
+    for (const contract of [
+      "Status polling never initiates repair",
+      "Five cycles is the shared maximum across linked attempts",
+      "`REPAIR_LIMIT_REACHED` means stop",
+      "A received request does not prove a workflow stopped",
+      "Ordinary status reads and informational failure notices never initiate repair",
+      "Obtain deployment approval for that published revision"
+    ])
+      expect(deployment).toContain(contract);
   });
 
   it("packages the schema-sensitivity credential contract, not a property-name rule", () => {

@@ -1,6 +1,11 @@
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
+import { createOperationRecord } from "@radius-project/core/lifecycle";
+import {
+  authorizeFixture,
+  createLifecycleFixture
+} from "../../../test/support/lifecycle.js";
 import { createRequestContext } from "../request-context.js";
 import {
   ABANDON_OPERATION_ROUTE,
@@ -335,6 +340,48 @@ function expectJsonNoStore(recording: Recording): void {
 }
 
 describe("operations-status routes (SU-16)", () => {
+  it("observes a known canonical operation without calling legacy readers", async () => {
+    const f = createLifecycleFixture();
+    const target = {
+      repo: "owner/repo",
+      definition: ".radius/app.bicep",
+      source: f.source
+    };
+    const owner = authorizeFixture({
+      caller: f.caller,
+      operation: "definition.author",
+      target
+    });
+    const operation = createOperationRecord(f.ports, {
+      operation: "definition.author",
+      target
+    });
+    await f.binding.registry.create(owner, operation, {
+      requestId: "register",
+      cancellation: { aborted: false, onAbort: () => () => {} }
+    });
+    try {
+      const routes = createOperationsStatusRoutes(
+        dependencies({ lifecycle: () => f.binding }),
+        createDependencies(),
+        actionDependencies()
+      );
+      const out = recorder();
+      await routes["GET /api/operations/"](
+        context(`/api/operations/${operation.operationId}`, out.response)
+      );
+      expect(out.recording.status).toBe(200);
+      expect(JSON.parse(out.recording.body)).toMatchObject({
+        operation: {
+          operationId: operation.operationId,
+          kind: "lifecycle_operation"
+        }
+      });
+      expectJsonNoStore(out.recording);
+    } finally {
+      await f.binding.close();
+    }
+  });
   it("declares exactly the seven routes it owns, diagnostics before the prefix", () => {
     const routes = createOperationsStatusRoutes(
       dependencies(),

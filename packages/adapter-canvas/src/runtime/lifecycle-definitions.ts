@@ -10,7 +10,9 @@ import {
   type SourceAccessPort,
   type LifecycleErrorResponse,
   type LifecycleReadCapability,
-  type PortResult
+  type PortResult,
+  type AuthorizedScope,
+  type RequestControl
 } from "@radius-project/core/lifecycle";
 import type { LifecycleAgent } from "./lifecycle-agent.js";
 import type { createLifecycleRouting } from "./lifecycle-routing.js";
@@ -22,6 +24,10 @@ export interface LifecycleDefinitionDependencies {
   readonly authoring?: {
     readonly source: DefinitionAuthoringSourcePort;
     readonly agent: LifecycleAgent;
+    readonly repairProvider?: (
+      scope: AuthorizedScope<"operation.repair">,
+      control: RequestControl
+    ) => Promise<PortResult<"azure" | "aws">>;
   };
 }
 function failure(
@@ -87,6 +93,7 @@ export function createLifecycleDefinitionRegistrations(
     : [])
   ];
   return {
+    authoring,
     capabilities,
     registrations: [
       registerLifecycleOperation(

@@ -108,6 +108,7 @@ export function createDeployment(deps: DeploymentDependencies) {
       const attempt = createExecutionAttempt(deps.ids, base);
       const operation = {
         ...base,
+        repairPolicy: request.input.repairPolicy,
         attempts: [attempt],
         observation: {
           quality: "unknown" as const,

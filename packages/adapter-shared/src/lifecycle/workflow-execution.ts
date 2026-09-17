@@ -76,6 +76,10 @@ export interface WorkflowExecutionDependencies {
       readonly progress?: string;
     }>
   >;
+  cancelRun?(
+    args: readonly string[],
+    control: RequestControl
+  ): Promise<PortResult<void>>;
 }
 export function createWorkflowExecution(
   deps: WorkflowExecutionDependencies
@@ -270,12 +274,82 @@ export function createWorkflowExecution(
         }
       });
     },
-    async cancel() {
-      return portUnavailable("CAPABILITY_UNAVAILABLE", {
-        quality: "unknown",
-        completeness: "unavailable",
-        evidence: "session",
-        limitation: "Explicit lifecycle cancellation is not implemented."
+    async cancel(scope, identity, control) {
+      if (!deps.cancelRun)
+        return portUnavailable("CAPABILITY_UNAVAILABLE", {
+          quality: "unknown",
+          completeness: "unavailable",
+          evidence: "session",
+          limitation: "The selected host cannot cancel an exact workflow run."
+        });
+      if (control.cancellation.aborted)
+        return portCancelled("request_cancelled");
+      if (
+        scope.operation !== "operation.cancel" ||
+        !scope.authorizationRef ||
+        scope.operationId !== identity.operationId ||
+        scope.target.repo !== identity.target.repo ||
+        scope.target.environment !== identity.target.environment ||
+        scope.target.application !== identity.target.application ||
+        identity.run.repo !== identity.target.repo ||
+        identity.run.commit !== identity.expectedCommit ||
+        !/^[1-9][0-9]*$/.test(identity.run.runId) ||
+        !Number.isSafeInteger(identity.run.runAttempt) ||
+        identity.run.runAttempt < 1
+      )
+        return portFailure("PRECONDITION_FAILED");
+      const current = await read(
+        () => deps.observation(scope, identity, control),
+        control
+      );
+      if (current.status === "absent") return unavailable();
+      if (current.status !== "ok") return current;
+      if (control.cancellation.aborted)
+        return portCancelled("request_cancelled");
+      if (!sameLifecycleData(current.value.identity, identity))
+        return portFailure("EVIDENCE_MISMATCH");
+      const observation = {
+        quality: "current" as const,
+        completeness: "partial" as const,
+        evidence: "workflow" as const,
+        observedAt: deps.clock.now()
+      };
+      const requestedAt = deps.clock.now();
+      if (
+        ["success", "failure", "cancelled", "timed_out", "skipped"].includes(
+          current.value.conclusion
+        )
+      )
+        return portSuccess({
+          status:
+            current.value.conclusion === "cancelled" ?
+              "confirmed"
+            : "already_completed",
+          requestedAt,
+          observation
+        });
+      if (current.value.conclusion === "unknown") return unavailable();
+      let requested: PortResult<void>;
+      try {
+        requested = await deps.cancelRun(
+          ["run", "cancel", identity.run.runId, "--repo", identity.run.repo],
+          control
+        );
+      } catch {
+        return unavailable();
+      }
+      if (control.cancellation.aborted)
+        return portCancelled("request_cancelled");
+      if (requested.status !== "ok") return requested;
+      return portSuccess({
+        status: "requested",
+        requestedAt,
+        observation: {
+          ...observation,
+          quality: "unknown",
+          limitation:
+            "Cancellation request received; termination and final state-save/cleanup remain unconfirmed."
+        }
       });
     }
   };
