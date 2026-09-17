@@ -84,6 +84,7 @@ export interface EnvironmentsCliExec {
 }
 
 export interface EnvironmentsDependencies {
+  discovery: import("../services/discovery-reader.js").LegacyDiscoveryReader;
   // --- shared ---
   errorMessage(error: unknown): string;
   // `list-environments` reports genuine listing failures to the browser, which
@@ -155,8 +156,13 @@ export interface EnvironmentsDependencies {
   // on every response (never cached) so the overlay clears the moment the
   // operation reaches a terminal state.
   activeDeleteEnvironment(repo: string): string;
-  envListCacheGet(repo: string): { at: number; payload: unknown } | undefined;
-  envListCacheSet(repo: string, entry: { at: number; payload: unknown }): void;
+  envListCacheGet(
+    repo: string
+  ): { at: number; payload: unknown; readerKey?: string } | undefined;
+  envListCacheSet(
+    repo: string,
+    entry: { at: number; payload: unknown; readerKey?: string }
+  ): void;
   envListCacheDelete(repo: string): void;
   /**
    * How many times this repository's listing has been invalidated.

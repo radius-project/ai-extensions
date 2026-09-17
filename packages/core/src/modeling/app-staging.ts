@@ -140,8 +140,13 @@ export type ManagedFileHashes = Readonly<Record<string, string | null>>;
 // What `--begin` recorded about the run. Its absence is never treated as "no
 // baseline"; it means the run cannot be published at all.
 export interface StagedRunRecord {
-  // Fingerprints of every file in `.radius/` this run may overwrite.
+  // Exact fingerprints of the complete original effective input closure and
+  // every possible destination, including explicit absence. Proposed external
+  // dependencies must also be compared with their original captured bytes.
   baseline: ManagedFileHashes;
+  // Exact byte hashes from successful validation, not normalized origin hashes.
+  // Older records remain readable, but cannot authorize promotion.
+  validatedOutputs?: ManagedFileHashes;
   // How the authoring repair loop has gone so far, when the Bicep checker has
   // run at least once. Absent on a run that has not compiled yet.
   repair?: RepairState;
@@ -156,8 +161,10 @@ export interface StagedRunInput {
   originText: string | null | undefined;
   // The run record `--begin` wrote, or null when it is missing or unusable.
   record: StagedRunRecord | null | undefined;
-  // Current fingerprints of the same files, read at publish time.
+  // Complete current effective inputs, including proposed dependencies.
   currentHashes: ManagedFileHashes;
+  // Exact current bytes of all proposed outputs, read under the promotion guard.
+  stagedHashes?: ManagedFileHashes;
   // Fingerprints a model the same way the origin writer did. Injected because
   // this package cannot import `node:crypto` (see app-origin.ts).
   hashAppBicep(content: string): string;
@@ -193,8 +200,8 @@ export function requiredStagedFiles(
 // the order the design fixes them: completeness, then a matching origin record,
 // then that the model on disk is still the one the run started from.
 //
-// Every refusal is total. There is no partial publish, because a partial publish
-// is precisely the damage this replaces.
+// This pure preflight authorizes no writes itself. The adapter rechecks under
+// its write guard and rolls back failures; a multi-file rename is not atomic.
 export function evaluateStagedRun(input: StagedRunInput): StagedRunEvaluation {
   // Checked before anything else: without the record there is no evidence of
   // what the run started from, and a publish that cannot see that cannot promise
@@ -203,6 +210,21 @@ export function evaluateStagedRun(input: StagedRunInput): StagedRunEvaluation {
   // and is refused.
   if (!input.record) {
     return evaluation("unrecorded", UNRECORDED_RUN_MESSAGE);
+  }
+  if (
+    input.stagedFiles?.some(
+      (name) =>
+        typeof name === "string" &&
+        (/[\\/:]/u.test(name) ||
+          /[. ]$/u.test(name) ||
+          name === "." ||
+          name === "..")
+    )
+  ) {
+    return evaluation(
+      "unverified",
+      "The staged output paths are not confined regular filenames. Nothing was published."
+    );
   }
   const required = requiredStagedFiles(input.stagedFiles);
   const present = new Set(
@@ -240,13 +262,33 @@ export function evaluateStagedRun(input: StagedRunInput): StagedRunEvaluation {
     );
   }
 
-  // Every file the publish would replace is compared, not just `app.bicep`. A
-  // hand-tuned `bicepconfig.json` or custom-type manifest is exactly as much the
-  // user's work as the model is, and overwriting one is the same failure.
+  const files = publishableFiles(input.stagedFiles);
+  const validated = input.record.validatedOutputs;
+  const staged = input.stagedHashes;
+  if (
+    !validated ||
+    !staged ||
+    Object.keys(validated).length !== files.length ||
+    Object.keys(staged).length !== files.length ||
+    files.some(
+      (file) =>
+        !Object.prototype.hasOwnProperty.call(validated, file) ||
+        !Object.prototype.hasOwnProperty.call(staged, file) ||
+        typeof validated[file] !== "string" ||
+        !validated[file] ||
+        validated[file] !== staged[file]
+    )
+  ) {
+    return evaluation(
+      "unverified",
+      "The staged output bytes do not match a complete successful validation record. Nothing was published."
+    );
+  }
+
   const changed = changedManagedFiles(
     input.record.baseline,
     input.currentHashes,
-    publishableFiles(input.stagedFiles)
+    files
   );
   if (changed.length > 0) {
     return evaluation("concurrent-edit", concurrentEditMessage(changed));
@@ -255,26 +297,28 @@ export function evaluateStagedRun(input: StagedRunInput): StagedRunEvaluation {
   return evaluation(
     "ready",
     "The modeling run is complete and its application model compiled.",
-    publishableFiles(input.stagedFiles)
+    files
   );
 }
 
-// Managed files whose content on disk differs from what the run started with,
-// limited to the ones this run would actually replace. A file the run does not
-// publish is not this run's business, even if it changed.
+// Check the entire effective input closure, not just replacement destinations.
+// Absence is evidence only when recorded explicitly; missing baseline coverage
+// cannot authorize a replacement or a newly proposed dependency.
 export function changedManagedFiles(
   baseline: ManagedFileHashes,
   current: ManagedFileHashes,
   files: ReadonlyArray<string>
 ): string[] {
-  // Only files the baseline actually covers can be compared. The authored-recipe
-  // name is a pattern rather than a fixed name, so a baseline taken before the
-  // run may legitimately not mention one; treating "not fingerprinted" as "was
-  // absent" would report an untouched file as a concurrent edit and refuse
-  // forever, which is exactly the bug this guard exists to prevent.
-  return files
-    .filter((file) => Object.prototype.hasOwnProperty.call(baseline, file))
-    .filter((file) => (baseline[file] ?? null) !== (current[file] ?? null))
+  return [
+    ...new Set([...Object.keys(baseline), ...Object.keys(current), ...files])
+  ]
+    .filter(
+      (file) =>
+        !Object.prototype.hasOwnProperty.call(baseline, file) ||
+        baseline[file] === "unreadable" ||
+        current[file] === "unreadable" ||
+        (baseline[file] ?? null) !== (current[file] ?? null)
+    )
     .sort();
 }
 

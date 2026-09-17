@@ -36,6 +36,7 @@ import {
 } from "../../../src/workspace.js";
 import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
 import { createSessionHolder } from "../../../src/runtime/session.js";
+import { createLifecycleBinding } from "../../../src/runtime/create-lifecycle-binding.js";
 import type { SessionPort } from "../../../src/runtime/session.js";
 import type {
   RadiusExtensionDependencies,
@@ -88,6 +89,7 @@ export function createFakeSession(
 }
 
 export interface FakeDependenciesOptions {
+  lifecycle?: RadiusExtensionDependencies["lifecycle"];
   radiusEnabled?: boolean;
   defaultBranch?: string;
   workspaceContext?: WorkspaceContext;
@@ -189,6 +191,39 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   } = {};
 
   const deps: RadiusExtensionDependencies = {
+    lifecycle:
+      options.lifecycle ??
+      createLifecycleBinding({
+        authority: {
+          resolveCaller: async () => {
+            throw new Error("Unmodeled lifecycle identity resolution");
+          },
+          authorize: async () => {
+            throw new Error("Unmodeled lifecycle authorization");
+          },
+          authorizeResponse: async () => {
+            throw new Error("Unmodeled lifecycle response authority");
+          }
+        },
+        ids: {
+          next: () => {
+            throw new Error("Unmodeled lifecycle ID allocation");
+          }
+        },
+        clock: {
+          now: () => {
+            throw new Error("Unmodeled lifecycle clock");
+          }
+        },
+        hostBinding: () => ({
+          bindingRef: "runtime-binding",
+          sessionRef: "runtime-session"
+        }),
+        resolveWorkspaceSource: async () => {
+          throw new Error("Unmodeled workspace source");
+        },
+        knownLegacyOperations: () => []
+      }),
     logError: vi.fn(),
     session: sessionHolder,
     // Instant, so no suite spends real seconds inside a runtime wait. The

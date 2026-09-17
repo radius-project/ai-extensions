@@ -629,7 +629,11 @@ export function populatePlannedSelectors(
   let environmentsUnavailable = false;
   const envPromise =
     envSelect ?
-      getJson(context, `${ENVIRONMENTS_PATH}?repo=${encodeURIComponent(repo)}`)
+      context.net
+        .fetch(`${ENVIRONMENTS_PATH}?repo=${encodeURIComponent(repo)}`, {
+          headers: { "X-Radius-Read-Only": "true" }
+        })
+        .then((response) => response.json())
         .then((payload) => {
           const listing = parseEnvironmentListing(payload);
           if (listing.error !== "") {
@@ -1284,10 +1288,11 @@ export function loadModeledEnvState(
   isCurrent: () => boolean = () => true
 ): Promise<void> {
   if (!repo) return Promise.resolve();
-  return getJson(
-    context,
-    `${ENVIRONMENTS_PATH}?repo=${encodeURIComponent(repo)}`
-  )
+  return context.net
+    .fetch(`${ENVIRONMENTS_PATH}?repo=${encodeURIComponent(repo)}`, {
+      headers: { "X-Radius-Read-Only": "true" }
+    })
+    .then((response) => response.json())
     .then((payload) => {
       if (!isCurrent()) return;
       const listing = parseEnvironmentListing(payload);

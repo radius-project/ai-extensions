@@ -11,6 +11,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./graph": "./src/graph/index.ts",
+    "./lifecycle": "./src/lifecycle/index.ts",
     "./modeling": "./src/modeling/index.ts",
     "./platforms": "./src/platforms/index.ts",
     "./remediations": "./src/remediations.ts"
@@ -23,6 +24,7 @@
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" vitest.config.ts"
   },
   "devDependencies": {
+    "json-schema-to-ts": "^3.1.1",
     "vitest": "catalog:",
     "yaml": "catalog:"
   }

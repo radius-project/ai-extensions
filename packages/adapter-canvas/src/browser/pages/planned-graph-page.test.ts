@@ -18,6 +18,7 @@ import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { BrowserContext, HttpResponse } from "../ports.js";
 import { PLANNED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
+import { GRAPH_EVIDENCE_STATUS_ID } from "../../pages/graph-evidence-id.js";
 import {
   initializePlannedGraphPage as initializePlannedGraphPageEntry,
   PLAN_DEBOUNCE_MS,
@@ -162,7 +163,106 @@ function globals(overrides: Record<string, unknown> = {}) {
   };
 }
 
+it.each(["unavailable", "stale", "available"] as const)(
+  "renders canonical planned %s without a reload or authoring retry",
+  async (outcome) => {
+    const h = fixture();
+    const evidence = createFakeElement(GRAPH_EVIDENCE_STATUS_ID);
+    h.browser.document.add(evidence);
+    const resources = [
+      {
+        id: "web",
+        name: "web",
+        type: "Radius.Compute/containers",
+        connections: [],
+        outputResources: []
+      }
+    ];
+    const payload =
+      outcome === "unavailable" ?
+        {
+          unavailable: true,
+          reason: "RESULT_UNAVAILABLE",
+          error: "Actual registrations are unavailable."
+        }
+      : outcome === "stale" ? { stale: true }
+      : {
+          resources,
+          provenance: {
+            repo: "octo/app",
+            branch: "feature",
+            fingerprint: "sha256:captured"
+          }
+        };
+    h.browser.net.handle("/api/plan-graph", () => jsonResponse(payload));
+    const render = globals();
+    const cleanup = initializePlannedGraphPage(h.browser.context, render);
+    await flushPromises();
+    h.browser.clock.tick(0);
+    await flushPromises();
+    if (outcome === "available") {
+      expect(render.radiusRenderGraph).toHaveBeenCalledWith(
+        "graph-container",
+        resources,
+        expect.objectContaining({ plannedMode: true })
+      );
+      expect(evidence.textContent).toContain("Expected recipe outputs");
+    } else if (outcome === "unavailable") {
+      expect(evidence.textContent).toContain(
+        "Actual registrations are unavailable"
+      );
+      expect(h.button.disabled).toBe(true);
+      expect(render.radiusRenderGraph).not.toHaveBeenCalled();
+    } else expect(fakeText(h.status)).toContain("selected source changed");
+    expect(h.browser.nav.reloads).toBe(0);
+    expect(
+      h.browser.net.calls.find((call) =>
+        call.url.startsWith("/api/list-environments")
+      )?.init?.headers
+    ).toEqual({ "X-Radius-Read-Only": "true" });
+    cleanup();
+  }
+);
+
 describe("initializePlannedGraphPage", () => {
+  it("reports an unavailable plan without optional wrapper or deploy controls", async () => {
+    const { browser, status, progressHost } = fixture({
+      withWrapper: false,
+      withButton: false
+    });
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({
+        unavailable: true,
+        error: { message: "not a diagnostic string" }
+      })
+    );
+    const rendering = globals();
+    const teardown = initializePlannedGraphPage(browser.context, rendering);
+    try {
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+
+      expect(rendering.radiusSetGraphError).toHaveBeenCalledExactlyOnceWith(
+        "graph-container",
+        "Actual environment recipe registrations are unavailable."
+      );
+      expect(rendering.radiusRenderGraph).not.toHaveBeenCalled();
+      expect(status.style.display).toBe("none");
+      expect(fakeText(progressHost)).toBe("");
+      browser.clock.tick(PLAN_RETRY_MS);
+      await flushPromises();
+      expect(
+        browser.net.calls.filter((call) => call.url === "/api/plan-graph")
+      ).toHaveLength(1);
+      expect(browser.nav.reloads).toBe(0);
+      expect(browser.logger.errors).toEqual([]);
+    } finally {
+      teardown();
+    }
+    expect(browser.clock.pending).toBe(0);
+  });
+
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializePlannedGraphPage(browser.context, globals());

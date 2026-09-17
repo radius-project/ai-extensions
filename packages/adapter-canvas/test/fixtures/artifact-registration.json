@@ -101,7 +101,7 @@
   "tools": [
     {
       "name": "radius_generate_app",
-      "description": "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, instruction, optional generator version, and optional ambiguity brief. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
+      "description": "Checks the trusted workspace for modelability, then invokes canonical definition.author once and returns its JSON operation result or explicit error. Requires trusted approval and authenticated agent assignment; current SDK hosts return CAPABILITY_UNAVAILABLE, with no independent skill handoff. Source discovery failures are explicit failures. A source subdirectory or external path cannot currently be represented and is unavailable, not widened to the workspace. For repositories without a Dockerfile, returns a Markdown refusal without starting authoring.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -115,7 +115,7 @@
     },
     {
       "name": "radius_report_modeling_failure",
-      "description": "Reports a permanent radius-app-bicep authoring failure to the Radius Canvas attempt that requested it. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures, cancellations, or a run that wrote app.bicep.",
+      "description": "Records a permanent modeling failure as a legacy Canvas diagnostic for the exact instance, repository, branch, and attempt token supplied by that Canvas handoff. This is not an authenticated agent outcome: it cannot complete a lifecycle action, approve changes, or promote outputs. Never report transient failures, cancellations, or a run that wrote app.bicep. Lifecycle agent outcomes require authenticated operation.respond instead.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -281,26 +281,30 @@
       "callable": true
     }
   ],
-  "bootstrap": {
-    "fields": [
-      "skill",
-      "repoPath",
-      "skillBase",
-      "skillVersion",
-      "instruction"
-    ],
-    "skill": "radius-app-bicep",
-    "repoPathMatchesWorkspace": true,
+  "authoringBeforeAttachment": {
+    "result": {
+      "skill": "radius-app-bicep",
+      "repoPath": "<workspace>",
+      "skillBase": "<packaged-skill>",
+      "skillVersion": "<package-version>",
+      "instruction": "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.",
+      "brief": "Workspace discovery was unavailable. Inspect the requested source before authoring; no source scope or lifecycle authority has been established by this handoff."
+    },
+    "sessionSendCount": 0,
+    "panelOpenCount": 0,
+    "canvasOpenCount": 0,
+    "containsLegacyInlinedHeading": false
+  },
+  "packagedSkill": {
     "skillBaseRelativeToArtifact": "skills/radius-app-bicep",
-    "skillVersionMatchesPackage": true,
-    "instruction": "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.",
+    "packageVersionPresent": true,
+    "pluginVersionMatchesPackage": true,
     "requiredFiles": [
       "SKILL.md",
       "scripts/promote-app-model.mjs",
       "scripts/validate-bicep.mjs",
       "scripts/write-app-origin.mjs",
       "references/source-code-references.md"
-    ],
-    "containsLegacyInlinedHeading": false
+    ]
   }
 }

@@ -14,6 +14,7 @@
 // that has since changed.
 
 export interface CachedEnvironmentListing {
+  readerKey?: string;
   at: number;
   payload: unknown;
 }

@@ -3,7 +3,13 @@ import { asGraphController } from "../graph/surface.js";
 import { clearGraphProgress, createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
-import { readArray, readBoolean, readNumber, readString } from "../json.js";
+import {
+  isRecord,
+  readArray,
+  readBoolean,
+  readNumber,
+  readString
+} from "../json.js";
 import { populateApplications, populateDiffBranches } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
@@ -14,6 +20,7 @@ import type {
   DomSelectElement
 } from "../ports.js";
 import { readPageState } from "./state.js";
+import { updateGraphEvidence } from "./graph-evidence.js";
 import { GRAPH_DIFF_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   showGraphModelingFailure,
@@ -40,6 +47,7 @@ interface DiffState {
 
 function parseState(context: BrowserContext): DiffState {
   const state = readPageState(context, GRAPH_DIFF_STATE_ID);
+  updateGraphEvidence(context, state.evidence, "diff");
   return {
     repo: readString(state, "repo"),
     base: readString(state, "base") || "main",
@@ -197,8 +205,46 @@ export function initializeGraphDiffPage(
       })
       .then((response) => response.json())
       .then((payload) => {
-        if (requestGeneration !== generation) return;
+        if (!entry.active || requestGeneration !== generation) return;
         stopProgress();
+        updateGraphEvidence(context, payload, "diff");
+        if (readBoolean(payload, "stale")) {
+          showStatus(
+            context,
+            "The selected source changed. Select the branches again to compare.",
+            "error"
+          );
+          return;
+        }
+        if (readBoolean(payload, "unavailable")) {
+          showModelingFailure(
+            readString(payload, "error") ||
+              "The committed graph comparison is unavailable."
+          );
+          return;
+        }
+        if (isRecord(payload) && Array.isArray(payload.resources)) {
+          controller?.destroy();
+          controller = asGraphController(
+            requireBrowserFunction(globalScope, "radiusRenderGraph")(
+              "graph-container",
+              payload.resources,
+              {
+                repoUrl: githubRepositoryUrl(repo),
+                branch: head,
+                diffMode: true,
+                localSource: false
+              }
+            )
+          );
+          showStatus(
+            context,
+            readString(payload, "message") ||
+              "The graph comparison is current.",
+            "info"
+          );
+          return;
+        }
         const unsupported = unsupportedGraphModelMessage(payload);
         if (unsupported) {
           showModelingFailure(unsupported);

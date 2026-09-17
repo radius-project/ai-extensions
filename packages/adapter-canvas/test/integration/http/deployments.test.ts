@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createLegacyDiscoveryFake } from "../../support/legacy-discovery.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
@@ -138,6 +139,9 @@ function start(): Harness {
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      discovery: createLegacyDiscoveryFake({
+        application: async (_repo, branch) => `todo-app@${branch}`
+      }),
       isValidRepoSlug,
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       triggerDeployRepairHandoff: () => false,
@@ -1080,6 +1084,11 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
 
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
+      discovery: {
+        open: async () => {
+          throw new Error("Unmodeled discovery");
+        }
+      },
       isValidRepoSlug,
       readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
       triggerDeployRepairHandoff: () => false,

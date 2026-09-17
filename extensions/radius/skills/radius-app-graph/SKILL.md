@@ -11,7 +11,7 @@ Build and display the Radius application graph for a repo. The graph is assemble
 
 - Never invoke `rad` or `rad.exe` directly from PowerShell, a shell, a subprocess, or a delegated agent. Do not ask another agent to run or troubleshoot the CLI.
 - Perform every Radius graph operation through the Radius canvas and its tools. Open `canvasId: "radius"` with `instanceId: "radius-panel"`, pass the current session repository as `repo` in `owner/repo` form, and treat the current Copilot worktree branch as the graph branch. The Radius extension is the only component allowed to run `rad` internally.
-- After opening the canvas, do not inspect the workspace for `app.bicep`, poll `get_graph_resources` to detect a missing model, invoke the `radius-app-bicep` skill or `radius_generate_app`, or delegate model generation. You may call `get_graph_resources` once to inspect an already-ready graph for missing source references; if it returns `ready: false`, end the current turn instead of retrying. When the model is missing, the canvas owns the single automatic handoff and queues the authoring turn. Starting model generation independently can leave a duplicate handoff queued behind it.
+- After opening the canvas, do not inspect the workspace for `app.bicep`, poll `get_graph_resources` to detect a missing model, invoke the `radius-app-bicep` skill or `radius_generate_app`, or delegate model generation. Graph reads are read-only. You may call `get_graph_resources` once to inspect an already-ready graph for missing source references; if it returns `ready: false`, report the unavailable result and end the current turn instead of retrying. Missing or stale models never authorize an automatic authoring handoff.
 - The extension honors `RADIUS_RAD_BINARY` when it names an existing binary. Otherwise it uses its managed binary at `%USERPROFILE%\.radius\ai-extensions\bin\rad.exe` on Windows or `$HOME/.radius/ai-extensions/bin/rad` on macOS/Linux. On extension load it attempts a best-effort latest-release check (offline/API failures keep the installed binary), downloads the managed binary when absent, and upgrades it when its installed version is older unless `RADIUS_RAD_SKIP_VERSION_CHECK` is set. It never resolves `rad` from `PATH` or the separate user CLI installation under `.rad/bin`.
 - Diagnose graph failures only through the Radius extension log (use extension inspection to locate and read it). Do not reproduce a failure by running `rad` directly.
 
@@ -25,10 +25,10 @@ Build and display the Radius application graph for a repo. The graph is assemble
 
 ## Data flow
 
-1. The canvas looks for `.radius/app.bicep` first, then `app.bicep`, on the selected branch. If neither file exists, the canvas does **not** generate one directly — it returns `needsAppBicep` and automatically hands off to Copilot to run the `radius-app-bicep` skill and author the definition. App model generation is owned solely by that skill; the canvas only consumes an `app.bicep` from the selected branch — committed for a non-workspace branch, or present in the working tree when the selected branch is the current workspace branch. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet).
+1. The canvas reads the selected application definition from captured source: the current workspace for graph/planned views, or explicit committed source for another branch and every diff side. Missing definitions or required evidence produce explicit unavailable results, not authoring. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet).
 2. The shared graph runner inside the Radius extension invokes offline `rad app graph <app.bicep> --include-icons` and writes `app-graph.json` locally. The modeled Bicep path must not use `--preview`: that flag switches the CLI to the deployed-application API and does not write `app-graph.json`. The required `--include-icons` flag embeds the resource icon metadata used by the canvas. The runner honors an existing `RADIUS_RAD_BINARY`; otherwise it uses the managed binary under `~/.radius/ai-extensions/bin`, downloading it when absent and upgrading it when older than the latest release. It never resolves `rad` from `PATH` or `~/.rad/bin`.
 3. `packages/core` converts the `rad` application graph output into the canvas `ApplicationGraphResource` shape and re-adds inbound connections so all views use the same resource model.
-4. The graph, planned graph, auto-open graph diff, and `radius_generate_pr_diff_markdown` all use the same graph build and `computeGraphDiff` flow. PR diff mode compares base and head branch app models and tags resources `added | removed | modified | unchanged`.
+4. Graph views and `radius_generate_pr_diff_markdown` use canonical graph operations. PR diff mode uses explicit committed base and head refs, never uncommitted worktree content, and tags resources `added | removed | modified | unchanged`.
 5. Each non-application node can carry a **source-code reference** (`codeReference` → node `codeRef`) that deep-links the node to where the resource is defined or initialized in the repo. The `radius-app-bicep` skill owns discovering and authoring this metadata; this skill consumes it from `app.bicep`.
 6. After deployment, the workflow captures the live deployed graph with `rad app graph -a "$APP_NAME" -o json --preview --include-icons` for deployed-resource status views. The deployed path requires both `--preview` and `--include-icons`.
 
@@ -50,7 +50,7 @@ The renderer ports the production improvements from `radius-project/github-exten
 The `codeReference` on each non-application resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). Generated models store it durably in `app.bicep` as either a current-worktree-relative path or an exact GitHub branch/file URL; the graph consumes that authored metadata.
 
 - The `radius-app-bicep` skill discovers and authors `codeReference` into `.radius/app.bicep` before publishing the model.
-- If a generated graph lacks a reference, repair the model through that skill. Do not treat the instance-scoped `update_source_refs` compatibility action as completion because its changes do not survive rebuilding the graph.
+- If a generated graph lacks a reference, report it. Repair requires a separate explicit modeling request through the selected authoring mode, not a graph-read side effect. Do not treat the instance-scoped `update_source_refs` compatibility action as completion because its changes do not survive rebuilding the graph.
 
 ### Missing-reference repair workflow
 
@@ -66,10 +66,10 @@ invoke_canvas_action({
 })
 ```
 
-If `ready` is `false`, end the current turn without waiting or retrying, and do not infer that the model is missing. The canvas will either finish building the existing model or queue the model-authoring handoff. Inspect missing references only in a later turn after the graph is ready. A ready response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
+If `ready` is `false`, end the current turn without waiting or retrying, and do not infer that the model is missing. Report the actual pending or unavailable state; the graph does not queue authoring. Inspect missing references only in a later turn after the graph is ready. A ready response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
 
-1. If the action returns any resources, run the `radius-app-bicep` skill as a repair of the existing model. That skill owns categorization, source discovery, line selection, validation, and atomic publication of the repaired `app.bicep`.
-2. Rebuild the graph and call `get_graph_resources` again. Completion requires an empty missing-resource list from the rebuilt `app.bicep`.
+1. If the action returns any resources, report the missing references and request a separately authorized repair. Current SDK hosts retain legacy modeling through `radius_generate_app`; canonical authoring remains unavailable without trusted approval and authenticated assignment. Never use legacy as a fallback for an accepted canonical operation.
+2. After observed promotion through the selected mode, rebuild the graph and call `get_graph_resources` again. An empty missing-resource list confirms the graph references, not the complete model's validation or deployment.
 
 ## How to invoke
 
@@ -95,32 +95,32 @@ open_canvas({
 
 > **Canvas not opening?** If the Radius panel does not appear even though this skill and the Radius plugin are installed, reload extensions (or restart the app) and try again.
 
-After `open_canvas` succeeds, do not poll the graph, search for `app.bicep`, or start model generation yourself. Call `get_graph_resources` at most once if the ready graph needs a missing-reference check. If the response is not ready, end the turn so the canvas can run its queued authoring handoff. The canvas renders an existing model immediately or queues exactly one authoring handoff when the model is missing.
+After `open_canvas` succeeds, do not poll the graph, search for `app.bicep`, or start model generation yourself. Call `get_graph_resources` at most once if the ready graph needs a missing-reference check. If the response is not ready, report the result and end the turn. The canvas reads existing model evidence or reports why the graph is unavailable.
 
 The canvas will:
 
-- Build the graph from the committed `.radius/app.bicep` or `app.bicep` on the selected branch.
+- Build the graph from the selected captured definition, using workspace content only for current-workspace graph/planned views.
 - Use `rad app graph <app.bicep> --include-icons` as the modeled graph assembly source of truth, matching the CLI model instead of maintaining a separate parser. Do not pass `--preview` with a Bicep file.
-- Show "no app.bicep found" (`needsAppBicep`) when no committed app definition exists on the branch. It does not infer one from the repo — it hands off to Copilot to generate one with the `radius-app-bicep` skill, then refresh the graph. See [Rendering a branch that has no model yet](#rendering-a-branch-that-has-no-model-yet) for where that generated model needs to land.
+- Report an explicit unavailable result when the selected source has no application definition. It does not infer or generate one from the repository.
 
 ## Rendering a branch that has no model yet
 
-When the selected branch has no committed `.radius/app.bicep` (or `app.bicep`), the canvas returns `needsAppBicep` and hands off to Copilot to author one with the `radius-app-bicep` skill (via the `radius_generate_app` tool). That skill models the working tree, so where the resulting file needs to be committed depends on which branch was selected:
+When the selected source has no application definition, report the missing model. Do not start authoring from a graph read. A separate explicit modeling request uses `radius_generate_app`, which follows the selected writer: the retained legacy bootstrap on the current SDK, or the guarded coordinator after a supported cutover. Direct canonical `definition.author` returns `CAPABILITY_UNAVAILABLE` without trusted host capabilities.
 
-- **Selected branch is the current workspace branch:** writing `.radius/app.bicep` to the working tree is enough — the graph, planned, and PR-diff-preview views render straight from the on-disk worktree checkout, so no commit or push is required to preview the graph.
-- **Selected branch is a different branch:** the skill must model that branch's code (not the current worktree's), and the resulting `.radius/app.bicep` must be committed and pushed to that branch before the graph can render there. Prefer opening a pull request into the target branch rather than committing directly to it, and never push a generated model straight to a protected branch such as `main` without the user's explicit confirmation.
+- **Current workspace graph/planned view:** captured on-disk model content can be read without a commit or push.
+- **Another branch or any diff side:** only the selected committed source is read. Do not author, commit, or push merely to make a comparison available.
 
-For the current graph view, keep the Canvas open while `.radius/app.bicep` is generated; it detects the model and renders in place. Planned and diff views still need to be reopened after the model is committed on a non-workspace target branch.
+After a separately authorized source change, refresh the relevant graph view. A graph rendering successfully does not establish that an authoring action was approved, validated, or promoted.
 
 ## Prerequisites
 
-- For the **modeled graph**: a committed `.radius/app.bicep` or `app.bicep` on the selected branch. If none exists, open the canvas and end the turn; the canvas queues the `radius-app-bicep` authoring handoff automatically.
+- For the **modeled graph**: an application definition and required evidence in the selected captured source. Missing evidence is unavailable, not permission to author.
 - For the **deployed graph**: at least one successful Radius deploy run so the workflow can capture `rad app graph -a "$APP_NAME" -o json --preview --include-icons`.
 - `RADIUS_RAD_BINARY` may override the binary path. Without that override, extension startup downloads `rad` into `~/.radius/ai-extensions/bin` when absent or upgrades it when older than the latest release. `RADIUS_RAD_SHA256` may pin the checksum of the managed download.
 
 ## Troubleshooting
 
-- **Empty graph**: no committed app definition on the branch. Keep the canvas open and end the turn so its queued `radius-app-bicep` authoring handoff can run. Do not start a second authoring path from this skill.
+- **Empty graph**: report the actual missing-model or unavailable-evidence reason. Do not start authoring from this skill.
 - **Graph build fails**: inspect the Radius extension log and report the failure without modifying the selected Radius CLI. Never download, install, upgrade, downgrade, copy, move, rename, back up, delete, or replace a `rad` binary; never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`; and never search `PATH`, `.rad/bin`, or another location for a fallback. The extension alone owns its managed binary lifecycle. Never run `rad app graph` locally to reproduce the failure. Do not add `--preview` to this modeled command. On Windows, the extension keeps its managed `rad.exe` attached and hidden, then terminates the process tree after a valid graph artifact or timeout.
 - **Stale graph**: Click Refresh to rebuild from the selected branch's current app definition.
 - **PR diff doesn't appear**: verify both base and head branches have a committed `app.bicep` that can be fetched. Branches without one are reported as missing — the diff no longer generates a model for an empty branch, and it no longer requires both branches to have deployed first.

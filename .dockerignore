@@ -6,6 +6,8 @@
 .radius-credentials.json
 **/.radius-credentials.json
 .pnpm-store
+.artifacts
+**/*.log*
 coverage
 node_modules
 packages/*/coverage

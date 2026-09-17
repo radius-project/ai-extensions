@@ -23,6 +23,7 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
+import { updateGraphEvidence } from "./graph-evidence.js";
 import {
   showGraphModelingFailure,
   unsupportedGraphModelMessage
@@ -51,6 +52,7 @@ interface GraphPageState {
 
 function parseState(context: BrowserContext): GraphPageState {
   const state = readPageState(context, GRAPH_PAGE_STATE_ID);
+  updateGraphEvidence(context, state.evidence, "authored");
   return {
     repo: readString(state, "repo"),
     branch: readString(state, "branch") || "main",
@@ -353,7 +355,17 @@ export function initializeGraphPage(
       })
       .then((response) => response.json())
       .then((payload) => {
-        if (requestGeneration !== generation) return;
+        if (!entry.active || requestGeneration !== generation) return;
+        updateGraphEvidence(context, payload, "authored");
+        if (readBoolean(payload, "unavailable")) {
+          modelState = "failed";
+          syncPrimaryButton();
+          stopProgress();
+          showFailure(
+            readString(payload, "error") || "The authored graph is unavailable."
+          );
+          return;
+        }
         const resolvedBranch = readString(payload, "resolvedBranch");
         if (resolvedBranch && resolvedBranch !== branch) {
           context.nav.reload();
@@ -479,7 +491,18 @@ export function initializeGraphPage(
         })
         .then((response) => response.json())
         .then((payload) => {
-          if (refreshGeneration !== generation) return;
+          if (!entry.active || refreshGeneration !== generation) return;
+          updateGraphEvidence(context, payload, "authored");
+          if (readBoolean(payload, "unavailable")) {
+            modelState = "failed";
+            syncPrimaryButton();
+            stopProgress();
+            showFailure(
+              readString(payload, "error") ||
+                "The authored graph is unavailable."
+            );
+            return;
+          }
           const resolvedBranch = readString(payload, "resolvedBranch");
           if (resolvedBranch && resolvedBranch !== page.branch) {
             context.nav.reload();

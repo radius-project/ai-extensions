@@ -1,5 +1,4 @@
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -20,7 +19,9 @@ describeWindows("spawnRad Windows process integration", () => {
   let radPath = "";
 
   beforeAll(async () => {
-    directory = await mkdtemp(join(tmpdir(), "radius spawnRad "));
+    const artifacts = join(process.cwd(), ".artifacts");
+    await mkdir(artifacts, { recursive: true });
+    directory = await mkdtemp(join(artifacts, "t038-process-windows "));
     radPath = join(directory, "rad.exe");
     await copyFile(process.execPath, radPath);
   });
@@ -40,7 +41,12 @@ describeWindows("spawnRad Windows process integration", () => {
     const result = await spawnRad(
       radPath,
       [childHarnessPath, "success", "two words", 'say "hello"'],
-      { timeout: 5_000 }
+      {
+        cwd: directory,
+        env: { SystemRoot: process.env.SystemRoot },
+        inheritEnv: false,
+        timeout: 5_000
+      }
     );
 
     expect(result).toEqual({
@@ -51,6 +57,9 @@ describeWindows("spawnRad Windows process integration", () => {
 
   it("propagates a non-zero exit with both captured streams", async () => {
     const error = await spawnRad(radPath, [childHarnessPath, "failure"], {
+      cwd: directory,
+      env: { SystemRoot: process.env.SystemRoot },
+      inheritEnv: false,
       timeout: 5_000,
       label: "managed rad fixture"
     }).catch((reason: unknown) => reason);
@@ -65,6 +74,9 @@ describeWindows("spawnRad Windows process integration", () => {
 
   it("kills the timed-out executable and its descendant process", async () => {
     const error = await spawnRad(radPath, [childHarnessPath, "process-tree"], {
+      cwd: directory,
+      env: { SystemRoot: process.env.SystemRoot },
+      inheritEnv: false,
       timeout: 3_000,
       label: "managed rad fixture"
     }).catch((reason: unknown) => reason);
@@ -89,6 +101,9 @@ describeWindows("spawnRad Windows process integration", () => {
 
   it("rejects with a RadProcessError when rad.exe cannot be spawned", async () => {
     const error = await spawnRad(join(directory, "missing-rad.exe"), ["x"], {
+      cwd: directory,
+      env: { SystemRoot: process.env.SystemRoot },
+      inheritEnv: false,
       timeout: 2_000
     }).catch((reason: unknown) => reason);
 

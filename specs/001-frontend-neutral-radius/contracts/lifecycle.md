@@ -49,13 +49,17 @@ All operations require caller authorization for the resolved scope. Mutations ad
 
 For `application.inspect`, authored inspection requires an authorized source and definition path but no environment, including when the repository has no environments. Deployed observations require an explicit environment. A request may select both, with authorization and evidence kept separate; a request selecting neither is invalid. Do not infer an environment or report missing deployed evidence as absence of an authored application.
 
+Authored inspection can return source and definition evidence without constructing a graph. Environment inspection can return partial read evidence without satisfying the complete configuration schema required for mutations. Keep unavailable configuration or recipe evidence explicit; neither missing fields nor an empty list may stand in for a successful observation of their absence.
+
+For the T018-T038 milestone, missing read-only access to actual environment registrations makes that recipe evidence and any dependent planned graph unavailable. This is an explicit capability limitation, not permission to restore a control plane, dispatch a workflow, create a new evidence producer, or substitute provider defaults. A confirmed registration set lacking a known type's recipe remains distinct from unavailable registration evidence.
+
 The standard target repo identifies the head for `graph.diff`; its input supplies both complete source selections, allowing an independently authorized base repository. Do not reuse one source's authorization or provenance for the other. Keep authorized source fetching separate from graph compilation. Compilation of untrusted inputs, including fork sources, must not receive deployment credentials, and graph inspection must not dispatch privileged workflows.
 
 Configuration payloads contain provider-specific non-secret settings and recipe-registration references, validated by the selected provider's capability schema. A patch is explicit about changed fields; omitted fields are not silently reset. Unsupported provider fields fail rather than select another provider.
 
 Starting a mutation may return `action_required` before any remote mutation occurs. If no current approval or deletion-plan reference is available, the service resolves the proposed scope, creates the operation-bound preview and required user decision, and waits for `operation.respond`. The caller does not need an undocumented plan-creation API. Reject stale supplied plan references; do not silently substitute a different destructive scope. Revalidate authority and ownership before each approved phase.
 
-Lists accept a positive page size bounded by the advertised implementation limit and an opaque continuation token. The same caller scope and filters must be used when continuing. Document the selected bounds in the published schema and test zero, minimum, maximum, and one-above-maximum; do not introduce pagination limits on unrelated legacy routes during a structural extraction.
+Lists accept an optional integer page size from 1 through 100 and an opaque continuation token. The schema injects no default; returned pages contain from 0 through 100 items. The same caller scope and filters must be used when continuing. The published schema and executable fixtures cover zero, minimum, maximum, and one-above-maximum; these bounds do not introduce pagination limits on unrelated legacy routes during a structural extraction.
 
 ## Required Actions and Validation
 

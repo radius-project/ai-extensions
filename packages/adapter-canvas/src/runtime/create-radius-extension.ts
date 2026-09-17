@@ -94,6 +94,12 @@ export interface RadiusExtension {
 export function createRadiusExtension(
   deps: RadiusExtensionDependencies
 ): RadiusExtension {
+  if (
+    typeof deps.lifecycle?.execute !== "function" ||
+    typeof deps.lifecycle.close !== "function" ||
+    typeof deps.lifecycle.hasActiveOperations !== "function"
+  )
+    throw new Error("Radius runtime requires the session lifecycle binding.");
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
   const canvasInstances = createRadiusCanvasInstanceRegistry();
@@ -343,6 +349,15 @@ export function createRadiusExtension(
       } catch {}
 
       try {
+        try {
+          await withTimeout(deps.lifecycle.close(), CLEANUP_TIMEOUT_MS);
+        } catch {
+          try {
+            deps.logError(
+              "Radius lifecycle cleanup failed; continuing session shutdown."
+            );
+          } catch {}
+        }
         const closes: Array<Promise<void>> = [];
         for (const [id, entry] of deps.servers) {
           try {
@@ -433,7 +448,13 @@ export function createRadiusExtension(
       } catch {
         /* never let the predicate break the keepalive */
       }
-      if (!panelRecentlyActive && !deployInFlight() && !settingUp) return;
+      if (
+        !panelRecentlyActive &&
+        !deployInFlight() &&
+        !settingUp &&
+        !deps.lifecycle.hasActiveOperations()
+      )
+        return;
       keepaliveBusy = true;
       try {
         const session = deps.session.tryGet();

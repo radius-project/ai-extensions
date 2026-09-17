@@ -4,6 +4,7 @@ import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
 import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
 import { deletionInventoryResources } from "../deletion-inventory.js";
+import { readRetainedMonitoring } from "./retained-monitoring.js";
 import {
   DELETE_FAILED_STATUS,
   FORCE_DELETE_ORPHAN_NOTICE,
@@ -320,6 +321,7 @@ export function initializeDeployedGraphPage(
     updatedAt: string,
     shownApplication: string
   ): string => {
+    if (mode === "deployed") return "Recorded deployed observation.";
     if (mode === "greyed") {
       return "Not deployed yet — showing the modeled application.";
     }
@@ -407,10 +409,32 @@ export function initializeDeployedGraphPage(
       .fetch(url, graphAbort ? { signal: graphAbort.signal } : undefined)
       .then((response) => response.json())
       .then((payload) => {
-        if (requestGeneration !== graphGeneration) return;
+        if (!entry.active || requestGeneration !== graphGeneration) return;
         stopProgress();
+        const monitoring = readRetainedMonitoring(
+          payload,
+          page.repo,
+          application,
+          environment
+        );
+        if (
+          isRecord(payload) &&
+          (payload.unavailable === true || payload.stale === true) &&
+          !monitoring
+        ) {
+          forgetDeployedResources();
+          modeledGraphPending = false;
+          lastMode = "unavailable";
+          showNothing(
+            payload.stale === true ?
+              "The selected deployment changed. Select it again to refresh."
+            : `Unavailable: ${readString(payload, "reason")}: ${readString(payload, "error")}`
+          );
+          setModeNote("Authored topology is not a deployed observation.");
+          return;
+        }
         const loadError = readString(payload, "error");
-        if (loadError) {
+        if (loadError && !monitoring) {
           forgetDeployedResources();
           modeledGraphPending = isRecord(payload) && payload.retry === true;
           if (!controller && status) {
@@ -424,13 +448,17 @@ export function initializeDeployedGraphPage(
           return;
         }
         modeledGraphPending = false;
-        const resources = parseGraphResources(readArray(payload, "resources"));
-        lastMode = readString(payload, "mode") || "greyed";
-        const verified = deletionInventoryResources(
-          payload,
-          application,
-          environment
-        );
+        const resources =
+          monitoring?.resources ??
+          parseGraphResources(readArray(payload, "resources"));
+        lastMode =
+          monitoring ?
+            "retained-monitoring"
+          : readString(payload, "mode") || "greyed";
+        const verified =
+          monitoring ?
+            []
+          : deletionInventoryResources(payload, application, environment);
         deletionInventory =
           verified.length > 0 ?
             { key: requestedKey, resources: verified }
@@ -462,11 +490,13 @@ export function initializeDeployedGraphPage(
             renderedLegend = showLegend;
           }
           setModeNote(
-            describeMode(
-              lastMode,
-              readString(payload, "updatedAt"),
-              readString(payload, "application")
-            )
+            monitoring ?
+              `Current deployed graph unavailable. Retained monitoring results from run ${monitoring.runId}; not a current deployed observation.`
+            : describeMode(
+                lastMode,
+                readString(payload, "updatedAt"),
+                readString(payload, "application")
+              )
           );
         }
         if (lastMode === "live") startLogStream();
@@ -653,7 +683,9 @@ export function initializeDeployedGraphPage(
 
   const loadEnvironments = (): Promise<void> =>
     context.net
-      .fetch(`/api/list-environments?repo=${encodeURIComponent(page.repo)}`)
+      .fetch(`/api/list-environments?repo=${encodeURIComponent(page.repo)}`, {
+        headers: { "X-Radius-Read-Only": "true" }
+      })
       .then((response) => response.json())
       .then((payload) => {
         const listing = parseEnvironmentListing(payload);

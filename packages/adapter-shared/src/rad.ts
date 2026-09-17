@@ -121,6 +121,13 @@ export interface BicepCompileConfig extends Record<string, unknown> {
 
 /** Options for {@link runRadAppGraph}. */
 export interface RunRadAppGraphOptions {
+  /** Prepared source copy with an owned parent Bicep cache baseline; not an OS sandbox. */
+  isolation?: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    bicepPath: string;
+  };
+  signal?: AbortSignal;
   log?: Logger;
   timeout?: number;
   saveGraphJsonTo?: string;
@@ -1140,6 +1147,62 @@ export async function resolveRadForGraph({
   return ensureRadBinary({ log });
 }
 
+export class GraphIsolationError extends Error {
+  constructor() {
+    super(
+      "The captured Bicep configuration cannot preserve an isolated compiler cache."
+    );
+    this.name = "GraphIsolationError";
+  }
+}
+
+export function verifyIsolatedBicepConfiguration(
+  isolation: NonNullable<RunRadAppGraphOptions["isolation"]>
+): void {
+  const home = isolation.env.HOME;
+  if (!home || !path.isAbsolute(home)) throw new GraphIsolationError();
+  const relativeHome = path.relative(path.dirname(isolation.cwd), home);
+  if (
+    relativeHome === ".." ||
+    relativeHome.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeHome)
+  )
+    throw new GraphIsolationError();
+  const baseline: unknown = JSON.parse(
+    fs.readFileSync(
+      path.join(path.dirname(isolation.cwd), "bicepconfig.json"),
+      "utf8"
+    )
+  );
+  if (
+    !isPlainObject(baseline) ||
+    Object.keys(baseline).length !== 1 ||
+    baseline.cacheRootDirectory !== path.join(home, ".bicep")
+  )
+    throw new GraphIsolationError();
+  const directories = [isolation.cwd];
+  for (const directory of directories) {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new GraphIsolationError();
+      if (entry.isDirectory()) directories.push(file);
+      else if (entry.name.toLowerCase() === "bicepconfig.json") {
+        const config: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+        // Windows .NET uses the OS profile, not USERPROFILE, for its default
+        // cache. Bicep accepts only an absolute cacheRootDirectory and does not
+        // merge ancestor configs. Preserve source bytes and refuse this context.
+        if (
+          !isPlainObject(config) ||
+          (config.cacheRootDirectory === undefined ?
+            process.platform === "win32"
+          : config.cacheRootDirectory !== baseline.cacheRootDirectory)
+        )
+          throw new GraphIsolationError();
+      }
+    }
+  }
+}
+
 /**
  * runRadAppGraph - run
  * `rad app graph <file>.bicep --include-icons` in a throwaway working dir and
@@ -1164,11 +1227,53 @@ export async function runRadAppGraph(
     radPath: providedRadPath = "",
     processPlatform = process.platform,
     artifactPollIntervalMs = 100,
-    exitCloseGraceMs = 2000
+    exitCloseGraceMs = 2000,
+    isolation,
+    signal
   }: RunRadAppGraphOptions = {}
 ): Promise<unknown> {
+  signal?.throwIfAborted();
+  if (isolation) {
+    const relativeInput = path.relative(isolation.cwd, bicepFilePath);
+    if (
+      !path.isAbsolute(providedRadPath) ||
+      !path.isAbsolute(isolation.bicepPath) ||
+      !path.isAbsolute(isolation.cwd) ||
+      !path.isAbsolute(bicepFilePath) ||
+      relativeInput === ".." ||
+      relativeInput.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relativeInput) ||
+      saveGraphJsonTo
+    ) {
+      throw new TypeError(
+        "Isolated graph execution requires explicit owned paths and no publication."
+      );
+    }
+    verifyIsolatedBicepConfiguration(isolation);
+    await spawnRad(
+      providedRadPath,
+      ["app", "graph", bicepFilePath, ...MODELED_APP_GRAPH_FLAGS],
+      {
+        cwd: isolation.cwd,
+        env: {
+          ...isolation.env,
+          BICEP: isolation.bicepPath,
+          GITHUB_ACTIONS: ""
+        },
+        inheritEnv: false,
+        signal,
+        timeout,
+        label: "rad app graph"
+      }
+    );
+    signal?.throwIfAborted();
+    return JSON.parse(
+      fs.readFileSync(path.join(isolation.cwd, "app-graph.json"), "utf8")
+    );
+  }
   const radPath = providedRadPath || (await resolveRadForGraph({ log }));
   await ensureManagedBicep(radPath, { log, timeout });
+  signal?.throwIfAborted();
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
   // would no longer point at the file.
   const absoluteBicep = path.resolve(bicepFilePath);
@@ -1194,6 +1299,19 @@ export async function runRadAppGraph(
           ...radSpawnOptions(processPlatform)
         }
       );
+      const closed = new Promise<void>((resolve) =>
+        child.once("close", () => resolve())
+      );
+      const cancellationSignal = signal;
+      const abort = (): void => {
+        if (settled) return;
+        complete();
+        void killChildTree(child, processPlatform)
+          .then(() => closed)
+          .then(() =>
+            reject(new DOMException("Process cancelled.", "AbortError"))
+          );
+      };
 
       const MAX = 32 * 1024 * 1024;
       let stdout = "";
@@ -1217,6 +1335,7 @@ export async function runRadAppGraph(
         settled = true;
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
+        cancellationSignal?.removeEventListener("abort", abort);
         killChildTree(child, processPlatform);
         reject(
           new RadProcessError(
@@ -1231,6 +1350,7 @@ export async function runRadAppGraph(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        cancellationSignal?.removeEventListener("abort", abort);
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
         try {
@@ -1244,6 +1364,8 @@ export async function runRadAppGraph(
           /* best-effort */
         }
       };
+      cancellationSignal?.addEventListener("abort", abort, { once: true });
+      if (cancellationSignal?.aborted) abort();
 
       function finalize(code: number | null, signal: NodeJS.Signals | null) {
         if (settled) return;
@@ -1318,6 +1440,8 @@ export async function runRadAppGraph(
     }
     return JSON.parse(raw);
   } catch (err) {
+    if (signal?.aborted)
+      throw new DOMException("Process cancelled.", "AbortError");
     throw new Error(`rad app graph failed: ${radErrorDetail(err)}`, {
       cause: err
     });

@@ -2,7 +2,11 @@
 // browser entries that consume it. Keeping these behavior-free contracts under
 // pages prevents executable browser modules from entering the Node artifact.
 
-import type { CanvasGraphResource, CanvasState } from "../shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  GraphReadEvidence
+} from "../shared.js";
 
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
 export const PLANNED_GRAPH_STATE_ID = "radius-planned-graph-state";
@@ -15,6 +19,7 @@ export const ENVIRONMENT_PAGE_STATE_ID = "radius-environment-state";
 interface RepositoryPageState {
   repo: string;
   branch: string;
+  evidence?: GraphReadEvidence;
 }
 
 export interface PageStateById {
@@ -32,6 +37,7 @@ export interface PageStateById {
     followWorkspaceBranch: boolean;
   };
   [GRAPH_DIFF_STATE_ID]: {
+    evidence?: GraphReadEvidence;
     repo: string;
     base: string;
     head: string;

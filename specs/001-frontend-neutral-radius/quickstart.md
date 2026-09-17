@@ -1,8 +1,18 @@
 # Validation Quickstart
 
-This guide validates the planned implementation. The lifecycle contract and conformance cases are not implemented by this planning change. Baseline commands below exist now; the proposed fixture-specific command is runnable only after the implementation adds the named tests.
+This guide records the implementation checkpoints completed through T050. Source, evidence, and host limitations are explicit below. No T051+ deployment, configuration, or deletion implementation is claimed.
+
+## Implemented Foundation and Limits
+
+The core lifecycle package publishes versioned schemas for all 21 operation variants, source-expectation policy, operation/action state, and the dispatcher. The shared adapter provides strict validators and authorized source snapshots. The App registers the additive `radius_lifecycle` tool without requiring a Canvas, retains existing tools/routes, and includes routing guards and a bridge to legacy setup/deletion records.
+
+The App registers `capabilities.get`, `application.list`, `application.inspect`, `environment.list`, `environment.inspect`, `graph.get`, and `graph.diff` alongside the foundation's `operation.respond` handler. Discovery uses fresh trusted authorization, GET-only GitHub reads, and confined current-worktree capture. Other lifecycle operations remain unavailable. The production binding still does not fabricate host approval or agent-assignment verification; a public approval claim cannot grant authority. Guarded action success is verified with injected trusted contexts, not claimed as real-host qualification. Source-capture limitations are documented in [data-model.md](data-model.md#source-snapshot-and-definition).
+
+Authored inspection returns source and definition evidence without requiring a graph or environment. Environment inspection retains partial configuration and explicitly unavailable recipe observations without fabricating an empty registration list. Deployed evidence requires an explicit environment and application-correlated GitHub metadata; uncorrelated metadata is unavailable, not proof of current Radius state.
 
 ## Prerequisites
+
+The T018-T038 scope remains strictly read-only. Where existing evidence cannot establish actual environment recipe registrations, the implementation discloses unavailable recipe evidence and planned graphs rather than restoring a control plane or producing new workflow artifacts. Authored inspection and authored graph reads remain independent of environment registration evidence. This user-approved limitation is recorded in [research.md](research.md#5-environment-specific-planned-graphs).
 
 - Node.js 24 and the repository-pinned pnpm 11.19.0.
 - An isolated repository worktree, not the primary checkout.
@@ -17,6 +27,8 @@ corepack pnpm install --frozen-lockfile
 
 The current environment's npm registry is configured to `https://packagefeedproxy.microsoft.io/npm/`. Registry selection is developer setup, not a lifecycle feature or a credential to embed in fixtures.
 
+If Corepack cannot fetch the pinned package manager through the configured feed, run `npm exec --yes --package=pnpm@11.19.0 -- pnpm --version` to bootstrap the same version through npm's registry resolution. Replace the `corepack pnpm` prefix below with `npm exec --yes --package=pnpm@11.19.0 -- pnpm` on that machine. Do not disable TLS verification or change repository version pins to bypass bootstrap failures.
+
 ## Focused Development Checks
 
 Run owning package tests while implementing:
@@ -30,15 +42,149 @@ corepack pnpm run test:integration:http
 
 Expected outcome: all selected tests execute and pass with fake external dependencies. An empty selection is not a pass for this feature.
 
-Add the proposed panel-free runtime conformance file under the already included runtime integration directory, then run:
+Run the implemented lifecycle contracts, state, adapters, and public-entry assertions:
+
+```powershell
+corepack pnpm exec vitest run lifecycle packages\adapter-shared\src\index.test.ts
+```
+
+Run the implemented panel-free foundation boundary:
+
+```powershell
+corepack pnpm --filter @radius-project/adapter-canvas exec vitest run test\integration\runtime\lifecycle-foundation.test.ts
+```
+
+Expected outcome: the real runtime composition with a fake SDK session preserves declared tool schemas and caller expectations, rejects untrusted responses, consumes a trusted response once, retains operation lifetime without a panel, and rejects routing transitions that orphan or redispatch known work. These tests do not execute the story scenarios below.
+
+The later full-feature conformance file remains a planned deliverable:
 
 ```powershell
 corepack pnpm --filter @radius-project/adapter-canvas exec vitest run test\integration\runtime\lifecycle-conformance.test.ts
 ```
 
-Expected outcome: the real production runtime composition, with a fake SDK session and controlled external ports, performs the acceptance sequence without opening a Canvas or starting a loopback server. This file is a required implementation deliverable, not present at planning time.
+Expected future outcome: the real production runtime composition, with a fake SDK session and controlled external ports, performs the acceptance sequence without opening a Canvas or starting a loopback server. This full-feature file is not part of the current T018-T038 scope.
 
 ## End-to-End Acceptance Scenarios
+
+### Runnable Panel-Free Discovery
+
+T018-T026 are complete. Panel-free discovery and legacy listing routes use the same core factories and shared adapters. The discovery checkpoint includes unit, runtime, HTTP, built-extension, and existing browser-journey evidence.
+
+Run the real runtime fixture:
+
+```powershell
+corepack pnpm exec vitest run packages\adapter-canvas\test\integration\runtime\lifecycle-discovery.test.ts
+```
+
+The scenarios `exposes truthful discovery capabilities through the panel-free public tool` and `discovers and inspects real authored bytes with zero environments and fences supplied source expectations` use the actual runtime composition, a fake SDK, controlled GitHub reads, and real temporary authored files. They require no personal credentials, cloud resources, publication, or Canvas server.
+
+Exercise the real-loopback compatibility and source boundaries with:
+
+```powershell
+corepack pnpm exec vitest run packages\adapter-canvas\test\integration\http\lifecycle-discovery.test.ts packages\adapter-shared\src\lifecycle\workspace-source.test.ts packages\adapter-shared\src\lifecycle\github-source.test.ts
+```
+
+Expect both canonical definitions to remain observable, exact captured source expectations, explicit absence versus unavailable errors, caller-scoped cache reuse, and partial environment evidence that is neither cached nor workflow-synced. Browser fixtures use finite canonical GET responses and reject unmatched commands; the complete Chromium gate covers the retained environment and deployment journeys.
+
+For a host attached to `owner/repo` with an `app.bicep` definition declaring application `app`, the public tool request is:
+
+```json
+{
+  "operation": "application.inspect",
+  "target": {
+    "repo": "owner/repo",
+    "application": "app",
+    "definition": "app.bicep"
+  },
+  "input": {}
+}
+```
+
+Replace the target values with the attached repository's actual values. Omit `source` to use the authorized current workspace: the binding supplies the context-owned reference and computed fingerprint, as well as the contract version and request ID. No environment is required. An explicit source expectation remains a constraint and is not overwritten when files change.
+
+Authored listing reads `.radius/app.bicep` and then `app.bicep`, retaining both applications when present, and reports partial coverage rather than claiming recursive repository enumeration. Explicit inspection selects the requested definition; an unsupported first definition is not silently skipped. The legacy single-application picker chooses the first canonical definition and warns when multiple definitions exist. Recipe observations may be unavailable even when environment configuration is readable, and correlated GitHub deployment metadata does not prove fresh Radius control-plane state.
+
+### Graph Fixtures and Current Limits
+
+T027-T038 are complete for the supported source and evidence forms below. The final checkpoint includes 11,892 passing Linux Node assertions, 17 built-extension assertions, 16 Windows process assertions, 30 component tests, and 75 Chromium cases with retries disabled. Existing HTTP failure statuses, source freshness, and separately labeled retained diagnostics are covered; this is not a claim of general registry-model or live-environment support.
+
+Run the fixture-backed graph boundary and process cases:
+
+```powershell
+corepack pnpm exec vitest run packages\core\src\lifecycle\graphs.test.ts packages\core\src\lifecycle\recipe-registrations.test.ts packages\adapter-canvas\test\integration\runtime\lifecycle-graphs.test.ts packages\adapter-canvas\test\integration\http\lifecycle-graphs.test.ts packages\adapter-shared\src\lifecycle\graph-execution.test.ts packages\adapter-shared\src\rad-process-isolation.test.ts
+```
+
+These cover changed supporting and binary inputs, independently authorized committed fork sources, exact source expectations, unavailable comparisons, zero publication, literal process arguments, isolated environment/home/cache, and cleanup. Runtime fixtures use real composition and snapshots with an injected compiler boundary; process cases run real child processes. They do not claim live cloud or actual-host qualification.
+
+The independent scenario changes a captured supporting file and binary artifact, requests another authored graph, then compares separately pinned base/head commits across authorized repositories. It verifies both provenances and refusal when either authorization or expectation fails. The core recipe fixtures use distinct actual-registration observations for two environments and distinguish a known missing recipe from unavailable registration evidence. No provider-default pack substitutes for either observation.
+
+For a fixture or attached repository containing a supported definition:
+
+```json
+{
+  "operation": "graph.get",
+  "target": {
+    "repo": "owner/repo",
+    "definition": ".radius/app.bicep"
+  },
+  "input": { "kind": "authored" }
+}
+```
+
+Omitting source selects the authorized current workspace. A committed comparison supplies independent `input.base` and `input.head` selections, each with repository, definition, and a Git source containing the explicit ref and expected commit. The outer target repository must match the head. Never invent a workspace reference or treat fixture commit values as live repository evidence.
+
+Authored reads require complete, supported, self-contained inputs and usable managed binaries. Static local extension archives are supported; ordinary generated registry-valued `bicepconfig.json` entries are not generally supported because isolated compilation does not restore registry dependencies. On Windows, captured configuration is refused unless its cache location matches the owned compilation cache; captured user configuration is never rewritten. The successful native Windows qualification used an inline local `.tgz` extension with no repository configuration. This is a limited supported source form, not a claim that ordinary generated models work unchanged.
+
+The native qualification used Radius v0.60.2 and Bicep 0.42.1 against the checked-in `packages/adapter-shared/test/fixtures/lifecycle-registry-inputs` model and local archive, including inert registry strings in companion data. On Windows, the separate `packages/adapter-shared/src/lifecycle/graph-execution-native.test.ts` case runs only when `RADIUS_NATIVE_GRAPH_TEST_TOOLS` explicitly selects an owned native-tool directory; routine runs intentionally skip it. Production acquisition may reuse an existing managed or explicitly selected Radius binary and managed Bicep; these qualification versions are not production pins. An unavailable or incompatible binary is a failure, not permission to replace a user's explicit override.
+
+Production planned reads return unavailable actual registration evidence. Production deployed reads return unavailable Radius graph provenance; GitHub deployment metadata is not a canonical deployed graph. A separately labeled, exact-run retained-monitoring projection can preserve settled diagnostics without supplying topology or deletion inventory. Available planned/deployed port fixtures prove service behavior only.
+
+### Authoring and Validation Checkpoint
+
+Standalone `definition.validate` is production-wired through authorized captured source, isolated native Bicep compilation, and the shipped validation rules. T039-T050 are complete, including the repaired legacy generation and CLI verification paths. Passing fixture authoring does not establish actual-host canonical authoring support.
+
+The generation tool follows the selected writer. The current SDK retains legacy skill bootstrap; a lifecycle-selected request never falls back after failure. The user explicitly chose to preserve legacy compiler/static checks while keeping canonical validation strict. The original standalone `--begin`, validate, write-origin, promote sequence remains supported: promotion performs actual verification before creating its first seal. An optional `--seal --staging <dir>` command permits a separate verification checkpoint. Missing or changed evidence after sealing is rejected; an origin hash alone does not authorize promotion. The shipped modeling skill documents both modes and the full sequence.
+
+Exercise the repaired runtime and executable CLI boundaries with:
+
+```text
+pnpm exec vitest run packages/adapter-canvas/src/runtime/create-radius-tools.test.ts packages/adapter-canvas/test/integration/runtime/lifecycle-authoring.test.ts packages/adapter-canvas/src/promote-app-model.cli.test.ts
+```
+
+For a supported definition in the attached repository:
+
+```json
+{
+  "operation": "definition.validate",
+  "target": {
+    "repo": "owner/repo",
+    "definition": ".radius/app.bicep"
+  },
+  "input": {
+    "policyVersion": "github-radius/validation/v1"
+  }
+}
+```
+
+The binding resolves omitted source intent through the authorized current workspace and preserves explicit commit/fingerprint expectations. Validation requires no agent or Canvas and does not modify source, publish artifacts, commit, push, or deploy. A failed required check produces `failed`; unavailable or skipped required evidence produces `incomplete` unless another required check failed. Advisory warnings are separate and cannot downgrade a required check.
+
+Run the runtime and promotion fixtures:
+
+```powershell
+corepack pnpm exec vitest run packages\adapter-canvas\test\integration\runtime\lifecycle-authoring.test.ts packages\adapter-shared\src\lifecycle\definition-promotion.test.ts packages\core\src\modeling\app-staging.test.ts packages\adapter-canvas\src\promote-app-model.guard.test.ts packages\adapter-canvas\src\promote-app-model.test.ts
+```
+
+The trusted-host fixture exercises assignment, authenticated completion, actual validation, and promotion; it rejects changed source, revoked approval, and foreign-agent outcomes. Production canonical authoring remains unavailable because the current SDK cannot prove source-bound approval or authenticated assignment/outcome. Public approval claims and an agent's completion message cannot supply that missing authority. This limitation does not disable the retained legacy workflow described above.
+
+Canonical promotion binds the complete original effective-input manifest and exact validated output bytes, including expected absence for a first definition. Newly introduced dependencies outside that captured baseline remain incomplete. Multi-file replacement is not a filesystem transaction: rollback and cleanup failures are reported, and unresolved recovery material is retained. The staged agent loop keeps five repairs after its initial compile; independent verification does not consume or reset that agent record.
+
+For canonical operations, registry-dependent models, unsafe Windows cache configuration, and missing applicable schema, runtime/client, source-reference, or Recipe evidence remain incomplete or unavailable. Application-only evidence can establish genuine non-applicability; that is not proof that workload models pass. Native qualification separately exercised five captures and five real Bicep builds with owned Radius 0.60.2/Bicep 0.42.1 tools, including warnings and property-type errors. Native tests are opt-in, not ordinary passing assertions. The new legacy CLI native qualification case was not run; its ordinary executable cases use a recorded compiler protocol and the real retained checks.
+
+The final checkpoint passes 12,639 Linux Node assertions with 47 intentional skips, static checks, coverage floors, build, 18 built-extension assertions, 30 component tests, 75 Chromium cases without retries, and 16 dedicated Windows process assertions. The CLI suite passes 30 executable cases on Windows. The new verification functions and retained generation helper have complete changed-function coverage; existing invariant-only exceptions remain recorded in the conformance inventory. No real-host or live-cloud qualification is implied.
+
+### Remaining Full-Feature Scenarios
+
+These broader scenarios are not claimed as implemented by the current checkpoint.
 
 Use the fixture families in [conformance.md](contracts/conformance.md), with identities and state transitions from [data-model.md](data-model.md). Exercise these sequences through the actual App binding, not test-only service entry points:
 

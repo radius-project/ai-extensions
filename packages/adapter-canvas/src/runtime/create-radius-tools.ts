@@ -1,14 +1,20 @@
-// createRadiusTools — builds the 7 radius_* tools from RADIUS_TOOL_DECLARATIONS
+// createRadiusTools — builds the retained tools and additive lifecycle tool
+// from RADIUS_TOOL_DECLARATIONS
 // plus a RadiusExtensionDependencies dependency object. Same shape as
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
-import { RADIUS_TOOL_DECLARATIONS } from "./declarations.js";
+import {
+  RADIUS_TOOL_DECLARATIONS,
+  RADIUS_LIFECYCLE_TOOL_DECLARATION
+} from "./declarations.js";
 import {
   ambiguousAppSourceBrief,
+  evaluateAppSource,
   unsupportedAppSourceReport
 } from "@radius-project/core";
 import { errorMessage, optionalString } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
+import { readCommittedGraphDiff, canvasResources } from "./graph-reader.js";
 import {
   failedGraphDiffResult,
   successfulGraphDiffResult,
@@ -17,7 +23,6 @@ import {
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { ModelingActivity } from "./modeling-activity.js";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
-import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 import {
   appModelTargetKey,
@@ -30,8 +35,7 @@ interface ToolArgs {
 
 export function createRadiusTools(
   deps: RadiusExtensionDependencies,
-  // Told when this tool hands the modeling skill over, so a graph render that
-  // finds no model does not ask for the run that is about to start.
+  // Legacy handoffs and nonterminal canonical results announce an active run.
   modelingActivity: ModelingActivity,
   // Released when a modeling run reports a terminal failure, so the retry the
   // failure message promises is not swallowed by the dead run's claim.
@@ -55,94 +59,155 @@ export function createRadiusTools(
     }
   }
 
-  // Records that a modeling run is about to start, so a graph render that finds
-  // no model defers to it instead of asking for the same work again. Called
-  // only on the paths that actually hand the skill over: a refused repository
-  // is not being modeled.
-  function announceModelingRun(state: CanvasState | null): void {
-    if (!state?.contextRepo || !state.contextBranch) return;
-    modelingActivity.announce({
-      repo: state.contextRepo,
-      branch: state.contextBranch
+  async function legacyAuthoring(repoPath?: string): Promise<string> {
+    let brief: string | undefined;
+    const discoveryUnavailable =
+      "Workspace discovery was unavailable. Inspect the requested source before authoring; no source scope or lifecycle authority has been established by this handoff.";
+    const state = await workspaceState().catch(() => {
+      brief = discoveryUnavailable;
+      return null;
     });
+    const targetsWorkspace =
+      !repoPath ||
+      deps.workspace.isWorkspacePath(state?.workspacePath, repoPath);
+    if (state && targetsWorkspace) {
+      const repo = state.contextRepo || "";
+      const branch = state.contextBranch || "";
+      const source = await evaluateAppSourceForBranch(
+        repo,
+        branch,
+        state
+      ).catch(() => null);
+      if (source?.status === "none")
+        return unsupportedAppSourceReport(state.contextRepo);
+      if (!source || source.status === "unknown") {
+        brief = discoveryUnavailable;
+      } else {
+        const listing =
+          source.status === "ambiguous" ?
+            await listSourceTreeForBranch(repo, branch, state)
+          : null;
+        const scoped =
+          !!repoPath &&
+          deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
+          !deps.workspace.isWorkspacePath(repoPath, state.workspacePath);
+        brief =
+          scoped ? undefined : (
+            (ambiguousAppSourceBrief(source, listing) ?? undefined)
+          );
+      }
+    }
+    if (deps.lifecycle.routing.selection("definition").writer !== "legacy")
+      return JSON.stringify({
+        error: {
+          code: "PRECONDITION_FAILED",
+          message:
+            "The authoring writer changed during source discovery. Retry the request."
+        }
+      });
+    const handoff = deps.radiusAppBicepSkill(repoPath, brief);
+    if (targetsWorkspace && state?.contextRepo && state.contextBranch)
+      modelingActivity.announce({
+        repo: state.contextRepo,
+        branch: state.contextBranch
+      });
+    return handoff;
   }
 
   return [
     {
+      ...RADIUS_LIFECYCLE_TOOL_DECLARATION,
+      handler: async (args: ToolArgs) =>
+        JSON.stringify(await deps.lifecycle.execute(args))
+    },
+    {
       ...declarationByName.get("radius_generate_app")!,
-      // Two source checks gate the authoring handoff, and they differ in
-      // kind. A repository with no Dockerfile is refused outright (2.1): the
-      // product cannot model it, so the skill is withheld entirely. A repository
-      // with SEVERAL Dockerfiles is not refused at all (2.2) — it is the normal
-      // shape of a microservices application and must still be modeled as one
-      // application — so the bootstrap is returned as usual, with a brief field
-      // describing the candidate directories and the narrow case in which the
-      // agent should stop and ask the user where the application is.
-      //
-      // Any failure to establish the repository's contents returns the handoff
-      // unchanged: both checks act on evidence, never on a lookup that did not
-      // work.
       handler: async (args: ToolArgs) => {
-        const repoPath = args.repoPath as string | undefined;
-        let brief: string | undefined;
-        const state = await workspaceState().catch(() => null);
-        // The listing this check can obtain describes the worktree, so it is
-        // evidence about the worktree and anything inside it — a subdirectory
-        // of a tree with no Dockerfile has none either. A caller naming some
-        // other location is asking about a target the extension cannot
-        // enumerate, and there is no evidence to refuse on. An omitted path
-        // means the workspace, which is how the tool is invoked in practice.
-        const targetsWorkspace =
-          !repoPath ||
-          deps.workspace.isWorkspacePath(state?.workspacePath, repoPath);
-        if (state && targetsWorkspace) {
-          const source = await evaluateAppSourceForBranch(
-            state.contextRepo || "",
-            state.contextBranch || "",
-            state
-          ).catch(() => null);
-          if (source?.status === "none") {
-            return unsupportedAppSourceReport(state.contextRepo);
-          }
-          // The workspace-manifest signal needs the listing itself, which the
-          // classification does not carry. It is re-read only on the
-          // `ambiguous` branch — the rare case — through the same branch-aware
-          // lister, so a branch that is not the current worktree gets the same
-          // signal the classification was derived from.
-          //
-          // A null listing means the re-read did not happen, so the brief
-          // simply omits the signal; it must never be read as "no manifests
-          // present".
-          const listing =
-            source?.status === "ambiguous" ?
-              await listSourceTreeForBranch(
-                state.contextRepo || "",
-                state.contextBranch || "",
-                state
-              )
-            : null;
-          // A repoPath naming somewhere INSIDE the worktree is the user's
-          // answer to the very question this brief asks. The gate above
-          // deliberately lets a subdirectory through, because a tree with no
-          // Dockerfile has none in any subdirectory either — but that evidence
-          // only justifies the refusal above. Asking again here, with
-          // candidates from outside the directory they just named, would undo
-          // their answer and loop. So the brief is for the worktree itself.
-          const answeredWithDirectory =
-            !!repoPath &&
-            deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
-            !deps.workspace.isWorkspacePath(repoPath, state.workspacePath);
-          brief =
-            answeredWithDirectory ? undefined : (
-              (ambiguousAppSourceBrief(source, listing) ?? undefined)
+        const failure = (code: string, message: string) =>
+          JSON.stringify({ error: { code, message } });
+        if (args.repoPath !== undefined && typeof args.repoPath !== "string")
+          return failure("INVALID_REQUEST", "repoPath must be a string.");
+        try {
+          if (
+            deps.lifecycle.routing.selection("definition").writer === "legacy"
+          )
+            return await legacyAuthoring(args.repoPath);
+          const state = await workspaceState();
+          const repo = state.contextRepo;
+          const branch = state.contextBranch;
+          if (
+            !state.workspacePath ||
+            !repo ||
+            !branch ||
+            !deps.workspace.isWorkspaceSelection(state, repo, branch)
+          )
+            return failure(
+              "RESULT_UNAVAILABLE",
+              "The trusted workspace source could not be established."
             );
+          const repoPath = args.repoPath;
+          if (
+            repoPath &&
+            !deps.workspace.isWorkspacePath(state.workspacePath, repoPath)
+          )
+            return failure(
+              "CAPABILITY_UNAVAILABLE",
+              "Authoring supports only the trusted workspace root; the requested source path is unavailable."
+            );
+          const listing = await deps.workspace.fetchWorkspaceTree(
+            state,
+            repo,
+            branch
+          );
+          const source = evaluateAppSource(listing);
+          if (source.status === "unknown")
+            return failure(
+              "RESULT_UNAVAILABLE",
+              "The workspace source listing could not be established."
+            );
+          if (source.status === "none") return unsupportedAppSourceReport(repo);
+          // A scoped directory is not representable by the canonical source
+          // contract. Never silently widen the user's selected application.
+          if (
+            repoPath &&
+            !deps.workspace.isWorkspacePath(repoPath, state.workspacePath)
+          )
+            return failure(
+              "CAPABILITY_UNAVAILABLE",
+              "Canonical authoring cannot represent a source subdirectory; no application definition was started."
+            );
+          const brief = ambiguousAppSourceBrief(source, listing);
+          const result = await deps.lifecycle.execute({
+            operation: "definition.author",
+            target: { repo, definition: ".radius/app.bicep" },
+            input: {
+              intent:
+                "Generate a Radius application definition from the current workspace." +
+                (brief ? `\n\n${brief}` : ""),
+              provider: "azure"
+            }
+          });
+          if (
+            "operation" in result &&
+            result.operation === "definition.author" &&
+            (result.result.state === "queued" ||
+              result.result.state === "running" ||
+              result.result.state === "action_required")
+          )
+            modelingActivity.announce({ repo, branch });
+          return JSON.stringify(result);
+        } catch {
+          return failure(
+            "RESULT_UNAVAILABLE",
+            "The workspace authoring request could not be completed."
+          );
         }
-        if (targetsWorkspace) announceModelingRun(state);
-        return deps.radiusAppBicepSkill(repoPath, brief);
       }
     },
     {
       ...declarationByName.get("radius_report_modeling_failure")!,
+      // Legacy Canvas diagnostic only: this is not an authenticated agent
+      // outcome and cannot complete, approve, or promote a lifecycle action.
       handler: async (args: ToolArgs) => {
         const instanceId = optionalString(args.instanceId).trim();
         const repo = optionalString(args.repo).trim();
@@ -217,75 +282,30 @@ export function createRadiusTools(
           headBranch: string;
         };
         try {
-          const state = await workspaceState();
-          const [baseContent, headContent] = await Promise.all([
-            fetchBicepForBranch(repo, baseBranch, state),
-            fetchBicepForBranch(repo, headBranch, state)
-          ]);
-
-          if (!baseContent && !headContent) {
+          const result = await readCommittedGraphDiff(
+            deps.lifecycle,
+            repo,
+            baseBranch,
+            headBranch
+          );
+          if (result.status !== "ok")
             return unavailableGraphDiffResult(
-              `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
+              `${result.error.code}: ${result.error.message}`
             );
-          }
-
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                baseBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                headBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const baseResources = await deps.rad.buildGraphViaRad(
-            baseContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: baseRadArtifactsDir,
-              cleanupRadArtifactsDir: baseRadArtifactsRemote
-            }
-          );
-          const headResources = await deps.rad.buildGraphViaRad(
-            headContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: headRadArtifactsDir,
-              cleanupRadArtifactsDir: headRadArtifactsRemote
-            }
-          );
-
-          const diffResources = deps.core.computeGraphDiff(
-            baseResources,
-            headResources
-          );
+          if (result.value.status === "unavailable")
+            return unavailableGraphDiffResult(
+              `${result.value.source}: ${result.value.reason}: ${result.value.message}`
+            );
           return successfulGraphDiffResult(
-            deps.renderPrDiffMarkdown(diffResources, baseBranch, headBranch)
+            deps.renderPrDiffMarkdown(
+              canvasResources(result.value.graph),
+              baseBranch,
+              headBranch
+            )
           );
-        } catch (err) {
+        } catch {
           return failedGraphDiffResult(
-            `Could not generate app graph diff: ${errorMessage(err)}`
+            "Could not generate app graph diff: the selected graph evidence is unavailable."
           );
         }
       }

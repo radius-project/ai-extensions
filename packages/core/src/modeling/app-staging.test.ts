@@ -10,6 +10,7 @@ import {
   STAGING_DIR_PREFIX,
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
+  changedManagedFiles,
   evaluateRepairAttempt,
   evaluateStagedRun,
   fingerprintCompilerOutput,
@@ -46,14 +47,31 @@ function origin(model = MODEL): string {
 function stagedRun(
   overrides: Partial<Parameters<typeof evaluateStagedRun>[0]> = {}
 ) {
+  const files = publishableFiles(
+    overrides.stagedFiles ?? REQUIRED_STAGED_FILES
+  );
+  const hashes = Object.fromEntries(
+    files.map((file) => [file, "sha256:exact"])
+  );
+  const baseline = Object.fromEntries(files.map((file) => [file, null]));
   return evaluateStagedRun({
     stagedFiles: [...REQUIRED_STAGED_FILES, STAGING_RUN_RECORD],
     appBicep: MODEL,
     originText: origin(),
-    record: { baseline: {} },
+    record: { baseline, validatedOutputs: hashes },
     currentHashes: {},
+    stagedHashes: hashes,
     hashAppBicep,
-    ...overrides
+    ...overrides,
+    ...(overrides.record ?
+      {
+        record: {
+          validatedOutputs: hashes,
+          ...overrides.record,
+          baseline: { ...baseline, ...overrides.record.baseline }
+        }
+      }
+    : {})
   });
 }
 
@@ -198,14 +216,12 @@ describe("evaluateStagedRun", () => {
     expect(result.reason).toContain(".radius/bicepconfig.json");
   });
 
-  // A file this run does not publish is not this run's business, even if it
-  // changed while the run was going.
-  it("ignores a change to a file this run would not publish", () => {
+  it("refuses changed effective inputs even when they are not replaced", () => {
     const result = stagedRun({
       record: { baseline: { "custom-types.yaml": null } },
       currentHashes: { "custom-types.yaml": "sha256:appeared" }
     });
-    expect(result.status).toBe("ready");
+    expect(result.status).toBe("concurrent-edit");
   });
 
   it.each(REQUIRED_STAGED_FILES)("refuses a run missing %s", (missing) => {
@@ -296,10 +312,7 @@ describe("evaluateStagedRun", () => {
     expect(result.status).toBe("concurrent-edit");
   });
 
-  // The authored-recipe name is a pattern, so a baseline taken before the run
-  // may not mention one. An uncovered file carries no evidence and must not be
-  // read as having appeared mid-run.
-  it("ignores a publishable file the baseline never covered", () => {
+  it("refuses a publishable file that appeared after the baseline", () => {
     const result = stagedRun({
       stagedFiles: [...REQUIRED_STAGED_FILES, "postgres-recipe.bicep"],
       record: { baseline: { "app.bicep": null } },
@@ -308,8 +321,165 @@ describe("evaluateStagedRun", () => {
         "postgres-recipe.bicep": "sha256:already-on-disk"
       }
     });
-    expect(result.status).toBe("ready");
-    expect(result.files).toContain("postgres-recipe.bicep");
+    expect(result.status).toBe("concurrent-edit");
+    expect(result.files).toEqual([]);
+  });
+
+  it.each(["module.bicep", "bicepconfig.json", "extension.tgz"])(
+    "refuses added, deleted, and changed effective input %s",
+    (file) => {
+      for (const [before, after] of [
+        [null, "sha256:added"],
+        ["sha256:old", null],
+        ["sha256:old", "sha256:new"]
+      ]) {
+        expect(
+          stagedRun({
+            record: { baseline: { [file]: before } },
+            currentHashes: { [file]: after }
+          }).status
+        ).toBe("concurrent-edit");
+      }
+    }
+  );
+
+  it("refuses new dependencies not covered by the original baseline", () => {
+    expect(
+      stagedRun({
+        currentHashes: { "new-module.bicep": "sha256:current" }
+      }).status
+    ).toBe("concurrent-edit");
+  });
+
+  it("requires validation fingerprints rather than only an origin hash", () => {
+    expect(
+      stagedRun({
+        record: { baseline: {}, validatedOutputs: undefined }
+      }).status
+    ).toBe("unverified");
+  });
+
+  it.each(REQUIRED_STAGED_FILES)(
+    "refuses exact validated bytes changing for %s",
+    (file) => {
+      expect(
+        stagedRun({
+          stagedHashes: Object.fromEntries(
+            REQUIRED_STAGED_FILES.map((name) => [
+              name,
+              name === file ? "sha256:changed" : "sha256:exact"
+            ])
+          )
+        }).status
+      ).toBe("unverified");
+    }
+  );
+
+  it.each<Parameters<typeof evaluateStagedRun>[0]["stagedHashes"]>([
+    undefined,
+    {},
+    { "app.bicep": null }
+  ])("refuses absent or partial staged fingerprints %j", (stagedHashes) => {
+    expect(stagedRun({ stagedHashes }).status).toBe("unverified");
+  });
+
+  it.each([
+    "../app.bicep",
+    "..\\app.bicep",
+    "C:\\app.bicep",
+    "C:app.bicep",
+    "\\\\server\\app.bicep",
+    "/app.bicep",
+    "app.bicep:stream",
+    "nested/../../app.bicep",
+    "app.bicep."
+  ])("refuses unsafe staged path %s", (file) => {
+    expect(
+      stagedRun({
+        stagedFiles: [...REQUIRED_STAGED_FILES, file]
+      }).publishable
+    ).toBe(false);
+  });
+
+  it("refuses fingerprints for different files even with equal manifest sizes", () => {
+    expect(
+      stagedRun({
+        record: {
+          baseline: {},
+          validatedOutputs: {
+            "app.bicep": "sha256:exact",
+            "bicepconfig.json": "sha256:exact",
+            "other.json": "sha256:exact"
+          }
+        }
+      }).status
+    ).toBe("unverified");
+  });
+
+  it.each([null, ""])("refuses unusable validation fingerprint %j", (hash) => {
+    expect(
+      stagedRun({
+        record: {
+          baseline: {},
+          validatedOutputs: Object.fromEntries(
+            REQUIRED_STAGED_FILES.map((file) => [file, hash])
+          )
+        }
+      }).status
+    ).toBe("unverified");
+  });
+
+  it("refuses extra artifacts that appeared after validation", () => {
+    expect(
+      stagedRun({
+        stagedFiles: [...REQUIRED_STAGED_FILES, "custom-recipe-pack.bicep"],
+        record: {
+          baseline: {},
+          validatedOutputs: Object.fromEntries(
+            REQUIRED_STAGED_FILES.map((file) => [file, "sha256:exact"])
+          )
+        }
+      }).status
+    ).toBe("unverified");
+  });
+
+  describe("changedManagedFiles", () => {
+    it("requires explicit baseline absence for every replacement", () => {
+      expect(changedManagedFiles({}, {}, ["new-recipe.bicep"])).toEqual([
+        "new-recipe.bicep"
+      ]);
+      expect(
+        changedManagedFiles({ "new-recipe.bicep": null }, {}, [
+          "new-recipe.bicep"
+        ])
+      ).toEqual([]);
+    });
+
+    it("refuses unreadable inputs even when both observations are unreadable", () => {
+      expect(
+        changedManagedFiles(
+          { "a.bicep": "unreadable", "b.bicep": "sha256:before" },
+          { "a.bicep": "unreadable", "b.bicep": "unreadable" },
+          []
+        )
+      ).toEqual(["a.bicep", "b.bicep"]);
+    });
+  });
+
+  it("refuses validated artifacts removed before publication", () => {
+    expect(
+      stagedRun({
+        record: {
+          baseline: {},
+          validatedOutputs: {
+            ...Object.fromEntries(
+              REQUIRED_STAGED_FILES.map((file) => [file, "sha256:exact"])
+            ),
+            "custom-recipe-pack.bicep": "sha256:exact"
+          }
+        }
+      }).status
+    ).toBe("unverified");
   });
 
   it("still refuses when a covered authored recipe changed", () => {

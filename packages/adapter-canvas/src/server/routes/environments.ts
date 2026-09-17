@@ -1,4 +1,11 @@
 import type { CanvasRequestContext } from "../request-context.js";
+import type { LegacyDiscoverySession } from "../services/discovery-reader.js";
+import { discoveryCancellation } from "../services/discovery-cancellation.js";
+import {
+  discoveryErrorMessage,
+  formatDiscoveryError,
+  projectLegacyEnvironment
+} from "../services/discovery-serialization.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type {
   EnvironmentActiveDeployment,
@@ -32,13 +39,12 @@ export type {
   DeleteOperationRecord,
   DeleteStartResult
 } from "./environments-types.js";
-import { classifyProvider } from "../../provider-classification.js";
 
 const BROWSER_DIAGNOSTIC_MAX_LENGTH = 2000;
 
 function browserVisibleDiagnostic(
   value: string,
-  dependencies: EnvironmentsDependencies
+  dependencies: Pick<EnvironmentsDependencies, "redactDiagnostic">
 ): string {
   const diagnostic = dependencies.redactDiagnostic(value).trim();
   return diagnostic.length > BROWSER_DIAGNOSTIC_MAX_LENGTH ?
@@ -750,7 +756,21 @@ export function overlayDeletingStatus(
 // fails closed on the environment being torn down.
 export async function handleListEnvironments(
   context: CanvasRequestContext,
-  dependencies: EnvironmentsDependencies
+  dependencies: Pick<
+    EnvironmentsDependencies,
+    | "activeDeleteEnvironment"
+    | "envListCacheGet"
+    | "envListCacheGeneration"
+    | "envListCacheSet"
+    | "envListTtlMs"
+    | "now"
+    | "discovery"
+    | "redactDiagnostic"
+    | "errorMessage"
+    | "readInstanceEntry"
+    | "repoMatchesWorkspace"
+    | "kickoffWorkflowSync"
+  >
 ): Promise<void> {
   const { response, url } = context;
   const repo = url.searchParams.get("repo") || "";
@@ -769,49 +789,50 @@ export async function handleListEnvironments(
     return;
   }
 
-  const cached = dependencies.envListCacheGet(repo);
-  if (cached && dependencies.now() - cached.at < dependencies.envListTtlMs) {
-    respond(cached.payload);
-    return;
-  }
-
-  // The generation this listing is being assembled against. Anything that
-  // removes an environment — the delete route, or a rollback or exit that
-  // deletes the one this setup created — invalidates the repo's listing, and
-  // that invalidation must survive a listing that started before it. Caching
-  // such a payload would put the removed environment back in front of the
-  // customer for a whole TTL, which is exactly what a completed rollback
-  // promised it would not do.
-  const generation = dependencies.envListCacheGeneration(repo);
-  const cacheListing = (payload: unknown): void => {
-    if (dependencies.envListCacheGeneration(repo) !== generation) return;
-    dependencies.envListCacheSet(repo, { at: dependencies.now(), payload });
-  };
-
-  const gh = (args: string[], timeout = 12000): Promise<string> =>
-    new Promise<string>((resolve) => {
-      dependencies.cliExec("gh", args, { timeout }, (err, stdout) => {
-        if (err) {
-          resolve("");
-          return;
-        }
-        resolve((stdout || "").trim());
-      });
-    });
-  const ghResult = (
-    args: string[],
-    timeout = 12000
-  ): Promise<{ ok: boolean; stdout: string }> =>
-    new Promise((resolve) => {
-      dependencies.cliExec("gh", args, { timeout }, (err, stdout) => {
-        resolve({
-          ok: !err,
-          stdout: err ? "" : (stdout || "").trim()
-        });
-      });
-    });
-
+  let reader: LegacyDiscoverySession | undefined;
   try {
+    const opened = await dependencies.discovery.open(
+      repo,
+      context.instanceId,
+      discoveryCancellation(context)
+    );
+    if (opened.status !== "ok") {
+      respond({ environments: [], error: discoveryErrorMessage(opened) });
+      return;
+    }
+    reader = opened.value;
+    const live = opened.value;
+    const cached = dependencies.envListCacheGet(repo);
+    if (
+      cached &&
+      cached.readerKey === live.cacheKey &&
+      dependencies.now() - cached.at < dependencies.envListTtlMs
+    ) {
+      respond(cached.payload);
+      return;
+    }
+
+    // The generation this listing is being assembled against. Anything that
+    // removes an environment — the delete route, or a rollback or exit that
+    // deletes the one this setup created — invalidates the repo's listing, and
+    // that invalidation must survive a listing that started before it. Caching
+    // such a payload would put the removed environment back in front of the
+    // customer for a whole TTL, which is exactly what a completed rollback
+    // promised it would not do.
+    const generation = dependencies.envListCacheGeneration(repo);
+    const cacheListing = (payload: unknown): void => {
+      if (dependencies.envListCacheGeneration(repo) !== generation) return;
+      dependencies.envListCacheSet(repo, {
+        at: dependencies.now(),
+        payload,
+        readerKey: live.cacheKey
+      });
+    };
+
+    const gh = async (args: string[]): Promise<string> =>
+      (await live.run(args)).stdout;
+    const ghResult = (args: string[]) => live.run(args);
+
     // 1) List environment names + ids for the repo. Kick off the
     //    verify-credentials workflow-runs fetch in parallel — it's independent
     //    of the names, so there's no reason to wait.
@@ -821,54 +842,21 @@ export async function handleListEnvironments(
       "--jq",
       '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
     ]);
-    const namesRes = await new Promise<{ error?: string; stdout?: string }>(
-      (resolve) => {
-        dependencies.cliExec(
-          "gh",
-          [
-            "api",
-            "--paginate",
-            `/repos/${repo}/environments?per_page=100`,
-            "--jq",
-            '.environments[] | (.id|tostring) + "\\t" + .name'
-          ],
-          { timeout: 12000 },
-          (err, stdout, stderr) => {
-            if (err) {
-              resolve({
-                error:
-                  browserVisibleDiagnostic(
-                    (stderr || err.message || "").trim(),
-                    dependencies
-                  ) || "Failed to list environments."
-              });
-              return;
-            }
-            resolve({ stdout: (stdout || "").trim() });
-          }
-        );
-      }
-    );
-    // Surface a genuine API/auth/permission failure instead of silently
-    // reporting "no environments" (which hides real problems). Failures are not
-    // cached so a retry can recover.
-    if (namesRes.error) {
-      respond({ environments: [], error: namesRes.error });
+    const observed = await live.environments();
+    const rows =
+      observed.status === "ok" ?
+        observed.value.entries.map(projectLegacyEnvironment)
+      : [];
+    const listingError =
+      observed.status === "ok" ?
+        observed.value.error ?
+          formatDiscoveryError(observed.value.error)
+        : undefined
+      : discoveryErrorMessage(observed);
+    if (listingError && rows.length === 0) {
+      respond({ environments: [], error: listingError });
       return;
     }
-    const namesRaw = namesRes.stdout || "";
-    const rows =
-      namesRaw ?
-        namesRaw
-          .split("\n")
-          .filter(Boolean)
-          .map((l) => {
-            const tab = l.indexOf("\t");
-            return tab === -1 ?
-                { id: "", name: l }
-              : { id: l.slice(0, tab), name: l.slice(tab + 1) };
-          })
-      : [];
     if (rows.length === 0) {
       const payload = { environments: [] };
       respond(payload);
@@ -902,43 +890,16 @@ export async function handleListEnvironments(
     //    env's deployments newest-first until we find one created by a
     //    verify-credentials run.
     const environments = await Promise.all(
-      rows.map(async ({ id, name }) => {
-        // The variables (provider) and deployments (status) lookups are
-        // independent, so fire them together.
-        const [varsRaw, depIdsRaw] = await Promise.all([
-          gh([
-            "api",
-            `/repos/${repo}/environments/${encodeURIComponent(
-              name
-            )}/variables?per_page=100`,
-            "--jq",
-            '.variables[] | .name + "\\t" + (.value // "")'
-          ]),
-          gh([
-            "api",
-            `/repos/${repo}/deployments?environment=${encodeURIComponent(
-              name
-            )}&per_page=10`,
-            "--jq",
-            ".[].id"
-          ])
+      rows.map(async ({ id, name, vars, provider }) => {
+        const depIdsRaw = await gh([
+          "api",
+          `/repos/${repo}/deployments?environment=${encodeURIComponent(
+            name
+          )}&per_page=10`,
+          "--jq",
+          ".[].id"
         ]);
-        // Parse the "name<TAB>value" variable lines into a map. Only surface
-        // environments created by this extension (tagged with a RADIUS_MANAGED
-        // variable at creation time); anything without it was created outside
-        // Radius and is filtered out below.
-        const vars: Record<string, string> = {};
-        for (const line of varsRaw ? varsRaw.split("\n").filter(Boolean) : []) {
-          const tab = line.indexOf("\t");
-          if (tab === -1) {
-            vars[line] = "";
-            continue;
-          }
-          vars[line.slice(0, tab)] = line.slice(tab + 1);
-        }
         if (!("RADIUS_MANAGED" in vars)) return null;
-
-        let provider: string = classifyProvider(vars);
 
         const credentialProfile = vars.RADIUS_CREDENTIAL_PROFILE || "";
 
@@ -1029,8 +990,13 @@ export async function handleListEnvironments(
       (environment): environment is NonNullable<typeof environment> =>
         environment !== null
     );
-    respond({ environments: managedEnvironments });
+    respond({
+      environments: managedEnvironments,
+      ...(listingError ? { error: listingError } : {})
+    });
+    if (listingError) return;
     cacheListing({ environments: managedEnvironments });
+    if (context.request.headers["x-radius-read-only"] === "true") return;
     // Background self-heal: update any committed workflow files that have
     // drifted from the upstream Radius templates. Also target the session
     // worktree branch (when it's this repo's) so a worktree-consistent deploy
@@ -1052,6 +1018,8 @@ export async function handleListEnvironments(
         browserVisibleDiagnostic(dependencies.errorMessage(e), dependencies) ||
         "Failed to list environments."
     });
+  } finally {
+    await reader?.close();
   }
 }
 
@@ -1421,6 +1389,10 @@ export async function handleVerifyStatus(
 export function createEnvironmentsRoutes(
   dependencies: EnvironmentsDependencies
 ): RouteHandlerRegistry {
+  if (typeof dependencies.discovery?.open !== "function")
+    throw new Error(
+      "Environment routes require the canonical discovery reader."
+    );
   return {
     "POST /api/app-params": (context) => handleAppParams(context, dependencies),
     "POST /api/delete-environment": (context) =>

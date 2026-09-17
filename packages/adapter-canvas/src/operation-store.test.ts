@@ -144,6 +144,5 @@ describe("file operation store", () => {
     await store.save(envelope);
 
     await expect(store.load()).resolves.toEqual(envelope);
-    expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
   });
 });

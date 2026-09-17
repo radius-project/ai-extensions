@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { serializeAppOrigin } from "@radius-project/core";
 // The staging rules are core's specification for the bundled script, not part
@@ -61,7 +61,7 @@ interface Repo {
 
 function repo(existingModel?: string): Repo {
   const root = fs.realpathSync(
-    fs.mkdtempSync(path.join(os.tmpdir(), "promote-app-model-"))
+    fs.mkdtempSync(path.join(process.cwd(), ".promote-app-model-"))
   );
   temporaryDirectories.add(root);
   git(root, ["init", "--quiet", "--initial-branch", "main"]);
@@ -86,10 +86,42 @@ function run(
   cwd: string,
   args: string[]
 ): { status: number; stdout: string; stderr: string } {
-  const result = spawnSync(process.execPath, [script, ...args], {
-    cwd,
-    encoding: "utf8"
-  });
+  // These fixtures exercise the trusted writer transaction, not validation.
+  // The installed CLI's real validation producer is tested in the CLI suite.
+  const transaction = `
+    import { promoteStagedRun, runPromotionCommand } from ${JSON.stringify(pathToFileURL(script).href)};
+    const args = ${JSON.stringify(args)};
+    const flag = name => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
+    if (args.includes('--begin') || args.includes('--abort')) {
+      process.exitCode = await runPromotionCommand(args);
+    } else {
+      try {
+        const result = await promoteStagedRun({
+          radiusDir: flag('--radius-dir') || '.radius',
+          stagingDir: flag('--staging') || ''
+        });
+        for (const file of result.files) console.log(file);
+        if (result.gitError) {
+          console.error('Published, but NOT staged: ' + result.gitError);
+          process.exitCode = 2;
+        }
+      } catch (error) {
+        console.error(error.message);
+        process.exitCode = error.published ? 2 : 1;
+      }
+    }`;
+  const result = spawnSync(
+    process.execPath,
+    ["--input-type=module", "--eval", transaction],
+    {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_CEILING_DIRECTORIES: path.dirname(cwd)
+      }
+    }
+  );
   return {
     status: result.status ?? -1,
     stdout: result.stdout.trim(),
@@ -117,6 +149,26 @@ function stageCompleteRun(stagingDir: string, model = MODEL): void {
   fs.writeFileSync(path.join(stagingDir, "app.bicep"), model);
   fs.writeFileSync(path.join(stagingDir, "bicepconfig.json"), CONFIG);
   fs.writeFileSync(path.join(stagingDir, "app.origin.json"), origin(model));
+  recordValidation(stagingDir);
+}
+
+function exactHash(content: string | Buffer): string {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+function recordValidation(stagingDir: string): void {
+  const recordPath = path.join(stagingDir, STAGING_RUN_RECORD);
+  if (!fs.existsSync(recordPath)) return;
+  const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+  record.validatedOutputs = Object.fromEntries(
+    publishableFiles(stagedNames(stagingDir))
+      .filter((file) => fs.existsSync(path.join(stagingDir, file)))
+      .map((file) => [
+        file,
+        exactHash(fs.readFileSync(path.join(stagingDir, file)))
+      ])
+  );
+  fs.writeFileSync(recordPath, JSON.stringify(record));
 }
 
 function stagedNames(stagingDir: string): string[] {
@@ -268,8 +320,8 @@ describe("--begin", () => {
     const record = JSON.parse(
       fs.readFileSync(path.join(begin(target), STAGING_RUN_RECORD), "utf8")
     ) as { baseline: Record<string, string | null>; runId: string };
-    expect(record.baseline["app.bicep"]).toBe(hashAppBicep(MODEL));
-    expect(record.baseline["bicepconfig.json"]).toBe(hashAppBicep(CONFIG));
+    expect(record.baseline["app.bicep"]).toBe(exactHash(MODEL));
+    expect(record.baseline["bicepconfig.json"]).toBe(exactHash(CONFIG));
     // A file that does not exist is recorded as absent, which is as meaningful
     // as a hash: one that appears during the run is a change too.
     expect(record.baseline["custom-types.yaml"]).toBeNull();
@@ -309,6 +361,51 @@ describe("--begin", () => {
 });
 
 describe("publish", () => {
+  it("refuses a changed module that is not being replaced", () => {
+    const model = `${MODEL}module helper '../helper.bicep' = { name: 'helper' }\n`;
+    const target = repo(model);
+    fs.writeFileSync(
+      path.join(target.root, "helper.bicep"),
+      "output x string = 'old'\n"
+    );
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir, model);
+    fs.writeFileSync(
+      path.join(target.root, "helper.bicep"),
+      "output x string = 'new'\n"
+    );
+
+    const result = run(target.root, ["--staging", stagingDir]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("changed");
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+    ).toBe(model);
+  });
+
+  it("refuses byte-only staged configuration edits after validation", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    fs.appendFileSync(path.join(stagingDir, "bicepconfig.json"), "\n");
+
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(1);
+    expect(fs.existsSync(path.join(target.radiusDir, "app.bicep"))).toBe(false);
+  });
+
+  it("rejects hardlinked output without changing the linked target", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    const linked = path.join(target.root, "linked-config");
+    fs.renameSync(path.join(stagingDir, "bicepconfig.json"), linked);
+    fs.linkSync(linked, path.join(stagingDir, "bicepconfig.json"));
+
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(1);
+    expect(fs.readFileSync(linked, "utf8")).toBe(CONFIG);
+  });
+
   it("publishes a complete run and stages it in git", () => {
     const target = repo();
     const stagingDir = begin(target);
@@ -342,6 +439,7 @@ describe("publish", () => {
       path.join(stagingDir, "custom-recipe-pack.bicep"),
       "pack\n"
     );
+    recordValidation(stagingDir);
 
     expect(run(target.root, ["--staging", stagingDir]).status).toBe(0);
     for (const file of [
@@ -634,6 +732,7 @@ describe("publish", () => {
       path.join(stagingDir, "custom-recipe-pack.bicep"),
       "pack\n"
     );
+    recordValidation(stagingDir);
 
     const result = run(target.root, ["--staging", stagingDir]);
 
@@ -664,7 +763,7 @@ describe("publish", () => {
   it("refuses a staging path that is a symlink", () => {
     const target = repo();
     const outside = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "promote-outside-"))
+      fs.mkdtempSync(path.join(process.cwd(), ".promote-outside-"))
     );
     temporaryDirectories.add(outside);
     stageCompleteRun(outside);
@@ -682,7 +781,7 @@ describe("publish", () => {
   it("does not delete through a symlink while sweeping up leftovers", () => {
     const target = repo();
     const outside = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), "promote-outside-"))
+      fs.mkdtempSync(path.join(process.cwd(), ".promote-outside-"))
     );
     temporaryDirectories.add(outside);
     fs.writeFileSync(path.join(outside, "keep.txt"), "keep\n");
@@ -712,6 +811,7 @@ describe("publish", () => {
       path.join(stagingDir, "postgres-recipe.bicep"),
       "// regenerated\n"
     );
+    recordValidation(stagingDir);
 
     const result = run(target.root, ["--staging", stagingDir]);
 
@@ -734,6 +834,7 @@ describe("publish", () => {
       path.join(stagingDir, "postgres-recipe.bicep"),
       "// new\n"
     );
+    recordValidation(stagingDir);
     fs.writeFileSync(recipe, "// hand edited\n");
 
     const result = run(target.root, ["--staging", stagingDir]);
@@ -812,17 +913,21 @@ describe("publish", () => {
   // The cleanup can fail too; the refusal must still explain itself rather than
   // dying with a stack trace on an exit code that reads the same.
   it.runIf(process.platform !== "win32")(
-    "still reports the refusal when the staging directory cannot be removed",
+    "reports replacement and cleanup failures while preserving the original workspace",
     () => {
       const target = repo();
       const stagingDir = begin(target);
       stageCompleteRun(stagingDir);
+      const before = radiusSnapshot(target.radiusDir);
       fs.chmodSync(stagingDir, 0o555);
       try {
         const result = run(target.root, ["--staging", stagingDir]);
 
         expect(result.status).toBe(1);
-        expect(result.stderr).toContain("Nothing was written");
+        expect(result.stderr).toContain("Every file was put back as it was");
+        expect(result.stderr).toContain("Cleanup failed:");
+        expect(radiusSnapshot(target.radiusDir)).toEqual(before);
+        expect(stagedInGit(target.root)).toEqual([]);
         expect(result.stderr).not.toContain("at rmSync");
       } finally {
         fs.chmodSync(stagingDir, 0o755);
@@ -876,7 +981,7 @@ describe("publish", () => {
     ]).stdout;
     stageCompleteRun(stagingDir);
     expect(
-      run(os.tmpdir(), [
+      run(process.cwd(), [
         "--staging",
         stagingDir,
         "--radius-dir",
@@ -1029,7 +1134,10 @@ describe("agreement with the core rules", () => {
 
     const record = JSON.parse(
       fs.readFileSync(path.join(stagingDir, STAGING_RUN_RECORD), "utf8")
-    ) as { baseline: Record<string, string | null> };
+    ) as {
+      baseline: Record<string, string | null>;
+      validatedOutputs?: Record<string, string | null>;
+    };
     const staged = stagedNames(stagingDir);
     const read = (dir: string, name: string): string | null => {
       const file = path.join(dir, name);
@@ -1045,7 +1153,7 @@ describe("agreement with the core rules", () => {
       ...publishableFiles(staged)
     ])) {
       const content = read(target.radiusDir, name);
-      currentHashes[name] = content === null ? null : hashAppBicep(content);
+      currentHashes[name] = content === null ? null : exactHash(content);
     }
     const core = evaluateStagedRun({
       stagedFiles: staged,
@@ -1053,6 +1161,14 @@ describe("agreement with the core rules", () => {
       originText: read(stagingDir, "app.origin.json"),
       record,
       currentHashes,
+      stagedHashes: Object.fromEntries(
+        publishableFiles(staged).map((file) => [
+          file,
+          fs.existsSync(path.join(stagingDir, file)) ?
+            exactHash(fs.readFileSync(path.join(stagingDir, file)))
+          : null
+        ])
+      ),
       hashAppBicep
     });
 

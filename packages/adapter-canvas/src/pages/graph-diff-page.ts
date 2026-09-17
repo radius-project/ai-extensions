@@ -9,6 +9,7 @@ import { GRAPH_DIFF_SUBTITLE } from "./fragments.js";
 import { GRAPH_DIFF_STATE_ID } from "./browser-state-ids.js";
 import { renderPageState } from "./page-state.js";
 import { browserScriptTag } from "../browser/scripts.js";
+import { renderGraphEvidence } from "./graph-evidence.js";
 
 export function graphDiffPage(state: CanvasState = {}): string {
   const resources = state?.diffResources || [];
@@ -42,6 +43,7 @@ export function graphDiffPage(state: CanvasState = {}): string {
       "Graph Diff",
       `
 ${graphHeader("graph-diff")}
+${renderGraphEvidence(state.graphReadEvidence?.diff)}
 ${GRAPH_DIFF_SUBTITLE}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
@@ -76,6 +78,7 @@ ${GRAPH_DIFF_SUBTITLE}
 <div id="diff-progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>
 <div id="graph-container"></div>
 ${renderPageState(GRAPH_DIFF_STATE_ID, {
+  evidence: state.graphReadEvidence?.diff,
   repo: targetRepo,
   base: baseBranch,
   head: headBranch,
@@ -99,6 +102,7 @@ ${graphHeaderClose()}`
     "Graph Diff",
     `
 ${graphHeader("graph-diff")}
+${renderGraphEvidence(state.graphReadEvidence?.diff)}
 ${GRAPH_DIFF_SUBTITLE}
 <input type="hidden" id="diff-repo-select" value="${escapeHtml(targetRepo)}">
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
@@ -151,6 +155,7 @@ ${
 </div>
 
 ${renderPageState(GRAPH_DIFF_STATE_ID, {
+  evidence: state.graphReadEvidence?.diff,
   repo: targetRepo,
   base: baseBranch,
   head: headBranch,

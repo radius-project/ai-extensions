@@ -12,7 +12,10 @@
         {
           "id": "/subscriptions/fixture/resourceGroups/demo/providers/Microsoft.ContainerService/managedClusters/demo",
           "name": "demo-cluster",
-          "type": "Microsoft.ContainerService/managedClusters"
+          "type": "Microsoft.ContainerService/managedClusters",
+          "displayType": "AKS Cluster",
+          "provider": "azure",
+          "apiVersion": "2024-05-01"
         }
       ]
     },

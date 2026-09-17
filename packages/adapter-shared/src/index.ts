@@ -40,3 +40,33 @@ export type {
   RunRadBicepPublishOptions
 } from "./rad.js";
 export { RadProcessError } from "./rad.js";
+export { createLifecycleValidators } from "./lifecycle/validation.js";
+export type {
+  ContractValidation,
+  LifecycleValidators
+} from "./lifecycle/validation.js";
+export {
+  createSourceReadAdapter,
+  nodeSourceFileSystem
+} from "./lifecycle/source-access.js";
+export type {
+  AuthorizedRemoteSource,
+  AuthorizedSourceLocation,
+  AuthorizedWorkspaceLocation,
+  SourceAuthorityPort,
+  SourceCaptureLimits,
+  SourceFileSystem,
+  SourceGitPort,
+  SourceReadAdapter,
+  SourceReadDependencies,
+  SourceReadHandle
+} from "./lifecycle/source-access.js";
+export * from "./lifecycle/application-read.js";
+export * from "./lifecycle/environment-read.js";
+export * from "./lifecycle/workspace-source.js";
+export * from "./lifecycle/github-source.js";
+export * from "./lifecycle/deployed-application-read.js";
+export * from "./lifecycle/recipe-evidence.js";
+export * from "./lifecycle/graph-execution.js";
+export * from "./lifecycle/definition-validation.js";
+export * from "./lifecycle/definition-promotion.js";

@@ -24,6 +24,7 @@ import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environme
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
+import { GRAPH_EVIDENCE_STATUS_ID } from "../../src/pages/graph-evidence-id.js";
 import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
@@ -185,7 +186,7 @@ async function waitForStableComputedTransform(
 // application is still deployed to the environment, and only deletes
 // Azure-backed environments (it reads AZURE_CLIENT_ID / AZURE_TENANT_ID to plan
 // the credential and app-registration cleanup). The default fixture has an
-// active deployment (dep-1) and no Azure identity variables, so the deletion
+// active deployment (dep-1) and incomplete Azure identity variables, so the deletion
 // journeys start from a scenario where the environment has no active app and is
 // classified Azure: the two deployment-list lookups the active-app guard runs
 // return empty, the environment's variable listing carries the Azure identity,
@@ -277,6 +278,25 @@ async function seed(canvas: CanvasHarness): Promise<void> {
     "utf8"
   );
   await canvas.setScenario(defaultFakeCliScenario());
+  await fs.writeFile(
+    path.join(canvas.workspacePath, ".radius", "bicepconfig.json"),
+    JSON.stringify({
+      extensions: { radius: "./custom-types.tgz" },
+      experimentalFeaturesEnabled: { extensibility: true }
+    })
+  );
+  await fs.writeFile(
+    path.join(canvas.workspacePath, ".radius", "custom-types.tgz"),
+    "controlled fixture extension bytes"
+  );
+  await fs.writeFile(
+    path.join(canvas.workspacePath, ".radius", "custom-types.yaml"),
+    "name: fixture\n"
+  );
+  await fs.writeFile(
+    path.join(canvas.workspacePath, ".radius", "custom-recipe-pack.bicep"),
+    "param name string\n"
+  );
   await canvas.seedState(baseCanvasState(canvas.workspacePath));
 }
 
@@ -811,6 +831,62 @@ test.describe("Radius Canvas in Chromium", () => {
       "demo-cluster",
       "db"
     ]);
+    await expect(page.locator(`#${GRAPH_EVIDENCE_STATUS_ID}`)).toContainText(
+      "Authored source:"
+    );
+    await expect(page.locator(`#${GRAPH_EVIDENCE_STATUS_ID}`)).toContainText(
+      "sha256:"
+    );
+    expect(
+      (await canvas.cliCalls()).filter(
+        (call) =>
+          call.tool === "gh" &&
+          call.args.some((arg) => arg.includes("/contents/.github/extension/"))
+      )
+    ).toEqual([]);
+  });
+
+  test("shows missing authored evidence without authoring or retrying the model @graph-canonical @safety", async ({
+    page,
+    canvas
+  }) => {
+    await fs.rm(path.join(canvas.workspacePath, ".radius", "app.bicep"));
+    await gotoCanvas(page, canvas, "graph");
+    await expect(page.locator(`#${GRAPH_EVIDENCE_STATUS_ID}`)).toContainText(
+      "Unavailable:"
+    );
+    await expect(page.locator(".rad-node")).toHaveCount(0);
+    expect(
+      await fs.readdir(path.join(canvas.workspacePath, ".radius"))
+    ).not.toContain("app.bicep");
+    expect(
+      (await canvas.cliCalls()).filter((call) => call.tool === "rad")
+    ).toEqual([]);
+    await expectNoWcagViolations(page);
+  });
+
+  test("shows unavailable planned registrations rather than provider-default infrastructure @graph-canonical @safety", async ({
+    page,
+    canvas
+  }) => {
+    const planned = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/plan-graph"
+    );
+    await gotoCanvas(page, canvas, "planned");
+    expect((await planned).status()).toBe(400);
+    await expect(page.locator(`#${GRAPH_EVIDENCE_STATUS_ID}`)).toContainText(
+      "Unavailable:"
+    );
+    await expect(page.locator(".rad-node")).toHaveCount(0);
+    await expect(page.locator("#planned-subtitle")).toContainText(
+      "not a guaranteed deployment plan"
+    );
+    expect(
+      (await canvas.cliCalls()).filter(
+        (call) => call.tool === "gh" && call.args.includes("dispatch")
+      )
+    ).toEqual([]);
+    await expectNoWcagViolations(page);
   });
 
   test("keeps the document canvas dark while navigating between top-level panes", async ({
@@ -1012,7 +1088,10 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toHaveCount(1);
     await expect(
       panel.getByRole("link", { name: "demo-cluster in Azure portal" })
-    ).toHaveAttribute("href", /portal\.azure\.com/);
+    ).toHaveCount(0);
+    await expect(
+      panel.getByRole("link", { name: "View app definition" })
+    ).toHaveCount(1);
     await expect(details).toBeFocused();
 
     // Clicking the empty pane closes the panel and hands focus back to the
@@ -3120,8 +3199,15 @@ test.describe("Radius Canvas in Chromium", () => {
     }
     await canvas.setScenario(scenario);
 
+    const applications = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/list-applications"
+    );
     await gotoCanvas(page, canvas, "planned");
 
+    expect(await (await applications).json()).toEqual({
+      applications: [{ name: "radius-app" }]
+    });
     await expect(page.locator("#planned-app")).toHaveValue("radius-app");
     await expect(page.locator("#planned-env")).toHaveValue(
       "fixture-environment"
@@ -3539,6 +3625,18 @@ test.describe("Radius Canvas in Chromium", () => {
           tool: "gh",
           args: [
             "api",
+            "--hostname",
+            "github.com",
+            "--method",
+            "GET",
+            `/repos/${REPOSITORY}/deployments?environment=fixture-environment&per_page=100`
+          ],
+          stdout: "[]"
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
             `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
           ],
           stdout: JSON.stringify({ artifacts: [] })
@@ -3558,6 +3656,9 @@ test.describe("Radius Canvas in Chromium", () => {
 
     await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(1);
     await expect(page.getByAltText("Deployed", { exact: true })).toHaveCount(1);
+    await expect(page.locator("#deployed-mode-note")).toContainText(
+      "Retained monitoring results from run 7"
+    );
     await expect(page.getByAltText("In progress", { exact: true })).toHaveCount(
       0
     );

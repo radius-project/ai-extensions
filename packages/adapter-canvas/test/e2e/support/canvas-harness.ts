@@ -10,6 +10,8 @@ import {
 } from "../../support/azure-discovery-contract.js";
 import type { CanvasState, SharedCredentials } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
+import { discoveryReadCommands } from "./discovery-commands.js";
+import type { LifecycleBinding } from "../../../src/runtime/create-lifecycle-binding.js";
 
 // Resolved from this module rather than the process directory so the suite
 // behaves identically whether it is launched from the workspace root or from
@@ -651,6 +653,7 @@ export function defaultFakeCliScenario(): FakeCliScenario {
   };
   return {
     commands: [
+      ...discoveryReadCommands(REPOSITORY, WORKTREE_BRANCH, PROFILE_NAME),
       {
         tool: "gh",
         args: ["--version"],
@@ -821,6 +824,7 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         stdout: [
           "RADIUS_MANAGED\ttrue",
           "AZURE_SUBSCRIPTION_ID\tfixture-subscription",
+          "AZURE_CLIENT_ID\tfixture-client-id",
           `RADIUS_CREDENTIAL_PROFILE\t${PROFILE_NAME}`
         ].join("\n")
       },
@@ -843,7 +847,7 @@ export function defaultFakeCliScenario(): FakeCliScenario {
           "--jq",
           ".variables[].name"
         ],
-        stdout: "RADIUS_MANAGED\nAZURE_SUBSCRIPTION_ID\n"
+        stdout: "RADIUS_MANAGED\nAZURE_SUBSCRIPTION_ID\nAZURE_CLIENT_ID\n"
       },
       {
         tool: "gh",
@@ -902,20 +906,19 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         stdout: ".github/workflows/run-rad-commands.yml\tcompleted\tsuccess"
       },
       appBicep404,
-      missingGhContent(
-        "/repos/radius-project/radius/contents/.github/extension/verify-azure.yml?ref=main"
-      ),
-      missingGhContent(
-        "/repos/radius-project/radius/contents/.github/extension/run-rad-commands.yml?ref=main"
-      ),
-      missingGhContent(
-        "/repos/radius-project/radius/contents/.github/extension/run-rad-commands-azure.yml?ref=main"
-      ),
-      missingGhContent(
-        "/repos/radius-project/radius/contents/.github/extension/delete-application.yml?ref=main"
-      ),
-      missingGhContent(
-        "/repos/radius-project/radius/contents/.github/extension/delete-azure.yml?ref=main"
+      ...["radius-project/radius", "radius-project/ai-extensions"].flatMap(
+        (repo) =>
+          [
+            "verify-azure.yml",
+            "run-rad-commands.yml",
+            "run-rad-commands-azure.yml",
+            "delete-application.yml",
+            "delete-azure.yml"
+          ].map((file) =>
+            missingGhContent(
+              `/repos/${repo}/contents/.github/extension/${file}?ref=main`
+            )
+          )
       ),
       {
         tool: "az",
@@ -1236,6 +1239,7 @@ export class CanvasHarness {
   private readonly ghModule: GhModule;
   private readonly originalFetch: typeof fetch;
   private readonly seededOperationIds = new Set<string>();
+  private graphLifecycle?: LifecycleBinding;
 
   private constructor(input: {
     page: Page;
@@ -1455,6 +1459,16 @@ export class CanvasHarness {
         serverModule,
         ghModule
       });
+      const { createHarnessGraphLifecycle } =
+        await import("./graph-lifecycle.js");
+      harness.graphLifecycle = await createHarnessGraphLifecycle({
+        root: rootParent,
+        state: entry.state,
+        fake: useFakeCli,
+        scenarioPath,
+        cliLogPath
+      });
+      entry.graphLifecycle = harness.graphLifecycle;
       await harness.installNetworkGuard();
       return harness;
     } catch (error) {
@@ -1793,6 +1807,7 @@ export class CanvasHarness {
 
   async cleanup(): Promise<void> {
     const errors: unknown[] = [];
+    await captureCleanupError(errors, () => this.graphLifecycle?.close());
     this.serverModule.setEnvironmentOperationTestRunner(null);
     this.serverModule.markEnvironmentInstanceShuttingDown(this.instanceId);
     if (this.serverModule.hasActiveEnvironmentTasks(this.instanceId)) {

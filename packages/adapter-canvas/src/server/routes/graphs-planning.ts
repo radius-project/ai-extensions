@@ -1,981 +1,225 @@
 import {
-  evaluateAppSource,
-  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
-} from "@radius-project/core";
-import {
-  asGraphModelingFailure,
-  GraphModelingFailure
-} from "../../graph-modeling-failure.js";
-import type { DeployStatus } from "@radius-project/core";
-import type {
-  DeployProgress,
-  WorkflowArtifact
-} from "../../deploy-artifacts.js";
-import { expireGraphProgressWait } from "../../shared.js";
-import { evaluateAppBicepWait } from "../../graph-progress-contract.js";
-import type {
-  GraphRepairAttempt,
-  GraphRepairRequest
-} from "../../graph-model-repair.js";
-import type { CanvasGraphResource, CanvasState } from "../../shared.js";
-import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
+  canvasResources,
+  type GraphLifecycleReader
+} from "../../runtime/graph-reader.js";
+import type { CanvasState } from "../../shared.js";
+import { retainedMonitoring } from "../services/retained-monitoring.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
-import type { CanvasServerEntry } from "../types.js";
-import type {
-  ResolvedWorkspaceBranch,
-  WorkspaceBranchResolution
-} from "../../workspace.js";
-import {
-  deletionInventoryFromSnapshot,
-  type DeletionInventory,
-  type DeletionInventorySnapshot
-} from "../services/deletion-inventory.js";
+import type { GraphPlanningWorkflows } from "./graph-workflows.js";
 
-// The two read-only halves of the `graphs-planning` family: the progress log the
-// page polls, and the deployed-graph projection. They are migrated together
-// because they are genuinely coupled — a failed status read inside
-// `/api/deployed-graph` appends to the very array `/api/progress` serves — and
-// splitting them would put the two ends of that coupling on opposite sides of
-// the dispatcher boundary.
-
-// Shaped exactly like the reader `createDeployStatusReader` returns, minus every
-// member these routes do not call. The inventory uses `read` so status and
-// progress come from one snapshot, without graph/progress's last-good fallback.
-export interface DeployedGraphStatusReader {
-  read(): Promise<DeletionInventorySnapshot>;
-  graph(): Promise<{
-    graph: unknown | null;
-    status: string;
-    artifact?: WorkflowArtifact | null;
-  }>;
-  progress(): Promise<DeployProgress | null>;
-}
-
-export interface DeployedGraphReaderOptions {
-  repo: string;
-  environment: string;
-  application: string;
-  runId: number | string | null;
-}
-
-// The instance entry as these routes see it. Only `state` is declared, and it is
-// declared optional because the legacy branches read it through `entry?.state?.`.
-// The entry indirection is kept rather than flattened to a state reader because
-// the two are not equivalent: a missing entry and an entry with empty state must
-// stay distinguishable, and `handleDeployedGraph` relies on that distinction
-// when it gates its `progressMessages` append on `entry?.state` below. Flattening
-// to a `{}` snapshot would make a missing instance silently accumulate messages
-// no `/api/progress` reader could ever serve.
 export interface DeployedGraphInstanceEntry {
   state?: CanvasState;
 }
-
-// Ten narrow function seams for two routes. Nothing is moved: the cached reader
-// factory, the status/message map builders and the workspace-repo predicate stay
-// in `server.ts`, and the projection helpers stay in `@radius-project/core` and
-// `deploy-artifacts.ts`. Every one of them is handed in, so this module owns no
-// cache, spawns no process and reads no module-level mutable state.
 export interface GraphsPlanningReadsDependencies {
-  // Returns undefined when the instance has no entry, which is what the legacy
-  // `servers.get(instanceId)` miss meant. The request context's `state` snapshot
-  // substitutes `{}` for a missing entry, and the deployed-graph handler must be
-  // able to tell the two apart: a missing entry receives no progress message.
   readInstanceEntry(instanceId: string): DeployedGraphInstanceEntry | undefined;
-  // The *cached* reader factory, not the raw constructor. Its TTL cache,
-  // single-flight de-dup and monotonic sequence guard live in the reader
-  // instance, so building a fresh one per request would make all three inert.
-  createDeployStatusReader(
-    options: DeployedGraphReaderOptions
-  ): DeployedGraphStatusReader;
-  loadModeledGraph(
-    instanceId: string,
-    repo: string,
-    branch: string
-  ): Promise<{ status: number; error?: string; retry?: boolean }>;
-  buildDeployStatusMap(
-    progress: DeployProgress | null | undefined
-  ): Map<string, DeployStatus>;
-  buildDeployMessageMap(
-    progress: DeployProgress | null | undefined
-  ): Map<string, string>;
-  deployStatusKeys(resource: unknown): string[];
-  projectDeployedGraph(
-    modeled: unknown[],
-    statusByKey: Map<string, DeployStatus>
-  ): unknown[];
-  mergeDeployedGraphMetadata(modeled: unknown[], deployed: unknown): unknown[];
-  canvasGraphResources(values: unknown[]): CanvasGraphResource[];
-  applyDeployMessages(
-    resources: CanvasGraphResource[],
-    messageMap: Map<string, string>
-  ): void;
-  settleDeployStatuses(
-    resources: Array<{ deployStatus?: DeployStatus }>,
-    conclusion?: string | null
-  ): void;
-  errorMessage(error: unknown): string;
-  repoMatchesWorkspace(state: CanvasState, repo: string): boolean;
-  // Newest filesystem activity from a modeling run, used to refresh liveness
-  // before committing a terminal idle expiry in the progress poller.
-  observeModelingRun(
-    state: CanvasState,
-    repo: string,
-    branches: string[]
-  ): Promise<number | null>;
-  // Wall clock for the build record's elapsed time.
+  lifecycle(instanceId: string): GraphLifecycleReader;
   now(): number;
 }
-
-// Graph workflows publish typed events. Keep legacy messages for deployed-graph
-// diagnostics until that independent status-read path is migrated.
-//
-// `generation` identifies which workflow owns the event stream. Polling is
-// concurrent with the workflow request itself, so a reader that only saw
-// `events` could apply an older in-flight response over a newer snapshot and
-// visibly regress the reported stage.
-export async function handleProgress(
-  context: CanvasRequestContext,
-  dependencies: GraphsPlanningReadsDependencies
-): Promise<void> {
-  const { response, url } = context;
-  const entry = dependencies.readInstanceEntry(context.instanceId);
-  const state = entry?.state;
-  const records = Object.values(state?.graphProgressRecords ?? {});
-  for (const record of records) {
-    if (
-      !record.graphProgressActive ||
-      !record.graphProgressAwaitingModel ||
-      typeof record.graphProgressWaitStartedAtMs !== "number"
-    ) {
-      continue;
-    }
-    // The same decision the graph workflow makes, over the same recorded
-    // evidence. This poller never probes for liveness itself: the workflow
-    // request the page is issuing alongside it records every observation, so
-    // reading the record keeps the two narrations from disagreeing.
-    const wait = evaluateAppBicepWait({
-      nowMs: dependencies.now(),
-      waitStartedAtMs: record.graphProgressWaitStartedAtMs,
-      lastActivityAtMs: record.graphProgressLastActivityAtMs ?? null
-    });
-    if (wait.status === "waiting") continue;
-    let terminalMessage = wait.message;
-    const observedGeneration = record.graphProgressGeneration;
-    const observedOwner = record.graphProgressOwner;
-    // Before committing a terminal idle expiry, probe the filesystem for
-    // fresh liveness evidence. Workflow retries observe every 10s while
-    // progress polls every 800ms; near the 5-minute boundary, real activity
-    // may have occurred after the last workflow observation and be falsely
-    // marked stalled without this check.
-    if (state && record.graphProgressRepo && record.graphProgressBranches) {
-      const freshActivityAtMs = await dependencies.observeModelingRun(
-        state,
-        record.graphProgressRepo,
-        record.graphProgressBranches
-      );
-      if (
-        state.graphProgressRecords?.[record.graphProgressView] !== record ||
-        record.graphProgressGeneration !== observedGeneration ||
-        record.graphProgressOwner !== observedOwner ||
-        !record.graphProgressActive ||
-        !record.graphProgressAwaitingModel
-      ) {
-        continue;
-      }
-      if (freshActivityAtMs !== null) {
-        record.graphProgressLastActivityAtMs = Math.max(
-          record.graphProgressLastActivityAtMs ?? 0,
-          freshActivityAtMs
-        );
-      }
-      // Another concurrent poll may have recorded newer activity while this
-      // probe was in flight, so every settlement re-evaluates the merged record.
-      const refreshed = evaluateAppBicepWait({
-        nowMs: dependencies.now(),
-        waitStartedAtMs: record.graphProgressWaitStartedAtMs,
-        lastActivityAtMs: record.graphProgressLastActivityAtMs ?? null
-      });
-      if (refreshed.status === "waiting") continue;
-      terminalMessage = refreshed.message;
-    }
-    expireGraphProgressWait(record, terminalMessage);
-  }
-  const requestedView = url.searchParams.get("view");
-  const record =
-    isGraphProgressView(requestedView) ?
-      state?.graphProgressRecords?.[requestedView]
-    : latestGraphProgressRecord(records);
-  const payload: Record<string, unknown> = {
-    messages: state?.progressMessages || []
-  };
-  if (record) {
-    payload.events = record.graphBuildEvents;
-    payload.generation = record.graphProgressGeneration;
-    // The record's own view of itself: whether work is still in flight, which
-    // graph it belongs to, and how long it has been running. A page mounted
-    // after the build started — or re-mounted when the user navigates back —
-    // adopts these rather than measuring from the moment it happened to load.
-    payload.active = record.graphProgressActive;
-    payload.view = record.graphProgressView;
-    payload.elapsedMs = Math.max(
-      0,
-      dependencies.now() - record.graphProgressStartedAtMs
-    );
-  }
-
-  function isGraphProgressView(
-    value: string | null
-  ): value is GraphProgressView {
-    return value === "graph" || value === "planned" || value === "diff";
-  }
-
-  function latestGraphProgressRecord(
-    records: GraphProgressRecord[]
-  ): GraphProgressRecord | undefined {
-    const active = records.filter((record) => record.graphProgressActive);
-    const candidates = active.length > 0 ? active : records;
-    return candidates.reduce<GraphProgressRecord | undefined>(
-      (latest, record) =>
-        (
-          !latest ||
-          record.graphProgressStartedAtMs > latest.graphProgressStartedAtMs
-        ) ?
-          record
-        : latest,
-      undefined
-    );
-  }
-  response.setHeader("Content-Type", "application/json");
-  response.writeHead(200);
-  response.end(JSON.stringify(payload));
+export interface GraphsPlanningStreamDependencies {
+  readInstanceEntry(instanceId: string): DeployedGraphInstanceEntry | undefined;
+  workflows: Pick<GraphPlanningWorkflows, "loadGraph">;
 }
 
-// The Deployed view is a projection: a fixed topology (the modeled application)
-// painted with a per-resource status that is resolved separately. Keeping them
-// independent means the graph renders before any status is known and never
-// changes shape when a deploy starts or ends.
-//
-//   live     - a deploy is in flight for this selection.
-//   terminal - a deployment's status is known.
-//   greyed   - nothing is known; every node renders pending.
-//
-// The deploy monitor seeds status before the artifact read. A validated
-// artifact is a newer monotonic snapshot for the same run, so its mentioned
-// keys overwrite the seed while omitted resources retain monitor state.
-// Topology has one authority: graphResources for the selected repo and branch,
-// populated on demand through the graph workflow.
-export async function handleDeployedGraph(
+export async function handleProgress(
   context: CanvasRequestContext,
-  dependencies: GraphsPlanningReadsDependencies
+  deps: GraphsPlanningReadsDependencies
 ): Promise<void> {
-  const { response, url } = context;
-  const entry = dependencies.readInstanceEntry(context.instanceId);
-  const repo =
-    (url.searchParams.get("repo") || "").trim() ||
-    entry?.state?.contextRepo ||
-    entry?.state?.deployingRepo ||
-    entry?.state?.plannedRepo ||
-    entry?.state?.graphTargetRepo ||
-    "";
-  // Set before the empty-repo branch, so both exits carry it.
-  response.setHeader("Content-Type", "application/json");
-  if (!repo) {
-    response.writeHead(200);
-    response.end(
-      JSON.stringify({
-        resources: [],
-        repo: "",
-        mode: "greyed",
-        deletionInventory: null
-      })
-    );
-    return;
-  }
-  const state = entry?.state || {};
-  if (entry?.state) entry.state.progressMessages = [];
-  const branch =
-    state.workspaceBranch && dependencies.repoMatchesWorkspace(state, repo) ?
-      state.workspaceBranch
-    : state.contextRepo === repo && state.contextBranch ? state.contextBranch
-    : state.deployingRepo === repo && state.deployingBranch ?
-      state.deployingBranch
-    : state.plannedRepo === repo && state.plannedBranch ? state.plannedBranch
-    : state.graphTargetRepo === repo && state.graphBranch ? state.graphBranch
-    : "main";
-
-  const modeledGraphMatchesSelection =
-    state.graphTargetRepo === repo &&
-    state.graphBranch === branch &&
-    Array.isArray(state.graphResources);
-  if (!modeledGraphMatchesSelection) {
-    const modeled = await dependencies.loadModeledGraph(
-      context.instanceId,
-      repo,
-      branch
-    );
-    if (modeled.error) {
-      response.writeHead(modeled.status);
-      response.end(
-        JSON.stringify({ error: modeled.error, retry: modeled.retry === true })
-      );
-      return;
-    }
-  }
-
-  // The page's selectors are authoritative: the user can pick an environment
-  // other than the one this session last deployed to, and the graph must follow
-  // the selection rather than silently rendering another environment's deploy
-  // under the selected environment's label.
-  const sessionEnv = state.deployEnvName || state.envName || "";
-  const requestedEnv =
-    (url.searchParams.get("environment") || "").trim() || sessionEnv;
-  const requestedApp =
-    (url.searchParams.get("application") || "").trim() ||
-    state.deployAppName ||
-    "";
-
-  // In-session monitor data is fresher than artifacts, but only for the exact
-  // selection it describes. Empty values remain unconstrained so the first poll
-  // can show a deploy before every selector has initialized.
-  const exactSelectionPartMatches = (
-    session: string,
-    selected: string
-  ): boolean => !session || !selected || session === selected;
-  const namedSelectionPartMatches = (
-    session: string,
-    selected: string
-  ): boolean =>
-    !session || !selected || session.toLowerCase() === selected.toLowerCase();
-  const sessionRepo = state.deployingRepo || state.contextRepo || "";
-  const sessionBranch =
-    state.deployingBranch || state.contextBranch || state.graphBranch || "";
-  const sessionMatchesSelection =
-    exactSelectionPartMatches(sessionRepo, repo) &&
-    exactSelectionPartMatches(sessionBranch, branch) &&
-    namedSelectionPartMatches(sessionEnv, requestedEnv) &&
-    namedSelectionPartMatches(state.deployAppName || "", requestedApp);
-  const deploying =
-    state.deployStatus === "in_progress" && sessionMatchesSelection;
-  const monitorRunId = state.deployRunId;
-
-  const statusByKey = new Map<string, DeployStatus>();
-  // Seed the resources the deploy monitor tracks so an empty artifact read keeps
-  // their status. A valid artifact later overwrites only the keys it mentions.
-  if (sessionMatchesSelection && Array.isArray(state.deployingResources)) {
-    for (const resource of state.deployingResources) {
-      const status = resource?.deployStatus as DeployStatus | undefined;
-      if (!status || status === "pending") continue;
-      for (const key of dependencies.deployStatusKeys(resource)) {
-        if (!statusByKey.has(key)) statusByKey.set(key, status);
-      }
-    }
-  }
-
-  let publishedGraph: unknown = null;
-  let readOk = false;
-  let updatedAt: string | null = null;
-  let progress: DeployProgress | null = null;
-  let artifactRunId: string | number | null = null;
-  let deletionInventory: DeletionInventory | null = null;
-  const inventoryApplication = (
-    url.searchParams.get("application") || ""
-  ).trim();
-  const inventoryEnvironment = (
-    url.searchParams.get("environment") || ""
-  ).trim();
-  const inventorySessionRunId = state.deployRunId;
-  const inventoryDeployStatus = state.deployStatus;
-  const inventoryStartedAt = state.deployStartedAt;
-  const inventoryFinishedAt = state.deployFinishedAt;
-  // The app selector is a hint, not a hard filter: the reader falls back to an
-  // env-only match when the selected app has no artifact yet (the app name can
-  // itself be a guess from the repo short name). Surface the app it actually
-  // resolved so the page can say which one is on screen rather than mislabeling
-  // another app's status under the selected name.
-  let resolvedApp: string | null = requestedApp || null;
-  const messageByKey = new Map<string, string>();
-  try {
-    const reader = dependencies.createDeployStatusReader({
-      repo,
-      environment: requestedEnv,
-      application: requestedApp,
-      // While a deploy is in flight, scope to its run so a previous
-      // deployment's newest-repo-wide artifact can't overwrite the live
-      // topology/status. The in-flight run hasn't uploaded yet, so this read is
-      // empty and the seeded live statuses stand. `??` rather than `||`: a run
-      // id of 0 is a real id and must not fall through to null.
-      runId: deploying ? (state.deployRunId ?? null) : null
-    });
-    const result = await reader.graph();
-    publishedGraph = result.graph;
-    readOk = result.status === "ok" || result.status === "stale";
-    progress = await reader.progress();
-    artifactRunId =
-      progress?.runId ?? result.artifact?.workflow_run?.id ?? null;
-    const artifactRunMismatchesSession =
-      sessionMatchesSelection &&
-      state.deployRunId != null &&
-      artifactRunId != null &&
-      String(artifactRunId) !== String(state.deployRunId);
-    const attemptBoundary = Math.max(
-      state.deployStartedAt ?? 0,
-      state.deployFinishedAt ?? 0
-    );
-    const artifactCreatedAt = Date.parse(result.artifact?.created_at ?? "");
-    const mismatchedArtifactIsNewer =
-      !artifactRunMismatchesSession ||
-      (!deploying &&
-        attemptBoundary > 0 &&
-        Number.isFinite(artifactCreatedAt) &&
-        artifactCreatedAt > attemptBoundary);
-    const terminalArtifactNeedsIdentity =
-      sessionMatchesSelection &&
-      state.deployRunId != null &&
-      state.deployErrorKind === "run-unconfirmed" &&
-      (progress?.state === "failed" || progress?.state === "succeeded");
-    const activeArtifactMatchesRun =
-      deploying ?
-        state.deployRunId != null &&
-        artifactRunId != null &&
-        String(artifactRunId) === String(state.deployRunId)
-      : mismatchedArtifactIsNewer &&
-        (!terminalArtifactNeedsIdentity || artifactRunId != null);
-    if (!activeArtifactMatchesRun) {
-      // Unknown or older artifact identity cannot establish the tracked run's
-      // outcome. Keep monitor state without exposing unrelated graph metadata.
-      publishedGraph = null;
-      readOk = false;
-      progress = null;
-      artifactRunId = null;
-    } else {
-      updatedAt = progress?.updatedAt || null;
-      if (progress?.application) resolvedApp = progress.application;
-      if (artifactRunMismatchesSession) {
-        statusByKey.clear();
-      }
-      for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
-        statusByKey.set(key, status);
-      }
-      // First-wins protects duplicate weaker identity keys in this snapshot.
-      for (const [key, message] of dependencies.buildDeployMessageMap(
-        progress
-      )) {
-        if (!messageByKey.has(key)) messageByKey.set(key, message);
-      }
-      const snapshot = await reader.read();
-      // A concurrent deploy must not turn an earlier snapshot into a delete
-      // inventory. Unlike graph display, selectors cannot fall back to session
-      // identity, and unverified reads cannot reuse last-good resources.
-      if (
-        !deploying &&
-        state.deployStatus === inventoryDeployStatus &&
-        state.deployRunId === inventorySessionRunId &&
-        state.deployStartedAt === inventoryStartedAt &&
-        state.deployFinishedAt === inventoryFinishedAt
-      ) {
-        deletionInventory = deletionInventoryFromSnapshot(
-          snapshot,
-          inventoryApplication,
-          inventoryEnvironment,
-          sessionMatchesSelection ? (inventorySessionRunId ?? null) : null
-        );
-      }
-    }
-  } catch (e) {
-    // A status read failure must not blank the tab: fall through to the seeded
-    // statuses and the modeled topology. The message is appended to the same
-    // array `/api/progress` serves, which is the one piece of cross-route state
-    // this pair shares.
-    if (entry?.state) {
-      entry.state.progressMessages = [
-        `Deployed graph status read failed: ${dependencies.errorMessage(e)}`
-      ];
-    }
-  }
-  const hasPublishedGraph =
-    publishedGraph != null ||
-    (sessionMatchesSelection && state.deployedGraph != null);
-  const artifactMatchesSessionRun =
-    artifactRunId == null ||
-    state.deployRunId == null ||
-    String(artifactRunId) === String(state.deployRunId);
-
-  // A terminal monitor snapshot includes the run-level explanation that an
-  // incomplete artifact cannot carry. Overlay it after the read: the monitor
-  // may have finished while that read was pending. A terminal artifact from
-  // this run or a newer deployment must supersede the snapshot. An unconfirmed
-  // run keeps its existing repair guard rather than acquiring a made-up conclusion.
-  if (
-    sessionMatchesSelection &&
-    artifactMatchesSessionRun &&
-    progress?.state !== "failed" &&
-    progress?.state !== "succeeded" &&
-    monitorRunId != null &&
-    state.deployRunId === monitorRunId &&
-    (state.deployStatus === "complete" || state.deployStatus === "failed") &&
-    Array.isArray(state.deployingResources)
-  ) {
-    const settledKeys = new Set<string>();
-    for (const resource of state.deployingResources) {
-      const status = resource.deployStatus;
-      if (status !== "success" && status !== "failed") continue;
-      for (const key of dependencies.deployStatusKeys(resource)) {
-        if (settledKeys.has(key)) continue;
-        settledKeys.add(key);
-        statusByKey.set(key, status);
-        messageByKey.delete(key);
-        if (status === "failed" && resource.deployMessage?.trim()) {
-          messageByKey.set(key, resource.deployMessage);
-        }
-      }
-    }
-  }
-
-  const terminalConclusion =
-    (
-      !deploying &&
-      sessionMatchesSelection &&
-      artifactMatchesSessionRun &&
-      state.deployStatus === "complete"
-    ) ?
-      "success"
-    : (
-      !deploying &&
-      sessionMatchesSelection &&
-      artifactMatchesSessionRun &&
-      state.deployStatus === "failed" &&
-      state.deployRunId != null &&
-      !state.deployErrorKind
-    ) ?
-      "failure"
-    : !deploying && progress?.state === "succeeded" ? "success"
-    : !deploying && progress?.state === "failed" ? "failure"
-    : null;
-
-  // A deployment is "terminal" when its status is known, which is not the same
-  // as having a published graph: the producer only attaches deploy-graph.json to
-  // its final upload, so a run can report real per-resource status with no graph
-  // at all.
-  const mode: "live" | "terminal" | "greyed" =
-    deploying ? "live"
-    : (
-      statusByKey.size > 0 || readOk || hasPublishedGraph || terminalConclusion
-    ) ?
-      "terminal"
-    : "greyed";
-
-  // deploy-graph.json is terminal metadata only. It can be sparse after a failed
-  // deployment and does not preserve modeled connections, so it must never
-  // replace the selected branch's fixed modeled topology.
-  const topology =
-    (
-      state.graphTargetRepo === repo &&
-      state.graphBranch === branch &&
-      Array.isArray(state.graphResources)
-    ) ?
-      state.graphResources
-    : [];
-
-  const plannedMetadataMatchesSelection =
-    terminalConclusion !== "failure" &&
-    !!state.deployProvider &&
-    state.plannedProvider === state.deployProvider &&
-    state.plannedRepo === repo &&
-    state.plannedBranch === branch &&
-    (!requestedEnv ||
-      (!!state.plannedEnvironment &&
-        namedSelectionPartMatches(state.plannedEnvironment, requestedEnv))) &&
-    Array.isArray(state.plannedResources);
-  const providerResolvedTopology = dependencies.mergeDeployedGraphMetadata(
-    topology,
-    plannedMetadataMatchesSelection ? state.plannedResources : null
-  );
-  const deploymentMetadata =
-    publishedGraph ??
-    (!deploying && sessionMatchesSelection ? state.deployedGraph : null) ??
-    null;
-  const enrichedTopology = dependencies.mergeDeployedGraphMetadata(
-    providerResolvedTopology,
-    deploymentMetadata
-  );
-  const resources = dependencies.canvasGraphResources(
-    dependencies.projectDeployedGraph(enrichedTopology, statusByKey)
-  );
-  // Attach the producer's per-resource message so a red node can explain itself
-  // in the popup instead of just being red.
-  dependencies.applyDeployMessages(resources, messageByKey);
-  if (terminalConclusion) {
-    dependencies.settleDeployStatuses(resources, terminalConclusion);
-  }
-  response.writeHead(200);
-  response.end(
+  const state = deps.readInstanceEntry(context.instanceId)?.state;
+  const view = context.url.searchParams.get("view");
+  const records = state?.graphProgressRecords ?? {};
+  const values = Object.values(records);
+  const active = values.filter((record) => record.graphProgressActive);
+  const record =
+    view === "graph" || view === "planned" || view === "diff" ?
+      records[view]
+    : (active.length ? active : values).sort(
+        (a, b) => b.graphProgressStartedAtMs - a.graphProgressStartedAtMs
+      )[0];
+  context.response.setHeader("Content-Type", "application/json");
+  context.response.writeHead(200);
+  context.response.end(
     JSON.stringify({
-      resources,
-      repo,
-      branch,
-      mode,
-      updatedAt,
-      application: resolvedApp,
-      deletionInventory
+      messages: state?.progressMessages || [],
+      ...(record ?
+        {
+          events: record.graphBuildEvents,
+          generation: record.graphProgressGeneration,
+          active: record.graphProgressActive,
+          view: record.graphProgressView,
+          elapsedMs: Math.max(0, deps.now() - record.graphProgressStartedAtMs)
+        }
+      : {})
     })
   );
 }
 
-export function createGraphsPlanningRoutes(
-  dependencies: GraphsPlanningReadsDependencies
-): RouteHandlerRegistry {
-  return {
-    "GET /api/progress": (context) => handleProgress(context, dependencies),
-    "GET /api/deployed-graph": (context) =>
-      handleDeployedGraph(context, dependencies)
-  };
+export async function handleDeployedGraph(
+  context: CanvasRequestContext,
+  deps: GraphsPlanningReadsDependencies
+): Promise<void> {
+  const entry = deps.readInstanceEntry(context.instanceId);
+  const state = entry?.state;
+  const selection = () =>
+    JSON.stringify([
+      state?.contextRepo,
+      state?.deployingRepo,
+      state?.plannedRepo,
+      state?.graphTargetRepo,
+      state?.deployEnvName,
+      state?.plannedEnvironment,
+      state?.envName,
+      state?.deployAppName,
+      state?.appName,
+      state?.deployRunId,
+      state?.deployGeneration
+    ]);
+  const selectedContext = selection();
+  const current = () =>
+    deps.readInstanceEntry(context.instanceId)?.state === state &&
+    selection() === selectedContext;
+  const repo =
+    context.url.searchParams.get("repo")?.trim() ||
+    state?.contextRepo ||
+    state?.deployingRepo ||
+    state?.plannedRepo ||
+    state?.graphTargetRepo ||
+    "";
+  const environment =
+    context.url.searchParams.get("environment") ||
+    state?.deployEnvName ||
+    state?.plannedEnvironment ||
+    state?.envName ||
+    "";
+  const application =
+    context.url.searchParams.get("application") ||
+    state?.deployAppName ||
+    (typeof state?.appName === "string" ? state.appName : "");
+  if (!repo) {
+    context.json(200, {
+      resources: [],
+      repo: "",
+      mode: "greyed",
+      deletionInventory: null
+    });
+    return;
+  }
+  try {
+    const result = await deps.lifecycle(context.instanceId).execute({
+      operation: "graph.get",
+      target: { repo, environment, application },
+      input: { kind: "deployed" }
+    });
+    if (!current()) {
+      context.json(200, { stale: true });
+      return;
+    }
+    if ("error" in result) {
+      const monitoring = retainedMonitoring(
+        state,
+        { repo, environment, application },
+        result.error.code
+      );
+      context.json(200, {
+        unavailable: true,
+        reason: result.error.code,
+        error: result.error.message,
+        mode: "unavailable",
+        deletionInventory: null,
+        ...(monitoring ? { retainedMonitoring: monitoring } : {})
+      });
+      return;
+    }
+    if (result.operation !== "graph.get" || result.result.kind !== "deployed")
+      throw new Error("Unexpected graph evidence.");
+    context.json(200, {
+      resources: canvasResources(result.result.graph),
+      repo,
+      environment,
+      application,
+      mode: "deployed",
+      provenance: result.result.provenance,
+      observation: result.result.observation,
+      deletionInventory: null
+    });
+  } catch {
+    if (!current()) {
+      context.json(200, { stale: true });
+      return;
+    }
+    context.json(200, {
+      unavailable: true,
+      reason: "RESULT_UNAVAILABLE",
+      error: "The deployed observation is unavailable.",
+      mode: "unavailable",
+      deletionInventory: null
+    });
+  }
 }
 
-// ── GET /api/load-graph-stream ──────────────────────────────────────────────
-// The Server-Sent-Events sibling of `POST /api/load-graph`: the Graph tab opens
-// this stream so the modeling progress log shows up live instead of arriving in
-// one lump when the (potentially slow) `rad` compile finishes. It is the first
-// streaming route to migrate, so its wire behavior is preserved byte for byte:
-// the `event:`/`data:` frames, the blank-line terminators, the three SSE
-// headers, the write-then-`end` ordering, and — critically — the fact that the
-// 503 no-entry exit answers *before* any SSE header is set and writes a plain
-// text body rather than a frame.
-
-// The graph-build entry as this route sees it: the live `CanvasServerEntry`, so
-// the entry captured by the 503 guard is the exact object every entry-consuming
-// seam operates on. That single-capture matters for fidelity — the legacy branch
-// read `servers.get(instanceId)` once and reused that reference for the whole
-// stream, so if the instance were deleted mid-compile it still wrote graph
-// provenance to the orphaned entry rather than silently no-op'ing. Re-resolving
-// by `instanceId` inside each seam would change that observable behavior.
-
-// The app.bicep selection `fetchBicepSelection` returns, narrowed to the members
-// this route reads. A null `content` is the "no app.bicep on this branch" signal
-// that triggers the generation handoff.
-export interface LoadGraphStreamBicepSelection {
-  content: string | null;
-  fromWorkspace: boolean;
-  branch: string;
-  bicepPath: string;
-}
-
-export interface LoadGraphStreamRadArtifacts {
-  dir: string;
-  remote: boolean;
-}
-
-export interface LoadGraphStreamRadArtifactsOptions {
-  isLocal: boolean;
-  state: CanvasState | undefined;
-  repo: string;
-  branch: string;
-  bicepRepoPath: string;
-  log: (message: string) => void;
-}
-
-export interface LoadGraphStreamBuildOptions {
-  log: (message: string) => void;
-  saveGraphJsonTo: string;
-  radArtifactsDir: string;
-  cleanupRadArtifactsDir: boolean;
-}
-
-// The source-ref bookkeeping token this route prepares before the compile and
-// checks after it, so a newer request for a different repo/branch wins. Only the
-// `token` is read by this route; the rest of the context stays opaque.
-export interface LoadGraphStreamSourceRefContext {
-  token: string;
-}
-
-// Eleven narrow function seams for one route. Nothing is moved: the bicep
-// fetch, the rad-artifacts resolver, the graph compiler, the source-ref
-// prepare/commit pair, the app.bicep handoff, the workspace-path deriver, the
-// branch defaulter, the canvas normalizer and the error formatter all stay where
-// they are defined and are handed in. The entry-consuming seams take the live
-// entry the handler captured, not an `instanceId`, so all of them see the same
-// object the 503 guard checked. `github` is bound into
-// `radArtifactsDirForSelection` at the composition root rather than surfaced
-// here, so this module spawns no process and reads no module-level mutable
-// state.
-export interface GraphsPlanningStreamDependencies {
-  // Returns undefined when the instance has no entry, which is what the legacy
-  // `servers.get(instanceId)` miss meant and what drives the 503 exit. The
-  // request context's `state` snapshot cannot express it: it substitutes `{}`
-  // for a missing entry.
-  readInstanceEntry(instanceId: string): CanvasServerEntry | undefined;
-  resolveBranchForRequest(
-    entry: CanvasServerEntry,
-    repo: string,
-    requestedBranch: string
-  ): Promise<WorkspaceBranchResolution>;
-  commitBranchResolution(
-    entry: CanvasServerEntry,
-    repo: string,
-    resolution: ResolvedWorkspaceBranch
-  ): boolean;
-  // Prepares the source-ref context for the entry and returns its token.
-  prepareSourceRef(
-    entry: CanvasServerEntry,
-    context: { repo: string; branch: string }
-  ): LoadGraphStreamSourceRefContext;
-  // Commits the modeled resources against `expectedToken`; returns false when a
-  // newer request has superseded this one, exactly like the legacy
-  // `setSourceRefResources` guard.
-  commitSourceRef(
-    entry: CanvasServerEntry,
-    resources: CanvasGraphResource[],
-    context: { repo: string; branch: string },
-    expectedToken: string
-  ): boolean;
-  isCurrentSourceRef(entry: CanvasServerEntry, expectedToken: string): boolean;
-  triggerAppBicepHandoff(
-    entry: CanvasServerEntry,
-    repo: string,
-    branch: string
-  ): void;
-  triggerGraphRepairHandoff(
-    entry: CanvasServerEntry,
-    request: GraphRepairRequest
-  ): GraphRepairAttempt;
-  clearGraphRepairAttempt(entry: CanvasServerEntry): void;
-  fetchBicepSelection(
-    entry: CanvasServerEntry,
-    repo: string,
-    branch: string
-  ): Promise<LoadGraphStreamBicepSelection>;
-  listBranchPaths(
-    entry: CanvasServerEntry,
-    repo: string,
-    branch: string
-  ): Promise<string[]>;
-  workspaceGraphJsonPath(state: CanvasState, bicepRepoPath: string): string;
-  radArtifactsDirForSelection(
-    options: LoadGraphStreamRadArtifactsOptions
-  ): Promise<LoadGraphStreamRadArtifacts>;
-  buildGraphViaRad(
-    content: string,
-    bicepPath: string,
-    options: LoadGraphStreamBuildOptions
-  ): Promise<unknown[]>;
-  canvasGraphResources(values: unknown[]): CanvasGraphResource[];
-  errorMessage(error: unknown): string;
-  logError(message: string): void;
-}
-
-// The progress log the Graph tab streams while `rad` models the app. The
-// observable contract preserved verbatim from the legacy arm:
-//   * The no-entry exit answers 503 with a plain-text body and NO SSE header —
-//     it precedes `setHeader`, so a missing instance never gets an event-stream.
-//   * The three SSE headers and `writeHead(200)` are written before any frame.
-//   * `progress` frames are `event: progress\ndata: <json>\n\n`; the terminal
-//     `done` frame is `event: done\ndata: <json>\n\n` immediately followed by
-//     `end()`. Every early exit routes through `sendDone`, so the stream always
-//     terminates with exactly one `done` frame and one `end`.
-//   * `||` (not `??`) throughout: an empty `repo`/`branch` string must fall
-//     through to its default, which `??` would not do.
 export async function handleLoadGraphStream(
   context: CanvasRequestContext,
-  dependencies: GraphsPlanningStreamDependencies
+  deps: GraphsPlanningStreamDependencies
 ): Promise<void> {
   const { response, url, instanceId } = context;
-  const repo = url.searchParams.get("repo") || "";
-  const requestedBranch = url.searchParams.get("branch") || "";
-  const entry = dependencies.readInstanceEntry(instanceId);
-  if (!entry) {
+  if (!deps.readInstanceEntry(instanceId)) {
     response.writeHead(503);
     response.end("Canvas server state is unavailable.");
     return;
   }
-  // Claim arrival order before the asynchronous live-branch lookup. The JSON
-  // graph route shares this generation, so whichever request arrived later owns
-  // the graph state regardless of which branch lookup finishes first.
-  const requestGeneration = (entry.state.graphBuildGeneration =
-    (entry.state.graphBuildGeneration || 0) + 1);
-
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
   response.writeHead(200);
-
-  const sendProgress = (message: string): void => {
-    response.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
-  };
-  let resolvedBranch: string | undefined;
-  const sendDone = (data: Record<string, unknown>): void => {
-    response.write(
-      `event: done\ndata: ${JSON.stringify({
-        ...data,
-        ...(resolvedBranch ? { resolvedBranch } : {})
-      })}\n\n`
-    );
-    response.end();
-  };
-
-  let branchResolution: WorkspaceBranchResolution;
+  response.write(
+    `event: progress\ndata: ${JSON.stringify({ message: "Reading the authored application graph." })}\n\n`
+  );
+  let payload: Record<string, unknown>;
   try {
-    branchResolution = await dependencies.resolveBranchForRequest(
-      entry,
-      repo,
-      requestedBranch
-    );
-  } catch (error) {
-    sendDone({ error: dependencies.errorMessage(error) });
-    return;
-  }
-  if (entry.state.graphBuildGeneration !== requestGeneration) {
-    sendDone({ stale: true });
-    return;
-  }
-  if (branchResolution.status === "unavailable") {
-    sendDone({
-      error: branchResolution.error,
-      workspaceBranchUnavailable: true,
-      repo
+    const outcome = await deps.workflows.loadGraph({
+      instanceId,
+      body: JSON.stringify({
+        repo: url.searchParams.get("repo") || "",
+        branch: url.searchParams.get("branch") || "",
+        ...(url.searchParams.has("followWorkspaceBranch") ?
+          {
+            followWorkspaceBranch:
+              url.searchParams.get("followWorkspaceBranch") === "true"
+          }
+        : {}),
+        refresh: true
+      })
     });
-    return;
+    payload = {
+      ...outcome.payload,
+      ...(typeof outcome.payload.branch === "string" ?
+        { resolvedBranch: outcome.payload.branch }
+      : {})
+    };
+  } catch {
+    payload = {
+      unavailable: true,
+      reason: "RESULT_UNAVAILABLE",
+      error: "The graph read could not be completed."
+    };
   }
-  if (!repo) {
-    sendDone({ error: "Please select a repository." });
-    return;
-  }
-  if (!dependencies.commitBranchResolution(entry, repo, branchResolution)) {
-    sendDone({ stale: true });
-    return;
-  }
-  const branch = branchResolution.branch;
-  resolvedBranch =
-    requestedBranch && requestedBranch !== branch ? branch : undefined;
-  const sourceRefContext = dependencies.prepareSourceRef(entry, {
-    repo,
-    branch
-  });
-
-  try {
-    sendProgress(`Checking ${repo} for existing app.bicep...`);
-    const selection = await dependencies.fetchBicepSelection(
-      entry,
-      repo,
-      branch
-    );
-    const content = selection.content;
-
-    if (content) {
-      sendProgress("Found existing app.bicep — parsing resources...");
-      // A model that exists can still no longer describe its source. The runtime
-      // classifies it and decides what, if anything, to say; the graph still
-      // streams either way.
-      dependencies.triggerAppBicepHandoff(entry, repo, branch);
-    } else {
-      const source = evaluateAppSource(
-        await dependencies.listBranchPaths(entry, repo, branch)
-      );
-      if (source.status === "none") {
-        sendDone({
-          error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
-          appBicepUnsupported: true,
-          repo,
-          branch
-        });
-        return;
-      }
-      dependencies.triggerAppBicepHandoff(entry, repo, branch);
-      // Deliberately outside the terminal-failure contract that the JSON
-      // load-graph/plan-graph routes implement: this stream has no restartWait,
-      // so every connection is a fresh explicit open with no way to distinguish
-      // a user retry from an automatic one. The shipped browser does not use
-      // this route. Do not wire it to a polling client without first teaching it
-      // to honour a recorded appModelAuthoringFailure, or a permanently failed
-      // model will request generation on every reconnect.
-      sendDone({
-        error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
-        needsAppBicep: true,
-        repo,
-        branch
-      });
-      return;
-    }
-
-    const graphJsonPath =
-      selection.fromWorkspace ?
-        dependencies.workspaceGraphJsonPath(entry.state, selection.bicepPath)
-      : "";
-    const { dir: radArtifactsDir, remote: radArtifactsRemote } =
-      await dependencies.radArtifactsDirForSelection({
-        isLocal: selection.fromWorkspace,
-        state: entry.state,
-        repo,
-        branch,
-        bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
-        log: sendProgress
-      });
-    const graphValues = await dependencies.buildGraphViaRad(
-      content,
-      selection.bicepPath || ".radius/app.bicep",
-      {
-        log: sendProgress,
-        saveGraphJsonTo: graphJsonPath,
-        radArtifactsDir,
-        cleanupRadArtifactsDir: radArtifactsRemote
-      }
-    );
-    const resources = dependencies.canvasGraphResources(graphValues);
-    sendProgress(`Mapped ${resources.length} resource(s) — rendering graph...`);
-
-    if (
-      !dependencies.commitSourceRef(
-        entry,
-        resources,
-        { repo, branch },
-        sourceRefContext.token
-      )
-    ) {
-      sendDone({ stale: true });
-      return;
-    }
-    entry.state.graphTargetRepo = repo;
-    entry.state.graphBranch = branch;
-    entry.state.graphFollowsWorkspaceBranch =
-      branchResolution.followsWorkspaceBranch === true;
-    // Authoritative provenance: true only when the local workspace actually
-    // supplied the app.bicep content (file is on disk).
-    entry.state.graphFromWorkspace = selection.fromWorkspace;
-    entry.state.activeGraphView = "graph";
-    dependencies.clearGraphRepairAttempt(entry);
-
-    sendDone({ reload: true });
-  } catch (e) {
-    const failure = asGraphModelingFailure(e);
-    if (failure instanceof GraphModelingFailure) {
-      dependencies.logError(
-        `[radius graph] modeling failed for ${repo}@${branch}: ${failure.diagnostic}`
-      );
-      if (!dependencies.isCurrentSourceRef(entry, sourceRefContext.token)) {
-        sendDone({ stale: true });
-        return;
-      }
-      const attempt = dependencies.triggerGraphRepairHandoff(entry, {
-        view: "graph",
-        repo,
-        branches: [branch],
-        diagnostic: failure.diagnostic
-      });
-      sendDone({
-        error: failure.message,
-        modelingFailed: true,
-        ...attempt
-      });
-      return;
-    }
-    sendDone({ error: dependencies.errorMessage(e) });
-  }
+  response.write(`event: done\ndata: ${JSON.stringify(payload)}\n\n`);
+  response.end();
 }
 
+export function createGraphsPlanningRoutes(
+  deps: GraphsPlanningReadsDependencies
+): RouteHandlerRegistry {
+  return {
+    "GET /api/progress": (context) => handleProgress(context, deps),
+    "GET /api/deployed-graph": (context) => handleDeployedGraph(context, deps)
+  };
+}
 export function createGraphsPlanningStreamRoutes(
-  dependencies: GraphsPlanningStreamDependencies
+  deps: GraphsPlanningStreamDependencies
 ): RouteHandlerRegistry {
   return {
     "GET /api/load-graph-stream": (context) =>
-      handleLoadGraphStream(context, dependencies)
+      handleLoadGraphStream(context, deps)
   };
 }

@@ -18,6 +18,7 @@ import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { BrowserContext, HttpResponse } from "../ports.js";
 import { GRAPH_DIFF_STATE_ID } from "../../pages/browser-state-ids.js";
+import { GRAPH_EVIDENCE_STATUS_ID } from "../../pages/graph-evidence-id.js";
 import {
   DIFF_DEBOUNCE_MS,
   DIFF_PROGRESS_MS,
@@ -125,6 +126,176 @@ function fixture(options: FixtureOptions = {}) {
 }
 
 describe("initializeGraphDiffPage", () => {
+  it("asks for a new selection when the committed comparison becomes stale", async () => {
+    const { browser, status, progressHost } = fixture();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ stale: true })
+    );
+    const render = vi.fn();
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: render
+    });
+    try {
+      await flushPromises();
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      expect(status.className).toBe("status error");
+      expect(status.textContent).toBe(
+        "The selected source changed. Select the branches again to compare."
+      );
+      expect(render).not.toHaveBeenCalled();
+      expect(fakeText(progressHost)).toBe("");
+      browser.clock.tick(DIFF_RETRY_MS);
+      await flushPromises();
+      expect(
+        browser.net.calls.filter((call) => call.url === "/api/diff-branches")
+      ).toHaveLength(1);
+      expect(browser.nav.reloads).toBe(0);
+    } finally {
+      teardown();
+    }
+    expect(browser.clock.pending).toBe(0);
+  });
+
+  it.each([
+    ["explicit diagnostic", "The committed source cannot be read."],
+    ["malformed diagnostic", { message: "not a diagnostic string" }]
+  ])("reports an unavailable comparison with %s", async (_label, error) => {
+    const { browser, status, summary, progressHost } = fixture({
+      resources: [{ id: "existing" }]
+    });
+    const evidence = createFakeElement(GRAPH_EVIDENCE_STATUS_ID);
+    browser.document.add(evidence);
+    const controller = { update: vi.fn(), destroy: vi.fn() };
+    const render = vi.fn(() => controller);
+    const setError = vi.fn();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ unavailable: true, reason: "RESULT_UNAVAILABLE", error })
+    );
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: render,
+      radiusSetGraphError: setError
+    });
+    try {
+      await flushPromises();
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      expect(setError).toHaveBeenCalledExactlyOnceWith(
+        "graph-container",
+        typeof error === "string" ? error : (
+          "The committed graph comparison is unavailable."
+        )
+      );
+      expect(evidence.textContent).toBe(
+        `Unavailable: RESULT_UNAVAILABLE: ${typeof error === "string" ? error : ""}`
+      );
+      expect(controller.destroy).toHaveBeenCalledOnce();
+      expect(render).toHaveBeenCalledOnce();
+      expect(status.style.display).toBe("none");
+      expect(summary.style.display).toBe("none");
+      expect(fakeText(progressHost)).toBe("");
+      browser.clock.tick(DIFF_RETRY_MS);
+      await flushPromises();
+      expect(
+        browser.net.calls.filter((call) => call.url === "/api/diff-branches")
+      ).toHaveLength(1);
+      expect(browser.nav.reloads).toBe(0);
+    } finally {
+      teardown();
+    }
+    expect(controller.destroy).toHaveBeenCalledOnce();
+    expect(browser.clock.pending).toBe(0);
+  });
+
+  it.each([
+    ["server message", "Captured committed graphs compared."],
+    ["malformed message", { text: "not a message string" }]
+  ])(
+    "renders canonical comparison resources in place with a %s",
+    async (_label, message) => {
+      const { browser, status, progressHost } = fixture({
+        resources: [{ id: "existing" }]
+      });
+      const resources = [{ id: "app/added", diffStatus: "added" }];
+      const previous = { update: vi.fn(), destroy: vi.fn() };
+      const current = { update: vi.fn(), destroy: vi.fn() };
+      const render = vi
+        .fn()
+        .mockReturnValueOnce(previous)
+        .mockReturnValue(current);
+      browser.net.handle("/api/diff-branches", () =>
+        jsonResponse({ resources, message })
+      );
+      const teardown = initializeGraphDiffPage(browser.context, {
+        radiusRenderGraph: render
+      });
+      try {
+        await flushPromises();
+        browser.clock.tick(DIFF_DEBOUNCE_MS);
+        await flushPromises();
+
+        expect(previous.destroy).toHaveBeenCalledOnce();
+        expect(render).toHaveBeenLastCalledWith("graph-container", resources, {
+          repoUrl: "https://github.com/octo/app",
+          branch: "feature",
+          diffMode: true,
+          localSource: false
+        });
+        expect(status.className).toBe("status info");
+        expect(status.textContent).toBe(
+          typeof message === "string" ? message : (
+            "The graph comparison is current."
+          )
+        );
+        expect(fakeText(progressHost)).toBe("");
+        expect(browser.nav.reloads).toBe(0);
+        expect(current.destroy).not.toHaveBeenCalled();
+      } finally {
+        teardown();
+      }
+      expect(current.destroy).toHaveBeenCalledOnce();
+      expect(browser.clock.pending).toBe(0);
+    }
+  );
+
+  it("retries a legacy modeling failure without optional graph or summary elements", async () => {
+    const { browser, head, status } = fixture({
+      modelingError: "The previous application model could not be compiled."
+    });
+    browser.document.remove("graph-container");
+    browser.document.remove("graph-diff-summary");
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ refreshed: true })
+    );
+    const setError = vi.fn();
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusSetGraphError: setError
+    });
+    try {
+      await flushPromises();
+      expect(
+        browser.net.calls.filter((call) => call.url === "/api/diff-branches")
+      ).toHaveLength(0);
+      head.dispatch("change");
+      browser.clock.tick(DIFF_DEBOUNCE_MS);
+      await flushPromises();
+
+      expect(setError).toHaveBeenCalledExactlyOnceWith(
+        "graph-container",
+        "The previous application model could not be compiled."
+      );
+      expect(status.textContent).toBe("The graph comparison is current.");
+      expect(status.className).toBe("status info");
+      expect(browser.nav.reloads).toBe(0);
+      expect(browser.logger.errors).toEqual([]);
+    } finally {
+      teardown();
+    }
+    expect(browser.clock.pending).toBe(0);
+  });
+
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializeGraphDiffPage(browser.context, {

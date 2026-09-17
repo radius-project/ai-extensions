@@ -6,7 +6,10 @@ import {
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
 import type { CanvasGraphResource } from "../shared.js";
-import { GRAPH_MODELING_FAILURE_MESSAGE } from "../graph-progress-contract.js";
+import {
+  scriptGraphDiff,
+  graphFailure
+} from "../../test/support/canonical-graphs.js";
 
 interface CanvasContext {
   extensionId: string;
@@ -481,6 +484,14 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: "1", name: "db", type: "Radius.Data/redis" }
     ]);
+    scriptGraphDiff(deps.lifecycle, [
+      {
+        id: "1",
+        name: "db",
+        type: "Radius.Data/redis",
+        diffStatus: "unchanged"
+      }
+    ]);
     const session = deps.session.get();
     session.log = vi.fn(() => {
       throw new Error("log unavailable");
@@ -502,7 +513,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     const state = deps.servers.get("radius-panel")!.state;
     expect(state.diffNoChanges).toBe(true);
     expect(state.diffError).toBeUndefined();
-    expect(session.log).toHaveBeenCalledWith("building graph");
+    expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
   });
 
   it("records a graph-diff failure for the current comparison", async () => {
@@ -522,6 +533,9 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       })
     );
 
+    scriptGraphDiff(deps.lifecycle).execute.mockResolvedValue(
+      graphFailure("VALIDATION_FAILED")
+    );
     await canvas.open(
       ctx("radius-panel", {
         page: "graph-diff",
@@ -531,25 +545,16 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       })
     );
 
-    expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
-      GRAPH_MODELING_FAILURE_MESSAGE
+    expect(deps.servers.get("radius-panel")!.state.diffError).toContain(
+      "VALIDATION_FAILED"
     );
-    expect(deps.logError).toHaveBeenCalledWith(
-      "[radius graph] modeling failed for acme/widgets@main...feat: BCP035: invalid model"
-    );
-    expect(deps.servers.get("radius-panel")!.state.diffModelingFailed).toBe(
-      true
-    );
-    const sent = vi.mocked(sessionHolder.get().send).mock.calls[0]?.[0] as {
-      prompt: string;
-      displayPrompt: string;
-    };
-    expect(sent.prompt).toContain("BCP035: invalid model");
-    expect(sent.prompt).toContain("attempt 1 of 3");
-    expect(sent.displayPrompt).not.toContain("BCP035");
+    expect(
+      deps.servers.get("radius-panel")!.state.diffModelingFailed
+    ).toBeUndefined();
+    expect(sessionHolder.get().send).not.toHaveBeenCalled();
   });
 
-  it("preserves the compile failure when the Agent handoff cannot be delivered", async () => {
+  it("does not attempt an Agent handoff when a canonical read fails", async () => {
     const { canvas, deps, sessionHolder } = setup({
       bicepByRepoBranch: {
         "remote:acme/widgets@main": "resource db {}",
@@ -569,6 +574,9 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       })
     );
 
+    scriptGraphDiff(deps.lifecycle).execute.mockResolvedValue(
+      graphFailure("VALIDATION_FAILED")
+    );
     await canvas.open(
       ctx("radius-panel", {
         page: "graph-diff",
@@ -578,12 +586,10 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       })
     );
 
-    expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
-      GRAPH_MODELING_FAILURE_MESSAGE
+    expect(deps.servers.get("radius-panel")!.state.diffError).toContain(
+      "VALIDATION_FAILED"
     );
-    expect(deps.logError).toHaveBeenCalledWith(
-      expect.stringContaining("session unavailable")
-    );
+    expect(sessionHolder.get().send).not.toHaveBeenCalled();
   });
 
   it("preserves a graph-diff toolchain failure without Bicep diagnostics", async () => {
@@ -602,6 +608,9 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     );
     const entry = await deps.getOrCreateServer("radius-panel", "graph-diff");
     entry.state.diffModelingFailed = true;
+    scriptGraphDiff(deps.lifecycle).execute.mockResolvedValue(
+      graphFailure("CAPABILITY_UNAVAILABLE")
+    );
 
     await canvas.open(
       ctx("radius-panel", {
@@ -612,8 +621,8 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       })
     );
 
-    expect(deps.servers.get("radius-panel")!.state.diffError).toBe(
-      "managed Bicep download failed"
+    expect(deps.servers.get("radius-panel")!.state.diffError).toContain(
+      "CAPABILITY_UNAVAILABLE"
     );
     expect(deps.logError).not.toHaveBeenCalled();
     expect(entry.state.diffModelingFailed).toBeUndefined();
@@ -627,6 +636,20 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         "remote:acme/widgets@other": "resource db {}"
       }
     });
+    const scripted = scriptGraphDiff(deps.lifecycle, [], "acme/widgets", [
+      "main",
+      "feat",
+      "other"
+    ]);
+    let fail: (result: ReturnType<typeof graphFailure>) => void = () => {
+      throw new Error("Not started");
+    };
+    scripted.execute.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          fail = resolve;
+        })
+    );
     // First compare fails...
     (
       deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>
@@ -647,6 +670,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         headBranch: "feat"
       })
     );
+    await vi.waitFor(() => expect(scripted.execute).toHaveBeenCalledTimes(1));
     // ...but a second compare (different heads) starts and succeeds before the
     // first one's rejection is observed, changing the live context token.
     (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -660,6 +684,7 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         headBranch: "other"
       })
     );
+    fail(graphFailure("VALIDATION_FAILED"));
     await firstOpen;
     // The stale failure must not have clobbered the current (successful) state.
     expect(deps.servers.get("radius-panel")!.state.diffError).toBeUndefined();
@@ -680,13 +705,19 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         return vi.fn();
       }
     );
-    const buildGraph = deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>;
+    const scripted = scriptGraphDiff(
+      deps.lifecycle,
+      [{ id: "current", name: "new", type: "new" }],
+      "acme/widgets",
+      ["main", "old", "new"]
+    );
+    const buildGraph = scripted.execute;
     buildGraph
       .mockImplementationOnce(async () => {
         await firstResult;
-        return [{ id: "stale", name: "old", type: "old" }];
+        return scripted.response;
       })
-      .mockResolvedValue([{ id: "current", name: "new", type: "new" }]);
+      .mockResolvedValue(scripted.response);
 
     const firstOpen = canvas.open(
       ctx("radius-panel", {

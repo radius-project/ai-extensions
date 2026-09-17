@@ -744,7 +744,9 @@ describe("runRadAppGraph artifact completion", () => {
   let prevBinary: string | undefined;
 
   beforeEach(() => {
-    binDir = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-bin-"));
+    const artifacts = path.join(process.cwd(), ".artifacts");
+    fs.mkdirSync(artifacts, { recursive: true });
+    binDir = fs.mkdtempSync(path.join(artifacts, "rad-graph-bin-"));
     bin = process.execPath;
     const preload = path.join(binDir, "fake-rad.cjs");
     fs.writeFileSync(
@@ -754,6 +756,11 @@ describe("runRadAppGraph artifact completion", () => {
         'const { spawn } = require("node:child_process");',
         'fs.writeFileSync("app", "");',
         'if (process.argv[1]?.endsWith("app")) {',
+        '  if (process.env.FAKE_RAD_SCENARIO === "cancel") {',
+        `    fs.writeFileSync(${JSON.stringify(path.join(binDir, "child.pid"))}, String(process.pid));`,
+        "    setInterval(() => {}, 1000);",
+        "    return;",
+        "  }",
         '  fs.writeFileSync("app-graph.json", "{");',
         "  setTimeout(() => {",
         '    fs.writeFileSync("app-graph.json", JSON.stringify({ resources: [] }));',
@@ -827,6 +834,52 @@ describe("runRadAppGraph artifact completion", () => {
       resources: []
     });
   }, 10000);
+
+  it("cancels legacy graph execution only after its child terminates", async () => {
+    process.env.FAKE_RAD_SCENARIO = "cancel";
+    const controller = new AbortController();
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(bicepFile, "");
+    const pending = runRadAppGraph(bicepFile, {
+      radPath: bin,
+      signal: controller.signal,
+      timeout: 4000
+    });
+    const rejection = expect(pending).rejects.toMatchObject({
+      name: "AbortError"
+    });
+    await vi.waitFor(() => {
+      expect(
+        Number(fs.readFileSync(path.join(binDir, "child.pid"), "utf8"))
+      ).toBeGreaterThan(0);
+    });
+    const pid = Number(fs.readFileSync(path.join(binDir, "child.pid"), "utf8"));
+    controller.abort();
+    await rejection;
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("preserves legacy timeout errors when cancellation is available", async () => {
+    process.env.FAKE_RAD_SCENARIO = "cancel";
+    const controller = new AbortController();
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(bicepFile, "");
+    await expect(
+      runRadAppGraph(bicepFile, {
+        radPath: bin,
+        signal: controller.signal,
+        timeout: 1000
+      })
+    ).rejects.toMatchObject({
+      cause: {
+        name: "RadProcessError",
+        message: "rad app graph timed out after 1000ms"
+      }
+    });
+    const pid = Number(fs.readFileSync(path.join(binDir, "child.pid"), "utf8"));
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
+    controller.abort();
+  });
 
   it("preserves a non-zero exit and diagnostics written after a valid artifact", async () => {
     process.env.FAKE_RAD_SCENARIO = "failure";

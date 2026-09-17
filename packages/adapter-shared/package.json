@@ -18,7 +18,8 @@
     "lint": "eslint \"src/**/*.{ts,mjs}\" \"test/**/*.mjs\" vitest.config.ts"
   },
   "dependencies": {
-    "@radius-project/core": "workspace:*"
+    "@radius-project/core": "workspace:*",
+    "ajv": "^8.17.1"
   },
   "devDependencies": {
     "vitest": "catalog:"

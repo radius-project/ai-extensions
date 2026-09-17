@@ -109,9 +109,9 @@ process.on("message", async (message) => {
   if (message?.type !== "render-page") return;
   renderingPage = true;
   try {
-    const html = await renderArtifactPage();
+    const { html, graphReadResult } = await renderArtifactPage();
     if (typeof process.send === "function") {
-      process.send({ type: "page", html });
+      process.send({ type: "page", html, graphReadResult });
     }
   } catch (error) {
     if (typeof process.send === "function") {

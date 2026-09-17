@@ -831,6 +831,43 @@ describe("RU-21: operation-aware host keepalive", () => {
 // RU-18 (extension half): shutdown closes every server and tears down the
 // session exactly once, even under a duplicate/concurrent call.
 describe("RU-18: shutdown is idempotent and closes every server exactly once", () => {
+  it("requires the session lifecycle binding before registering tools", () => {
+    const { deps } = createFakeDependencies();
+    for (const lifecycle of [
+      undefined,
+      { execute() {} },
+      { execute() {}, close() {} }
+    ]) {
+      expect(() =>
+        Reflect.apply(createRadiusExtension, undefined, [
+          { ...deps, lifecycle }
+        ])
+      ).toThrow("lifecycle binding");
+    }
+  });
+  it.each([false, true])(
+    "continues shutdown after lifecycle cleanup failure with logger failure=%s",
+    async (loggerFailure) => {
+      const fake = createFakeDependencies();
+      const closeSession = vi.fn();
+      fake.sessionHolder.set(createFakeSession({ close: closeSession }));
+      fake.deps.lifecycle.close = vi.fn(async () => {
+        throw new Error("cleanup failed");
+      });
+      if (loggerFailure)
+        fake.deps.logError = vi.fn(() => {
+          throw new Error("logger failed");
+        });
+      await fake.getOrCreateServer("panel", "graph");
+      const extension = createRadiusExtension(fake.deps);
+      await extension.shutdown("test");
+      expect(fake.deps.logError).toHaveBeenCalledWith(
+        "Radius lifecycle cleanup failed; continuing session shutdown."
+      );
+      expect(closeSession).toHaveBeenCalledTimes(1);
+      expect(fake.servers.size).toBe(0);
+    }
+  );
   it("closes every open canvas server and never twice", async () => {
     const { ext, deps } = setup();
     const closeA = vi.fn((cb?: () => void) => cb?.());

@@ -18,6 +18,7 @@ import { formatElapsed } from "../progress-format.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
+import { GRAPH_EVIDENCE_STATUS_ID } from "../../pages/graph-evidence-id.js";
 import { WORKSPACE_MODEL_CHANGED_EVENT } from "../heartbeat.js";
 import {
   GRAPH_PAGE_STATE_ID,
@@ -130,6 +131,62 @@ function globals(overrides: Record<string, unknown> = {}) {
 }
 
 describe("initializeGraphPage", () => {
+  describe.each([false, true])("unavailable graph with loaded=%s", (loaded) => {
+    it.each([
+      ["explicit diagnostic", "The captured authored model is unavailable."],
+      ["malformed diagnostic", { message: "not a diagnostic string" }]
+    ])("fails closed with %s", async (_label, error) => {
+      const { browser, button, status, guidance, progressHost } = fixture({
+        loaded
+      });
+      const evidence = createFakeElement(GRAPH_EVIDENCE_STATUS_ID);
+      browser.document.add(evidence);
+      browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+        jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+      );
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({
+          unavailable: true,
+          reason: "RESULT_UNAVAILABLE",
+          error
+        })
+      );
+      const rendering = globals();
+      const teardown = initializeGraphPage(browser.context, rendering);
+      try {
+        await flushPromises();
+
+        expect(rendering.radiusSetGraphError).toHaveBeenCalledExactlyOnceWith(
+          "graph-container",
+          typeof error === "string" ? error : (
+            "The authored graph is unavailable."
+          )
+        );
+        expect(evidence.textContent).toBe(
+          `Unavailable: RESULT_UNAVAILABLE: ${typeof error === "string" ? error : ""}`
+        );
+        expect(button.dataset.mode).toBe("plan");
+        expect(button.disabled).toBe(true);
+        expect(button.getAttribute("title")).toBe(GRAPH_PLAN_BLOCKED_TITLE);
+        expect(status?.style.display).toBe("none");
+        expect(guidance.style.display).toBe("none");
+        expect(fakeText(progressHost)).toBe("");
+        expect(rendering.radiusRenderGraph).toHaveBeenCalledTimes(
+          loaded ? 1 : 0
+        );
+        browser.clock.tick(GRAPH_RETRY_MS);
+        await flushPromises();
+        expect(
+          browser.net.calls.filter((call) => call.url === "/api/load-graph")
+        ).toHaveLength(1);
+        expect(browser.nav.reloads).toBe(0);
+      } finally {
+        teardown();
+      }
+      expect(browser.clock.pending).toBe(0);
+    });
+  });
+
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializeGraphPage(browser.context, globals());

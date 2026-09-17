@@ -11,6 +11,11 @@
 // Every exported declaration is deep-frozen so a consumer (or a careless test)
 // cannot mutate the canonical shape out from under other importers.
 
+import {
+  LIFECYCLE_OPERATIONS,
+  operationSchemas
+} from "@radius-project/core/lifecycle";
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     for (const key of Object.keys(value as Record<string, unknown>)) {
@@ -178,11 +183,11 @@ IMPORTANT — Automatic PR Graph Diff: When a pull request is created (via creat
 3. If the call is denied, the graph is unavailable, branch resolution fails, or the tool reports an error, create the pull request without a graph diff section. Do not add a sentence to the PR body explaining why the graph is missing. Report the reason in chat, and do not open the graph-diff Canvas. This rule governs only the graph diff section; describe the change itself normally, including any Radius modeling changes.
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
-1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
-2. If it does not, author it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure, and writes the file to the working tree) and follow that skill to completion.
-3. Only AFTER the skill has written app.bicep to the working tree, open: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }). For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
+1. Open: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).
+2. Graph reads are read-only: a missing, stale, or invalid model is an explicit unavailable result, never permission to author or refresh it. Report the result honestly.
+3. Author only on a separate explicit modeling request through radius_generate_app or canonical definition.author. Both use the same guarded coordinator. Current SDK hosts do not provide trusted approval and authenticated agent assignment, so authoring returns CAPABILITY_UNAVAILABLE; never bypass this by invoking the skill or sending a session message.
 
-The planned page resolves .radius/app.bicep from the working tree the same way. The graph-diff page also reads an on-disk .radius/app.bicep for whichever side exactly matches the current workspace repo and branch. Do not commit or push the current worktree merely to compare it. A different repo or branch is read from GitHub and must already contain a committed model; if it does not, report that the diff is unavailable rather than publishing the worktree.
+The graph and planned pages can read captured on-disk working tree source for the current workspace branch without a push. Graph diff uses explicit committed base and head refs, including the workspace branch when selected as a diff side; uncommitted worktree changes are not part of that comparison. Do not commit or push merely to make a graph available. If the committed model or required evidence is unavailable, report that result instead of publishing the worktree.
 
 When the user asks to "show me the planned graph", "plan my app": open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "planned", repo: "<current-repo>" } }).
 
@@ -202,13 +207,74 @@ export interface ToolDeclaration {
   parameters: Record<string, unknown>;
 }
 
-// The 7 tools, in their current order. Declarative shape only — see tools.ts
+function lifecycleToolVariant(
+  schema: Readonly<Record<string, unknown>>
+): Record<string, unknown> {
+  if (Array.isArray(schema.oneOf)) {
+    return { oneOf: schema.oneOf.map((value) => lifecycleToolVariant(value)) };
+  }
+  const properties = schema.properties as Readonly<Record<string, unknown>>;
+  const required = schema.required as readonly string[];
+  const target = (value: unknown): unknown => {
+    if (!value || typeof value !== "object") return value;
+    const original = value as Readonly<Record<string, unknown>>;
+    if (Array.isArray(original.oneOf))
+      return { ...original, oneOf: original.oneOf.map(target) };
+    return {
+      ...original,
+      ...(Array.isArray(original.required) ?
+        { required: original.required.filter((key) => key !== "source") }
+      : {})
+    };
+  };
+  const input = properties.input as Readonly<Record<string, unknown>>;
+  const inputProperties = input.properties as
+    Readonly<Record<string, unknown>> | undefined;
+  return {
+    ...schema,
+    properties: {
+      operation: properties.operation,
+      target: target(properties.target),
+      input:
+        inputProperties?.base && inputProperties.head ?
+          {
+            ...input,
+            properties: {
+              ...inputProperties,
+              base: target(inputProperties.base),
+              head: target(inputProperties.head)
+            }
+          }
+        : input
+    },
+    required: required.filter(
+      (key) => key !== "apiVersion" && key !== "requestId"
+    )
+  };
+}
+
+export const RADIUS_LIFECYCLE_TOOL_DECLARATION: ToolDeclaration = deepFreeze({
+  name: "radius_lifecycle",
+  description:
+    "Invokes the frontend-neutral Radius lifecycle without opening a panel. Discovery, supported graph reads, agent-free definition.validate and operation.respond are available; capabilities.get reports supported operations and source limits. Definition authoring requires trusted host approval and authenticated assignment, unavailable in current SDK hosts. Unregistered operations return CAPABILITY_UNAVAILABLE. The host supplies request identity and trusted authority; public approval or credential claims are not accepted.",
+  parameters: {
+    type: "object",
+    properties: { operation: { enum: LIFECYCLE_OPERATIONS } },
+    oneOf: Object.values(operationSchemas).map((value) =>
+      lifecycleToolVariant(value.request)
+    )
+  }
+});
+
+// The additive lifecycle tool and 7 retained tools in their original order.
+// Declarative shape only — see tools.ts
 // for the handlers.
 export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
+  RADIUS_LIFECYCLE_TOOL_DECLARATION,
   {
     name: "radius_generate_app",
     description:
-      "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, instruction, optional generator version, and optional ambiguity brief. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
+      "Checks the trusted workspace for modelability, then invokes canonical definition.author once and returns its JSON operation result or explicit error. Requires trusted approval and authenticated agent assignment; current SDK hosts return CAPABILITY_UNAVAILABLE, with no independent skill handoff. Source discovery failures are explicit failures. A source subdirectory or external path cannot currently be represented and is unavailable, not widened to the workspace. For repositories without a Dockerfile, returns a Markdown refusal without starting authoring.",
     parameters: {
       type: "object",
       properties: {
@@ -222,7 +288,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_report_modeling_failure",
     description:
-      "Reports a permanent radius-app-bicep authoring failure to the Radius Canvas attempt that requested it. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures, cancellations, or a run that wrote app.bicep.",
+      "Records a permanent modeling failure as a legacy Canvas diagnostic for the exact instance, repository, branch, and attempt token supplied by that Canvas handoff. This is not an authenticated agent outcome: it cannot complete a lifecycle action, approve changes, or promote outputs. Never report transient failures, cancellations, or a run that wrote app.bicep. Lifecycle agent outcomes require authenticated operation.respond instead.",
     parameters: {
       type: "object",
       properties: {

@@ -3,7 +3,13 @@ import { asGraphController } from "../graph/surface.js";
 import { clearGraphProgress, createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl } from "../graph/model.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
-import { readArray, readBoolean, readNumber, readString } from "../json.js";
+import {
+  isRecord,
+  readArray,
+  readBoolean,
+  readNumber,
+  readString
+} from "../json.js";
 import {
   applyPlanEnvState,
   createPlanScheduler,
@@ -17,6 +23,7 @@ import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
+import { updateGraphEvidence } from "./graph-evidence.js";
 import { PLANNED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   showGraphModelingFailure,
@@ -43,6 +50,7 @@ interface PlannedPageState {
 
 function parseState(context: BrowserContext): PlannedPageState {
   const state = readPageState(context, PLANNED_GRAPH_STATE_ID);
+  updateGraphEvidence(context, state.evidence, "planned");
   return {
     repo: readString(state, "repo"),
     branch: readString(state, "branch") || "main",
@@ -259,6 +267,43 @@ export function initializePlannedGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (!current()) return;
+        updateGraphEvidence(context, payload, "planned");
+        if (readBoolean(payload, "unavailable")) {
+          plan.requestFailed = true;
+          showModelingFailure(
+            readString(payload, "error") ||
+              "Actual environment recipe registrations are unavailable."
+          );
+          return;
+        }
+        if (readBoolean(payload, "stale")) {
+          plan.requestFailed = true;
+          status(
+            context,
+            "The selected source changed. Select the environment again to refresh.",
+            "error"
+          );
+          return;
+        }
+        if (isRecord(payload) && Array.isArray(payload.resources)) {
+          plan.requestFailed = false;
+          controller?.destroy();
+          page.resources = payload.resources;
+          controller = asGraphController(
+            renderGraph(graphContainer(context), payload.resources, {
+              repoUrl: githubRepositoryUrl(page.repo),
+              branch: selectedBranch,
+              localSource: readBoolean(payload, "fromWorkspace"),
+              plannedMode: true
+            })
+          );
+          status(
+            context,
+            "Expected recipe outputs are ready. This is not a guaranteed deployment plan.",
+            "info"
+          );
+          return;
+        }
         const resolvedBranch = readString(payload, "resolvedBranch");
         if (resolvedBranch && resolvedBranch !== selectedBranch) {
           context.nav.reload();

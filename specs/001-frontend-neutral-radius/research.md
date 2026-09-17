@@ -50,6 +50,8 @@
 
 **Alternatives considered**: Default-provider enrichment can show the wrong outputs. Invented custom types or singleton recipes would bypass the missing registration instead of resolving it.
 
+**Implementation scope decision (T018-T038)**: The user chose to keep reads strictly read-only when existing deployment artifacts do not expose actual environment registrations. Report unavailable recipe evidence and planned graphs explicitly in that context. Do not restore a control plane, dispatch a workflow, or add a registration-artifact producer to obtain this evidence in the current milestone. Available registration evidence remains usable through the typed read port; unavailable evidence is not proof of an empty registration set or a missing recipe for a known type. Authored inspection and authored graph reads do not depend on this evidence.
+
 ## 6. Authoring and validation
 
 **Decision**: Preserve staged authoring and the current modelability rules. Classify checks before execution; required-check failure blocks promotion, required-check unavailability produces incomplete validation, and unavailable advisory checks produce warnings. Shared lifecycle services validate agent output references and recheck source before promotion.

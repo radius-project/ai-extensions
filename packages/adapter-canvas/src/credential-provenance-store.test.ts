@@ -10,6 +10,7 @@ import {
 const directories: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const directory of directories.splice(0)) {
     await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
   }
@@ -28,10 +29,19 @@ describe("createFileCredentialProvenanceStore", () => {
       directory: path.join(parent, "missing")
     });
     expect(await store.load()).toEqual([]);
+    expect(await store.read("missing")).toBeNull();
   });
 
-  it("round-trips independent records with restrictive permissions", async () => {
+  it("returns null for a missing record in an existing directory", async () => {
+    const store = createFileCredentialProvenanceStore({
+      directory: await tempDirectory()
+    });
+    expect(await store.read("missing")).toBeNull();
+  });
+
+  it("round-trips independent records and requests restrictive file modes", async () => {
     const directory = await tempDirectory();
+    const writeFile = vi.spyOn(fs, "writeFile");
     const store = createFileCredentialProvenanceStore({ directory });
     await store.write("one", { id: 1 });
     await store.write("two", { id: 2 });
@@ -41,13 +51,29 @@ describe("createFileCredentialProvenanceStore", () => {
     );
     const names = await fs.readdir(directory);
     expect(names).toHaveLength(2);
-    expect((await fs.stat(path.join(directory, names[0]))).mode & 0o777).toBe(
-      0o600
+    expect(writeFile).toHaveBeenCalledWith(
+      expect.stringMatching(/\.tmp$/),
+      expect.any(String),
+      { encoding: "utf8", mode: 0o600 }
     );
     await store.remove(["one"]);
     expect(await store.read("one")).toBeNull();
     expect(await store.load()).toEqual([{ id: 2 }]);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "restricts persisted records to their owner on POSIX systems",
+    async () => {
+      const directory = await tempDirectory();
+      const store = createFileCredentialProvenanceStore({ directory });
+      await store.write("one", { id: 1 });
+      const names = await fs.readdir(directory);
+      expect(names).toHaveLength(1);
+      expect((await fs.stat(path.join(directory, names[0]))).mode & 0o777).toBe(
+        0o600
+      );
+    }
+  );
 
   it("makes records visible to another store instance", async () => {
     const directory = await tempDirectory();
@@ -150,6 +176,59 @@ describe("createFileCredentialProvenanceStore", () => {
       "credential-provenance-unavailable",
       "credential-provenance-unavailable"
     ]);
+  });
+
+  it("reports failure to inspect the directory rather than declaring a record missing", async () => {
+    const directory = await tempDirectory();
+    const failure = Object.assign(new Error("directory access denied"), {
+      code: "EACCES"
+    });
+    const report = vi.fn();
+    const store = createFileCredentialProvenanceStore({ directory, report });
+    vi.spyOn(fs, "stat").mockRejectedValueOnce(failure);
+
+    await expect(store.read("missing")).rejects.toMatchObject({
+      cause: failure
+    });
+    expect(report).toHaveBeenCalledWith({
+      code: "credential-provenance-unavailable",
+      message: expect.stringContaining("directory access denied")
+    });
+  });
+
+  it("does not treat Windows ENOENT beneath a file as a missing record", async () => {
+    const directory = path.join(await tempDirectory(), "not-a-directory");
+    await fs.writeFile(directory, "file");
+    const report = vi.fn();
+    const store = createFileCredentialProvenanceStore({ directory, report });
+    const failure = Object.assign(new Error("path not found"), {
+      code: "ENOENT"
+    });
+    vi.spyOn(fs, "readFile").mockRejectedValueOnce(failure);
+
+    await expect(store.read("key")).rejects.toMatchObject({ cause: failure });
+    expect(report).toHaveBeenCalledWith({
+      code: "credential-provenance-unavailable",
+      message: expect.stringContaining("path not found")
+    });
+  });
+
+  it("reports a record replaced by a directory as unreadable", async () => {
+    const directory = await tempDirectory();
+    const report = vi.fn();
+    const store = createFileCredentialProvenanceStore({ directory, report });
+    await store.write("key", { id: 1 });
+    const names = await fs.readdir(directory);
+    expect(names).toHaveLength(1);
+    const record = path.join(directory, names[0]);
+    await fs.unlink(record);
+    await fs.mkdir(record);
+
+    await expect(store.read("key")).rejects.toThrow("could not be read");
+    expect(report).toHaveBeenCalledWith({
+      code: "credential-provenance-unavailable",
+      message: expect.stringContaining("Could not read credential provenance")
+    });
   });
 
   it("cleans up the temporary file and rethrows a failed rename", async () => {

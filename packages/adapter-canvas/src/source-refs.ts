@@ -35,7 +35,7 @@ function sourceRefToken(
     view === "diff" ?
       `${context.baseBranch || ""}...${context.headBranch || ""}`
     : context.branch || "";
-  return `${view}|${context.repo || ""}|${branch}`;
+  return `${view}|${context.repo || ""}|${branch}${typeof context.requestId === "string" ? `|${context.requestId}` : ""}`;
 }
 
 export function prepareSourceRefResources(

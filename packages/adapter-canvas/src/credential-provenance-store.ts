@@ -41,6 +41,20 @@ export function createFileCredentialProvenanceStore({
   // must be comfortably shorter than the STALE_LOCK_MS steal threshold.
   const LOCK_HEARTBEAT_MS = lockHeartbeatMs;
   const STALE_LOCK_MS = 5 * 60_000;
+  const readFailure = (filePath: string, cause: unknown): Error => {
+    report({
+      code: "credential-provenance-unavailable",
+      message: `Could not read credential provenance file "${path.basename(
+        filePath
+      )}": ${String(cause)}`
+    });
+    return new Error(
+      `Credential provenance file "${path.basename(
+        filePath
+      )}" could not be read.`,
+      { cause }
+    );
+  };
   const readFile = async (filePath: string): Promise<unknown | null> => {
     let raw: string;
     try {
@@ -52,22 +66,22 @@ export function createFileCredentialProvenanceStore({
         "code" in error &&
         error.code === "ENOENT"
       ) {
-        return null;
-      }
-      report({
-        code: "credential-provenance-unavailable",
-        message: `Could not read credential provenance file "${path.basename(
-          filePath
-        )}": ${String(error)}`
-      });
-      throw new Error(
-        `Credential provenance file "${path.basename(
-          filePath
-        )}" could not be read.`,
-        {
-          cause: error
+        try {
+          // Windows can report ENOENT when the configured parent is a file.
+          if ((await fs.stat(directory)).isDirectory()) return null;
+        } catch (directoryError) {
+          if (
+            directoryError &&
+            typeof directoryError === "object" &&
+            "code" in directoryError &&
+            directoryError.code === "ENOENT"
+          ) {
+            return null;
+          }
+          throw readFailure(filePath, directoryError);
         }
-      );
+      }
+      throw readFailure(filePath, error);
     }
     try {
       return JSON.parse(raw);

@@ -8,6 +8,7 @@ import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
 import { PLANNED_GRAPH_STATE_ID } from "./browser-state-ids.js";
 import { renderPageState } from "./page-state.js";
+import { renderGraphEvidence } from "./graph-evidence.js";
 
 export function plannedGraphPage(state: CanvasState = {}): string {
   const targetRepo =
@@ -37,7 +38,8 @@ export function plannedGraphPage(state: CanvasState = {}): string {
       "Planned Graph",
       `
 ${graphHeader("planned")}
-<p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph previews the infrastructure that will be provisioned for each component of your application if deployed to a given environment.<span id="planned-subtitle-hint"></span></p>
+${renderGraphEvidence(state.graphReadEvidence?.planned)}
+<p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph shows expected infrastructure outputs from the selected environment's actual recipe registrations. It is not a guaranteed deployment plan.<span id="planned-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
     <label for="planned-app">Application</label>
@@ -68,7 +70,8 @@ ${renderPageState(PLANNED_GRAPH_STATE_ID, {
   provider,
   resources: [],
   localSource,
-  followWorkspaceBranch
+  followWorkspaceBranch,
+  evidence: state.graphReadEvidence?.planned
 })}
 ${browserScriptTag("planned-graph-page")}
 ${graphHeaderClose()}`
@@ -80,7 +83,8 @@ ${graphHeaderClose()}`
     "Planned Graph",
     `
 ${graphHeader("planned")}
-<p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph previews the infrastructure that will be provisioned for each component of your application if deployed to a given environment.<span id="planned-subtitle-hint"></span></p>
+${renderGraphEvidence(state.graphReadEvidence?.planned)}
+<p class="rad-lede" id="planned-subtitle" style="margin:0 0 20px;">The planned application graph shows expected infrastructure outputs from the selected environment's actual recipe registrations. It is not a guaranteed deployment plan.<span id="planned-subtitle-hint"></span></p>
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:12px; flex-wrap:wrap;">
   <div class="rad-field">
     <label for="planned-app">Application</label>
@@ -112,7 +116,8 @@ ${renderPageState(PLANNED_GRAPH_STATE_ID, {
   provider,
   resources: plannedResources,
   localSource,
-  followWorkspaceBranch
+  followWorkspaceBranch,
+  evidence: state.graphReadEvidence?.planned
 })}
 ${browserScriptTag("planned-graph-page")}
 ${graphHeaderClose()}`

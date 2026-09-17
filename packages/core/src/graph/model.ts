@@ -13,15 +13,18 @@ export function stripAPIVersion(t: string): string {
 }
 
 export function addInboundConnections(graph: any): void {
-  const byID: any = {};
+  const byID = new Map<
+    string,
+    { connections?: Array<{ id: string; direction: string }> }
+  >();
   for (const r of graph.resources) {
-    if (r && r.id) byID[r.id] = r;
+    if (r && r.id) byID.set(r.id, r);
   }
   for (const src of graph.resources) {
     if (!src || !src.id) continue;
     for (const conn of src.connections || []) {
       if (!conn || !conn.id || conn.direction !== "Outbound") continue;
-      const dest = byID[conn.id];
+      const dest = byID.get(conn.id);
       if (!dest) continue;
       dest.connections = dest.connections || [];
       dest.connections.push({ id: src.id, direction: "Inbound" });

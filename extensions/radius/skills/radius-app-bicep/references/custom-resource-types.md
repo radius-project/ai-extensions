@@ -168,7 +168,7 @@ output result object = {
 }
 ```
 
-Then publish it to the user's GitHub Container Registry for the repository being modeled by calling the `radius_publish_recipe` tool (never invoke `rad` directly), and use the resulting path as the recipe pack `source`. Pass `file` (the recipe path) and `target` (`br:ghcr.io/<owner>/<repo>/<recipe>:<tag>`):
+Registry publication requires separate explicit authorization and is not part of lifecycle authoring. During authoring, stage the recipe and report an unavailable prerequisite if no already-published, authorized recipe can satisfy the runtime contract; never call `radius_publish_recipe` implicitly. Only in a separately authorized registry-publication operation, publish to the user's GitHub Container Registry for the repository by calling `radius_publish_recipe` (never invoke `rad` directly), then use the verified resulting path as the recipe pack `source`. Pass `file` (the recipe path) and `target` (`br:ghcr.io/<owner>/<repo>/<recipe>:<tag>`):
 
 ```text
 file: <staging-dir>/<type>-recipe.bicep

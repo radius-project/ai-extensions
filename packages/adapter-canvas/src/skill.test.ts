@@ -1,7 +1,11 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { createRadiusAppBicepSkill, radiusAppBicepSkill } from "./skill.js";
+import {
+  createRadiusAppBicepSkill,
+  radiusAppBicepSkill,
+  radiusAppBicepValidationScript
+} from "./skill.js";
 
 const MODULE_DIR = path.join(
   path.parse(process.cwd()).root,
@@ -72,6 +76,13 @@ function parseHandoff(value: string): Record<string, unknown> {
 }
 
 describe("radiusAppBicepSkill", () => {
+  it("resolves the no-agent validator from the same complete trusted skill", () => {
+    const handoff = parseHandoff(radiusAppBicepSkill());
+    expect(radiusAppBicepValidationScript()).toBe(
+      path.join(String(handoff.skillBase), "scripts", "validate-bicep.mjs")
+    );
+  });
+
   it("resolves packaged skills from the canonical bundle directory", () => {
     const packaged = path.join(PLUGIN_ROOT, "skills", "radius-app-bicep");
     const { skill } = createSkill(

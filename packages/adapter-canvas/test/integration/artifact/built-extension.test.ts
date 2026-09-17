@@ -28,6 +28,7 @@ import {
   compileBrowserStyle
 } from "../../../src/browser/build.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
+import { RADIUS_LIFECYCLE_TOOL_DECLARATION } from "../../../src/runtime/declarations.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
@@ -227,8 +228,73 @@ describe("P0-C built Radius extension artifact", () => {
   }, 30_000);
 
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
-    expect(smoke.registration).toEqual(EXPECTED_REGISTRATION);
+    const { lifecycle, authoringBeforeAttachment, ...registration } =
+      smoke.registration;
+    const handoff = authoringBeforeAttachment.result;
+    expect(handoff).toMatchObject({
+      skill: "radius-app-bicep",
+      skillBase: DIST_SKILL,
+      skillVersion: JSON.parse(readFileSync(join(DIST, "package.json"), "utf8"))
+        .version
+    });
+    if (
+      !handoff ||
+      typeof handoff !== "object" ||
+      !("repoPath" in handoff) ||
+      typeof handoff.repoPath !== "string"
+    )
+      throw new Error("Missing legacy workspace handoff.");
+    expect(dirname(handoff.repoPath)).toBe(process.cwd());
+    expect(handoff.repoPath).toContain(".radius-artifact-smoke-");
+    expect({
+      ...registration,
+      authoringBeforeAttachment: {
+        ...authoringBeforeAttachment,
+        result: {
+          ...handoff,
+          repoPath: "<workspace>",
+          skillBase: "<packaged-skill>",
+          skillVersion: "<package-version>"
+        }
+      },
+      tools: registration.tools.filter(
+        (tool) => tool.name !== "radius_lifecycle"
+      )
+    }).toEqual(EXPECTED_REGISTRATION);
+    expect(
+      registration.tools.filter((tool) => tool.name === "radius_lifecycle")
+    ).toEqual([
+      { ...RADIUS_LIFECYCLE_TOOL_DECLARATION, handlerCallable: true }
+    ]);
+    expect(lifecycle).toMatchObject({
+      invalidAuthorityResult: { error: { code: "INVALID_REQUEST" } },
+      unattachedResult: { error: { code: "CAPABILITY_UNAVAILABLE" } }
+    });
     expect(smoke.closeCount).toBe(1);
+    expect(smoke.graphReadResult).toMatchObject({
+      apiVersion: "github-radius/v1",
+      error: { code: "CAPABILITY_UNAVAILABLE" }
+    });
+    // The real composition is attached, but the controlled GH/source boundary
+    // is unavailable. This proves routing/failure, not native validation success
+    // or authenticated authoring; those require their owning runtime tests.
+    expect(smoke.lifecycle).toMatchObject({
+      validationResult: {
+        apiVersion: "github-radius/v1",
+        error: { code: "CAPABILITY_UNAVAILABLE" }
+      },
+      invalidApprovalResult: {
+        apiVersion: "github-radius/v1",
+        error: { code: "INVALID_REQUEST" }
+      },
+      authorResult: {
+        apiVersion: "github-radius/v1",
+        error: { code: "CAPABILITY_UNAVAILABLE" }
+      },
+      sessionSendCount: 0,
+      panelOpenCount: 0,
+      canvasOpenCount: 0
+    });
     // `extension.ts` deliberately swallows uncaughtException/unhandledRejection
     // and reports them only on stderr. The harness already requires exit code 0;
     // here we require graceful shutdown and reject crash-shaped diagnostics
@@ -341,8 +407,12 @@ describe("P0-C built Radius extension artifact", () => {
       ),
       "utf8"
     );
-    expect(radiusTypeResolver).not.toContain("@radius-project/adapter-shared");
-    expect(radiusTypeResolver).not.toContain("packages/adapter-shared");
+    const resolverCode = radiusTypeResolver
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("//"))
+      .join("\n");
+    expect(resolverCode).not.toContain("@radius-project/adapter-shared");
+    expect(resolverCode).not.toContain("packages/adapter-shared");
     expect(radiusTypeResolver).toContain("Managed Radius version query");
     // The installed plugin has no workspace packages beside it, so every
     // surviving import must be a Node builtin or the script fails at runtime.
@@ -695,7 +765,10 @@ describe("P0-C built Radius extension artifact", () => {
     );
 
     expect(skillGuidance).toMatch(
-      /show-radius-type\.mjs` fails while locating, querying, or validating.*stop the modeling run.*promote-app-model\.mjs.*--abort.*report the exact error/su
+      /show-radius-type\.mjs` fails while locating, querying, or validating.*stop and report the actionable error using the selected mode's failure path/su
+    );
+    expect(skillGuidance).toContain(
+      "For canonical failures, send a failed outcome through authenticated `operation.respond` with redacted, actionable diagnostics"
     );
     expect(skillGuidance).toMatch(
       /missing binary.*invalid or incomplete version JSON.*noncanonical commit.*unsupported development, edge, or pull-request version/su
@@ -709,6 +782,49 @@ describe("P0-C built Radius extension artifact", () => {
       );
       expect(guidance).toMatch(/never search.*PATH.*\.rad\/bin.*fallback/isu);
     }
+  });
+  it("ships distinct legacy and canonical authoring guidance without an authority fallback", () => {
+    assertCurrentArtifact();
+    const guidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+    for (const contract of [
+      "CAPABILITY_UNAVAILABLE",
+      "trusted operation/action/staging handoff",
+      "authenticated `operation.respond`",
+      "Never supply `approved: true`",
+      "Never invoke standalone begin, seal, promotion, or abort commands for that operation",
+      "Never manufacture `validatedOutputs`",
+      "An origin hash alone is insufficient",
+      "six compiles",
+      "`--validate-json`",
+      "each agent compile still counts",
+      "advisory classifications are fixed before execution",
+      "Every compiler, type, source, secret, runtime, reference, and recipe warning is required",
+      "cannot complete a lifecycle action",
+      "without separate authorization",
+      "Never switch an accepted canonical operation to legacy",
+      "The existing begin, validate, origin, promote sequence also remains supported"
+    ])
+      expect(guidance).toContain(contract);
+    const boundary = guidance.split("## Prerequisites")[0];
+    expect(boundary).not.toContain(
+      "the promote script publishes and stages the run"
+    );
+    expect(boundary).not.toContain('promote-app-model.mjs" --begin');
+    expect(boundary).not.toContain('promote-app-model.mjs" --staging');
+    expect(guidance).toContain('promote-app-model.mjs" --begin');
+    expect(guidance).toContain('promote-app-model.mjs" --staging');
+    const graph = readFileSync(
+      join(DIST, "skills", "radius-app-graph", "SKILL.md"),
+      "utf8"
+    );
+    expect(graph).toContain("Graph reads are read-only");
+    expect(graph).toContain("explicit committed base and head refs");
+    expect(graph).toContain("CAPABILITY_UNAVAILABLE");
+    expect(graph).not.toContain("queues the authoring turn");
+    expect(graph).not.toContain("queues exactly one authoring handoff");
+    expect(graph).not.toContain(
+      "PR-diff-preview views render straight from the on-disk"
+    );
   });
 
   it("packages the schema-sensitivity credential contract, not a property-name rule", () => {

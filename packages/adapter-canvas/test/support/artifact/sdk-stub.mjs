@@ -3,6 +3,9 @@ import { join, relative, resolve } from "node:path";
 
 let joinCount = 0;
 let joinedDeclaration;
+let sessionSendCount = 0;
+let panelOpenCount = 0;
+let canvasOpenCount = 0;
 
 const REQUIRED_SKILL_FILES = [
   "SKILL.md",
@@ -26,7 +29,13 @@ function send(message) {
 }
 
 export function createCanvas(declaration) {
-  return declaration;
+  return {
+    ...declaration,
+    open: (...args) => {
+      canvasOpenCount++;
+      return declaration.open(...args);
+    }
+  };
 }
 
 export async function joinSession(declaration) {
@@ -35,19 +44,43 @@ export async function joinSession(declaration) {
   const generateApp = declaration.tools.find(
     (tool) => tool.name === "radius_generate_app"
   );
-  const bootstrapText = await generateApp?.handler({
+  if (!generateApp) throw new Error("Radius generate app was not registered.");
+  const generateAppText = await generateApp.handler({
     repoPath: process.env.RADIUS_ARTIFACT_WORKSPACE
   });
-  const bootstrap = JSON.parse(String(bootstrapText));
+  const generateAppResult = JSON.parse(String(generateAppText));
   const artifactDir = resolve(process.env.RADIUS_ARTIFACT_ROOT);
-  const skillBase = String(bootstrap.skillBase);
+  // Packaging evidence is independent of authoring: a refusal must never be
+  // reinterpreted as a skill handoff or supply a path to inspect.
+  const skillBase = join(artifactDir, "skills", "radius-app-bicep");
   const packageVersion = JSON.parse(
     readFileSync(join(artifactDir, "package.json"), "utf8")
   ).version;
+  const pluginVersion = JSON.parse(
+    readFileSync(join(artifactDir, "plugin.json"), "utf8")
+  ).version;
+  const lifecycle = declaration.tools.find(
+    (tool) => tool.name === "radius_lifecycle"
+  );
+  if (!lifecycle) throw new Error("Radius lifecycle was not registered.");
+  const lifecycleIntent = {
+    operation: "operation.respond",
+    target: { repo: "fixture/repository" },
+    input: {
+      operationId: "missing",
+      actionId: "action",
+      response: { kind: "user.decision", choice: "approve" }
+    }
+  };
+  const invalidAuthorityResult = JSON.parse(
+    await lifecycle.handler({ ...lifecycleIntent, approved: true })
+  );
+  const unattachedResult = JSON.parse(await lifecycle.handler(lifecycleIntent));
   await send({
     type: "registered",
     snapshot: {
       joinCount,
+      lifecycle: { invalidAuthorityResult, unattachedResult },
       canvases: declaration.canvases.map((canvas) => ({
         id: canvas.id,
         displayName: canvas.displayName,
@@ -74,37 +107,92 @@ export async function joinSession(declaration) {
           callable: typeof hook === "function"
         }))
         .sort((left, right) => left.name.localeCompare(right.name)),
-      bootstrap: {
-        fields: Object.keys(bootstrap),
-        skill: bootstrap.skill,
-        repoPathMatchesWorkspace:
-          bootstrap.repoPath === process.env.RADIUS_ARTIFACT_WORKSPACE,
+      authoringBeforeAttachment: {
+        result: generateAppResult,
+        sessionSendCount,
+        panelOpenCount,
+        canvasOpenCount,
+        containsLegacyInlinedHeading: String(generateAppText).includes(
+          LEGACY_INLINED_HEADING
+        )
+      },
+      packagedSkill: {
         skillBaseRelativeToArtifact: relative(
           artifactDir,
           skillBase
         ).replaceAll("\\", "/"),
-        skillVersionMatchesPackage: bootstrap.skillVersion === packageVersion,
-        instruction: bootstrap.instruction,
+        packageVersionPresent:
+          typeof packageVersion === "string" && packageVersion.length > 0,
+        pluginVersionMatchesPackage: pluginVersion === packageVersion,
         requiredFiles: REQUIRED_SKILL_FILES.filter((requiredFile) =>
           existsSync(join(skillBase, requiredFile))
-        ),
-        containsLegacyInlinedHeading: String(bootstrapText).includes(
-          LEGACY_INLINED_HEADING
         )
       }
     }
   });
   return {
     workspacePath: process.env.RADIUS_ARTIFACT_WORKSPACE,
-    send: async () => undefined,
+    send: async () => {
+      sessionSendCount++;
+    },
     log: () => undefined,
-    rpc: { canvas: { open: async () => ({}) } },
+    rpc: {
+      canvas: {
+        open: async () => {
+          panelOpenCount++;
+          return {};
+        }
+      }
+    },
     metadata: { snapshot: async () => ({}) },
     close: () => send({ type: "shutdown", closeCount: 1 })
   };
 }
 
 export async function renderArtifactPage() {
+  const lifecycle = joinedDeclaration?.tools.find(
+    (tool) => tool.name === "radius_lifecycle"
+  );
+  if (!lifecycle) throw new Error("Radius lifecycle was not registered.");
+  const graphReadResult = JSON.parse(
+    await lifecycle.handler({
+      operation: "graph.get",
+      target: { repo: "fixture/repository" },
+      input: { kind: "authored" }
+    })
+  );
+  const validationIntent = {
+    operation: "definition.validate",
+    target: {
+      repo: "fixture/repository",
+      definition: ".radius/app.bicep"
+    },
+    input: {}
+  };
+  const validationResult = JSON.parse(
+    await lifecycle.handler(validationIntent)
+  );
+  const invalidApprovalResult = JSON.parse(
+    await lifecycle.handler({ ...validationIntent, approved: true })
+  );
+  const authorResult = JSON.parse(
+    await lifecycle.handler({
+      operation: "definition.author",
+      target: validationIntent.target,
+      input: { intent: "Model the workspace application.", provider: "azure" }
+    })
+  );
+  await send({
+    type: "lifecycle",
+    evidence: {
+      validationResult,
+      invalidApprovalResult,
+      authorResult,
+      sessionSendCount,
+      panelOpenCount,
+      canvasOpenCount
+    }
+  });
   const canvas = joinedDeclaration?.canvases.find(
     (candidate) => candidate.id === "radius"
   );
@@ -123,7 +211,7 @@ export async function renderArtifactPage() {
     if (!response.ok) {
       throw new Error(`Artifact page returned HTTP ${response.status}.`);
     }
-    return await response.text();
+    return { html: await response.text(), graphReadResult };
   } finally {
     if (opened) await canvas.onClose(context);
   }

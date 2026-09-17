@@ -19,6 +19,8 @@ import { promisify } from "node:util";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
+import type { HostCallerBinding } from "@radius-project/core/lifecycle";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
   computeGraphDiff,
@@ -31,7 +33,15 @@ import {
   runRadBicepPublishExtension,
   runRadBicepPublish
 } from "@radius-project/adapter-shared";
-import { github, fetchFileFromRepo, getBranchHeadSha } from "./gh.js";
+import {
+  github,
+  fetchFileFromRepo,
+  getBranchHeadSha,
+  getGitHubIdentity,
+  resetGhIdentityCache,
+  createSelectedGhExecutor,
+  runCommand
+} from "./gh.js";
 import {
   defaultBranchForState,
   detectWorkspaceContext,
@@ -83,6 +93,7 @@ import {
   configureOperationStore,
   onOperationTerminal,
   setupInFlight,
+  operations,
   summarize
 } from "./operations.js";
 import {
@@ -91,7 +102,10 @@ import {
 } from "./operation-store.js";
 import { configureCredentialProvenanceStore } from "./credential-provenance.js";
 import { createFileCredentialProvenanceStore } from "./credential-provenance-store.js";
-import { radiusAppBicepSkill } from "./skill.js";
+import {
+  radiusAppBicepSkill,
+  radiusAppBicepValidationScript
+} from "./skill.js";
 import { createGeneratorVersionReader } from "./generator-version.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
@@ -106,6 +120,21 @@ import { createSessionHolder } from "./runtime/session.js";
 import type { SessionPort } from "./runtime/session.js";
 import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
+import { createLifecycleBinding } from "./runtime/create-lifecycle-binding.js";
+import {
+  createCanvasLifecycleAuthority,
+  unavailableCanvasLifecyclePrerequisite
+} from "./runtime/lifecycle-authorization.js";
+import { createLifecycleSetupStore } from "./runtime/lifecycle-setup-store.js";
+import { createCanvasDiscoveryContext } from "./runtime/create-discovery-context.js";
+import { mkdir } from "node:fs/promises";
+import {
+  createGraphCompilationAdapter,
+  createDefinitionValidationAdapter,
+  nodeSourceFileSystem,
+  acquireManagedGraphBinaries,
+  runRadAppGraph
+} from "@radius-project/adapter-shared";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -115,9 +144,106 @@ const execFileAsync = promisify(execFile);
 
 // ─── Production dependency wiring ────────────────────────────────────────────
 const sessionHolder = createSessionHolder();
+const lifecycleHostBinding: HostCallerBinding = {
+  bindingRef: randomUUID(),
+  sessionRef: randomUUID()
+};
+const lifecycleBinding = () => {
+  sessionHolder.get();
+  return lifecycleHostBinding;
+};
+const lifecycleSetupStore = createLifecycleSetupStore({
+  registry: () => operations
+});
+const lifecycleAuthority = createCanvasLifecycleAuthority({
+  binding: lifecycleBinding,
+  identity: () => {
+    resetGhIdentityCache();
+    return getGitHubIdentity();
+  },
+  workspace: () => detectWorkspaceContext(sessionHolder.get()),
+  executor: createSelectedGhExecutor,
+  // Tool arguments cannot prove user approval or authenticated agent output.
+  responseAuthority: async () => unavailableCanvasLifecyclePrerequisite()
+});
+const lifecycleClock = { now: () => new Date().toISOString() };
+const lifecycleIds = { next: () => randomUUID() };
+const discoveryContext = createCanvasDiscoveryContext({
+  ids: lifecycleIds,
+  clock: lifecycleClock,
+  authority: lifecycleAuthority,
+  hostBinding: lifecycleBinding,
+  workspace: () => detectWorkspaceContext(sessionHolder.get()),
+  storageRoot: join(
+    os.homedir(),
+    ".radius",
+    "ai-extensions",
+    "source-snapshots"
+  ),
+  executor: createSelectedGhExecutor,
+  git: (root, args, control) => {
+    const abort = new AbortController();
+    const unsubscribe = control.cancellation.onAbort(() => abort.abort());
+    return runCommand("git", ["-C", root, ...args], {
+      timeout: 5000,
+      signal: abort.signal
+    }).finally(unsubscribe);
+  }
+});
+const graphStorageRoot = join(
+  os.homedir(),
+  ".radius",
+  "ai-extensions",
+  "graph-compilations"
+);
+const compilationDependencies: Omit<
+  Parameters<typeof createGraphCompilationAdapter>[0],
+  "runGraph"
+> = {
+  source: discoveryContext.source,
+  files: nodeSourceFileSystem,
+  storageRoot: graphStorageRoot,
+  ids: lifecycleIds,
+  acquireBinaries: async (control) => {
+    await mkdir(graphStorageRoot, { recursive: true });
+    return acquireManagedGraphBinaries(control);
+  },
+  trustedPath: [],
+  ...(process.env.SystemRoot ? { systemRoot: process.env.SystemRoot } : {}),
+  timeoutMs: 120_000
+};
+const graphCompiler = createGraphCompilationAdapter({
+  ...compilationDependencies,
+  runGraph: runRadAppGraph
+});
+const lifecycle = createLifecycleBinding({
+  ids: lifecycleIds,
+  clock: lifecycleClock,
+  hostBinding: lifecycleBinding,
+  authority: lifecycleAuthority,
+  ...discoveryContext,
+  definitions: {
+    source: discoveryContext.source,
+    validator: createDefinitionValidationAdapter({
+      ...compilationDependencies,
+      nodePath: process.execPath,
+      scriptPath: radiusAppBicepValidationScript()
+    })
+  },
+  graphs: {
+    source: discoveryContext.source,
+    graph: {
+      ...graphCompiler,
+      observeDeployed: discoveryContext.observeDeployed
+    },
+    environment: discoveryContext.environments
+  },
+  knownLegacyOperations: () => lifecycleSetupStore.knownOperations()
+});
 
 const ghCommandPresentation = resolveGhCommandPresentation();
 const dependencies: RadiusExtensionDependencies = {
+  lifecycle,
   logError: (message) => console.error(message),
   session: sessionHolder,
   clock: {
@@ -130,7 +256,11 @@ const dependencies: RadiusExtensionDependencies = {
       })
   },
   servers,
-  getOrCreateServer,
+  getOrCreateServer: async (instanceId, page) => {
+    const entry = await getOrCreateServer(instanceId, page);
+    entry.graphLifecycle = lifecycle;
+    return entry;
+  },
   getLastWebviewActivityAt,
   workspace: {
     hasRadiusApplicationModel,

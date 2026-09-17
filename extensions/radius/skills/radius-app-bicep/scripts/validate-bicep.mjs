@@ -21,6 +21,8 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { validateAzureRecipePack } from "./radius-recipe-pack.mjs";
 
 const STAGING_RUN_RECORD = "run.json";
 // The resolved type contract show-radius-type.mjs stages for this run: a map of
@@ -139,7 +141,11 @@ function readRunRecord(app) {
   } catch (error) {
     // A record that is absent means this is not a staged run. A record that
     // exists but cannot be read is a staged run whose bookkeeping is broken.
-    if (error.code === "ENOENT") return null;
+    if (
+      error.code === "ENOENT" &&
+      !path.basename(path.dirname(app)).startsWith(".staging-")
+    )
+      return null;
     return { file, record: null, state: null, unusable: true };
   }
   let parsed;
@@ -907,7 +913,13 @@ function secureTargetFinding(contract, type, property, parameter) {
   );
 }
 
-function scanSecureParameterTargets(template, app, contract, parentPath = "") {
+function scanSecureParameterTargets(
+  template,
+  app,
+  contract,
+  parentPath = "",
+  onMissingEvidence
+) {
   let failed = false;
   const secure = secureParameterNames(template);
   for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
@@ -922,7 +934,8 @@ function scanSecureParameterTargets(template, app, contract, parentPath = "") {
             nestedTemplate,
             app,
             contract,
-            resourcePath
+            resourcePath,
+            onMissingEvidence
           )
         ) {
           failed = true;
@@ -954,6 +967,13 @@ function scanSecureParameterTargets(template, app, contract, parentPath = "") {
       if (reference === null || !secure.has(reference[1])) {
         continue;
       }
+      if (
+        onMissingEvidence &&
+        contract.types[resource.type]?.[property] === undefined
+      ) {
+        onMissingEvidence();
+        continue;
+      }
       const finding = secureTargetFinding(
         contract,
         resource.type,
@@ -972,7 +992,12 @@ function scanSecureParameterTargets(template, app, contract, parentPath = "") {
   return failed;
 }
 
-function checkSecureParameterTargets(template, app, contract) {
+function checkSecureParameterTargets(
+  template,
+  app,
+  contract,
+  onMissingEvidence
+) {
   // A staged contract that exists but cannot be read fails the compile whether
   // or not the model assigns a secure parameter anywhere. The file is this
   // check's only evidence, and reporting nothing would be indistinguishable
@@ -988,21 +1013,34 @@ function checkSecureParameterTargets(template, app, contract) {
   if (contract.status === "unstaged") {
     return false;
   }
-  return scanSecureParameterTargets(template, app, contract);
+  return scanSecureParameterTargets(
+    template,
+    app,
+    contract,
+    "",
+    onMissingEvidence
+  );
 }
-
-const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
-const bicep = path.join(
-  os.homedir(),
-  ".radius",
-  "ai-extensions",
-  "bin",
-  executable
-);
 
 // Compiles the model and reports what Bicep rejected. Unchanged from what this
 // script has always done; the budget wraps it rather than living inside it.
-function check(app, staged) {
+function check(app, staged, selectedBicep) {
+  const requested = process.argv.indexOf("--bicep");
+  const bicep =
+    selectedBicep ??
+    (requested >= 0 ?
+      process.argv[requested + 1]
+    : path.join(
+        os.homedir(),
+        ".radius",
+        "ai-extensions",
+        "bin",
+        process.platform === "win32" ? "bicep.exe" : "bicep"
+      ));
+  if (typeof bicep !== "string" || !path.isAbsolute(bicep)) {
+    report("--bicep requires an absolute executable path.");
+    return 1;
+  }
   const compiled = spawnSync(
     bicep,
     ["build", app, "--diagnostics-format", "sarif", "--stdout"],
@@ -1131,4 +1169,187 @@ function main() {
   return status;
 }
 
-process.exitCode = main();
+// Standalone promotion retains the shipped checks, not canonical evidence
+// classification. Its independent verification never reserves an agent attempt.
+export function verifyLegacyDefinition(app, bicep) {
+  if (!path.isAbsolute(app) || !path.isAbsolute(bicep))
+    throw new Error(
+      "Legacy verification requires absolute artifact and compiler paths."
+    );
+  return check(app, true, bicep);
+}
+
+// Machine mode consumes the isolated runner's compiler output. It never starts
+// another compiler or reads/writes a run counter, origin record, or source file.
+function isCompiledTemplate(template) {
+  return (
+    isPlainObject(template) &&
+    (isPlainObject(template.resources) || Array.isArray(template.resources))
+  );
+}
+
+export function validateCompiledDefinition({
+  app,
+  templateText,
+  diagnosticsText,
+  compilerStatus,
+  provider,
+  recipeFiles = []
+}) {
+  const checks = [];
+  const add = (checkId, status) => checks.push({ checkId, status });
+  const findings = diagnostics(diagnosticsText);
+  const compilerFailed =
+    compilerStatus === "failed" || findings?.some(isFailure) === true;
+  add(
+    "bicep-compile",
+    compilerFailed ? "failed"
+    : findings === null ? "unavailable"
+    : "passed"
+  );
+  let template;
+  try {
+    template = JSON.parse(templateText);
+  } catch {
+    template = null;
+  }
+  if (!isCompiledTemplate(template)) {
+    if (!compilerFailed) checks[0].status = "unavailable";
+    for (const id of [
+      "type-compatibility",
+      "secret-safety",
+      "runtime-contract",
+      "reference-consistency",
+      "recipe-constraints"
+    ])
+      add(id, "unavailable");
+    return { version: 1, checks };
+  }
+
+  const types = new Set();
+  const visit = (current) => {
+    for (const resource of Object.values(current.resources)) {
+      if (resource?.type === "Microsoft.Resources/deployments") {
+        if (isCompiledTemplate(resource.properties?.template))
+          visit(resource.properties.template);
+        else types.add("unresolved-module");
+      } else if (typeof resource?.type === "string") {
+        types.add(resource.type);
+      } else {
+        types.add("unresolved-resource");
+      }
+    }
+  };
+  visit(template);
+  const contract = readResolvedTypes(app, true);
+  const schemasComplete =
+    types.size === 0 ||
+    (contract.status === "ready" &&
+      [...types].every((type) => Object.hasOwn(contract.types, type)));
+  add(
+    "type-compatibility",
+    compilerFailed ? "failed"
+    : findings === null || !schemasComplete ? "unavailable"
+    : "passed"
+  );
+  // Missing schema evidence is not a failed secret assignment. Still run the
+  // existing scanner when evidence exists, so one unresolved type cannot hide
+  // a known unsafe assignment on another type.
+  let secretEvidenceComplete = schemasComplete;
+  const secretFailed =
+    contract.status === "ready" &&
+    checkSecureParameterTargets(template, app, contract, () => {
+      secretEvidenceComplete = false;
+    });
+  add(
+    "secret-safety",
+    secretFailed ? "failed"
+    : secretEvidenceComplete ? "passed"
+    : "unavailable"
+  );
+  const runtimeFailed = checkRuntimeVariableExpansion(template, app);
+  const buildFailed = checkContainerImageBuildSources(template, app);
+  const referenceFailed = checkSourceCodeReferences(template, app);
+  // Applications are grouping resources: they have no workload/client, source
+  // reference, or provisioning Recipe contract. The existing reference scanner
+  // exempts this same type. Inspect every nested resource, not just the root:
+  // unknown types and unresolved modules cannot prove non-applicability.
+  const hasResourceContracts = [...types].some(
+    (type) => !type.startsWith("Radius.Core/applications@")
+  );
+  add(
+    "runtime-contract",
+    runtimeFailed ? "failed"
+    : hasResourceContracts ? "unavailable"
+    : "passed"
+  );
+  add(
+    "reference-consistency",
+    buildFailed || referenceFailed ? "failed"
+    : hasResourceContracts ? "unavailable"
+    : "passed"
+  );
+  let recipeFailed = false;
+  if (provider === "azure") {
+    for (const file of recipeFiles) {
+      // This is structure evidence only, not proof of target registration,
+      // provider output mapping, or the application's client parser contract.
+      let recipe;
+      try {
+        recipe = readFileSync(file, "utf8");
+      } catch {
+        // The declared Recipe still requires evidence; unreadability must not
+        // be presented as either a passed check or an invalid Recipe.
+        continue;
+      }
+      try {
+        validateAzureRecipePack(recipe);
+      } catch {
+        recipeFailed = true;
+      }
+    }
+  }
+  add(
+    "recipe-constraints",
+    recipeFailed ? "failed"
+    : hasResourceContracts || recipeFiles.length > 0 ? "unavailable"
+    : "passed"
+  );
+  return { version: 1, checks };
+}
+
+export function validateCompiledDefinitionFiles(args) {
+  const [app, template, sarif, compilerStatus, provider, ...recipeFiles] = args;
+  if (
+    ![app, template, sarif].every(
+      (file) => typeof file === "string" && path.isAbsolute(file)
+    ) ||
+    !["passed", "failed"].includes(compilerStatus) ||
+    (provider !== undefined &&
+      !["azure", "aws", "unspecified"].includes(provider)) ||
+    !recipeFiles.every((file) => path.isAbsolute(file))
+  ) {
+    throw new Error(
+      "Machine validation requires explicit owned artifact paths."
+    );
+  }
+  return validateCompiledDefinition({
+    app,
+    templateText: readFileSync(template, "utf8"),
+    diagnosticsText: readFileSync(sarif, "utf8"),
+    compilerStatus,
+    provider,
+    recipeFiles
+  });
+}
+
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  if (process.argv[2] === "--validate-json")
+    console.log(
+      JSON.stringify(validateCompiledDefinitionFiles(process.argv.slice(3)))
+    );
+  else process.exitCode = main();
+}

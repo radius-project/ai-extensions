@@ -236,6 +236,130 @@ function createConfirmingDialog() {
 }
 
 describe("initializeDeployedGraphPage", () => {
+  it("renders retained timeout monitoring without treating it as deployed inventory or polling it", async () => {
+    const h = fixture();
+    h.browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          unavailable: true,
+          reason: "RESULT_UNAVAILABLE",
+          error: "No current deployed graph.",
+          retainedMonitoring: {
+            repo: "octo/app",
+            application: "app",
+            environment: "dev",
+            runId: 7,
+            resources: [
+              {
+                id: "web",
+                name: "web",
+                type: "Radius.Compute/containers",
+                deployStatus: "failed",
+                deployMessage: "Monitoring timed out."
+              }
+            ]
+          },
+          deletionInventory: { resources: [{ id: "untrusted" }] }
+        })
+    );
+    const render = globals();
+    const cleanup = initializeDeployedGraphPage(h.browser.context, render);
+    await flushPromises();
+    expect(render.radiusRenderGraph).toHaveBeenCalledWith(
+      "graph-container",
+      [
+        expect.objectContaining({
+          id: "web",
+          deployMessage: "Monitoring timed out."
+        })
+      ],
+      expect.objectContaining({ deployMode: true })
+    );
+    expect(fakeText(h.note)).toContain(
+      "Retained monitoring results from run 7; not a current deployed observation."
+    );
+    const before = h.browser.net.calls.length;
+    h.browser.document.visibilityState = "hidden";
+    h.browser.document.dispatch("visibilitychange");
+    h.browser.document.visibilityState = "visible";
+    h.browser.document.dispatch("visibilitychange");
+    await flushPromises();
+    expect(h.browser.net.calls.length).toBe(before);
+    cleanup();
+  });
+  it("shows unavailable evidence when optional progress and confirmation markup is absent", async () => {
+    const h = fixture();
+    h.browser.document.remove("deployed-progress-steps");
+    h.browser.document.remove("env-confirm-modal");
+    h.browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () =>
+        jsonResponse({
+          unavailable: true,
+          reason: "RESULT_UNAVAILABLE",
+          error: "No deployed evidence."
+        })
+    );
+    const render = globals();
+    const cleanup = initializeDeployedGraphPage(h.browser.context, render);
+    await flushPromises();
+    expect(fakeText(h.container)).toContain("No deployed evidence.");
+    expect(render.radiusRenderGraph).not.toHaveBeenCalled();
+    cleanup();
+    expect(h.browser.clock.pending).toBe(0);
+  });
+  it.each(["unavailable", "stale", "deployed"] as const)(
+    "renders canonical %s observations without an authored fallback",
+    async (mode) => {
+      const h = fixture();
+      const payload =
+        mode === "deployed" ?
+          {
+            mode,
+            resources: [
+              {
+                id: "observed",
+                name: "observed",
+                type: "Radius.Compute/containers"
+              }
+            ]
+          }
+        : mode === "stale" ? { stale: true }
+        : {
+            unavailable: true,
+            reason: "RESULT_UNAVAILABLE",
+            error: "Recorded evidence is unavailable."
+          };
+      h.browser.net.handle(
+        "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+        () => jsonResponse(payload)
+      );
+      const render = globals();
+      const cleanup = initializeDeployedGraphPage(h.browser.context, render);
+      await flushPromises();
+      if (mode === "deployed") {
+        expect(render.radiusRenderGraph).toHaveBeenCalled();
+        expect(fakeText(h.note)).toBe("Recorded deployed observation.");
+      } else {
+        expect(render.radiusRenderGraph).not.toHaveBeenCalled();
+        expect(fakeText(h.container)).toContain(
+          mode === "stale" ?
+            "selected deployment changed"
+          : "Recorded evidence is unavailable"
+        );
+        expect(fakeText(h.note)).toBe(
+          "Authored topology is not a deployed observation."
+        );
+      }
+      expect(
+        h.browser.net.calls.find((call) =>
+          call.url.startsWith("/api/list-environments")
+        )?.init?.headers
+      ).toEqual({ "X-Radius-Read-Only": "true" });
+      cleanup();
+    }
+  );
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializeDeployedGraphPage(browser.context, globals());

@@ -127,8 +127,9 @@ describe("RU-02: action declarations", () => {
 
 // RU-03: tool names/schemas/descriptions/unique.
 describe("RU-03: tool declarations", () => {
-  it("declares exactly the retained 7 tool names, in order", () => {
+  it("declares the additive lifecycle tool and retains the 7 tool names in order", () => {
     expect(RADIUS_TOOL_DECLARATIONS.map((t) => t.name)).toEqual([
+      "radius_lifecycle",
       "radius_generate_app",
       "radius_report_modeling_failure",
       "radius_generate_pr_diff_markdown",
@@ -164,8 +165,10 @@ describe("RU-03: tool declarations", () => {
       (tool) => tool.name === "radius_generate_app"
     )!;
 
-    expect(declaration.description).toContain("returns one JSON object");
-    expect(declaration.description).toContain("optional ambiguity brief");
+    expect(declaration.description).toContain("definition.author");
+    expect(declaration.description).toContain("CAPABILITY_UNAVAILABLE");
+    expect(declaration.description).toContain("trusted approval");
+    expect(declaration.description).toContain("subdirectory");
     expect(declaration.description).toContain("returns a Markdown refusal");
   });
 
@@ -173,6 +176,9 @@ describe("RU-03: tool declarations", () => {
     const declaration = RADIUS_TOOL_DECLARATIONS.find(
       (tool) => tool.name === "radius_report_modeling_failure"
     )!;
+    expect(declaration.description).toContain("legacy Canvas diagnostic");
+    expect(declaration.description).toContain("cannot complete");
+    expect(declaration.description).toContain("authenticated agent outcome");
 
     expect(declaration.parameters.required).toEqual([
       "instanceId",
@@ -248,13 +254,13 @@ describe("RU-03: tool declarations", () => {
 
     it("never requires publishing the current worktree for a graph diff", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "Do not commit or push the current worktree merely to compare it."
+        "Do not commit or push merely to make a graph available."
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "whichever side exactly matches the current workspace repo and branch"
+        "uncommitted worktree changes are not part of that comparison"
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "report that the diff is unavailable rather than publishing the worktree"
+        "report that result instead of publishing the worktree"
       );
     });
 
@@ -274,6 +280,21 @@ describe("RU-03: tool declarations", () => {
       for (const line of RADIUS_SESSION_START_CONTEXT.split("\n")) {
         expect(line).not.toMatch(/^\s{4,}\d\./);
       }
+    });
+    it("keeps graph reads separate from authorized authoring and committed diffs", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Graph reads are read-only"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "explicit committed base and head refs"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain("CAPABILITY_UNAVAILABLE");
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "If it does not, author it"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "graph-diff page also reads an on-disk"
+      );
     });
   });
 

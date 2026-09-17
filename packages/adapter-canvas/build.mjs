@@ -98,12 +98,13 @@ const pluginSources = [
 // build but not in a plain local one.
 const optionalPluginSources = [[extensionDir, "CHANGELOG.md"]];
 
-// esbuild refuses a file it has no loader for, so an unlisted extension added
-// to the plugin tree fails the build instead of silently not shipping.
+// Copy assets verbatim. In particular, esbuild's TypeScript loader would turn
+// a declaration asset into an empty .d.js instead of preserving its contract.
 const pluginAssetLoaders = {
   ".json": "copy",
   ".md": "copy",
   ".mjs": "copy",
+  ".mts": "copy",
   ".png": "copy"
 };
 
@@ -255,13 +256,8 @@ async function assembleDist(bundleInputs) {
   );
   const resolverBuild = await esbuild.build({
     entryPoints: [radiusTypeResolver],
-    outfile: join(
-      distDir,
-      "skills",
-      "radius-app-bicep",
-      "scripts",
-      "show-radius-type.mjs"
-    ),
+    outExtension: { ".js": ".mjs" },
+    outdir: join(distDir, "skills", "radius-app-bicep", "scripts"),
     bundle: true,
     format: "esm",
     platform: "node",

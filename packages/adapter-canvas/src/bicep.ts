@@ -165,8 +165,24 @@ export function buildAppGraphRadCommand(appName: unknown): string {
 // `name: '...'` in the file, mirroring the deploy workflow's own extraction
 // (`grep -oP "name:\s*'\K[^']+" .radius/app.bicep | head -1`). Returns "" when
 // no name can be found.
-export function extractAppName(source: unknown): string {
+export function extractAppName(
+  source: unknown,
+  options: { strict?: boolean } = {}
+): string {
   if (typeof source !== "string" || !source) return "";
+  if (options.strict) {
+    if (source.includes("/*") || source.includes("'''")) return "";
+    const declarations = [
+      ...source.matchAll(
+        /^\s*resource\s+\w+\s+['"](?:Radius|Applications)\.Core\/applications@[^'"]+['"]/gm
+      )
+    ];
+    if (declarations.length !== 1) return "";
+    const literal = source.match(
+      /^\s*resource\s+\w+\s+['"](?:Radius|Applications)\.Core\/applications@[^'"]+['"]\s*=\s*\{\s*name:\s*['"]([A-Za-z0-9][A-Za-z0-9_.-]*)['"](?=\s*(?:$|}))/m
+    );
+    return literal ? literal[1] : "";
+  }
   const onResource = source.match(
     /applications@[^'"]*['"]\s*=\s*\{[\s\S]*?\bname:\s*['"]([^'"]+)['"]/
   );

@@ -49,6 +49,45 @@ Use [the current test plan](../../../docs/design/2026-08-radius-canvas-test-plan
 
 Every applicable row is cumulative. Unit tests target 100% changed-code coverage; existing aggregate/package/browser thresholds remain hard floors. Existing legacy untyped code is not a reason to introduce casts or success-shaped fallbacks into the new contract.
 
+## Current Discovery Migration Inventory
+
+The canonical discovery migration is complete through T026, including its existing browser journeys. This inventory records retained behavior, not a claim that the graph or mutation migrations are complete.
+
+- `GET /api/list-applications` uses `createLegacyDiscoveryReader`, core `createApplicationDiscovery`, shared `createApplicationReadAdapter`, and authorized source capture. Its single-application serialization selects the first canonical definition and warns about additional definitions. Confirmed absence is an empty list; an unavailable lookup can retain a compatibility label only with an explicit error.
+- `GET /api/list-environments` uses that reader, core `createEnvironmentDiscovery`, and shared `createEnvironmentReadAdapter`. Compatibility configuration metadata comes from the same successful inspection. Partial rows retain an explicit error; incomplete results are neither cached nor workflow-synced. Cache reuse requires matching reader/repository scope and fresh repository visibility.
+- Legacy environment enrichment still performs auxiliary verification and deployment-status GETs. Successful legacy listing still permits its existing background workflow synchronization. Neither behavior is introduced into the panel-free lifecycle discovery operations.
+- Other deployment/deletion paths retain their existing resolver and mutation routing. Legacy deployment-status repair remains unchanged until T064.
+- Graph tools, routes, and pages use the canonical implementation accepted through T038. The checkpoint does not make unavailable recipe or deployed graph evidence available.
+
+## Current Graph Migration Inventory
+
+The graph migration is accepted through T038, with the supported-source and evidence limitations documented in the quickstart.
+
+- The lifecycle tool, retained PR-diff tool, Canvas diff open, authored/planned POST routes, graph SSE route, and deployed GET route use the same lifecycle binding and core `createLifecycleGraphs` service. Authored compilation flows through shared `createGraphCompilationAdapter`, owned captured bytes, `runRadAppGraph`, and the non-inheriting process boundary.
+- Missing definitions no longer initiate model generation or indefinite modeling waits. Compilation failures no longer initiate repair. Planned reads do not substitute provider defaults, and deployed reads do not substitute authored or modeled topology. Separate explicit authoring and publication tools remain.
+- Retained route methods, ownership, and SSE framing are preserved. Superseded canonical reads return JSON HTTP 409; existing external failures and unsupported execution return HTTP 400 with explicit unavailable evidence. Observed missing definitions return HTTP 200 unavailable without resources or authoring. Missing instances retain bare HTTP 503. SSE retains its headers and exactly one terminal `done` frame for underlying success, unavailable, 400, or 409 outcomes. The retired staging pipeline's bare-409 exit has no surviving staging equivalent; the migration does not recreate staging or automatic authoring.
+- Source freshness uses the captured input-closure fingerprint, including supporting and binary inputs. Heartbeat reads the current fingerprint through trusted workspace resolution without compiling or authoring.
+- Exact-run retained monitoring is separate from canonical graph evidence. It requires matching repository/application/environment, a recorded positive run ID, eligible failed or unconfirmed monitoring, settled resource status, and generation/run fencing. It is not available after authorization failure and cannot provide deletion inventory.
+- `createPlannedGraphRecoveryService`, with legacy graph building and provider-default recipe helpers, remains within deployment monitoring. Deployment-status repair remains unchanged until T064. Neither is part of migrated graph reads.
+- The old `graph-pipeline.ts` retains tests and type references but is not constructed by migrated production graph routes. Non-emitted legacy modeling/reload browser branches remain compatibility code.
+- Ordinary legacy environment listing can still synchronize workflows. Graph selectors send `X-Radius-Read-Only: true` to suppress this side effect.
+- The catalog still has 21 operations; the seven legacy tools, two actions, seven pages, and 52 routes remain alongside the additive lifecycle tool. Compilation environment isolation is not an OS sandbox, and the checkpoint does not claim registry-restoration or actual-host support.
+
+## Authoring and Validation Checkpoint
+
+- Standalone validation uses the shared captured-source executor, isolated Bicep build, the shipped validator's machine mode, and the fixed required/advisory policy. Missing required evidence stays incomplete; validation does not become authoring or deployment.
+- Authenticated authoring is implemented through core operations/actions, the host-port agent bridge, actual proposal validation, and the existing promotion machinery. The current SDK cannot prove its required approval/assignment authority, so actual-host lifecycle authoring remains unavailable.
+- The retained generation tool follows the selected writer: legacy selection preserves its usable bootstrap and modelability behavior; lifecycle selection never falls back on failure. A writer change during legacy discovery rejects the request instead of handing off or redispatching. Compatible readers and controls remain available through rollback.
+- Direct CLI promotion has a real validation sequence that produces full original-input and validated-output evidence. The original command sequence creates its first seal through verification; explicit sealing is optional. An origin hash or caller-computed hashes alone cannot substitute for validation. Missing original baselines require a new run, not reconstructed approval or source history.
+- The user approved retaining legacy compiler/static validation independently of canonical requirements. The repaired CLI preserves the original command sequence with actual verification and automatic first sealing; optional explicit sealing rejects subsequent input/output or record changes. This residual path retains legacy registry/cache behavior and git staging, not canonical runtime/Recipe evidence, host authority, or external-dependency isolation. Canonical authoring never falls back to it.
+- T039-T050 are complete with actual runtime, executable, and built-artifact evidence. T051 onward is excluded. The final gate totals and reproducible scenarios are in `quickstart.md`.
+
+### Coverage Limitations
+
+The new legacy generation and CLI verification functions have complete statement, function, and branch coverage across Windows and Linux. The canonical validation policy, validation service/adapter, and authenticated agent bridge have complete coverage. No new coverage ignores or reduced thresholds were introduced.
+
+Remaining guards in otherwise covered modules protect invariants guaranteed by their real producers: `core/src/lifecycle/authoring.ts:208,494` requires response/staging and outstanding-action invariants; `adapter-canvas/src/runtime/lifecycle-definitions.ts:138,154,168,192` relies on workspace provenance, an outstanding action, a successful proposal, or a failed-operation error from core; `adapter-shared/src/lifecycle/definition-promotion.ts:138,579` receives normalized absence and a native writer that cannot return non-promoted success or a git error when git staging is disabled. Existing captured-source guards at `graph-execution.ts:180`, `source-access.ts:384`, and `source-access-closure.ts:401` likewise rely on validated snapshot/owner and populated-cache invariants. These are not claims of 100% coverage for those whole modules or for unrelated legacy deployment code. The composition root is exercised by built-extension smoke rather than in-process unit instrumentation.
+
 ## Placement and Execution
 
 Collocate service/adapter unit tests beside production modules. Put shared App conformance fixture data in `packages/adapter-canvas/test/fixtures/lifecycle`, and reusable test fakes in `test/support`; production code never imports them. Put cross-boundary tests in the existing runtime, HTTP, artifact, component, and e2e suites.

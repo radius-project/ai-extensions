@@ -27,11 +27,12 @@ export function managedBicepEnv(env = {}, bicepPath) {
  * prints Bicep compile errors like BCP* to stdout, not stderr).
  */
 export class RadProcessError extends Error {
-  constructor(message, stdout, stderr) {
+  constructor(message, stdout, stderr, cleanupIncomplete = false) {
     super(message);
     this.name = "RadProcessError";
     this.stdout = stdout;
     this.stderr = stderr;
+    this.cleanupIncomplete = cleanupIncomplete;
   }
 }
 
@@ -47,7 +48,7 @@ export function windowsTaskkillPath(env = process.env) {
 // rad is a process-group leader (spawned detached), so signalling the group
 // (-pid) stops rad and its children together. Best-effort — any failure is
 // swallowed.
-export function killChildTree(child, platform = process.platform) {
+export async function killChildTree(child, platform = process.platform) {
   if (!child || child.pid == null) return;
   const killChild = () => {
     try {
@@ -58,15 +59,24 @@ export function killChildTree(child, platform = process.platform) {
   };
   try {
     if (platform === "win32") {
-      const taskkill = spawn(
-        windowsTaskkillPath(),
-        ["/pid", String(child.pid), "/t", "/f"],
-        {
-          stdio: "ignore",
-          windowsHide: true
-        }
-      );
-      taskkill.once("error", killChild);
+      await new Promise((resolve) => {
+        const taskkill = spawn(
+          windowsTaskkillPath(),
+          ["/pid", String(child.pid), "/t", "/f"],
+          {
+            stdio: "ignore",
+            windowsHide: true
+          }
+        );
+        taskkill.once("error", () => {
+          killChild();
+          resolve();
+        });
+        taskkill.once("close", (code) => {
+          if (code !== 0) killChild();
+          resolve();
+        });
+      });
     } else {
       process.kill(-child.pid, "SIGKILL");
     }
@@ -103,20 +113,67 @@ export function radSpawnOptions(platform = process.platform) {
  * grandchild, so POSIX runs rad as a detached process-group leader while
  * Windows keeps rad in the caller's Job Object and relies on taskkill /t for
  * tree cleanup. `label` only names the command in timeout/exit error messages;
- * `env` is merged over process.env.
+ * `env` is merged over process.env unless inheritance is explicitly disabled.
  */
 export function spawnRad(
   radPath,
   args,
-  { cwd, env = {}, timeout = 120000, label = "rad" } = {}
+  {
+    cwd,
+    env = {},
+    timeout = 120000,
+    label = "rad",
+    inheritEnv = true,
+    signal: cancellationSignal
+  } = {}
 ) {
   return new Promise((resolve, reject) => {
+    if (cancellationSignal?.aborted) {
+      reject(new DOMException("Process cancelled.", "AbortError"));
+      return;
+    }
+    const childEnv = inheritEnv ? { ...process.env, ...env } : { ...env };
+    if (!inheritEnv) {
+      if (process.platform === "win32") {
+        const explicitKeys = new Set(
+          Object.keys(env).map((key) => key.toUpperCase())
+        );
+        if (
+          !Object.entries(env).some(
+            ([key, value]) => key.toUpperCase() === "SYSTEMROOT" && value
+          )
+        ) {
+          reject(
+            new TypeError(
+              "Isolated Windows execution requires explicit SystemRoot."
+            )
+          );
+          return;
+        }
+        // libuv otherwise copies these keys from the host even with env: {}.
+        for (const key of [
+          "HOMEDRIVE",
+          "HOMEPATH",
+          "LOGONSERVER",
+          "PATH",
+          "SYSTEMDRIVE",
+          "TEMP",
+          "USERDOMAIN",
+          "USERNAME",
+          "USERPROFILE",
+          "WINDIR"
+        ]) {
+          if (!explicitKeys.has(key)) childEnv[key] = "";
+        }
+      }
+    }
     const child = spawn(radPath, args, {
       cwd,
-      env: { ...process.env, ...env },
+      env: childEnv,
       ...radSpawnOptions()
     });
 
+    const closed = new Promise((resolve) => child.once("close", resolve));
     const maxOutput = 32 * 1024 * 1024;
     let stdout = "";
     let stderr = "";
@@ -130,12 +187,38 @@ export function spawnRad(
       if (stderr.length < maxOutput) stderr += chunk.toString();
     });
 
-    const timer = setTimeout(() => {
+    const stop = async (error) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       if (graceTimer) clearTimeout(graceTimer);
-      killChildTree(child);
+      cancellationSignal?.removeEventListener("abort", abort);
+      let cleanupTimer;
+      const finished = await Promise.race([
+        killChildTree(child)
+          .then(() => closed)
+          .then(() => true),
+        new Promise((resolve) => {
+          cleanupTimer = setTimeout(() => resolve(false), 2000);
+        })
+      ]);
+      clearTimeout(cleanupTimer);
       reject(
+        finished ? error : (
+          new RadProcessError(
+            `${label} process cleanup did not complete`,
+            stdout,
+            stderr,
+            true
+          )
+        )
+      );
+    };
+    const abort = () => {
+      void stop(new DOMException("Process cancelled.", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      void stop(
         new RadProcessError(
           `${label} timed out after ${timeout}ms`,
           stdout,
@@ -143,11 +226,13 @@ export function spawnRad(
         )
       );
     }, timeout);
+    cancellationSignal?.addEventListener("abort", abort, { once: true });
 
     function finalize(code, signal) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      cancellationSignal?.removeEventListener("abort", abort);
       if (graceTimer) clearTimeout(graceTimer);
       try {
         child.stdout?.destroy();
@@ -178,13 +263,27 @@ export function spawnRad(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      cancellationSignal?.removeEventListener("abort", abort);
       if (graceTimer) clearTimeout(graceTimer);
       reject(new RadProcessError(error.message, stdout, stderr));
     });
     child.on("exit", (code, signal) => {
       exited = { code, signal };
       if (settled || graceTimer) return;
-      graceTimer = setTimeout(() => finalize(code, signal), 2000);
+      graceTimer = setTimeout(() => {
+        if (inheritEnv) finalize(code, signal);
+        else {
+          // An isolated invocation must not release its files while a child
+          // still owns inherited pipes. Wait for tree termination first.
+          void stop(
+            new RadProcessError(
+              `${label} retained child pipes after exit`,
+              stdout,
+              stderr
+            )
+          );
+        }
+      }, 2000);
     });
     child.on("close", (code, signal) => {
       if (exited) finalize(exited.code, exited.signal);

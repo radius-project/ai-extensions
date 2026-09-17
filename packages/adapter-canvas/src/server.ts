@@ -9,19 +9,16 @@
 // extension.ts.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { readWorkspaceGraphRevision } from "./runtime/graph-reader.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import {
   buildRemediation,
-  computeGraphDiff,
-  deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
-  mergeDeployedGraphMetadata,
-  projectDeployedGraph,
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
@@ -124,17 +121,14 @@ import {
   fetchWorkspaceFile,
   isWorkspaceSelection,
   resolveGraphBranchForRequest,
-  modelingRunLastActivityAtMs,
   resolveSessionId,
   toSafeRepoRelPath,
-  uncommittedGeneratedPaths,
-  workspaceGraphJsonPath
+  uncommittedGeneratedPaths
 } from "./workspace.js";
 import {
   DEFAULT_CANVAS_PAGE,
   DEPLOY_REPAIR_ATTEMPT_CAP
 } from "./runtime/hooks.js";
-import { observeWorkspaceModelingRun } from "./runtime/modeling-activity.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -207,10 +201,7 @@ import type {
   SetupCleanupOutcome,
   SetupCleanupResult
 } from "./operations.js";
-import {
-  radArtifactsDirForSelection,
-  radArtifactsFingerprint
-} from "./remote-rad-artifacts.js";
+import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
 import {
   prepareSourceRefResources,
   setSourceRefResources
@@ -285,6 +276,7 @@ import {
   cleanupRemovedGitHubEnvironment
 } from "./server/services/cleanup-commands.js";
 import { createEnvironmentListingCache } from "./server/services/environment-listing-cache.js";
+import { createLegacyDiscoveryReader } from "./server/services/discovery-reader.js";
 import type { CleanupCommandKind } from "./server/services/cleanup-commands.js";
 import { runWorkflowRollback } from "./server/services/workflow-rollback.js";
 import type { WorkflowRollbackPorts } from "./server/services/workflow-rollback.js";
@@ -314,13 +306,6 @@ import {
 } from "./server/routes/graphs-planning.js";
 import { createGraphsPlanningWritesRoutes } from "./server/routes/graphs-planning-writes.js";
 import { createGraphPlanningWorkflows } from "./server/routes/graph-workflows.js";
-import { createGraphPipeline } from "./server/routes/graph-pipeline.js";
-import {
-  beginGraphRepairAttempt,
-  clearGraphRepairAttempt,
-  graphRepairHandoffMessage,
-  type GraphRepairRequest
-} from "./graph-model-repair.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
@@ -722,24 +707,8 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   getOpenSourceHandler: () => openSourceHandler,
   readInstanceState: (instanceId) =>
     canvasServer.instances.get(instanceId)?.state,
-  getWorkspaceModelRevision: async (instanceId) => {
-    const state = canvasServer.instances.get(instanceId)?.state;
-    if (
-      !state?.graphFromWorkspace ||
-      !state.graphTargetRepo ||
-      !state.graphBranch
-    ) {
-      return null;
-    }
-    const model = await resolveWorkspaceBicep(
-      state,
-      state.graphTargetRepo,
-      state.graphBranch
-    );
-    // Model content only: the revision must not move when a staged-artifact
-    // fingerprint changes, or every stage would look like a model edit.
-    return model ? graphDefinitionHash(model.content, "") : null;
-  },
+  getWorkspaceModelRevision: (instanceId) =>
+    readWorkspaceGraphRevision(canvasServer.instances.get(instanceId)),
   toSafeRepoRelPath
 });
 
@@ -938,7 +907,33 @@ const repositoriesRoutes = createRepositoriesRoutes({
 // The listing cache, its TTL and the deploy service are read through getters
 // because all three are declared further down the module and would otherwise be
 // in the temporal dead zone when this object is built at import time.
+const discoveryReader = createLegacyDiscoveryReader({
+  storageRoot: join(homedir(), ".radius", "ai-extensions", "source-snapshots"),
+  identity: getGitHubIdentity,
+  executor: createSelectedGhExecutor,
+  clock: { now: () => new Date().toISOString() },
+  ids: { next: () => randomUUID() },
+  workspace: async (instanceId) => {
+    const state = canvasServer.instances.get(instanceId)?.state;
+    if (!state?.workspacePath || !state.workspaceRepo || !state.workspaceBranch)
+      throw new Error("The attached workspace is unavailable.");
+    return {
+      workspacePath: state.workspacePath,
+      repo: state.workspaceRepo,
+      branch: state.workspaceBranch
+    };
+  },
+  git: (root, args, control) => {
+    const abort = new AbortController();
+    const unsubscribe = control.cancellation.onAbort(() => abort.abort());
+    return runCommand("git", ["-C", root, ...args], {
+      timeout: 5000,
+      signal: abort.signal
+    }).finally(unsubscribe);
+  }
+});
 const deploymentsRoutes = createDeploymentsRoutes({
+  discovery: discoveryReader,
   ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isValidRepoSlug,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
@@ -1212,71 +1207,18 @@ const remediationRoutes = createRemediationRoutes(
 
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  resolveBranchForRequest: (entry, repo, requestedBranch) =>
-    resolveGraphBranchForRequest(
-      entry.state,
-      repo,
-      requestedBranch,
-      undefined,
-      currentWorkspaceBranch
-    ),
-  commitBranchResolution: (entry, repo, resolution) =>
-    commitWorkspaceBranchResolution(entry.state, repo, resolution),
-  prepareSourceRef: (entry, context) =>
-    prepareSourceRefResources(entry, "graph", context),
-  commitSourceRef: (entry, resources, context, expectedToken) =>
-    setSourceRefResources(entry, "graph", resources, context, expectedToken),
-  isCurrentSourceRef: (entry, expectedToken) =>
-    isCurrentSourceRefToken(entry.state, "graph", expectedToken),
-  triggerAppBicepHandoff: (entry, repo, branch) =>
-    triggerAppBicepHandoff(entry, repo, branch, "graph"),
-  triggerGraphRepairHandoff: (entry, request) =>
-    triggerGraphRepairHandoff(entry, request),
-  clearGraphRepairAttempt: (entry) =>
-    clearGraphRepairAttempt(entry.state, "graph"),
-  fetchBicepSelection: (entry, repo, branch) =>
-    fetchBicepSelection(entry, repo, branch),
-  listBranchPaths: (entry, repo, branch) =>
-    listBranchPaths(entry, repo, branch),
-  workspaceGraphJsonPath: (state, bicepRepoPath) =>
-    workspaceGraphJsonPath(state, bicepRepoPath),
-  radArtifactsDirForSelection: (options) =>
-    radArtifactsDirForSelection({ ...options, github }),
-  buildGraphViaRad: (content, bicepPath, options) =>
-    buildGraphViaRad(content, bicepPath, options),
-  canvasGraphResources,
-  errorMessage,
-  logError: (message) => console.error(message)
+  workflows: {
+    loadGraph: (request) => graphPlanningWorkflows.loadGraph(request)
+  }
 });
 
-// Composition root for the write half of the `graphs-planning` family. The
-// complete dependency object is assembled here and nowhere else; the workflow
-// service receives narrow function seams and the shared modeling pipeline
-// receives its own eight, so neither module holds a GitHub client, spawns
-// `rad`, or touches disk directly.
-//
-// `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
-// `resolveRecipeOutputs` here rather than injected, which is what keeps the
-// route modules free of it. The pure helpers (`computeGraphDiff`, `record`, …)
-// are injected rather than imported by the workflows, matching how the sibling
-// families inject `repoMatchesWorkspace`.
-const observeServerWorkspaceModelingRun = (
-  state: CanvasState,
-  repo: string,
-  branches: string[]
-): Promise<number | null> =>
-  observeWorkspaceModelingRun(
-    repo,
-    branches,
-    {
-      repo: state.workspaceRepo ?? "",
-      branch: state.workspaceBranch ?? "",
-      path: state.workspacePath
-    },
-    modelingRunLastActivityAtMs
-  );
-
+// The retained graph routes share the session's canonical lifecycle reader.
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
+  lifecycle: (entry) => {
+    if (!entry.graphLifecycle)
+      throw new Error("Graph lifecycle is unavailable.");
+    return entry.graphLifecycle;
+  },
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   resolveBranchForRequest: (
     entry,
@@ -1293,109 +1235,27 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     ),
   commitBranchResolution: (entry, repo, resolution) =>
     commitWorkspaceBranchResolution(entry.state, repo, resolution),
-  pipeline: createGraphPipeline<CanvasServerEntry>({
-    fetchBicepSelection: (entry, repo, branch) =>
-      fetchBicepSelection(entry, repo, branch),
-    resolveRadArtifactsDir: (request) =>
-      radArtifactsDirForSelection({ ...request, github }),
-    buildGraphViaRad: (content, definitionFile, options) =>
-      buildGraphViaRad(content, definitionFile, options),
-    canvasGraphResources,
-    workspaceGraphJsonPath,
-    graphDefinitionHash,
-    radArtifactsFingerprint,
-    removeDirectory: (dir) => {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }),
-  triggerAppBicepHandoff,
-  triggerGraphRepairHandoff: (entry, request) =>
-    triggerGraphRepairHandoff(entry, request),
-  clearGraphRepairAttempt: (entry, view) => {
-    clearGraphRepairAttempt(entry.state, view);
-    if (view === "diff") delete entry.state.diffModelingFailed;
-  },
-  listBranchPaths: (entry, repo, branch) =>
-    listBranchPaths(entry, repo, branch),
   prepareSourceRefResources: (entry, view, sourceRefInput) =>
     prepareSourceRefResources(entry, view, sourceRefInput),
   setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
     setSourceRefResources(entry, view, resources, sourceRefInput, token),
   isCurrentSourceRefToken,
-  canReuseModeledGraph,
   addGraphProgress,
   beginPlannedGraphRequest,
   isCurrentPlannedGraphRequest,
-  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
-  resolveRecipeOutputs: (resources, recipes, provider) =>
-    resolveRecipeOutputs(github, resources, recipes, provider),
-  computeGraphDiff: (baseResources, headResources) =>
-    computeGraphDiff(baseResources, headResources),
-  observeModelingRun: observeServerWorkspaceModelingRun,
-  record,
-  optionalString,
-  errorMessage,
-  logError: (message) => console.error(message),
   now: () => Date.now()
 });
 
-function triggerGraphRepairHandoff(
-  entry: CanvasServerEntry,
-  request: GraphRepairRequest
-) {
-  if (request.view === "diff") entry.state.diffModelingFailed = true;
-  const attempt = beginGraphRepairAttempt(entry.state, request);
-  if (attempt.repairing) {
-    void invokeSessionPrompt(
-      sessionPromptHandler,
-      graphRepairHandoffMessage(request, attempt)
-    ).then((result) => {
-      if (result.status >= 400) {
-        console.error(
-          `[radius graph] failed to hand repair attempt ${attempt.attempt} to the agent: ${result.error}`
-        );
-      }
-    });
-  }
-  return attempt;
-}
-
-// Composition root for the read-only half of the `graphs-planning` family. The
-// Deployed route reads status through the cached artifact reader, but obtains its
-// fixed topology through the same modeled-graph workflow and cache as the Graph
-// route. It never parses Bicep or invokes rad through a second path.
+// Graph reads share the canonical lifecycle reader. Deployed topology requires
+// its own observation; retained monitoring diagnostics are not graph evidence.
 const graphsPlanningRoutes = createGraphsPlanningRoutes({
+  now: () => Date.now(),
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
-  loadModeledGraph: async (instanceId, repo, branch) => {
-    const outcome = await graphPlanningWorkflows.loadGraph({
-      instanceId,
-      body: JSON.stringify({ repo, branch, refresh: true })
-    });
-    const workflowError = optionalString(outcome.payload.error);
-    return {
-      status: outcome.status,
-      retry: outcome.payload.needsAppBicep === true,
-      error:
-        workflowError ||
-        (outcome.status >= 400 ?
-          `Modeled graph load failed with status ${outcome.status}.`
-        : undefined)
-    };
-  },
-  buildDeployStatusMap,
-  buildDeployMessageMap,
-  deployStatusKeys,
-  mergeDeployedGraphMetadata,
-  projectDeployedGraph: (modeled, statusByKey) =>
-    projectDeployedGraph(modeled as any[], statusByKey),
-  canvasGraphResources,
-  applyDeployMessages,
-  settleDeployStatuses,
-  errorMessage,
-  repoMatchesWorkspace,
-  observeModelingRun: observeServerWorkspaceModelingRun,
-  now: () => Date.now()
+  lifecycle: (instanceId) => {
+    const lifecycle = canvasServer.instances.get(instanceId)?.graphLifecycle;
+    if (!lifecycle) throw new Error("Graph lifecycle is unavailable.");
+    return lifecycle;
+  }
 });
 
 // The route layer sees exactly one seam: the workflow service above. Parsing
@@ -1474,6 +1334,7 @@ async function discoverEnvironmentTarget(
 // and are injected rather than moved, so the route module spawns nothing and
 // reads no module-level mutable state.
 const environmentsRoutes = createEnvironmentsRoutes({
+  discovery: discoveryReader,
   errorMessage,
   redactDiagnostic: (value) => redactGhCredentials(value),
   repoMatchesWorkspace,
@@ -2284,13 +2145,9 @@ async function ensureWorkflowsCurrent(
   }
 }
 
-// no access to the SDK `session`, so when a graph/generate route finds no
-// app.bicep it delegates through this hook, which injects a user turn asking the
-// agent to run the radius-app-bicep skill. This is what makes branch/repo
-// selection (not just canvas open) trigger generation automatically.
-let appBicepHandoff: AppBicepHandoff | null = null;
 export function setAppBicepHandoff(fn: AppBicepHandoff): void {
-  appBicepHandoff = fn;
+  // Retained callback registration does not authorize implicit graph authoring.
+  void fn;
 }
 
 // Registered by the SDK entry (extension.ts) to hand a failed canvas deploy
@@ -2313,7 +2170,7 @@ export function setDeployFailureNotice(fn: DeployFailureNotice | null): void {
 // Handler registered by the SDK entry (extension.ts) that opens a repo file in
 // the Copilot app's built-in "editor" canvas (side pane). The server has no SDK
 // access, so the webview's "View source code" click (for local-workspace graphs)
-// reaches the SDK through this hook. Mirrors setAppBicepHandoff.
+// reaches the SDK through this hook.
 let openSourceHandler: OpenSourceHandler | null = null;
 export function setOpenSourceHandler(fn: OpenSourceHandler): void {
   openSourceHandler = fn;
@@ -2442,42 +2299,6 @@ export function azureCliAssistMessage(
   input: AzureCliAssistInput = {}
 ): SessionPromptMessage {
   return remediationSessionMessage(azureCliAssistRemediation(input));
-}
-
-// Report a graph view's application model to the runtime, which decides whether
-// it needs authoring, a refresh, the user's agreement, or only a note.
-//
-// Deliberately unconditional: a route calls this on every render, whether or not
-// the model exists, because a model that is present can still be stale. The
-// runtime owns the dedupe — its key covers what is wrong with the model, not
-// merely which branches were looked at, so re-reporting an unchanged situation
-// stays silent while a model that changes from stale to hand-edited is still
-// reported. Fire-and-forget so it never blocks the HTTP response.
-function triggerAppBicepHandoff(
-  entry: { state: CanvasState } | undefined,
-  repo: string,
-  branches: string | string[],
-  page: string,
-  progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph"
-): void {
-  try {
-    if (typeof appBicepHandoff !== "function") return;
-    if (!repo) return;
-    const list = (Array.isArray(branches) ? branches : [branches]).filter(
-      (branch): branch is string => Boolean(branch)
-    );
-    Promise.resolve(
-      appBicepHandoff({
-        repo,
-        branches: list,
-        page,
-        progressView,
-        state: entry?.state
-      })
-    ).catch(() => {});
-  } catch {
-    /* never let a handoff failure break the response */
-  }
 }
 
 // Hand a failed deploy to the agent to repair and redeploy. Fires at most once
@@ -5499,15 +5320,6 @@ async function fetchFileForSelection(
 // rule as the Bicep selection so the answer describes the tree the graph would
 // actually be built from. Resolves empty when the tree cannot be read, which
 // callers must treat as "unknown" rather than "empty repository".
-async function listBranchPaths(
-  entry: CanvasServerEntry,
-  repo: string,
-  branch: string
-): Promise<string[]> {
-  const access = accessForSelection(entry, repo, branch);
-  return await access.github.treePaths(repo, access.branch);
-}
-
 // Reject browser-labeled cross-site mutations while allowing non-browser clients.
 export function isCrossSiteMutation(
   method: string | undefined,

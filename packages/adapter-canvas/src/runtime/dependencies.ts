@@ -22,6 +22,7 @@ import type {
   DeployStatusSummary
 } from "../deploy-tools.js";
 import type { SessionHolder } from "./session.js";
+import type { LifecycleBinding } from "./create-lifecycle-binding.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -346,6 +347,7 @@ export interface OperationsDependencies {
 // here, so a test can construct a complete fake without importing any adapter
 // module (server.ts/gh.ts/workspace.ts/...) or performing real I/O.
 export interface RadiusExtensionDependencies {
+  lifecycle: LifecycleBinding;
   logError(message: string): void;
   session: SessionHolder;
   clock: ClockDependencies;

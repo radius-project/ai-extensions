@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { createLegacyDiscoveryFake } from "../../../test/support/legacy-discovery.js";
 import {
   createServer,
   type IncomingMessage,
@@ -109,6 +110,7 @@ function deps(
     throw new Error(`unexpected call: ${name}`);
   };
   const base: EnvironmentsDependencies = {
+    discovery: createLegacyDiscoveryFake({ cli: overrides.cliExec }),
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
     // Deliberately distinct from identity so a route that forgets to redact a
@@ -164,7 +166,14 @@ function deps(
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: "verify"
   };
-  return { ...base, ...overrides };
+  const merged = { ...base, ...overrides };
+  return {
+    ...merged,
+    envListCacheGet: (repo) => {
+      const cached = merged.envListCacheGet(repo);
+      return cached ? { readerKey: "fixture-reader", ...cached } : cached;
+    }
+  };
 }
 
 // A scripted `cliExec` fake keyed on the API path it targets (the `/repos/...`
@@ -1324,6 +1333,14 @@ describe("environments — bypass-verification", () => {
 });
 
 describe("environments — list-environments", () => {
+  it.each([{}, { discovery: {} }])(
+    "requires the canonical discovery reader at construction",
+    (dependencies) => {
+      expect(() =>
+        Reflect.apply(createEnvironmentsRoutes, undefined, [dependencies])
+      ).toThrow("canonical discovery reader");
+    }
+  );
   // API paths (the `args[1]` each `gh api` call targets), which uniquely key
   // the scripted `cliExec` responses.
   const ENV_PATH = {
@@ -1392,6 +1409,7 @@ describe("environments — list-environments", () => {
     expect(JSON.parse(recording.body)).toEqual({ environments: [] });
     expect(envListCacheSet).toHaveBeenCalledWith("o/r", {
       at: 1_000_000,
+      readerKey: "fixture-reader",
       payload: { environments: [] }
     });
   });
@@ -1502,63 +1520,69 @@ describe("environments — list-environments", () => {
     });
   });
 
-  it("filters to RADIUS_MANAGED envs and derives provider and verify status", async () => {
-    const script: CliScript = {
-      [ENV_PATH.verifyRuns("o/r")]: {
-        stdout: "42\tcompleted\tsuccess"
-      },
-      [ENV_PATH.names("o/r")]: { stdout: "7\tdev\n8\tunmanaged" },
-      [ENV_PATH.vars("o/r", "dev")]: {
-        stdout:
-          "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nRADIUS_CREDENTIAL_PROFILE\tprod"
-      },
-      [ENV_PATH.vars("o/r", "unmanaged")]: { stdout: "SOMETHING\tx" },
-      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
-      [ENV_PATH.statuses("o/r", "100")]: {
-        stdout: "https://github.com/o/r/actions/runs/42"
-      }
-    };
-    const kickoffWorkflowSync = vi.fn();
-    const envListCacheSet = vi.fn();
-    const entry: EnvironmentsInstanceEntry = {
-      state: { workspaceBranch: "feat" } as never
-    };
-    const { recording, ctx } = context(
-      "GET",
-      "/api/list-environments?repo=o/r"
-    );
-    await handleListEnvironments(
-      ctx,
-      deps({
-        now: () => 5,
-        envListCacheGet: () => undefined,
-        envListCacheGeneration: () => 0,
-        envListCacheSet,
-        cliExec: cliFake(script),
-        readInstanceEntry: () => entry,
-        repoMatchesWorkspace: () => true,
-        kickoffWorkflowSync
-      })
-    );
-    const parsed = JSON.parse(recording.body);
-    expect(parsed.environments).toEqual([
-      {
-        name: "dev",
-        provider: "azure",
-        status: "success",
-        webUrl: "https://github.com/o/r/settings/environments/7/edit",
-        credentialProfile: "prod",
-        config: {}
-      }
-    ]);
-    // A matched workspace branch is passed to the background sync.
-    expect(kickoffWorkflowSync).toHaveBeenCalledWith(
-      "o/r",
-      parsed.environments,
-      "feat"
-    );
-    expect(envListCacheSet).toHaveBeenCalled();
-  });
+  it.each([false, true])(
+    "filters managed envs while honoring read-only graph intent (%s)",
+    async (readOnly) => {
+      const script: CliScript = {
+        [ENV_PATH.verifyRuns("o/r")]: {
+          stdout: "42\tcompleted\tsuccess"
+        },
+        [ENV_PATH.names("o/r")]: { stdout: "7\tdev\n8\tunmanaged" },
+        [ENV_PATH.vars("o/r", "dev")]: {
+          stdout:
+            "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nRADIUS_CREDENTIAL_PROFILE\tprod"
+        },
+        [ENV_PATH.vars("o/r", "unmanaged")]: { stdout: "SOMETHING\tx" },
+        [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+        [ENV_PATH.statuses("o/r", "100")]: {
+          stdout: "https://github.com/o/r/actions/runs/42"
+        }
+      };
+      const kickoffWorkflowSync = vi.fn();
+      const envListCacheSet = vi.fn();
+      const entry: EnvironmentsInstanceEntry = {
+        state: { workspaceBranch: "feat" } as never
+      };
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      if (readOnly) ctx.request.headers["x-radius-read-only"] = "true";
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 5,
+          envListCacheGet: () => undefined,
+          envListCacheGeneration: () => 0,
+          envListCacheSet,
+          cliExec: cliFake(script),
+          readInstanceEntry: () => entry,
+          repoMatchesWorkspace: () => true,
+          kickoffWorkflowSync
+        })
+      );
+      const parsed = JSON.parse(recording.body);
+      expect(parsed.environments).toEqual([
+        {
+          name: "dev",
+          provider: "azure",
+          status: "success",
+          webUrl: "https://github.com/o/r/settings/environments/7/edit",
+          credentialProfile: "prod",
+          config: {}
+        }
+      ]);
+      // A matched workspace branch is passed to the background sync.
+      if (readOnly) expect(kickoffWorkflowSync).not.toHaveBeenCalled();
+      else
+        expect(kickoffWorkflowSync).toHaveBeenCalledWith(
+          "o/r",
+          parsed.environments,
+          "feat"
+        );
+      expect(envListCacheSet).toHaveBeenCalled();
+    }
+  );
 
   it("reports a bypassed marker on a failed verify as the bypassed status", async () => {
     const script: CliScript = {
@@ -2127,6 +2151,7 @@ describe("environments — list-environments", () => {
       );
       expect(envListCacheSet).toHaveBeenCalledWith("o/r", {
         at: 11,
+        readerKey: "fixture-reader",
         payload: {
           environments: [expect.objectContaining({ name: "dev" })]
         }

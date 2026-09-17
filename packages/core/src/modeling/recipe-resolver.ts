@@ -17,6 +17,22 @@ import {
   recipePackContentPath
 } from "./recipe-pack.js";
 
+export function normalizeRecipeResourceType(type: string): string {
+  const typeMap: Readonly<Record<string, string>> = {
+    "Applications.Core/containers": "Radius.Compute/containers",
+    "Applications.Core/gateways": "Radius.Networking/gateways",
+    "Applications.Core/httpRoutes": "Radius.Networking/routes",
+    "Applications.Core/volumes": "Radius.Compute/persistentVolumes",
+    "Applications.Core/secretStores": "Radius.Security/secrets",
+    "Applications.Core/extenders": "Radius.Core/extenders",
+    "Applications.Datastores/sqlDatabases": "Radius.Data/sqlServerDatabases",
+    "Applications.Datastores/mongoDatabases": "Radius.Data/mongoDatabases",
+    "Applications.Datastores/redisCaches": "Radius.Data/redisCaches",
+    "Applications.Messaging/rabbitMQQueues": "Radius.Messaging/rabbitMQ"
+  };
+  return Object.hasOwn(typeMap, type) ? typeMap[type] : type;
+}
+
 // Fetch the provider's default recipe pack and resolve each entry to the primary
 // concrete resource its recipe deploys. Replaces the legacy per-recipe tree walk:
 // instead of discovering and parsing individual recipe files under
@@ -50,26 +66,9 @@ export async function resolveRecipeOutputs(
 ) {
   const resolved = [];
 
-  // Normalize type: Applications.Core/containers -> Radius.Compute/containers, etc.
-  function normalizeType(type) {
-    const typeMap = {
-      "Applications.Core/containers": "Radius.Compute/containers",
-      "Applications.Core/gateways": "Radius.Networking/gateways",
-      "Applications.Core/httpRoutes": "Radius.Networking/routes",
-      "Applications.Core/volumes": "Radius.Compute/persistentVolumes",
-      "Applications.Core/secretStores": "Radius.Security/secrets",
-      "Applications.Core/extenders": "Radius.Core/extenders",
-      "Applications.Datastores/sqlDatabases": "Radius.Data/sqlServerDatabases",
-      "Applications.Datastores/mongoDatabases": "Radius.Data/mongoDatabases",
-      "Applications.Datastores/redisCaches": "Radius.Data/redisCaches",
-      "Applications.Messaging/rabbitMQQueues": "Radius.Messaging/rabbitMQ"
-    };
-    return typeMap[type] || type;
-  }
-
   for (const appRes of appResources) {
     const rawType = appRes.type.split("@")[0];
-    const baseType = normalizeType(rawType);
+    const baseType = normalizeRecipeResourceType(rawType);
 
     // Match a recipe from the default recipe pack by resource type (try both
     // normalized and raw). Recipe resolution for custom/unlisted types is

@@ -9,6 +9,16 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePluginRoot } from "./plugin-root.js";
+import type { LifecycleResponseFor } from "@radius-project/core/lifecycle";
+
+export type GraphReadEvidence =
+  | { unavailable: true; reason: string; message: string; source?: string }
+  | {
+      unavailable: false;
+      result:
+        | LifecycleResponseFor<"graph.get">["result"]
+        | LifecycleResponseFor<"graph.diff">["result"];
+    };
 
 export interface CredentialProfile {
   [key: string]: unknown;
@@ -221,6 +231,7 @@ export function expireGraphProgressWait(
 
 export interface CanvasState {
   [key: string]: unknown;
+  graphReadEvidence?: Partial<Record<GraphView, GraphReadEvidence>>;
   graphResources?: CanvasGraphResource[] | null;
   graphTargetRepo?: string;
   graphBranch?: string;

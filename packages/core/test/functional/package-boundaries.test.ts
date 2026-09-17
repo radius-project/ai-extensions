@@ -296,8 +296,8 @@ describe("core package in a host without HTTP or DOM globals", () => {
       await readFile(join(packageRoot, "package.json"), "utf8")
     ) as { exports: Record<string, string> };
 
-    // Only these subpaths have an importer outside core; `./workflows` was
-    // declared but never imported, so it is not part of the package's contract.
+    // These are the supported subpaths, including the new lifecycle contract.
+    // `./workflows` remains internal rather than a separate public subpath.
     // `./modeling` carries the staged-run rules, which are core's specification
     // for the bundled promote script rather than public API, so they are
     // reached here instead of being widened onto the top-level barrel. Targets
@@ -306,6 +306,7 @@ describe("core package in a host without HTTP or DOM globals", () => {
     expect(manifest.exports).toEqual({
       ".": "./src/index.ts",
       "./graph": "./src/graph/index.ts",
+      "./lifecycle": "./src/lifecycle/index.ts",
       "./modeling": "./src/modeling/index.ts",
       "./platforms": "./src/platforms/index.ts",
       "./remediations": "./src/remediations.ts"
@@ -318,10 +319,11 @@ describe("core package in a host without HTTP or DOM globals", () => {
         pathToFileURL(join(packageRoot, manifest.exports[subpath])).href
       ) as Promise<Record<string, unknown>>;
 
-    const [barrel, graph, modeling, platforms, remediations] =
+    const [barrel, graph, lifecycle, modeling, platforms, remediations] =
       await Promise.all([
         load("."),
         load("./graph"),
+        load("./lifecycle"),
         load("./modeling"),
         load("./platforms"),
         load("./remediations")
@@ -329,6 +331,7 @@ describe("core package in a host without HTTP or DOM globals", () => {
 
     expect(typeof barrel.computeGraphDiff).toBe("function");
     expect(typeof graph.filterGraphVisualizationResources).toBe("function");
+    expect(lifecycle.LIFECYCLE_API_VERSION).toBe("github-radius/v1");
     expect(typeof modeling.evaluateStagedRun).toBe("function");
     expect(typeof platforms.buildOidcSubject).toBe("function");
     expect(typeof remediations.remediationView).toBe("function");

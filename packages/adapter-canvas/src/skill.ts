@@ -66,15 +66,15 @@ function skillBaseCandidates(
   ];
 }
 
-export function createRadiusAppBicepSkill(
+function createSkillLocator(
   dependencies: RadiusAppBicepSkillDependencies
-): (repoPath?: string, brief?: string) => string {
+): () => string {
   const candidates = skillBaseCandidates(
     dependencies.moduleDir,
     dependencies.homeDir
   );
 
-  return (repoPath?: string, brief?: string): string => {
+  return (): string => {
     const skillBase = candidates.find((candidate) =>
       REQUIRED_SKILL_FILES.every((requiredFile) =>
         dependencies.pathExists(path.join(candidate, requiredFile))
@@ -93,6 +93,16 @@ export function createRadiusAppBicepSkill(
       );
     }
 
+    return skillBase;
+  };
+}
+
+export function createRadiusAppBicepSkill(
+  dependencies: RadiusAppBicepSkillDependencies
+): (repoPath?: string, brief?: string) => string {
+  const locate = createSkillLocator(dependencies);
+  return (repoPath?: string, brief?: string): string => {
+    const skillBase = locate();
     const skillVersion = dependencies.generatorVersion().trim();
     const handoff: RadiusAppBicepHandoff = {
       skill: "radius-app-bicep",
@@ -106,12 +116,19 @@ export function createRadiusAppBicepSkill(
   };
 }
 
-const defaultRadiusAppBicepSkill = createRadiusAppBicepSkill({
+const defaultDependencies: RadiusAppBicepSkillDependencies = {
   moduleDir: path.dirname(fileURLToPath(import.meta.url)),
   homeDir: homedir(),
   pathExists: existsSync,
   generatorVersion: resolveGeneratorVersion
-});
+};
+const defaultRadiusAppBicepSkill =
+  createRadiusAppBicepSkill(defaultDependencies);
+const locateDefaultSkill = createSkillLocator(defaultDependencies);
+
+export function radiusAppBicepValidationScript(): string {
+  return path.join(locateDefaultSkill(), "scripts", "validate-bicep.mjs");
+}
 
 export function radiusAppBicepSkill(repoPath?: string, brief?: string): string {
   return defaultRadiusAppBicepSkill(repoPath, brief);

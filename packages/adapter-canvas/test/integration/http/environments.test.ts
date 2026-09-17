@@ -8,6 +8,7 @@ import { deleteGitHubEnvironmentIdempotent } from "../../../src/server/services/
 import { runEnvironmentDeletion } from "../../../src/server/services/environment-deletion.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
 import { redactGhCredentials } from "../../../src/gh.js";
+import { createLegacyDiscoveryFake } from "../../support/legacy-discovery.js";
 import {
   buildDeleteStages,
   createOperation,
@@ -120,7 +121,43 @@ async function start(
   const held = new Map<string, { gate: Promise<void>; markReached(): void }>();
   const commands: string[][] = [];
   let script = initialScript;
-  const dependencies: Partial<EnvironmentsDependencies> = {
+  const unexpected = (): never => {
+    throw new Error("Unmodeled environment dependency");
+  };
+  const dependencies: EnvironmentsDependencies = {
+    discovery: createLegacyDiscoveryFake({
+      cli: (...args) => dependencies.cliExec(...args)
+    }),
+    fetchFileFromRepo: unexpected,
+    appParams: unexpected,
+    logError: unexpected,
+    discoverEnvironmentTarget: unexpected,
+    createOperation: unexpected,
+    buildDeleteStages: unexpected,
+    startOperation: unexpected,
+    toClientView: unexpected,
+    scheduleEnvironmentOperation: unexpected,
+    getOperation: unexpected,
+    getSelectedGitHubExecutor: unexpected,
+    isSelectedGitHubAuthorizationError: unexpected,
+    hasCompleteVerificationIdentity: unexpected,
+    findWorkflowRun: unexpected,
+    settleVerificationDispatchRecovery: unexpected,
+    getRunDetail: unexpected,
+    fetchRunLog: unexpected,
+    extractErrorLines: unexpected,
+    extractGitHubActionsStepLog: unexpected,
+    explainOidcEnterpriseClaim: unexpected,
+    explainNoSubscriptions: unexpected,
+    addLegacyStep: unexpected,
+    isTerminalState: unexpected,
+    finish: unexpected,
+    finishSucceeded: unexpected,
+    persistBestEffort: unexpected,
+    persistOperations: unexpected,
+    reportOperationDiagnostic: unexpected,
+    verifyWorkflowFile: "radius-verify-credentials.yml",
+    stageVerify: "verify",
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
     redactDiagnostic: (value) => redactGhCredentials(value, {}),
@@ -173,9 +210,7 @@ async function start(
     kickoffWorkflowSync: () => {},
     ...extraDependencies
   };
-  const routes = createTestRouteTable(
-    createEnvironmentsRoutes(dependencies as EnvironmentsDependencies)
-  );
+  const routes = createTestRouteTable(createEnvironmentsRoutes(dependencies));
   container = createCanvasServer({
     createHttpServer: (handler) => createServer(handler),
     createRequestHandler: ({ instanceId, instances, markActivity }) =>
@@ -465,7 +500,8 @@ describe("environment listing cache after environment cleanup", () => {
     expect(names(after.body)).toEqual([]);
     expect(harness.cache.get(REPO)).toEqual({
       at: 0,
-      payload: { environments: [] }
+      payload: { environments: [] },
+      readerKey: "fixture-reader"
     });
   });
 

@@ -27,7 +27,6 @@ import {
   createGraphsPlanningRoutes,
   createGraphsPlanningStreamRoutes
 } from "./routes/graphs-planning.js";
-import { createGraphPipeline } from "./routes/graph-pipeline.js";
 import { createGraphsPlanningWritesRoutes } from "./routes/graphs-planning-writes.js";
 import { createGraphPlanningWorkflows } from "./routes/graph-workflows.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
@@ -111,6 +110,11 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    discovery: {
+      open: async () => {
+        throw new Error("Unmodeled discovery");
+      }
+    },
     probeDeleteConflict: () => Promise.resolve({ state: "clear" as const }),
     isValidRepoSlug: () => true,
     readInstanceEntry: () => undefined,
@@ -230,64 +234,33 @@ const productionHandlers = {
     })
   ),
   ...createGraphsPlanningRoutes({
+    now: () => 0,
     readInstanceEntry: () => undefined,
-    createDeployStatusReader: () => ({
-      read: () => Promise.resolve({ status: "missing", progress: null }),
-      graph: () => Promise.resolve({ graph: null, status: "missing" }),
-      progress: () => Promise.resolve(null)
-    }),
-    loadModeledGraph: () => Promise.resolve({ status: 200 }),
-    buildDeployStatusMap: () => new Map(),
-    buildDeployMessageMap: () => new Map(),
-    deployStatusKeys: () => [],
-    mergeDeployedGraphMetadata: (modeled) => modeled,
-    projectDeployedGraph: () => [],
-    canvasGraphResources: () => [],
-    applyDeployMessages: () => {},
-    settleDeployStatuses: () => {},
-    errorMessage: (error) => String(error),
-    repoMatchesWorkspace: () => false,
-    observeModelingRun: () => Promise.resolve(null),
-    now: () => 0
+    lifecycle: () => {
+      throw new Error("Unmodeled graph request");
+    }
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
-    resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
-      Promise.resolve({
-        status: "resolved",
-        branch: requestedBranch,
-        followsWorkspaceBranch: false
-      }),
-    commitBranchResolution: () => true,
-    prepareSourceRef: () => ({ token: "" }),
-    commitSourceRef: () => true,
-    isCurrentSourceRef: () => true,
-    triggerAppBicepHandoff: () => {},
-    triggerGraphRepairHandoff: () => ({
-      attempt: 1,
-      maxAttempts: 3,
-      repairing: true,
-      repairExhausted: false
-    }),
-    clearGraphRepairAttempt: () => {},
-    fetchBicepSelection: () =>
-      Promise.resolve({
-        content: null,
-        fromWorkspace: false,
-        branch: "main",
-        bicepPath: ""
-      }),
-    listBranchPaths: () => Promise.resolve([]),
-    workspaceGraphJsonPath: () => "",
-    radArtifactsDirForSelection: () =>
-      Promise.resolve({ dir: "", remote: false }),
-    buildGraphViaRad: () => Promise.resolve([]),
-    canvasGraphResources: () => [],
-    errorMessage: (error) => String(error),
-    logError: () => {}
+    workflows: {
+      loadGraph: async () => {
+        throw new Error("Unmodeled graph workflow");
+      }
+    }
   }),
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({
+      lifecycle: {
+        resolveWorkspaceSource: async () => {
+          throw new Error("Unmodeled workspace source");
+        },
+        execute: async () => {
+          throw new Error("Unmodeled graph request");
+        },
+        resolveCommittedSource: async () => {
+          throw new Error("Unmodeled graph source");
+        }
+      },
       readInstanceEntry: () => undefined,
       resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
         Promise.resolve({
@@ -296,51 +269,21 @@ const productionHandlers = {
           followsWorkspaceBranch: false
         }),
       commitBranchResolution: () => true,
-      pipeline: createGraphPipeline({
-        fetchBicepSelection: () =>
-          Promise.resolve({
-            content: null,
-            fromWorkspace: false,
-            branch: "",
-            bicepPath: ""
-          }),
-        resolveRadArtifactsDir: () =>
-          Promise.resolve({ dir: "", remote: false }),
-        buildGraphViaRad: () => Promise.resolve([]),
-        canvasGraphResources: () => [],
-        workspaceGraphJsonPath: () => "",
-        graphDefinitionHash: () => "",
-        radArtifactsFingerprint: () => "",
-        removeDirectory: () => {}
-      }),
-      triggerAppBicepHandoff: () => {},
-      observeModelingRun: () => Promise.resolve(null),
-      triggerGraphRepairHandoff: () => ({
-        attempt: 1,
-        maxAttempts: 3,
-        repairing: true,
-        repairExhausted: false
-      }),
-      clearGraphRepairAttempt: () => {},
-      listBranchPaths: () => Promise.resolve([]),
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
-      canReuseModeledGraph: () => false,
       addGraphProgress: () => false,
       beginPlannedGraphRequest: () => 1,
       isCurrentPlannedGraphRequest: () => false,
-      fetchRecipePack: () => Promise.resolve([]),
-      resolveRecipeOutputs: () => Promise.resolve([]),
-      computeGraphDiff: () => [],
-      record: () => ({}),
-      optionalString: () => "",
-      errorMessage: (error) => String(error),
-      logError: () => {},
       now: () => 0
     })
   }),
   ...createEnvironmentsRoutes({
+    discovery: {
+      open: async () => {
+        throw new Error("Unmodeled discovery");
+      }
+    },
     errorMessage: (error) => String(error),
     redactDiagnostic: (value) => value,
     repoMatchesWorkspace: () => false,

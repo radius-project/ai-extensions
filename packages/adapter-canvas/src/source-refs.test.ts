@@ -13,6 +13,115 @@ function entry(page = "graph"): SourceRefEntry {
 }
 
 describe("source-code reference state", () => {
+  it("pins successive requests for the same selection independently and preserves other views' queued references", () => {
+    const state = entry();
+    const graph = prepareSourceRefResources(state, "graph", {
+      repo: "acme/app",
+      branch: "feature",
+      requestId: "first"
+    });
+    const planned = prepareSourceRefResources(state, "planned", {
+      repo: "acme/app",
+      branch: "feature"
+    });
+    updateSourceRefs(state, graph.token, [
+      { id: "old", codeReference: "old.ts" }
+    ]);
+    updateSourceRefs(state, planned.token, [
+      { id: "plan", codeReference: "plan.ts" }
+    ]);
+    const current = prepareSourceRefResources(state, "graph", {
+      repo: "acme/app",
+      branch: "feature",
+      requestId: "second"
+    });
+    expect(current.token).toBe("graph|acme/app|feature|second");
+    expect(
+      setSourceRefResources(state, "graph", [{ id: "old" }], graph, graph.token)
+    ).toBe(false);
+    expect(
+      updateSourceRefs(state, graph.token, [
+        { id: "old", codeReference: "old.ts" }
+      ]).error
+    ).toContain("stale");
+    expect(state.state.pendingSourceRefs).toEqual([
+      { contextToken: planned.token, id: "plan", codeReference: "plan.ts" }
+    ]);
+  });
+  it("keeps absent and non-string request identifiers compatible with legacy tokens", () => {
+    const state = entry();
+    expect(prepareSourceRefResources(state, "diff", {}).token).toBe(
+      "diff||..."
+    );
+    expect(
+      prepareSourceRefResources(state, "graph", { requestId: 12 }).token
+    ).toBe("graph||");
+    expect(
+      prepareSourceRefResources(state, "graph", { requestId: "" }).token
+    ).toBe("graph|||");
+    expect(() => setSourceRefResources(state, "unknown", [], {})).toThrow(
+      "Unknown graph view"
+    );
+  });
+  it.each(["graph-diff", "graphDiff"])(
+    "selects diff resources from the %s page",
+    (page) => {
+      const state = entry(page);
+      setSourceRefResources(state, "diff", [{ id: "diff" }], {});
+      expect(getSourceRefResources(state)).toMatchObject({
+        ready: true,
+        view: "diff",
+        resources: [{ id: "diff" }]
+      });
+    }
+  );
+  it("selects the active view, then the default view, and rejects an unknown requested view", () => {
+    const state = entry("environments");
+    expect(getSourceRefResources(state)).toEqual({
+      ready: false,
+      view: "graph",
+      resources: []
+    });
+    state.state.activeGraphView = "planned";
+    expect(getSourceRefResources(state).view).toBe("planned");
+    expect(getSourceRefResources(state, "unknown")).toEqual({
+      ready: false,
+      view: "unknown",
+      resources: []
+    });
+    expect(
+      updateSourceRefs(state, "unknown", [{ id: "db", codeReference: "db.ts" }])
+    ).toMatchObject({
+      skipped: 1,
+      updated: 0,
+      queued: 0,
+      error: expect.stringContaining("stale")
+    });
+  });
+  it("consumes matching queued references without overwriting existing references or another view's queue", () => {
+    const state = entry();
+    const graph = prepareSourceRefResources(state, "graph", {});
+    const planned = prepareSourceRefResources(state, "planned", {});
+    updateSourceRefs(state, graph.token, [
+      { id: "existing", codeReference: "queued.ts" },
+      { id: "absent", codeReference: "absent.ts" }
+    ]);
+    updateSourceRefs(state, planned.token, [
+      { id: "plan", codeReference: "plan.ts" }
+    ]);
+    setSourceRefResources(
+      state,
+      "graph",
+      [{ id: "existing", codeReference: "original.ts" }],
+      {}
+    );
+    expect(getSourceRefResources(state).resources).toEqual([
+      { id: "existing", codeReference: "original.ts" }
+    ]);
+    expect(state.state.pendingSourceRefs).toEqual([
+      { contextToken: planned.token, id: "plan", codeReference: "plan.ts" }
+    ]);
+  });
   it("rejects unknown graph views", () => {
     expect(() =>
       prepareSourceRefResources(entry(), "unknown", {

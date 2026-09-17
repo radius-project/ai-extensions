@@ -6,11 +6,14 @@ import {
   rmSync,
   writeFileSync
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export interface ArtifactRegistrationSnapshot {
+  lifecycle?: {
+    invalidAuthorityResult: unknown;
+    unattachedResult: unknown;
+  };
   joinCount: number;
   canvases: Array<{
     id: string;
@@ -33,26 +36,46 @@ export interface ArtifactRegistrationSnapshot {
     handlerCallable: boolean;
   }>;
   hooks: Array<{ name: string; callable: boolean }>;
-  bootstrap: {
-    fields: string[];
-    skill: string;
-    repoPathMatchesWorkspace: boolean;
-    skillBaseRelativeToArtifact: string;
-    skillVersionMatchesPackage: boolean;
-    instruction: string;
-    requiredFiles: string[];
+  authoringBeforeAttachment: {
+    result: unknown;
+    sessionSendCount: number;
+    panelOpenCount: number;
+    canvasOpenCount: number;
     containsLegacyInlinedHeading: boolean;
   };
+  packagedSkill: {
+    skillBaseRelativeToArtifact: string;
+    packageVersionPresent: boolean;
+    pluginVersionMatchesPackage: boolean;
+    requiredFiles: string[];
+  };
+}
+
+export interface ArtifactLifecycleEvidence {
+  validationResult: unknown;
+  invalidApprovalResult: unknown;
+  authorResult: unknown;
+  sessionSendCount: number;
+  panelOpenCount: number;
+  canvasOpenCount: number;
 }
 
 interface ChildMessage {
   type:
-    "registered" | "ready" | "shutdown" | "blocked" | "page" | "render-error";
+    | "registered"
+    | "ready"
+    | "shutdown"
+    | "blocked"
+    | "page"
+    | "render-error"
+    | "lifecycle";
   snapshot?: ArtifactRegistrationSnapshot;
   closeCount?: number;
   kind?: string;
   detail?: string;
   html?: string;
+  graphReadResult?: unknown;
+  evidence?: ArtifactLifecycleEvidence;
 }
 
 export interface ArtifactSmokeResult {
@@ -60,6 +83,8 @@ export interface ArtifactSmokeResult {
   closeCount: number;
   stderr: string;
   renderedPage: string;
+  graphReadResult: unknown;
+  lifecycle: ArtifactLifecycleEvidence;
 }
 
 function waitForExit(child: ChildProcess): Promise<number | null> {
@@ -74,7 +99,7 @@ export async function runArtifactSmoke(
   timeoutMs = 20_000,
   artifactRoot = dirname(artifactPath)
 ): Promise<ArtifactSmokeResult> {
-  const root = mkdtempSync(join(tmpdir(), "radius-artifact-smoke-"));
+  const root = mkdtempSync(join(process.cwd(), ".radius-artifact-smoke-"));
   const fakeRad = join(root, process.platform === "win32" ? "rad.exe" : "rad");
   const fakeBicep = join(
     root,
@@ -125,6 +150,8 @@ export async function runArtifactSmoke(
   let ready = false;
   let closeCount = 0;
   let renderedPage: string | undefined;
+  let graphReadResult: unknown;
+  let lifecycle: ArtifactLifecycleEvidence | undefined;
   let failure: Error | undefined;
   child.stderr?.on("data", (chunk: Buffer) => {
     if (stderr.length < 16_384) stderr += chunk.toString();
@@ -139,6 +166,9 @@ export async function runArtifactSmoke(
       );
     } else if (raw.type === "page") {
       renderedPage = raw.html;
+      graphReadResult = raw.graphReadResult;
+    } else if (raw.type === "lifecycle") {
+      lifecycle = raw.evidence;
     } else if (raw.type === "render-error") {
       failure = new Error(
         `Artifact page render failed: ${raw.detail ?? "unknown error"}`
@@ -175,6 +205,9 @@ export async function runArtifactSmoke(
         `Artifact did not render a page within ${timeoutMs}ms. stderr: ${stderr.slice(-2000)}`
       );
     }
+    if (!lifecycle) {
+      throw new Error("Artifact did not report attached lifecycle evidence.");
+    }
 
     child.send({ type: "shutdown" });
     const exitDeadline = Date.now() + 5_000;
@@ -201,7 +234,14 @@ export async function runArtifactSmoke(
         `Artifact subprocess exited with ${exitCode}. stderr: ${stderr.slice(-2000)}`
       );
     }
-    return { registration, closeCount, stderr, renderedPage };
+    return {
+      registration,
+      closeCount,
+      stderr,
+      renderedPage,
+      graphReadResult,
+      lifecycle
+    };
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGKILL");

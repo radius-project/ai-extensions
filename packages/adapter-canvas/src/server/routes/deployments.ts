@@ -1,4 +1,10 @@
 import type { CanvasState } from "../../shared.js";
+import type {
+  LegacyDiscoveryReader,
+  LegacyDiscoverySession
+} from "../services/discovery-reader.js";
+import { serializeLegacyApplications } from "../services/discovery-serialization.js";
+import { discoveryCancellation } from "../services/discovery-cancellation.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type { DeploymentAbandonmentService } from "../services/deployment-abandonment.js";
@@ -88,6 +94,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  discovery: LegacyDiscoveryReader;
   ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
@@ -322,7 +329,7 @@ export function handleDeployStatus(
 // was guessed. That success fallback is pre-existing and preserved.
 export async function handleListApplications(
   context: CanvasRequestContext,
-  dependencies: DeploymentsDependencies
+  dependencies: Pick<DeploymentsDependencies, "readInstanceEntry" | "discovery">
 ): Promise<void> {
   const { response } = context;
   const repo = context.url.searchParams.get("repo") || "";
@@ -336,19 +343,31 @@ export async function handleListApplications(
     respond({ applications: [] });
     return;
   }
+  let reader: LegacyDiscoverySession | undefined;
   try {
-    // The application name is defined in the repo's app.bicep (a repo hosts a
-    // single Radius application in this model). Shared with the
-    // deployments/env-deletion paths via resolveRepoAppName.
     const entry = dependencies.readInstanceEntry(context.instanceId);
     const branch = deployContextBranch(entry);
-    const appName = await dependencies.resolveRepoAppName(repo, branch);
-    respond({ applications: [{ name: appName }] });
+    const opened = await dependencies.discovery.open(
+      repo,
+      context.instanceId,
+      discoveryCancellation(context)
+    );
+    if (opened.status !== "ok") {
+      respond(serializeLegacyApplications(repo, opened));
+      return;
+    }
+    reader = opened.value;
+    const result = await reader.applications(branch);
+    await reader.close();
+    reader = undefined;
+    respond(serializeLegacyApplications(repo, result));
   } catch (e) {
     respond({
       applications: [{ name: repo.split("/").pop() || repo }],
       error: errorMessage(e)
     });
+  } finally {
+    await reader?.close();
   }
 }
 
@@ -960,6 +979,10 @@ export function handleDeployNotification(
 export function createDeploymentsRoutes(
   dependencies: DeploymentsDependencies
 ): RouteHandlerRegistry {
+  if (typeof dependencies.discovery?.open !== "function")
+    throw new Error(
+      "Deployment routes require the canonical discovery reader."
+    );
   return {
     "GET /api/deploy-status": (context) =>
       handleDeployStatus(context, dependencies),

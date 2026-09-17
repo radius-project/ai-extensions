@@ -12,7 +12,7 @@ import {
   RADIUS_ACTION_DECLARATIONS,
   buildRadiusCanvasInputSchema
 } from "./declarations.js";
-import { record, optionalString, errorMessage } from "./util.js";
+import { record, optionalString } from "./util.js";
 import { DEFAULT_CANVAS_PAGE } from "./hooks.js";
 import { reloadCanvasInstance } from "./canvas-lifecycle.js";
 import { createGraphContextHelpers } from "./graph-context.js";
@@ -21,16 +21,9 @@ import {
   createRadiusCanvasInstanceRegistry,
   type RadiusCanvasInstanceRegistry
 } from "./canvas-instance-registry.js";
-import type { CanvasGraphResource, CanvasState } from "../shared.js";
-import {
-  asGraphModelingFailure,
-  GraphModelingFailure
-} from "../graph-modeling-failure.js";
-import {
-  beginGraphRepairAttempt,
-  clearGraphRepairAttempt,
-  graphRepairHandoffMessage
-} from "../graph-model-repair.js";
+import type { CanvasState } from "../shared.js";
+import { readCommittedGraphDiff, canvasResources } from "./graph-reader.js";
+import { randomUUID } from "node:crypto";
 
 const MAX_DEFERRED_ENVIRONMENT_CLOSE_MS = 46 * 60 * 1000;
 
@@ -61,8 +54,7 @@ export function createRadiusCanvas(
   canvasInstances: RadiusCanvasInstanceRegistry = createRadiusCanvasInstanceRegistry()
 ) {
   const closeGenerations = new Map<string, number>();
-  const { workspaceState, fetchBicepForBranch } =
-    createGraphContextHelpers(deps);
+  const { workspaceState } = createGraphContextHelpers(deps);
 
   const declarationByName = new Map(
     RADIUS_ACTION_DECLARATIONS.map((decl) => [decl.name, decl])
@@ -72,7 +64,17 @@ export function createRadiusCanvas(
     {
       ...declarationByName.get("get_graph_resources")!,
       handler: async (ctx: CanvasContext) => {
+        const generation = closeGenerations.get(ctx.instanceId);
         const entry = await deps.getOrCreateServer(ctx.instanceId);
+        if (
+          generation !== closeGenerations.get(ctx.instanceId) ||
+          deps.servers.get(ctx.instanceId) !== entry
+        )
+          return {
+            ready: false,
+            resources: [],
+            message: "The graph context changed."
+          };
         const input = record(ctx.input);
         const result = deps.sourceRefs.getSourceRefResources(
           entry,
@@ -122,7 +124,18 @@ export function createRadiusCanvas(
     {
       ...declarationByName.get("update_source_refs")!,
       handler: async (ctx: CanvasContext) => {
+        const generation = closeGenerations.get(ctx.instanceId);
         const entry = await deps.getOrCreateServer(ctx.instanceId);
+        if (
+          generation !== closeGenerations.get(ctx.instanceId) ||
+          deps.servers.get(ctx.instanceId) !== entry
+        )
+          return {
+            error: "The graph context changed.",
+            updated: 0,
+            queued: 0,
+            skipped: 0
+          };
         const input = record(ctx.input);
         const contextToken = input.contextToken;
         if (!contextToken || typeof contextToken !== "string") {
@@ -157,6 +170,19 @@ export function createRadiusCanvas(
         const page = result.view === "diff" ? "graph-diff" : result.view;
         entry.url = `${entry.baseUrl}/?page=${page}&sourceRefs=${Date.now()}`;
         await reloadCanvasInstance(deps.session.get(), ctx, { page });
+        if (
+          deps.servers.get(ctx.instanceId) !== entry ||
+          (result.view !== "graph" &&
+            result.view !== "planned" &&
+            result.view !== "diff") ||
+          !isCurrentSourceRefToken(entry.state, result.view, contextToken)
+        )
+          return {
+            error: "The graph context changed.",
+            updated: 0,
+            queued: 0,
+            skipped: 0
+          };
         return {
           ...result,
           message: `Updated ${result.updated} resource(s); queued ${result.queued}; skipped ${result.skipped}.`,
@@ -183,11 +209,17 @@ export function createRadiusCanvas(
         ctx.instanceId,
         (closeGenerations.get(ctx.instanceId) || 0) + 1
       );
+      const openGeneration = closeGenerations.get(ctx.instanceId);
       const input = record(ctx.input);
       const page = optionalString(input.page) || DEFAULT_CANVAS_PAGE;
       let entry;
       try {
         entry = await deps.getOrCreateServer(ctx.instanceId, page);
+        if (
+          closeGenerations.get(ctx.instanceId) !== openGeneration ||
+          deps.servers.get(ctx.instanceId) !== entry
+        )
+          throw new Error("The canvas context changed while opening.");
       } catch (error) {
         if (!deps.servers.has(ctx.instanceId)) {
           canvasInstances.release(ctx.instanceId);
@@ -208,6 +240,11 @@ export function createRadiusCanvas(
           }
         : undefined;
       const workspace = await workspaceState();
+      if (
+        closeGenerations.get(ctx.instanceId) !== openGeneration ||
+        deps.servers.get(ctx.instanceId) !== entry
+      )
+        throw new Error("The canvas context changed while opening.");
       Object.assign(entry.state, workspace);
       const inputRepo = optionalString(input.repo);
       const inputBranch = optionalString(input.branch);
@@ -265,9 +302,14 @@ export function createRadiusCanvas(
       }
 
       if (page === "graph" || page === "planned") {
+        const previous = entry.state.sourceRefContexts?.[page];
+        const sameSelection =
+          previous?.repo === entry.state.contextRepo &&
+          previous?.branch === entry.state.contextBranch;
         deps.sourceRefs.prepareSourceRefResources(entry, page, {
           repo: entry.state.contextRepo || "",
-          branch: entry.state.contextBranch || ""
+          branch: entry.state.contextBranch || "",
+          ...(sameSelection ? previous : { requestId: randomUUID() })
         });
       }
 
@@ -282,7 +324,7 @@ export function createRadiusCanvas(
         const sourceRefContext = deps.sourceRefs.prepareSourceRefResources(
           entry,
           "diff",
-          { repo, baseBranch, headBranch }
+          { repo, baseBranch, headBranch, requestId: randomUUID() }
         );
         entry.state.diffBase = baseBranch;
         entry.state.diffHead = headBranch;
@@ -290,116 +332,61 @@ export function createRadiusCanvas(
         delete entry.state.diffError;
         delete entry.state.diffModelingFailed;
         try {
-          const [baseContent, headContent] = await Promise.all([
-            fetchBicepForBranch(repo, baseBranch, entry.state),
-            fetchBicepForBranch(repo, headBranch, entry.state)
-          ]);
-
-          const session = deps.session.get();
-          const log = (m: string) => {
-            try {
-              session.log?.(m);
-            } catch {}
-          };
-
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                entry.state,
-                repo,
-                baseBranch
-              ),
-              state: entry.state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                entry.state,
-                repo,
-                headBranch
-              ),
-              state: entry.state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log
-            });
-          let baseResources: CanvasGraphResource[];
-          let headResources: CanvasGraphResource[];
-          try {
-            baseResources = await deps.rad.buildGraphViaRad(
-              baseContent || "",
-              ".radius/app.bicep",
-              {
-                log,
-                radArtifactsDir: baseRadArtifactsDir,
-                cleanupRadArtifactsDir: baseRadArtifactsRemote
-              }
-            );
-            headResources = await deps.rad.buildGraphViaRad(
-              headContent || "",
-              ".radius/app.bicep",
-              {
-                log,
-                radArtifactsDir: headRadArtifactsDir,
-                cleanupRadArtifactsDir: headRadArtifactsRemote
-              }
-            );
-          } catch (error) {
-            const failure = asGraphModelingFailure(error);
-            if (!(failure instanceof GraphModelingFailure)) throw error;
-            deps.logError(
-              `[radius graph] modeling failed for ${repo}@${baseBranch}...${headBranch}: ${failure.diagnostic}`
-            );
-            const request = {
-              view: "diff" as const,
-              repo: repo || "",
-              branches: [baseBranch, headBranch],
-              diagnostic: failure.diagnostic
-            };
-            if (
-              !isCurrentSourceRefToken(
-                entry.state,
-                "diff",
-                sourceRefContext.token
-              )
-            ) {
-              throw failure;
-            }
-            const attempt = beginGraphRepairAttempt(entry.state, request);
-            entry.state.diffModelingFailed = true;
-            if (attempt.repairing) {
-              try {
-                await deps.session
-                  .get()
-                  .send(graphRepairHandoffMessage(request, attempt));
-              } catch (handoffError) {
-                deps.logError(
-                  `[radius graph] failed to hand repair attempt ${attempt.attempt} to the agent: ${errorMessage(handoffError)}`
-                );
-              }
-            }
-            throw failure;
-          }
-          const diffResources = deps.core.computeGraphDiff(
-            baseResources,
-            headResources
+          const result = await readCommittedGraphDiff(
+            deps.lifecycle,
+            repo,
+            baseBranch,
+            headBranch
           );
+          if (
+            !isCurrentSourceRefToken(
+              entry.state,
+              "diff",
+              sourceRefContext.token
+            ) ||
+            deps.servers.get(ctx.instanceId) !== entry
+          )
+            return { title: "Radius", url: entry.url };
+          entry.state.graphReadEvidence ??= {};
+          if (result.status !== "ok") {
+            delete entry.state.diffResources;
+            delete entry.state.diffNoChanges;
+            entry.state.graphReadEvidence.diff = {
+              unavailable: true,
+              reason: result.error.code,
+              message: result.error.message
+            };
+            entry.state.diffError = `${result.error.code}: ${result.error.message}`;
+            return { title: "Radius", url: entry.url };
+          }
+          if (result.value.status === "unavailable") {
+            delete entry.state.diffResources;
+            delete entry.state.diffNoChanges;
+            entry.state.graphReadEvidence.diff = {
+              unavailable: true,
+              reason: result.value.reason,
+              message: result.value.message,
+              source: result.value.source
+            };
+            entry.state.diffError = `${result.value.reason}: ${result.value.message}`;
+            return { title: "Radius", url: entry.url };
+          }
+          const diffResources = canvasResources(result.value.graph);
           const committed = deps.sourceRefs.setSourceRefResources(
             entry,
             "diff",
             diffResources,
-            { repo, baseBranch, headBranch },
+            {
+              ...sourceRefContext,
+              provenance: { base: result.value.base, head: result.value.head }
+            },
             sourceRefContext.token
           );
           if (committed) {
-            clearGraphRepairAttempt(entry.state, "diff");
+            entry.state.graphReadEvidence.diff = {
+              unavailable: false,
+              result: result.value
+            };
             delete entry.state.diffModelingFailed;
             const hasChanges = diffResources.some(
               (r) => r.diffStatus !== "unchanged"
@@ -408,9 +395,19 @@ export function createRadiusCanvas(
           }
         } catch (e) {
           if (
+            deps.servers.get(ctx.instanceId) === entry &&
             isCurrentSourceRefToken(entry.state, "diff", sourceRefContext.token)
           ) {
-            entry.state.diffError = errorMessage(e);
+            delete entry.state.diffResources;
+            delete entry.state.diffNoChanges;
+            entry.state.diffError =
+              "The selected graph comparison is unavailable.";
+            entry.state.graphReadEvidence ??= {};
+            entry.state.graphReadEvidence.diff = {
+              unavailable: true,
+              reason: "RESULT_UNAVAILABLE",
+              message: entry.state.diffError
+            };
           }
         }
       }
@@ -420,6 +417,7 @@ export function createRadiusCanvas(
     onClose: async (ctx: CanvasContext) => {
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
+        delete entry.state.sourceRefContexts;
         if (deps.operations.hasActiveEnvironmentTasks(ctx.instanceId)) {
           const closeGeneration = closeGenerations.get(ctx.instanceId) || 0;
           let closeTimer: ReturnType<typeof setTimeout> | undefined;

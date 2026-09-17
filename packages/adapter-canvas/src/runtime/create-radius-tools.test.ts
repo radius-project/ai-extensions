@@ -1,28 +1,40 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  scriptGraphDiff,
+  graphFailure
+} from "../../test/support/canonical-graphs.js";
+import {
   UNIDENTIFIED_APPLICATION_MESSAGE,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
 import { createRadiusTools } from "./create-radius-tools.js";
+import {
+  LIFECYCLE_API_VERSION,
+  lifecycleError,
+  type LifecycleResponseFor
+} from "@radius-project/core/lifecycle";
 import { createMissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import {
   createFakeDependencies,
   createFakeSession
 } from "../../test/support/runtime/fakes.js";
 
-function findTool(
-  tools: ReturnType<typeof createRadiusTools>,
-  name: string
-): { handler: (args: Record<string, unknown>) => Promise<any> } {
+function findTool(tools: ReturnType<typeof createRadiusTools>, name: string) {
   const tool = tools.find((t) => t.name === name);
   if (!tool) throw new Error(`tool ${name} not found`);
-  return tool as unknown as {
-    handler: (args: Record<string, unknown>) => Promise<any>;
-  };
+  return tool;
 }
 
-function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
+function setup(
+  options?: Parameters<typeof createFakeDependencies>[0],
+  writer: "legacy" | "lifecycle" = "lifecycle"
+) {
   const fake = createFakeDependencies(options);
+  fake.deps.lifecycle.routing.transition("definition", {
+    writer,
+    readers: ["legacy", "lifecycle"],
+    controllers: ["legacy", "lifecycle"]
+  });
   fake.sessionHolder.set(createFakeSession());
   const modelingActivity = {
     announce: vi.fn(),
@@ -58,49 +70,499 @@ function parseSkillHandoff(value: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function expectSkillHandoff(
-  value: unknown,
-  repoPath: string,
-  brief?: string
-): void {
-  const handoff = parseSkillHandoff(value);
-  expect(handoff).toMatchObject({
-    skill: "radius-app-bicep",
-    repoPath,
-    skillBase: "/test/skills/radius-app-bicep",
-    skillVersion: "0.1.0-test",
-    instruction: `SKILL.md content for ${repoPath}`
-  });
-  if (brief === undefined) expect(handoff).not.toHaveProperty("brief");
-  else expect(handoff.brief).toBe(brief);
-}
-
-function skillBrief(value: unknown): string {
-  const brief = parseSkillHandoff(value).brief;
-  return typeof brief === "string" ? brief : "";
-}
-
-// RU-07: radius_generate_app analysis and compact skill bootstrap.
+// RU-07: the selected writer owns each new authoring request.
 describe("RU-07: radius_generate_app", () => {
-  it("delegates to the injected skill with the given repoPath", async () => {
-    const { tools, deps } = setup();
-    const result = await findTool(tools, "radius_generate_app").handler({
-      repoPath: "/some/repo"
+  const intent = {
+    operation: "definition.author",
+    target: { repo: "acme/widgets", definition: ".radius/app.bicep" },
+    input: {
+      intent:
+        "Generate a Radius application definition from the current workspace.",
+      provider: "azure"
+    }
+  };
+  function response(
+    state:
+      | "queued"
+      | "running"
+      | "action_required"
+      | "succeeded"
+      | "failed"
+      | "cancelled"
+  ): LifecycleResponseFor<"definition.author"> {
+    const source = {
+      kind: "workspace" as const,
+      repo: "acme/widgets",
+      workspaceRef: "workspace",
+      branch: "main",
+      fingerprint: `sha256:${"a".repeat(64)}`,
+      resolvedAt: "2026-09-16T00:00:00Z"
+    };
+    const target = {
+      ...intent.target,
+      source: {
+        kind: "workspace" as const,
+        workspaceRef: "workspace",
+        branch: "main",
+        expectedFingerprint: source.fingerprint
+      }
+    };
+    const common = {
+      operationId: "authoring-operation",
+      target,
+      source,
+      observation: {
+        quality: "current" as const,
+        completeness: "complete" as const,
+        evidence: "session" as const
+      }
+    };
+    return {
+      apiVersion: LIFECYCLE_API_VERSION,
+      requestId: "authoring-request",
+      operation: "definition.author",
+      result:
+        state === "action_required" ?
+          {
+            ...common,
+            state,
+            requiredAction: {
+              actionId: "authoring-action",
+              operationId: common.operationId,
+              target,
+              source,
+              status: "outstanding",
+              kind: "agent.author_definition",
+              responder: "agent",
+              response: { kind: "agent.outcome" },
+              message: "Author the guarded proposal."
+            }
+          }
+        : state === "succeeded" ?
+          {
+            ...common,
+            state,
+            proposal: {
+              operationId: common.operationId,
+              actionId: "authoring-action",
+              stagingRef: "guarded-staging",
+              originalFingerprint: source.fingerprint,
+              outputs: [
+                {
+                  path: ".radius/app.bicep",
+                  kind: "definition",
+                  existed: false,
+                  contentHash: `sha256:${"b".repeat(64)}`
+                }
+              ],
+              validation: {
+                status: "passed",
+                sourceFingerprint: source.fingerprint,
+                proposalFingerprint: `sha256:${"b".repeat(64)}`,
+                checks: [
+                  {
+                    checkId: "compiler",
+                    classification: "required",
+                    status: "passed",
+                    reason: "Compiled the exact staged proposal."
+                  }
+                ],
+                warnings: [],
+                diagnostics: []
+              },
+              promotion: "promoted"
+            }
+          }
+        : state === "failed" ?
+          { ...common, state, error: lifecycleError("PRECONDITION_FAILED") }
+        : { ...common, state }
+    };
+  }
+  function supported(paths = ["Dockerfile"]) {
+    return setup({
+      workspaceTreeByRepoBranch: { "acme/widgets@main": paths }
     });
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/some/repo",
+  }
+  it("preserves legacy bootstrap when the current host cannot author through lifecycle", async () => {
+    const { tools, deps, modelingActivity } = setup(
+      { workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] } },
+      "legacy"
+    );
+    const execute = vi.spyOn(deps.lifecycle, "execute");
+    const result = parseSkillHandoff(
+      await findTool(tools, "radius_generate_app").handler({})
+    );
+    expect(result).toMatchObject({
+      skill: "radius-app-bicep",
+      repoPath: "."
+    });
+    expect(deps.radiusAppBicepSkill).toHaveBeenCalledExactlyOnceWith(
+      undefined,
       undefined
     );
-    expectSkillHandoff(result, "/some/repo");
+    expect(execute).not.toHaveBeenCalled();
+    expect(modelingActivity.announce).toHaveBeenCalledExactlyOnceWith({
+      repo: "acme/widgets",
+      branch: "main"
+    });
   });
-
-  it("falls back to a standalone invocation when repoPath is omitted", async () => {
-    const { tools, deps } = setup();
+  it("routes new requests back to legacy after rollback while retaining lifecycle controls", async () => {
+    const { tools, deps } = supported();
+    deps.lifecycle.routing.claimDispatch("definition", "accepted-authoring");
+    deps.lifecycle.routing.transition("definition", {
+      writer: "legacy",
+      readers: ["legacy", "lifecycle"],
+      controllers: ["legacy", "lifecycle"]
+    });
+    const execute = vi.spyOn(deps.lifecycle, "execute");
+    expect(
+      parseSkillHandoff(
+        await findTool(tools, "radius_generate_app").handler({})
+      )
+    ).toMatchObject({ skill: "radius-app-bicep" });
+    expect(execute).not.toHaveBeenCalled();
+    expect(deps.lifecycle.routing.address("accepted-authoring", true)).toBe(
+      "lifecycle"
+    );
+  });
+  it.each([
+    { paths: ["Dockerfile"], repoPath: "/workspace", brief: false },
+    {
+      paths: ["services/api/Dockerfile", "services/web/Dockerfile"],
+      repoPath: "/workspace",
+      brief: true
+    },
+    {
+      paths: ["services/api/Dockerfile", "services/web/Dockerfile"],
+      repoPath: "/workspace/services/api",
+      brief: false
+    },
+    { paths: null, repoPath: "/workspace", brief: true },
+    { paths: ["package.json"], repoPath: "/other-repository", brief: false }
+  ])(
+    "retains legacy source scope and discovery information for $repoPath with $paths",
+    async ({ paths, repoPath, brief }) => {
+      const { tools, deps, modelingActivity } = setup(
+        { workspaceTreeByRepoBranch: { "acme/widgets@main": paths } },
+        "legacy"
+      );
+      const execute = vi.spyOn(deps.lifecycle, "execute");
+      const result = parseSkillHandoff(
+        await findTool(tools, "radius_generate_app").handler({ repoPath })
+      );
+      expect(result).toMatchObject({ skill: "radius-app-bicep", repoPath });
+      expect(typeof result.brief === "string").toBe(brief);
+      expect(execute).not.toHaveBeenCalled();
+      expect(modelingActivity.announce).toHaveBeenCalledTimes(
+        repoPath === "/other-repository" ? 0 : 1
+      );
+    }
+  );
+  it("withholds a legacy bootstrap on confirmed Dockerfile absence", async () => {
+    const { tools, deps, modelingActivity } = setup(
+      {
+        workspaceTreeByRepoBranch: { "acme/widgets@main": ["package.json"] }
+      },
+      "legacy"
+    );
+    expect(await findTool(tools, "radius_generate_app").handler({})).toContain(
+      UNSUPPORTED_NO_DOCKERFILE_MESSAGE
+    );
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
+  });
+  it.each([
+    { repo: "", branch: "main" },
+    { repo: "acme/widgets", branch: "" }
+  ])(
+    "does not announce an unbound legacy target: $repo@$branch",
+    async (context) => {
+      const { tools, deps, modelingActivity } = setup(
+        { workspaceContext: { workspacePath: "/workspace", ...context } },
+        "legacy"
+      );
+      const execute = vi.spyOn(deps.lifecycle, "execute");
+      expect(
+        parseSkillHandoff(
+          await findTool(tools, "radius_generate_app").handler({})
+        )
+      ).toMatchObject({ skill: "radius-app-bicep" });
+      expect(modelingActivity.announce).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+    }
+  );
+  it.each(["context", "listing", "selection"] as const)(
+    "retains the legacy handoff with an explicit warning when %s lookup fails",
+    async (boundary) => {
+      const { tools, deps, modelingActivity } = setup(undefined, "legacy");
+      if (boundary === "context")
+        vi.mocked(deps.workspace.detectWorkspaceContext).mockRejectedValueOnce(
+          new Error("private context details")
+        );
+      else if (boundary === "selection")
+        vi.mocked(deps.workspace.isWorkspaceSelection).mockImplementationOnce(
+          () => {
+            throw new Error("private selection details");
+          }
+        );
+      else
+        vi.mocked(deps.workspace.fetchWorkspaceTree).mockRejectedValueOnce(
+          new Error("private filesystem details")
+        );
+      const result = parseSkillHandoff(
+        await findTool(tools, "radius_generate_app").handler({})
+      );
+      expect(result).toMatchObject({
+        skill: "radius-app-bicep",
+        brief: expect.stringContaining("discovery was unavailable")
+      });
+      expect(JSON.stringify(result)).not.toContain("private");
+      expect(modelingActivity.announce).toHaveBeenCalledTimes(
+        boundary === "context" ? 0 : 1
+      );
+    }
+  );
+  it("does not hand off or redispatch if the writer changes during legacy discovery", async () => {
+    const { tools, deps, modelingActivity } = setup(undefined, "legacy");
+    const execute = vi.spyOn(deps.lifecycle, "execute");
+    vi.mocked(deps.workspace.fetchWorkspaceTree).mockImplementationOnce(
+      async () => {
+        deps.lifecycle.routing.transition("definition", {
+          writer: "lifecycle",
+          readers: ["legacy", "lifecycle"],
+          controllers: ["legacy", "lifecycle"]
+        });
+        return ["Dockerfile"];
+      }
+    );
+    expect(
+      parseSkillHandoff(
+        await findTool(tools, "radius_generate_app").handler({})
+      )
+    ).toMatchObject({ error: { code: "PRECONDITION_FAILED" } });
+    expect(execute).not.toHaveBeenCalled();
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
+  });
+  it("reports legacy bootstrap failure without announcing a run or falling through", async () => {
+    const { tools, deps, modelingActivity } = setup(
+      { workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] } },
+      "legacy"
+    );
+    const execute = vi.spyOn(deps.lifecycle, "execute");
+    vi.mocked(deps.radiusAppBicepSkill).mockImplementationOnce(() => {
+      throw new Error("skill installation missing");
+    });
+    expect(
+      parseSkillHandoff(
+        await findTool(tools, "radius_generate_app").handler({})
+      )
+    ).toMatchObject({ error: { code: "RESULT_UNAVAILABLE" } });
+    expect(execute).not.toHaveBeenCalled();
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
+  });
+  it.each([
+    undefined,
+    "",
+    "/workspace",
+    "/workspace/",
+    "\\workspace",
+    "/workspace/."
+  ])(
+    "maps workspace root %s to exactly one canonical request",
+    async (repoPath) => {
+      const { tools, deps, modelingActivity } = supported();
+      const result = response("queued");
+      const execute = vi
+        .spyOn(deps.lifecycle, "execute")
+        .mockImplementationOnce(async (input) => {
+          expect(input).toEqual(intent);
+          return result;
+        });
+      const send = vi.spyOn(deps.session.get(), "send");
+      expect(
+        parseSkillHandoff(
+          await findTool(tools, "radius_generate_app").handler({ repoPath })
+        )
+      ).toEqual(result);
+      expect(execute).toHaveBeenCalledExactlyOnceWith(intent);
+      expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(modelingActivity.announce).toHaveBeenCalledExactlyOnceWith({
+        repo: "acme/widgets",
+        branch: "main"
+      });
+    }
+  );
+  it.each([
+    "queued",
+    "running",
+    "action_required",
+    "succeeded",
+    "failed",
+    "cancelled"
+  ] as const)(
+    "preserves canonical %s without inventing a handoff or completion",
+    async (state) => {
+      const { tools, deps, modelingActivity } = supported();
+      const result = response(state);
+      const execute = vi
+        .spyOn(deps.lifecycle, "execute")
+        .mockImplementationOnce(async (input) => {
+          expect(input).toEqual(intent);
+          return result;
+        });
+      expect(
+        parseSkillHandoff(
+          await findTool(tools, "radius_generate_app").handler({})
+        )
+      ).toEqual(result);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(modelingActivity.announce).toHaveBeenCalledTimes(
+        state === "succeeded" || state === "failed" || state === "cancelled" ?
+          0
+        : 1
+      );
+      expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    }
+  );
+  it("does not bypass unavailable host authority through a skill or session message", async () => {
+    const { tools, deps, modelingActivity } = supported();
+    const result = graphFailure("CAPABILITY_UNAVAILABLE");
+    const execute = vi
+      .spyOn(deps.lifecycle, "execute")
+      .mockImplementationOnce(async (input) => {
+        expect(input).toEqual(intent);
+        return result;
+      });
+    const send = vi.spyOn(deps.session.get(), "send");
+    expect(
+      parseSkillHandoff(
+        await findTool(tools, "radius_generate_app").handler({})
+      )
+    ).toEqual(result);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
+  });
+  it("fails explicitly without exposing external errors when canonical execution rejects", async () => {
+    const { tools, deps, modelingActivity } = supported();
+    vi.spyOn(deps.lifecycle, "execute").mockImplementationOnce(
+      async (input) => {
+        expect(input).toEqual(intent);
+        throw new Error("private diagnostic");
+      }
+    );
     const result = await findTool(tools, "radius_generate_app").handler({});
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(undefined, undefined);
-    expectSkillHandoff(result, ".");
+    expect(parseSkillHandoff(result)).toMatchObject({
+      error: { code: "RESULT_UNAVAILABLE" }
+    });
+    expect(result).not.toContain("private diagnostic");
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
-
+  it.each([
+    "services/api",
+    "/workspace/services/api",
+    "/workspace/./services/api"
+  ])(
+    "refuses unsupported scoped source %s rather than modeling the whole repository",
+    async (repoPath) => {
+      const { tools, deps, modelingActivity } = supported();
+      const execute = vi.spyOn(deps.lifecycle, "execute");
+      expect(
+        parseSkillHandoff(
+          await findTool(tools, "radius_generate_app").handler({ repoPath })
+        )
+      ).toMatchObject({ error: { code: "CAPABILITY_UNAVAILABLE" } });
+      expect(execute).not.toHaveBeenCalled();
+      expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+      expect(modelingActivity.announce).not.toHaveBeenCalled();
+    }
+  );
+  it.each([null, 42, {}, []])(
+    "rejects malformed repoPath %j",
+    async (repoPath) => {
+      const { tools, deps } = supported();
+      const execute = vi.spyOn(deps.lifecycle, "execute");
+      expect(
+        parseSkillHandoff(
+          await findTool(tools, "radius_generate_app").handler({ repoPath })
+        )
+      ).toMatchObject({ error: { code: "INVALID_REQUEST" } });
+      expect(execute).not.toHaveBeenCalled();
+    }
+  );
+  it("passes multi-service evidence as intent, without a second listing or independent agent handoff", async () => {
+    const { tools, deps } = supported([
+      "services/api/Dockerfile",
+      "services/web/Dockerfile",
+      "pnpm-workspace.yaml",
+      "node_modules/ignored/Dockerfile"
+    ]);
+    const execute = vi
+      .spyOn(deps.lifecycle, "execute")
+      .mockImplementationOnce(async (input) => {
+        expect(input).toEqual({
+          ...intent,
+          input: {
+            provider: "azure",
+            intent: expect.stringContaining("ONE application")
+          }
+        });
+        const text = JSON.stringify(input);
+        expect(text).toContain("`services/api`");
+        expect(text).toContain("`services/web`");
+        expect(text).toContain("`pnpm-workspace.yaml`");
+        expect(text).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
+        expect(text).not.toContain("node_modules");
+        return response("queued");
+      });
+    await findTool(tools, "radius_generate_app").handler({});
+    expect(execute).toHaveBeenCalledOnce();
+    expect(deps.workspace.fetchWorkspaceTree).toHaveBeenCalledOnce();
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+  });
+  it("refuses a source not bound to the current worktree instead of reading a remote substitute", async () => {
+    const { tools, deps } = supported();
+    vi.mocked(deps.workspace.isWorkspaceSelection).mockReturnValue(false);
+    const execute = vi.spyOn(deps.lifecycle, "execute");
+    expect(
+      parseSkillHandoff(
+        await findTool(tools, "radius_generate_app").handler({})
+      )
+    ).toMatchObject({ error: { code: "RESULT_UNAVAILABLE" } });
+    expect(deps.github.treePaths).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it.each(["missing", "throwing"] as const)(
+    "publishes successfully when session logging is %s",
+    async (logging) => {
+      const { tools, deps, sessionHolder } = setup();
+      const log = vi.fn(() => {
+        throw new Error("Host logger disconnected");
+      });
+      sessionHolder.set(
+        createFakeSession({ log: logging === "throwing" ? log : undefined })
+      );
+      vi.spyOn(deps.rad, "runRadBicepPublishExtension").mockImplementation(
+        async (args) => {
+          args.log?.("Publishing extension");
+          return args.target;
+        }
+      );
+      const result = await findTool(
+        tools,
+        "radius_publish_custom_type_extension"
+      ).handler({});
+      expect(result).toContain("Published custom-type extension");
+      expect(deps.rad.runRadBicepPublishExtension).toHaveBeenCalledOnce();
+      if (logging === "throwing")
+        expect(log).toHaveBeenCalledWith("Publishing extension");
+      await deps.lifecycle.close();
+    }
+  );
   it("withholds the skill and reports the unsupported repository when it has no Dockerfile", async () => {
     const { tools, deps } = setup({
       workspaceTreeByRepoBranch: {
@@ -117,41 +579,6 @@ describe("RU-07: radius_generate_app", () => {
     expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
 
-  it("hands over the skill when the repository has a Dockerfile", async () => {
-    const { tools, deps } = setup({
-      workspaceTreeByRepoBranch: {
-        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
-      }
-    });
-
-    const result = await findTool(tools, "radius_generate_app").handler({
-      repoPath: "/workspace"
-    });
-
-    expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/workspace",
-      undefined
-    );
-  });
-
-  it("announces the run it is about to start, so a graph render defers instead of asking for it again", async () => {
-    const { tools, modelingActivity } = setup({
-      workspaceTreeByRepoBranch: {
-        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
-      }
-    });
-
-    await findTool(tools, "radius_generate_app").handler({
-      repoPath: "/workspace"
-    });
-
-    expect(modelingActivity.announce).toHaveBeenCalledWith({
-      repo: "acme/widgets",
-      branch: "main"
-    });
-  });
-
   it("does not announce a repository-wide wildcard when the workspace branch is unresolved", async () => {
     const { tools, modelingActivity } = setup({
       workspaceContext: {
@@ -166,24 +593,6 @@ describe("RU-07: radius_generate_app", () => {
     });
 
     expect(modelingActivity.announce).not.toHaveBeenCalled();
-  });
-
-  it("announces the run when the agent is briefed about several candidate directories", async () => {
-    const { tools, modelingActivity } = setup({
-      workspaceTreeByRepoBranch: {
-        "acme/widgets@main": [
-          "services/api/Dockerfile",
-          "services/web/Dockerfile"
-        ]
-      }
-    });
-
-    await findTool(tools, "radius_generate_app").handler({});
-
-    expect(modelingActivity.announce).toHaveBeenCalledWith({
-      repo: "acme/widgets",
-      branch: "main"
-    });
   });
 
   it("announces nothing for a repository it refuses to model", async () => {
@@ -213,7 +622,7 @@ describe("RU-07: radius_generate_app", () => {
     expect(modelingActivity.announce).not.toHaveBeenCalled();
   });
 
-  it("hands over the skill when the repository cannot be listed", async () => {
+  it("fails explicitly when the repository cannot be listed", async () => {
     const { tools, deps } = setup();
     (
       deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
@@ -223,14 +632,32 @@ describe("RU-07: radius_generate_app", () => {
       repoPath: "/workspace"
     });
 
-    expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/workspace",
-      undefined
-    );
+    expect(parseSkillHandoff(result)).toMatchObject({
+      error: { code: "RESULT_UNAVAILABLE" }
+    });
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
+  it.each([null, []])(
+    "fails closed for unknown source evidence %j",
+    async (listing) => {
+      const { tools, deps, modelingActivity } = setup({
+        workspaceTreeByRepoBranch: { "acme/widgets@main": listing }
+      });
+      const execute = vi.spyOn(deps.lifecycle, "execute");
+      expect(
+        parseSkillHandoff(
+          await findTool(tools, "radius_generate_app").handler({})
+        )
+      ).toMatchObject({
+        error: { code: "RESULT_UNAVAILABLE" }
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+      expect(modelingActivity.announce).not.toHaveBeenCalled();
+    }
+  );
 
-  it("hands over the skill when the workspace context cannot be resolved", async () => {
+  it("fails explicitly when the workspace context cannot be resolved", async () => {
     const { tools, deps } = setup();
     (
       deps.workspace.detectWorkspaceContext as ReturnType<typeof vi.fn>
@@ -240,14 +667,13 @@ describe("RU-07: radius_generate_app", () => {
       repoPath: "/workspace"
     });
 
-    expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/workspace",
-      undefined
-    );
+    expect(parseSkillHandoff(result)).toMatchObject({
+      error: { code: "RESULT_UNAVAILABLE" }
+    });
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
 
-  it("hands over the skill when deciding which listing to use throws", async () => {
+  it("fails explicitly when deciding which listing to use throws", async () => {
     const { tools, deps } = setup();
     (
       deps.workspace.isWorkspaceSelection as ReturnType<typeof vi.fn>
@@ -259,17 +685,13 @@ describe("RU-07: radius_generate_app", () => {
       repoPath: "/workspace"
     });
 
-    expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/workspace",
-      undefined
-    );
+    expect(parseSkillHandoff(result)).toMatchObject({
+      error: { code: "RESULT_UNAVAILABLE" }
+    });
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
 
-  // Without a repository the worktree predicate is fail-closed, so nothing can
-  // be listed and no verdict is available. The gate must hand over the skill
-  // rather than refuse, and must not spend a doomed remote lookup to get there.
-  it("hands over the skill, without listing, when the workspace has no repo context", async () => {
+  it("fails without listing when the workspace has no repo context", async () => {
     const { tools, deps } = setup({
       workspaceContext: { workspacePath: "/workspace", repo: "", branch: "" }
     });
@@ -278,11 +700,10 @@ describe("RU-07: radius_generate_app", () => {
       repoPath: "/workspace"
     });
 
-    expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/workspace",
-      undefined
-    );
+    expect(parseSkillHandoff(result)).toMatchObject({
+      error: { code: "RESULT_UNAVAILABLE" }
+    });
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
     expect(deps.github.treePaths).not.toHaveBeenCalled();
     expect(deps.workspace.fetchWorkspaceTree).not.toHaveBeenCalled();
   });
@@ -292,7 +713,7 @@ describe("RU-07: radius_generate_app", () => {
   it.each([
     ["a sibling with a shared prefix", "/workspace-other"],
     ["a path that escapes upward", "/workspace/../elsewhere"]
-  ])("does not gate %s", async (_label, repoPath) => {
+  ])("rejects %s without filesystem authority", async (_label, repoPath) => {
     const { tools, deps } = setup({
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["src/index.ts", "package.json"]
@@ -303,8 +724,10 @@ describe("RU-07: radius_generate_app", () => {
       repoPath
     });
 
-    expectSkillHandoff(result, repoPath);
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(repoPath, undefined);
+    expect(parseSkillHandoff(result)).toMatchObject({
+      error: { code: "CAPABILITY_UNAVAILABLE" }
+    });
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
 
   // The listing the check can obtain describes the workspace, so it is not
@@ -320,11 +743,10 @@ describe("RU-07: radius_generate_app", () => {
       repoPath: "/elsewhere/other-repo"
     });
 
-    expectSkillHandoff(result, "/elsewhere/other-repo");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/elsewhere/other-repo",
-      undefined
-    );
+    expect(parseSkillHandoff(result)).toMatchObject({
+      error: { code: "CAPABILITY_UNAVAILABLE" }
+    });
+    expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
     expect(modelingActivity.announce).not.toHaveBeenCalled();
   });
 
@@ -349,7 +771,7 @@ describe("RU-07: radius_generate_app", () => {
     expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
   });
 
-  it("does not gate when the workspace path itself is unknown", async () => {
+  it("fails explicitly when the workspace path itself is unknown", async () => {
     const { tools, deps } = setup({
       workspaceContext: {
         workspacePath: "",
@@ -365,187 +787,10 @@ describe("RU-07: radius_generate_app", () => {
       repoPath: "/workspace"
     });
 
-    expectSkillHandoff(result, "/workspace");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/workspace",
-      undefined
-    );
-  });
-});
-
-// RU-07b: several Dockerfiles brief the agent without refusing to model.
-describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
-  const MICROSERVICES = [
-    "services/api/Dockerfile",
-    "services/web/Dockerfile",
-    "services/worker/Dockerfile",
-    "pnpm-workspace.yaml"
-  ];
-
-  async function generateFor(paths: string[], repoPath = "/workspace") {
-    const { tools, deps } = setup({
-      workspaceTreeByRepoBranch: { "acme/widgets@main": paths }
+    expect(parseSkillHandoff(result)).toMatchObject({
+      error: { code: "RESULT_UNAVAILABLE" }
     });
-    const result = await findTool(tools, "radius_generate_app").handler({
-      repoPath
-    });
-    return { result: String(result), deps };
-  }
-
-  // The central regression: a microservices repository is ONE application, so
-  // several Dockerfiles must never withhold the skill or trigger the question.
-  it("still hands over the full skill so the services are modeled as one application", async () => {
-    const { result, deps } = await generateFor(MICROSERVICES);
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "/workspace",
-      expect.any(String)
-    );
-    expectSkillHandoff(
-      result,
-      "/workspace",
-      String(parseSkillHandoff(result).brief)
-    );
-    expect(result).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
-  });
-
-  it("does not instruct the agent to ask merely because there are several", async () => {
-    const { result } = await generateFor(MICROSERVICES);
-    expect(skillBrief(result)).toContain("ONE application");
-    expect(skillBrief(result)).toMatch(/Ask the user only if/);
-  });
-
-  it("includes the candidate directories it found in the brief field", async () => {
-    const { result } = await generateFor(MICROSERVICES);
-    expect(skillBrief(result)).toContain("`services/api`");
-    expect(skillBrief(result)).toContain("`services/web`");
-    expect(skillBrief(result)).toContain("`services/worker`");
-  });
-
-  it("carries the specified question for the case where no application can be identified", async () => {
-    const { result } = await generateFor(MICROSERVICES);
-    expect(skillBrief(result)).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
-  });
-
-  it("reports the workspace manifest it found", async () => {
-    const { result } = await generateFor(MICROSERVICES);
-    expect(skillBrief(result)).toContain("`pnpm-workspace.yaml`");
-  });
-
-  // The user's answer to the question comes back as repoPath naming a
-  // subdirectory. That is not the workspace, so the evidence gate skips the
-  // block entirely and the question cannot be re-asked after being answered.
-  it("says nothing more once the user has answered with a directory", async () => {
-    const { result, deps } = await generateFor(MICROSERVICES, "services/api");
-    expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
-      "services/api",
-      undefined
-    );
-    expectSkillHandoff(result, "services/api");
-  });
-
-  // Acceptance criterion 3 of #437: the answer scopes the next analysis to that
-  // directory, which means the question must not be posed a second time.
-  it("says nothing more for an absolute path inside the workspace either", async () => {
-    const { result } = await generateFor(
-      MICROSERVICES,
-      "/workspace/services/api"
-    );
-    expect(parseSkillHandoff(result)).not.toHaveProperty("brief");
-  });
-
-  it("does not re-ask when the answer is a dot-relative path inside the tree", async () => {
-    const { result } = await generateFor(
-      MICROSERVICES,
-      "/workspace/./services/api"
-    );
-    expect(parseSkillHandoff(result)).not.toHaveProperty("brief");
-  });
-
-  it("still refuses a scoped answer when the whole tree has no Dockerfile", async () => {
-    // The refusal survives the scope check: a tree with no Dockerfile has none
-    // in the named subdirectory either, so 2.1's evidence still applies.
-    const { result, deps } = await generateFor(
-      ["src/index.ts", "package.json"],
-      "/workspace/services/api"
-    );
-    expect(result).toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(deps.radiusAppBicepSkill).not.toHaveBeenCalled();
-  });
-
-  it("still briefs for a location outside the worktree", async () => {
-    // Not the user's answer to this question, and the worktree listing is not
-    // evidence about it, so the gate skips the block entirely.
-    const { result, deps } = await generateFor(MICROSERVICES, "/elsewhere/api");
-    expectSkillHandoff(result, "/elsewhere/api");
-    expect(deps.workspace.isWorkspacePath).toHaveBeenCalled();
-  });
-
-  it("briefs when the target is the workspace root", async () => {
-    const { result } = await generateFor(MICROSERVICES, "/workspace/");
-    expect(skillBrief(result)).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
-  });
-
-  // Now reachable: the brief reads the listing through the same branch-aware
-  // lister as the classification, so a non-workspace branch is briefed from the
-  // repository tree rather than losing the signal.
-  it("briefs from the repository tree when the branch is not the worktree", async () => {
-    const { tools, deps } = setup({
-      remoteTreeByRepoBranch: { "acme/widgets@main": MICROSERVICES }
-    });
-    vi.mocked(deps.workspace.isWorkspaceSelection).mockReturnValue(false);
-
-    const result = String(
-      await findTool(tools, "radius_generate_app").handler({
-        repoPath: "/workspace"
-      })
-    );
-
-    expect(skillBrief(result)).toContain("`services/api`");
-    expect(skillBrief(result)).toContain("`pnpm-workspace.yaml`");
-    expect(deps.github.treePaths).toHaveBeenCalledWith("acme/widgets", "main");
-  });
-
-  it("still briefs the agent when the workspace-manifest re-read fails", async () => {
-    // The signal is an enhancement, not a precondition: losing it must not cost
-    // the candidate directories or the question.
-    const { tools, deps } = setup({
-      workspaceTreeByRepoBranch: { "acme/widgets@main": MICROSERVICES }
-    });
-    vi.mocked(deps.workspace.fetchWorkspaceTree)
-      .mockImplementationOnce(async () => MICROSERVICES)
-      .mockRejectedValueOnce(new Error("permission denied"));
-
-    const result = String(
-      await findTool(tools, "radius_generate_app").handler({
-        repoPath: "/workspace"
-      })
-    );
-
-    expect(skillBrief(result)).toContain("`services/api`");
-    expect(skillBrief(result)).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
-    expect(skillBrief(result)).not.toContain("`pnpm-workspace.yaml`");
-  });
-
-  it("omits the brief when a single Dockerfile makes the location unambiguous", async () => {
-    const { result } = await generateFor(["services/api/Dockerfile"]);
-    expectSkillHandoff(result, "/workspace");
-  });
-
-  it("omits the brief when the listing could not be established", async () => {
-    // An unlistable repository is `unknown`, never a report to the user.
-    const { tools } = setup();
-    const result = await findTool(tools, "radius_generate_app").handler({
-      repoPath: "/workspace"
-    });
-    expectSkillHandoff(result, "/workspace");
-  });
-
-  it("ignores Dockerfiles in vendored directories when counting candidates", async () => {
-    const { result } = await generateFor([
-      "services/api/Dockerfile",
-      "node_modules/some-dep/Dockerfile"
-    ]);
-    expectSkillHandoff(result, "/workspace");
   });
 });
 
@@ -578,7 +823,8 @@ describe("TL-11: radius_report_modeling_failure", () => {
   };
 
   it("records a permanent failure for the current missing-model attempt", async () => {
-    const { tools, entry } = await currentAttempt();
+    const { tools, entry, deps } = await currentAttempt();
+    const execute = vi.spyOn(deps.lifecycle, "execute");
 
     const result = await findTool(
       tools,
@@ -590,6 +836,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
       attemptToken: "attempt-1",
       error: report.error
     });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("releases the dead run's handoff claim so the promised retry can be sent", async () => {
@@ -708,15 +955,15 @@ describe("TL-11: radius_report_modeling_failure", () => {
 describe("RU-08: radius_generate_pr_diff_markdown", () => {
   it("reports missing app.bicep on both branches without calling rad", async () => {
     const { tools, deps } = setup();
+    const scripted = scriptGraphDiff(deps.lifecycle);
+    scripted.execute.mockResolvedValue(graphFailure("DEFINITION_NOT_FOUND"));
     const result = await findTool(
       tools,
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
     expect(result).toMatchObject({
       resultType: "success",
-      textResultForLlm: expect.stringContaining(
-        "does not exist on main or feat yet"
-      ),
+      textResultForLlm: expect.stringContaining("DEFINITION_NOT_FOUND"),
       toolTelemetry: { radiusGraphDiff: { outcome: "unavailable" } }
     });
     expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
@@ -735,6 +982,10 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
         { id: "db", name: "db", type: "x" },
         { id: "cache", name: "cache", type: "x" }
       ]);
+    scriptGraphDiff(deps.lifecycle, [
+      { id: "db", name: "db", type: "x", diffStatus: "unchanged" },
+      { id: "cache", name: "cache", type: "x", diffStatus: "added" }
+    ]);
     const result = await findTool(
       tools,
       "radius_generate_pr_diff_markdown"
@@ -744,8 +995,12 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       textResultForLlm: expect.stringContaining("Application Graph Diff"),
       toolTelemetry: { radiusGraphDiff: { outcome: "diff" } }
     });
-    expect(result.textResultForLlm).toContain("main");
-    expect(result.textResultForLlm).toContain("feat");
+    expect(result).toMatchObject({
+      textResultForLlm: expect.stringContaining("main")
+    });
+    expect(result).toMatchObject({
+      textResultForLlm: expect.stringContaining("feat")
+    });
   });
 
   it("maps a fetch/build failure to a friendly warning instead of throwing", async () => {
@@ -758,20 +1013,25 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("rad exploded")
     );
+    scriptGraphDiff(deps.lifecycle).execute.mockRejectedValue(
+      new Error("rad exploded")
+    );
     const result = await findTool(
       tools,
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
     expect(result).toMatchObject({
       resultType: "failure",
-      error: expect.stringContaining("rad exploded"),
+      error:
+        "Could not generate app graph diff: the selected graph evidence is unavailable.",
       textResultForLlm: expect.stringContaining(
         "Could not generate app graph diff"
       )
     });
+    expect(JSON.stringify(result)).not.toContain("rad exploded");
   });
 
-  it("logs graph build progress when available without letting a logging failure break the diff", async () => {
+  it("uses canonical read results without calling legacy graph builders or logs", async () => {
     const { tools, deps } = setup({
       bicepByRepoBranch: {
         "remote:acme/widgets@main": "resource db {}",
@@ -779,6 +1039,9 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       }
     });
     const session = deps.session.get();
+    scriptGraphDiff(deps.lifecycle, [
+      { id: "cache", name: "cache", type: "x", diffStatus: "added" }
+    ]);
     session.log = vi.fn(() => {
       throw new Error("log unavailable");
     });
@@ -794,8 +1057,10 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
       "radius_generate_pr_diff_markdown"
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
 
-    expect(session.log).toHaveBeenCalledWith("building graph");
-    expect(result.textResultForLlm).toContain("Application Graph Diff");
+    expect(deps.rad.radArtifactsDirForSelection).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      textResultForLlm: expect.stringContaining("Application Graph Diff")
+    });
   });
 });
 
@@ -1162,7 +1427,7 @@ describe("RU-12: radius_deploy_status", () => {
       })
     );
     const result = await findTool(tools, "radius_deploy_status").handler({});
-    const parsed = JSON.parse(result);
+    const parsed = parseSkillHandoff(result);
     expect(parsed.status).toBe("failed");
     expect(parsed.deployRunUrl).toBe(
       "https://github.com/acme/widgets/actions/runs/1"
@@ -1189,7 +1454,7 @@ describe("RU-12: radius_deploy_status", () => {
     const result = await findTool(tools, "radius_deploy_status").handler({
       logLines: 999
     });
-    const parsed = JSON.parse(result);
+    const parsed = parseSkillHandoff(result);
     // capped at DEPLOY_LOG_TAIL_MAX (200)
     expect(parsed.diagnostic).toContain("line 100");
     expect(parsed.diagnostic).not.toContain("line 99\n");
@@ -1244,7 +1509,7 @@ describe("RU-12: radius_deploy_status", () => {
       new Response("not json", { status: 200 })
     );
 
-    const result = JSON.parse(
+    const result = parseSkillHandoff(
       await findTool(tools, "radius_deploy_status").handler({})
     );
 

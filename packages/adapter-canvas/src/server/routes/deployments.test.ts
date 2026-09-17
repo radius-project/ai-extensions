@@ -1,6 +1,8 @@
 import { Readable } from "node:stream";
+import { createLegacyDiscoveryFake } from "../../../test/support/legacy-discovery.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
+import { portSuccess } from "@radius-project/core/lifecycle";
 import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
@@ -77,6 +79,9 @@ function dependencies(
   overrides: Partial<DeploymentsDependencies> = {}
 ): DeploymentsDependencies {
   return {
+    discovery: createLegacyDiscoveryFake({
+      application: overrides.resolveRepoAppName
+    }),
     isValidRepoSlug: (value) => value === "octo/todolist",
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
@@ -229,6 +234,42 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
+  it("closes an acquired discovery session when a read unexpectedly throws", async () => {
+    let closed = 0;
+    const h = context("GET", "/api/list-applications?repo=octo/todolist");
+    const unexpected = async (): Promise<never> => {
+      throw new Error("Read stopped");
+    };
+    await handleListApplications(h.context, {
+      readInstanceEntry: () => undefined,
+      discovery: {
+        open: async () =>
+          portSuccess({
+            cacheKey: "reader",
+            applications: unexpected,
+            environments: unexpected,
+            run: unexpected,
+            close: async () => {
+              closed++;
+            }
+          })
+      }
+    });
+    expect(h.recording.status).toBe(200);
+    expect(JSON.parse(h.recording.body)).toEqual({
+      applications: [{ name: "todolist" }],
+      error: "Read stopped"
+    });
+    expect(closed).toBe(1);
+  });
+  it.each([{}, { discovery: {} }])(
+    "requires the canonical discovery reader at construction",
+    (dependencies) => {
+      expect(() =>
+        Reflect.apply(createDeploymentsRoutes, undefined, [dependencies])
+      ).toThrow("canonical discovery reader");
+    }
+  );
   it("declares exactly the nine routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
