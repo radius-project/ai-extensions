@@ -3219,6 +3219,32 @@ describe("createCloudFixture", () => {
       ).toBe(true);
     });
 
+    it("accepts a failed delete whose namespace disappears before the re-list", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        failing("kubectl", ["delete", "all"], "etcdserver: request timed out"),
+        {
+          tool: "kubectl",
+          match: ["get", RADIUS_RENDERED_RESOURCES],
+          respond: {
+            code: 1,
+            stderr:
+              'Error from server (NotFound): namespaces "default-demo" not found'
+          }
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        `Radius application demo in ${ENVIRONMENT}`,
+        "Kubernetes workloads for demo in default-demo"
+      ]);
+    });
+
     it("accepts a failed delete whose namespace is already gone without re-listing", async () => {
       const { fixture, fake } = await createHarness([
         {
