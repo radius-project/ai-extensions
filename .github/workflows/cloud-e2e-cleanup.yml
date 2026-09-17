@@ -240,7 +240,7 @@ jobs:
                   )
                 );
                 process.stdout.write(findNewWorkflowRunId(before, after) ?? "");
-                NODE
+          NODE
               )"
               [[ -n "$run_id" ]] && break
               sleep 5
@@ -552,7 +552,7 @@ jobs:
               }
             ]);
             await writeFile(selectedFile, JSON.stringify(selected));
-            NODE
+          NODE
             then
               failures+=("validate role assignments for service principal $id")
               echo "$app_id" >>"$blocked_app_ids"
