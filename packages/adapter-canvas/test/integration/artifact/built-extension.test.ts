@@ -684,14 +684,6 @@ describe("P0-C built Radius extension artifact", () => {
     for (const block of bicepBlocks) {
       expect(block).not.toMatch(literalCredentialAssignment);
     }
-
-    const checker = readFileSync(
-      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
-      "utf8"
-    );
-    expect(checker).toContain("error connection-source");
-    expect(checker).toContain("managed Kubernetes Secret name");
-    expect(checker).toContain("producer resource ID (<producer>.id)");
   });
 
   it("packages fail-closed guidance for developer rad resolution failures", () => {
@@ -959,6 +951,16 @@ describe("P0-C built Radius extension artifact", () => {
     ]) {
       expect(checkerScript).toContain(rule);
     }
+  });
+
+  it("packages the connection-source validator", () => {
+    assertCurrentArtifact();
+    const checkerScript = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+
+    expect(checkerScript).toContain("connection-source");
   });
 
   it("packages each page module exactly once", () => {

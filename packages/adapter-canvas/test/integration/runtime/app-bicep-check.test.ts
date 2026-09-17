@@ -557,8 +557,9 @@ describe("managed Secret connection sources", () => {
 
   it.each([
     managedSecretName,
-    "[reference('cache', '2025-08-01-preview', 'full').properties.secrets.name]"
-  ])("rejects a direct managed Secret name connection source", (source) => {
+    "[reference(format('caches[{0}]', 0)).properties.secrets.name]",
+    "[reference(format('caches[{0}]', parameters('idx'))).properties.secrets.name]"
+  ])("rejects an exact managed Secret name connection source", (source) => {
     const directory = temporaryDirectory();
     const compiledOutput = template({
       web: containerConnections({
@@ -576,10 +577,14 @@ describe("managed Secret connection sources", () => {
     assert.match(result.stderr, /web\.properties\.connections\.cache\.source/u);
     assert.match(result.stderr, /managed Kubernetes Secret name/u);
     assert.match(result.stderr, /producer resource ID \(<producer>\.id\)/u);
-    assert.doesNotMatch(result.stderr, /reference\('cache'/u);
+    assert.match(
+      result.stderr,
+      /valueFrom\.secretKeyRef\.secretName.*explicit Kubernetes environment binding/u
+    );
+    assert.doesNotMatch(result.stderr, /\[reference\(/u);
   });
 
-  it("resolves a top-level parameter default", () => {
+  it("resolves a synthesized template's top-level parameter default", () => {
     const directory = temporaryDirectory();
     const compiledOutput = template(
       {
@@ -599,6 +604,34 @@ describe("managed Secret connection sources", () => {
 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /connection-source/u);
+  });
+
+  it.each([
+    {
+      fixture: "direct-connection-source",
+      paths: ["web.properties.connections.cache.source"]
+    },
+    {
+      fixture: "looped-connection-source",
+      paths: [
+        "literalIndex.properties.connections.cache.source",
+        "parameterIndex.properties.connections.cache.source"
+      ]
+    }
+  ])("rejects compiler-generated $fixture fixture", ({ fixture, paths }) => {
+    const directory = temporaryDirectory();
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledBicepFixture(fixture))
+    );
+
+    assert.equal(result.status, 1);
+    for (const resourcePath of paths) {
+      assert.match(
+        result.stderr,
+        new RegExp(`connection-source: ${escapeRegExp(resourcePath)}`, "u")
+      );
+    }
   });
 
   it("resolves a local module parameter", () => {
@@ -683,6 +716,14 @@ describe("managed Secret connection sources", () => {
       name: "a condition expression",
       source:
         "[if(parameters('enabled'), reference('cache').properties.secrets.name, resourceId('Radius.Data/redisCaches', 'cache'))]"
+    },
+    {
+      name: "a trim expression",
+      source: "[trim(reference('cache').properties.secrets.name)]"
+    },
+    {
+      name: "an outer format expression",
+      source: "[format('{0}', reference('cache').properties.secrets.name)]"
     },
     {
       name: "a different reference property",

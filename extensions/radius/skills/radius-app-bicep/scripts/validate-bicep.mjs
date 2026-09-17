@@ -700,11 +700,20 @@ function plainEnvironmentValues(env) {
   return values;
 }
 
-// Match only the whole expression Bicep emits for `<producer>.properties.secrets.name`.
-// Compound or unresolved expressions do not prove the connection source is invalid.
+// Any expression whose outermost call is reference(...) and whose result is
+// .properties.secrets.name is a managed Secret name. The argument may select a
+// literal resource or a loop instance through format(...). Expressions wrapped
+// in another operation remain outside this deliberately narrow match.
+//
+// This assumes the predefined Radius producer semantics documented by the
+// skill. A future expression parser could identify a direct producer's type and
+// distinguish custom Radius.Resources/* properties without broadening this rule.
 const MANAGED_SECRET_NAME_REFERENCE =
-  /^\[reference\('[^']+'(?:,[^)]*)?\)\.properties\.secrets\.name\]$/u;
+  /^\[reference\(.+\)\.properties\.secrets\.name\]$/u;
 
+// resolveTemplateString follows whole string parameters and the one supported
+// format pass-through. It deliberately does not trace object properties, module
+// outputs, variables, or general ARM expression data flow.
 function checkConnectionSources(
   template,
   app,
@@ -739,6 +748,8 @@ function checkConnectionSources(
       }
       continue;
     }
+    // #676 is scoped to the container connection projection that consumes
+    // producer IDs. Other Radius resource types remain outside this check.
     if (
       typeof resource?.type !== "string" ||
       !resource.type.startsWith("Radius.Compute/containers@")
@@ -765,7 +776,7 @@ function checkConnectionSources(
         continue;
       }
       report(
-        `${app}: error connection-source: ${resourcePath}.properties.connections.${name}.source: this Radius container connection uses a managed Kubernetes Secret name; use the producer resource ID (<producer>.id) as the connection source instead.`
+        `${app}: error connection-source: ${resourcePath}.properties.connections.${name}.source: this Radius container connection uses a managed Kubernetes Secret name; use the producer resource ID (<producer>.id) as the connection source instead. Use <producer>.properties.secrets.name only as valueFrom.secretKeyRef.secretName for an explicit Kubernetes environment binding.`
       );
       failed = true;
     }
