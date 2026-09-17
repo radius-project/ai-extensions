@@ -412,33 +412,34 @@ export function selectExpiredFallbackBranches(
 }
 
 /**
- * GHCR state packages that no live environment can account for.
+ * Every GHCR state package the fixture has left behind.
  *
- * Every other state sweep walks the fixture's GitHub Environments and derives
- * the package name from each one, so it can only ever see state whose
- * environment still exists. A journey deletes its environment during teardown
- * and can then fail before deleting the package, which leaves state that no
- * environment-driven sweep will ever reach again. Selecting by name closes that
- * gap.
+ * The other state sweep walks the fixture's GitHub Environments and derives the
+ * package name from each one, so it can only ever see state whose environment
+ * still exists. A journey deletes its environment during teardown and can then
+ * fail before deleting the package, and because the name ends in twelve hex
+ * characters of the environment identity, the name is unrecoverable once the
+ * environment is gone. That state is then unreachable forever.
  *
- * `livePackageNames` is the set derived from environments that are still
- * present and still inside the age threshold, so a package belonging to a run
- * that is mid-flight is never a candidate. A package with no readable
+ * Cleanup returns the fixture to a pristine baseline and no run shares it, so
+ * anything older than the threshold is simply reclaimed: there is no live state
+ * worth keeping. The age check exists only so a sweep cannot delete state out
+ * from under a run that is still going. The name must match the full shape the
+ * writer produces - prefix, environment slug, then twelve hex characters -
+ * because an unrelated package may share the prefix. A package with no readable
  * `updated_at` is skipped rather than deleted: an unparseable timestamp must
  * fail towards keeping data.
  */
-export function selectOrphanedStatePackages(
+export function selectStaleStatePackages(
   payload: unknown,
   prefix: string,
-  livePackageNames: readonly string[],
   cutoff: string
 ): string[] {
   if (!prefix.trim())
     throw new Error(
-      "A state package prefix is required to select orphaned packages."
+      "A state package prefix is required to select stale state packages."
     );
   const cutoffMilliseconds = requireCutoff(cutoff);
-  const live = new Set(livePackageNames);
   const names: string[] = [];
   for (const entry of flattenPages(payload, "GHCR packages")) {
     const item = asRecord(entry);
@@ -446,7 +447,6 @@ export function selectOrphanedStatePackages(
     if (
       name.startsWith(prefix) &&
       STATE_PACKAGE_SUFFIX.test(name.slice(prefix.length)) &&
-      !live.has(name) &&
       expired(item?.updated_at, cutoffMilliseconds)
     )
       names.push(name);
@@ -462,30 +462,30 @@ export interface LeakedClusterWorkload {
 }
 
 /**
- * Radius-rendered objects on the shared cluster whose environment is gone.
+ * Radius-rendered objects the fixture has left running on the shared cluster.
  *
  * Deleting the Radius application is meant to remove these, and when that
- * fails, nothing else does: no sweep reads the cluster, so a rendered workload
- * outlives its run indefinitely and keeps consuming shared capacity. Worse, a
- * later run rendering the same application reuses the same object, so a single
- * leak silently absorbs every subsequent run instead of showing up as a new
- * one.
+ * fails, nothing else does: no other sweep reads the cluster, so a rendered
+ * workload outlives its run indefinitely and keeps consuming shared capacity.
+ * Worse, a later run rendering the same application reuses the same object, so
+ * a single leak silently absorbs every subsequent run instead of showing up as
+ * a new one - which is exactly how one Deployment survived three runs.
  *
- * Selection is by the environment label rather than by age. A reused object
- * carries the label of the most recent run to render it, so an object whose
- * environment is still live belongs to work that may still be in flight, while
- * an object naming an environment that no longer exists cannot belong to
- * anyone. The fixture application must be named exactly as well: the sweep is
- * only entitled to the workloads this suite renders, and a stale environment
- * label alone does not make someone else's object ours. System namespaces are
- * refused outright; nothing this suite creates belongs in one, so a match there
- * means the label is being misread.
+ * An object qualifies on identity, not on whether its environment still exists:
+ * the fixture's environment prefix and its exact application label. Nothing
+ * else on this cluster carries both, and no run shares the fixture, so every
+ * match is the fixture's to reclaim. Age is the only thing that protects a run
+ * in flight, and a reused object keeps the creation timestamp of the run that
+ * first rendered it, so a leak stays reclaimable no matter how often it is
+ * rolled. An object with no readable `creationTimestamp` is left alone. System
+ * namespaces are refused outright; nothing this suite creates belongs in one,
+ * so a match there means the label is being misread.
  */
 export function selectLeakedClusterWorkloads(
   payload: unknown,
   environmentPrefix: string,
   application: string,
-  liveEnvironments: readonly string[]
+  cutoff: string
 ): LeakedClusterWorkload[] {
   if (!environmentPrefix.trim())
     throw new Error(
@@ -495,7 +495,7 @@ export function selectLeakedClusterWorkloads(
     throw new Error(
       "An application name is required to select leaked cluster workloads."
     );
-  const live = new Set(liveEnvironments);
+  const cutoffMilliseconds = requireCutoff(cutoff);
   const items = asRecord(payload)?.items;
   const leaked: LeakedClusterWorkload[] = [];
   for (const entry of requireArray(items, "Kubernetes objects")) {
@@ -503,10 +503,10 @@ export function selectLeakedClusterWorkloads(
     const metadata = asRecord(item?.metadata);
     const labels = asRecord(metadata?.labels);
     const environment = requireString(labels?.[RADIUS_ENVIRONMENT_LABEL]);
-    if (!environment.startsWith(environmentPrefix) || live.has(environment))
-      continue;
+    if (!environment.startsWith(environmentPrefix)) continue;
     if (requireString(labels?.[RADIUS_APPLICATION_LABEL]) !== application)
       continue;
+    if (!expired(metadata?.creationTimestamp, cutoffMilliseconds)) continue;
 
     const kind = requireString(item?.kind);
     const name = requireString(metadata?.name);

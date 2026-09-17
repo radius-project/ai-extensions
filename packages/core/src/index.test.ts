@@ -48,7 +48,6 @@ const EXPECTED_FUNCTIONS = [
   "verifyTemplateFile",
   "generateDeployWorkflow",
   "stateRegistryForEnvironment",
-  "stateRegistryPrefix",
   "generateDeleteWorkflow"
 ] as const;
 

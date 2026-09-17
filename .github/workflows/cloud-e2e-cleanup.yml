@@ -431,80 +431,46 @@ jobs:
       # hex characters the package name ends in are unrecoverable, so the
       # package becomes permanently invisible to every environment-driven sweep.
       #
-      # This lists the organisation's packages instead and keeps the ones some
-      # surviving environment still claims. It must stay ahead of the
-      # environment purge: run it afterwards and every package looks orphaned.
+      # This lists the organisation's packages instead and reclaims every one
+      # the fixture wrote. Cleanup exists to return the fixture to a pristine
+      # baseline and no run shares it, so there is no live state to preserve;
+      # the age threshold is only here so a sweep cannot delete state out from
+      # under a run that is still going.
       #
-      # Unlike the step above it is deliberately not gated on the Radius
-      # application delete succeeding. That delete failing is one of the ways
-      # state is orphaned in the first place, and the live-environment check is
-      # already the safety boundary: an application still mid-delete has an
-      # environment, so its package is claimed and never a candidate.
+      # It is deliberately not gated on the Radius application delete
+      # succeeding, because that delete failing is one of the ways state is
+      # orphaned in the first place.
       - name: Purge orphaned GHCR deployment state
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
           FIXTURE_OWNER: ${{ steps.pin.outputs.owner }}
-          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
         shell: bash
         run: |
           set -euo pipefail
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
-          environments="$RUNNER_TEMP/orphan-state-environments.json"
-          live_packages="$RUNNER_TEMP/orphan-state-live-packages.txt"
           packages="$RUNNER_TEMP/orphan-state-packages.json"
           orphans="$RUNNER_TEMP/orphan-state-orphans.json"
-          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
 
-          : >"$live_packages"
-          while read -r environment; do
-            [[ -n "$environment" ]] || continue
-            FIXTURE_REPOSITORY="$FIXTURE_REPOSITORY" ENVIRONMENT="$environment" \
-              node --input-type=module -e '
-                const { stateRegistryForEnvironment } = await import(
-                  "./packages/core/src/workflows/state.ts"
-                );
-                const registry = stateRegistryForEnvironment(
-                  process.env.FIXTURE_REPOSITORY,
-                  process.env.ENVIRONMENT
-                );
-                process.stdout.write(registry.split("/").at(-1) + "\n");
-              ' >>"$live_packages"
-          done < <(jq -r --arg prefix "$ENVIRONMENT_PREFIX" \
-            '.[].environments[]?.name | select(startswith($prefix))' "$environments")
-
-          package_prefix="$(
-            FIXTURE_REPOSITORY="$FIXTURE_REPOSITORY" \
-              node --input-type=module -e '
-                const { stateRegistryPrefix } = await import(
-                  "./packages/core/src/workflows/state.ts"
-                );
-                process.stdout.write(stateRegistryPrefix(process.env.FIXTURE_REPOSITORY));
-              '
-          )"
+          # Matches the package name the deploy workflow writes for this
+          # repository, whose shape the selector below re-checks in full.
+          repository_name="${FIXTURE_REPOSITORY##*/}"
+          package_prefix="${repository_name,,}-radius-state-"
           GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --paginate --slurp \
             "orgs/$FIXTURE_OWNER/packages?package_type=container" >"$packages"
 
           node --input-type=module - \
-            "$packages" "$package_prefix" "$live_packages" "$cutoff" "$orphans" <<'NODE'
+            "$packages" "$package_prefix" "$cutoff" "$orphans" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [packagesFile, prefix, livePackagesFile, cutoff, outputFile] =
-            process.argv.slice(2);
-          const { selectOrphanedStatePackages } = await import(
+          const [packagesFile, prefix, cutoff, outputFile] = process.argv.slice(2);
+          const { selectStaleStatePackages } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
           );
           const packages = JSON.parse(await readFile(packagesFile, "utf8"));
-          const live = (await readFile(livePackagesFile, "utf8"))
-            .split("\n")
-            .map((name) => name.trim())
-            .filter(Boolean);
           await writeFile(
             outputFile,
-            JSON.stringify(
-              selectOrphanedStatePackages(packages, prefix, live, cutoff)
-            )
+            JSON.stringify(selectStaleStatePackages(packages, prefix, cutoff))
           );
           NODE
 
@@ -552,37 +518,30 @@ jobs:
       # name, it rolls the leaked object rather than creating its own - so one
       # leak quietly absorbs every subsequent run instead of being noticed.
       #
-      # Objects are matched by their environment label, not by age: the label
-      # names the last run to render them, so anything naming an environment
-      # that no longer exists cannot belong to work still in flight. The
-      # fixture application must be named exactly as well - a stale environment
-      # label alone does not make somebody else's object ours to delete.
+      # Objects are claimed by identity rather than by whether their
+      # environment still exists: the fixture's environment prefix plus its
+      # exact application label. Nothing else on this cluster carries both, and
+      # no run shares the fixture, so every match is ours to reclaim. Age is
+      # the only thing protecting a run in flight, and a reused object keeps
+      # the creation timestamp of the run that first rendered it, so a leak
+      # stays reclaimable however often it is rolled.
       #
       # This is not gated on the Radius application delete succeeding, because
-      # that failing is precisely what strands a workload here. An application
-      # still mid-delete has an environment, so its objects are live and are
-      # never candidates.
+      # that failing is precisely what strands a workload here.
       - name: Reclaim leaked Radius workloads from the shared cluster
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.azure-login.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
           FIXTURE_APPLICATION: ${{ steps.pin.outputs.fixture-application }}
-          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
           RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         shell: bash
         run: |
           set -euo pipefail
-          environments="$RUNNER_TEMP/cluster-cleanup-environments.json"
-          live_environments="$RUNNER_TEMP/cluster-cleanup-live-environments.txt"
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           objects="$RUNNER_TEMP/cluster-cleanup-objects.json"
           leaked="$RUNNER_TEMP/cluster-cleanup-leaked.json"
-          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
-          jq -r --arg prefix "$ENVIRONMENT_PREFIX" \
-            '.[].environments[]?.name | select(startswith($prefix))' \
-            "$environments" >"$live_environments"
 
           az aks get-credentials \
             --subscription "$SUBSCRIPTION_ID" \
@@ -597,22 +556,18 @@ jobs:
             --output json >"$objects"
 
           node --input-type=module - \
-            "$objects" "$ENVIRONMENT_PREFIX" "$FIXTURE_APPLICATION" "$live_environments" "$leaked" <<'NODE'
+            "$objects" "$ENVIRONMENT_PREFIX" "$FIXTURE_APPLICATION" "$cutoff" "$leaked" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [objectsFile, prefix, application, liveEnvironmentsFile, outputFile] =
+          const [objectsFile, prefix, application, cutoff, outputFile] =
             process.argv.slice(2);
           const { selectLeakedClusterWorkloads } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
           );
           const objects = JSON.parse(await readFile(objectsFile, "utf8"));
-          const live = (await readFile(liveEnvironmentsFile, "utf8"))
-            .split("\n")
-            .map((name) => name.trim())
-            .filter(Boolean);
           await writeFile(
             outputFile,
             JSON.stringify(
-              selectLeakedClusterWorkloads(objects, prefix, application, live)
+              selectLeakedClusterWorkloads(objects, prefix, application, cutoff)
             )
           );
           NODE

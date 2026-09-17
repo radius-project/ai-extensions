@@ -494,41 +494,34 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
   });
 
-  it("sweeps orphaned GHCR state before the environments that name it are deleted", async () => {
+  it("sweeps every GHCR state package the fixture wrote", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge);
-    const orphanIndex = purge.findIndex(
+    const orphanCleanup = purge.find(
       (step) => step.name === "Purge orphaned GHCR deployment state"
     );
-    const environmentIndex = purge.findIndex((step) =>
-      step.run?.includes("selectExpiredEnvironments")
-    );
-    const orphanCleanup = purge[orphanIndex];
     const script = orphanCleanup?.run ?? "";
 
-    expect(orphanIndex).toBeGreaterThanOrEqual(0);
-    expect(environmentIndex).toBeGreaterThanOrEqual(0);
+    expect(orphanCleanup).toBeDefined();
     // A failed application delete is one of the ways state is orphaned, so
     // gating recovery on it would skip exactly the runs that need it.
     expect(orphanCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    // Enumerating environments is what made orphaned state unreachable.
+    expect(script).not.toContain("environments");
     expect(orphanCleanup?.env?.GH_PACKAGES_TOKEN).toBe(
       "${{ secrets.GH_RAD_CI_BOT_PAT }}"
     );
-    expect(script).toContain("selectOrphanedStatePackages");
-    expect(script).toContain("stateRegistryPrefix");
+    expect(script).toContain("selectStaleStatePackages");
+    expect(script).toContain(
+      'package_prefix="${repository_name,,}-radius-state-"'
+    );
     expect(script).toContain(
       '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
     );
     expect(script).toContain(
       '[[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]'
     );
-    // Sweeping after the environment purge would strand no packages, it would
-    // report every one of them as orphaned.
-    expect(
-      purge.findIndex((step) =>
-        step.name?.startsWith("Purge stale GitHub Environments")
-      )
-    ).toBeGreaterThan(orphanIndex);
+    expect(script).toContain('cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago"');
   });
 
   it("reclaims leaked cluster workloads with credentials for the shared cluster", async () => {
@@ -544,6 +537,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     // A workload is stranded here precisely when that delete fails.
     expect(clusterCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    expect(script).toContain('cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago"');
     expect(clusterCleanup?.env?.FIXTURE_APPLICATION).toBe(
       "${{ steps.pin.outputs.fixture-application }}"
     );

@@ -102,7 +102,6 @@ export {
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
   stateRegistryForEnvironment,
-  stateRegistryPrefix,
   generateDeleteWorkflow,
   DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
