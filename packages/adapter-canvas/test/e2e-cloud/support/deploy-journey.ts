@@ -417,30 +417,31 @@ export function classifyDeploymentPresence(
 }
 
 /**
- * The Kubernetes namespace Radius renders an application into.
+ * The Kubernetes namespace Radius renders an application's workloads into.
  *
- * `<environment namespace>-<application name>`, normalized, from
- * `pkg/corerp/frontend/controller/applications/updatefilter.go`. Computing it
- * here rather than reading it back from the product keeps the assertion
- * independent: a product that reported the wrong namespace would otherwise be
- * checked against its own mistake.
+ * The fixture declares only `Radius.*` resource types, which are rendered by
+ * recipes rather than by the legacy `Applications.Core` renderer. A recipe
+ * writes its Kubernetes objects into `context.runtime.kubernetes.namespace`,
+ * which is the environment namespace the user chose, so that namespace is what
+ * the journey polls. Radius still reserves `<environment>-<application>` for
+ * the application, but nothing is rendered into it, so asserting there would
+ * both fail a healthy deploy and pass a delete that removed nothing.
+ *
+ * Every assertion is additionally scoped by `radapp.io/application`, so sharing
+ * the namespace with unrelated workloads cannot make one application's
+ * assertion pass on another's resources.
  */
-export function applicationNamespace(
-  environmentNamespace: string,
-  application: string
-): string {
-  const environmentPart = requireName(
+export function deploymentNamespace(environmentNamespace: string): string {
+  const namespace = requireName(
     environmentNamespace,
     "environment namespace"
-  );
-  const applicationPart = requireName(application, "application name");
-  const namespace = `${environmentPart}-${applicationPart}`.toLowerCase();
-  // Kubernetes rejects a namespace longer than 63 characters outright, so a
-  // long application name is a deploy that never happens rather than one this
+  ).toLowerCase();
+  // Kubernetes rejects a namespace longer than 63 characters outright, so an
+  // over-long namespace is a deploy that never happens rather than one this
   // journey should sit and poll for.
   if (namespace.length > 63)
     throw new Error(
-      `The application namespace "${namespace}" is ${namespace.length} characters; Kubernetes rejects ` +
+      `The deployment namespace "${namespace}" is ${namespace.length} characters; Kubernetes rejects ` +
         "anything longer than 63, so Radius could never have created it."
     );
   return namespace;

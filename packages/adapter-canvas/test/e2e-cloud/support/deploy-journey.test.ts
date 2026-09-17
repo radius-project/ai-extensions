@@ -10,7 +10,7 @@ import {
 } from "../../../src/infra.js";
 import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
 import {
-  applicationNamespace,
+  deploymentNamespace,
   classifyDeploymentPresence,
   DELETE_DEPLOYMENT_WORKFLOW,
   DELETE_ENVIRONMENT_WORKFLOW,
@@ -602,37 +602,30 @@ describe("classifyDeploymentPresence", () => {
   });
 });
 
-describe("applicationNamespace", () => {
-  it("joins the environment namespace and application, normalized", () => {
-    expect(applicationNamespace("RadTest-NS", "Demo")).toBe("radtest-ns-demo");
+describe("deploymentNamespace", () => {
+  it("uses the environment namespace the recipe renders into, normalized", () => {
+    expect(deploymentNamespace("RadTest-NS")).toBe("radtest-ns");
   });
 
-  it("trims each part before joining", () => {
-    expect(applicationNamespace("  ns  ", "  demo  ")).toBe("ns-demo");
+  it("trims the namespace", () => {
+    expect(deploymentNamespace("  default  ")).toBe("default");
   });
 
   it.each([
-    ["environment namespace", "", "demo", /environment namespace is empty/],
-    [
-      "environment namespace of whitespace",
-      "   ",
-      "demo",
+    ["empty environment namespace", ""],
+    ["environment namespace of whitespace", "   "]
+  ])("rejects an %s", (_label, namespace) => {
+    expect(() => deploymentNamespace(namespace)).toThrow(
       /environment namespace is empty/
-    ],
-    ["application name", "ns", "", /application name is empty/]
-  ])("rejects an empty %s", (_label, namespace, application, expected) => {
-    expect(() => applicationNamespace(namespace, application)).toThrow(
-      expected
     );
   });
 
   it("accepts a namespace of exactly the 63-character limit", () => {
-    const application = "a".repeat(60);
-    expect(applicationNamespace("ns", application)).toHaveLength(63);
+    expect(deploymentNamespace("a".repeat(63))).toHaveLength(63);
   });
 
   it("rejects a namespace one character over the limit Kubernetes accepts", () => {
-    expect(() => applicationNamespace("ns", "a".repeat(61))).toThrow(
+    expect(() => deploymentNamespace("a".repeat(64))).toThrow(
       /is 64 characters; Kubernetes rejects anything longer than 63/
     );
   });
