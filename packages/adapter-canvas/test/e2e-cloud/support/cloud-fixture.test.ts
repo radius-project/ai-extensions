@@ -13,6 +13,10 @@ import {
 } from "./fake-cloud-commands.js";
 import { assertEnvironmentDeletionIdentityOutcome } from "./delete-environment-journey.js";
 import {
+  RADIUS_RENDERED_RESOURCES,
+  RADIUS_WORKLOAD_RESOURCES
+} from "./deploy-journey.js";
+import {
   FIXTURE_BASELINE_SHA,
   FIXTURE_REPO_DEFAULT_BRANCH,
   FIXTURE_REPOSITORY
@@ -3761,7 +3765,7 @@ describe("createCloudFixture", () => {
 
     const listing = (respond: FakeCommandStub["respond"]): FakeCommandStub => ({
       tool: "kubectl",
-      match: ["get", "deployments"],
+      match: ["get", RADIUS_WORKLOAD_RESOURCES],
       respond
     });
 
@@ -3769,7 +3773,7 @@ describe("createCloudFixture", () => {
       respond: FakeCommandStub["respond"]
     ): FakeCommandStub => ({
       tool: "kubectl",
-      match: ["get", "deployments,pods"],
+      match: ["get", RADIUS_RENDERED_RESOURCES],
       respond
     });
 
@@ -3778,6 +3782,7 @@ describe("createCloudFixture", () => {
     ): string =>
       JSON.stringify({
         items: names.map(([name, available, desired = 1]) => ({
+          kind: "Deployment",
           metadata: { name, labels: { "radapp.io/application": APP } },
           spec: { replicas: desired },
           status: { availableReplicas: available }
@@ -3874,11 +3879,12 @@ describe("createCloudFixture", () => {
       );
 
       expect(fake.commands.commandLines("kubectl")).toEqual([
-        `--kubeconfig ${KUBECONFIG} get deployments --namespace ${NAMESPACE} ` +
+        `--kubeconfig ${KUBECONFIG} get ${RADIUS_WORKLOAD_RESOURCES} --namespace ${NAMESPACE} ` +
           `--selector ${SELECTOR} --output json`
       ]);
       expect(workloads).toEqual([
         {
+          kind: "Deployment",
           name: "demo-frontend",
           application: APP,
           desiredReplicas: 1,
@@ -3963,7 +3969,7 @@ describe("createCloudFixture", () => {
         credentials(),
         {
           tool: "kubectl",
-          match: ["get", "deployments"],
+          match: ["get", RADIUS_WORKLOAD_RESOURCES],
           respond: { stdout: JSON.stringify({ items: [] }) },
           times: 2
         },
@@ -3984,7 +3990,7 @@ describe("createCloudFixture", () => {
         credentials(),
         {
           tool: "kubectl",
-          match: ["get", "deployments"],
+          match: ["get", RADIUS_WORKLOAD_RESOURCES],
           respond: { stdout: workloadsJson(["demo-frontend", 0]) },
           times: 1
         },
@@ -4010,7 +4016,7 @@ describe("createCloudFixture", () => {
           credentials(),
           {
             tool: "kubectl",
-            match: ["get", "deployments"],
+            match: ["get", RADIUS_WORKLOAD_RESOURCES],
             respond: {
               stdout: workloadsJson([
                 "demo-frontend",
@@ -4101,7 +4107,7 @@ describe("createCloudFixture", () => {
       await expect(
         fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
       ).rejects.toThrow(
-        /kubectl get deployments -n radius-demo failed with exit code 1: Unable to connect/
+        `kubectl get ${RADIUS_WORKLOAD_RESOURCES} -n radius-demo failed with exit code 1: Unable to connect`
       );
     });
 
@@ -4118,13 +4124,13 @@ describe("createCloudFixture", () => {
           credentials(),
           {
             tool: "kubectl",
-            match: ["get", "deployments"],
+            match: ["get", RADIUS_WORKLOAD_RESOURCES],
             respond: { stdout: workloadsJson(["demo-frontend", 0]) },
             times: 1
           },
           {
             tool: "kubectl",
-            match: ["get", "deployments"],
+            match: ["get", RADIUS_WORKLOAD_RESOURCES],
             respond: () => {
               clock += 2000;
               return {
@@ -4177,13 +4183,13 @@ describe("createCloudFixture", () => {
           credentials(),
           {
             tool: "kubectl",
-            match: ["get", "deployments"],
+            match: ["get", RADIUS_WORKLOAD_RESOURCES],
             respond: { stdout: workloadsJson(["demo-frontend", 0]) },
             times: 1
           },
           {
             tool: "kubectl",
-            match: ["get", "deployments"],
+            match: ["get", RADIUS_WORKLOAD_RESOURCES],
             respond: () => {
               clock += 2000;
               return {
@@ -4215,7 +4221,7 @@ describe("createCloudFixture", () => {
         );
 
       expect(failure?.message).toMatch(
-        /kubectl get deployments -n radius-demo failed with exit code 1: Unable to connect to the server: x509/
+        `kubectl get ${RADIUS_WORKLOAD_RESOURCES} -n radius-demo failed with exit code 1: Unable to connect to the server: x509`
       );
       expect(failure?.message).not.toMatch(/are not ready/);
       expect(failure?.cause).toBeUndefined();
@@ -4278,7 +4284,7 @@ describe("createCloudFixture", () => {
         credentials(),
         {
           tool: "kubectl",
-          match: ["get", "deployments,pods"],
+          match: ["get", RADIUS_RENDERED_RESOURCES],
           respond: {
             stdout: resourcesJson(
               ["Deployment", "demo-frontend"],
@@ -4349,7 +4355,7 @@ describe("createCloudFixture", () => {
       await expect(
         fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
       ).rejects.toThrow(
-        /kubectl get deployments,pods -n radius-demo failed with exit code 1/
+        `kubectl get ${RADIUS_RENDERED_RESOURCES} -n radius-demo failed with exit code 1`
       );
     });
 

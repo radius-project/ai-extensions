@@ -90,7 +90,7 @@ import {
   findDeleteEnvironmentSuccessProblems
 } from "./support/delete-environment-journey.js";
 import {
-  applicationNamespace,
+  deploymentNamespace,
   classifyDeploymentPresence,
   DELETE_DEPLOYMENT_WORKFLOW,
   DELETE_ENVIRONMENT_WORKFLOW,
@@ -673,10 +673,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         }, applicationListingPath)
       );
       deployedApplication = requireSingleApplication(applications);
-      deployedNamespace = applicationNamespace(
-        KUBERNETES_NAMESPACE,
-        deployedApplication
-      );
+      deployedNamespace = deploymentNamespace(KUBERNETES_NAMESPACE);
       cloud.registerApplicationCleanupTarget(
         deployedApplication,
         deployedNamespace
