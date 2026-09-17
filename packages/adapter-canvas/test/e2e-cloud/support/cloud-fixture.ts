@@ -1420,15 +1420,19 @@ export async function createCloudFixture(
           );
         } else {
           await attempt(`GHCR state package ${statePackage}`, async () => {
-            expectSuccess(
-              await commands.runGhPackage([
-                "api",
-                "--method",
-                "DELETE",
-                packageRecord.apiPath
-              ]),
-              `gh api DELETE ${packageRecord.apiPath}`
-            );
+            const deletion = await commands.runGhPackage([
+              "api",
+              "--method",
+              "DELETE",
+              packageRecord.apiPath
+            ]);
+            // The package is read before it is deleted, so a 404 here means it
+            // disappeared in between rather than that reclamation failed. The
+            // read path already treats absence as "nothing to reclaim"; a
+            // delete that reports the same absence has reached the same end
+            // state and must not fail the run.
+            if (!isGitHubApiNotFound(deletion))
+              expectSuccess(deletion, `gh api DELETE ${packageRecord.apiPath}`);
           });
         }
       }
@@ -1580,16 +1584,38 @@ interface PollForValueOptions<T> {
 
 async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
   const deadline = options.ports.now().getTime() + options.timeoutMs;
+  const expired = (): boolean => deadline - options.ports.now().getTime() <= 0;
   while (true) {
     const remainingBeforeProbe = deadline - options.ports.now().getTime();
     if (remainingBeforeProbe <= 0) throw new Error(options.timeoutMessage());
-    const value = await options.probe(remainingBeforeProbe);
+    let value: T | undefined;
+    try {
+      value = await options.probe(remainingBeforeProbe);
+    } catch (error) {
+      // The probe runs its command with whatever budget is left, so the last
+      // attempt before the deadline is killed mid-flight and reports an exit
+      // code with no output at all. Raising that as a probe failure would
+      // replace the timeout diagnostic — which names the workloads and their
+      // replica counts — with a bare "failed with exit code 1". A probe that
+      // fails while budget remains is still a genuine failure and still
+      // raises, so a broken cluster is not waited out.
+      if (!expired() || error instanceof AssertionDeadlineExpired) throw error;
+      throw new Error(options.timeoutMessage(), { cause: error });
+    }
     if (value !== undefined) return value;
     const remaining = deadline - options.ports.now().getTime();
     if (remaining <= 0) throw new Error(options.timeoutMessage());
     await options.ports.wait(Math.min(options.intervalMs, remaining));
   }
 }
+
+/**
+ * Refusing to start a command because the budget is already gone, as opposed
+ * to a command that was killed part-way through it. The poll reports this one
+ * verbatim: it names the exact step that ran out, which its own timeout
+ * message could not.
+ */
+class AssertionDeadlineExpired extends Error {}
 
 function remainingCommandTimeout(
   deadline: number,
@@ -1598,7 +1624,9 @@ function remainingCommandTimeout(
 ): number {
   const remaining = deadline - now().getTime();
   if (remaining <= 0)
-    throw new Error(`${context} exhausted its assertion deadline.`);
+    throw new AssertionDeadlineExpired(
+      `${context} exhausted its assertion deadline.`
+    );
   return remaining;
 }
 

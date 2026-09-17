@@ -3488,6 +3488,34 @@ describe("createCloudFixture", () => {
       );
     });
 
+    it("accepts a GHCR state package that disappeared before deletion", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "internal",
+              repository: { full_name: REPOSITORY }
+            })
+          },
+          times: 1
+        },
+        {
+          tool: "gh-package",
+          match: ["api", "--method", "DELETE", PACKAGE_PATH],
+          respond: NOT_FOUND
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
+        expect.arrayContaining([`GHCR state package ${STATE_PACKAGE}`])
+      );
+      expect(fake.commands.commandLines("gh-package")).toContain(
+        `api --method DELETE ${PACKAGE_PATH}`
+      );
+    });
+
     it("records an unreadable GHCR state package probe and continues cleanup", async () => {
       const { fixture, fake } = await createHarness([
         failing("gh-package", ["api", PACKAGE_PATH], "HTTP 502"),
@@ -4074,6 +4102,66 @@ describe("createCloudFixture", () => {
         fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
       ).rejects.toThrow(
         /kubectl get deployments -n radius-demo failed with exit code 1: Unable to connect/
+      );
+    });
+
+    // The probe runs kubectl with whatever budget the poll has left, so the
+    // last attempt before the deadline is killed mid-flight: execFile reports a
+    // non-zero exit with both streams empty and only its own "Command failed"
+    // message. Raising that as a probe failure replaced the timeout diagnostic
+    // with a bare exit code, which is what made a real run unexplainable.
+    it("reports a probe killed by its own deadline as the assertion timeout", async () => {
+      let clock = NOW.getTime();
+      const { fixture } = await createHarness(
+        [
+          credentials(),
+          {
+            tool: "kubectl",
+            match: ["get", "deployments"],
+            respond: { stdout: workloadsJson(["demo-frontend", 0]) },
+            times: 1
+          },
+          {
+            tool: "kubectl",
+            match: ["get", "deployments"],
+            respond: () => {
+              clock += 2000;
+              return {
+                code: 1,
+                stdout: "",
+                stderr: "Command failed: kubectl --kubeconfig /tmp/k get"
+              };
+            }
+          }
+        ],
+        {
+          makeWorkspaceDir: (prefix) =>
+            Promise.resolve(prefix.includes("kube") ? KUBE_DIR : WORKSPACE),
+          readNow: () => new Date(clock),
+          wait: (milliseconds) => {
+            clock += milliseconds;
+            return Promise.resolve();
+          }
+        },
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      const failure = await fixture
+        .assertApplicationWorkloadsPresent(APP, NAMESPACE)
+        .then(
+          () => undefined,
+          (error: unknown) => error as Error
+        );
+
+      // The diagnostic the run actually needed: which workload, and how far
+      // short of ready it was.
+      expect(failure?.message).toMatch(
+        /workloads exist but are not ready.*demo-frontend.*0 available replica\(s\) of 1 desired/s
+      );
+      expect(failure?.message).not.toMatch(/failed with exit code/);
+      // The killed command is still reachable for anyone debugging the run.
+      expect((failure?.cause as Error | undefined)?.message).toMatch(
+        /failed with exit code 1/
       );
     });
 
