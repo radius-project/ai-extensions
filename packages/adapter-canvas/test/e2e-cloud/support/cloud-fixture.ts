@@ -1223,11 +1223,27 @@ export async function createCloudFixture(
               ],
               assertionTimeoutMs
             );
-            if (result.code !== 0 && !isMissingNamespace(result))
-              expectSuccess(
-                result,
-                `kubectl delete all -n ${target.namespace}`
-              );
+            if (result.code === 0 || isMissingNamespace(result)) return;
+            // `kubectl delete --wait=true` prints its "deleted" lines and then
+            // blocks until every object is finalized, so a delete that removed
+            // everything can still be killed by this step's own budget.
+            // Deciding on the exit code alone failed a whole run for a reclaim
+            // that had in fact succeeded, so ask the cluster what survived and
+            // report the delete only if something actually did.
+            const failure = new CloudCommandError(
+              `kubectl delete all -n ${target.namespace}`,
+              result
+            );
+            const survivors = await listApplicationResources(
+              target.application,
+              target.namespace,
+              assertionTimeoutMs
+            );
+            if (survivors === "no-namespace" || survivors.length === 0) return;
+            throw new Error(
+              `${failure.message}\n  Still present: ${survivors.join(", ")}`,
+              { cause: failure }
+            );
           }
         );
 

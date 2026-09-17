@@ -417,6 +417,57 @@ export function classifyDeploymentPresence(
 }
 
 /**
+ * A probe that survives the transient failures the canvas itself survives.
+ *
+ * `/api/list-deployments` fans out over `gh`, and a deployment record exists
+ * for a few seconds before GitHub attaches its first status — long enough for
+ * the endpoint to answer with an `error` the resolver cannot attribute to a
+ * workflow. The canvas client treats that answer as "stale, retry" and keeps
+ * the rows it already has, so a journey that fails on the first one is
+ * stricter than the product it is testing.
+ *
+ * `read` reports an unreadable answer as `undefined`, which no assertion
+ * matches, so polling continues. `explain` then puts the last failure back into
+ * a timeout, so a *persistent* error still fails with its own diagnostic rather
+ * than as an unexplained timeout.
+ */
+export interface TolerantProbe<T> {
+  readonly read: () => Promise<T | undefined>;
+  readonly lastFailure: () => string;
+  readonly explain: (error: unknown) => unknown;
+}
+
+export function createTolerantProbe<T>(
+  probe: () => Promise<T>
+): TolerantProbe<T> {
+  let failure = "";
+  return {
+    read: async () => {
+      try {
+        const value = await probe();
+        failure = "";
+        return value;
+      } catch (error) {
+        failure = describeProbeFailure(error);
+        return undefined;
+      }
+    },
+    lastFailure: () => failure,
+    explain: (error) =>
+      failure ?
+        new Error(
+          `${describeProbeFailure(error)}\n  The last attempt failed with: ${failure}`,
+          { cause: error }
+        )
+      : error
+  };
+}
+
+function describeProbeFailure(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
  * The Kubernetes namespace Radius renders an application's workloads into.
  *
  * The fixture declares only `Radius.*` resource types, which are rendered by

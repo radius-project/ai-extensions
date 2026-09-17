@@ -3156,6 +3156,15 @@ describe("createCloudFixture", () => {
         },
         failing("kubectl", ["delete", "all"], "namespace unavailable"),
         {
+          tool: "kubectl",
+          match: ["get", RADIUS_RENDERED_RESOURCES],
+          respond: {
+            stdout: JSON.stringify({
+              items: [{ kind: "Deployment", metadata: { name: "sleeper" } }]
+            })
+          }
+        },
+        {
           tool: "gh",
           match: ["api", MATCHING_REFS_PATH],
           respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
@@ -3165,11 +3174,77 @@ describe("createCloudFixture", () => {
       fixture.registerApplicationCleanupTarget("demo", "default-demo");
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /Kubernetes workloads for demo in default-demo: .*namespace unavailable.*Reclaimed before failing: Radius application demo in radtest-run0000000a, branch radius\/setup-a/s
+        /Kubernetes workloads for demo in default-demo: .*namespace unavailable.*Still present: Deployment\/sleeper.*Reclaimed before failing: Radius application demo in radtest-run0000000a, branch radius\/setup-a/s
       );
       expect(fake.commands.commandLines("gh")).toContain(
         `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
+    });
+
+    // `kubectl delete --wait=true` prints its "deleted" lines and then blocks
+    // until finalization, so the step's own budget can kill a delete that
+    // removed everything. Failing the whole run on the exit code alone
+    // reported a reclaim that had in fact succeeded as a leak.
+    it("accepts a delete killed mid-wait once nothing labelled survives", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {
+            code: 1,
+            stdout: 'deployment.apps "sleeper" deleted from default-demo\n'
+          }
+        },
+        {
+          tool: "kubectl",
+          match: ["get", RADIUS_RENDERED_RESOURCES],
+          respond: { stdout: JSON.stringify({ items: [] }) }
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        `Radius application demo in ${ENVIRONMENT}`,
+        "Kubernetes workloads for demo in default-demo"
+      ]);
+      expect(
+        fake.commands
+          .commandLines("kubectl")
+          .some((line) => line.includes(`get ${RADIUS_RENDERED_RESOURCES}`))
+      ).toBe(true);
+    });
+
+    it("accepts a failed delete whose namespace is already gone without re-listing", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {
+            code: 1,
+            stderr:
+              'Error from server (NotFound): namespaces "default-demo" not found'
+          }
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await fixture.reclaimLeakedProductArtifacts();
+
+      expect(
+        fake.commands
+          .commandLines("kubectl")
+          .some((line) => line.includes("get "))
+      ).toBe(false);
     });
 
     it("preserves recovery inputs when Radius application deletion fails", async () => {
