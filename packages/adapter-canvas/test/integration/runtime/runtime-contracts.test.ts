@@ -1336,4 +1336,43 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
 
     await harness.extension.shutdown("test");
   });
+
+  it("records a diff attempt per branch so either side can end the comparison's wait", async () => {
+    const harness = await createRuntimeSdkHarness();
+    const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
+    Object.assign(entry.state, {
+      contextRepo: "acme/widgets",
+      contextBranch: "main",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "main",
+      workspacePath: "/workspace",
+      appModelAttemptTokens: {
+        "acme/widgets::main": "attempt-1",
+        "acme/widgets::feature/x": "attempt-1"
+      }
+    });
+    const tool = harness.extension.tools.find(
+      (candidate) => candidate.name === "radius_report_modeling_failure"
+    );
+    if (!tool) throw new Error("radius_report_modeling_failure not registered");
+
+    await expect(
+      tool.handler({
+        instanceId: "radius-panel",
+        repo: "acme/widgets",
+        branch: "feature/x",
+        attemptToken: "attempt-1",
+        error: "The configured Recipe rejects the required credential shape."
+      })
+    ).resolves.toEqual({ recorded: true });
+
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::feature/x"]?.error
+    ).toContain("configured Recipe");
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::main"]
+    ).toBeUndefined();
+
+    await harness.extension.shutdown("test");
+  });
 });
