@@ -113,10 +113,12 @@ import {
   requireSingleApplication
 } from "./support/deploy-journey.js";
 import {
+  describePreservedFixtureState,
   describeUnprovisionedFixtureRepository,
   isFixtureRepositoryProvisioned,
   resolveFixtureClusterTarget,
-  resolveFixtureLocation
+  resolveFixtureLocation,
+  resolveFixturePreserveState
 } from "./support/fixture-repository.js";
 
 const PROFILE_NAME = "cloud-e2e";
@@ -374,6 +376,23 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     const current = fixture;
     fixture = undefined;
     if (!current) return;
+    // Checked before the token refresh and the dispatch guard below: a
+    // preserved run must not fail on the way to leaving state alone.
+    if (
+      resolveFixturePreserveState(process.env.AIEXT_CLOUD_E2E_PRESERVE_STATE)
+    ) {
+      console.warn(
+        describePreservedFixtureState({
+          repository: current.repository,
+          environmentName: current.environmentName,
+          resourceGroup: current.resourceGroup,
+          clusterName: current.clusterName,
+          application: deployedApplication,
+          namespace: deployedNamespace
+        })
+      );
+      return;
+    }
     await refreshGitHubToken();
     if (untrackedWorkflowDispatch)
       throw new Error(

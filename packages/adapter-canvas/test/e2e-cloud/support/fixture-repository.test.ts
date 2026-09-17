@@ -6,6 +6,7 @@ import {
   CLOUD_E2E_LEASE_OWNER_PREFIX,
   CLOUD_E2E_LEASE_REF,
   describeUnprovisionedFixtureRepository,
+  describePreservedFixtureState,
   ENVIRONMENT_NAME_PREFIX,
   environmentName,
   findUnprovisionedFixtureFields,
@@ -18,6 +19,7 @@ import {
   RESOURCE_GROUP_PREFIX,
   resolveFixtureClusterTarget,
   resolveFixtureLocation,
+  resolveFixturePreserveState,
   resourceGroupName,
   resourceGroupScope,
   shortenUniqueId,
@@ -347,4 +349,92 @@ describe("resolveFixtureClusterTarget", () => {
       );
     }
   );
+});
+
+describe("resolveFixturePreserveState", () => {
+  it("reclaims by default, which is the state every scheduled run is in", () => {
+    // GitHub supplies an empty string for an input the trigger never set, so
+    // "absent" and "empty" must both mean reclaim.
+    expect(resolveFixturePreserveState(undefined)).toBe(false);
+    expect(resolveFixturePreserveState("")).toBe(false);
+    expect(resolveFixturePreserveState("   ")).toBe(false);
+  });
+
+  it("accepts the values a boolean workflow input actually produces", () => {
+    expect(resolveFixturePreserveState("true")).toBe(true);
+    expect(resolveFixturePreserveState("false")).toBe(false);
+    expect(resolveFixturePreserveState("1")).toBe(true);
+    expect(resolveFixturePreserveState("0")).toBe(false);
+    expect(resolveFixturePreserveState(" TRUE ")).toBe(true);
+  });
+
+  it.each(["yes", "no", "on", "preserve", "TRUEISH"])(
+    "rejects %p rather than guessing which way it leans",
+    (value) => {
+      // A typo that read as "preserve" would strand a lease and a live
+      // workload; one that read as "reclaim" would delete the evidence the
+      // operator asked to keep. Neither is safe to infer.
+      expect(() => resolveFixturePreserveState(value)).toThrow(
+        /AIEXT_CLOUD_E2E_PRESERVE_STATE must be "true" or "false"/
+      );
+    }
+  );
+});
+
+describe("describePreservedFixtureState", () => {
+  const base = {
+    repository: "radius-project/ai-extensions-fixture",
+    environmentName: "radtest-abc123",
+    resourceGroup: "ai_extensions_test",
+    clusterName: "ai_extensions_aks"
+  };
+
+  it("names every surface the operator has to go look at", () => {
+    const report = describePreservedFixtureState({
+      ...base,
+      application: "cloud-e2e",
+      namespace: "default-cloud-e2e"
+    });
+
+    expect(report).toContain("radius-project/ai-extensions-fixture");
+    expect(report).toContain("radtest-abc123");
+    expect(report).toContain("ai_extensions_aks");
+    expect(report).toContain("ai_extensions_test");
+    expect(report).toContain("default-cloud-e2e");
+  });
+
+  it("spells out the commands that read the preserved cluster state", () => {
+    const report = describePreservedFixtureState({
+      ...base,
+      application: "cloud-e2e",
+      namespace: "default-cloud-e2e"
+    });
+
+    expect(report).toContain(
+      "az aks get-credentials -g ai_extensions_test -n ai_extensions_aks"
+    );
+    expect(report).toContain(
+      "kubectl get all -n default-cloud-e2e --show-labels"
+    );
+  });
+
+  it("still reports the run when it failed before anything was deployed", () => {
+    // The journey can fail in its first test, long before an application name
+    // exists. The spec tracks that name as an empty string until then, so the
+    // report must not print a half-formed namespace or "undefined".
+    for (const state of [base, { ...base, application: "", namespace: "" }]) {
+      const report = describePreservedFixtureState(state);
+
+      expect(report).not.toContain("undefined");
+      expect(report).not.toContain("kubectl");
+      expect(report).toContain("radtest-abc123");
+    }
+  });
+
+  it("states the cost so a preserved run is not mistaken for a clean one", () => {
+    const report = describePreservedFixtureState(base);
+
+    expect(report).toContain("Nothing was reclaimed");
+    expect(report).toContain("clean-slate probe will fail");
+  });
 });

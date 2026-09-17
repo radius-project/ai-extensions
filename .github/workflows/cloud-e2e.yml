@@ -34,6 +34,14 @@ on:
     # do not contend. Runs share one precreated AKS cluster and remain serialized.
     - cron: "23 4 * * *"
   workflow_dispatch:
+    inputs:
+      preserve_on_failure:
+        description: >-
+          Leave this run's cloud state in place instead of reclaiming it, so a
+          failure can be inspected live. Occupies the shared estate until the
+          cleanup workflow runs.
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -218,6 +226,9 @@ jobs:
           AIEXT_CLOUD_E2E_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
+          # Empty on every scheduled run, so the nightly tier always reclaims.
+          # Only a hand-dispatched run can ask to leave its state standing.
+          AIEXT_CLOUD_E2E_PRESERVE_STATE: ${{ inputs.preserve_on_failure }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment
           # before starting Canvas or any CLI child command.

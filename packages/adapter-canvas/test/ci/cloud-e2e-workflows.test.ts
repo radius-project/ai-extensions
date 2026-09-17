@@ -259,6 +259,25 @@ describe("cloud-e2e.yml", () => {
     expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
   });
 
+  it("only lets a hand-dispatched run preserve its cloud state", async () => {
+    // The scheduled trigger supplies no inputs, so the env value is empty there
+    // and the journey reclaims. Wiring the flag to anything other than the
+    // dispatch input would let the nightly tier silently hoard the estate.
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const dispatch = workflow.on?.workflow_dispatch as
+      | { inputs?: Record<string, { type?: string; default?: unknown }> }
+      | undefined;
+    const input = dispatch?.inputs?.preserve_on_failure;
+    expect(input?.type).toBe("boolean");
+    expect(input?.default).toBe(false);
+    const run = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
+      step.run?.includes("test:cloud")
+    );
+    expect(run?.env?.AIEXT_CLOUD_E2E_PRESERVE_STATE).toBe(
+      "${{ inputs.preserve_on_failure }}"
+    );
+  });
+
   it("inherits the fixture-scoped App grants so actions variables remain available", async () => {
     // The pinned token action cannot express the App's actions_variables
     // permission. Passing any permission inputs would narrow the token and

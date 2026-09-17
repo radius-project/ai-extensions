@@ -274,3 +274,79 @@ export function resolveFixtureClusterTarget(
 
   return { resourceGroup, clusterName };
 }
+
+/**
+ * Whether this run must leave its cloud state standing instead of reclaiming it.
+ *
+ * A failing journey normally tears everything down, which is correct for the
+ * nightly schedule and hostile to debugging: the evidence that would explain the
+ * failure — the rendered workloads, the Radius environment, the fixture branch —
+ * is deleted seconds after the assertion that needed it. This opt-in keeps that
+ * state alive for a hand-dispatched run.
+ *
+ * Deliberately strict rather than truthy. `AIEXT_CLOUD_E2E_PRESERVE_STATE` is
+ * empty on every scheduled run, and a typo that silently read as "preserve"
+ * would strand a lease, an Entra application, and a live cluster workload until
+ * someone noticed. An unparseable value is a configuration error, not a vote.
+ */
+export function resolveFixturePreserveState(
+  value: string | undefined
+): boolean {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "" || normalized === "false" || normalized === "0")
+    return false;
+  if (normalized === "true" || normalized === "1") return true;
+  throw new Error(
+    `AIEXT_CLOUD_E2E_PRESERVE_STATE must be "true" or "false"; received "${value}".`
+  );
+}
+
+/** The cloud state a preserved run leaves behind, for the report below. */
+export interface PreservedFixtureState {
+  readonly repository: string;
+  readonly environmentName: string;
+  readonly resourceGroup: string;
+  readonly clusterName: string;
+  readonly application?: string;
+  readonly namespace?: string;
+}
+
+/**
+ * The operator-facing report a preserved run ends with.
+ *
+ * Preserving state is only useful if the operator can find it, so this names
+ * every surface the run touched and the exact commands that read them. It also
+ * states the cost plainly: the shared estate stays occupied, and the next run's
+ * clean-slate probe will fail until someone reclaims it.
+ */
+export function describePreservedFixtureState(
+  state: PreservedFixtureState
+): string {
+  const lines = [
+    "AIEXT_CLOUD_E2E_PRESERVE_STATE is set, so this run left its cloud state in place.",
+    `  Fixture repository: ${state.repository}`,
+    `  Radius environment: ${state.environmentName}`,
+    `  AKS cluster:        ${state.clusterName} (resource group ${state.resourceGroup})`
+  ];
+  if (
+    state.application !== undefined &&
+    state.application !== "" &&
+    state.namespace !== undefined &&
+    state.namespace !== ""
+  ) {
+    lines.push(
+      `  Application:        ${state.application} in namespace ${state.namespace}`,
+      "",
+      "Inspect the rendered workloads:",
+      `  az aks get-credentials -g ${state.resourceGroup} -n ${state.clusterName} --overwrite-existing`,
+      `  kubectl get all -n ${state.namespace} --show-labels`
+    );
+  }
+  lines.push(
+    "",
+    "Nothing was reclaimed: the shared cloud estate stays occupied and the next",
+    "run's clean-slate probe will fail until this state is removed. Reclaim it by",
+    "running the Cloud E2E cleanup workflow."
+  );
+  return lines.join("\n");
+}
