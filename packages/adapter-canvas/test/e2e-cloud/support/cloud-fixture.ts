@@ -21,6 +21,7 @@ import {
   stateRegistryForEnvironment
 } from "@radius-project/core";
 import {
+  CloudCommandError,
   describeError,
   expectSuccess,
   isGitHubApiNotFound,
@@ -568,11 +569,7 @@ export async function createCloudFixture(
     );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
-      throw new Error(
-        `${context} failed with exit code ${result.code}: ${(
-          result.stderr || result.stdout
-        ).trim()}`
-      );
+      throw new CloudCommandError(context, result);
     }
     return readKubernetesWorkloads(parseJsonObject(result, context));
   };
@@ -607,11 +604,7 @@ export async function createCloudFixture(
     );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
-      throw new Error(
-        `${context} failed with exit code ${result.code}: ${(
-          result.stderr || result.stdout
-        ).trim()}`
-      );
+      throw new CloudCommandError(context, result);
     }
     return readKubernetesResourceNames(parseJsonObject(result, context));
   };
@@ -1097,11 +1090,7 @@ export async function createCloudFixture(
       ]);
       if (result.code === 0) return true;
       if (isMissingNamespace(result)) return false;
-      throw new Error(
-        `${context} failed with exit code ${result.code}: ${(
-          result.stderr || result.stdout
-        ).trim()}`
-      );
+      throw new CloudCommandError(context, result);
     },
 
     registerApplicationCleanupTarget(application, namespace) {
@@ -1420,15 +1409,19 @@ export async function createCloudFixture(
           );
         } else {
           await attempt(`GHCR state package ${statePackage}`, async () => {
-            expectSuccess(
-              await commands.runGhPackage([
-                "api",
-                "--method",
-                "DELETE",
-                packageRecord.apiPath
-              ]),
-              `gh api DELETE ${packageRecord.apiPath}`
-            );
+            const deletion = await commands.runGhPackage([
+              "api",
+              "--method",
+              "DELETE",
+              packageRecord.apiPath
+            ]);
+            // The package is read before it is deleted, so a 404 here means it
+            // disappeared in between rather than that reclamation failed. The
+            // read path already treats absence as "nothing to reclaim"; a
+            // delete that reports the same absence has reached the same end
+            // state and must not fail the run.
+            if (!isGitHubApiNotFound(deletion))
+              expectSuccess(deletion, `gh api DELETE ${packageRecord.apiPath}`);
           });
         }
       }
@@ -1580,10 +1573,30 @@ interface PollForValueOptions<T> {
 
 async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
   const deadline = options.ports.now().getTime() + options.timeoutMs;
+  const expired = (): boolean => deadline - options.ports.now().getTime() <= 0;
   while (true) {
     const remainingBeforeProbe = deadline - options.ports.now().getTime();
     if (remainingBeforeProbe <= 0) throw new Error(options.timeoutMessage());
-    const value = await options.probe(remainingBeforeProbe);
+    let value: T | undefined;
+    try {
+      value = await options.probe(remainingBeforeProbe);
+    } catch (error) {
+      // The probe runs its command with whatever budget is left, so the last
+      // attempt before the deadline is killed mid-flight and reports an exit
+      // code with no output at all. Raising that as a probe failure would
+      // replace the timeout diagnostic — which names the workloads and their
+      // replica counts — with a bare "failed with exit code 1".
+      //
+      // Only a command the port saw killed by its own timeout is translated,
+      // and only once the deadline has already passed. Every other failure
+      // raises verbatim however late it arrives: a probe that genuinely found
+      // something wrong — a duplicate app registration, a rejected credential
+      // — must keep saying so rather than be reported as "timed out waiting",
+      // which would describe a state nothing observed.
+      if (!expired() || !(error instanceof CloudCommandError && error.timedOut))
+        throw error;
+      throw new Error(options.timeoutMessage(), { cause: error });
+    }
     if (value !== undefined) return value;
     const remaining = deadline - options.ports.now().getTime();
     if (remaining <= 0) throw new Error(options.timeoutMessage());

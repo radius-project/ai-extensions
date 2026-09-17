@@ -22,6 +22,20 @@ export interface CloudCommandResult {
   readonly code: number;
   readonly stdout: string;
   readonly stderr: string;
+  /**
+   * Whether the command was killed by its own timeout rather than exiting on
+   * its own. A killed process is frequently indistinguishable from an ordinary
+   * failure by exit code and output alone — both streams are empty — so the
+   * distinction is recorded here instead of being guessed at from a message.
+   */
+  readonly timedOut?: boolean;
+}
+
+/** The `execFile` callback error, as much of it as normalization reads. */
+export interface CloudCommandFailure {
+  readonly code?: string | number | null;
+  readonly killed?: boolean;
+  readonly message?: string;
 }
 
 /**
@@ -82,7 +96,7 @@ function runTool(
   args: readonly string[],
   cwd?: string,
   normalize: (
-    error: { code?: string | number | null } | null,
+    error: CloudCommandFailure | null,
     stdout: string | undefined,
     stderr: string | undefined
   ) => CloudCommandResult = normalizeCommandResult,
@@ -353,7 +367,7 @@ export function redactAzureCredentials(
 }
 
 export function normalizeAzureCommandResult(
-  error: { code?: string | number | null } | null,
+  error: CloudCommandFailure | null,
   stdout: string | undefined,
   stderr: string | undefined,
   env: NodeJS.ProcessEnv = process.env
@@ -373,9 +387,14 @@ export function normalizeAzureCommandResult(
  * `ETIMEDOUT`, which would read as `NaN` and compare falsely against zero. Any
  * failure that cannot be expressed as a non-zero number becomes exit code 1, so
  * a caller can never mistake a killed command for a successful one.
+ *
+ * A timeout kill is also recorded as such. `execFile` reports it as `killed`
+ * with an empty stdout and stderr, which is otherwise identical to a command
+ * that failed on its own with nothing to say; a caller that wants to treat the
+ * two differently cannot recover the difference later.
  */
 export function normalizeCommandResult(
-  error: { code?: string | number | null; message?: string } | null,
+  error: CloudCommandFailure | null,
   stdout: string | undefined,
   stderr: string | undefined
 ): CloudCommandResult {
@@ -387,7 +406,9 @@ export function normalizeCommandResult(
     stderr:
       !normalizedStdout && !normalizedStderr ?
         error?.message || ""
-      : normalizedStderr
+      : normalizedStderr,
+    timedOut:
+      error ? error.killed === true || error.code === "ETIMEDOUT" : false
   };
 }
 
@@ -481,7 +502,7 @@ export function createGitHubPackageCommandEnvironment(
 }
 
 export function normalizeGitHubPackageCommandResult(
-  error: { code?: string | number | null } | null,
+  error: CloudCommandFailure | null,
   stdout: string | undefined,
   stderr: string | undefined,
   packageToken: string
@@ -499,6 +520,8 @@ export class CloudCommandError extends Error {
   readonly code: number;
   readonly stdout: string;
   readonly stderr: string;
+  /** Whether the command was killed by its own timeout. */
+  readonly timedOut: boolean;
 
   constructor(context: string, result: CloudCommandResult) {
     const detail = (result.stderr || result.stdout).trim();
@@ -510,6 +533,7 @@ export class CloudCommandError extends Error {
     this.code = result.code;
     this.stdout = result.stdout;
     this.stderr = result.stderr;
+    this.timedOut = result.timedOut === true;
   }
 }
 
