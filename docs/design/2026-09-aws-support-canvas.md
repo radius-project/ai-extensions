@@ -153,9 +153,31 @@ Section 3 names the identity the environment will use, as Azure's equivalent nam
 
 The developer is told what that reaches before they agree to it, because a role that provisions databases and queues on their behalf is not a detail to discover later. The role can create and manage resources across AWS services in its region, not only the ones this application declares; its cluster access is administrative over the whole cluster rather than the environment's namespace; and a few AWS services are global, so a region restriction does not bound them. Each additional environment widens this — another region, another cluster — and the confirmation says so at the time.
 
-The default is a new role proposed as `radius-deploy-<owner>-<repo>`. The name is editable and a typed name is never overwritten — the field re-proposes only while it is empty or still holds the previous proposal. Because the name carries the repository and not the environment, editing the environment name leaves the role name alone, and a second environment in the same AWS account reuses the same role.
+The default is a new role proposed as `radius-deploy-<owner>-<repo>`. The name is editable and a typed name is never overwritten — the field re-proposes only while it is empty or still holds the previous proposal. Because the name carries the repository and not the environment, editing the environment name leaves the role name alone.
 
-The developer can instead pick an existing role from the profile's account. The picker lists roles the signed-in identity can inspect, identifies the repositories each already trusts, and pins the choice by ARN rather than by its editable name. Selecting a role is explicit consent to add this repository and environment to its trust, grant the AWS permissions the environment needs, and grant access to the selected EKS cluster; the canvas shows those changes before confirmation, and stops on any the signed-in identity cannot make, providing the action for the role's owner. Choosing a role disables the name field and is reversible until the environment is created. Typing the name of a role that already exists is not selection and is never treated as consent to modify it. How far reuse reaches, and where it stops, is [set out below](#how-far-one-role-reaches).
+The developer can instead pick an existing role from the profile's account. The picker lists roles the signed-in identity can inspect, identifies the repositories each already trusts, and pins the choice by ARN rather than by its editable name. Selecting a role is explicit consent to add this repository and environment to its trust, grant the AWS permissions the environment needs, and grant access to the selected EKS cluster; the canvas shows those changes before confirmation, and stops on any the signed-in identity cannot make, providing the action for the role's owner. Choosing a role disables the name field and is reversible until the environment is created.
+
+*Selection, not name, authorizes reuse.* Typing the name of a role that already exists is never consent to modify it. Azure sets the precedent: it stops setup rather than rewriting an app registration encountered only because its name collides, and offers a `use an existing application…` link that pins the chosen one, disables the name field, is reversible through `Use a per-repo identity instead`, and warns that `Sharing one identity across repositories means every wired repository can use its Azure permissions. Only do this for repos that belong to the same product.` AWS applies the same rule to IAM roles.
+
+**How far one role reaches.**
+
+| Cloud     | Deploy identity  | Belongs to | Environments are separated by         |
+|-----------|------------------|------------|---------------------------------------|
+| **Azure** | App registration | A tenant   | Subscription                          |
+| **AWS**   | IAM role         | An account | Account, though several may share one |
+
+Azure's identity sits one level above the boundary between environments: an app registration belongs to a tenant, a tenant contains every subscription, and environments are separated by subscription, so one registration reaches dev, staging, and production alike. An IAM role belongs to an account and cannot leave it. AWS's own guidance is an account per environment, which makes a role per environment the common shape — but several environments may share an account, and then they share a role: automatically for a Radius-created role, and by deliberate selection for any other. A second environment in the same account shows the role the repository already uses there rather than inviting a new name, so a repository never acquires a second role by accident. This is the one piece of parity AWS cannot deliver; everything Azure does *with* its identity carries over unchanged.
+
+*One environment never disturbs another.* On Azure this is free, because each subscription holds its own role assignment and a new environment has nothing to displace. A shared AWS role instead carries the sum of what its environments need, recorded on the role itself — every repository subject trusted to assume it, every region it may act in, every cluster it can reach — so an operator reading the role in the console can see which environments depend on it and why.
+
+| What the role carries  | Added                                              | Removed                                                  |
+|------------------------|----------------------------------------------------|----------------------------------------------------------|
+| An environment's trust | When that environment is set up                    | When that environment is deleted                         |
+| Permission in a region | When an environment needing a new region is set up | When no environment on the role still names that region  |
+| Access to a cluster    | When an environment on a new cluster is set up     | When no environment on the role still names that cluster |
+| The role               | With the first environment in the account          | With the last, and only when Radius created it           |
+
+A developer with `dev` in `us-west-2` who adds `staging` in `us-east-1` finds both still deploying: a second environment on a cluster another already uses finds the access it needs in place, deleting either leaves it for the other, and two environments set up at the same time both end up working.
 
 #### Section 4 · Infrastructure
 
@@ -192,38 +214,6 @@ Progress is reported through the canvas's existing three stages — `Authorize d
 A second environment in the same repository **and the same account** reports the shared role instead, as `Reusing the Radius-managed IAM role radius-deploy-contoso-storefront`, followed by `Keeping 1 subject(s) already trusted by this role` when the existing trust policy is widened rather than replaced.
 
 Failures reuse the established pattern: a summary card titled `Setup didn’t finish`, resources grouped as created, retained, reused, cleaned, and requiring manual action, and an offer to roll back. A new role appears under created resources. A selected existing role appears under reused resources, and rollback covers only the trust, permissions, and cluster access Radius added during this setup.
-
-#### How far one role reaches
-
-By default, an Azure developer gets one app registration per repository and an AWS developer gets one Radius-created role per repository in each account. Both clouds also let the developer select an existing identity instead.
-
-| Cloud     | Deploy identity  | Belongs to | Environments are separated by         |
-|-----------|------------------|------------|---------------------------------------|
-| **Azure** | App registration | A tenant   | Subscription                          |
-| **AWS**   | IAM role         | An account | Account, though several may share one |
-
-Azure's identity sits one level above the boundary between environments. An app registration belongs to a tenant, a tenant contains every subscription, and environments are separated by subscription — so one app registration reaches dev, staging, and production alike.
-
-AWS has no such level. An IAM role belongs to an account and cannot leave it, so an account is the furthest any role reaches. AWS's own guidance is an account per environment, which makes a role per environment the common shape — but several environments may share an account, and then they share a role. A Radius-created role is reused automatically by the repository's environments in that account. A role selected through the picker is the explicit exception: it can serve the repositories and environments that deliberately select it, but it still cannot cross into another account.
-
-That is the one piece of parity AWS cannot deliver. Everything Azure does *with* its identity carries over unchanged.
-
-*One environment never disturbs another.* On Azure this is free: each subscription gets its own role assignment, so a new environment has nothing to displace. AWS reaches the same outcome deliberately. A shared role holds the sum of what its environments need — every repository subject trusted to assume it, every region it may act in, every cluster it can reach. A new environment adds to that sum, deleting one takes away only what no remaining environment still uses, and nothing an environment depends on is kept where the next environment can replace it. A developer with `dev` in `us-west-2` who adds `staging` in `us-east-1` finds both still deploying.
-
-The role itself records which environments use it and what each needs from it — the region it deploys to, the cluster it targets. An operator looking at the role in the console can see which environments depend on it and why, and every addition and removal is measured against that record rather than against anything Radius remembers separately.
-
-| What the role carries  | Added                                              | Removed                                                  |
-|------------------------|----------------------------------------------------|----------------------------------------------------------|
-| An environment's trust | When that environment is set up                    | When that environment is deleted                         |
-| Permission in a region | When an environment needing a new region is set up | When no environment on the role still names that region  |
-| Access to a cluster    | When an environment on a new cluster is set up     | When no environment on the role still names that cluster |
-| The role               | With the first environment in the account          | With the last, and only when Radius created it           |
-
-So a second environment on a cluster another environment already uses finds the access it needs already there, deleting either one leaves it in place for the other, and two environments set up at the same time both end up working.
-
-The **IAM role** field on a second environment in the same account shows the role the repository already uses there and does not invite a new name, so a repository does not acquire a second role by accident. Choosing an existing role through the picker stays available, and remains the deliberate way to point an environment somewhere else.
-
-*Selection, not name, authorizes reuse.* Both rules follow Azure's. Azure stops setup rather than rewriting an app registration encountered only because its name collides, and offers a `use an existing application…` link that pins the chosen one, disables the name field, is reversible through `Use a per-repo identity instead`, and warns that `Sharing one identity across repositories means every wired repository can use its Azure permissions. Only do this for repos that belong to the same product.` AWS applies both to IAM roles.
 
 #### Parity with Azure · creating an environment
 
