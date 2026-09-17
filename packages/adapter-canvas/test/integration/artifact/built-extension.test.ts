@@ -711,6 +711,42 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
+  it("packages the Bicep checker exit-code contract", () => {
+    assertCurrentArtifact();
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+    const exitTwoRow = skillGuidance
+      .split(/\r?\n/u)
+      .find((line) => line.startsWith("| `2`"));
+
+    expect(skillGuidance).toContain(
+      "Only exit `1` permits a model edit in response to checker output."
+    );
+    expect(exitTwoRow).toContain(
+      'node "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"'
+    );
+    expect(exitTwoRow).toContain(
+      "report the exact checker failure, and state that no application model was written."
+    );
+    expect(exitTwoRow).toContain(
+      "Do not edit the model based on this result, write `app.origin.json`, publish, or claim that the model compiled."
+    );
+    expect(skillGuidance).toContain(
+      "These codes apply only to `validate-bicep.mjs`."
+    );
+    expect(skillGuidance).toContain(
+      "counting reserved validation attempts in that run's `run.json`"
+    );
+    expect(skillGuidance).toContain(
+      "An unavailable check still consumes its reserved attempt."
+    );
+    expect(skillGuidance).toContain(
+      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" <staging-dir>/app.bicep'
+    );
+    expect(skillGuidance).not.toContain(
+      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep'
+    );
+  });
+
   it("packages the schema-sensitivity credential contract, not a property-name rule", () => {
     assertCurrentArtifact();
     const readGuidance = (relativePath: string): string =>
