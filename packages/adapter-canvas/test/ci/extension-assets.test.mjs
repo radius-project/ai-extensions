@@ -11,6 +11,14 @@ const INTERNAL_PREFIX =
   "radius-project/ai-extensions/.github/extension/actions/";
 const EXTENSION_ACTION_PATH = "/.github/extension/actions/";
 const FULL_SHA_REFERENCE = /^[^@\s]+@[0-9a-f]{40}$/;
+const DATABASE_CPU_REQUEST =
+  /--set\s+database\.resources\.requests\.cpu=(\S+)/u;
+
+function millicores(value) {
+  return value.endsWith("m") ?
+      Number(value.slice(0, -1))
+    : Number(value) * 1000;
+}
 
 function filesUnder(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -163,6 +171,42 @@ describe(".github/extension release assets", () => {
     expect(publishScript).toContain(
       'if [ "$GITHUB_SHA" != "$(git rev-parse refs/remotes/origin/main)" ]; then'
     );
+  });
+
+  // GitHub gives a standard runner 2 vCPU in a private or internal repository
+  // and 4 vCPU in a public one. The chart requests 2 CPUs for the
+  // control-plane PostgreSQL, so on the private-repository runner it can never
+  // be scheduled once BuildKit and the k3s system pods have taken their share.
+  // PostgreSQL stays pending, UCP never becomes available, and the install
+  // times out. Every install that enables the database has to request less
+  // than the remaining budget. See radius-project/ai-extensions#794.
+  it("requests little enough CPU to schedule the database on a 2-vCPU runner", () => {
+    const RUNNER_MILLICORES = 2000;
+    const COMPETING_REQUESTS = 200 + 100 + 100; // buildkit, CoreDNS, metrics-server
+
+    const installs = filesUnder(EXTENSION_ROOT)
+      .filter((path) => /\.ya?ml$/u.test(path))
+      .flatMap((path) =>
+        runScripts(parseYaml(readFileSync(path, "utf8")))
+          .filter((script) => script.includes("rad install kubernetes"))
+          .map((script) => ({ path, script }))
+      );
+
+    expect(installs.length).toBeGreaterThan(0);
+
+    // Counted so that renaming the flag cannot make this test vacuously pass.
+    let guarded = 0;
+    for (const { path, script } of installs) {
+      if (!script.includes("--set database.enabled=true")) continue;
+      guarded++;
+      const override = DATABASE_CPU_REQUEST.exec(script);
+      expect(override, path).not.toBeNull();
+      expect(millicores(override[1]), path).toBeLessThanOrEqual(
+        RUNNER_MILLICORES - COMPETING_REQUESTS
+      );
+    }
+
+    expect(guarded).toBeGreaterThan(0);
   });
 
   it("uses the completed pre-canonical release as the verification cutover", () => {

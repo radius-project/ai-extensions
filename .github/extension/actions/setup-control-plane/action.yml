@@ -88,12 +88,23 @@ runs:
         #
         # database.enabled=true installs the control-plane PostgreSQL so durable
         # Radius state can be backed up and restored by `rad shutdown`/`rad startup`.
+        #
+        # The chart requests 2 CPUs for PostgreSQL, which is every core GitHub
+        # gives a standard runner in a private or internal repository (public
+        # repositories get 4). BuildKit and the k3s system pods claim some of
+        # that first, so PostgreSQL can never be scheduled, UCP never reaches
+        # ready, and the install times out. Lower the scheduling request only:
+        # the chart's CPU limit stays at 2, so PostgreSQL can still burst when
+        # the runner has cores to spare. This ephemeral single-node control
+        # plane holds a small amount of Radius state and does not need two
+        # cores reserved for it.
         TARGET_FLAGS=()
         if [ -f "$RADIUS_TARGET_KUBECONFIG" ]; then
           TARGET_FLAGS+=(--set global.targetCluster.enabled=true)
         fi
         rad install kubernetes \
           --set database.enabled=true \
+          --set database.resources.requests.cpu=250m \
           --set rp.publicEndpointOverride=localhost \
           --set dynamicrp.buildkit.enabled=true \
           "${TARGET_FLAGS[@]}"
