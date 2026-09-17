@@ -844,20 +844,18 @@ describe("P0-C built Radius extension artifact", () => {
     );
     const secretsGuidance = readGuidance("references/secrets-handling.md");
     const skillGuidance = readGuidance("SKILL.md");
+    const guidanceDocs = [connectionGuidance, secretsGuidance, skillGuidance];
 
-    for (const guidance of [
-      connectionGuidance,
-      secretsGuidance,
-      skillGuidance
-    ]) {
+    for (const guidance of guidanceDocs) {
       expect(guidance).toMatch(
         /read the application code|trace every app-native|traced through checked-in source/iu
       );
       expect(guidance).toMatch(
-        /exact format that parser expects|exact syntax that parser accepts/u
+        /exact (?:format that parser expects|syntax that parser accepts)/iu
       );
-      expect(guidance).toContain("safe");
-      expect(guidance).toContain("runtime");
+      expect(guidance).toMatch(
+        /\bsafe(?:,\s+proven)?\s+runtime\s+(?:path|composition)\b/iu
+      );
     }
     expect(connectionGuidance).toContain(
       "do not remap the Recipe `url` to a native setting merely because both are strings or use the same protocol"
@@ -878,11 +876,7 @@ describe("P0-C built Radius extension artifact", () => {
     expect(secretsGuidance).toContain(
       "As a fail-closed backstop, `validate-bicep.mjs` rejects a direct Recipe-managed aggregate secret key"
     );
-    for (const guidance of [
-      connectionGuidance,
-      secretsGuidance,
-      skillGuidance
-    ]) {
+    for (const guidance of guidanceDocs) {
       expect(guidance).not.toContain("StackExchange.Redis");
     }
     const checker = readFileSync(
