@@ -12,6 +12,8 @@ GitHub Radius currently creates GitHub environments, coordinates Radius applicat
 
 That coupling makes another frontend expensive to build. A Copilot CLI integration, for example, would have to reproduce the Canvas implementation's decisions about environment setup, command execution, workflow dispatch, progress, and failures, or depend on Canvas being open. Copies of this logic would drift: a deployment fix in Canvas would not necessarily fix the same problem in another frontend.
 
+Note - this proposal is not a competing proposal to [docs: design common Radius graph libraries](https://github.com/nicolejms/ai-extensions/pull/2). These would both work quite well together.
+
 ## Terms and definitions
 
 Two terms need distinction.
