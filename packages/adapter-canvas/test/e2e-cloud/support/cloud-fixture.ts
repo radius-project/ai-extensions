@@ -47,6 +47,8 @@ import {
 } from "./fixture-repository.js";
 import {
   radiusApplicationSelector,
+  RADIUS_WORKLOAD_RESOURCES,
+  RADIUS_RENDERED_RESOURCES,
   findNewWorkflowRunId,
   readWorkflowRunIds,
   readKubernetesWorkloads,
@@ -544,7 +546,7 @@ export async function createCloudFixture(
     namespace: string,
     timeoutMs?: number
   ): Promise<readonly KubernetesWorkload[] | "no-namespace"> => {
-    const context = `kubectl get deployments -n ${namespace}`;
+    const context = `kubectl get ${RADIUS_WORKLOAD_RESOURCES} -n ${namespace}`;
     const deadline =
       timeoutMs === undefined ? undefined : ports.now().getTime() + timeoutMs;
     const kubeconfig = await clusterKubeconfig(timeoutMs);
@@ -557,7 +559,7 @@ export async function createCloudFixture(
         "--kubeconfig",
         kubeconfig,
         "get",
-        "deployments",
+        RADIUS_WORKLOAD_RESOURCES,
         "--namespace",
         namespace,
         "--selector",
@@ -579,7 +581,7 @@ export async function createCloudFixture(
     namespace: string,
     timeoutMs: number
   ): Promise<readonly string[] | "no-namespace"> => {
-    const context = `kubectl get deployments,pods -n ${namespace}`;
+    const context = `kubectl get ${RADIUS_RENDERED_RESOURCES} -n ${namespace}`;
     const deadline = ports.now().getTime() + timeoutMs;
     const kubeconfig = await clusterKubeconfig(timeoutMs);
     const commandTimeoutMs = remainingCommandTimeout(
@@ -592,7 +594,7 @@ export async function createCloudFixture(
         "--kubeconfig",
         kubeconfig,
         "get",
-        "deployments,pods",
+        RADIUS_RENDERED_RESOURCES,
         "--namespace",
         namespace,
         "--selector",

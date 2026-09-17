@@ -8,7 +8,10 @@ import {
   selectExpiredServicePrincipals,
   selectAppIdsWithUnprocessedServicePrincipals,
   selectExpectedRoleAssignments,
+  selectLeakedClusterWorkloads,
+  selectReclaimableGroupResources,
   selectOpenPullRequestHeadRefs,
+  selectStaleStatePackages,
   selectTestResourceGroups
 } from "./cloud-cleanup.js";
 
@@ -609,3 +612,407 @@ function pull({
     }
   };
 }
+
+describe("selectStaleStatePackages", () => {
+  const prefix = "ai-extensions-fixture-radius-state-";
+  const cutoff = "2026-09-17T12:00:00Z";
+  const stale = "2026-09-17T07:54:10Z";
+  const fresh = "2026-09-17T17:30:33Z";
+
+  it("selects every state package the fixture has left behind", () => {
+    // Cleanup restores a pristine fixture and nothing shares it, so a package
+    // whose environment is long gone is reclaimed rather than stranded.
+    const packages = [
+      [
+        {
+          name: `${prefix}radtest-6fe9780807f4-53cf5e9d4628`,
+          updated_at: stale
+        },
+        {
+          name: `${prefix}radtest-f471e24d92f0-181627bff61c`,
+          updated_at: stale
+        }
+      ]
+    ];
+
+    expect(selectStaleStatePackages(packages, prefix, cutoff)).toEqual([
+      `${prefix}radtest-6fe9780807f4-53cf5e9d4628`,
+      `${prefix}radtest-f471e24d92f0-181627bff61c`
+    ]);
+  });
+
+  it("leaves a package that is younger than the cutoff", () => {
+    // The age check is the only thing standing between this sweep and a run
+    // that is still writing its state.
+    const packages = [
+      [
+        {
+          name: `${prefix}radtest-f471e24d92f0-181627bff61c`,
+          updated_at: fresh
+        }
+      ]
+    ];
+
+    expect(selectStaleStatePackages(packages, prefix, cutoff)).toEqual([]);
+  });
+
+  it("ignores packages outside the fixture's state prefix", () => {
+    const packages = [
+      [
+        { name: "radius-project-canvas", updated_at: stale },
+        {
+          name: "some-other-repo-radius-state-radtest-1-aaaaaaaaaaaa",
+          updated_at: stale
+        }
+      ]
+    ];
+
+    expect(selectStaleStatePackages(packages, prefix, cutoff)).toEqual([]);
+  });
+
+  it("ignores a package that shares the prefix but is not state", () => {
+    // The writer always appends an environment slug and twelve hex characters,
+    // so a package that merely starts with the prefix belongs to someone else.
+    const packages = [
+      [
+        { name: `${prefix}radtest-1-not-hex-here`, updated_at: stale },
+        { name: `${prefix}radtest-1-53cf5e9d462`, updated_at: stale },
+        { name: `${prefix}53cf5e9d4628`, updated_at: stale }
+      ]
+    ];
+
+    expect(selectStaleStatePackages(packages, prefix, cutoff)).toEqual([]);
+  });
+
+  it("keeps a package whose timestamp cannot be read", () => {
+    // An unreadable timestamp must fail towards keeping data, never towards
+    // deleting state that might still be in use.
+    const packages = [
+      [
+        {
+          name: `${prefix}radtest-1-aaaaaaaaaaaa`,
+          updated_at: "not-a-timestamp"
+        },
+        { name: `${prefix}radtest-2-bbbbbbbbbbbb` }
+      ]
+    ];
+
+    expect(selectStaleStatePackages(packages, prefix, cutoff)).toEqual([]);
+  });
+
+  it("flattens paginated pages", () => {
+    const packages = [
+      [{ name: `${prefix}radtest-1-aaaaaaaaaaaa`, updated_at: stale }],
+      [{ name: `${prefix}radtest-2-bbbbbbbbbbbb`, updated_at: stale }]
+    ];
+
+    expect(selectStaleStatePackages(packages, prefix, cutoff)).toEqual([
+      `${prefix}radtest-1-aaaaaaaaaaaa`,
+      `${prefix}radtest-2-bbbbbbbbbbbb`
+    ]);
+  });
+
+  it("refuses an empty prefix rather than matching every package", () => {
+    expect(() => selectStaleStatePackages([], "  ", cutoff)).toThrow(
+      /state package prefix is required/
+    );
+  });
+
+  it("refuses a payload that is not an array", () => {
+    expect(() =>
+      selectStaleStatePackages({ packages: [] }, prefix, cutoff)
+    ).toThrow(/GHCR packages did not return a JSON array/);
+  });
+});
+
+describe("selectLeakedClusterWorkloads", () => {
+  const prefix = "radtest-";
+  const application = "cloud-e2e";
+  const cutoff = "2026-09-17T12:00:00Z";
+  const stale = "2026-09-16T21:41:02Z";
+  const fresh = "2026-09-17T17:30:33Z";
+
+  const workload = (
+    kind: string,
+    name: string,
+    namespace: string,
+    environment: string,
+    creationTimestamp = stale
+  ) => ({
+    kind,
+    metadata: {
+      name,
+      namespace,
+      creationTimestamp,
+      labels: {
+        "radapp.io/application": application,
+        "radapp.io/environment": environment
+      }
+    }
+  });
+
+  it("reclaims a workload the fixture left running", () => {
+    // Observed leak: a Deployment still running 14 hours after its run, rolled
+    // by every later run instead of being noticed as new.
+    const payload = {
+      items: [
+        workload("Deployment", "sleeper", "default", "radtest-f471e24d92f0")
+      ]
+    };
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, application, cutoff)
+    ).toEqual([
+      {
+        kind: "Deployment",
+        name: "sleeper",
+        namespace: "default",
+        environment: "radtest-f471e24d92f0"
+      }
+    ]);
+  });
+
+  it("leaves a workload a run may still be using", () => {
+    // A reused object keeps the creation timestamp of the run that first
+    // rendered it, so only a genuinely new object is protected here.
+    const payload = {
+      items: [
+        workload("Deployment", "sleeper", "default", "radtest-live", fresh)
+      ]
+    };
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, application, cutoff)
+    ).toEqual([]);
+  });
+
+  it("keeps a workload whose creation timestamp cannot be read", () => {
+    const payload = {
+      items: [
+        workload("Deployment", "sleeper", "default", "radtest-1", "not-a-time"),
+        {
+          kind: "Deployment",
+          metadata: {
+            name: "undated",
+            namespace: "default",
+            labels: {
+              "radapp.io/application": application,
+              "radapp.io/environment": "radtest-2"
+            }
+          }
+        }
+      ]
+    };
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, application, cutoff)
+    ).toEqual([]);
+  });
+
+  it("ignores objects that carry no fixture environment label", () => {
+    const payload = {
+      items: [
+        workload("Deployment", "someone-else", "default", "prod-environment"),
+        { kind: "Deployment", metadata: { name: "bare", namespace: "default" } }
+      ]
+    };
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, application, cutoff)
+    ).toEqual([]);
+  });
+
+  it("ignores an object belonging to a different application", () => {
+    // The environment prefix alone does not make somebody else's workload ours
+    // to delete.
+    const payload = {
+      items: [workload("Deployment", "theirs", "default", "radtest-1")]
+    };
+    payload.items[0].metadata.labels["radapp.io/application"] = "other-app";
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, application, cutoff)
+    ).toEqual([]);
+  });
+
+  it("ignores an object carrying no application label", () => {
+    const payload = {
+      items: [
+        {
+          kind: "Deployment",
+          metadata: {
+            name: "unlabelled",
+            namespace: "default",
+            creationTimestamp: stale,
+            labels: { "radapp.io/environment": "radtest-1" }
+          }
+        }
+      ]
+    };
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, application, cutoff)
+    ).toEqual([]);
+  });
+
+  it("collects every kind the sweep is given", () => {
+    const payload = {
+      items: [
+        workload("Deployment", "sleeper", "default", "radtest-1"),
+        workload("HorizontalPodAutoscaler", "sleeper", "default", "radtest-1"),
+        workload("Service", "sleeper", "default", "radtest-1")
+      ]
+    };
+
+    expect(
+      selectLeakedClusterWorkloads(payload, prefix, application, cutoff).map(
+        (item) => item.kind
+      )
+    ).toEqual(["Deployment", "HorizontalPodAutoscaler", "Service"]);
+  });
+
+  it("refuses the control-plane namespace as well as Kubernetes' own", () => {
+    // Nothing this suite creates belongs in one, so a match there means the
+    // label is being misread and deleting would be destructive.
+    for (const namespace of [
+      "kube-system",
+      "kube-public",
+      "kube-node-lease",
+      "radius-system"
+    ]) {
+      const payload = {
+        items: [workload("Deployment", "sleeper", namespace, "radtest-1")]
+      };
+
+      expect(() =>
+        selectLeakedClusterWorkloads(payload, prefix, application, cutoff)
+      ).toThrow(new RegExp(`system namespace "${namespace}"`));
+    }
+  });
+
+  it("refuses an object that is missing its identity", () => {
+    const payload = {
+      items: [
+        {
+          kind: "Deployment",
+          metadata: {
+            creationTimestamp: stale,
+            labels: {
+              "radapp.io/environment": "radtest-1",
+              "radapp.io/application": application
+            }
+          }
+        }
+      ]
+    };
+
+    expect(() =>
+      selectLeakedClusterWorkloads(payload, prefix, application, cutoff)
+    ).toThrow(/is missing a kind, name or namespace/);
+  });
+
+  it("refuses an empty prefix rather than matching every environment", () => {
+    expect(() =>
+      selectLeakedClusterWorkloads({ items: [] }, " ", application, cutoff)
+    ).toThrow(/environment prefix is required/);
+  });
+
+  it("refuses an empty application rather than matching every workload", () => {
+    expect(() =>
+      selectLeakedClusterWorkloads({ items: [] }, prefix, " ", cutoff)
+    ).toThrow(/application name is required/);
+  });
+
+  it("refuses a payload that is not a kubectl list", () => {
+    expect(() =>
+      selectLeakedClusterWorkloads([], prefix, application, cutoff)
+    ).toThrow(/Kubernetes objects did not return a JSON array/);
+  });
+});
+
+describe("selectReclaimableGroupResources", () => {
+  const cluster = "ai_extensions_aks";
+  const clusterResource = {
+    id: "/subscriptions/s/resourceGroups/g/providers/Microsoft.ContainerService/managedClusters/ai_extensions_aks",
+    name: cluster,
+    type: "Microsoft.ContainerService/managedClusters"
+  };
+  const postgres = {
+    id: "/subscriptions/s/resourceGroups/g/providers/Microsoft.DBforPostgreSQL/flexibleServers/pgsql-8278c35f7a31c8f7",
+    name: "pgsql-8278c35f7a31c8f7",
+    type: "Microsoft.DBforPostgreSQL/flexibleServers"
+  };
+
+  it("reclaims a recipe-created resource the application delete left behind", () => {
+    expect(
+      selectReclaimableGroupResources([clusterResource, postgres], cluster)
+    ).toEqual([{ id: postgres.id, name: postgres.name, type: postgres.type }]);
+  });
+
+  it("keeps the cluster the suite deploys to", () => {
+    expect(selectReclaimableGroupResources([clusterResource], cluster)).toEqual(
+      []
+    );
+  });
+
+  it("keeps a managed cluster it was not pointed at, rather than stranding its node group", () => {
+    const other = {
+      id: "/subscriptions/s/resourceGroups/g/providers/Microsoft.ContainerService/managedClusters/other",
+      name: "other",
+      type: "Microsoft.ContainerService/managedClusters"
+    };
+    expect(
+      selectReclaimableGroupResources([clusterResource, other], cluster)
+    ).toEqual([]);
+  });
+
+  it("matches the cluster type however Azure cases it", () => {
+    expect(
+      selectReclaimableGroupResources(
+        [
+          {
+            ...clusterResource,
+            type: "microsoft.containerservice/managedClusters"
+          }
+        ],
+        cluster
+      )
+    ).toEqual([]);
+  });
+
+  it("refuses a group that does not hold the configured cluster", () => {
+    expect(() => selectReclaimableGroupResources([postgres], cluster)).toThrow(
+      /does not contain cluster "ai_extensions_aks"/
+    );
+  });
+
+  it("refuses an empty group, which cannot be the shared one", () => {
+    expect(() => selectReclaimableGroupResources([], cluster)).toThrow(
+      /refusing to delete any of its contents/
+    );
+  });
+
+  it("refuses a resource missing an id, name or type", () => {
+    expect(() =>
+      selectReclaimableGroupResources(
+        [clusterResource, { ...postgres, id: "" }],
+        cluster
+      )
+    ).toThrow(/missing an id, name or type/);
+  });
+
+  it("refuses a payload that is not a resource list", () => {
+    expect(() =>
+      selectReclaimableGroupResources({ value: [] }, cluster)
+    ).toThrow(/Azure resources did not return a JSON array/);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["whitespace", "   "]
+  ])("refuses a %s cluster name", (_label, name) => {
+    expect(() =>
+      selectReclaimableGroupResources([clusterResource], name)
+    ).toThrow(/A cluster name is required/);
+  });
+});
