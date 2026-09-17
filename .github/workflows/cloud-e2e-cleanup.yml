@@ -819,17 +819,27 @@ jobs:
           # otherwise leave the mutex held by a dead run, failing every Cloud
           # E2E run until the next scheduled cleanup reclaims it. Release it
           # only while it still points at the commit this run owns so that a
-          # concurrent owner is never deleted.
+          # concurrent owner is never deleted. Every outcome is reported: a
+          # step that fails while holding the lease must never leave an
+          # operator guessing whether the mutex is still held.
           release_orphaned_lease() {
             local status=$?
             if [[ -z "$lease_held_by_us" ]]; then return 0; fi
             if (( status == 0 )); then return 0; fi
             local current
             current="$(gh api "$lease_read_path" --jq .object.sha 2>/dev/null || true)"
-            if [[ -n "$current" && "$current" == "$held_lease_sha" ]]; then
-              if gh api -X DELETE "$lease_write_path" >/dev/null 2>&1; then
-                echo "::warning::Released $LEASE_REF after cleanup failed while holding it."
-              fi
+            if [[ -z "$current" ]]; then
+              echo "::warning::$LEASE_REF could not be read after cleanup failed; it appears to be gone already."
+              return 0
+            fi
+            if [[ "$current" != "$held_lease_sha" ]]; then
+              echo "::warning::$LEASE_REF now points at another owner; leaving it intact after cleanup failed."
+              return 0
+            fi
+            if gh api -X DELETE "$lease_write_path" >/dev/null 2>&1; then
+              echo "::warning::Released $LEASE_REF after cleanup failed while holding it."
+            else
+              echo "::error::Could not release $LEASE_REF after cleanup failed while holding it; Cloud E2E stays blocked until it is deleted."
             fi
           }
           trap release_orphaned_lease EXIT
@@ -896,12 +906,22 @@ jobs:
               --jq .sha)"
             if ! gh api --method POST "repos/$FIXTURE_REPOSITORY/git/refs" \
                 -f "ref=$LEASE_REF" -f "sha=$held_lease_sha" >/dev/null; then
-              if gh api "$lease_read_path" >/dev/null 2>&1; then
+              # A create that reports failure may still have landed: the
+              # response can be lost, or gh's own retry can meet "Reference
+              # already exists" from its first attempt. Treating any readable
+              # ref as a concurrent owner would abandon a write that actually
+              # succeeded and wedge the mutex until the next scheduled cleanup.
+              # The lease commit message carries this run's id, so its sha is
+              # unique to this run and settles ownership.
+              if ! created_lease_sha="$(read_lease_sha)"; then
+                echo "::error::Could not acquire $LEASE_REF and could not verify a concurrent owner."
+                exit 1
+              fi
+              if [[ "$created_lease_sha" != "$held_lease_sha" ]]; then
                 echo "::warning::$LEASE_REF was acquired concurrently; leaving the fixture branch intact."
                 exit 0
               fi
-              echo "::error::Could not acquire $LEASE_REF and could not verify a concurrent owner."
-              exit 1
+              echo "::warning::$LEASE_REF was created despite a failed create response; continuing as its owner."
             fi
             echo "Acquired $LEASE_REF for cleanup run $GITHUB_RUN_ID."
             lease_held_by_us=1
@@ -931,7 +951,7 @@ jobs:
           fi
 
           if ! verify_lease_sha="$(read_lease_sha)"; then
-            echo "::error::Could not re-read $LEASE_REF before release; leaving the lease intact."
+            echo "::error::Could not re-read $LEASE_REF before release; the failure handler reports below whether the lease was released."
             exit 1
           fi
           if [[ "$verify_lease_sha" != "$held_lease_sha" ]]; then
