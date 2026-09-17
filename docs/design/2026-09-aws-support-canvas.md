@@ -238,23 +238,13 @@ Failures reuse the established pattern: a summary card titled `Setup didn’t fi
 
 ### Step 4 · Review the application graph
 
-Before deploying, a developer wants to know what will be created in their AWS account; afterwards, what is actually running there. The application graph answers both, through `Modeled`, `Planned`, `Deployed`, and `Diff` views, and the type on a node depends on which one. `Modeled` shows the Radius type the developer declared — `Radius.Data/mySqlDatabases` — the same on either cloud. `Planned` and `Deployed` show what the recipe resolves that to, per resource type rather than by a single rule: a database backed by Amazon RDS appears as `aws_db_instance`, a cache backed by ElastiCache or a stream backed by MSK as its own AWS type. Azure behaves the same way, showing `Microsoft.DBforMySQL/flexibleServers`. The graph is therefore where an application stops being portable in the abstract and becomes a specific set of AWS resources.
+Before deploying, a developer wants to know what will be created in their AWS account. The application graph answers that through `Modeled`, `Planned`, and `Diff` views, and the type on a node depends on which one. The matching question afterwards — what is actually running — is answered by the `Deployed` view, which only means anything once a deployment exists and so is described with deployment in Step 5. `Modeled` shows the Radius type the developer declared — `Radius.Data/mySqlDatabases` — the same on either cloud. `Planned` shows what the recipe resolves that to, per resource type rather than by a single rule: a database backed by Amazon RDS appears as `aws_db_instance`, a cache backed by ElastiCache or a stream backed by MSK as its own AWS type. Azure behaves the same way, showing `Microsoft.DBforMySQL/flexibleServers`. The graph is therefore where an application stops being portable in the abstract and becomes a specific set of AWS resources.
 
 A recipe that provisions several AWS resources — an RDS instance alongside its subnet group and security group — shows the one the application depends on, and the rest appear in the node's details rather than as siblings. Every recipe names which of its resources that is, including a generated one.
 
 ![The Planned application graph for an AWS environment. The application node todo-list-app resolves to apps/Deployment, and connects to a mysql node typed aws_db_instance and a mysql-client-credentials node typed core/Secret. Planned nodes are drawn with a dashed border, and each offers View source code.](2026-09-aws-support-canvas/graph-planned-aws.png)
 
 The developer picks the application, branch, and environment, then deploys from this view. `The planned deployment is current.` confirms the graph reflects the branch as it stands. Planned nodes are drawn with a dashed border and deployed nodes with a solid, badged one, exactly as they are for Azure.
-
-The `Deployed` view shows the application as it currently runs in the selected environment, introduced as `The deployed application graph depicts the selected application as it is currently deployed and running in a given environment.` Before a first deployment there is nothing to show, and the view says so — `Not deployed yet — showing the modeled application.` — then renders the modeled topology so the developer sees what they are about to deploy rather than an empty panel.
-
-The distinction matters more on AWS than it looks. The types in that fallback are resolved from the recipe pack rather than read from the account, so the database below is typed `aws_db_instance` before any database exists. The notice is what keeps that honest: the same node means *this is what the recipe will create* under the notice and *this exists in your account* without it. A node in the fallback carries no console link, because there is nothing yet to link to.
-
-![The Deployed application graph for the AWS environment Aws-test-env before a first deployment, reporting "Not deployed yet — showing the modeled application." and rendering todo-list-app as apps/Deployment connected to mysql typed aws_db_instance and mysql-client-credentials typed core/Secret.](2026-09-aws-support-canvas/graph-deployed-aws.png)
-
-Deployed AWS resources link to the AWS console from both the node and the details drawer. The drawer link reads `View in AWS console` and a node's accessible label reads `Open <resource> in AWS console`, mirroring the Azure portal links available today — the console is derived from the destination URL rather than from a provider field, so the right name follows the right link automatically.
-
-AWS resources identified only by an ARN appear as cloud rows in the details drawer. A resource the canvas can place in the console links straight to it; one it cannot links to the console's resource search, carrying the ARN. A link is never fabricated, because a link that lands on the wrong page is worse than no link.
 
 **Parity with Azure**
 
@@ -271,6 +261,16 @@ The renderer, the icon set, and the `Diff` views are provider-neutral and need n
 Deploying is the same act on either cloud. The developer deploys from the application view, sees `Deploying <app> to environment <env>` with `Track progress in the deployments list below.`, and tracks the run in the deployments list, where each row offers `Monitor Graph`, `View Run`, and `Delete Deployment`.
 
 On success the log closes with `🎉 Deployment complete! Application deployed to AWS.` followed by `Click on deployed resources to view them in the AWS Console.`
+
+Once a deployment finishes, the `Deployed` view shows the application as it now runs in that environment, introduced as `The deployed application graph depicts the selected application as it is currently deployed and running in a given environment.` Before a first deployment there is nothing to show, and the view says so — `Not deployed yet — showing the modeled application.` — then renders the modeled topology so the developer sees what they are about to deploy rather than an empty panel.
+
+The distinction matters more on AWS than it looks. The types in that fallback are resolved from the recipe pack rather than read from the account, so the database below is typed `aws_db_instance` before any database exists. The notice is what keeps that honest: the same node means *this is what the recipe will create* under the notice and *this exists in your account* without it. A node in the fallback carries no console link, because there is nothing yet to link to.
+
+![The Deployed application graph for the AWS environment Aws-test-env before a first deployment, reporting "Not deployed yet — showing the modeled application." and rendering todo-list-app as apps/Deployment connected to mysql typed aws_db_instance and mysql-client-credentials typed core/Secret.](2026-09-aws-support-canvas/graph-deployed-aws.png)
+
+Deployed AWS resources link to the AWS console from both the node and the details drawer. The drawer link reads `View in AWS console` and a node's accessible label reads `Open <resource> in AWS console`, mirroring the Azure portal links available today — the console is derived from the destination URL rather than from a provider field, so the right name follows the right link automatically.
+
+AWS resources identified only by an ARN appear as cloud rows in the details drawer. A resource the canvas can place in the console links straight to it; one it cannot links to the console's resource search, carrying the ARN. A link is never fabricated, because a link that lands on the wrong page is worse than no link.
 
 AWS deployments require no new controls, and failures caused by identity or cluster access name their specific cause rather than reporting a generic workflow failure. What a deployment can *contain* is not provider-neutral, and is set out below.
 
