@@ -270,9 +270,33 @@ output="$(run_step "404
 assert_contains "${output}" "__exit__1" "exhausted retry: step fails"
 assert_contains "${output}" "Could not re-read ${LEASE_REF} to confirm ownership" \
     "exhausted retry: reports the failed verification"
-assert_equals "$(grep -c "sleep" "${TEST_ROOT}/sleep-calls.log")" "5" \
-    "exhausted retry: backs off five times"
+assert_contains "${output}" "the lease may still be held" \
+    "exhausted retry: trap reports the lease state as unknown"
+assert_not_contains "${output}" "appears to be gone" \
+    "exhausted retry: never claims an unreadable lease is gone"
+assert_equals "$(lease_deletes)" "0" \
+    "exhausted retry: never deletes a lease it could not read"
+assert_equals "$(grep -c "sleep" "${TEST_ROOT}/sleep-calls.log")" "10" \
+    "exhausted retry: backs off five times in the step and five more in the trap"
 pass "gives up after five attempts instead of looping forever"
+
+# ---------------------------------------------------------------------------
+# The trap runs on the same lagging replica that aborted the step, so its own
+# read must retry. A single read here would report the lease gone and leave the
+# mutex held by this dead run: the exact wedge this change exists to prevent.
+# ---------------------------------------------------------------------------
+output="$(run_step "404
+${OUR_LEASE_SHA}
+404
+404
+404
+${OUR_LEASE_SHA}" STUB_PATCH_BRANCH_EXIT=1 STUB_BRANCH_SHA="dddd4444dddd4444dddd4444dddd4444dddd4444")"
+assert_contains "${output}" "Released ${LEASE_REF} after cleanup failed while holding it." \
+    "lagging trap: releases the lease once the replica catches up"
+assert_not_contains "${output}" "appears to be gone" \
+    "lagging trap: never mistakes replica lag for a deleted lease"
+assert_equals "$(lease_deletes)" "1" "lagging trap: deletes the lease once"
+pass "retries a lagging read in the failure trap instead of abandoning the lease"
 
 # ---------------------------------------------------------------------------
 # The ownership guard. A lease that changed hands must never be deleted.

@@ -827,9 +827,12 @@ jobs:
             if [[ -z "$lease_held_by_us" ]]; then return 0; fi
             if (( status == 0 )); then return 0; fi
             local current
-            current="$(gh api "$lease_read_path" --jq .object.sha 2>/dev/null || true)"
-            if [[ -z "$current" ]]; then
-              echo "::warning::$LEASE_REF could not be read after cleanup failed; it appears to be gone already."
+            # Retry here too. The likeliest reason to reach this trap is that
+            # the step aborted on a lagging read, in which case a single read
+            # lands on the same stale replica and a lease this run is still
+            # holding looks deleted.
+            if ! current="$(read_lease_sha)"; then
+              echo "::error::$LEASE_REF could not be read after cleanup failed while holding it; the lease may still be held. Cloud E2E stays blocked until $LEASE_REF is confirmed deleted."
               return 0
             fi
             if [[ "$current" != "$held_lease_sha" ]]; then
