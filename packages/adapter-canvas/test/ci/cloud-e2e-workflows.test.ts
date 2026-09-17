@@ -764,8 +764,14 @@ describe.each(WORKFLOWS)("%s - shell scripts parse", (file) => {
           const opened = /<<'([A-Za-z_][A-Za-z0-9_]*)'/.exec(line);
           if (!opened || line.includes("<<-")) return;
           const tag = opened[1];
+          const nextOpen = lines.findIndex(
+            (candidate, candidateIndex) =>
+              candidateIndex > index &&
+              /<<'([A-Za-z_][A-Za-z0-9_]*)'/.test(candidate) &&
+              !candidate.includes("<<-")
+          );
           const terminated = lines
-            .slice(index + 1)
+            .slice(index + 1, nextOpen === -1 ? undefined : nextOpen)
             .some((candidate) => candidate === tag);
           if (!terminated) {
             offenders.push(
