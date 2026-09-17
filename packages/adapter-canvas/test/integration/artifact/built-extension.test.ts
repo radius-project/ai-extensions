@@ -71,7 +71,7 @@ const SOURCE_REF = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: REPO_ROOT,
   encoding: "utf8"
 }).trim();
-const literalCredentialAssignment =
+const LITERAL_CREDENTIAL_ASSIGNMENT =
   /^\s*(?:[A-Za-z][A-Za-z0-9]*_)*(?:access_?key|api_?key|client_?secret|connection_?string|password|passwd|secret_?key|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu;
 // Independent reviewed oracle: unlike importing the live declaration builders,
 // this fixture changes only when a contract update is deliberately accepted.
@@ -248,15 +248,15 @@ describe("packaged Bicep literal credential detector", () => {
         '{\n  value: "unsafe-example"\n}'
       ]) {
         expect(`  ${prefix}${key}: ${value}`).toMatch(
-          literalCredentialAssignment
+          LITERAL_CREDENTIAL_ASSIGNMENT
         );
       }
       expect(`${prefix}${key}: { value: credentialParameter }`).not.toMatch(
-        literalCredentialAssignment
+        LITERAL_CREDENTIAL_ASSIGNMENT
       );
       expect(
         `${prefix}${key}: { valueFrom: { secretKeyRef: { secretName: credentials.name, key: 'credential' } } }`
-      ).not.toMatch(literalCredentialAssignment);
+      ).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
     }
   });
 
@@ -271,9 +271,9 @@ describe("packaged Bicep literal credential detector", () => {
     "PASSWD_LENGTH",
     "NOTPASSWORD"
   ])("allows noncredential configuration key %s", (key) => {
-    expect(`${key}: 'strict'`).not.toMatch(literalCredentialAssignment);
+    expect(`${key}: 'strict'`).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
     expect(`${key}: { value: 'strict' }`).not.toMatch(
-      literalCredentialAssignment
+      LITERAL_CREDENTIAL_ASSIGNMENT
     );
   });
 });
@@ -734,7 +734,7 @@ describe("P0-C built Radius extension artifact", () => {
 
     expect(bicepBlocks.length).toBeGreaterThan(0);
     for (const block of bicepBlocks) {
-      expect(block).not.toMatch(literalCredentialAssignment);
+      expect(block).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
     }
   });
 
