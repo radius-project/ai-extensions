@@ -6,13 +6,17 @@ import {
 } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 import { createCanvasServer } from "../create-canvas-server.js";
 import { createRequestContext } from "../request-context.js";
+import type { CanvasRequestContext } from "../request-context.js";
 import { createRequestHandler } from "../create-request-handler.js";
+import { validateBrowserMutationRequest } from "../browser-mutation.js";
 import { type ServerRoute } from "../route-table.js";
 import {
   createEnvironmentsRoutes,
   handleAppParams,
+  handleBypassVerification,
   handleDeleteEnvironment,
   handleListEnvironments,
   handleVerifyStatus,
@@ -197,7 +201,10 @@ function cliFake(script: CliScript, misses: string[] = []) {
 }
 
 function createControlledEnvironmentServer(
-  overrides: Partial<EnvironmentsDependencies>
+  overrides: Partial<EnvironmentsDependencies>,
+  options: {
+    validateBrowserMutation?: (context: CanvasRequestContext) => boolean;
+  } = {}
 ) {
   const routes = createTestRouteTable(
     createEnvironmentsRoutes(deps(overrides))
@@ -210,6 +217,8 @@ function createControlledEnvironmentServer(
         instances,
         routes,
         markActivity,
+        validateBrowserMutation:
+          options.validateBrowserMutation ?? (() => true),
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");
@@ -795,6 +804,525 @@ describe("environments — delete-environment refusal ladder", () => {
   });
 });
 
+describe("environments — bypass-verification", () => {
+  // A verification operation that tracks a failed permissions run for env "dev".
+  const bypassOp = (over: Record<string, unknown> = {}) => ({
+    repo: "o/r",
+    environment: "dev",
+    context: { githubLogin: "octocat" },
+    verification: { runId: "555" },
+    ...over
+  });
+  // The gh calls the handler issues run through the pinned executor, in order:
+  // (1) `api .../variables` for the RADIUS_MANAGED check, then (2) `variable set`
+  // to write the marker. managedVars is the stdout of the variables read.
+  const managedVars = "RADIUS_MANAGED\nAZURE_CLIENT_ID";
+  type GhResult = Awaited<ReturnType<SelectedGhExecutor["run"]>>;
+  const ok = (stdout = ""): GhResult => ({ code: 0, stdout, stderr: "" });
+  // Builds an executor whose run() scripts the two gh calls the handler makes:
+  // the `api` variables read and the `variable set` marker write.
+  const scriptedExecutor = (
+    script: {
+      variables?: () => Promise<GhResult>;
+      write?: () => Promise<GhResult>;
+    } = {}
+  ) => {
+    const run = vi.fn(((args: readonly string[]) =>
+      args[0] === "api" ?
+        (script.variables || (() => Promise.resolve(ok(managedVars))))()
+      : (
+          script.write || (() => Promise.resolve(ok()))
+        )()) as SelectedGhExecutor["run"]);
+    return { run, executor: successfulSelectedGhExecutor({ run }) };
+  };
+  const bypassBody = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      repo: "o/r",
+      environment: "dev",
+      operationId: "op1",
+      runId: "555",
+      ...over
+    });
+  // Deps that carry a bypass all the way through to the marker write: a
+  // Radius-managed env whose run is a terminal permissions failure.
+  const passingDeps = (over: Partial<EnvironmentsDependencies> = {}) =>
+    deps({
+      getOperation: () => bypassOp(),
+      getSelectedGitHubExecutor: () => scriptedExecutor().executor,
+      hasCompleteVerificationIdentity: () => true,
+      getRunDetail: () =>
+        Promise.resolve({
+          status: "completed",
+          conclusion: "failure",
+          steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
+        }),
+      fetchRunLog: () =>
+        Promise.resolve("Error from server (Forbidden): cannot list resource"),
+      extractGitHubActionsStepLog: () => "",
+      explainOidcEnterpriseClaim: () => "",
+      explainNoSubscriptions: () => "",
+      ...over
+    });
+
+  it("400s when a required field is missing", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(recording.headerOrder).toEqual(["Content-Type"]);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "repo, environment, operationId and runId are required."
+    });
+  });
+
+  it("400s when a required field is the wrong type instead of throwing", async () => {
+    // A non-string repo must be a clean 400, not a coerced value or a
+    // "trim is not a function" TypeError swallowed as a 500.
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({
+        repo: { nested: true },
+        environment: 7,
+        operationId: "op1",
+        runId: "555"
+      })
+    );
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "repo, environment, operationId and runId are required."
+    });
+  });
+
+  it("400s when runId is neither a string nor a number", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({
+        repo: "o/r",
+        environment: "dev",
+        operationId: "op1",
+        runId: { not: "scalar" }
+      })
+    );
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body).error).toContain("are required");
+  });
+
+  it("accepts a numeric runId (coerced to a string for matching)", async () => {
+    const { run, executor } = scriptedExecutor();
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({
+        repo: "o/r",
+        environment: "dev",
+        operationId: "op1",
+        runId: 555
+      })
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getSelectedGitHubExecutor: () => executor,
+        envListCacheDelete: vi.fn()
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(200);
+    expect(run).toHaveBeenCalledWith(
+      expect.arrayContaining(["variable", "set", "--body", "555"]),
+      { timeout: 20000 }
+    );
+  });
+
+  it("an empty body parses to {} and 400s rather than throwing", async () => {
+    const { recording, ctx } = context("POST", "/api/bypass-verification", "");
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "repo, environment, operationId and runId are required."
+    });
+  });
+
+  it("409s when the operation does not match the repo/env/run", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody({ runId: "999" })
+    );
+    await handleBypassVerification(
+      ctx,
+      deps({ getOperation: () => bypassOp() })
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain(
+      "does not match this bypass request"
+    );
+  });
+
+  it("409s when the operation is missing entirely", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(ctx, deps({ getOperation: () => null }));
+    expect(recording.status).toBe(409);
+  });
+
+  it("409s when the verification identity is incomplete", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      deps({
+        getOperation: () => bypassOp(),
+        hasCompleteVerificationIdentity: () => false
+      })
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain(
+      "incomplete dispatch identity"
+    );
+  });
+
+  it("409s when the pinned login or executor cannot be resolved", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      deps({
+        getOperation: () => bypassOp(),
+        hasCompleteVerificationIdentity: () => true,
+        getSelectedGitHubExecutor: () => undefined
+      })
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain(
+      "GitHub account that ran verification"
+    );
+  });
+
+  it("502s when the managed-environment check cannot be read", async () => {
+    const { executor } = scriptedExecutor({
+      variables: () => Promise.reject(new Error("boom"))
+    });
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
+    );
+    expect(recording.status).toBe(502);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not confirm the environment"
+    );
+  });
+
+  it("502s when the managed-environment check exits non-zero", async () => {
+    const { executor } = scriptedExecutor({
+      variables: () =>
+        Promise.resolve({ code: 1, stdout: "", stderr: "gh boom" })
+    });
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
+    );
+    expect(recording.status).toBe(502);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not confirm the environment"
+    );
+  });
+
+  it("409s when the target is not a Radius-managed environment", async () => {
+    const { executor } = scriptedExecutor({
+      variables: () => Promise.resolve(ok("SOME_OTHER_VAR"))
+    });
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain("not managed by Radius");
+  });
+
+  it("502s when the run cannot be re-read", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getRunDetail: () => Promise.resolve(null)
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(502);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not read the verification run"
+    );
+  });
+
+  it("502s when re-reading the run throws (fails closed)", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getRunDetail: () => Promise.reject(new Error("gh api 502"))
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(502);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not read the verification run to confirm the bypass: gh api 502"
+    );
+  });
+
+  it("502s when reading the run log throws (fails closed)", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        fetchRunLog: () => Promise.reject(new Error("log unreadable"))
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(502);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not read the verification run log to confirm the bypass: log unreadable"
+    );
+  });
+
+  it("409s when the run is still in progress", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "in_progress",
+            conclusion: null,
+            steps: []
+          })
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain("still running");
+  });
+
+  it("409s when verification actually passed", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "completed",
+            conclusion: "success",
+            steps: []
+          })
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain("nothing to bypass");
+  });
+
+  it("409s when the run ended in a non-failure conclusion (cancelled/timed out)", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "completed",
+            conclusion: "cancelled",
+            steps: []
+          })
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain("did not fail cleanly");
+  });
+
+  it("409s when the failure category is not bypassable", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        // Login step + trust evidence classifies as oidc-trust (not bypassable).
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "completed",
+            conclusion: "failure",
+            steps: [
+              { name: "Configure AWS Credentials", conclusion: "failure" }
+            ]
+          }),
+        fetchRunLog: () =>
+          Promise.resolve(
+            "Not authorized to perform sts:AssumeRoleWithWebIdentity"
+          )
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain("must be fixed");
+  });
+
+  it("500s when writing the marker variable fails", async () => {
+    const { executor } = scriptedExecutor({
+      write: () => Promise.reject(new Error("boom"))
+    });
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
+    );
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Could not record the verification bypass: boom"
+    });
+  });
+
+  it("500s when writing the marker variable exits non-zero", async () => {
+    const { executor } = scriptedExecutor({
+      write: () =>
+        Promise.resolve({ code: 1, stdout: "", stderr: "write denied" })
+    });
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
+    );
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not record the verification bypass"
+    );
+  });
+
+  it("clean pass: writes the run-id marker, invalidates the cache, and 200s", async () => {
+    const { run, executor } = scriptedExecutor();
+    const envListCacheDelete = vi.fn();
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getSelectedGitHubExecutor: () => executor,
+        envListCacheDelete
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(run).toHaveBeenCalledWith(
+      [
+        "variable",
+        "set",
+        "RADIUS_VERIFICATION_BYPASSED",
+        "--body",
+        "555",
+        "--env",
+        "dev",
+        "--repo",
+        "o/r"
+      ],
+      { timeout: 20000 }
+    );
+    expect(envListCacheDelete).toHaveBeenCalledWith("o/r");
+    expect(recording.status).toBe(200);
+    expect(JSON.parse(recording.body)).toEqual({
+      success: true,
+      category: "permissions"
+    });
+  });
+
+  it("400s when the body is malformed JSON (a client error)", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      "{bad"
+    );
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(typeof JSON.parse(recording.body).error).toBe("string");
+  });
+
+  it("500s when internal work throws (a server error, not a 400)", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getOperation: () => {
+          throw new Error("operation store unavailable");
+        }
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body).error).toContain(
+      "operation store unavailable"
+    );
+  });
+});
+
 describe("environments — list-environments", () => {
   // API paths (the `args[1]` each `gh api` call targets), which uniquely key
   // the scripted `cliExec` responses.
@@ -1030,6 +1558,110 @@ describe("environments — list-environments", () => {
       "feat"
     );
     expect(envListCacheSet).toHaveBeenCalled();
+  });
+
+  it("reports a bypassed marker on a failed verify as the bypassed status", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tfailure" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nRADIUS_VERIFICATION_BYPASSED\t42"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    const parsed = JSON.parse(recording.body);
+    expect(parsed.environments[0].status).toBe("bypassed");
+  });
+
+  it("keeps a failed verify failed when the bypass marker is for a different run", async () => {
+    // The marker names run 41, but the environment's current failed run is 42:
+    // a later, different failure must not inherit the earlier bypass.
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tfailure" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nRADIUS_VERIFICATION_BYPASSED\t41"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    const parsed = JSON.parse(recording.body);
+    expect(parsed.environments[0].status).toBe("failed");
+  });
+
+  it("keeps a passing verify as success even when the bypass marker is present", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tsuccess" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nRADIUS_VERIFICATION_BYPASSED\t42"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    const parsed = JSON.parse(recording.body);
+    expect(parsed.environments[0].status).toBe("success");
   });
 
   it("reports unknown instead of pending when verification history is absent", async () => {
@@ -2249,12 +2881,13 @@ describe("environments — verify-status", () => {
 });
 
 describe("environments — registry", () => {
-  it("registers exactly the four migrated environment routes", () => {
+  it("registers exactly the five migrated environment routes", () => {
     const registry = createEnvironmentsRoutes(deps({}));
     expect(Object.keys(registry).sort()).toEqual([
       "GET /api/list-environments",
       "GET /api/verify-status",
       "POST /api/app-params",
+      "POST /api/bypass-verification",
       "POST /api/delete-environment"
     ]);
   });
@@ -2414,6 +3047,160 @@ describe("environments — real loopback", () => {
           expect.objectContaining({ name: "dev", status: "pending" })
         ]
       });
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("records a verification bypass over controlled HTTP with a valid mutation nonce", async () => {
+    const run = vi.fn(((args: readonly string[]) =>
+      args[0] === "api" ?
+        Promise.resolve({ code: 0, stdout: "RADIUS_MANAGED", stderr: "" })
+      : Promise.resolve({
+          code: 0,
+          stdout: "",
+          stderr: ""
+        })) as SelectedGhExecutor["run"]);
+    const envListCacheDelete = vi.fn();
+    // Wire the real nonce validator (not the `() => true` stub) so this test
+    // actually proves the route's nonce-required security contract: the request
+    // succeeds only because it carries the correct nonce and same-origin
+    // headers, and would fail if that validation were broken or removed.
+    const nonce = "controlled-bypass-nonce";
+    let serverBaseUrl = "";
+    const container = createControlledEnvironmentServer(
+      {
+        envListCacheDelete,
+        getOperation: () => ({
+          repo: "octo/app",
+          environment: "dev",
+          context: { githubLogin: "octocat" },
+          verification: { runId: "555" }
+        }),
+        getSelectedGitHubExecutor: () => successfulSelectedGhExecutor({ run }),
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "completed",
+            conclusion: "failure",
+            steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
+          }),
+        fetchRunLog: () =>
+          Promise.resolve(
+            "Error from server (Forbidden): cannot list resource"
+          ),
+        extractGitHubActionsStepLog: () => "",
+        explainOidcEnterpriseClaim: () => "",
+        explainNoSubscriptions: () => ""
+      },
+      {
+        validateBrowserMutation: (context) =>
+          validateBrowserMutationRequest({
+            request: context.request,
+            baseUrl: serverBaseUrl,
+            nonce
+          })
+      }
+    );
+    try {
+      const controlled = await container.getOrCreate("bypass-verification");
+      serverBaseUrl = controlled.baseUrl;
+      const origin = new URL(serverBaseUrl).origin;
+      const res = await fetch(controlled.baseUrl + "/api/bypass-verification", {
+        method: "POST",
+        headers: {
+          origin,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": nonce
+        },
+        body: JSON.stringify({
+          repo: "octo/app",
+          environment: "dev",
+          operationId: "op1",
+          runId: "555"
+        })
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        success: true,
+        category: "permissions"
+      });
+      expect(run).toHaveBeenCalledWith(
+        [
+          "variable",
+          "set",
+          "RADIUS_VERIFICATION_BYPASSED",
+          "--body",
+          "555",
+          "--env",
+          "dev",
+          "--repo",
+          "octo/app"
+        ],
+        { timeout: 20000 }
+      );
+      expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("rejects a bypass-verification POST that omits the mutation nonce with 403", async () => {
+    // The security contract: `/api/bypass-verification` is `nonce-required`, so
+    // a request missing the `X-Radius-Mutation-Nonce` header (or same-origin
+    // headers) is refused before the handler runs — no executor is touched and
+    // no bypass variable is written.
+    const run = vi.fn((() =>
+      Promise.resolve({
+        code: 0,
+        stdout: "",
+        stderr: ""
+      })) as SelectedGhExecutor["run"]);
+    const envListCacheDelete = vi.fn();
+    const nonce = "controlled-bypass-nonce";
+    let serverBaseUrl = "";
+    const container = createControlledEnvironmentServer(
+      {
+        envListCacheDelete,
+        getOperation: () => ({
+          repo: "octo/app",
+          environment: "dev",
+          context: { githubLogin: "octocat" },
+          verification: { runId: "555" }
+        }),
+        getSelectedGitHubExecutor: () => successfulSelectedGhExecutor({ run }),
+        hasCompleteVerificationIdentity: () => true
+      },
+      {
+        validateBrowserMutation: (context) =>
+          validateBrowserMutationRequest({
+            request: context.request,
+            baseUrl: serverBaseUrl,
+            nonce
+          })
+      }
+    );
+    try {
+      const controlled = await container.getOrCreate("bypass-verification");
+      serverBaseUrl = controlled.baseUrl;
+      const res = await fetch(controlled.baseUrl + "/api/bypass-verification", {
+        method: "POST",
+        body: JSON.stringify({
+          repo: "octo/app",
+          environment: "dev",
+          operationId: "op1",
+          runId: "555"
+        })
+      });
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({
+        error: "This browser mutation request is not trusted.",
+        code: "browser-mutation-validation-failed"
+      });
+      expect(run).not.toHaveBeenCalled();
+      expect(envListCacheDelete).not.toHaveBeenCalled();
     } finally {
       await container.stopAll();
     }
@@ -2590,7 +3377,8 @@ describe("environments — real loopback", () => {
         runId: "55",
         runUrl: "https://github.com/octo/app/actions/runs/55",
         error:
-          "Credential verification failed (failure). Failed step: Verify.\nboom"
+          "Credential verification failed (failure). Failed step: Verify.\nboom",
+        category: "generic"
       });
       expect(finish).toHaveBeenCalledWith(operation, "failed_partial", {
         failure: {
@@ -2602,6 +3390,70 @@ describe("environments — real loopback", () => {
             "Credential verification failed (failure). Failed step: Verify.\nboom"
         }
       });
+      expect(persistOperations).toHaveBeenCalledOnce();
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("classifies a cluster-access verification failure with category and permissions", async () => {
+    const operation = {
+      repo: "octo/app",
+      environment: "dev",
+      context: { githubLogin: "octocat" },
+      currentStage: "verify",
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "feature",
+        environment: "dev",
+        runId: "77"
+      }
+    };
+    const finish = vi.fn();
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const container = createControlledEnvironmentServer({
+      readInstanceEntry: () => undefined,
+      getOperation: () => operation,
+      hasCompleteVerificationIdentity: () => true,
+      getRunDetail: () =>
+        Promise.resolve({
+          status: "completed",
+          conclusion: "failure",
+          steps: [{ name: "Check AKS cluster access", conclusion: "failure" }]
+        }),
+      fetchRunLog: () =>
+        Promise.resolve(
+          "Error: AuthorizationFailed. The client does not have permission to perform action 'Microsoft.ContainerService/managedClusters/read'."
+        ),
+      extractErrorLines: () => ["denied"],
+      extractGitHubActionsStepLog: () => "",
+      explainOidcEnterpriseClaim: () => "",
+      explainNoSubscriptions: () => "",
+      finish,
+      persistBestEffort,
+      persistOperations,
+      reportOperationDiagnostic: () => {}
+    });
+    try {
+      const controlled = await container.getOrCreate("verify-cluster-failure");
+      const res = await fetch(
+        controlled.baseUrl +
+          "/api/verify-status?repo=octo/app&environment=dev&operationId=op-1"
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        state: string;
+        category: string;
+        component?: string;
+        missingPermissions?: string[];
+      };
+      expect(body.state).toBe("failed");
+      expect(body.category).toBe("permissions");
+      expect(body.component).toBeUndefined();
+      expect(body.missingPermissions).toEqual([
+        "Microsoft.ContainerService/managedClusters/read"
+      ]);
       expect(persistOperations).toHaveBeenCalledOnce();
     } finally {
       await container.stopAll();

@@ -27,12 +27,34 @@ import {
   showGraphModelingFailure,
   unsupportedGraphModelMessage
 } from "./graph-modeling-failure.js";
+import { WORKSPACE_MODEL_CHANGED_EVENT } from "../heartbeat.js";
+import { GRAPH_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 
 const ENTRY_KEY = "graph-page";
-export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
-export const GRAPH_RETRY_MS = 10_000;
+export { GRAPH_PAGE_STATE_ID };
+// The wait between `needsAppBicep` polls, by attempt. Copilot usually finishes
+// authoring `.radius/app.bicep` within the first few seconds, so the first polls
+// are cheap and fast and only a long-running model generation settles onto the
+// unchanged 10s steady-state interval. A single fixed delay made the common
+// case pay the worst case: the model was already on disk while the page sat
+// idle.
+export const GRAPH_RETRY_SCHEDULE_MS: readonly number[] = Object.freeze([
+  300, 1_000, 2_000, 5_000, 10_000
+]);
+// The last entry of the schedule, which every attempt past its end reuses.
+export const GRAPH_RETRY_MAX_MS =
+  GRAPH_RETRY_SCHEDULE_MS[GRAPH_RETRY_SCHEDULE_MS.length - 1];
 export const GRAPH_STALE_RETRY_MS = 1_000;
 export const GRAPH_PROGRESS_MS = 800;
+
+// The delay before the `attempt`-th (0-based) `needsAppBicep` retry. Attempts
+// past the end of the schedule hold at its last entry, so polling never stops
+// and never grows without bound.
+export function graphRetryDelayMs(attempt: number): number {
+  return GRAPH_RETRY_SCHEDULE_MS[
+    Math.min(attempt, GRAPH_RETRY_SCHEDULE_MS.length - 1)
+  ];
+}
 // Why the primary button is inert after a modeling failure. The graph surface
 // carries the diagnostic; this only explains the disabled control.
 export const GRAPH_PLAN_BLOCKED_TITLE =
@@ -107,6 +129,10 @@ export function initializeGraphPage(
   let branchSelectionGeneration = 0;
   let requestActive = false;
   let retry: ScopeTimer | null = null;
+  // How many `needsAppBicep` retries the current wait has already scheduled.
+  // Each wait owns its own counter and resets when a fresh (non-continuing)
+  // request starts it, so a later wait never inherits a previous one's backoff.
+  let loadRetryAttempt = 0;
   let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
@@ -117,6 +143,8 @@ export function initializeGraphPage(
   // graph and the refresh decides the real state.
   let modelState: "pending" | "ready" | "failed" = "pending";
   let followWorkspaceBranch = page.followWorkspaceBranch;
+  let graphFromWorkspace = page.localSource;
+  let refreshLoadedGraph: (() => void) | null = null;
 
   // Keep the primary button in step with the compile state. The server renders
   // the button without a mode and loadModeledEnvState assigns "plan" later, so
@@ -230,10 +258,12 @@ export function initializeGraphPage(
 
   // The server recomputes provenance per request, so a response that reports it
   // wins over the value serialized into the initial page render.
-  const sourceProvenance = (payload: unknown): boolean =>
-    isRecord(payload) && typeof payload.fromWorkspace === "boolean" ?
-      payload.fromWorkspace
-    : page.localSource;
+  const recordSourceProvenance = (payload: unknown): boolean => {
+    if (isRecord(payload) && typeof payload.fromWorkspace === "boolean") {
+      graphFromWorkspace = payload.fromWorkspace;
+    }
+    return graphFromWorkspace;
+  };
 
   const showGuidance = (): void => {
     const guidance = context.dom.byId("graph-guidance");
@@ -293,9 +323,13 @@ export function initializeGraphPage(
       });
   };
 
+  // The selector is the live source of the branch on screen; the serialized
+  // page branch is only the starting point.
+  const currentBranch = (): string => branchSelect?.value.trim() || page.branch;
+
   const load = (options: { readonly continuing?: boolean } = {}): void => {
     if (requestActive || !entry.active) return;
-    const branch = branchSelect?.value.trim() || page.branch;
+    const branch = currentBranch();
     if (!page.repo || !branch) {
       showStatus(
         context,
@@ -305,6 +339,7 @@ export function initializeGraphPage(
       return;
     }
     requestActive = true;
+    if (!options.continuing) loadRetryAttempt = 0;
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
     controller?.destroy();
@@ -358,7 +393,7 @@ export function initializeGraphPage(
           renderOrUpdate(parseGraphResources(payload.resources), {
             repoUrl: githubRepositoryUrl(page.repo),
             branch,
-            localSource: sourceProvenance(payload)
+            localSource: recordSourceProvenance(payload)
           });
           hasLoadedGraph = true;
           return;
@@ -373,7 +408,7 @@ export function initializeGraphPage(
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
             "info"
           );
-          retry = entry.after(GRAPH_RETRY_MS, () => {
+          retry = entry.after(graphRetryDelayMs(loadRetryAttempt++), () => {
             retry = null;
             load({ continuing: true });
           });
@@ -451,9 +486,9 @@ export function initializeGraphPage(
     // blanks the container before it fetches. Only the first request restarts
     // the server-side wait; the polls that continue it must not, or the wait
     // would never age out.
-    const refreshLoadedGraph = (
-      options: { readonly continuing?: boolean } = {}
-    ): void => {
+    let refreshRetryAttempt = 0;
+    const refresh = (options: { readonly continuing?: boolean } = {}): void => {
+      if (!options.continuing) refreshRetryAttempt = 0;
       const refreshGeneration = ++generation;
       requestAbort = context.net.createAbort();
       void context.net
@@ -484,7 +519,7 @@ export function initializeGraphPage(
             showStatus(context, "Application graph ready.", "info");
             renderOrUpdate(parseGraphResources(payload.resources), {
               ...graphOptions,
-              localSource: sourceProvenance(payload)
+              localSource: recordSourceProvenance(payload)
             });
             showGuidance();
             return;
@@ -507,10 +542,13 @@ export function initializeGraphPage(
               "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
               "info"
             );
-            retry = entry.after(GRAPH_RETRY_MS, () => {
-              retry = null;
-              refreshLoadedGraph({ continuing: true });
-            });
+            retry = entry.after(
+              graphRetryDelayMs(refreshRetryAttempt++),
+              () => {
+                retry = null;
+                refresh({ continuing: true });
+              }
+            );
           } else if (readBoolean(payload, "stale")) {
             showStatus(
               context,
@@ -519,7 +557,7 @@ export function initializeGraphPage(
             );
             retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
               retry = null;
-              refreshLoadedGraph({ continuing: true });
+              refresh({ continuing: true });
             });
           } else {
             const error = readString(payload, "error");
@@ -555,8 +593,22 @@ export function initializeGraphPage(
           if (refreshGeneration === generation) requestAbort = null;
         });
     };
-    refreshLoadedGraph();
+    refreshLoadedGraph = refresh;
+    refresh();
   }
+  entry.on(context.dom.document, WORKSPACE_MODEL_CHANGED_EVENT, () => {
+    if (!graphFromWorkspace || !hasLoadedGraph) return;
+    stopRequest();
+    // The preloaded refresh closure is pinned to the branch the page was
+    // rendered with. Once the selection has moved on, only `load` targets the
+    // branch that is actually on screen.
+    const selectedBranch = currentBranch();
+    if (refreshLoadedGraph && selectedBranch === page.branch) {
+      refreshLoadedGraph();
+    } else {
+      load();
+    }
+  });
   void populateApplications(context, page.repo, "graph-app");
   const branchListingGeneration = branchSelectionGeneration;
   void populateBranches(

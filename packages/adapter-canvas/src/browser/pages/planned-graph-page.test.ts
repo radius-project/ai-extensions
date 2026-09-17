@@ -17,9 +17,9 @@ import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { BrowserContext, HttpResponse } from "../ports.js";
+import { PLANNED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   initializePlannedGraphPage as initializePlannedGraphPageEntry,
-  PLANNED_GRAPH_STATE_ID,
   PLAN_DEBOUNCE_MS,
   PLAN_PROGRESS_MS,
   PLAN_RETRY_MS

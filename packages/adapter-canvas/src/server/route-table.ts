@@ -171,6 +171,7 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "identity-credentials"
   ),
   legacyPost("/api/delete-environment", "exact", "json", "environments"),
+  declare("POST", "/api/bypass-verification", "exact", "json", "environments"),
   declare("POST", "/api/operations", "exact", "json", "operations-status"),
   legacyPost("/api/azure-auto-setup", "exact", "json", "azure-discovery"),
   declare(

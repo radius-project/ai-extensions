@@ -102,6 +102,23 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain("<code>repo:octo/app</code>");
   });
 
+  it("distinguishes required and best-effort Azure role assignments", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      "granted <strong>Contributor</strong> on the selected resource group"
+    );
+    expect(html).toContain(
+      "attempts to grant <strong>Locks Contributor</strong>"
+    );
+    expect(html).toContain(
+      "<strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster"
+    );
+    expect(html).toContain(
+      "if either optional assignment fails, setup continues with a warning and remediation command"
+    );
+    expect(html).not.toContain("User Access Administrator");
+  });
+
   it("keeps the identity name usable when no repository is known", () => {
     const html = environmentsPaneMarkup({ ...baseOptions, ctxRepo: "" });
     expect(html).toContain('value="radius-deploy-"');
@@ -465,6 +482,24 @@ describe("namespace constraint guidance", () => {
       new RegExp(`<(?:select|input) id="${control}"[^>]*>`).exec(html)?.[0] ??
       "";
     expect(tag, `${control} should be rendered`).not.toBe("");
-    expect(tag).toContain(`aria-describedby="${help}"`);
+    expect(tag).toContain(
+      `aria-describedby="${help} ${control.replace(/-(?:select|custom)$/u, "-error")}"`
+    );
   });
+
+  it.each(["azure", "aws"])(
+    "renders an accessible constrained custom namespace field for %s",
+    (provider) => {
+      const html = environmentsPaneMarkup(baseOptions);
+      const input =
+        new RegExp(`<input id="${provider}-namespace-custom"[^>]*>`).exec(
+          html
+        )?.[0] ?? "";
+      expect(input).toContain('maxlength="63"');
+      expect(input).toContain('pattern="[a-z0-9](?:[-a-z0-9]*[a-z0-9])?"');
+      expect(html).toContain(
+        `<div id="${provider}-namespace-error" class="status error" role="alert" hidden></div>`
+      );
+    }
+  );
 });

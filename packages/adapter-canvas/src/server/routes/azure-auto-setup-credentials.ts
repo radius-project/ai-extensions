@@ -82,6 +82,41 @@ export function azureRetryDelayMs(
   return delay > MAX_RETRY_DELAY_MS ? null : delay;
 }
 
+async function readAzureWithPropagationRetry(
+  read: () => Promise<AzureAutoSetupCommandResult>,
+  sleep: AzureAutoSetupCredentialInput["dependencies"]["sleep"],
+  accept: (result: AzureAutoSetupCommandResult) => boolean,
+  retrySuccessfulResult: (
+    result: AzureAutoSetupCommandResult
+  ) => boolean = () => false
+): Promise<AzureAutoSetupCommandResult> {
+  let last: AzureAutoSetupCommandResult = {
+    code: 1,
+    stdout: "",
+    stderr: "Azure read was not attempted."
+  };
+  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
+    last = await read();
+    if (accept(last)) return last;
+    const succeeded = last.code === 0 || last.code === "0";
+    const detail = last.stderr || last.stdout;
+    if (
+      !(
+        (succeeded && retrySuccessfulResult(last)) ||
+        isReplicationLagError(detail) ||
+        isRetryableAzureReadFailure(detail)
+      ) ||
+      attempt + 1 >= AZURE_PROPAGATION_ATTEMPTS
+    ) {
+      break;
+    }
+    const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
+    if (delay === null) break;
+    await sleep(delay);
+  }
+  return last;
+}
+
 function parseFederatedCredentialInventory(stdout: string): {
   subjects: string[];
   nameToSubject: Map<string, string>;
@@ -153,7 +188,7 @@ function isRollbackPending(operation: { providerRecovery?: unknown }): boolean {
 
 export function isReplicationLagError(stderr?: string): boolean {
   if (!stderr) return false;
-  return /does not exist in the directory|PrincipalNotFound|Cannot find (?:principal|user or service principal)|No matching principal|not found in the directory/i.test(
+  return /Request_ResourceNotFound|Directory_ObjectNotFound|does not exist(?: in the directory)?|PrincipalNotFound|Cannot find (?:principal|user or service principal)|No matching principal|not found in the directory/i.test(
     stderr
   );
 }
@@ -299,19 +334,30 @@ async function createFederatedCredentials({
   | "appName"
 >): Promise<boolean> {
   const { steps, runAz, fail, stopBoundary, checkpoint } = workflow;
-  const appResult = await runAz([
-    "ad",
-    "app",
-    "show",
-    "--id",
-    clientId,
-    "--query",
-    "id",
-    "-o",
-    "tsv"
-  ]);
+  const appResult = await readAzureWithPropagationRetry(
+    () =>
+      runAz([
+        "ad",
+        "app",
+        "show",
+        "--id",
+        clientId,
+        "--query",
+        "id",
+        "-o",
+        "tsv"
+      ]),
+    dependencies.sleep,
+    (result) =>
+      (result.code === 0 || result.code === "0") && result.stdout.trim() !== "",
+    (result) =>
+      (result.code === 0 || result.code === "0") && result.stdout.trim() === ""
+  );
   const applicationObjectId = appResult.stdout.trim();
-  if (appResult.code !== 0 || !applicationObjectId) {
+  if (
+    (appResult.code !== 0 && appResult.code !== "0") ||
+    !applicationObjectId
+  ) {
     await fail(
       400,
       `Could not resolve the Entra object id for App Registration ${clientId}.`,
@@ -332,22 +378,12 @@ async function createFederatedCredentials({
     "-o",
     "json"
   ];
-  let listResult: AzureAutoSetupCommandResult | null = null;
-  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
-    listResult = await runAz(listArgs);
-    if (listResult.code === 0 || listResult.code === "0") break;
-    const detail = listResult.stderr || listResult.stdout;
-    if (
-      !isRetryableAzureReadFailure(detail) ||
-      attempt + 1 >= AZURE_PROPAGATION_ATTEMPTS
-    ) {
-      break;
-    }
-    const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
-    if (delay === null) break;
-    await dependencies.sleep(delay);
-  }
-  if (!listResult || (listResult.code !== 0 && listResult.code !== "0")) {
+  const listResult = await readAzureWithPropagationRetry(
+    () => runAz(listArgs),
+    dependencies.sleep,
+    (result) => result.code === 0 || result.code === "0"
+  );
+  if (listResult.code !== 0 && listResult.code !== "0") {
     await fail(
       400,
       "Could not read the App Registration federated credentials: " +
@@ -669,23 +705,46 @@ async function createFederatedCredentials({
         return false;
       }
     }
-    const showResult = await runAz([
-      "ad",
-      "app",
-      "federated-credential",
-      "show",
-      "--id",
-      clientId,
-      "--federated-credential-id",
-      credential.name,
-      "--query",
-      "{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences}",
-      "-o",
-      "json"
-    ]);
+    const showCredential = () =>
+      runAz([
+        "ad",
+        "app",
+        "federated-credential",
+        "show",
+        "--id",
+        clientId,
+        "--federated-credential-id",
+        credential.name,
+        "--query",
+        "{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences}",
+        "-o",
+        "json"
+      ]);
+    const showResult = await readAzureWithPropagationRetry(
+      showCredential,
+      dependencies.sleep,
+      (candidate) => {
+        const live = parseFederatedCredentialObject(candidate.stdout);
+        return (
+          (candidate.code === 0 || candidate.code === "0") &&
+          live?.subject === credential.subject &&
+          hasCompleteFederatedCredentialIdentity(live)
+        );
+      },
+      (candidate) => {
+        if (candidate.code !== 0 && candidate.code !== "0") return false;
+        const live = parseFederatedCredentialObject(candidate.stdout);
+        return (
+          created &&
+          (!live ||
+            live.subject === "" ||
+            !hasCompleteFederatedCredentialIdentity(live))
+        );
+      }
+    );
     const liveCredential = parseFederatedCredentialObject(showResult.stdout);
     if (
-      showResult.code !== 0 ||
+      (showResult.code !== 0 && showResult.code !== "0") ||
       liveCredential?.subject !== credential.subject
     ) {
       await fail(
@@ -737,35 +796,33 @@ async function resolveServicePrincipalObjectId(
   runAz: AzureAutoSetupCredentialInput["workflow"]["runAz"],
   sleep: AzureAutoSetupCredentialInput["dependencies"]["sleep"]
 ): Promise<{ objectId: string; error: string }> {
-  let lastError = "";
-  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
-    const result = await runAz([
-      "ad",
-      "sp",
-      "show",
-      "--id",
-      clientId,
-      "--query",
-      "id",
-      "-o",
-      "tsv"
-    ]);
-    const objectId = (result.stdout || "").trim();
-    if (result.code === 0 && objectId) return { objectId, error: "" };
-    lastError = result.stderr || result.stdout || "";
-    if (
-      !isReplicationLagError(lastError) &&
-      !isRetryableAzureReadFailure(lastError)
-    ) {
-      break;
-    }
-    if (attempt + 1 < AZURE_PROPAGATION_ATTEMPTS) {
-      const delay = azureRetryDelayMs(lastError, 2000 * (attempt + 1));
-      if (delay === null) break;
-      await sleep(delay);
-    }
-  }
-  return { objectId: "", error: lastError };
+  const result = await readAzureWithPropagationRetry(
+    () =>
+      runAz([
+        "ad",
+        "sp",
+        "show",
+        "--id",
+        clientId,
+        "--query",
+        "id",
+        "-o",
+        "tsv"
+      ]),
+    sleep,
+    (candidate) =>
+      (candidate.code === 0 || candidate.code === "0") &&
+      candidate.stdout.trim() !== "",
+    (candidate) =>
+      (candidate.code === 0 || candidate.code === "0") &&
+      candidate.stdout.trim() === ""
+  );
+  const objectId = result.stdout.trim();
+  return {
+    objectId:
+      (result.code === 0 || result.code === "0") && objectId ? objectId : "",
+    error: result.stderr || result.stdout || ""
+  };
 }
 
 async function assignRole(
@@ -1182,8 +1239,8 @@ export async function configureAzureAutoSetupCredentials({
     steps.push(
       "⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. " +
         'If your cluster uses Azure RBAC for Kubernetes (the default for AKS Automatic) the deploy will fail at "Verify AKS Access". ' +
-        `Grant it manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}. ` +
-        "Details: " +
+        `Grant it manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}` +
+        "\nDetails: " +
         clusterRole.stderr
     );
   }
@@ -1191,6 +1248,67 @@ export async function configureAzureAutoSetupCredentials({
     await fail(
       409,
       "Radius reconciled the interrupted AKS role assignment and must delete the setup resources before setup can complete.",
+      "provider-rollback-pending",
+      { steps, clientId, appName }
+    );
+    return false;
+  }
+
+  // Contributor cannot manage Microsoft.Authorization/locks. Locks Contributor
+  // (28bf596f-4eb7-45ce-b5bc-6cf482fec137) grants only the lock read, write, and
+  // delete actions needed by recipes that create CanNotDelete locks.
+  //
+  // Best-effort and non-fatal, like the AKS cluster role: the operator may not
+  // be allowed to create role assignments, and applications that never request
+  // a lock work without this role.
+  const locksContributorAssignmentId = deterministicProviderUuid(
+    `${operation.operationId}\0${servicePrincipalObjectId}\0Locks Contributor\0${contributorScope}`
+  );
+  steps.push(
+    `Assigning Locks Contributor on ${resourceGroup} for applications that manage resource locks...`
+  );
+  const locksContributor = await assignRole(
+    {
+      objectId: servicePrincipalObjectId,
+      assignmentId: locksContributorAssignmentId,
+      role: "Locks Contributor",
+      scope: contributorScope,
+      subscriptionId
+    },
+    operation,
+    dependencies.operations.persist,
+    runAz,
+    dependencies.sleep,
+    stopBoundary
+  );
+  if (locksContributor.ok) {
+    steps.push("✅ Locks Contributor role assigned");
+    if (locksContributor.created) {
+      dependencies.operations.recordCreatedRoleAssignment(operation, {
+        assignmentId: locksContributorAssignmentId,
+        role: "Locks Contributor",
+        scope: contributorScope,
+        principalObjectId: servicePrincipalObjectId
+      });
+      if (!(await checkpoint("after-role-assignment:Locks Contributor")))
+        return false;
+    }
+  } else if (locksContributor.stopped) {
+    return false;
+  } else {
+    steps.push(
+      "⚠️ Could not assign the Locks Contributor role automatically. " +
+        "Applications whose recipes set a resource lock will fail to deploy, and " +
+        'existing locked resources will fail to delete with "AuthorizationFailed". ' +
+        `Grant the least-privilege role manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Locks Contributor" --scope ${contributorScope}` +
+        "\nDetails: " +
+        locksContributor.stderr
+    );
+  }
+  if (isRollbackPending(operation)) {
+    await fail(
+      409,
+      "Radius reconciled the interrupted Locks Contributor role assignment and must delete the setup resources before setup can complete.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );

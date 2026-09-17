@@ -36,6 +36,7 @@ import {
 } from "../services/provider-mutation-recovery.js";
 import {
   azureRetryDelayMs,
+  isReplicationLagError,
   isRetryableAzureReadFailure
 } from "./azure-auto-setup-credentials.js";
 
@@ -43,6 +44,7 @@ export const ENTRA_APP_RETENTION_NOTICE =
   "Radius retains this app registration if you later delete the environment; environment deletion removes only that environment's federated identity credential.";
 
 const CALLER_IDENTITY_LOOKUP_ATTEMPTS = 6;
+const APP_PROPAGATION_ATTEMPTS = 6;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -226,6 +228,76 @@ export async function resolveAzureAutoSetupApplication({
       ok: true as const,
       owned: parseDirectoryObjectIds(result.stdout).includes(caller.id)
     };
+  };
+  const readCreatedAppOwners = async (
+    appId: string,
+    ownerObjectId: string
+  ): Promise<AzureAutoSetupCommandResult> => {
+    let result: AzureAutoSetupCommandResult = {
+      code: 1,
+      stdout: "",
+      stderr: "App Registration owners were not read."
+    };
+    for (let attempt = 1; attempt <= APP_PROPAGATION_ATTEMPTS; attempt++) {
+      result = await runAz(buildAppOwnerListArgs({ appId }));
+      const succeeded = result.code === 0 || result.code === "0";
+      if (
+        succeeded &&
+        parseDirectoryObjectIds(result.stdout).includes(
+          ownerObjectId.toLowerCase()
+        )
+      ) {
+        return result;
+      }
+      const detail = result.stderr || result.stdout;
+      if (
+        !(
+          succeeded ||
+          isReplicationLagError(detail) ||
+          isRetryableAzureReadFailure(detail)
+        ) ||
+        attempt >= APP_PROPAGATION_ATTEMPTS
+      ) {
+        break;
+      }
+      const delay = azureRetryDelayMs(detail, 2000 * attempt);
+      if (delay === null) break;
+      await dependencies.sleep(delay);
+    }
+    return result;
+  };
+  const readCreatedAppTags = async (
+    appId: string,
+    requiredTags: readonly string[]
+  ): Promise<AzureAutoSetupCommandResult> => {
+    let result: AzureAutoSetupCommandResult = {
+      code: 1,
+      stdout: "",
+      stderr: "App Registration tags were not read."
+    };
+    for (let attempt = 1; attempt <= APP_PROPAGATION_ATTEMPTS; attempt++) {
+      result = await runAz(buildAppTagShowArgs({ appId }));
+      const succeeded = result.code === 0 || result.code === "0";
+      const tags = succeeded ? parseAppTags(result.stdout) : null;
+      if (tags && missingRequiredAppTags(tags, requiredTags).length === 0) {
+        return result;
+      }
+      const detail = result.stderr || result.stdout;
+      if (
+        !(
+          (succeeded && tags !== null) ||
+          isReplicationLagError(detail) ||
+          isRetryableAzureReadFailure(detail)
+        ) ||
+        attempt >= APP_PROPAGATION_ATTEMPTS
+      ) {
+        break;
+      }
+      const delay = azureRetryDelayMs(detail, 2000 * attempt);
+      if (delay === null) break;
+      await dependencies.sleep(delay);
+    }
+    return result;
   };
   const readRadiusProvenance = async (
     appId: string
@@ -794,12 +866,42 @@ export async function resolveAzureAutoSetupApplication({
             beforeMutation: () =>
               stopBoundary("before-app-registration-owner-add"),
             mutate: async () => {
-              const result = await runAz(
-                buildAppOwnerAddArgs({
-                  appId: clientId,
-                  ownerObjectId: caller.id
-                })
-              );
+              let result: AzureAutoSetupCommandResult = {
+                code: 1,
+                stdout: "",
+                stderr: "App Registration owner assignment was not attempted."
+              };
+              for (
+                let attempt = 1;
+                attempt <= APP_PROPAGATION_ATTEMPTS;
+                attempt++
+              ) {
+                result = await runAz(
+                  buildAppOwnerAddArgs({
+                    appId: clientId,
+                    ownerObjectId: caller.id
+                  })
+                );
+                if (
+                  result.code === 0 ||
+                  result.code === "0" ||
+                  isAppOwnerAlreadyAssignedError(result.stderr)
+                ) {
+                  break;
+                }
+                if (
+                  !isReplicationLagError(result.stderr || result.stdout) ||
+                  attempt >= APP_PROPAGATION_ATTEMPTS
+                ) {
+                  break;
+                }
+                const delay = azureRetryDelayMs(
+                  result.stderr || result.stdout,
+                  2000 * attempt
+                );
+                if (delay === null) break;
+                await dependencies.sleep(delay);
+              }
               return isAppOwnerAlreadyAssignedError(result.stderr) ?
                   { ...result, code: 0, alreadyAssigned: true }
                 : result;
@@ -810,9 +912,7 @@ export async function resolveAzureAutoSetupApplication({
                 "Entra reported the Azure CLI identity was already an owner, so this operation added nothing."
               : null,
             reconcile: async () => {
-              const owners = await runAz(
-                buildAppOwnerListArgs({ appId: clientId })
-              );
+              const owners = await readCreatedAppOwners(clientId, caller.id);
               if (owners.code !== 0 && owners.code !== "0") {
                 throw new Error(
                   owners.stderr ||
@@ -864,9 +964,7 @@ export async function resolveAzureAutoSetupApplication({
         steps.push(
           "Verifying the Azure CLI identity owns the new App Registration..."
         );
-        const ownerList = await runAz(
-          buildAppOwnerListArgs({ appId: clientId })
-        );
+        const ownerList = await readCreatedAppOwners(clientId, caller.id);
         if (ownerList.code !== 0 && ownerList.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to verify owners of the new App Registration: " +
@@ -916,15 +1014,42 @@ export async function resolveAzureAutoSetupApplication({
             persist: operations.persist,
             beforeMutation: () =>
               stopBoundary("before-app-registration-tag-update"),
-            mutate: () =>
-              runAz(
-                buildAppTagPatchArgs({ appId: clientId, tags: provenanceTags })
-              ),
+            mutate: async () => {
+              let result: AzureAutoSetupCommandResult = {
+                code: 1,
+                stdout: "",
+                stderr: "App Registration tag update was not attempted."
+              };
+              for (
+                let attempt = 1;
+                attempt <= APP_PROPAGATION_ATTEMPTS;
+                attempt++
+              ) {
+                result = await runAz(
+                  buildAppTagPatchArgs({
+                    appId: clientId,
+                    tags: provenanceTags
+                  })
+                );
+                if (result.code === 0 || result.code === "0") break;
+                if (
+                  !isReplicationLagError(result.stderr || result.stdout) ||
+                  attempt >= APP_PROPAGATION_ATTEMPTS
+                ) {
+                  break;
+                }
+                const delay = azureRetryDelayMs(
+                  result.stderr || result.stdout,
+                  2000 * attempt
+                );
+                if (delay === null) break;
+                await dependencies.sleep(delay);
+              }
+              return result;
+            },
             accept: (result) => result,
             reconcile: async () => {
-              const shown = await runAz(
-                buildAppTagShowArgs({ appId: clientId })
-              );
+              const shown = await readCreatedAppTags(clientId, provenanceTags);
               if (shown.code !== 0 && shown.code !== "0") {
                 throw new Error(
                   shown.stderr ||
@@ -966,7 +1091,7 @@ export async function resolveAzureAutoSetupApplication({
             };
         if (!(await checkpoint("after-app-registration-tag-update")))
           return null;
-        if (tagPatch.code !== 0) {
+        if (tagPatch.code !== 0 && tagPatch.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to apply Radius provenance tags to the new App Registration: " +
               tagPatch.stderr,
@@ -976,8 +1101,8 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
         steps.push("Verifying Radius provenance tags...");
-        const tagShow = await runAz(buildAppTagShowArgs({ appId: clientId }));
-        if (tagShow.code !== 0) {
+        const tagShow = await readCreatedAppTags(clientId, provenanceTags);
+        if (tagShow.code !== 0 && tagShow.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to read the App Registration tags after update: " +
               tagShow.stderr,

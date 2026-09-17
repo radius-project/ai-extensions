@@ -9,6 +9,11 @@ import { generateVerifyWorkflow, verifyTemplateFile } from "./verify.js";
 // and the `{{RADIUS_REF}}` pinned into the verify-ghcr-push action reference.
 const AZURE_TEMPLATE = `name: Verify Azure credentials
 on:
+  push:
+    branches:
+      - "radius/setup-**"
+    paths:
+      - ".github/workflows/radius-verify-credentials.yml"
   workflow_dispatch:
     inputs:
       environment:
@@ -16,6 +21,7 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    environment: \${{ inputs.environment || '{{ENV}}' }}
     steps:
       - uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}
         with:
@@ -41,6 +47,13 @@ describe("generateVerifyWorkflow", () => {
         const yaml = generateVerifyWorkflow("prod", platform, template);
 
         expect(yaml).toContain('default: "prod"');
+        expect(yaml).toContain(
+          "environment: ${{ inputs.environment || 'prod' }}"
+        );
+        expect(yaml).toContain('"radius/setup-**"');
+        expect(yaml).toContain(
+          '".github/workflows/radius-verify-credentials.yml"'
+        );
         expect(yaml).toContain(
           `radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@${RADIUS_REF}`
         );

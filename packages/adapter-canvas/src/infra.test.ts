@@ -16,6 +16,7 @@ interface InfraMockState {
   // When true, commitFileToRepo rejects (mirrors gh.ts, which throws on a failed
   // PUT — e.g. a protected branch) so tests can exercise the `failed` path.
   failCommits: boolean;
+  noopCommits: boolean;
 }
 
 // Shared mock state for the ./gh.ts stub. `vi.hoisted` runs before the module
@@ -35,11 +36,11 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
     // so a template without it would 422, and the operation marker is inserted
     // into that same inputs block.
     "verify-azure.yml":
-      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  push:\n    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "verify-aws.yml":
-      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  push:\n    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "run-rad-commands.yml":
-      "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\n  workflow_run:\n    workflows: [verify]\n    types: [completed]\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
+      "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
     "run-rad-commands-azure.yml":
       "name: deploy-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
     "delete-application.yml":
@@ -54,6 +55,7 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
       commits: [], // recorded commitFileToRepo calls
       fetches: [],
       failCommits: false, // when true, commitFileToRepo rejects
+      noopCommits: false,
       upstream: { ...BASE_UPSTREAM }
     }
   };
@@ -104,6 +106,7 @@ vi.mock("./gh.js", () => ({
     message: string
   ) => {
     if (h.failCommits) throw new Error("protected branch");
+    if (h.noopCommits) return false;
     h.commits.push({ path, content, branch, message });
     (h.committed[branch] ||= {})[path] = content;
     return true;
@@ -138,7 +141,7 @@ jobs:
 `);
 
     expect(workflow).toContain(
-      "run-name: Radius verify ${{ inputs.environment }} [${{ inputs.radius_operation }}]"
+      "run-name: Radius verify ${{ inputs.environment || '' }} [${{ inputs.radius_operation || '' }}]"
     );
     expect(workflow).toContain("      radius_operation:");
     expect(workflow).toContain("        required: false");
@@ -158,6 +161,24 @@ jobs:
         )
       ).toBe(true);
     }
+  });
+
+  it("preserves only the constrained push trigger with an operation fallback", async () => {
+    const workflow = await generateVerifyWorkflow("dev", "azure", undefined, {
+      setupPushOperationMarker: "op_123"
+    });
+
+    expect(workflow).toContain("  push:");
+    expect(workflow).toContain("      - 'radius/setup-**'");
+    expect(workflow).toContain(
+      "run-name: Radius verify ${{ inputs.environment || 'dev' }} [${{ inputs.radius_operation || 'op_123' }}]"
+    );
+  });
+
+  it("strips setup push when no exact operation marker is supplied", async () => {
+    expect(await generateVerifyWorkflow("dev", "azure")).not.toContain(
+      "  push:"
+    );
   });
 
   it("refuses a template that no longer exposes a dispatch inputs block", () => {
@@ -259,21 +280,30 @@ describe("generated workflow YAML validation", () => {
     );
   });
 
-  it.each([
-    "push",
-    "pull_request",
-    "pull_request_target",
-    "workflow_run",
-    "schedule"
-  ])("rejects the unsafe automatic `%s` trigger", async (trigger) => {
+  it.each(["pull_request", "pull_request_target", "workflow_run", "schedule"])(
+    "rejects the unsafe automatic `%s` trigger",
+    async (trigger) => {
+      h.upstream["verify-azure.yml"] = BASE_UPSTREAM[
+        "verify-azure.yml"
+      ].replace("  workflow_dispatch:", `  ${trigger}:\n  workflow_dispatch:`);
+
+      await expect(generateVerifyWorkflow("prod", "azure")).rejects.toThrow(
+        `unsafe automatic trigger \`${trigger}\` is not allowed`
+      );
+    }
+  );
+
+  it("rejects a broad push trigger", async () => {
     h.upstream["verify-azure.yml"] = BASE_UPSTREAM["verify-azure.yml"].replace(
-      "  workflow_dispatch:",
-      `  ${trigger}:\n  workflow_dispatch:`
+      "    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'",
+      "    branches:\n      - '**'"
     );
 
-    await expect(generateVerifyWorkflow("prod", "azure")).rejects.toThrow(
-      `unsafe automatic trigger \`${trigger}\` is not allowed`
-    );
+    await expect(
+      generateVerifyWorkflow("prod", "azure", undefined, {
+        setupPushOperationMarker: "op_123"
+      })
+    ).rejects.toThrow(/push trigger must be limited/u);
   });
 
   it("rejects unresolved placeholders not recognized by the core renderer", async () => {
@@ -346,7 +376,7 @@ describe("generated workflow YAML validation", () => {
     );
 
     await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
-      /unsafe automatic trigger `push` is not allowed/u
+      /reusable `workflow_call` trigger must be the only trigger/u
     );
   });
 
@@ -628,6 +658,7 @@ describe("syncRepoWorkflows", () => {
     h.committed = {};
     h.commits = [];
     h.failCommits = false;
+    h.noopCommits = false;
     h.upstream = { ...BASE_UPSTREAM };
     expireTemplateCache();
   });
@@ -720,6 +751,53 @@ describe("syncRepoWorkflows", () => {
     ]);
     expect(res.updated).toEqual([]);
     expect(h.commits).toEqual([]);
+  });
+
+  it.each(["azure", "aws"])(
+    "keeps an exact %s setup-branch verify workflow in sync",
+    async (provider) => {
+      h.committed.main = {
+        [VERIFY_PATH]: await generateVerifyWorkflow(
+          "dev",
+          provider,
+          undefined,
+          {
+            setupPushOperationMarker: "op_123"
+          }
+        )
+      };
+
+      const res = await syncRepoWorkflows("acme/app", [
+        { name: "dev", provider }
+      ]);
+
+      expect(res.updated).toEqual([]);
+      expect(h.commits).toEqual([]);
+    }
+  );
+
+  it("rewrites a modified setup-branch verify workflow", async () => {
+    const setupWorkflow = await generateVerifyWorkflow(
+      "dev",
+      "azure",
+      undefined,
+      { setupPushOperationMarker: "op_123" }
+    );
+    const modifiedWorkflow = setupWorkflow.replace(
+      "paths:\n      - '.github/workflows/radius-verify-credentials.yml'",
+      "paths:\n      - '.github/workflows/**'"
+    );
+    expect(modifiedWorkflow).not.toBe(setupWorkflow);
+    h.committed.main = { [VERIFY_PATH]: modifiedWorkflow };
+
+    const res = await syncRepoWorkflows("acme/app", [
+      { name: "dev", provider: "azure" }
+    ]);
+
+    expect(res.updated).toEqual([VERIFY_PATH]);
+    expect(h.commits[0].content).toBe(
+      await generateVerifyWorkflow("dev", "azure")
+    );
   });
 
   it("preserves the committed provider when rewriting the shared verify file", async () => {
@@ -976,5 +1054,23 @@ describe("syncRepoWorkflows", () => {
       ".github/workflows/delete-azure.yml"
     ]);
     expect(res.failed.every((f) => f.branch === "main")).toBe(true);
+  });
+
+  it("does not report a create when a concurrent writer made the same change", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-application.yml"];
+    h.noopCommits = true;
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { only: ["delete-application.yml"], create: true }
+    );
+
+    expect(res.created).toEqual([]);
+    expect(res.registrationPending).toEqual([
+      ".github/workflows/delete-application.yml"
+    ]);
+    expect(h.commits).toEqual([]);
   });
 });

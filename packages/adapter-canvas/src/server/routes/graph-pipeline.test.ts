@@ -308,6 +308,26 @@ describe("graph pipeline", () => {
     });
   });
 
+  describe("modelRevisionFor", () => {
+    it("hashes only the selected model content", () => {
+      const { pipeline, calls } = build();
+
+      expect(
+        pipeline.modelRevisionFor(selectionOf({ content: "app bicep" }))
+      ).toBe("hash(app bicep|)");
+      expect(calls.hashes).toEqual([{ content: "app bicep", fingerprint: "" }]);
+      expect(calls.fingerprinted).toEqual([]);
+    });
+
+    it("hashes empty content when the selection carries none", () => {
+      const { pipeline, calls } = build();
+
+      pipeline.modelRevisionFor(selectionOf({ content: null }));
+
+      expect(calls.hashes[0]?.content).toBe("");
+    });
+  });
+
   describe("discardStagedArtifacts", () => {
     it("removes a staged remote directory", () => {
       const { pipeline, calls } = build();

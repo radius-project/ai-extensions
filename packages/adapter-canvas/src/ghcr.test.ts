@@ -513,6 +513,30 @@ test("gives source-aware guidance for an injected credential denied deletion", a
   );
 });
 
+test("names the dedicated package token when package access is rejected", async () => {
+  const harness = createDeletionHarness({ deleteStatus: 403 });
+  const original = process.env.GH_PACKAGES_TOKEN;
+  process.env.GH_PACKAGES_TOKEN = "dedicated-package-token";
+  try {
+    await assert.rejects(
+      deleteGHCRStatePackage({
+        ...deleteOptions,
+        credentials: {
+          username: "octocat",
+          token: "dedicated-package-token",
+          source: "injected-token",
+          scopes: ["read:packages", "delete:packages"]
+        },
+        fetchImpl: harness.fetchImpl
+      }),
+      /GH_PACKAGES_TOKEN.*gh auth refresh cannot change it/
+    );
+  } finally {
+    if (original === undefined) delete process.env.GH_PACKAGES_TOKEN;
+    else process.env.GH_PACKAGES_TOKEN = original;
+  }
+});
+
 test.each([401, 403])(
   "reports deletion scopes when the initial package lookup is rejected with HTTP %i",
   async (packageReadStatus) => {

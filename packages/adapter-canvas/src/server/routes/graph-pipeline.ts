@@ -136,6 +136,7 @@ export interface GraphPipeline<
     selection: AppBicepSelection,
     staged: StagedRadArtifacts
   ): string;
+  modelRevisionFor(selection: AppBicepSelection): string;
   discardStagedArtifacts(staged: StagedRadArtifacts): void;
 }
 
@@ -201,6 +202,10 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
         selection.content || "",
         dependencies.radArtifactsFingerprint(staged.dir)
       );
+    },
+
+    modelRevisionFor(selection) {
+      return dependencies.graphDefinitionHash(selection.content || "", "");
     },
 
     discardStagedArtifacts(staged) {

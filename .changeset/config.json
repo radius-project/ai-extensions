@@ -1,6 +1,11 @@
 {
   "$schema": "https://unpkg.com/@changesets/config@4.0.0/schema.json",
-  "changelog": "@changesets/changelog-github",
+  "changelog": [
+    "@changesets/changelog-github",
+    {
+      "template": "\n\n- {pull} {authors} - {summary}"
+    }
+  ],
   "commit": false,
   "fixed": [],
   "linked": [],

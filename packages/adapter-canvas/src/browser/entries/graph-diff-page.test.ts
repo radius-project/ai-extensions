@@ -9,7 +9,7 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import { PAGE_REGISTRY_GLOBAL } from "../globals.js";
 import { resolvePageRegistry } from "../registry.js";
-import { GRAPH_DIFF_STATE_ID } from "../pages/graph-diff-page.js";
+import { GRAPH_DIFF_STATE_ID } from "../../pages/browser-state-ids.js";
 import { installGraphDiffPageEntry } from "./graph-diff-page.js";
 
 describe("graph diff page browser entry", () => {

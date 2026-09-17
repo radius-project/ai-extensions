@@ -1,4 +1,5 @@
 import { findExactVerificationRun } from "../../verification-run-identity.js";
+import type { VerificationRunEvent } from "../../verification-run-identity.js";
 
 // Recovering the run identity a dispatch never got to record.
 //
@@ -29,6 +30,7 @@ export interface RecoveredVerificationIdentity {
   operationMarker: string;
   dispatchedAt: number;
   baselineRunId: number | null;
+  event: VerificationRunEvent;
 }
 
 export type RecoveredVerificationRunOutcome =
@@ -66,7 +68,8 @@ export function readRecoveredVerificationIdentity(
         verification.operationMarker
       : "",
     dispatchedAt: Number(verification.dispatchedAt),
-    baselineRunId: Number.isFinite(baseline) ? baseline : null
+    baselineRunId: Number.isFinite(baseline) ? baseline : null,
+    event: verification.event === "push" ? "push" : "workflow_dispatch"
   };
 }
 
@@ -129,7 +132,8 @@ export async function recoverVerificationRun(input: {
     dispatchedAt: identity.dispatchedAt,
     ref: identity.ref,
     environment: identity.environment,
-    operationMarker: identity.operationMarker
+    operationMarker: identity.operationMarker,
+    event: identity.event
   });
   if (exact.state === "applied") {
     return {

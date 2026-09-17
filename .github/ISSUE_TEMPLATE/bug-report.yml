@@ -1,0 +1,77 @@
+name: Bug report
+description: Something is broken or not behaving as documented.
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A short description of the bug.
+      placeholder: Deploying an app with a Redis dependency fails during recipe resolution.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the repository does this affect?
+      options:
+        - Radius plugin or skills
+        - Radius canvas extension
+        - Core packages (core, adapter-shared, adapter-canvas)
+        - Build, CI, or tooling
+        - Documentation
+        - Not sure
+    validations:
+      required: false
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact steps needed to reproduce the behavior.
+      placeholder: |
+        1. Open ...
+        2. Run ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: false
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include the full error message if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, or stack traces
+      description: |
+        Paste relevant output. Logs are rendered as a code block automatically,
+        so no backticks are needed.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: |
+        The version, commit SHA, or branch you are on, plus any environment
+        details that seem relevant.
+      placeholder: |
+        Version: release tag, branch, or commit SHA
+        OS: name and version
+        Node.js: version
+        Copilot CLI or app: version
+        Cloud provider: Azure or AWS
+    validations:
+      required: false

@@ -42,6 +42,13 @@ const SOURCE_CHANGELOG = join(
   "radius",
   "CHANGELOG.md"
 );
+const SOURCE_PREVIEW = join(
+  REPO_ROOT,
+  "plugins",
+  "radius",
+  "assets",
+  "preview.png"
+);
 const SOURCE_SKILL = join(
   REPO_ROOT,
   "extensions",
@@ -149,11 +156,9 @@ function prepareBuildWorkspace(
     join(workspaceExtensionDir, "skills"),
     { recursive: true }
   );
-  cpSync(
-    join(sourceExtensionDir, "assets"),
-    join(workspaceExtensionDir, "assets"),
-    { recursive: true }
-  );
+  cpSync(join(sourcePlugin, "assets"), join(workspacePlugin, "assets"), {
+    recursive: true
+  });
   if (missingAsset.length > 0) {
     rmSync(join(workspaceExtensionDir, "skills", ...missingAsset), {
       recursive: true
@@ -197,7 +202,7 @@ function assertCurrentArtifact(): void {
     join(REPO_ROOT, "plugins", "radius", "README.md"),
     ...(existsSync(SOURCE_CHANGELOG) ? [SOURCE_CHANGELOG] : []),
     ...filesUnder(join(REPO_ROOT, "extensions", "radius", "skills")),
-    ...filesUnder(join(REPO_ROOT, "extensions", "radius", "assets")),
+    ...filesUnder(join(REPO_ROOT, "plugins", "radius", "assets")),
     ...filesUnder(join(REPO_ROOT, ".github", "extension"))
   ];
   const newestInput = Math.max(
@@ -325,6 +330,7 @@ describe("P0-C built Radius extension artifact", () => {
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
+    expectMatchingFile(SOURCE_PREVIEW, join(DIST, "assets", "preview.png"));
     const radiusTypeResolver = readFileSync(
       join(
         DIST,
@@ -680,6 +686,67 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
+  it("packages fail-closed guidance for developer rad resolution failures", () => {
+    assertCurrentArtifact();
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+    const graphGuidance = readFileSync(
+      join(DIST, "skills", "radius-app-graph", "SKILL.md"),
+      "utf8"
+    );
+
+    expect(skillGuidance).toMatch(
+      /show-radius-type\.mjs` fails while locating, querying, or validating.*stop the modeling run.*promote-app-model\.mjs.*--abort.*report the exact error/su
+    );
+    expect(skillGuidance).toMatch(
+      /missing binary.*invalid or incomplete version JSON.*noncanonical commit.*unsupported development, edge, or pull-request version/su
+    );
+    for (const guidance of [skillGuidance, graphGuidance]) {
+      expect(guidance).toMatch(
+        /never (?:download|install).*(?:rename|back up).*(?:delete|replace) a `rad` binary/isu
+      );
+      expect(guidance).toMatch(
+        /never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`/iu
+      );
+      expect(guidance).toMatch(/never search.*PATH.*\.rad\/bin.*fallback/isu);
+    }
+  });
+
+  it("packages the Bicep checker exit-code contract", () => {
+    assertCurrentArtifact();
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+    const exitTwoRow = skillGuidance
+      .split(/\r?\n/u)
+      .find((line) => line.startsWith("| `2`"));
+
+    expect(skillGuidance).toContain(
+      "Only exit `1` permits a model edit in response to checker output."
+    );
+    expect(exitTwoRow).toContain(
+      'node "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"'
+    );
+    expect(exitTwoRow).toContain(
+      "report the exact checker failure, and state that no application model was written."
+    );
+    expect(exitTwoRow).toContain(
+      "Do not edit the model based on this result, write `app.origin.json`, publish, or claim that the model compiled."
+    );
+    expect(skillGuidance).toContain(
+      "These codes apply only to `validate-bicep.mjs`."
+    );
+    expect(skillGuidance).toContain(
+      "counting reserved validation attempts in that run's `run.json`"
+    );
+    expect(skillGuidance).toContain(
+      "An unavailable check still consumes its reserved attempt."
+    );
+    expect(skillGuidance).toContain(
+      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" <staging-dir>/app.bicep'
+    );
+    expect(skillGuidance).not.toContain(
+      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep'
+    );
+  });
+
   it("packages the schema-sensitivity credential contract, not a property-name rule", () => {
     assertCurrentArtifact();
     const readGuidance = (relativePath: string): string =>
@@ -911,13 +978,36 @@ describe("P0-C built Radius extension artifact", () => {
     // Secret's data key. Layer 1's data-key rule has no mechanical guard, so
     // the guidance must not let "the checker enforces this" read as covering
     // it — that false confidence is the failure mode this stack exists to fix.
+    // The guidance now names two checks, so the caveat has to exclude both.
     const secretsGuidance = readFileSync(
       join(DIST_SKILL, "references", "secrets-handling.md"),
       "utf8"
     );
     expect(secretsGuidance).toContain(
-      "the data-key contract below is not verified by any check"
+      "the data-key contract below is not verified anywhere"
     );
+  });
+
+  it("packages the checker's secure-value remedies", () => {
+    assertCurrentArtifact();
+    const checkerScript = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+
+    // Bicep names the rejected property but never the remedy, and Radius emits
+    // these findings with no severity, so they print as a warning while failing
+    // the build. The remedy has to ship with the checker or the model spends a
+    // repair attempt rediscovering it. The rule IDs are the contract here: what
+    // each remedy says is asserted behaviorally in app-bicep-check.test.ts,
+    // where rewording cannot silently pass.
+    for (const rule of [
+      "use-secure-value-for-secure-inputs",
+      "secure-secrets-in-params",
+      "secure-parameter-default"
+    ]) {
+      expect(checkerScript).toContain(rule);
+    }
   });
 
   it("packages each page module exactly once", () => {
@@ -931,6 +1021,7 @@ describe("P0-C built Radius extension artifact", () => {
     );
     const pageModules = [
       "pages/browser-state-ids.ts",
+      "pages/page-state.ts",
       "pages/encoding.ts",
       "pages/shell-styles.ts",
       "pages/shell.ts",

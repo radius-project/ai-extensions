@@ -50,6 +50,16 @@ export class FakeEventTarget implements DomEventTarget {
     this.listeners.get(type)?.delete(listener);
   }
 
+  dispatchEvent(
+    event: Partial<DomEvent> & { readonly type?: unknown }
+  ): boolean {
+    if (typeof event.type !== "string") {
+      throw new Error("Fake events require a string type.");
+    }
+    this.dispatch(event.type, event);
+    return true;
+  }
+
   dispatch(type: string, event: Partial<DomEvent> = {}): void {
     for (const listener of this.listeners.get(type) ?? []) {
       listener(fakeEvent(event));
@@ -195,20 +205,6 @@ export class FakeElement extends FakeEventTarget implements DomElement {
     this.removed = true;
     const parent = this.parentNode;
     if (parent instanceof FakeElement) parent.removeChild(this);
-  }
-
-  dispatchEvent(event: unknown): boolean {
-    const type =
-      (
-        typeof event === "object" &&
-        event !== null &&
-        "type" in event &&
-        typeof event.type === "string"
-      ) ?
-        event.type
-      : "";
-    this.dispatch(type);
-    return true;
   }
 
   get appended(): readonly FakeElement[] {

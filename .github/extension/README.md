@@ -12,6 +12,8 @@ Every plugin build copies this complete tree into `.artifacts/<plugin>/workflows
 
 The released extension fetches remote templates at its baked source commit and fills every first-party `{{RADIUS_REF}}` action reference with that same commit. GitHub therefore resolves `.github/extension/actions/` from the immutable source commit, not from the moving edge/latest branch or its orphan commit. Keep the placeholder in source templates; never replace it with `main`, `edge`, `latest`, or another mutable ref. Third-party actions use full commit SHAs directly.
 
+Merging a shared-action fix does not update workflows that are already generated and pinned. After installing a release that contains the fix, regenerate and recommit `run-rad-commands-azure.yml`, `run-rad-commands-aws.yml`, `delete-azure.yml`, `delete-aws.yml`, and `delete-environment-azure.yml`, then verify their first-party action references point to the new source commit. Rerunning an unchanged workflow still uses its old action revision.
+
 ## Credential-verification workflows
 
 Radius uses these workflows to confirm that a GitHub Environment is wired up correctly before any application is deployed. The environment-setup flow generates the provider-specific file, commits it to the target repo under `.github/workflows/`, and triggers it.
@@ -52,7 +54,7 @@ The check lives in the shared [`verify-ghcr-push`](actions/verify-ghcr-push/acti
 
 ### Trigger and permissions
 
-- **Trigger:** `workflow_dispatch` with a single `environment` input (the GitHub Environment name). The job binds to that environment via `environment: ${{ inputs.environment }}`.
+- **Triggers:** `workflow_dispatch` with an `environment` input (the GitHub Environment name), plus a constrained `push` trigger for changes to `.github/workflows/radius-verify-credentials.yml` on `radius/setup-**` branches during first-time protected-branch setup. The job binds to the selected environment via `environment: ${{ inputs.environment || '{{ENV}}' }}`.
 - **Permissions:** `id-token: write` (required for OIDC), `contents: read`, and `packages: write` (so the GHCR package push check tests the same token capability the deploy uses).
 
 ### Required environment variables
@@ -78,7 +80,7 @@ The run-rad-commands workflow Radius uses to run one or more `rad` CLI commands 
 
 To keep the two provider paths from duplicating the ~80% of steps they share, it ships as a unified dispatcher, two thin provider workflows, and shared composite actions:
 
-- **`run-rad-commands.yml`** — the unified **dispatcher** and the only file that is dispatched. It owns the dispatch contract (`workflow_dispatch` inputs and the `Radius - Verify Credentials` auto-trigger). A `detect` job binds the GitHub Environment, reads which provider variable is set (`AZURE_CLIENT_ID` / `AWS_ROLE_ARN`), and calls the matching provider workflow via `workflow_call` with `secrets: inherit`.
+- **`run-rad-commands.yml`** — the unified **dispatcher** and the only file that is dispatched. It owns the `workflow_dispatch` contract. A `detect` job binds the GitHub Environment, reads which provider variable is set (`AZURE_CLIENT_ID` / `AWS_ROLE_ARN`), and calls the matching provider workflow via `workflow_call` with `secrets: inherit`.
 - **`run-rad-commands-azure.yml`** — a reusable (`workflow_call`) workflow with only the Azure-specific steps: Azure OIDC login, AKS connection (`az aks get-credentials`), workload-identity credential registration, and the `azure-avm` recipe pack (Azure Verified Modules) downloaded from the immutable `resource-types-contrib` commit recorded in `deploy/manifest/defaults.yaml`. Its Kubernetes recipe sources are rewritten from upstream's floating aliases to the corresponding validated namespace commits before deployment.
 - **`run-rad-commands-aws.yml`** — a reusable (`workflow_call`) workflow with only the AWS-specific steps: AWS OIDC login, EKS connection (access entry + static token kubeconfig), IRSA credential registration, and the `aws-terraform` recipe pack. Every Terraform source uses its resource-type namespace's immutable catalog commit; the container image build recipe defaults to the Compute namespace commit.
 - **`actions/*`** — composite actions holding the provider-agnostic phases both provider workflows share: [`setup-control-plane`](actions/setup-control-plane/action.yml), [`load-contrib-catalog`](actions/load-contrib-catalog/action.yml), [`restore-state`](actions/restore-state/action.yml), [`apply-custom-recipe-packs`](actions/apply-custom-recipe-packs/action.yml), [`manage-routes-gateway`](actions/manage-routes-gateway/action.yml), [`run-rad-commands`](actions/run-rad-commands/action.yml), [`publish-deploy-status`](actions/publish-deploy-status/action.yml), [`delete-resource`](actions/delete-resource/action.yml), [`discard-deploy-status`](actions/discard-deploy-status/action.yml), and [`teardown`](actions/teardown/action.yml). The provider workflows reference them from `radius-project/ai-extensions` at a pinned ref (the `{{RADIUS_REF}}` placeholder the generator fills in), so the shared logic has a single reviewed home and is not copied into user repos. Third-party actions in these workflows are pinned to full commit SHAs (with a `# vX` comment); only the first-party Radius composite actions are referenced by ref.
@@ -103,7 +105,7 @@ The dispatcher routes to the matching provider workflow, which runs on `ubuntu-2
 2. **Build the target-cluster kubeconfig.** When an external workload cluster is configured, sets `RADIUS_TARGET_KUBECONFIG` to a workspace-local file and connects to the cluster: Azure runs `az aks get-credentials --file`; AWS ensures an EKS access entry and cluster-admin access policy for the IAM role and writes a static, token-based kubeconfig. Without an external cluster the variable is empty and lifecycle operations target the ephemeral control-plane cluster.
 3. **Create the ephemeral control plane.** Installs k3d and creates the `radius-cp` cluster, then installs `oras`, the `rad` CLI (edge), and Terraform.
 4. **Create the target-kubeconfig secret.** Stores the target kubeconfig as the `target-kubeconfig` secret in `radius-system` (skipped when no target kubeconfig is present).
-5. **Install Radius on the control plane.** Runs `rad install kubernetes` with `database.enabled=true` (control-plane PostgreSQL for durable state), `rp.publicEndpointOverride=localhost`, `dynamicrp.buildkit.enabled=true`, and — when a target kubeconfig is present — `global.targetCluster.enabled=true`. The chart mounts the secret into `applications-rp`, `dynamic-rp`, and `bicep-de` and sets `RADIUS_TARGET_KUBECONFIG`, so recipe execution and directly-rendered resources land on the external cluster. The Terraform state backend deliberately stays on the control-plane cluster.
+5. **Install Radius on the control plane.** Runs `rad install kubernetes` with `database.enabled=true` (control-plane PostgreSQL for durable state), `database.resources.requests.cpu=500m`, `rp.publicEndpointOverride=localhost`, `dynamicrp.buildkit.enabled=true`, and, when a target kubeconfig is present, `global.targetCluster.enabled=true`. The database override lets the control plane schedule on a standard private-repository runner's 2-CPU budget. It leaves PostgreSQL's CPU limit, memory, persistent storage, and BuildKit settings unchanged. The chart mounts the secret into `applications-rp`, `dynamic-rp`, and `bicep-de` and sets `RADIUS_TARGET_KUBECONFIG`, so recipe execution and directly rendered resources land on the external cluster. The Terraform state backend deliberately stays on the control-plane cluster.
 6. **Project cloud OIDC tokens.** Mints a GitHub OIDC token for the provider and patches it into the RP/DE pods at the fixed path each reads for the federated token exchange (AWS IRSA `/var/run/secrets/eks.amazonaws.com/serviceaccount/token`; Azure workload identity `/var/run/secrets/azure/tokens/azure-identity-token`). A GitHub OIDC token expires after 5 minutes, so a single projected assertion cannot cover a longer run. Before Azure `rad` commands or deletes, the shared actions re-mint the assertion, update the Secret, and restart its three consumers so their initial mounts are current. While the operation runs, they update the Secret every two minutes; kubelet propagates those updates to the non-`subPath` volume mounts.
 7. **Refresh external target credentials.** AWS re-mints the short-lived EKS token; both providers rewrite the `target-kubeconfig` secret and restart `applications-rp`, `dynamic-rp`, and `bicep-de` so they re-read it.
 8. **Configure the workspace.** Runs `rad workspace create kubernetes default` and `rad group create` / `rad group switch default`.
@@ -128,8 +130,14 @@ The dispatcher routes to the matching provider workflow, which runs on `ubuntu-2
     The fixed-name terminal payload uses one sequence greater than the last successful live upload, or sequence 1 when no live upload succeeded. Consumers therefore select the numerically greatest valid sequence without relying on artifact list order or slot number, and the terminal artifact wins naturally after deployment ends.
 
     Workflow artifacts are the transport because the REST API can read them **while the run is still in progress** (`GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts`), which is what lets the canvas show deployment state as it happens; `GET /repos/{owner}/{repo}/actions/artifacts?name=<name>` finds the newest one later without knowing the run. They also require no extra registry, no `packages: write` permission, and no name derivation duplicated between this action and the canvas reader.
-16. **Persist state (`rad shutdown`).** Backs the control-plane databases and Terraform recipe-state Secrets up to the state archive — the OCI-backed archive by default (pushed to GHCR, selected by the `RADIUS_STATE_*` variables), or the `radius-state` git orphan branch when `RADIUS_STATE_BACKEND=git`. This runs even when the deploy fails (`if: always()`), so a partially-applied Terraform run is not lost.
+16. **Persist state (`rad shutdown`).** Backs the control-plane databases and Terraform recipe-state Secrets up to the OCI-backed state archive, pushed to GHCR and selected by the `RADIUS_STATE_*` variables. This runs even when the deploy fails (`if: always()`), so a partially-applied Terraform run is not lost.
 17. **Tear down.** Runs `rad app list`, and always deletes the ephemeral `radius-cp` cluster. On failure, Radius and application logs are collected and uploaded as the `radius-logs` artifact (three-day retention).
+
+### Runner resource budget
+
+With the `500m` database request, the verified single-node baseline reserves `1200m` in steady state. Including the readiness hook and encryption-rotation job gives a conservative `1310m`, leaving `690m` against a nominal `2000m` allocatable CPU budget. This is scheduling headroom for the control plane, not an application capacity or performance guarantee.
+
+When no external AKS or EKS target is configured, application pods share the k3d node with the control plane. Their requests and rollout overlap must fit the remaining node resources. With an external target, application pods use that cluster, but local BuildKit, recipe execution, state backup, and state restore still consume runner CPU, memory, and storage.
 
 ### Triggers and permissions
 
@@ -140,8 +148,7 @@ The Azure and AWS deploy/delete provider workflows share one repository-wide rou
 GitHub Actions concurrency groups cannot coordinate runs in different repositories. Exactly one repository should own the managed lifecycle for a target cluster; repositories that share its Gateway must configure `RADIUS_ROUTES_GATEWAY_NAME=radius` and `RADIUS_ROUTES_GATEWAY_NAMESPACE=radius-system` as validation-only BYO infrastructure.
 
 - **Triggers:**
-  - `workflow_dispatch` with an `environment` input (the GitHub Environment name) plus optional `image` and `rad_commands` inputs. The `detect` job binds that environment via `environment: ${{ inputs.environment }}` to read the provider variables.
-  - `workflow_run` after the `Radius - Verify Credentials` workflow completes. The `detect` job runs only when the upstream verify run concluded `success`, so a successful credential check auto-triggers a deploy.
+  - `workflow_dispatch` with an `environment` input (the GitHub Environment name) plus optional `image` and `rad_commands` inputs. The `detect` job binds that environment via `environment: ${{ inputs.environment || '{{ENV}}' }}` to read the provider variables, falling back to the environment embedded when Radius generated the workflow.
 - **Inputs:**
 
   | Input          | Required | Description                                                                                                                                                                                                                                                                                                                                                                         |
@@ -151,7 +158,7 @@ GitHub Actions concurrency groups cannot coordinate runs in different repositori
   | `rad_commands` | No       | A single `rad` command string, or a JSON array of command strings run in order (the `rad` prefix omitted, e.g. `["deploy .radius/app.bicep --environment dev", "app graph my-app -o json"]`). Each command is validated against the allowed-command set. Falls back to the `RADIUS_RAD_COMMANDS` variable. When empty, the workflow runs its default `rad deploy` of the app bicep. |
 
 - **Outputs:** a combined `rad-commands-result` artifact — a JSON document with a top-level `outcome`/`exitCode` and a `commands` array (one entry per command, in input order, with each command's exit code and output).
-- **Permissions:** `id-token: write` (required for OIDC), `contents: write` (so `rad shutdown` can push the `radius-state` branch when the git state backend is selected), and `packages: write` (to push the OCI-backed state archive to GHCR and the application image built by the containerImages recipe).
+- **Permissions:** `id-token: write` (required for OIDC), `contents: write` (granted to the generated workflows; no step currently pushes to the repository, so this is broader than the workflow requires), and `packages: write` (to push the OCI-backed state archive to GHCR and the application image built by the containerImages recipe).
 
 ### Required environment variables
 
@@ -172,11 +179,11 @@ This workflow also reads GitHub Actions **secrets** for image push and applicati
 
 ### State persistence (`rad startup` / `rad shutdown`)
 
-`rad startup` and `rad shutdown` are kind-agnostic CLI commands that restore and back up all durable Radius state (control-plane PostgreSQL + Terraform recipe-state Secrets). These workflows use the OCI-backed state archive by default — the `RADIUS_STATE_*` variables select an OCI repository and the workflow logs in to GHCR before `rad startup`/`rad shutdown` — and fall back to the `radius-state` git orphan branch only when `RADIUS_STATE_BACKEND=git`. They do not manage cluster lifecycle — the workflow owns creating and destroying the ephemeral control plane around them. `rad startup` runs after the install (so `rad deploy` plans against prior state) and `rad shutdown` runs after the commands with `if: always()` (so state survives a failed deploy).
+`rad startup` and `rad shutdown` are kind-agnostic CLI commands that restore and back up all durable Radius state (control-plane PostgreSQL + Terraform recipe-state Secrets). These workflows use the OCI-backed state archive — the `RADIUS_STATE_*` variables select an OCI repository and the workflow logs in to GHCR before `rad startup`/`rad shutdown`. They do not manage cluster lifecycle — the workflow owns creating and destroying the ephemeral control plane around them. `rad startup` runs after the install (so `rad deploy` plans against prior state) and `rad shutdown` runs after the commands with `if: always()` (so state survives a failed deploy).
 
 ### Prerequisites
 
-- OIDC trust for the environment (federated credential on Azure, IAM role trust policy on AWS). Run the verify workflow first to confirm the environment is wired up correctly — a successful verify run also auto-triggers this workflow.
+- OIDC trust for the environment (federated credential on Azure, IAM role trust policy on AWS). Run the verify workflow first to confirm the environment is wired up correctly, then dispatch this workflow explicitly to deploy.
 - The target cluster (`AWS_EKS_CLUSTER_NAME` / `AZURE_AKS_CLUSTER_NAME`) must already exist and be reachable; the assumed identity needs cluster-admin-level access to it.
 - The application must define its app bicep file in the target repo.
 

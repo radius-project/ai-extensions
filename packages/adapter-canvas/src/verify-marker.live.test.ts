@@ -36,13 +36,18 @@ describe.skipIf(!LIVE)(
         const workflow = await generateVerifyWorkflow(
           "prod",
           provider,
-          LIVE_REF
+          LIVE_REF,
+          { setupPushOperationMarker: "op_live_contract" }
         );
 
         // The exact predicate `planCredentialVerification` calls, so this
         // asserts the contract those two modules actually share rather than
         // the substrings that happen to implement it today.
         expect(hasVerificationOperationMarker(workflow)).toBe(true);
+        expect(workflow).toContain("  push:");
+        expect(workflow).toContain(
+          "${{ inputs.radius_operation || 'op_live_contract' }}"
+        );
       },
       30_000
     );

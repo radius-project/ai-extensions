@@ -10,7 +10,8 @@ import {
   ENVIRONMENT_PAGE_STATE_ID
 } from "./browser-state-ids.js";
 import { pageShell } from "./shell.js";
-import { inlineJson, safeExternalHref } from "./encoding.js";
+import { safeExternalHref } from "./encoding.js";
+import { renderPageState } from "./page-state.js";
 import { environmentsPaneMarkup } from "./environment/environments-pane.js";
 import { credentialsPaneMarkup } from "./environment/credentials-pane.js";
 import { confirmDialogMarkup } from "./environment/confirm-dialog.js";
@@ -54,9 +55,9 @@ ${
 }
 <button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--rad-neutral-bg); color:var(--rad-neutral-text); border:1px solid var(--rad-neutral-border); border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
 <div id="deploy-reset-status" class="status error" role="alert" style="display:none; margin-top:12px;"></div>
-<div hidden id="${DEPLOY_RESULT_STATE_ID}">${escapeHtml(
-        inlineJson({ attemptId: state?.deployAttempt?.id || "" })
-      )}</div>
+${renderPageState(DEPLOY_RESULT_STATE_ID, {
+  attemptId: state?.deployAttempt?.id || ""
+})}
 ${browserScriptTag("deploy-result-page")}`
     );
   }
@@ -166,7 +167,8 @@ ${confirmDialogMarkup()}
 .env-action-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-primary); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
 .env-action-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); line-height:1.5; }
 .env-action-banner__text strong { font-weight:600; }
-.env-action-banner__text a { color:var(--rad-primary); }
+.env-action-banner__text a { color:var(--rad-link); text-decoration:underline; }
+.env-action-banner__text a:hover { color:var(--rad-link-hover); }
 .env-action-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-action-banner__close:hover { color:var(--rad-text); }
 /* Progress panel — inline, non-blocking, and deliberately not a progress bar. */
@@ -321,18 +323,16 @@ ${confirmDialogMarkup()}
 }
 </style>
 
-<div hidden id="${ENVIRONMENT_PAGE_STATE_ID}">${escapeHtml(
-      inlineJson({
-        repo: ctxRepo,
-        branch: ctxBranch,
-        activeSubtab,
-        ghCommandPresentation: state.ghCommandPresentation,
-        mutationNonce:
-          typeof state.browserMutationNonce === "string" ?
-            state.browserMutationNonce
-          : ""
-      })
-    )}</div>
+${renderPageState(ENVIRONMENT_PAGE_STATE_ID, {
+  repo: ctxRepo,
+  branch: ctxBranch,
+  activeSubtab,
+  ghCommandPresentation: state.ghCommandPresentation,
+  mutationNonce:
+    typeof state.browserMutationNonce === "string" ?
+      state.browserMutationNonce
+    : ""
+})}
 ${browserScriptTag("environment-page")}`
   );
 }

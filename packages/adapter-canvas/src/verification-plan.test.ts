@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  automaticBranchVerificationPolicy,
+  automaticBranchVerificationPolicyMessage,
   buildVerifyWorkflowDispatchArgs,
   describeMergeRequiredTerminal,
   describePullRequestNextStep,
@@ -7,7 +9,8 @@ import {
   hasWorkflowRunTrigger,
   parseVerifyWorkflowRunUrl,
   planCredentialVerification,
-  type PullRequestNextStep
+  type PullRequestNextStep,
+  type WorkflowFileReadResult
 } from "./verification-plan.js";
 
 const dispatcher = (env: string, chain = true) => `name: Radius
@@ -35,6 +38,163 @@ describe("workflow parsing", () => {
       )
     ).toBe(false);
   });
+
+  describe("automatic setup-branch verification safety", () => {
+    const absent = {
+      content: null,
+      error: "HTTP 404: Not Found",
+      status: 404
+    };
+    const present = (content: string) => ({
+      content,
+      error: null,
+      status: 200
+    });
+    const input = (
+      verify: WorkflowFileReadResult,
+      dispatcherResult: WorkflowFileReadResult,
+      legacyDeploy: WorkflowFileReadResult = absent
+    ) => ({ verify, dispatcher: dispatcherResult, legacyDeploy });
+
+    it.each([
+      ["an absent dispatcher", absent],
+      ["a chain-free dispatcher", present(dispatcher("dev", false))]
+    ])("enables first-time verification with %s", (_name, safeDispatcher) => {
+      expect(
+        automaticBranchVerificationPolicy(input(absent, safeDispatcher))
+      ).toEqual({ state: "enabled" });
+    });
+
+    it("fails closed for a legacy chained dispatcher", () => {
+      expect(
+        automaticBranchVerificationPolicy(
+          input(absent, present(dispatcher("dev")))
+        )
+      ).toEqual({ state: "disabled", reason: "dispatcher-legacy-chain" });
+    });
+
+    it.each([
+      [
+        "a generic missing result",
+        { content: null, error: null, status: null }
+      ],
+      [
+        "an unreadable result",
+        { content: null, error: "connection reset", status: null }
+      ],
+      [
+        "malformed workflow YAML",
+        { content: "on: [", error: null, status: 200 }
+      ],
+      [
+        "a workflow without a trigger mapping",
+        { content: "name: legacy", error: null, status: 200 }
+      ]
+    ])("does not treat %s as absence", (_name, dispatcherResult) => {
+      expect(
+        automaticBranchVerificationPolicy(input(absent, dispatcherResult))
+      ).toEqual({ state: "disabled", reason: "dispatcher-unreadable" });
+    });
+
+    it("preserves branch dispatch when the default verify workflow exists", () => {
+      expect(
+        automaticBranchVerificationPolicy(
+          input(present("on: workflow_dispatch"), absent)
+        )
+      ).toEqual({ state: "disabled", reason: "verify-present" });
+    });
+
+    it("does not enable automatic verification when verify absence is unreadable", () => {
+      expect(
+        automaticBranchVerificationPolicy(
+          input({ content: null, error: "timed out", status: null }, absent)
+        )
+      ).toEqual({ state: "disabled", reason: "verify-unreadable" });
+    });
+
+    it.each([
+      [
+        "is present",
+        present("on:\n  workflow_run:\n"),
+        "legacy-deploy-present"
+      ],
+      [
+        "cannot be read",
+        { content: null, error: "forbidden", status: 403 },
+        "legacy-deploy-unreadable"
+      ]
+    ])(
+      "fails closed when the legacy deploy workflow %s",
+      (_name, legacy, reason) => {
+        expect(
+          automaticBranchVerificationPolicy(input(absent, absent, legacy))
+        ).toEqual({ state: "disabled", reason });
+      }
+    );
+
+    it.each([
+      [
+        "the verify workflow is also unreadable",
+        { content: null, error: "timed out", status: null },
+        absent
+      ],
+      [
+        "the dispatcher is also unreadable",
+        absent,
+        { content: null, error: "forbidden", status: 403 }
+      ]
+    ])(
+      "prioritizes legacy workflow cleanup when %s",
+      (_name, verify, dispatcherResult) => {
+        expect(
+          automaticBranchVerificationPolicy(
+            input(verify, dispatcherResult, present("on:\n  workflow_run:\n"))
+          )
+        ).toEqual({ state: "disabled", reason: "legacy-deploy-present" });
+      }
+    );
+
+    it.each([
+      ["enabled", { state: "enabled" } as const, ""],
+      [
+        "an existing verify workflow",
+        { state: "disabled", reason: "verify-present" } as const,
+        ""
+      ],
+      [
+        "an unreadable verify workflow",
+        { state: "disabled", reason: "verify-unreadable" } as const,
+        "could not safely read"
+      ],
+      [
+        "a chained dispatcher",
+        { state: "disabled", reason: "dispatcher-legacy-chain" } as const,
+        "can still auto-run"
+      ],
+      [
+        "an unreadable dispatcher",
+        { state: "disabled", reason: "dispatcher-unreadable" } as const,
+        "could not safely inspect"
+      ],
+      [
+        "a legacy deploy workflow",
+        { state: "disabled", reason: "legacy-deploy-present" } as const,
+        "legacy deploy workflow"
+      ],
+      [
+        "an unreadable legacy deploy workflow",
+        { state: "disabled", reason: "legacy-deploy-unreadable" } as const,
+        "could not safely confirm"
+      ]
+    ])(
+      "describes %s without exposing internal reason codes",
+      (_name, policy, text) => {
+        expect(automaticBranchVerificationPolicyMessage(policy)).toContain(
+          text
+        );
+      }
+    );
+  });
 });
 
 describe("credential verification planning", () => {
@@ -51,6 +211,7 @@ describe("credential verification planning", () => {
         "on:\n  workflow_dispatch:\n    inputs:\n      radius_operation:\n        required: false\nrun-name: ${{ inputs.radius_operation }}\n"
     });
     expect(plan.shouldDispatch).toBe(true);
+    expect(plan.trigger).toBe("workflow_dispatch");
     expect(plan.ref).toBe("main");
     expect(plan.defaultBranch).toBe("main");
     expect(plan.supportsOperationMarker).toBe(true);
@@ -89,6 +250,24 @@ describe("credential verification planning", () => {
         : null
     });
     expect(plan.supportsOperationMarker).toBe(true);
+  });
+
+  it("discovers rather than dispatching when the setup push was enabled", async () => {
+    const plan = await planCredentialVerification({
+      ...base,
+      prState: { branch: "radius/setup-dev", base: "main" },
+      automaticPushEnabled: true,
+      fetchFile: async () => {
+        throw new Error("automatic verification must not re-plan from files");
+      }
+    });
+
+    expect(plan).toMatchObject({
+      shouldDispatch: false,
+      trigger: "push",
+      ref: "radius/setup-dev",
+      pullRequestUrl: ""
+    });
   });
 
   it("defers when the default branch still chains verification to deployment", async () => {
@@ -138,6 +317,24 @@ describe("credential verification planning", () => {
     });
     expect(safe.shouldDispatch).toBe(true);
     expect(safe.supportsOperationMarker).toBe(false);
+  });
+
+  it("blocks branch dispatch when status-aware workflow safety failed", async () => {
+    const plan = await planCredentialVerification({
+      ...base,
+      prState: { branch: "radius/setup-dev", base: "main" },
+      pullRequestUrl: "https://github.com/octo/app/pull/7",
+      branchVerificationAllowed: false,
+      fetchFile: async () =>
+        "on:\n  workflow_dispatch:\n    inputs:\n      radius_operation:\n"
+    });
+
+    expect(plan).toMatchObject({
+      shouldDispatch: false,
+      trigger: "none",
+      pullRequestUrl: "https://github.com/octo/app/pull/7"
+    });
+    expect(plan.skipReason).toContain("safety could not be established");
   });
 });
 
@@ -216,7 +413,7 @@ describe("pull request next step", () => {
     );
   });
 
-  it("tells the customer merging is what starts verification when it waits", () => {
+  it("tells the customer to retry verification after merging", () => {
     expect(
       describePullRequestNextStep({
         outcome: "awaiting-merge",
@@ -224,8 +421,7 @@ describe("pull request next step", () => {
         ref: "radius/setup-dev-workflows-abc"
       })
     ).toBe(
-      "Merge the pull request above to finish setup; credential verification " +
-        'and deploys run once it lands on "main".'
+      'Merge the pull request above to put the workflows on "main", then retry credential verification.'
     );
   });
 
@@ -260,15 +456,13 @@ describe("pull request next step", () => {
     expect(message).not.toContain("run once it lands");
   });
 
-  // Only one of the four outcomes may promise that merging starts
-  // verification, because it is the only one where that is true.
-  it("promises verification follows the merge in exactly one outcome", () => {
+  it("never promises that merging starts verification", () => {
     const promising = ALL_OUTCOMES.filter((outcome) =>
       /run once it lands/.test(
         describePullRequestNextStep({ outcome, baseBranch: "main", ref: "x" })
       )
     );
-    expect(promising).toEqual(["awaiting-merge"]);
+    expect(promising).toEqual([]);
   });
 
   // The two claims are opposites, so no single message may make both.
@@ -329,7 +523,7 @@ describe("merge-required terminal message", () => {
         hasPullRequest: true
       })
     ).toBe(
-      "Merge the pull request to finish setup; credential verification and deploys run once it lands."
+      "Merge the pull request, then retry credential verification to finish setup."
     );
   });
 

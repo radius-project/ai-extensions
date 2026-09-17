@@ -8,6 +8,7 @@
 // step stays disabled until the typed token matches exactly.
 
 import { buildElement } from "./dom.js";
+import { readString } from "./json.js";
 import type { ElementSpec } from "./dom.js";
 import type {
   BrowserContext,
@@ -24,6 +25,10 @@ export const DELETE_DIALOG_IDS = {
   environment: "deploy-delete-env",
   close: "deploy-delete-close"
 } as const;
+
+// A destructive dialog is only useful if the confirmation control stays on
+// screen with it, so a long deployment is summarised rather than listed whole.
+export const DELETE_DIALOG_RESOURCE_LIMIT = 8;
 
 export const DELETE_DIALOG_STEP1_BUTTON_ID = "del-step1-btn";
 export const DELETE_DIALOG_STEP2_BUTTON_ID = "del-step2-btn";
@@ -43,14 +48,24 @@ export interface DeleteDialogOptions {
 }
 
 export interface DeleteDialogHandle {
-  open(app: string, environment: string): void;
+  open(app: string, environment: string, resources?: readonly unknown[]): void;
   close(): void;
   teardown(): void;
+}
+
+// What the dialog needs from one entry of the server's deletion inventory,
+// which reports resources that were last observed to exist rather than the ones
+// the application merely models. The list arrives as `unknown[]` because it
+// crosses the HTTP boundary unvalidated, so every field is re-read defensively.
+export interface DeleteTargetResource {
+  readonly name: string;
+  readonly type: string;
 }
 
 export interface DeleteTarget {
   readonly app: string;
   readonly environment: string;
+  readonly resources?: readonly unknown[];
 }
 
 interface Registration {
@@ -103,6 +118,75 @@ export function deleteDialogIntentSpecs(
       className: "rad-ddlg__btn",
       attrs: { type: "button" },
       text: "I want to delete this deployment"
+    }
+  ];
+}
+
+// An entry the user cannot read is worse than no entry: a nameless resource
+// would render as an empty bullet, so it is dropped rather than shown. Order and
+// duplicates are preserved because they are what the deployment actually holds.
+// `displayType` wins over `type` to match how the graph labels the same
+// resources, so the two views never disagree about what a resource is called.
+function deleteDialogResourceSummary(
+  resources: readonly unknown[] | undefined
+): readonly DeleteTargetResource[] {
+  const summary: DeleteTargetResource[] = [];
+  for (const entry of resources ?? []) {
+    const name = readString(entry, "name").trim();
+    if (name === "") continue;
+    summary.push({
+      name,
+      type:
+        readString(entry, "displayType").trim() ||
+        readString(entry, "type").trim()
+    });
+  }
+  return summary;
+}
+
+function deleteDialogResourceSpecs(
+  resources: readonly unknown[] | undefined
+): readonly ElementSpec[] {
+  const summary = deleteDialogResourceSummary(resources);
+  if (summary.length === 0) return [];
+  const shown = summary.slice(0, DELETE_DIALOG_RESOURCE_LIMIT);
+  const hidden = summary.length - shown.length;
+  const items: ElementSpec[] = shown.map((resource) => ({
+    tag: "li",
+    className: "rad-ddlg__resource",
+    children:
+      resource.type === "" ?
+        [{ tag: "strong", text: resource.name }]
+      : [
+          { tag: "strong", text: resource.name },
+          {
+            tag: "span",
+            className: "rad-ddlg__resource-type",
+            text: resource.type
+          }
+        ]
+  }));
+  if (hidden > 0) {
+    items.push({
+      tag: "li",
+      className: "rad-ddlg__resource-more",
+      text: `+${hidden} more`
+    });
+  }
+  return [
+    {
+      tag: "p",
+      className: "rad-ddlg__resource-caption",
+      text:
+        summary.length === 1 ?
+          "1 resource last reported for this deployment:"
+        : `${summary.length} resources last reported for this deployment:`
+    },
+    {
+      tag: "ul",
+      className: "rad-ddlg__resources",
+      attrs: { tabindex: "0", "aria-label": "Resources to be deleted" },
+      children: items
     }
   ];
 }
@@ -183,6 +267,7 @@ export function deleteDialogEffectsSpecs(
         }
       ]
     },
+    ...deleteDialogResourceSpecs(target.resources),
     {
       tag: "button",
       id: DELETE_DIALOG_STEP2_BUTTON_ID,
@@ -326,10 +411,13 @@ export function createDeleteDeploymentDialog(
 
   const showEffects = (target: DeleteTarget): void => {
     const nodes = renderStep(deleteDialogEffectsSpecs(target, variant));
-    bind(stepBindings, nodes[2], "click", () => {
+    // The continue control is always last: the resource list rendered above it
+    // is variable-length, so a fixed index would bind the wrong node.
+    const next = nodes[nodes.length - 1];
+    bind(stepBindings, next, "click", () => {
       showConfirm(target);
     });
-    focusFirstControl();
+    context.focus.focus(next);
   };
 
   const showConfirm = (target: DeleteTarget): void => {
@@ -355,14 +443,18 @@ export function createDeleteDeploymentDialog(
     input.focus();
   };
 
-  const open = (app: string, environment: string): void => {
+  const open = (
+    app: string,
+    environment: string,
+    resources?: readonly unknown[]
+  ): void => {
     returnFocusTo = context.focus.active();
     if (appEl) appEl.textContent = app;
     if (envEl) envEl.textContent = environment;
     // The modal has to be visible before the first step renders: a control
     // inside a hidden subtree cannot take focus.
     modal.style.display = "flex";
-    showIntent({ app, environment });
+    showIntent({ app, environment, resources });
   };
 
   if (closeEl) bind(owned, closeEl, "click", close);

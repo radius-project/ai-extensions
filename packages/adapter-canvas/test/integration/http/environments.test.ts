@@ -592,6 +592,11 @@ describe("the async delete route through its background runner", () => {
     let runnerFinished = deferred();
     const azCommands: string[][] = [];
     let packageFailure = false;
+    const reportedPackageFailures: Array<{
+      repo: string;
+      environment: string;
+      message: string;
+    }> = [];
     const operations: Parameters<
       NonNullable<EnvironmentsDependencies["scheduleEnvironmentOperation"]>
     >[1][] = [];
@@ -629,6 +634,9 @@ describe("the async delete route through its background runner", () => {
               );
             }
             return "deleted";
+          },
+          reportStatePackageDeletionFailure: async (failure) => {
+            reportedPackageFailures.push(failure);
           },
           withCredentialProvenanceLock: (work) => work(),
           runAz: async (args) => {
@@ -784,6 +792,13 @@ describe("the async delete route through its background runner", () => {
         })
       ])
     });
+    expect(reportedPackageFailures).toEqual([
+      {
+        repo: REPO,
+        environment: "dev",
+        message: expect.stringContaining("delete:packages")
+      }
+    ]);
     expect(names((await harness.list()).body)).toEqual([]);
   });
 
@@ -828,6 +843,7 @@ describe("the async delete route through its background runner", () => {
         void runEnvironmentDeletion(op as never, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
           deleteStatePackage: async () => "deleted",
+          reportStatePackageDeletionFailure: async () => {},
           withCredentialProvenanceLock: (work) => work(),
           runAz: async (args) => {
             const credential = {

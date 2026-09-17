@@ -15,6 +15,7 @@
 // must be mirrored in `rad-process.d.mts` by hand.
 
 import { spawn } from "node:child_process";
+import { win32 as pathWin32 } from "node:path";
 
 export function managedBicepEnv(env = {}, bicepPath) {
   return { ...env, BICEP: bicepPath };
@@ -34,28 +35,64 @@ export class RadProcessError extends Error {
   }
 }
 
+export function windowsTaskkillPath(env = process.env) {
+  const systemRoot = env.SystemRoot || env.WINDIR;
+  return systemRoot ?
+      pathWin32.join(systemRoot, "System32", "taskkill.exe")
+    : "taskkill";
+}
+
 // Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
-// the whole process tree; on POSIX, rad is a process-group leader (spawned
-// detached), so signalling the group (-pid) stops rad and its children together.
-// Best-effort — any failure is swallowed.
-export function killChildTree(child) {
+// the whole process tree while leaving rad in the caller's Job Object; on POSIX,
+// rad is a process-group leader (spawned detached), so signalling the group
+// (-pid) stops rad and its children together. Best-effort — any failure is
+// swallowed.
+export function killChildTree(child, platform = process.platform) {
   if (!child || child.pid == null) return;
-  try {
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-        stdio: "ignore",
-        windowsHide: true
-      });
-    } else {
-      process.kill(-child.pid, "SIGKILL");
-    }
-  } catch {
+  const killChild = () => {
     try {
       child.kill("SIGKILL");
     } catch {
       // Best-effort cleanup.
     }
+  };
+  try {
+    if (platform === "win32") {
+      const taskkill = spawn(
+        windowsTaskkillPath(),
+        ["/pid", String(child.pid), "/t", "/f"],
+        {
+          stdio: "ignore",
+          windowsHide: true
+        }
+      );
+      taskkill.once("error", killChild);
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    killChild();
   }
+}
+
+/**
+ * Keep Windows rad processes attached to the caller's Job Object so cancellation
+ * reaches their full process tree. POSIX still uses a detached process group,
+ * which killChildTree signals by its negative process ID.
+ *
+ * @param {NodeJS.Platform} [platform]
+ * @returns {{
+ *   stdio: ["ignore", "pipe", "pipe"],
+ *   windowsHide: true,
+ *   detached: boolean
+ * }}
+ */
+export function radSpawnOptions(platform = process.platform) {
+  return {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    detached: platform !== "win32"
+  };
 }
 
 /**
@@ -63,10 +100,10 @@ export function killChildTree(child) {
  * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
  * { stdout, stderr } on a zero exit or reject (with both streams attached) on a
  * non-zero exit, timeout, or spawn error. rad shells out to bicep as a
- * grandchild, so it spawns detached (rad leads its own process group), kills the
- * whole tree on timeout, and uses an exit/close grace window because that
- * grandchild can inherit and hold the stdio pipes open. `label` only names the
- * command in timeout/exit error messages; `env` is merged over process.env.
+ * grandchild, so POSIX runs rad as a detached process-group leader while
+ * Windows keeps rad in the caller's Job Object and relies on taskkill /t for
+ * tree cleanup. `label` only names the command in timeout/exit error messages;
+ * `env` is merged over process.env.
  */
 export function spawnRad(
   radPath,
@@ -77,9 +114,7 @@ export function spawnRad(
     const child = spawn(radPath, args, {
       cwd,
       env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      detached: true
+      ...radSpawnOptions()
     });
 
     const maxOutput = 32 * 1024 * 1024;

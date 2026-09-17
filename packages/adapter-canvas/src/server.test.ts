@@ -13,6 +13,7 @@ import {
   cleanupAzureSetupArtifacts,
   cleanupProviderRecoveryDisposition,
   cleanupGitHubEnvironmentArtifact,
+  createInstanceRequestCoordinator,
   rollbackCommittedWorkflowFiles,
   rollbackGitHubEnvironmentVariableArtifacts,
   guardStopBoundary,
@@ -47,20 +48,26 @@ import {
   resolveDeploymentEnvironment,
   resolveDeployStatus,
   resolveDeployRepairLoop,
+  onEnvironmentTasksSettled,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff,
   setDeployFailureNotice,
+  setSessionPromptHandler,
   triggerDeployFailureNotice,
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
-  DEPLOY_RUN_UNCONFIRMED_KIND
+  DEPLOY_CLOUD_AUTH_DRIFT_KIND,
+  DEPLOY_RUN_UNCONFIRMED_KIND,
+  preflightRepoAdmin
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
+import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
   createOperation,
   finish,
   prepareProviderMutation,
+  setStageState,
   settleProviderMutation,
   getSetupArtifactLedger,
   recordAzureApp,
@@ -80,10 +87,16 @@ import {
   canStartRollback,
   canRetryCleanup,
   canExitSetup,
+  buildDeleteStages,
   requestStop,
   toClientView,
   cleanupTargetKey,
-  unresolvedCleanupTargets
+  unresolvedCleanupTargets,
+  operations,
+  STAGE_DELETE_CREDENTIAL,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_STATE_PACKAGE
 } from "./operations.js";
 import { createHash } from "node:crypto";
 import type { CanvasState } from "./shared.js";
@@ -238,6 +251,41 @@ describe("preflightGhcrPackageWriteAccess", () => {
       "'/Applications/GitHub Copilot/gh' auth login -h github.com -s read:packages -s write:packages"
     );
     expect(result.error).toContain("Install GitHub CLI system-wide.");
+  });
+
+  it("uses the selected executor's dedicated package credential and scopes", async () => {
+    const run = async () => ({ code: 0, stdout: "", stderr: "" });
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => {
+        throw new Error("global package credential must not be loaded");
+      },
+      async () => {
+        throw new Error("global identity must not be loaded");
+      },
+      {
+        login: "radius-cloud-e2e[bot]",
+        credentialSource: "injected",
+        requiresKeyringSwitch: false,
+        scopes: [],
+        run,
+        runOrThrow: run,
+        verifyIdentity: async () => {},
+        packageCredentials: () => ({
+          token: "package-token",
+          username: "package-publisher",
+          source: "injected-token",
+          scopes: ["read:packages", "write:packages"]
+        }),
+        redact: (value) => value,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected GHCR preflight to pass");
+    expect(result.login).toBe("package-publisher");
+    expect(result.credentials.token).toBe("package-token");
   });
 
   it("fails closed when the package credential username is blank", async () => {
@@ -4819,6 +4867,22 @@ describe("triggerDeployRepairHandoff", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("does not hand off a cloud-auth-drift failure, which only re-verifying can fix", () => {
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    // Exception 5.2: the credentials drifted since the environment verified, so
+    // redeploying the same model would only fail login again — the user must
+    // re-verify first.
+    expect(
+      triggerDeployRepairHandoff(
+        failedEntry({ deployErrorKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
   it("does not hand off unless the deploy actually failed", () => {
     const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
@@ -5891,6 +5955,113 @@ describe("invokeSessionPrompt", () => {
   });
 });
 
+describe("environment deletion session reporting coordinator", () => {
+  afterEach(() => {
+    setSessionPromptHandler(null);
+    operations.clear();
+  });
+
+  it.each([
+    ["forwards the failure prompt", false],
+    ["preserves the deletion result when session delivery fails", true]
+  ])("%s", async (_description, rejectSessionPrompt) => {
+    const instanceId = `ghcr-report-${rejectSessionPrompt ? "failure" : "success"}`;
+    const operation = createOperation({
+      operationId: `op-${instanceId}`,
+      kind: "delete",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "dev",
+      stages: buildDeleteStages({ includeAzureCleanup: true })
+    });
+    for (const stage of [
+      STAGE_DELETE_RADIUS_ENV,
+      STAGE_DELETE_CREDENTIAL,
+      STAGE_DELETE_GITHUB_ENV
+    ]) {
+      setStageState(operation, stage, "succeeded");
+    }
+    operation.currentStage = STAGE_DELETE_STATE_PACKAGE;
+    operations.put(operation);
+
+    const sessionPromptHandler = vi.fn(async () => {
+      if (rejectSessionPrompt) throw new Error("session delivery failed");
+    });
+    setSessionPromptHandler(sessionPromptHandler);
+    const persistedFailures: unknown[] = [];
+    const persist = vi.fn(async () => {
+      persistedFailures.push(structuredClone(operation.failure));
+    });
+    const log = vi.fn();
+    const coordinator = createInstanceRequestCoordinator(
+      instanceId,
+      () => "http://127.0.0.1:0",
+      {
+        deleteRadiusEnvironment: vi.fn(async () => ({
+          outcome: "deleted" as const
+        })),
+        runAz: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+        readAzureIdentity: vi.fn(async () => ({
+          tenantId: "tenant-1",
+          applicationObjectId: "application-1"
+        })),
+        deleteGitHubEnvironment: vi.fn(async () => ({
+          outcome: "deleted" as const
+        })),
+        deleteStatePackage: vi.fn(async () => {
+          throw new Error("missing delete:packages");
+        }),
+        withCredentialProvenanceLock: (work) => work(),
+        readCredentialProvenance: vi.fn(() => []),
+        removeCredentialProvenance: vi.fn(async () => {}),
+        clearEnvironmentCredentialProvenance: vi.fn(async () => {}),
+        persist,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error),
+        log
+      }
+    );
+    const settled = new Promise<void>((resolve) => {
+      let stop = (): void => {};
+      stop = onEnvironmentTasksSettled(instanceId, () => {
+        stop();
+        resolve();
+      });
+    });
+
+    coordinator.scheduleEnvironmentOperation(operation);
+    await settled;
+
+    expect(operation).toMatchObject({
+      state: "failed_partial",
+      failure: {
+        code: "state-package-delete-failed",
+        message: expect.stringContaining("missing delete:packages")
+      }
+    });
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persistedFailures.at(-1)).toMatchObject({
+      code: "state-package-delete-failed",
+      message: expect.stringContaining("missing delete:packages")
+    });
+    expect(sessionPromptHandler).toHaveBeenCalledOnce();
+    expect(sessionPromptHandler).toHaveBeenCalledWith({
+      prompt: expect.stringContaining("missing delete:packages"),
+      displayPrompt:
+        'Resolving the failed GHCR cleanup for environment "dev" in octo/app.'
+    });
+    if (rejectSessionPrompt) {
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "Could not report the GHCR package deletion failure to Copilot chat"
+        )
+      );
+    } else {
+      expect(log).not.toHaveBeenCalled();
+    }
+  });
+});
+
 describe("buildAzureCliAssistPrompt", () => {
   it("builds a login prompt with the requested tenant when it is a valid guid", () => {
     const prompt = buildAzureCliAssistPrompt({
@@ -6077,4 +6248,95 @@ describe("deploy failures that may leave a run in flight", () => {
   //     `server/services/deploy-dispatch.test.ts`
   // A confirmed workflow failure is deliberately excluded from that set — it is
   // the only kind a repair may act on.
+});
+
+describe("GitHub App repository preflight", () => {
+  function appExecutor(
+    responses: Record<string, { code: number; stdout: string; stderr: string }>
+  ) {
+    const calls: string[] = [];
+    const run = async (args: string[]) => {
+      const path = args[1] || "";
+      calls.push(path);
+      return (
+        responses[path] || {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Not Found (HTTP 404)"
+        }
+      );
+    };
+    const executor = {
+      login: "radius-cloud-e2e[bot]",
+      credentialSource: "injected" as const,
+      requiresKeyringSwitch: false,
+      scopes: [] as string[],
+      run,
+      runOrThrow: run,
+      verifyIdentity: async () => {},
+      packageCredentials: () => ({
+        token: "package-token",
+        username: "package-publisher",
+        source: "injected-token" as const
+      }),
+      redact: (value: string) => value,
+      errorMessage: (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
+    };
+    return { executor, calls };
+  }
+
+  const REPO_OK = {
+    code: 0,
+    stdout: JSON.stringify({ permissions: { admin: false } }),
+    stderr: ""
+  };
+
+  const PROBES_OK = Object.fromEntries(
+    gitHubAppAccessProbePaths("octo/app").map((path) => [
+      path,
+      { code: 0, stdout: "[]", stderr: "" }
+    ])
+  );
+
+  it("clears an installation that can read every resource it will configure", async () => {
+    const { executor, calls } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      ...PROBES_OK
+    });
+
+    await expect(preflightRepoAdmin("octo/app", executor)).resolves.toBe("");
+    for (const path of gitHubAppAccessProbePaths("octo/app"))
+      expect(calls).toContain(path);
+  });
+
+  it("blocks an installation missing a permission a later probe reads", async () => {
+    const { executor } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      ...PROBES_OK,
+      "repos/octo/app/actions/variables": {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Resource not accessible by integration (HTTP 403)"
+      }
+    });
+
+    const message = await preflightRepoAdmin("octo/app", executor);
+    expect(message).toContain("radius-cloud-e2e[bot]");
+    expect(message).toContain("cannot exercise its Variables permission");
+  });
+
+  it("stays silent when a probe fails ambiguously", async () => {
+    const { executor } = appExecutor({
+      "repos/octo/app": REPO_OK,
+      ...PROBES_OK,
+      "repos/octo/app/environments": {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Bad Gateway (HTTP 502)"
+      }
+    });
+
+    await expect(preflightRepoAdmin("octo/app", executor)).resolves.toBe("");
+  });
 });

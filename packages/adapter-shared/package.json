@@ -14,7 +14,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "lint": "eslint \"src/**/*.ts\" vitest.config.ts"
+    "test:integration:windows-process": "vitest run src/rad-process.windows.test.ts",
+    "lint": "eslint \"src/**/*.{ts,mjs}\" \"test/**/*.mjs\" vitest.config.ts"
   },
   "dependencies": {
     "@radius-project/core": "workspace:*"

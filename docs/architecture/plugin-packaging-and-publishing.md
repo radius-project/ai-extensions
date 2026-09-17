@@ -14,12 +14,12 @@ graph TD
     subgraph PluginSrc["plugins/radius (source, tracked)"]
         Manifest["plugin.json<br/>(Agent Plugins 1.0.0 + canvas metadata)"]
         Readme["README.md"]
+        Assets["assets/preview.png"]
     end
 
     subgraph ExtSrc["extensions/radius (source, tracked)"]
         Pkg["package.json<br/>(type: module, main: canonical Canvas path)"]
         Skills["skills/<br/>(5 SKILL.md trees)"]
-        Assets["assets/preview.png"]
         Changelog["CHANGELOG.md<br/>(written by changeset version)"]
     end
 
@@ -47,8 +47,8 @@ graph TD
 - **`packages/adapter-shared` (`@radius-project/adapter-shared`)** — shared adapter utilities (for example, `rad` CLI invocation). Depends on core via `workspace:*`.
 - **`packages/adapter-canvas` (`@radius-project/adapter-canvas`)** — the canvas adapter whose entry `src/extension.ts` calls `joinSession` / `createCanvas({ id: "radius" })`. Depends on core and shared via `workspace:*`.
 - **`packages/adapter-canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file, then assembles `.artifacts/radius/`.
-- **`plugins/radius/`** — the tracked plugin source and the discovery anchor: `plugin.json` and `README.md`.
-- **`extensions/radius/`** — the tracked canvas extension source: `package.json`, `skills/`, the `assets/` tree the canvas contract requires, and the `CHANGELOG.md` Changesets writes beside the package it versions.
+- **`plugins/radius/`** — the tracked plugin source and the discovery anchor: `plugin.json`, `README.md`, and the `assets/` tree the canvas contract requires.
+- **`extensions/radius/`** — the tracked canvas extension source: `package.json`, `skills/`, and the `CHANGELOG.md` Changesets writes beside the package it versions.
 - **`.artifacts/radius/`** — the generated, installable plugin: both tracked source trees above, the Canvas bundle and source map at `com.github.copilot/extensions/radius/`, and a complete `workflows/` copy of `.github/extension/`. Git-ignored, wiped and rebuilt on every build, and published verbatim at `plugins/radius/` rather than under this local name.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at `plugins/radius` on `radius@edge`.
 - **`.changeset/config.json`** — Changesets owns released versions. `privatePackages.version` includes private plugins; `privatePackages.tag` is disabled because the workflow creates one scoped tag on the artifact commit instead of running Changesets' all-package source tag scan.
@@ -68,15 +68,15 @@ graph TD
 
 The repository is a [pnpm](https://pnpm.io/) workspace monorepo (`pnpm-workspace.yaml` lists `packages/*` and `extensions/*`). All workspace packages are `private`; the canvas adapter pulls in the core and shared packages through the `workspace:*` protocol rather than from a registry.
 
-Plugin **source** is split in two, the way [`github/awesome-copilot`](https://github.com/github/awesome-copilot) splits it: `plugins/radius/` carries the Agent Plugins manifest and readme, and `extensions/radius/` carries the canvas extension package, its skills, and its assets. `plugins/` stays the discovery anchor — a directory there becomes shippable once both halves exist. The **installable** plugin is assembled from both into `.artifacts/radius/`, which is git-ignored, and is published verbatim only at `plugins/radius/` on a release branch:
+Plugin **source** is split in two, the way [`github/awesome-copilot`](https://github.com/github/awesome-copilot) splits it: `plugins/radius/` carries the Agent Plugins manifest, readme, and gallery assets, while `extensions/radius/` carries the canvas extension package and its skills. `plugins/` stays the discovery anchor — a directory there becomes shippable once both halves exist. The **installable** plugin is assembled from both into `.artifacts/radius/`, which is git-ignored, and is published verbatim only at `plugins/radius/` on a release branch:
 
 | Path                                                                   | Origin          | Tracked? | Purpose                                                    |
 |------------------------------------------------------------------------|-----------------|----------|------------------------------------------------------------|
 | `plugins/radius/plugin.json`                                           | source          | yes      | [Agent Plugins 1.0.0](https://agent-plugins.org) manifest. |
 | `plugins/radius/README.md`                                             | source          | yes      | Plugin documentation.                                      |
+| `plugins/radius/assets/`                                               | source          | yes      | `preview.png`, which the canvas contract requires.         |
 | `extensions/radius/package.json`                                       | source          | yes      | Extension package metadata and canonical `main`.           |
 | `extensions/radius/skills/`                                            | source          | yes      | The five skill trees (`SKILL.md` plus `references/`).      |
-| `extensions/radius/assets/`                                            | source          | yes      | `preview.png`, which the canvas contract requires.         |
 | `extensions/radius/CHANGELOG.md`                                       | Changesets      | yes      | Release notes, written beside the package it versions.     |
 | `.artifacts/radius/`                                                   | built           | no       | The complete installable plugin; git-ignored.              |
 | `.artifacts/radius/com.github.copilot/extensions/radius/extension.mjs` | built (esbuild) | no       | The canonical Canvas bundle, plus its `.map`.              |
@@ -98,7 +98,7 @@ The plugin manifest hardcodes the external Canvas contract consumed by [Awesome 
 
 esbuild transpiles the TypeScript core and inlines the `workspace:*` dependencies, producing a single self-contained `extension.mjs` (~700 KB minified). This file is the reason a build step is unavoidable: the plugin cannot ship hand-authored source because the canvas imports the **TypeScript** core via `workspace:*`, which must be transpiled and inlined first.
 
-The script then uses esbuild's `copy` loader to place `plugin.json` and `README.md` from the plugin directory, and `package.json`, `skills/`, `assets/`, and any `CHANGELOG.md` from the extension directory at the artifact root; it adds the repository `LICENSE` and copies the complete `.github/extension/` tree to `.artifacts/radius/workflows/`. It writes the full checked-out source SHA to `package.json#radiusSourceRef` and compiles that same value into the workflow generator: remote template fetches and every first-party composite-action `uses:` resolve the commit that produced the plugin, never `main`, `edge`, or `latest`. Both the Node bundle and nested browser/resolver builds emit esbuild metafiles; their complete input union drives `THIRD-PARTY-NOTICES.txt`, including packages such as `yaml` that do not appear in the browser-only graph. The generic dist validator checks names, versions, the Agent Plugins manifest schema, source SHA, workflow assets, `package.json#main`, the canonical Canvas entry, the fixed `skills/` location, README, license, confinement, and symlinks before upload or publication.
+The script then uses esbuild's `copy` loader to place `plugin.json`, `README.md`, and `assets/` from the plugin directory, and `package.json`, `skills/`, and any `CHANGELOG.md` from the extension directory at the artifact root; it adds the repository `LICENSE` and copies the complete `.github/extension/` tree to `.artifacts/radius/workflows/`. It writes the full checked-out source SHA to `package.json#radiusSourceRef` and compiles that same value into the workflow generator: remote template fetches and every first-party composite-action `uses:` resolve the commit that produced the plugin, never `main`, `edge`, or `latest`. Both the Node bundle and nested browser/resolver builds emit esbuild metafiles; their complete input union drives `THIRD-PARTY-NOTICES.txt`, including packages such as `yaml` that do not appear in the browser-only graph. The generic dist validator checks names, versions, the Agent Plugins manifest schema, source SHA, workflow assets, `package.json#main`, the canonical Canvas entry, the fixed `skills/` location, README, license, confinement, and symlinks before upload or publication.
 
 The whole of `.artifacts/` is git-ignored so `main` never carries large generated files that would cause constant merge conflicts. Because the tree is wiped and rebuilt on every run, the build first asks `git ls-files` whether anything tracked lives there and refuses to wipe it if so — a build can never delete source.
 

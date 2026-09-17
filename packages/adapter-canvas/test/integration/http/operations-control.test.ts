@@ -136,6 +136,7 @@ function start(): Harness {
           typeof value === "string" && /^[^/\s]+\/[^/\s]+$/.test(value),
         isResourceGroupName: () => true,
         isAksClusterName: () => true,
+        isKubernetesNamespace: () => true,
         isUuid: () => true,
         buildStages,
         createOperation,

@@ -7,10 +7,11 @@
 // for the release workflows to pick it up.
 //
 // Source is split the way github/awesome-copilot splits it: `plugins/<name>/`
-// carries the Agent Plugins manifest, `extensions/<name>/` carries the canvas
-// extension. The build assembles both into `.artifacts/<name>/`, which is
-// git-ignored and is published verbatim at `plugins/<name>/` on a release
-// branch — so the build never writes into a tracked source tree.
+// carries the Agent Plugins manifest, readme, and gallery assets, while
+// `extensions/<name>/` carries the canvas extension package and skills. The
+// build assembles both into `.artifacts/<name>/`, which is git-ignored and is
+// published verbatim at `plugins/<name>/` on a release branch — so the build
+// never writes into a tracked source tree.
 //
 // Naming convention, applied uniformly so a second plugin can never collide
 // with the first:

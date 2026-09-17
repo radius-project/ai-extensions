@@ -180,7 +180,7 @@ A plugin whose `keywords` include `canvas` must publish the canonical manifest m
 | Requirement                                                             | Where it is produced                           |
 |-------------------------------------------------------------------------|------------------------------------------------|
 | `plugin.json#extensions.com.github.copilot.logo` = `assets/preview.png` | hardcoded in `plugins/<plugin>/plugin.json`    |
-| `assets/preview.png`                                                    | tracked in `extensions/<plugin>/assets/`       |
+| `assets/preview.png`                                                    | tracked in `plugins/<plugin>/assets/`          |
 | Root `package.json#main`                                                | canonical Canvas entry-point path              |
 | `com.github.copilot/extensions/<plugin>/extension.mjs`                  | generated runtime bundle for Copilot discovery |
 | `com.github.copilot/extensions/<plugin>/extension.mjs.map`              | generated source map beside the runtime bundle |
