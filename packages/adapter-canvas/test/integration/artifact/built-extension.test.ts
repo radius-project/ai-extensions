@@ -71,6 +71,8 @@ const SOURCE_REF = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: REPO_ROOT,
   encoding: "utf8"
 }).trim();
+const LITERAL_CREDENTIAL_ASSIGNMENT =
+  /^\s*(?:[A-Za-z][A-Za-z0-9]*_)*(?:access_?key|api_?key|client_?secret|connection_?string|password|passwd|secret_?key|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu;
 // Independent reviewed oracle: unlike importing the live declaration builders,
 // this fixture changes only when a contract update is deliberately accepted.
 const EXPECTED_REGISTRATION = JSON.parse(
@@ -217,6 +219,64 @@ function assertCurrentArtifact(): void {
     );
   }
 }
+
+describe("packaged Bicep literal credential detector", () => {
+  it.each([
+    "PASSWORD",
+    "PASSWD",
+    "TOKEN",
+    "API_KEY",
+    "APP_API_KEY",
+    "CLIENT_SECRET",
+    "CONNECTION_STRING",
+    "SECRET_KEY",
+    "ACCESS_KEY",
+    "MYSQL_PASSWORD",
+    "accessKey",
+    "apiKey",
+    "clientSecret",
+    "connectionString",
+    "password",
+    "secretKey",
+    "token"
+  ])("rejects literal assignments to %s with optional prefixes", (key) => {
+    for (const prefix of ["", "APP_", "APP_V2_"]) {
+      for (const value of [
+        "'unsafe-example'",
+        '"unsafe-example"',
+        "{ value: 'unsafe-example' }",
+        '{\n  value: "unsafe-example"\n}'
+      ]) {
+        expect(`  ${prefix}${key}: ${value}`).toMatch(
+          LITERAL_CREDENTIAL_ASSIGNMENT
+        );
+      }
+      expect(`${prefix}${key}: { value: credentialParameter }`).not.toMatch(
+        LITERAL_CREDENTIAL_ASSIGNMENT
+      );
+      expect(
+        `${prefix}${key}: { valueFrom: { secretKeyRef: { secretName: credentials.name, key: 'credential' } } }`
+      ).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
+    }
+  });
+
+  it.each([
+    "APP_PASSWORD_POLICY",
+    "APP_API_KEY_NAME",
+    "CLIENT_SECRET_FILE",
+    "CONNECTION_STRING_FORMAT",
+    "SECRET_KEY_ROTATION",
+    "ACCESS_KEY_ID",
+    "TOKEN_EXPIRY",
+    "PASSWD_LENGTH",
+    "NOTPASSWORD"
+  ])("allows noncredential configuration key %s", (key) => {
+    expect(`${key}: 'strict'`).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
+    expect(`${key}: { value: 'strict' }`).not.toMatch(
+      LITERAL_CREDENTIAL_ASSIGNMENT
+    );
+  });
+});
 
 describe("P0-C built Radius extension artifact", () => {
   let smoke: ArtifactSmokeResult;
@@ -672,17 +732,9 @@ describe("P0-C built Radius extension artifact", () => {
       );
     }
 
-    const literalCredentialAssignment =
-      /^\s*(?:[A-Za-z][A-Za-z0-9]*_)*(?:accessKey|apiKey|clientSecret|connectionString|password|secretKey|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu;
-    expect("MYSQL_PASSWORD: { value: 'unsafe-example' }").toMatch(
-      literalCredentialAssignment
-    );
-    expect("APP_PASSWORD_POLICY: { value: 'strict' }").not.toMatch(
-      literalCredentialAssignment
-    );
     expect(bicepBlocks.length).toBeGreaterThan(0);
     for (const block of bicepBlocks) {
-      expect(block).not.toMatch(literalCredentialAssignment);
+      expect(block).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
     }
   });
 
