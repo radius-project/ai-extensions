@@ -40,6 +40,12 @@ export interface AppModelHandoffRequest {
   // The canvas instance's state: the branch context the readers resolve against,
   // the latest request for cancellation, and delivered handoffs keyed by target.
   state?: CanvasState;
+  // Answers whether the render that raised this handoff is still the one on
+  // screen. The handoff probes sources and waits out a grace window before it
+  // speaks, and the user can change the selection throughout: without this the
+  // work started by an abandoned render still mints attempt tokens and asks the
+  // agent to model branches nobody is looking at.
+  isCurrent?: () => boolean;
 }
 
 export interface AppModelHandoffDependencies {
@@ -161,9 +167,11 @@ export function createAppModelHandoff(
     branches,
     page,
     progressView,
-    state
+    state,
+    isCurrent
   }: AppModelHandoffRequest): Promise<void> {
     if (!repo) return;
+    const stillCurrent = (): boolean => isCurrent === undefined || isCurrent();
     const targets = branches.filter((branch): branch is string =>
       Boolean(branch)
     );
@@ -305,6 +313,13 @@ export function createAppModelHandoff(
         return;
       }
       if (settled.some((status) => status.freshness.status !== "missing")) {
+        releaseReservation();
+        return;
+      }
+      // Last check before this handoff becomes observable. Everything above is
+      // reversible; minting the tokens and sending the turn are not, and both
+      // the source probe and the grace window gave the user time to move on.
+      if (!stillCurrent()) {
         releaseReservation();
         return;
       }

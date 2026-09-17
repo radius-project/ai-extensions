@@ -556,6 +556,62 @@ describe("createAppModelHandoff", () => {
     expect(state.appBicepHandoffKey).toBe("newer-request");
   });
 
+  // The handoff keeps probing and waiting long after the route responded, so a
+  // selection change during that window must stop it before it becomes
+  // observable — no attempt tokens, no turn.
+  it("mints no tokens and sends nothing when the request is superseded during its asynchronous work", async () => {
+    const state: CanvasState = { canvasInstanceId: "panel-1" };
+    let current = true;
+    let releaseProbe!: () => void;
+    const probeStarted = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    const { handOff, sent } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", { status: "missing" }),
+        feat: modelStatus("a/b", "feat", { status: "missing" })
+      },
+      evaluateSource: async () => {
+        releaseProbe();
+        await Promise.resolve();
+        return MODELABLE;
+      }
+    });
+
+    const pending = handOff({
+      repo: "a/b",
+      branches: ["main", "feat"],
+      page: "graph-diff",
+      state,
+      isCurrent: () => current
+    });
+    await probeStarted;
+    current = false;
+    await pending;
+
+    expect(sent).toEqual([]);
+    expect(state.appModelAttemptTokens).toBeUndefined();
+    expect(state.appBicepHandoffKeys?.["a/b::main:feat"]).toBeUndefined();
+  });
+
+  it("still hands off when the request stays current", async () => {
+    const state: CanvasState = { canvasInstanceId: "panel-1" };
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
+    });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state,
+      isCurrent: () => true
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeDefined();
+  });
+
   it("does not clear a newer shared owner when an older status read reports a model", async () => {
     let finishStatus!: (status: AppModelStatus) => void;
     const missingModelHandoffs = createMissingModelHandoffClaims(
@@ -1338,6 +1394,29 @@ describe("createAppModelHandoff", () => {
       handOff({ repo: "a/b", branches: ["feat"], page: "graph" })
     ).rejects.toThrow("reader offline");
     expect(sent).toEqual([]);
+  });
+
+  // The failure message promises the user a refresh. That refresh re-enters the
+  // handoff with the same branches and the same missing statuses, so the panel
+  // reservation must not still be holding the key from the delivered attempt.
+  it("releases the panel reservation after a delivered diff handoff so the promised refresh can ask again", async () => {
+    const state: CanvasState = { canvasInstanceId: "panel-1" };
+    const statuses = {
+      main: modelStatus("a/b", "main", { status: "missing" }),
+      feat: modelStatus("a/b", "feat", { status: "missing" })
+    };
+    const { handOff, sent } = harness({ statuses });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["main", "feat"],
+      page: "graph-diff",
+      state
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(state.appBicepHandoffKeys?.["a/b::main:feat"]).toBeUndefined();
+    expect(state.appBicepHandoffKey).toBeUndefined();
   });
 
   it("releases the panel reservation when send fails for a missing model, allowing retry", async () => {

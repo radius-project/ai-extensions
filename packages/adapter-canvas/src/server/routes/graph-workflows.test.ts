@@ -2118,6 +2118,29 @@ describe("graph planning workflows", () => {
       expect(harness.state.appModelAttemptTokens).toEqual({});
     });
 
+    // Clearing a token no failure is recorded against would strand a modeling
+    // run that is still in flight: its report is rejected as stale and the real
+    // error never reaches the view.
+    it("keeps a live attempt token on refresh when no failure has been recorded yet", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        }
+      });
+      harness.state.appModelAttemptTokens = { "octo/app::main": "in-flight" };
+
+      const outcome = await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.state.appModelAttemptTokens).toEqual({
+        "octo/app::main": "in-flight"
+      });
+    });
+
     it("leaves fencing state alone when a newer comparison supersedes the request", async () => {
       let harness!: Harness;
       harness = start({

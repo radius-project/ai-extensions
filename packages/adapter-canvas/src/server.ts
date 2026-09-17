@@ -583,6 +583,9 @@ interface AppBicepHandoffInput {
   // against the same workspace context the route just rendered from, and so it
   // can deduplicate against the handoff it last performed for this panel.
   state?: CanvasState;
+  // Whether the render that raised this handoff is still on screen, re-checked
+  // by the runtime just before it mints attempt tokens and speaks.
+  isCurrent?: () => boolean;
 }
 
 export interface DeployRepairHandoffInput {
@@ -2463,7 +2466,8 @@ function triggerAppBicepHandoff(
   repo: string,
   branches: string | string[],
   page: string,
-  progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph"
+  progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph",
+  isCurrent?: () => boolean
 ): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
@@ -2477,7 +2481,8 @@ function triggerAppBicepHandoff(
         branches: list,
         page,
         progressView,
-        state: entry?.state
+        state: entry?.state,
+        isCurrent
       })
     ).catch(() => {});
   } catch {

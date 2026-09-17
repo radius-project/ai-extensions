@@ -64,6 +64,22 @@ function appModelAuthoringFailureDetail(error: string): string {
   return `Application model generation stopped: ${error} Fix the reported issue, then refresh the Radius Canvas to try modeling again.`;
 }
 
+// The explicit-refresh unfence. `clearAppModelAuthoringFailure` also drops the
+// branch's attempt token, which is only safe once that attempt has reported.
+// Dropping a token no failure is recorded against would strand a modeling run
+// that is still in flight: its eventual report is rejected as stale, so the
+// real error never reaches the view and the wait runs to its timeout instead.
+// A diff makes that reachable from a second view, because it clears both of
+// its branches, either of which another view may already be modeling.
+function retryRecordedAuthoringFailure(
+  state: CanvasState,
+  repo: string,
+  branch: string
+): void {
+  if (!appModelAuthoringFailure(state, repo, branch)) return;
+  clearAppModelAuthoringFailure(state, repo, branch);
+}
+
 // `bare` responses are written without a `Content-Type` header, exactly as the
 // legacy branches wrote them: the missing-entry 503 on all three routes, and
 // load-graph's pre-compile 409. Every other response sets the header first.
@@ -112,7 +128,10 @@ export interface GraphWorkflowDependencies<
     repo: string,
     branches: string | string[],
     page: string,
-    progressView: GraphProgressView
+    progressView: GraphProgressView,
+    // Re-checked inside the handoff, immediately before it mints attempt tokens
+    // and speaks, because it probes and waits long after this route responded.
+    isCurrent?: () => boolean
   ): void;
   triggerGraphRepairHandoff(
     entry: TEntry,
@@ -540,7 +559,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   ): Promise<GraphWorkflowOutcome> {
     if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
     if (retryAuthoring) {
-      clearAppModelAuthoringFailure(entry.state, repo, branch);
+      retryRecordedAuthoringFailure(entry.state, repo, branch);
     }
     const authoringFailure = appModelAuthoringFailure(
       entry.state,
@@ -1325,8 +1344,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // runs before the both-missing check so a refresh still unfences the
       // missing side of a half-modeled comparison.
       if (data.restartWait === true) {
-        clearAppModelAuthoringFailure(state, repo, data.base);
-        clearAppModelAuthoringFailure(state, repo, data.head);
+        retryRecordedAuthoringFailure(state, repo, data.base);
+        retryRecordedAuthoringFailure(state, repo, data.head);
       }
 
       if (!baseSelection.content && !headSelection.content) {
@@ -1376,14 +1395,17 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         }
         // Re-checked after the refusal probe: the handoff mints the attempt
         // tokens that fence both branches, so a superseded request must not
-        // start one and overwrite the current comparison's attempt.
+        // start one and overwrite the current comparison's attempt. The
+        // predicate goes with it, because the handoff keeps probing and waiting
+        // after this response is written.
         if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
         dependencies.triggerAppBicepHandoff(
           entry,
           repo,
           [data.base, data.head],
           "graph-diff",
-          "diff"
+          "diff",
+          isCurrentRequest
         );
         // No `branch` key here, unlike the other two routes: the diff spans two.
         return json(200, {

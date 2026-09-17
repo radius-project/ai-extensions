@@ -197,11 +197,13 @@ export function createRadiusTools(
         };
         // The run this claim belongs to just ended, so the claim can only
         // suppress the retry the failure message tells the user to make. A diff
-        // claim is keyed `repo::base,head` while this failure is keyed
-        // `repo::branch`, so releasing by branch — not by exact target — is what
-        // frees both the single-branch claim and the diff claim that covers it.
-        // Without this the explicit refresh clears the failure, asks for a
-        // handoff, and is dropped by the dead run's claim until it expires.
+        // claim covers both compared branches under one target, while this
+        // failure is keyed `repo::branch`, so releasing by branch — not by
+        // exact target — is what frees both the single-branch claim and the
+        // diff claim that covers it. Without this the explicit refresh clears
+        // the failure, asks for a handoff, and is dropped by the dead run's
+        // claim until it expires. `missingModelHandoffTarget` owns the target
+        // encoding; do not rebuild or parse it here.
         missingModelHandoffs.releaseForBranch(repo, branch);
         modelingActivity.release({ repo, branch });
         return { recorded: true };
