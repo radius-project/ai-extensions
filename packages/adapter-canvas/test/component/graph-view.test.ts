@@ -40,7 +40,6 @@ interface Recorded {
   external: string[];
   local: Array<[string, number, string]>;
   toggled: string[];
-  opened: string[];
   reloads: number;
 }
 
@@ -84,7 +83,6 @@ function mount(
     external: [],
     local: [],
     toggled: [],
-    opened: [],
     reloads: 0
   };
   const graph = mountGraph({
@@ -102,8 +100,7 @@ function mount(
       openLocalSource: (path, line, fallback) =>
         recorded.local.push([path, line, fallback]),
       toggleDetails: (data: GraphNodeData, card: DomElement | null) =>
-        recorded.toggled.push(`${data.id}:${card ? "card" : "none"}`),
-      openDetails: (data: GraphNodeData) => recorded.opened.push(data.id)
+        recorded.toggled.push(`${data.id}:${card ? "card" : "none"}`)
     }
   });
   disposers.push(() => {
@@ -287,7 +284,7 @@ describe("graph view in a real browser", () => {
       "https://portal.azure.com/#@tenant/resource/server"
     );
     expect(portal.getAttribute("target")).toBe("_blank");
-    expect(recorded.opened).toEqual([]);
+    expect(recorded.toggled).toEqual([]);
   });
 
   it("places connected nodes on separate rows using the real dagre layout", async () => {
@@ -337,7 +334,7 @@ describe("graph view in a real browser", () => {
     // A real navigation would have torn the document down.
     expect(document.body.contains(link)).toBe(true);
     // The card's own click handler must not also fire for a source click.
-    expect(recorded.opened).toEqual([]);
+    expect(recorded.toggled).toEqual([]);
   });
 
   it("opens a remote source link through the host without navigating the webview", async () => {
@@ -353,7 +350,7 @@ describe("graph view in a real browser", () => {
       "https://github.test/o/r/blob/feature-branch/src/web.ts#L4"
     ]);
     expect(document.body.contains(link)).toBe(true);
-    expect(recorded.opened).toEqual([]);
+    expect(recorded.toggled).toEqual([]);
   });
 
   it("opens an exact GitHub source URL externally from a worktree graph", async () => {
