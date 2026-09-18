@@ -326,7 +326,8 @@ function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
 async function routeDeployedPage(
   page: Page,
   deploymentStatus: () => string,
-  abandon?: (body: unknown, nonce: string) => void
+  abandon?: (body: unknown, nonce: string) => void,
+  resources: unknown[] = []
 ): Promise<void> {
   await page.route("**/api/list-applications**", async (route) => {
     await route.fulfill({
@@ -369,7 +370,10 @@ async function routeDeployedPage(
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ resources: [], mode: "greyed" })
+      body: JSON.stringify({
+        resources,
+        mode: resources.length > 0 ? "terminal" : "greyed"
+      })
     });
   });
   await page.route("**/api/deploy-status**", async (route) => {
@@ -811,6 +815,94 @@ test.describe("Radius Canvas in Chromium", () => {
       "demo-cluster",
       "db"
     ]);
+  });
+
+  test("shows friendly planned service names and keeps the concrete type in keyboard-accessible details", async ({
+    page,
+    canvas
+  }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      plannedRepo: REPOSITORY,
+      plannedProvider: "azure",
+      plannedBranch: WORKTREE_BRANCH,
+      plannedEnvironment: "fixture-environment",
+      plannedFromWorkspace: true,
+      plannedResources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          outputResources: [
+            {
+              type: "Microsoft.ContainerService/managedClusters@2024-01-01",
+              displayType: "Azure Kubernetes Service"
+            }
+          ]
+        }
+      ]
+    });
+    await page.route("**/api/plan-graph", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ refreshed: true })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "planned");
+
+    const web = page.locator(".rad-node").filter({ hasText: "web" });
+    const type = web.locator(".rad-node__type");
+    await expect(type).toHaveText("Azure Kubernetes Service");
+    await expect(type).toHaveAttribute(
+      "title",
+      "Microsoft.ContainerService/managedClusters@2024-01-01"
+    );
+    const details = web.getByRole("button", { name: "Show details" });
+    await details.focus();
+    await page.keyboard.press("Enter");
+
+    const panel = page.locator("#node-popup");
+    await expect(panel).toContainText("Concrete type");
+    await expect(panel).toContainText(
+      "Microsoft.ContainerService/managedClusters@2024-01-01"
+    );
+    await expectNoWcagViolations(page);
+  });
+
+  test("shows friendly deployed service names with the concrete type in details", async ({
+    page,
+    canvas
+  }) => {
+    await routeDeployedPage(page, () => "success", undefined, [
+      {
+        id: "app/postgres",
+        name: "postgres",
+        type: "Radius.Data/postgreSqlDatabases",
+        deployStatus: "success",
+        outputResources: [
+          {
+            type: "Microsoft.DBforPostgreSQL/flexibleServers",
+            displayType: "Azure Database for PostgreSQL"
+          }
+        ]
+      }
+    ]);
+
+    await gotoCanvas(page, canvas, "deployed");
+
+    const postgres = page.locator(".rad-node").filter({ hasText: "postgres" });
+    const type = postgres.locator(".rad-node__type");
+    await expect(type).toHaveText("Azure Database for PostgreSQL");
+    await expect(type).toHaveAttribute(
+      "title",
+      "Microsoft.DBforPostgreSQL/flexibleServers"
+    );
+    await postgres.getByRole("button", { name: "Show details" }).click();
+    await expect(page.locator("#node-popup")).toContainText(
+      "Microsoft.DBforPostgreSQL/flexibleServers"
+    );
   });
 
   test("keeps the document canvas dark while navigating between top-level panes", async ({

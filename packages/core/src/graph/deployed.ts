@@ -75,6 +75,63 @@ function deployedResources(value: unknown): any[] {
   return [];
 }
 
+function outputIdentity(value: unknown): { id: string; type: string } {
+  if (value === null || typeof value !== "object") {
+    return { id: "", type: "" };
+  }
+  const output = value as { id?: unknown; type?: unknown };
+  return {
+    id: typeof output.id === "string" ? output.id.trim() : "",
+    type:
+      typeof output.type === "string" ?
+        stripAPIVersion(output.type.trim()).toLowerCase()
+      : ""
+  };
+}
+
+function outputDisplayType(value: unknown): string {
+  if (value === null || typeof value !== "object") return "";
+  const displayType = (value as { displayType?: unknown }).displayType;
+  return typeof displayType === "string" ? displayType.trim() : "";
+}
+
+function mergeOutputResources(previous: unknown, deployed: unknown[]): any[] {
+  const previousOutputs = Array.isArray(previous) ? previous : [];
+  const previousById = new Map<string, unknown>();
+  const previousByType = new Map<string, unknown>();
+  for (const output of previousOutputs) {
+    const identity = outputIdentity(output);
+    if (identity.id && !previousById.has(identity.id)) {
+      previousById.set(identity.id, output);
+    }
+    if (
+      identity.type &&
+      outputDisplayType(output) &&
+      !previousByType.has(identity.type)
+    ) {
+      previousByType.set(identity.type, output);
+    }
+  }
+
+  return deployed.map((output) => {
+    const identity = outputIdentity(output);
+    const displayType =
+      outputDisplayType(output) ||
+      (identity.id ? outputDisplayType(previousById.get(identity.id)) : "") ||
+      (identity.type ?
+        outputDisplayType(previousByType.get(identity.type))
+      : "");
+    const outputRecord =
+      output !== null && typeof output === "object" ?
+        (output as Record<string, unknown>)
+      : {};
+    return {
+      ...outputRecord,
+      ...(displayType ? { displayType } : {})
+    };
+  });
+}
+
 /**
  * mergeDeployedGraphMetadata - enrich modeled parents with exact deployment
  * metadata without changing their topology. Parent ids are the producer's
@@ -98,7 +155,10 @@ export function mergeDeployedGraphMetadata(
         Array.isArray(metadata?.outputResources) &&
         metadata.outputResources.length > 0
       ) ?
-        metadata.outputResources
+        mergeOutputResources(
+          resource?.outputResources,
+          metadata.outputResources
+        )
       : Array.isArray(resource?.outputResources) ? resource.outputResources
       : [];
     return {

@@ -1157,6 +1157,71 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     ]);
   });
 
+  it("serves planned friendly types with final deployment metadata", async () => {
+    const harness = start();
+    harness.state.contextRepo = "octo/app";
+    harness.state.plannedRepo = "octo/app";
+    harness.state.plannedBranch = "main";
+    harness.state.plannedEnvironment = "prod";
+    harness.state.plannedProvider = "azure";
+    harness.state.deployProvider = "azure";
+    harness.state.plannedResources = [
+      {
+        id: "postgres",
+        name: "postgres",
+        type: "Radius.Data/postgreSqlDatabases",
+        outputResources: [
+          {
+            id: "planned-server",
+            type: "Microsoft.DBforPostgreSQL/flexibleServers@2024-01-01",
+            displayType: "Azure Database for PostgreSQL"
+          }
+        ]
+      }
+    ];
+    harness.modeledResources.push({
+      id: "postgres",
+      name: "postgres",
+      type: "Radius.Data/postgreSqlDatabases"
+    });
+    harness.reader.graph = {
+      graph: {
+        resources: [
+          {
+            id: "postgres",
+            name: "postgres",
+            outputResources: [
+              {
+                id: "deployed-server",
+                type: "Microsoft.DBforPostgreSQL/flexibleServers@2025-01-01",
+                portalUrl: "https://portal.azure.com/postgres"
+              }
+            ]
+          }
+        ]
+      },
+      status: "ok"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/deployed-graph?environment=prod`
+    );
+    const payload = (await response.json()) as {
+      resources: CanvasGraphResource[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.resources[0].outputResources).toEqual([
+      {
+        id: "deployed-server",
+        type: "Microsoft.DBforPostgreSQL/flexibleServers@2025-01-01",
+        displayType: "Azure Database for PostgreSQL",
+        portalUrl: "https://portal.azure.com/postgres"
+      }
+    ]);
+  });
+
   it("does not serve planned-only provider links after deployment failure", async () => {
     const harness = start();
     harness.state.contextRepo = "octo/app";
