@@ -173,11 +173,28 @@ function rememberBoundedSet(set: Set<string>, key: string): void {
 export function createPullRequestGraphDiffGuard(
   deps: PullRequestGraphDiffGuardDependencies
 ): PullRequestGraphDiffGuard {
-  let radiusInteractionObserved = false;
+  // Keyed by workingDirectory rather than a single session-wide flag, so an
+  // explicit Radius interaction in one worktree does not cause PR
+  // interception to leak into an unrelated worktree/repo opened in the same
+  // session.
+  const radiusInteractionObservedIn = new Set<string>();
   const attempts = new Map<string, GraphDiffAttempt>();
   const requestedDiffs = new Set<string>();
   const pendingPullRequests = new Set<string>();
   const defaultBranches = new Map<string, string>();
+
+  function hasObservedInteraction(input: ToolUseInput): boolean {
+    const workspacePath = optionalString(input.workingDirectory);
+    return (
+      workspacePath !== "" && radiusInteractionObservedIn.has(workspacePath)
+    );
+  }
+
+  function markInteractionObserved(input: ToolUseInput): void {
+    const workspacePath = optionalString(input.workingDirectory);
+    if (!workspacePath) return;
+    rememberBoundedSet(radiusInteractionObservedIn, workspacePath);
+  }
 
   async function modelExists(input: ToolUseInput): Promise<boolean | null> {
     const workspacePath = optionalString(input.workingDirectory);
@@ -228,7 +245,7 @@ export function createPullRequestGraphDiffGuard(
     // This hook can enforce known PR tools. Shell commands such as
     // `gh pr create` are opaque to extensions and require a host-level PR hook.
     if (!isPullRequestCreationTool(input.toolName)) return undefined;
-    if (!radiusInteractionObserved) return undefined;
+    if (!hasObservedInteraction(input)) return undefined;
 
     let modeled: boolean | null;
     try {
@@ -294,14 +311,14 @@ export function createPullRequestGraphDiffGuard(
   ): Promise<PostToolUseGuidance | undefined> {
     const attempt = graphDiffAttempt(input);
     if (attempt) {
-      radiusInteractionObserved = true;
+      markInteractionObserved(input);
       rememberBounded(attempts, proofKey(attempt), attempt);
       requestedDiffs.delete(proofKey(attempt));
       return undefined;
     }
 
     if (isPullRequestCreationTool(input.toolName)) {
-      if (!radiusInteractionObserved) return undefined;
+      if (!hasObservedInteraction(input)) return undefined;
       let identity: PullRequestIdentity | null;
       try {
         identity = await resolvePullRequestIdentity(input.toolArgs);
@@ -326,7 +343,7 @@ export function createPullRequestGraphDiffGuard(
     }
 
     if (isRadiusToolUse(input.toolName, input.toolArgs)) {
-      radiusInteractionObserved = true;
+      markInteractionObserved(input);
       try {
         await modelExists(input);
       } catch (error) {
@@ -347,7 +364,7 @@ export function createPullRequestGraphDiffGuard(
       optionalString(input.error) || "The graph-diff tool failed."
     );
     if (attempt) {
-      radiusInteractionObserved = true;
+      markInteractionObserved(input);
       rememberBounded(attempts, proofKey(attempt), attempt);
       requestedDiffs.delete(proofKey(attempt));
     }

@@ -314,6 +314,40 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.shutdown("test");
   });
 
+  it("does not intercept a PR in an unrelated worktree after a Radius interaction elsewhere", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: true,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    await harness.extension.hooks.onPostToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "graph", repo: "acme/widgets" }
+      },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const result = await harness.extension.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Unrelated change", body: "Summary" },
+      workingDirectory: "/worktrees/other-repo"
+    });
+
+    expect(result).toBeUndefined();
+    expect(harness.deps.github.getDefaultBranch).not.toHaveBeenCalled();
+    expect(harness.session.rpc.canvas.open).not.toHaveBeenCalled();
+    await harness.extension.shutdown("test");
+  });
+
   it("activates PR graph diffs after first-time modeling in the same session", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {

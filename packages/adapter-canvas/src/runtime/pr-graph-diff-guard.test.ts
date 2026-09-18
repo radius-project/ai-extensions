@@ -109,6 +109,24 @@ describe("pull request application graph diff guard", () => {
     expect(deps.workspaceContext).not.toHaveBeenCalled();
   });
 
+  it("does not intercept a PR in a different worktree after an interaction elsewhere", async () => {
+    const { guard, deps } = setup(true);
+    await observeRadiusInteraction(guard);
+
+    await expect(
+      guard.onPreToolUse({
+        toolName: "create_pull_request",
+        toolArgs: { title: "Unrelated repo", body: "" },
+        workingDirectory: "/worktrees/other-repo"
+      })
+    ).resolves.toBeUndefined();
+    expect(deps.workspaceContext).not.toHaveBeenCalled();
+
+    await expect(guard.onPreToolUse(pullRequest())).resolves.toMatchObject({
+      permissionDecision: "deny"
+    });
+  });
+
   it("requires a graph diff when a model appears after an explicit Radius interaction", async () => {
     const { guard, deps, setModeled } = setup();
     await guard.inspectAtSessionStart("/worktrees/widgets");
