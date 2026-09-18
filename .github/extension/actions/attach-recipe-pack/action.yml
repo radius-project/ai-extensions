@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+name: Radius - Attach recipe pack
+description: Resolve one deployed recipe pack by name and attach it to a Radius environment.
+
+inputs:
+  environment:
+    description: Radius environment name to update.
+    required: true
+  recipe-pack:
+    description: Exact name of the deployed recipe pack to attach.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Attach recipe pack to environment
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        RECIPE_PACK: ${{ inputs.recipe-pack }}
+      run: bash "${GITHUB_ACTION_PATH}/attach-recipe-pack.sh"
