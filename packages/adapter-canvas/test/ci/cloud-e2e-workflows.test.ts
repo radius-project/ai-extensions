@@ -240,8 +240,14 @@ describe("cloud-e2e.yml", () => {
       step.run?.includes("test:cloud")
     );
     expect(run?.env).toMatchObject({
+      AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}",
+      AIEXT_CLOUD_E2E_AZURE_LOCATION:
+        "${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}",
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
         "${{ steps.fixture.outputs.full-name }}",
+      AIEXT_CLOUD_E2E_RESOURCE_GROUP:
+        "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}",
       CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
       CLOUD_E2E_BOT_INSTALLATION_ID:
         "${{ steps.app-token.outputs.installation-id }}",
@@ -405,14 +411,209 @@ describe("cloud-e2e.yml", () => {
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
-  it("requests Actions read access before listing fixture environments", async () => {
+  it("requests Actions write access for Radius cleanup dispatch without package write", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const token = steps(workflow.jobs?.purge).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
     );
 
-    expect(token?.with?.["permission-actions"]).toBe("read");
+    expect(token?.with?.["permission-actions"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
+    // cloud-e2e.yml mints its journey token with no permission inputs, so any
+    // grant added to this installation widens that token too.
+    expect(token?.with?.["permission-packages"]).toBeUndefined();
+  });
+
+  it("deletes legacy resource groups only after the Radius applications on them", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const radiusIndex = purge.findIndex(
+      (step) =>
+        step.name === "Delete stale Radius applications before recovery state"
+    );
+    const legacyIndex = purge.findIndex((step) =>
+      step.run?.includes("selectTestResourceGroups")
+    );
+
+    expect(radiusIndex).toBeGreaterThanOrEqual(0);
+    expect(legacyIndex).toBeGreaterThan(radiusIndex);
+    expect(purge[legacyIndex]?.if).toContain(
+      "steps.radius-app-cleanup.outcome == 'success'"
+    );
+  });
+
+  it("deletes stale Radius applications before recovery inputs", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const radiusCleanup = purge.find(
+      (step) =>
+        step.name === "Delete stale Radius applications before recovery state"
+    );
+    const protectedSteps = purge.filter((step) =>
+      [
+        "Purge stale Entra identities",
+        "Purge stale GHCR deployment state",
+        "Purge stale GitHub Environments",
+        "Purge stale fallback pull requests and branches",
+        "Reset an idle fixture repository to the pinned baseline"
+      ].includes(step.name ?? "")
+    );
+
+    expect(radiusCleanup?.run).toContain(
+      "gh workflow run delete-application.yml"
+    );
+    expect(radiusCleanup?.run).toContain('gh run watch "$run_id"');
+    for (const step of protectedSteps)
+      expect(step.if).toContain(
+        "steps.radius-app-cleanup.outcome == 'success'"
+      );
+  });
+
+  it("deletes only fixture-linked private GHCR state after Radius cleanup", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const stateCleanup = steps(workflow.jobs?.purge).find(
+      (step) => step.name === "Purge stale GHCR deployment state"
+    );
+    const script = stateCleanup?.run ?? "";
+
+    expect(stateCleanup?.if).toContain(
+      "steps.radius-app-cleanup.outcome == 'success'"
+    );
+    expect(stateCleanup?.env?.GH_PACKAGES_TOKEN).toBe(
+      "${{ secrets.GH_RAD_CI_BOT_PAT }}"
+    );
+    expect(script).toContain("stateRegistryForEnvironment");
+    expect(script).toContain(
+      '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
+    );
+    expect(script).toContain(
+      '[[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]'
+    );
+    expect(script).toContain(
+      'GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"'
+    );
+  });
+
+  it("sweeps every GHCR state package the fixture wrote", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const orphanCleanup = purge.find(
+      (step) => step.name === "Purge orphaned GHCR deployment state"
+    );
+    const script = orphanCleanup?.run ?? "";
+
+    expect(orphanCleanup).toBeDefined();
+    // A failed application delete is one of the ways state is orphaned, so
+    // gating recovery on it would skip exactly the runs that need it.
+    expect(orphanCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    // Enumerating environments is what made orphaned state unreachable.
+    expect(script).not.toContain("environments");
+    expect(orphanCleanup?.env?.GH_PACKAGES_TOKEN).toBe(
+      "${{ secrets.GH_RAD_CI_BOT_PAT }}"
+    );
+    expect(script).toContain("selectStaleStatePackages");
+    expect(script).toContain(
+      'package_prefix="${repository_name,,}-radius-state-"'
+    );
+    expect(script).toContain(
+      '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
+    );
+    expect(script).toContain(
+      '[[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]'
+    );
+    expect(script).toContain('cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago"');
+  });
+
+  it("reclaims leaked cluster workloads with credentials for the shared cluster", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const clusterCleanup = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name === "Reclaim leaked Radius workloads from the shared cluster"
+    );
+    const script = clusterCleanup?.run ?? "";
+
+    expect(clusterCleanup?.if).toContain(
+      "steps.azure-login.outcome == 'success'"
+    );
+    // A workload is stranded here precisely when that delete fails.
+    expect(clusterCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    expect(script).toContain('cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago"');
+    expect(clusterCleanup?.env?.FIXTURE_APPLICATION).toBe(
+      "${{ steps.pin.outputs.fixture-application }}"
+    );
+    expect(clusterCleanup?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(clusterCleanup?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(script).toContain("az aks get-credentials");
+    expect(script).toContain("--selector radapp.io/environment");
+    expect(script).toContain("selectLeakedClusterWorkloads");
+    expect(script).toContain('kubectl delete "${kind,,}/$name"');
+  });
+
+  it("empties the shared resource group of everything but the cluster", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const groupCleanup = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name ===
+        "Reclaim Azure resources left in the shared resource group"
+    );
+    const script = groupCleanup?.run ?? "";
+
+    expect(groupCleanup?.if).toContain(
+      "steps.azure-login.outcome == 'success'"
+    );
+    // A recipe-created resource is stranded here precisely when that fails.
+    expect(groupCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    expect(groupCleanup?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(groupCleanup?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(script).toContain("az resource list \\");
+    expect(script).toContain("selectReclaimableGroupResources");
+    expect(script).toContain('az resource delete --ids "$id"');
+    // Nothing here is tagged, so age cannot be what qualifies a resource.
+    expect(script).not.toContain("MAX_AGE_HOURS");
+  });
+
+  it("removes only allowlisted assignments before deleting leaked service principals", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge).find((step) =>
+      step.run?.includes("selectExpectedRoleAssignments")
+    );
+    const script = purge?.run ?? "";
+
+    expect(purge?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(purge?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(script).toContain("selectExpectedRoleAssignments");
+    expect(script).toContain(
+      'roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin"'
+    );
+    expect(script).toContain(
+      'az role assignment delete --ids "$assignment_id"'
+    );
+    expect(script.indexOf("az role assignment delete")).toBeLessThan(
+      script.indexOf("az ad sp delete")
+    );
+    expect(script).toContain("assignment_failure");
+    expect(script).toContain("blocked-application-ids.txt");
+    expect(script).toContain(
+      "preserve application $id because service principal cleanup"
+    );
+    // Deleting an application cascade-deletes its principal, so a principal the
+    // age filter never selected must block its parent rather than ride along.
+    expect(script).toContain("selectAppIdsWithUnprocessedServicePrincipals");
+    expect(script).toContain(
+      "preserve appId $unprocessed_app_id because a matching service principal was not a deletion candidate"
+    );
   });
 
   it("deletes tagged resource groups the suite creates without waiting for age", async () => {
@@ -430,11 +631,17 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(purge?.env?.RESOURCE_GROUP_PREFIX).toBe(
       "${{ steps.pin.outputs.resource-group-prefix }}"
     );
+    expect(purge?.env?.SHARED_RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
     expect(purge?.env?.GH_TOKEN).toBe("${{ github.token }}");
     expect(purge?.env?.SUBSCRIPTION_ID).toBe(
       "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
     );
     expect(script).toContain("starts_with(name, '$RESOURCE_GROUP_PREFIX')");
+    expect(script).toContain(
+      "selectTestResourceGroups(groups, prefix, sharedResourceGroup)"
+    );
     expect(script).toContain('--subscription "$SUBSCRIPTION_ID"');
     expect(script).not.toContain("MAX_AGE_HOURS hours ago");
     expect(script).toContain("gh run view");
@@ -493,9 +700,66 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     expect(script).toContain("changed before release");
     expect(script).toContain('gh api -X DELETE "$lease_write_path"');
+    // lastIndexOf, not indexOf: the failure-path trap defined at the top of the
+    // script also releases the lease, so the final occurrence is the normal
+    // release that must follow the branch reset.
     expect(script.indexOf("gh api -X PATCH")).toBeLessThan(
-      script.indexOf('gh api -X DELETE "$lease_write_path"')
+      script.lastIndexOf('gh api -X DELETE "$lease_write_path"')
     );
+  });
+
+  it("survives a read-after-write lag instead of dying while holding the lease", async () => {
+    // A ref read issued immediately after creating that ref can 404 on a stale
+    // replica. Under `set -e` an unretried read aborts the step between
+    // acquiring and releasing the mutex, so the lease outlives the run and
+    // every Cloud E2E run fails until the next scheduled cleanup reclaims it.
+    //
+    // These are structural assertions only: they pin the wiring in place but
+    // cannot tell a working retry from a broken one. The behavior itself is
+    // executed against stubbed `gh`/`node`/`sleep` in
+    // build/scripts/cloud-e2e-lease_test.sh, which is what actually fails when
+    // one of these paths regresses.
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const reset = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name === "Reset the fixture default branch under the shared lease"
+    );
+    const script = reset?.run ?? "";
+
+    expect(script).toContain("read_lease_sha()");
+    // Both post-write verifications must go through the retry, never a bare read.
+    expect(script).not.toContain(
+      'verify_lease_sha="$(gh api "$lease_read_path" --jq .object.sha)"'
+    );
+    expect(
+      script.match(/verify_lease_sha="\$\(read_lease_sha\)"/g)?.length
+    ).toBe(2);
+
+    // Failing anywhere while holding the lease must still release it. Anchored
+    // so a commented-out trap cannot satisfy the assertion.
+    expect(script).toMatch(/^\s*trap release_orphaned_lease EXIT\s*$/m);
+    expect(script).toContain(
+      "Released $LEASE_REF after cleanup failed while holding it."
+    );
+    // Both acquisition paths - reclaiming an abandoned lease and creating a new
+    // one - must mark ownership, or the trap silently skips the release.
+    expect(script.match(/^\s*lease_held_by_us=1\s*$/gm)?.length).toBe(2);
+    // The release must stay guarded so a concurrent owner is never deleted.
+    expect(script).toContain('"$current" != "$held_lease_sha"');
+    // A create that reports failure may still have landed. Ownership is settled
+    // by comparing the ref against this run's own lease commit, never by the
+    // mere existence of a ref.
+    expect(script).toContain('"$created_lease_sha" != "$held_lease_sha"');
+  });
+
+  it("runs the lease behavior suite in CI", async () => {
+    // The structural assertions above are only a tripwire; the executable
+    // coverage lives in a shell suite. If it stops being wired into a workflow
+    // it stops running, and nothing else would notice.
+    const selftests = await readWorkflow("extension-selftests.yml");
+
+    expect(selftests).toContain("build/scripts/cloud-e2e-lease_test.sh");
+    expect(selftests).toContain("build/scripts/cloud-e2e-lease*.sh");
   });
 
   it("matches environments by the prefix the suite actually applies", async () => {
@@ -617,5 +881,50 @@ describe("cloud-e2e-cleanup.yml", () => {
     const raw = await readWorkflow(CLEANUP_WORKFLOW);
     expect(raw).toContain("AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY");
     expect(raw).toContain("Refusing to purge against an ambiguous scope");
+  });
+});
+
+describe.each(WORKFLOWS)("%s - shell scripts parse", (file) => {
+  it("terminates every heredoc at column zero", async () => {
+    // `<<'TAG'` requires the terminator to start at column 0 of the script.
+    // YAML block scalars strip only the block's base indentation, so a
+    // terminator indented to match the surrounding bash nesting survives review
+    // and passes YAML and actionlint, then makes bash swallow the rest of the
+    // script as heredoc body: "unexpected EOF". The step cannot run at all, and
+    // nothing before this test caught it - a purge step shipped broken and
+    // silently stopped reclaiming leaked cloud state.
+    const workflow = await parseWorkflow(file);
+    const offenders: string[] = [];
+
+    for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+      for (const step of steps(job)) {
+        if (typeof step.run !== "string") continue;
+        const lines = step.run.split("\n");
+
+        lines.forEach((line, index) => {
+          // `<<-` is excluded deliberately: it strips leading tabs, so an
+          // indented terminator is legal there.
+          const opened = /<<'([A-Za-z_][A-Za-z0-9_]*)'/.exec(line);
+          if (!opened || line.includes("<<-")) return;
+          const tag = opened[1];
+          const nextOpen = lines.findIndex(
+            (candidate, candidateIndex) =>
+              candidateIndex > index &&
+              /<<'([A-Za-z_][A-Za-z0-9_]*)'/.test(candidate) &&
+              !candidate.includes("<<-")
+          );
+          const terminated = lines
+            .slice(index + 1, nextOpen === -1 ? undefined : nextOpen)
+            .some((candidate) => candidate === tag);
+          if (!terminated) {
+            offenders.push(
+              `${file} ${jobName} > ${step.name ?? "(unnamed)"}: <<'${tag}' opened on script line ${index + 1}`
+            );
+          }
+        });
+      }
+    }
+
+    expect(offenders).toEqual([]);
   });
 });

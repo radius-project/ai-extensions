@@ -494,7 +494,6 @@ describe("findEnvironmentIdentityProblems", () => {
     subscriptionId: "sub-1",
     resourceGroup: "radtest-canvas-abc",
     cluster: "aks-abc",
-    location: "westus3",
     namespace: "default"
   };
   const complete = (clientId: string): ReadonlyMap<string, string> =>
@@ -504,7 +503,6 @@ describe("findEnvironmentIdentityProblems", () => {
       ["AZURE_SUBSCRIPTION_ID", expected.subscriptionId],
       ["AZURE_RESOURCE_GROUP", expected.resourceGroup],
       ["AZURE_AKS_CLUSTER_NAME", expected.cluster],
-      ["AZURE_LOCATION", expected.location],
       ["KUBERNETES_NAMESPACE", expected.namespace]
     ]);
 
@@ -580,8 +578,7 @@ describe("findEnvironmentIdentityProblems", () => {
         ["AZURE_CLIENT_ID", "app-1"],
         ["AZURE_TENANT_ID", "other-tenant"],
         ["AZURE_SUBSCRIPTION_ID", expected.subscriptionId],
-        ["AZURE_RESOURCE_GROUP", "someone-elses-group"],
-        ["AZURE_LOCATION", "eastus"]
+        ["AZURE_RESOURCE_GROUP", "someone-elses-group"]
       ]),
       createdAppId: "app-1",
       expected
@@ -590,7 +587,6 @@ describe("findEnvironmentIdentityProblems", () => {
       'AZURE_TENANT_ID is "other-tenant"; expected "tenant-1".',
       'AZURE_RESOURCE_GROUP is "someone-elses-group"; expected "radtest-canvas-abc".',
       'AZURE_AKS_CLUSTER_NAME is absent; expected "aks-abc".',
-      'AZURE_LOCATION is "eastus"; expected "westus3".',
       'KUBERNETES_NAMESPACE is absent; expected "default".'
     ]);
   });

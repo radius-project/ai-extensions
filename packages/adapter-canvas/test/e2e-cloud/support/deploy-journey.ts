@@ -52,10 +52,12 @@ export const DELETE_ENVIRONMENT_WORKFLOW = DELETE_ENV_DISPATCHER_FILE;
 /** Every workflow the complete lifecycle requires before its first dispatch. */
 export const REQUIRED_LIFECYCLE_WORKFLOWS: readonly string[] = [
   ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
-  ...REQUIRED_DEPLOY_WORKFLOWS,
-  ...REQUIRED_DELETE_WORKFLOWS,
-  DELETE_ENV_DISPATCHER_FILE,
-  DELETE_ENV_AZURE_FILE
+  ...[
+    ...REQUIRED_DEPLOY_WORKFLOWS,
+    ...REQUIRED_DELETE_WORKFLOWS,
+    DELETE_ENV_DISPATCHER_FILE,
+    DELETE_ENV_AZURE_FILE
+  ].map((file) => `.github/workflows/${file}`)
 ];
 
 /**
@@ -81,7 +83,6 @@ export const REQUIRED_ENVIRONMENT_VARIABLES: readonly string[] = [
   "AZURE_SUBSCRIPTION_ID",
   "AZURE_RESOURCE_GROUP",
   "AZURE_AKS_CLUSTER_NAME",
-  "AZURE_LOCATION",
   "KUBERNETES_NAMESPACE",
   ...REQUIRED_STATE_VARIABLES
 ];
@@ -416,30 +417,82 @@ export function classifyDeploymentPresence(
 }
 
 /**
- * The Kubernetes namespace Radius renders an application into.
+ * A probe that survives the transient failures the canvas itself survives.
  *
- * `<environment namespace>-<application name>`, normalized, from
- * `pkg/corerp/frontend/controller/applications/updatefilter.go`. Computing it
- * here rather than reading it back from the product keeps the assertion
- * independent: a product that reported the wrong namespace would otherwise be
- * checked against its own mistake.
+ * `/api/list-deployments` fans out over `gh`, and a deployment record exists
+ * for a few seconds before GitHub attaches its first status — long enough for
+ * the endpoint to answer with an `error` the resolver cannot attribute to a
+ * workflow. The canvas client treats that answer as "stale, retry" and keeps
+ * the rows it already has, so a journey that fails on the first one is
+ * stricter than the product it is testing.
+ *
+ * `read` reports an unreadable answer as `undefined`, which no assertion
+ * matches, so polling continues. `explain` then puts the last failure back into
+ * a timeout, so a *persistent* error still fails with its own diagnostic rather
+ * than as an unexplained timeout.
  */
-export function applicationNamespace(
-  environmentNamespace: string,
-  application: string
-): string {
-  const environmentPart = requireName(
+export interface TolerantProbe<T> {
+  readonly read: () => Promise<T | undefined>;
+  readonly lastFailure: () => string;
+  readonly explain: (error: unknown) => unknown;
+}
+
+export function createTolerantProbe<T>(
+  probe: () => Promise<T>
+): TolerantProbe<T> {
+  let failure = "";
+  return {
+    read: async () => {
+      try {
+        const value = await probe();
+        failure = "";
+        return value;
+      } catch (error) {
+        failure = describeProbeFailure(error);
+        return undefined;
+      }
+    },
+    lastFailure: () => failure,
+    explain: (error) =>
+      failure ?
+        new Error(
+          `${describeProbeFailure(error)}\n  The last attempt failed with: ${failure}`,
+          { cause: error }
+        )
+      : error
+  };
+}
+
+function describeProbeFailure(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The Kubernetes namespace Radius renders an application's workloads into.
+ *
+ * The fixture declares only `Radius.*` resource types, which are rendered by
+ * recipes rather than by the legacy `Applications.Core` renderer. A recipe
+ * writes its Kubernetes objects into `context.runtime.kubernetes.namespace`,
+ * which is the environment namespace the user chose, so that namespace is what
+ * the journey polls. Radius still reserves `<environment>-<application>` for
+ * the application, but nothing is rendered into it, so asserting there would
+ * both fail a healthy deploy and pass a delete that removed nothing.
+ *
+ * Every assertion is additionally scoped by `radapp.io/application`, so sharing
+ * the namespace with unrelated workloads cannot make one application's
+ * assertion pass on another's resources.
+ */
+export function deploymentNamespace(environmentNamespace: string): string {
+  const namespace = requireName(
     environmentNamespace,
     "environment namespace"
-  );
-  const applicationPart = requireName(application, "application name");
-  const namespace = `${environmentPart}-${applicationPart}`.toLowerCase();
-  // Kubernetes rejects a namespace longer than 63 characters outright, so a
-  // long application name is a deploy that never happens rather than one this
+  ).toLowerCase();
+  // Kubernetes rejects a namespace longer than 63 characters outright, so an
+  // over-long namespace is a deploy that never happens rather than one this
   // journey should sit and poll for.
   if (namespace.length > 63)
     throw new Error(
-      `The application namespace "${namespace}" is ${namespace.length} characters; Kubernetes rejects ` +
+      `The deployment namespace "${namespace}" is ${namespace.length} characters; Kubernetes rejects ` +
         "anything longer than 63, so Radius could never have created it."
     );
   return namespace;
@@ -453,7 +506,50 @@ export function radiusApplicationSelector(application: string): string {
   ).toLowerCase()}`;
 }
 
+/**
+ * The Kubernetes kinds Radius renders for an application.
+ *
+ * Presence and absence are asserted over the same set on purpose. Listing
+ * fewer kinds on the delete side would let a delete that removed the Deployment
+ * but stranded its Service or autoscaler report success, and cleanup already
+ * reclaims all of them - so the assertion would be weaker than the sweep that
+ * backs it.
+ */
+export const RADIUS_WORKLOAD_KINDS = [
+  "deployments",
+  "statefulsets",
+  "daemonsets",
+  "services",
+  "horizontalpodautoscalers"
+] as const;
+
+/** The `kubectl get` argument covering every rendered kind. */
+export const RADIUS_WORKLOAD_RESOURCES = RADIUS_WORKLOAD_KINDS.join(",");
+
+/**
+ * The same set plus pods, for asserting a delete removed everything.
+ *
+ * A pod outliving its owner is a delete that half-finished, which is exactly
+ * what the absence assertion exists to catch.
+ */
+export const RADIUS_RENDERED_RESOURCES = [
+  ...RADIUS_WORKLOAD_KINDS,
+  "pods"
+].join(",");
+
+// A Service or autoscaler has no replicas to become available, so readiness
+// for those kinds is existence. Treating them as replica-bearing would fail a
+// healthy deploy; an unrecognized kind stays replica-bearing so a new rendered
+// kind is asserted rather than waved through.
+const NON_REPLICA_KINDS = new Set([
+  "Service",
+  "HorizontalPodAutoscaler",
+  "Secret",
+  "ConfigMap"
+]);
+
 export interface KubernetesWorkload {
+  readonly kind: string;
   readonly name: string;
   readonly application: string;
   readonly desiredReplicas: number;
@@ -463,6 +559,7 @@ export interface KubernetesWorkload {
 export function isKubernetesWorkloadReady(
   workload: KubernetesWorkload
 ): boolean {
+  if (NON_REPLICA_KINDS.has(workload.kind)) return true;
   return (
     workload.desiredReplicas > 0 &&
     workload.availableReplicas >= workload.desiredReplicas
@@ -470,11 +567,15 @@ export function isKubernetesWorkloadReady(
 }
 
 /**
- * Narrows `kubectl get deployments -o json`.
+ * Narrows `kubectl get <kinds> -o json`.
  *
  * A malformed body throws. Reading it as "no workloads" would make stage two
  * report a failed deploy and stage three report a successful delete, from the
  * very same unreadable answer.
+ *
+ * A DaemonSet carries its counts on `status` rather than `spec.replicas`, so
+ * its own fields are read; otherwise it would look like a workload desiring
+ * zero replicas and never be asserted at all.
  */
 export function readKubernetesWorkloads(
   payload: unknown
@@ -500,11 +601,18 @@ export function readKubernetesWorkloads(
     const application = labels?.[RADIUS_APPLICATION_LABEL];
     const spec = asRecord(item.spec);
     const status = asRecord(item.status);
+    const kind = typeof item.kind === "string" ? item.kind.trim() : "";
+    const daemonSet = kind === "DaemonSet";
     return {
+      kind,
       name: name.trim(),
       application: typeof application === "string" ? application : "",
-      desiredReplicas: countOf(spec?.replicas),
-      availableReplicas: countOf(status?.availableReplicas)
+      desiredReplicas: countOf(
+        daemonSet ? status?.desiredNumberScheduled : spec?.replicas
+      ),
+      availableReplicas: countOf(
+        daemonSet ? status?.numberAvailable : status?.availableReplicas
+      )
     };
   });
 }

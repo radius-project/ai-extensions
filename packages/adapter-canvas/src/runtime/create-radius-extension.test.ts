@@ -412,7 +412,7 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
       appBicepHandoffPrompt("acme/widgets", "graph", ["main"], "app-graph", {
         attemptToken,
         instanceId: "app-graph",
-        branch: "main"
+        branches: ["main"]
       })
     );
     // ...and the timeline half must be the short stand-in, not the reverse.

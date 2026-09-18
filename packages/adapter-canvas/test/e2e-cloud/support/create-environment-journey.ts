@@ -392,7 +392,6 @@ export interface EnvironmentVariableExpectation {
   readonly subscriptionId: string;
   readonly resourceGroup: string;
   readonly cluster: string;
-  readonly location: string;
   readonly namespace: string;
 }
 
@@ -444,7 +443,6 @@ export function findEnvironmentIdentityProblems(
     ["AZURE_SUBSCRIPTION_ID", input.expected.subscriptionId, false],
     ["AZURE_RESOURCE_GROUP", input.expected.resourceGroup, false],
     ["AZURE_AKS_CLUSTER_NAME", input.expected.cluster, true],
-    ["AZURE_LOCATION", input.expected.location, false],
     ["KUBERNETES_NAMESPACE", input.expected.namespace, true]
   ] as const) {
     const actual = input.variables.get(name);

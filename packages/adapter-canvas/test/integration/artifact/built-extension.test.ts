@@ -71,6 +71,8 @@ const SOURCE_REF = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: REPO_ROOT,
   encoding: "utf8"
 }).trim();
+const LITERAL_CREDENTIAL_ASSIGNMENT =
+  /^\s*(?:[A-Za-z][A-Za-z0-9]*_)*(?:access_?key|api_?key|client_?secret|connection_?string|password|passwd|secret_?key|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu;
 // Independent reviewed oracle: unlike importing the live declaration builders,
 // this fixture changes only when a contract update is deliberately accepted.
 const EXPECTED_REGISTRATION = JSON.parse(
@@ -217,6 +219,64 @@ function assertCurrentArtifact(): void {
     );
   }
 }
+
+describe("packaged Bicep literal credential detector", () => {
+  it.each([
+    "PASSWORD",
+    "PASSWD",
+    "TOKEN",
+    "API_KEY",
+    "APP_API_KEY",
+    "CLIENT_SECRET",
+    "CONNECTION_STRING",
+    "SECRET_KEY",
+    "ACCESS_KEY",
+    "MYSQL_PASSWORD",
+    "accessKey",
+    "apiKey",
+    "clientSecret",
+    "connectionString",
+    "password",
+    "secretKey",
+    "token"
+  ])("rejects literal assignments to %s with optional prefixes", (key) => {
+    for (const prefix of ["", "APP_", "APP_V2_"]) {
+      for (const value of [
+        "'unsafe-example'",
+        '"unsafe-example"',
+        "{ value: 'unsafe-example' }",
+        '{\n  value: "unsafe-example"\n}'
+      ]) {
+        expect(`  ${prefix}${key}: ${value}`).toMatch(
+          LITERAL_CREDENTIAL_ASSIGNMENT
+        );
+      }
+      expect(`${prefix}${key}: { value: credentialParameter }`).not.toMatch(
+        LITERAL_CREDENTIAL_ASSIGNMENT
+      );
+      expect(
+        `${prefix}${key}: { valueFrom: { secretKeyRef: { secretName: credentials.name, key: 'credential' } } }`
+      ).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
+    }
+  });
+
+  it.each([
+    "APP_PASSWORD_POLICY",
+    "APP_API_KEY_NAME",
+    "CLIENT_SECRET_FILE",
+    "CONNECTION_STRING_FORMAT",
+    "SECRET_KEY_ROTATION",
+    "ACCESS_KEY_ID",
+    "TOKEN_EXPIRY",
+    "PASSWD_LENGTH",
+    "NOTPASSWORD"
+  ])("allows noncredential configuration key %s", (key) => {
+    expect(`${key}: 'strict'`).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
+    expect(`${key}: { value: 'strict' }`).not.toMatch(
+      LITERAL_CREDENTIAL_ASSIGNMENT
+    );
+  });
+});
 
 describe("P0-C built Radius extension artifact", () => {
   let smoke: ArtifactSmokeResult;
@@ -672,17 +732,9 @@ describe("P0-C built Radius extension artifact", () => {
       );
     }
 
-    const literalCredentialAssignment =
-      /^\s*(?:[A-Za-z][A-Za-z0-9]*_)*(?:accessKey|apiKey|clientSecret|connectionString|password|secretKey|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu;
-    expect("MYSQL_PASSWORD: { value: 'unsafe-example' }").toMatch(
-      literalCredentialAssignment
-    );
-    expect("APP_PASSWORD_POLICY: { value: 'strict' }").not.toMatch(
-      literalCredentialAssignment
-    );
     expect(bicepBlocks.length).toBeGreaterThan(0);
     for (const block of bicepBlocks) {
-      expect(block).not.toMatch(literalCredentialAssignment);
+      expect(block).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
     }
   });
 
@@ -709,6 +761,42 @@ describe("P0-C built Radius extension artifact", () => {
       );
       expect(guidance).toMatch(/never search.*PATH.*\.rad\/bin.*fallback/isu);
     }
+  });
+
+  it("packages the Bicep checker exit-code contract", () => {
+    assertCurrentArtifact();
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+    const exitTwoRow = skillGuidance
+      .split(/\r?\n/u)
+      .find((line) => line.startsWith("| `2`"));
+
+    expect(skillGuidance).toContain(
+      "Only exit `1` permits a model edit in response to checker output."
+    );
+    expect(exitTwoRow).toContain(
+      'node "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"'
+    );
+    expect(exitTwoRow).toContain(
+      "report the exact checker failure, and state that no application model was written."
+    );
+    expect(exitTwoRow).toContain(
+      "Do not edit the model based on this result, write `app.origin.json`, publish, or claim that the model compiled."
+    );
+    expect(skillGuidance).toContain(
+      "These codes apply only to `validate-bicep.mjs`."
+    );
+    expect(skillGuidance).toContain(
+      "counting reserved validation attempts in that run's `run.json`"
+    );
+    expect(skillGuidance).toContain(
+      "An unavailable check still consumes its reserved attempt."
+    );
+    expect(skillGuidance).toContain(
+      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" <staging-dir>/app.bicep'
+    );
+    expect(skillGuidance).not.toContain(
+      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep'
+    );
   });
 
   it("packages the schema-sensitivity credential contract, not a property-name rule", () => {
