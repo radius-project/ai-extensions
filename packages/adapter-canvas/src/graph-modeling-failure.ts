@@ -62,10 +62,19 @@ export function graphModelingFailureMessage(diagnostic: string): string {
     .find((candidate) => /\bBCP\d{3}\b/u.test(candidate));
   if (!line) return GRAPH_MODELING_FAILURE_MESSAGE;
   const match =
-    /(?:^|[\\/])(?<file>[^\\/()[\]\r\n]+\.bicep)\((?<line>\d+)(?:,\d+)?\)\s*:\s*(?:Error|Warning)\s+BCP\d{3}:\s*(?<detail>.*?)(?:\s+\[https?:\/\/.*)?$/iu.exec(
+    /(?:^|[\\/])(?<file>[^\\/()[\]\r\n]+\.bicep)\((?<line>\d+)(?:,(?<column>\d+))?\)\s*:\s*(?:Error|Warning)\s+BCP\d{3}:\s*(?<detail>.*?)(?:\s+\[https?:\/\/.*)?$/iu.exec(
       line
     );
   if (!match?.groups) return GRAPH_MODELING_FAILURE_MESSAGE;
+  const lineNumber = Number(match.groups.line);
+  if (!Number.isSafeInteger(lineNumber) || lineNumber <= 0) {
+    return GRAPH_MODELING_FAILURE_MESSAGE;
+  }
   const detail = match.groups.detail.trim();
-  return `${GRAPH_MODELING_FAILURE_MESSAGE} ${match.groups.file} line ${match.groups.line}: ${detail}`;
+  const column = Number(match.groups.column);
+  const position =
+    Number.isSafeInteger(column) && column > 0 ?
+      `line ${match.groups.line}, column ${match.groups.column}`
+    : `line ${match.groups.line}`;
+  return `${GRAPH_MODELING_FAILURE_MESSAGE} ${match.groups.file} ${position}: ${detail}`;
 }
