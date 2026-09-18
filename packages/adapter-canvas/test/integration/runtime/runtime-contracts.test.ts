@@ -212,6 +212,15 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.hooks.onSessionStart({
       workingDirectory: "/worktrees/widgets"
     });
+    await harness.extension.hooks.onPostToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "graph", repo: "acme/widgets" }
+      },
+      workingDirectory: "/worktrees/widgets"
+    });
     const pullRequest = {
       toolName: "create_pull_request",
       toolArgs: { title: "Add cache", body: "" },
@@ -280,6 +289,31 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.shutdown("test");
   });
 
+  it("does not intercept a modeled worktree PR before an explicit Radius interaction", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: true,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const result = await harness.extension.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Fix typo", body: "Summary" },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    expect(result).toBeUndefined();
+    expect(harness.deps.github.getDefaultBranch).not.toHaveBeenCalled();
+    expect(harness.session.rpc.canvas.open).not.toHaveBeenCalled();
+    await harness.extension.shutdown("test");
+  });
+
   it("activates PR graph diffs after first-time modeling in the same session", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
@@ -293,13 +327,21 @@ describe("P0-A Radius runtime registration contract", () => {
     });
     const hasModel = harness.deps.workspace
       .hasRadiusApplicationModel as ReturnType<typeof vi.fn>;
-    hasModel.mockResolvedValueOnce(false).mockResolvedValue(true);
+    hasModel
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
 
     await expect(
       harness.extension.hooks.onSessionStart({
         workingDirectory: "/worktrees/new-app"
       })
     ).resolves.toBeUndefined();
+    await harness.extension.hooks.onPostToolUse({
+      toolName: "radius_generate_app",
+      toolArgs: { repoPath: "/worktrees/new-app" },
+      workingDirectory: "/worktrees/new-app"
+    });
 
     const pullRequest = {
       toolName: "create_pull_request",

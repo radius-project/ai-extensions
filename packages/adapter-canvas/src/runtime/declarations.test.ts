@@ -221,7 +221,19 @@ describe("RU-03: tool declarations", () => {
     expect(decl.parameters.required).toEqual(["file", "target"]);
   });
 
-  describe("RU-19: automatic PR graph diff guidance", () => {
+  describe("RU-19: conditional PR graph diff guidance", () => {
+    it("limits generation to pull requests following an explicit Radius interaction", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "after an explicit Radius tool or Radius Canvas action"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "current repository contains a Radius app.bicep model"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Do not call radius_generate_pr_diff_markdown for unrelated pull requests"
+      );
+    });
+
     it("requires exact returned markdown only when a graph diff exists", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
         "If it returns a Mermaid application graph diff"

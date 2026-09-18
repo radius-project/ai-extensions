@@ -170,12 +170,13 @@ export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (can
 3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 In every example below, "<radius-instance>" means the existing Radius Canvas instanceId when one is open, or "${RADIUS_CANVAS_INSTANCE_ID}" only when none is open.
 
-IMPORTANT — Automatic PR Graph Diff: When a pull request is created (via create_pull_request tool or any PR creation action):
+IMPORTANT — Conditional PR Graph Diff: Only when a pull request is created after an explicit Radius tool or Radius Canvas action in this session, and the current repository contains a Radius app.bicep model:
 1. FIRST, call the radius_generate_pr_diff_markdown tool with the repo, base branch, and head branch.
 2. If it returns a Mermaid application graph diff diagram and summary, include the exact returned markdown at the TOP of the PR description/body (before any other content), and THEN open the Radius Canvas to the graph-diff page:
    open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph-diff", repo: "<current-repo>", baseBranch: "<pr-base-branch>", headBranch: "<pr-head-branch>" } })
    The PR description will show the app graph diff inline on GitHub, and the canvas provides the interactive version.
 3. If the call is denied, the graph is unavailable, branch resolution fails, or the tool reports an error, create the pull request without a graph diff section. Do not add a sentence to the PR body explaining why the graph is missing. Report the reason in chat, and do not open the graph-diff Canvas. This rule governs only the graph diff section; describe the change itself normally, including any Radius modeling changes.
+Do not call radius_generate_pr_diff_markdown for unrelated pull requests that were not preceded by an explicit Radius interaction in this session.
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
