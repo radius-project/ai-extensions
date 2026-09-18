@@ -55,20 +55,36 @@ function graphDiff(
   };
 }
 
+async function observeRadiusInteraction(
+  guard: ReturnType<typeof createPullRequestGraphDiffGuard>
+) {
+  await guard.onPostToolUse({
+    toolName: "open_canvas",
+    toolArgs: { canvasId: "radius", input: { page: "graph" } },
+    workingDirectory: "/worktrees/widgets"
+  });
+}
+
 describe("pull request application graph diff guard", () => {
-  it("activates at startup only when the worktree contains a Radius model", async () => {
+  it("reports a startup model without activating pull request interception", async () => {
     const enabled = setup(true);
     const unrelated = setup();
 
     await expect(
-      enabled.guard.activateAtSessionStart("/worktrees/widgets")
+      enabled.guard.inspectAtSessionStart("/worktrees/widgets")
     ).resolves.toBe(true);
     await expect(
-      unrelated.guard.activateAtSessionStart("/worktrees/unrelated")
+      unrelated.guard.inspectAtSessionStart("/worktrees/unrelated")
     ).resolves.toBe(false);
     await expect(
-      unrelated.guard.activateAtSessionStart(undefined)
+      unrelated.guard.inspectAtSessionStart(undefined)
     ).resolves.toBe(false);
+    await expect(
+      enabled.guard.onPreToolUse(pullRequest())
+    ).resolves.toBeUndefined();
+    expect(
+      enabled.deps.hasRadiusApplicationModel
+    ).toHaveBeenCalledExactlyOnceWith("/worktrees/widgets");
   });
 
   it("does not inspect or block pull requests in unrelated worktrees", async () => {
@@ -81,7 +97,8 @@ describe("pull request application graph diff guard", () => {
 
   it("does not inherit a modeled worktree when a later hook omits its directory", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await guard.inspectAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
 
     await expect(
       guard.onPreToolUse({
@@ -92,9 +109,32 @@ describe("pull request application graph diff guard", () => {
     expect(deps.workspaceContext).not.toHaveBeenCalled();
   });
 
-  it("detects a model created after startup and requires a matching graph diff", async () => {
+  it("does not intercept a PR in a different worktree after an interaction elsewhere", async () => {
+    const { guard, deps } = setup(true);
+    await observeRadiusInteraction(guard);
+
+    await expect(
+      guard.onPreToolUse({
+        toolName: "create_pull_request",
+        toolArgs: { title: "Unrelated repo", body: "" },
+        workingDirectory: "/worktrees/other-repo"
+      })
+    ).resolves.toBeUndefined();
+    expect(deps.workspaceContext).not.toHaveBeenCalled();
+
+    await expect(guard.onPreToolUse(pullRequest())).resolves.toMatchObject({
+      permissionDecision: "deny"
+    });
+  });
+
+  it("requires a graph diff when a model appears after an explicit Radius interaction", async () => {
     const { guard, deps, setModeled } = setup();
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await guard.inspectAtSessionStart("/worktrees/widgets");
+    await guard.onPostToolUse({
+      toolName: "radius_generate_app",
+      toolArgs: { repoPath: "/worktrees/widgets" },
+      workingDirectory: "/worktrees/widgets"
+    });
     setModeled(true);
 
     const result = await guard.onPreToolUse(pullRequest());
@@ -110,7 +150,7 @@ describe("pull request application graph diff guard", () => {
 
   it("uses explicit repository and branch arguments when a PR tool supplies them", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
 
     const result = await guard.onPreToolUse({
       toolName: "github/create_pull_request",
@@ -131,7 +171,7 @@ describe("pull request application graph diff guard", () => {
 
   it("allows the PR without a graph when model verification fails", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
     deps.hasRadiusApplicationModel.mockRejectedValueOnce(
       new Error("filesystem unavailable")
     );
@@ -143,18 +183,19 @@ describe("pull request application graph diff guard", () => {
     expect(result?.additionalContext).toContain("without a graph diff section");
   });
 
-  it("does not activate an unrelated session when model verification fails", async () => {
+  it("does not inspect the model for a PR before a Radius interaction", async () => {
     const { guard, deps } = setup();
     deps.hasRadiusApplicationModel.mockRejectedValueOnce(
       new Error("filesystem unavailable")
     );
 
     await expect(guard.onPreToolUse(pullRequest())).resolves.toBeUndefined();
+    expect(deps.hasRadiusApplicationModel).not.toHaveBeenCalled();
   });
 
   it("allows the PR without a graph when identity lookup is unavailable", async () => {
     const unresolved = setup(true);
-    await unresolved.guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(unresolved.guard);
     unresolved.deps.workspaceContext.mockResolvedValueOnce({
       repo: "",
       branch: ""
@@ -168,7 +209,7 @@ describe("pull request application graph diff guard", () => {
     );
 
     const failed = setup(true);
-    await failed.guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(failed.guard);
     failed.deps.workspaceContext.mockRejectedValueOnce(
       new Error("git unavailable")
     );
@@ -178,9 +219,7 @@ describe("pull request application graph diff guard", () => {
     expect(error?.additionalContext).toContain("git unavailable");
 
     const defaultBranchFailed = setup(true);
-    await defaultBranchFailed.guard.activateAtSessionStart(
-      "/worktrees/widgets"
-    );
+    await observeRadiusInteraction(defaultBranchFailed.guard);
     defaultBranchFailed.deps.getDefaultBranch.mockRejectedValueOnce(
       new Error("GitHub rate limited")
     );
@@ -193,7 +232,7 @@ describe("pull request application graph diff guard", () => {
 
   it("allows a PR without a graph after an explicit unavailable result", async () => {
     const { guard } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
 
     await guard.onPostToolUse(
       graphDiff(unavailableGraphDiffResult("No committed model"))
@@ -206,7 +245,7 @@ describe("pull request application graph diff guard", () => {
 
   it("requires a successful graph diff for the exact branch pair", async () => {
     const { guard } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
 
     await guard.onPostToolUse(
       graphDiff(successfulGraphDiffResult(MARKDOWN), {
@@ -221,7 +260,7 @@ describe("pull request application graph diff guard", () => {
 
   it("requires the exact generated markdown at the top of the PR body", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
     await guard.onPostToolUse(graphDiff());
 
     const result = await guard.onPreToolUse(
@@ -243,7 +282,7 @@ describe("pull request application graph diff guard", () => {
 
   it("allows the PR after graph generation fails", async () => {
     const { guard } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
     await guard.onPostToolUseFailure({
       toolName: "radius_generate_pr_diff_markdown",
       toolArgs: {
@@ -263,7 +302,7 @@ describe("pull request application graph diff guard", () => {
 
   it("stops denying when a graph tool call has no observable result", async () => {
     const { guard } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
 
     expect((await guard.onPreToolUse(pullRequest()))?.permissionDecision).toBe(
       "deny"
@@ -284,7 +323,7 @@ describe("pull request application graph diff guard", () => {
 
   it("retains unavailable outcomes across failed PR retries", async () => {
     const { guard } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
     await guard.onPostToolUse(
       graphDiff(unavailableGraphDiffResult("No committed model"))
     );
@@ -298,7 +337,7 @@ describe("pull request application graph diff guard", () => {
 
   it("opens the matching interactive diff after PR creation and consumes the proof", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
     await guard.onPostToolUse(graphDiff());
     const request = pullRequest(`${MARKDOWN}\nPR summary`);
     await guard.onPreToolUse(request);
@@ -316,7 +355,7 @@ describe("pull request application graph diff guard", () => {
 
   it("does not open a Canvas for a PR that did not pass the guard", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
 
     await expect(
       guard.onPostToolUse(pullRequest(MARKDOWN))
@@ -326,7 +365,7 @@ describe("pull request application graph diff guard", () => {
 
   it("does not open a Canvas when post-PR identity is incomplete", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
     deps.workspaceContext.mockResolvedValueOnce({ repo: "", branch: "" });
     deps.getDefaultBranch.mockResolvedValueOnce("");
 
@@ -338,7 +377,7 @@ describe("pull request application graph diff guard", () => {
 
   it("returns recovery guidance when the post-PR Canvas open fails", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
     await guard.onPostToolUse(graphDiff());
     const request = pullRequest(MARKDOWN);
     await guard.onPreToolUse(request);
@@ -381,12 +420,14 @@ describe("pull request application graph diff guard", () => {
     });
 
     expect(result?.additionalContext).toContain("disk offline");
-    expect(result?.additionalContext).toContain("remain inactive");
+    expect(result?.additionalContext).toContain(
+      "verify the model again before the next pull request"
+    );
   });
 
   it("reports PR identity lookup failures after creation", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
     deps.workspaceContext.mockRejectedValueOnce(new Error("git unavailable"));
 
     const result = await guard.onPostToolUse(pullRequest());
@@ -397,7 +438,7 @@ describe("pull request application graph diff guard", () => {
 
   it("bounds remembered diff proofs and pending PR opens", async () => {
     const { guard, deps } = setup(true);
-    await guard.activateAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
 
     for (let index = 0; index <= 20; index++) {
       const headBranch = `feature-${index}`;

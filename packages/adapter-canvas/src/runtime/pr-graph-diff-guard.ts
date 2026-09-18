@@ -56,7 +56,7 @@ interface GraphDiffAttempt extends PullRequestIdentity {
 }
 
 export interface PullRequestGraphDiffGuard {
-  activateAtSessionStart(workingDirectory: unknown): Promise<boolean>;
+  inspectAtSessionStart(workingDirectory: unknown): Promise<boolean>;
   onPreToolUse(
     input: ToolUseInput
   ): Promise<DeniedToolUse | ToolUseGuidance | undefined>;
@@ -173,11 +173,28 @@ function rememberBoundedSet(set: Set<string>, key: string): void {
 export function createPullRequestGraphDiffGuard(
   deps: PullRequestGraphDiffGuardDependencies
 ): PullRequestGraphDiffGuard {
-  let active = false;
+  // Keyed by workingDirectory rather than a single session-wide flag, so an
+  // explicit Radius interaction in one worktree does not cause PR
+  // interception to leak into an unrelated worktree/repo opened in the same
+  // session.
+  const radiusInteractionObservedIn = new Set<string>();
   const attempts = new Map<string, GraphDiffAttempt>();
   const requestedDiffs = new Set<string>();
   const pendingPullRequests = new Set<string>();
   const defaultBranches = new Map<string, string>();
+
+  function hasObservedInteraction(input: ToolUseInput): boolean {
+    const workspacePath = optionalString(input.workingDirectory);
+    return (
+      workspacePath !== "" && radiusInteractionObservedIn.has(workspacePath)
+    );
+  }
+
+  function markInteractionObserved(input: ToolUseInput): void {
+    const workspacePath = optionalString(input.workingDirectory);
+    if (!workspacePath) return;
+    rememberBoundedSet(radiusInteractionObservedIn, workspacePath);
+  }
 
   async function modelExists(input: ToolUseInput): Promise<boolean | null> {
     const workspacePath = optionalString(input.workingDirectory);
@@ -208,13 +225,12 @@ export function createPullRequestGraphDiffGuard(
     return { repo, baseBranch, headBranch };
   }
 
-  async function activateAtSessionStart(
+  async function inspectAtSessionStart(
     workingDirectoryInput: unknown
   ): Promise<boolean> {
     const workspacePath = optionalString(workingDirectoryInput);
     if (!workspacePath) return false;
-    active = await deps.hasRadiusApplicationModel(workspacePath);
-    return active;
+    return deps.hasRadiusApplicationModel(workspacePath);
   }
 
   async function onPreToolUse(
@@ -229,19 +245,18 @@ export function createPullRequestGraphDiffGuard(
     // This hook can enforce known PR tools. Shell commands such as
     // `gh pr create` are opaque to extensions and require a host-level PR hook.
     if (!isPullRequestCreationTool(input.toolName)) return undefined;
+    if (!hasObservedInteraction(input)) return undefined;
 
     let modeled: boolean | null;
     try {
       modeled = await modelExists(input);
     } catch (error) {
-      if (!active) return undefined;
       return unavailableGuidance(
         `Radius could not verify the current application model: ${errorMessage(error)}`
       );
     }
     if (modeled === null) return undefined;
-    active = modeled;
-    if (!active) return undefined;
+    if (!modeled) return undefined;
 
     let identity: PullRequestIdentity | null;
     try {
@@ -296,14 +311,14 @@ export function createPullRequestGraphDiffGuard(
   ): Promise<PostToolUseGuidance | undefined> {
     const attempt = graphDiffAttempt(input);
     if (attempt) {
-      active = true;
+      markInteractionObserved(input);
       rememberBounded(attempts, proofKey(attempt), attempt);
       requestedDiffs.delete(proofKey(attempt));
       return undefined;
     }
 
     if (isPullRequestCreationTool(input.toolName)) {
-      if (!active) return undefined;
+      if (!hasObservedInteraction(input)) return undefined;
       let identity: PullRequestIdentity | null;
       try {
         identity = await resolvePullRequestIdentity(input.toolArgs);
@@ -328,12 +343,12 @@ export function createPullRequestGraphDiffGuard(
     }
 
     if (isRadiusToolUse(input.toolName, input.toolArgs)) {
+      markInteractionObserved(input);
       try {
-        const modeled = await modelExists(input);
-        if (modeled !== null) active = modeled;
+        await modelExists(input);
       } catch (error) {
         return {
-          additionalContext: `Radius could not verify whether this explicit Radius operation activated the current session: ${errorMessage(error)}. The operation completed, but automatic application graph diffs will remain inactive until the model can be verified.`
+          additionalContext: `Radius could not verify the application model after this explicit Radius operation: ${errorMessage(error)}. The operation completed, and Radius will verify the model again before the next pull request.`
         };
       }
     }
@@ -349,7 +364,7 @@ export function createPullRequestGraphDiffGuard(
       optionalString(input.error) || "The graph-diff tool failed."
     );
     if (attempt) {
-      active = true;
+      markInteractionObserved(input);
       rememberBounded(attempts, proofKey(attempt), attempt);
       requestedDiffs.delete(proofKey(attempt));
     }
@@ -357,7 +372,7 @@ export function createPullRequestGraphDiffGuard(
   }
 
   return {
-    activateAtSessionStart,
+    inspectAtSessionStart,
     onPreToolUse,
     onPostToolUse,
     onPostToolUseFailure
