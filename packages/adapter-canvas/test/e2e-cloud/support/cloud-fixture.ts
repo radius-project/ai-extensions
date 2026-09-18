@@ -1409,8 +1409,65 @@ export async function createCloudFixture(
             "--output",
             "none"
           ]);
-          if (!isAzureResourceNotFound(deletion))
+          const notFound = isAzureResourceNotFound(deletion);
+          if (!notFound)
             expectSuccess(deletion, `az ad app delete ${app.objectId}`);
+          // Neither a zero exit nor a not-found is proof the object is gone.
+          // A run reported this step reclaimed while the app registration was
+          // still live and absent from Entra's deleted items, which wedged the
+          // next run's clean-slate check. Entra also deletes asynchronously,
+          // so confirm absence the same way the workload step does rather than
+          // trusting the command that claimed to have done it.
+          let survivors: readonly string[] = [app.appId];
+          await pollForValue({
+            ports,
+            timeoutMs: assertionTimeoutMs,
+            intervalMs: assertionPollIntervalMs,
+            probe: async () => {
+              const remaining = await listAppRegistrations(
+                commands,
+                expectedAppName
+              );
+              survivors = remaining
+                .filter((candidate) => candidate.objectId === app.objectId)
+                .map((candidate) => candidate.appId);
+              return survivors.length === 0 ? true : undefined;
+            },
+            timeoutMessage: () =>
+              `az ad app delete ${app.objectId} ` +
+              `${notFound ? "reported the app registration was already absent" : "succeeded"}, ` +
+              `but app registration ${survivors.join(", ")} was still listed after ${assertionTimeoutMs}ms.`
+          });
+        });
+      }
+
+      // Verified only after the app registrations are gone: deleting an
+      // application cascade-deletes its principal, so probing immediately
+      // after `az ad sp delete` would race that cascade and fail a reclaim
+      // that was about to succeed. An orphaned principal wedges every later
+      // clean-slate check, and `az ad sp delete` reports success without
+      // proving the object is gone, so confirm the end state here. Deliberate
+      // preservation is not a leak, so skip the check when anything was held
+      // back for recovery.
+      if (!preserveAllApplications && blockedApplicationIds.size === 0) {
+        let survivingPrincipals: readonly string[] = [];
+        await pollForValue({
+          ports,
+          timeoutMs: assertionTimeoutMs,
+          intervalMs: assertionPollIntervalMs,
+          probe: async () => {
+            survivingPrincipals = (
+              await listServicePrincipals(commands, expectedAppName)
+            ).map((principal) => principal.objectId);
+            return survivingPrincipals.length === 0 ? true : undefined;
+          },
+          timeoutMessage: () =>
+            `service principal(s) ${survivingPrincipals.join(", ")} for ${expectedAppName} ` +
+            `were still listed ${assertionTimeoutMs}ms after their application was deleted.`
+        }).catch((error: unknown) => {
+          failures.push(
+            `verify no service principal for ${expectedAppName} survives: ${describeError(error)}`
+          );
         });
       }
 

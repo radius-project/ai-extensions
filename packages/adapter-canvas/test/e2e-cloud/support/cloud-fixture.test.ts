@@ -192,6 +192,12 @@ function baselineStubs(): FakeCommandStub[] {
       respond: {}
     },
     { tool: "az", match: ["group", "create"], respond: {} },
+    // The reclaim re-lists both after deleting them, because neither `az ad
+    // app delete` nor `az ad sp delete` proves the object is gone. A scenario
+    // that wants the delete to land marks its own listing stub `times: 1` and
+    // falls through to these, which model the directory after the deletion.
+    { tool: "az", match: APP_LIST, respond: { stdout: "[]" } },
+    { tool: "az", match: SP_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: ["aks", "create"], respond: {} },
     { tool: "az", match: ["group", "delete"], respond: {} },
     { tool: "gh", match: ["repo", "clone"], respond: {} },
@@ -2689,7 +2695,8 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' },
+          times: 1
         },
         {
           tool: "az",
@@ -2698,7 +2705,8 @@ describe("createCloudFixture", () => {
             stdout: JSON.stringify([
               { appId: "app-1", id: "obj-1", displayName: APP_NAME }
             ])
-          }
+          },
+          times: 1
         },
         { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
         { tool: "az", match: ["ad", "app", "delete"], respond: {} },
@@ -2799,7 +2807,8 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' },
+          times: 1
         },
         {
           tool: "az",
@@ -2808,7 +2817,8 @@ describe("createCloudFixture", () => {
             stdout: JSON.stringify([
               { appId: "app-1", id: "obj-1", displayName: APP_NAME }
             ])
-          }
+          },
+          times: 1
         },
         {
           tool: "az",
@@ -2843,7 +2853,8 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"orphan-sp"}]' }
+          respond: { stdout: '[{"id":"orphan-sp"}]' },
+          times: 1
         },
         { tool: "az", match: ["ad", "sp", "delete"], respond: {} }
       ]);
@@ -2885,7 +2896,8 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: SP_LIST,
-            respond: { stdout: '[{"id":"sp-1"}]' }
+            respond: { stdout: '[{"id":"sp-1"}]' },
+            times: 1
           },
           {
             tool: "az",
@@ -3613,6 +3625,18 @@ describe("createCloudFixture", () => {
               { appId: "app-1", id: "obj-1", displayName: APP_NAME },
               { appId: "app-2", id: "obj-2", displayName: APP_NAME }
             ])
+          },
+          times: 1
+        },
+        // app-2's delete lands, so only the app whose delete was refused is
+        // still in the directory when the reclaim confirms the removal.
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
           }
         },
         {
@@ -3643,6 +3667,111 @@ describe("createCloudFixture", () => {
       expect(error.message).toContain(
         "Reclaimed before failing: app registration app-2."
       );
+    });
+
+    // A run reported this step reclaimed while the app registration was still
+    // live and not even in Entra's deleted items, which then wedged the next
+    // run at the clean-slate check.
+    it("fails when the app registration survives a delete that reported success", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            }
+          },
+          { tool: "az", match: ["ad", "app", "delete"], respond: {} }
+        ],
+        {},
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      const error = await captureError(fixture.reclaimLeakedProductArtifacts());
+
+      expect(error.message).toContain("app registration app-1");
+      expect(error.message).toContain("succeeded");
+      expect(error.message).toContain("still listed after 2000ms");
+    });
+
+    it("fails when a delete reporting the app was already absent leaves it listed", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            }
+          },
+          {
+            tool: "az",
+            match: ["ad", "app", "delete"],
+            respond: {
+              code: 1,
+              stderr:
+                "ERROR: Resource 'Application_obj-1' does not exist or one of its queried reference-property objects are not present."
+            }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      const error = await captureError(fixture.reclaimLeakedProductArtifacts());
+
+      expect(error.message).toContain(
+        "reported the app registration was already absent"
+      );
+      expect(error.message).toContain("still listed after 2000ms");
+    });
+
+    it("fails when a service principal outlives the application it belonged to", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: SP_LIST,
+            respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
+          },
+          { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: { stdout: "[]" }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      const error = await captureError(fixture.reclaimLeakedProductArtifacts());
+
+      expect(error.message).toContain(
+        "verify no service principal for radius-deploy-fixture-owner-fixture-repo survives"
+      );
+      expect(error.message).toContain("sp-1");
+    });
+
+    it("does not demand principal absence when an application was deliberately preserved", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: SP_LIST,
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
+        },
+        failing("az", ["ad", "sp", "delete"], "Insufficient privileges")
+      ]);
+
+      const error = await captureError(fixture.reclaimLeakedProductArtifacts());
+
+      expect(error.message).toContain("Insufficient privileges");
+      expect(error.message).not.toContain("verify no service principal");
     });
 
     it("records a failing app registration listing without abandoning the rest", async () => {
