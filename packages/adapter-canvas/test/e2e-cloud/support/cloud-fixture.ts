@@ -1471,6 +1471,12 @@ export async function createCloudFixture(
         });
       }
 
+      // A deployment record names the environment it deployed to, but outlives
+      // it. Deleting the environment while its records are still present
+      // strands them behind a name nothing will ever match again, so track
+      // whether this step actually cleared them and hold the environment back
+      // if it did not.
+      const failureCountBeforeDeploymentRecords = failures.length;
       const deploymentRecords = await listDeploymentRecordIds(
         commands,
         repository,
@@ -1513,28 +1519,36 @@ export async function createCloudFixture(
           }
         );
 
-      const environment = await commands.runGh([
-        "api",
-        `repos/${repository}/environments/${environmentName}`
-      ]);
-      if (environment.code === 0)
-        await attempt(`GitHub environment ${environmentName}`, async () => {
-          expectSuccess(
-            await commands.runGh([
-              "api",
-              "--method",
-              "DELETE",
-              `repos/${repository}/environments/${environmentName}`
-            ]),
-            `gh api DELETE environments/${environmentName}`
-          );
-        });
-      else if (!isGitHubApiNotFound(environment))
+      if (failures.length !== failureCountBeforeDeploymentRecords)
         failures.push(
-          `probe GitHub environment ${environmentName}: gh exited ${environment.code}: ${(
-            environment.stderr || environment.stdout
-          ).trim()}`
+          `preserve GitHub environment ${environmentName}: its deployment records could not be ` +
+            "reclaimed, and deleting the environment now would strand them behind a name nothing " +
+            "will match again"
         );
+      else {
+        const environment = await commands.runGh([
+          "api",
+          `repos/${repository}/environments/${environmentName}`
+        ]);
+        if (environment.code === 0)
+          await attempt(`GitHub environment ${environmentName}`, async () => {
+            expectSuccess(
+              await commands.runGh([
+                "api",
+                "--method",
+                "DELETE",
+                `repos/${repository}/environments/${environmentName}`
+              ]),
+              `gh api DELETE environments/${environmentName}`
+            );
+          });
+        else if (!isGitHubApiNotFound(environment))
+          failures.push(
+            `probe GitHub environment ${environmentName}: gh exited ${environment.code}: ${(
+              environment.stderr || environment.stdout
+            ).trim()}`
+          );
+      }
 
       const packageRecord = await readStatePackage(
         commands,
@@ -1944,13 +1958,26 @@ async function listDeploymentRecordIds(
   environmentName: string
 ): Promise<number[]> {
   const context = `gh api repos/${repository}/deployments?environment=${environmentName}`;
-  const entries = parseJsonArray(
-    await commands.runGh([
-      "api",
-      `repos/${repository}/deployments?environment=${environmentName}&per_page=100`
-    ]),
-    context
-  );
+  // Paginated: a run creates a deployment record per deploy, and an
+  // environment can accumulate more than one page of them. Stopping at the
+  // first page would report success while stranding the rest.
+  const result = await commands.runGh([
+    "api",
+    "--paginate",
+    "--slurp",
+    `repos/${repository}/deployments?environment=${environmentName}&per_page=100`
+  ]);
+  expectSuccess(result, context);
+  if (!result.stdout.trim())
+    throw new Error(`${context} returned an empty response instead of JSON.`);
+  const pages = parseJsonArray(result, context);
+  const entries = pages.flatMap((page, index) => {
+    if (!Array.isArray(page))
+      throw new Error(
+        `${context} returned page ${index} with JSON type "${typeof page}" where an array was expected.`
+      );
+    return page;
+  });
   return entries.map((entry, index) => {
     const record = asRecord(entry, context, index);
     const id = record.id;

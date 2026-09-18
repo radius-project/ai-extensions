@@ -162,9 +162,11 @@ function baselineStubs(): FakeCommandStub[] {
       tool: "gh",
       match: [
         "api",
+        "--paginate",
+        "--slurp",
         `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
       ],
-      respond: { stdout: "[]" }
+      respond: { stdout: "[[]]" }
     },
     {
       tool: "gh",
@@ -3177,9 +3179,13 @@ describe("createCloudFixture", () => {
           tool: "gh",
           match: [
             "api",
+            "--paginate",
+            "--slurp",
             `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
           ],
-          respond: { stdout: '[{"id":41},{"id":42}]' }
+          // Two pages: an environment can accumulate more records than a
+          // single page holds, and stopping at the first would strand the rest.
+          respond: { stdout: '[[{"id":41}],[{"id":42}]]' }
         },
         {
           tool: "gh",
@@ -3245,15 +3251,132 @@ describe("createCloudFixture", () => {
           tool: "gh",
           match: [
             "api",
+            "--paginate",
+            "--slurp",
             `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
           ],
-          respond: { stdout: '[{"environment":"radtest"}]' }
+          respond: { stdout: '[[{"environment":"radtest"}]]' }
         }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
         /probe GitHub deployment records for radtest-run0000000a: .*no usable numeric "id"/s
       );
+    });
+
+    // A deployment record names its environment but outlives it, so deleting
+    // the environment while a record survives strands that record behind a
+    // name nothing will ever match again -- the exact leak this step exists to
+    // prevent.
+    it.each([
+      [
+        "deactivation",
+        [
+          "api",
+          "--method",
+          "POST",
+          `repos/${REPOSITORY}/deployments/41/statuses`
+        ],
+        "POST deployments/41/statuses"
+      ],
+      [
+        "delete",
+        ["api", "--method", "DELETE", `repos/${REPOSITORY}/deployments/41`],
+        "DELETE deployments/41"
+      ]
+    ])(
+      "preserves the environment when a deployment record %s fails",
+      async (_label, match, context) => {
+        const { fixture, fake } = await createHarness([
+          {
+            tool: "gh",
+            match: [
+              "api",
+              "--paginate",
+              "--slurp",
+              `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
+            ],
+            respond: { stdout: '[[{"id":41}]]' }
+          },
+          failing(
+            "gh",
+            match,
+            "HTTP 403: Resource not accessible by integration"
+          ),
+          {
+            tool: "gh",
+            match: [
+              "api",
+              "--method",
+              "POST",
+              `repos/${REPOSITORY}/deployments/41/statuses`
+            ],
+            respond: {}
+          }
+        ]);
+
+        const error = await captureError(
+          fixture.reclaimLeakedProductArtifacts()
+        );
+
+        expect(error.message).toContain(
+          `1 GitHub deployment record(s) for ${ENVIRONMENT}`
+        );
+        expect(error.message).toContain(context);
+        expect(error.message).toContain(
+          `preserve GitHub environment ${ENVIRONMENT}`
+        );
+        expect(
+          fake.commands
+            .commandLines("gh")
+            .some(
+              (line) =>
+                line.includes("DELETE") &&
+                line.includes(`environments/${ENVIRONMENT}`)
+            )
+        ).toBe(false);
+      }
+    );
+
+    it("keeps reclaiming the remaining artifacts after a deployment record fails", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: [
+            "api",
+            "--paginate",
+            "--slurp",
+            `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
+          ],
+          respond: { stdout: '[[{"id":41}]]' }
+        },
+        failing(
+          "gh",
+          ["api", "--method", "DELETE", `repos/${REPOSITORY}/deployments/41`],
+          "HTTP 403: Resource not accessible by integration"
+        ),
+        {
+          tool: "gh",
+          match: [
+            "api",
+            "--method",
+            "POST",
+            `repos/${REPOSITORY}/deployments/41/statuses`
+          ],
+          respond: {}
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /deployment record/
+      );
+      // The environment is held back deliberately, but everything downstream of
+      // it is unrelated to the stranded record and still has to be reclaimed.
+      expect(
+        fake.commands
+          .commandLines("gh-package")
+          .some((line) => line.includes("packages/container"))
+      ).toBe(true);
     });
 
     it("reports targeted workload cleanup failure and continues reclaiming other artifacts", async () => {

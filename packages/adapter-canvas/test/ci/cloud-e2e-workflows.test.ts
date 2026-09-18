@@ -41,6 +41,7 @@ const GUARD = "github.repository == 'radius-project/ai-extensions'";
 
 interface WorkflowStep {
   readonly name?: string;
+  readonly id?: string;
   readonly uses?: string;
   readonly run?: string;
   readonly if?: string;
@@ -493,6 +494,24 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("selectExpiredDeployments");
     expect(script.indexOf("-f state=inactive")).toBeLessThan(
       script.indexOf("--method DELETE")
+    );
+  });
+
+  // Ordering alone is not enough: if the record purge fails, deleting the
+  // environment anyway strands exactly the records this step exists to remove.
+  it("holds back the environment purge when the record purge fails", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const deployments = purge.find(
+      (step) => step.name === "Purge stale GitHub deployment records"
+    );
+    const environments = purge.find(
+      (step) => step.name === "Purge stale GitHub Environments"
+    );
+
+    expect(deployments?.id).toBe("deployment-records-cleanup");
+    expect(environments?.if).toContain(
+      "steps.deployment-records-cleanup.outcome == 'success'"
     );
   });
 

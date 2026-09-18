@@ -849,6 +849,7 @@ jobs:
       # them before the environments so a failure here cannot orphan a record
       # whose environment has already gone.
       - name: Purge stale GitHub deployment records
+        id: deployment-records-cleanup
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -907,8 +908,14 @@ jobs:
       # there is more than one candidate. Still matched by the suite's own
       # prefix and still age-gated, so a live run's environment is never a
       # candidate.
+      #
+      # Gated on the deployment-record purge as well: a deployment record names
+      # the environment it deployed to but outlives it, so deleting the
+      # environment while its records are still present strands them behind a
+      # name nothing will match again. Leaving the environment in place instead
+      # lets the next sweep retry both.
       - name: Purge stale GitHub Environments
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success' && steps.deployment-records-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
