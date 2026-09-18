@@ -395,12 +395,13 @@ export const REPAIR_ATTEMPT_BUDGET = 5;
 // Compiles a run may perform: the first, plus one per allowed repair.
 export const REPAIR_COMPILE_LIMIT = REPAIR_ATTEMPT_BUDGET + 1;
 
-// What the checker has recorded about this run's compiles.
+// What the checker has recorded about this run's validation attempts.
 export interface RepairState {
-  // Compiles already performed, including the ones that passed.
+  // Validation attempts already reserved, including unavailable or interrupted
+  // checks.
   attempts: number;
-  // Fingerprint of the last failing compiler output, or null when the last
-  // compile did not fail.
+  // Last actionable model-failure fingerprint. Unavailable checks retain it;
+  // successful validation clears it.
   fingerprint: string | null;
 }
 
@@ -432,8 +433,8 @@ export function parseRepairState(value: unknown): RepairState {
   const attempts = record.attempts;
   const fingerprint = record.fingerprint;
   // The two fields are read as one fact, not two. A fingerprint only means
-  // "what the previous attempt failed with", so without a usable count there is
-  // no previous attempt for it to describe, and keeping it would report the
+  // "the most recent actionable model failure", so without a usable count there
+  // is no earlier attempt for it to describe, and keeping it would report the
   // first compile of the run as a repeat — telling the agent its last fix was
   // wrong when it has not made one yet.
   if (
@@ -466,8 +467,9 @@ export function evaluateRepairAttempt(state: RepairState): RepairDecision {
   return { verdict: "allowed", allowed: true, attempt, reason: "" };
 }
 
-// The run record's repair field after a compile that produced `fingerprint`
-// (null when it passed).
+// The run record's repair field after a reserved validation attempt. Callers
+// supply a new model-failure fingerprint, retain the previous one when
+// validation is unavailable, or clear it after successful validation.
 export function nextRepairState(
   state: RepairState,
   fingerprint: string | null
@@ -511,11 +513,9 @@ export function fingerprintCompilerOutput(output: unknown): string {
 // What the checker says when it refuses to compile again.
 export function repairBudgetSpentMessage(attempts: number): string {
   return (
-    `The application model was compiled ${attempts} times in this modeling run and still does not build, ` +
-    `so the repair budget of ${REPAIR_ATTEMPT_BUDGET} is spent and it was not compiled again. ` +
-    "Stop repairing: do not write the origin record and do not publish the run. " +
-    "Report to the user which resource and property the compiler rejected, quote the last compiler output verbatim, " +
-    "and say that no application definition was written."
+    `This modeling run has reserved ${attempts} validation attempts, so the limit of ${REPAIR_COMPILE_LIMIT} has been reached. ` +
+    "No new validation was run. Abort the staged run: do not write the origin record and do not publish the run. " +
+    "Report this exact refusal to the user and say that no application definition was written."
   );
 }
 

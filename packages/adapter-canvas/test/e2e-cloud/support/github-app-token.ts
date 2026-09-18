@@ -134,13 +134,13 @@ export async function mintGitHubAppToken(
         repositories: [repositoryName],
         permissions: {
           actions: "write",
-          administration: "read",
+          actions_variables: "write",
+          administration: "write",
           contents: "write",
           deployments: "read",
           environments: "write",
           pull_requests: "write",
           secrets: "write",
-          variables: "write",
           workflows: "write"
         }
       })

@@ -6,6 +6,7 @@ import type {
   RadiusAppProvenanceInput,
   ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
+import type { AzureAppCreateContinuation } from "../../azure-app-create-continuation.js";
 
 export interface AzureAutoSetupCommandResult {
   code: string | number;
@@ -20,9 +21,11 @@ export interface AzureAutoSetupOperation {
   environment: string;
   provider: string;
   currentStage: string;
+  steps?: Array<{ label: string }>;
   state?: string;
   inputRequired?: unknown;
   providerRecovery?: unknown;
+  azureAppCreateContinuation?: unknown;
   setupArtifacts?: {
     azureApp?: {
       origin?: string;
@@ -68,6 +71,13 @@ export interface AzureAutoSetupOperationLifecyclePort {
     state: string,
     options: Record<string, unknown>
   ): void;
+  getAzureAppCreateContinuation(
+    operation: AzureAutoSetupOperation
+  ): AzureAppCreateContinuation | null;
+  setAzureAppCreateContinuation(
+    operation: AzureAutoSetupOperation,
+    continuation: unknown
+  ): AzureAppCreateContinuation | null;
 }
 
 export interface AzureAutoSetupOperationProgressPort {
@@ -252,6 +262,10 @@ export interface AzureAutoSetupApplicationInput {
   requestedClientId: string;
   serviceManagementReference: string;
   callerIdentity: CallerIdentity;
+  resumeAtCreate?: {
+    appName: string;
+    callerObjectId: string;
+  };
 }
 
 export interface AzureAutoSetupApplicationResult {

@@ -25,6 +25,8 @@ import {
   requestStop,
   requireInput,
   resumeAfterInput,
+  getAzureAppCreateContinuation,
+  setAzureAppCreateContinuation,
   touchOperation,
   setExecutionActive,
   recordAzureApp,
@@ -129,6 +131,7 @@ import {
   STAGE_DELETE_STATE_PACKAGE,
   STAGE_REVIEW_APP_REGISTRATION
 } from "./operations.js";
+import { createAzureAppCreateContinuation } from "./azure-app-create-continuation.js";
 
 describe("provider mutation recovery journal", () => {
   it("preserves separate bounded redacted dispatch diagnostics", () => {
@@ -1205,6 +1208,56 @@ function newOp(overrides = {}) {
   });
 }
 
+function validAzureAppCreateContinuation(operationId) {
+  return createAzureAppCreateContinuation(
+    {
+      operationId,
+      request: {
+        repo: "contoso/store",
+        environment: "dev",
+        operationEnvironment: "dev",
+        requestedSubscriptionId: "22222222-2222-2222-2222-222222222222",
+        requestedTenantId: "11111111-1111-1111-1111-111111111111",
+        resourceGroup: "rg-radius",
+        clusterResourceGroup: "rg-aks",
+        clusterName: "aks-radius",
+        explicitAppId: "",
+        createNewApp: false,
+        appNameProvided: false,
+        requestedAppName: "",
+        requestedClientId: ""
+      },
+      githubExecutor: {
+        login: "octocat",
+        credentialSource: "keyring",
+        requiresKeyringSwitch: true,
+        scopes: ["repo", "workflow", "write:packages"]
+      },
+      resolved: {
+        subscriptionId: "22222222-2222-2222-2222-222222222222",
+        tenantId: "11111111-1111-1111-1111-111111111111",
+        oidcSuffix: "environment:dev",
+        callerIdentity: { kind: "user" },
+        oidc: {
+          fullName: "contoso/store",
+          ownerId: 7,
+          repoId: 5,
+          subjectConfig: { useDefault: true },
+          federatedCredentials: [
+            {
+              name: "dev",
+              subject: "repo:contoso/store:environment:dev"
+            }
+          ]
+        }
+      }
+    },
+    "radius-deploy-contoso-store",
+    "44444444-4444-4444-4444-444444444444",
+    "2026-09-11T20:00:00.000Z"
+  );
+}
+
 function addSafeResumeRequest(op) {
   op.resumeRequest = {
     needsAzureCredentials: true,
@@ -1610,6 +1663,53 @@ describe("record shape", () => {
         results: []
       }
     });
+  });
+
+  it("round-trips only the normalized private Azure app-create continuation", () => {
+    const op = newOp({ operationId: "op_smr" });
+    const continuation = validAzureAppCreateContinuation(op.operationId);
+    const unsafe = {
+      ...continuation,
+      credential: "omitted-value",
+      rawOutput: "provider output",
+      resolved: {
+        ...continuation.resolved,
+        token: "omitted-value"
+      }
+    };
+
+    expect(setAzureAppCreateContinuation(op, unsafe)).toEqual(continuation);
+    const persisted = toPersistedOperation(op);
+    const restored = fromPersistedOperation(persisted);
+
+    expect(getAzureAppCreateContinuation(restored)).toEqual(continuation);
+    expect(JSON.stringify(persisted)).not.toContain("omitted-value");
+    expect(JSON.stringify(persisted)).not.toContain("provider output");
+    expect(toClientView(restored).azureAppCreateContinuation).toBeUndefined();
+  });
+
+  it("drops malformed and pre-version-8 app-create continuations without rejecting the operation", () => {
+    const op = newOp({ operationId: "op_smr_legacy" });
+    op.azureAppCreateContinuation = {
+      schemaVersion: 1,
+      operationId: op.operationId
+    };
+    expect(toPersistedOperation(op).azureAppCreateContinuation).toBeUndefined();
+
+    const persisted = toPersistedOperation(op);
+    persisted.azureAppCreateContinuation = validAzureAppCreateContinuation(
+      op.operationId
+    );
+    persisted.schemaVersion = 7;
+    expect(
+      fromPersistedOperation(persisted).azureAppCreateContinuation
+    ).toBeUndefined();
+
+    persisted.schemaVersion = OPERATION_SCHEMA_VERSION;
+    persisted.azureAppCreateContinuation = { schemaVersion: 1 };
+    expect(
+      fromPersistedOperation(persisted).azureAppCreateContinuation
+    ).toBeUndefined();
   });
 
   it("keeps setup artifact mutations alive across operation-id lookups", () => {

@@ -32,6 +32,11 @@ import {
 } from "./operation-store.js";
 import { redactGhCredentials } from "./gh.js";
 import { remediationReference } from "./remediation-reference.js";
+import {
+  acceptAzureAppCreateContinuationPrompt,
+  normalizeAzureAppCreateContinuation,
+  type AzureAppCreateContinuation
+} from "./azure-app-create-continuation.js";
 
 // Version 2 adds the cooperative control record (stop, attempts, commands,
 // outcome history). Version 3 adds workflow provenance to the artifact ledger
@@ -49,9 +54,11 @@ import { remediationReference } from "./remediation-reference.js";
 // extension rejects a newer record instead of dropping an in-flight retry.
 // Version 6 adds the GitHub environment-variable artifact ledger. Version 7
 // adds the GHCR state-package stage to resumable environment deletion records.
-export const OPERATION_SCHEMA_VERSION = 7;
+// Version 8 adds the private Azure app-create continuation used only after an
+// SMR policy prompt.
+export const OPERATION_SCHEMA_VERSION = 8;
 export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
-  1, 2, 3, 4, 5, 6, 7
+  1, 2, 3, 4, 5, 6, 7, 8
 ]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
@@ -1482,11 +1489,36 @@ export function resumeAfterInput(op: any): any {
     !op.inputRequired
   )
     return op;
+  if (op.azureAppCreateContinuation !== undefined) {
+    const continuation = acceptAzureAppCreateContinuationPrompt(
+      op.azureAppCreateContinuation,
+      op.inputRequired
+    );
+    if (continuation) op.azureAppCreateContinuation = continuation;
+    else delete op.azureAppCreateContinuation;
+  }
   op.state = RUNNING_STATE;
   op.inputRequired = null;
   op.recoveryState = null;
   op.lastActivityAt = nowIso();
   return op;
+}
+
+export function setAzureAppCreateContinuation(
+  op: any,
+  value: unknown
+): AzureAppCreateContinuation | null {
+  if (!op || typeof op !== "object") return null;
+  const continuation = normalizeAzureAppCreateContinuation(value);
+  if (continuation) op.azureAppCreateContinuation = continuation;
+  else delete op.azureAppCreateContinuation;
+  return continuation;
+}
+
+export function getAzureAppCreateContinuation(
+  op: any
+): AzureAppCreateContinuation | null {
+  return normalizeAzureAppCreateContinuation(op?.azureAppCreateContinuation);
 }
 
 export function canResumeInput(
@@ -5528,7 +5560,8 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "resumeFrom",
   "verification",
   "control",
-  "providerRecovery"
+  "providerRecovery",
+  "azureAppCreateContinuation"
 ]);
 
 // The minimal, typed request needed to resume a delete operation after a
@@ -5590,7 +5623,12 @@ export function toPersistedOperation(op: any): any {
   }
   const record: any = {};
   for (const key of PERSISTED_OPERATION_KEYS) {
-    if (key === "failure" || key === "control") continue;
+    if (
+      key === "failure" ||
+      key === "control" ||
+      key === "azureAppCreateContinuation"
+    )
+      continue;
     if (op[key] !== undefined) record[key] = structuredClone(op[key]);
   }
   record.failure = persistedFailure(op.failure);
@@ -5605,6 +5643,12 @@ export function toPersistedOperation(op: any): any {
   }
   record.control = readOperationControl(op.control);
   record.providerRecovery = readProviderRecovery(op.providerRecovery);
+  const azureAppCreateContinuation = normalizeAzureAppCreateContinuation(
+    op.azureAppCreateContinuation
+  );
+  if (azureAppCreateContinuation) {
+    record.azureAppCreateContinuation = azureAppCreateContinuation;
+  }
   // Written through the same normalizer the restore path uses, so a saved
   // ledger always carries the current provenance shape.
   record.setupArtifacts = readSetupArtifactLedger(op.setupArtifacts);
@@ -5633,7 +5677,12 @@ export function fromPersistedOperation(value: any): any {
   }
   const record: any = {};
   for (const key of PERSISTED_OPERATION_KEYS) {
-    if (key === "failure" || key === "control") continue;
+    if (
+      key === "failure" ||
+      key === "control" ||
+      key === "azureAppCreateContinuation"
+    )
+      continue;
     if (value[key] !== undefined) record[key] = structuredClone(value[key]);
   }
   record.failure = persistedFailure(value.failure);
@@ -5674,6 +5723,14 @@ export function fromPersistedOperation(value: any): any {
   }
   record.control = readOperationControl(value.control);
   record.providerRecovery = readProviderRecovery(value.providerRecovery);
+  if (record.schemaVersion >= 8) {
+    const azureAppCreateContinuation = normalizeAzureAppCreateContinuation(
+      value.azureAppCreateContinuation
+    );
+    if (azureAppCreateContinuation) {
+      record.azureAppCreateContinuation = azureAppCreateContinuation;
+    }
+  }
   // Versions 1 and 2 have no workflow provenance, and version 3 does not say
   // whether a null previous blob means "absent" or "unknown". Normalizing here
   // gives every reader the current shape; the missing proof refuses rollback.

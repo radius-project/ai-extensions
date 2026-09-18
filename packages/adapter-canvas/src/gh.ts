@@ -14,6 +14,10 @@ import type {
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
 import { redactCredentials } from "./credential-redaction.js";
+import {
+  isGitHubAppBotLogin,
+  isGitHubAppUserEndpointFailure
+} from "./github-app-installation.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 
 export interface GhAccount {
@@ -901,6 +905,10 @@ export async function createSelectedGhExecutor(
       if (stdin !== undefined) child.stdin?.end(stdin);
     });
   };
+  const dedicatedPackageResolution =
+    process.env.GH_PACKAGES_TOKEN?.trim() ?
+      await ensurePackageCredential()
+    : null;
   const verifyIdentityRaw = async (): Promise<void> => {
     const result = await runRaw(["api", "user", "--jq", ".login"], {
       timeout: 15000
@@ -908,6 +916,8 @@ export async function createSelectedGhExecutor(
     const actingLogin = result.stdout.trim();
     if (result.code !== 0) {
       const detail = (result.stderr || result.stdout).trim();
+      if (isGitHubAppBotLogin(login) && isGitHubAppUserEndpointFailure(detail))
+        return;
       throw new Error(
         detail ?
           `GitHub identity verification failed for @${login}: ${detail}`
@@ -965,11 +975,18 @@ export async function createSelectedGhExecutor(
     // The executor pins one credential, so it also names which one it is: a
     // `gh auth refresh` can repair a keyring login but never an injected
     // session token, and the GHCR preflight's guidance turns on that.
-    packageCredentials: () => ({
-      username: login,
-      token,
-      source: credentialSource === "keyring" ? "keyring" : "injected-token"
-    }),
+    packageCredentials: () => {
+      if (dedicatedPackageResolution?.ok)
+        return dedicatedPackageResolution.credentials;
+      if (dedicatedPackageResolution && !dedicatedPackageResolution.ok)
+        throw new Error(dedicatedPackageResolution.error);
+      return {
+        username: login,
+        token,
+        source: credentialSource === "keyring" ? "keyring" : "injected-token",
+        scopes: [...scopes]
+      };
+    },
     redact,
     errorMessage: (error) => selectedErrorMessage(error, redact)
   };

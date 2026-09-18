@@ -2000,6 +2000,221 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual(["select:main", "select:feature/x"]);
     });
 
+    it.each([
+      ["base", "octo/app::main"],
+      ["head", "octo/app::feature/x"]
+    ])(
+      "ends the diff's wait when modeling failed permanently on the %s branch",
+      async (_side, target) => {
+        const harness = start({
+          selections: {
+            main: selectionOf({ branch: "main", content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          }
+        });
+        harness.state.appModelFailures = {
+          [target]: {
+            attemptToken: "attempt-1",
+            error:
+              "The configured Recipe rejects the required credential shape."
+          }
+        };
+        harness.state.appModelAttemptTokens = { [target]: "attempt-1" };
+
+        const outcome = await harness.run("diffBranches", diffBody);
+
+        expect(outcome.status).toBe(200);
+        expect(outcome.payload).toEqual({
+          error:
+            "Application model generation stopped: The configured Recipe rejects the required credential shape. Fix the reported issue, then refresh the Radius Canvas to try modeling again.",
+          modelingFailed: true,
+          appModelAuthoringFailed: true,
+          repo: "octo/app"
+        });
+        expect(outcome.payload.needsAppBicep).toBeUndefined();
+        expect(harness.handoffs).toEqual([]);
+      }
+    );
+
+    it("ignores a recorded diff failure whose attempt token is no longer current", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "superseded failure"
+        }
+      };
+      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-2" };
+
+      const outcome = await harness.run("diffBranches", diffBody);
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("clears both sides and asks again when the diff is explicitly refreshed", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": { attemptToken: "attempt-1", error: "base failed" },
+        "octo/app::feature/x": {
+          attemptToken: "attempt-1",
+          error: "head failed"
+        }
+      };
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1",
+        "octo/app::feature/x": "attempt-1"
+      };
+
+      const outcome = await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(outcome.payload.modelingFailed).toBeUndefined();
+      expect(harness.state.appModelFailures).toEqual({});
+      expect(harness.state.appModelAttemptTokens).toEqual({});
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    // The clearing sits ahead of the both-missing check so a half-modeled
+    // comparison still unfences its missing side; leaving that fence standing
+    // would make the next comparison terminal the moment the modeled side
+    // stopped carrying content.
+    it("clears the still-missing side's failure on an explicit refresh when the other side has a model", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::feature/x": {
+          attemptToken: "attempt-1",
+          error: "head failed"
+        }
+      };
+      harness.state.appModelAttemptTokens = {
+        "octo/app::feature/x": "attempt-1"
+      };
+
+      await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+      );
+
+      expect(harness.state.appModelFailures).toEqual({});
+      expect(harness.state.appModelAttemptTokens).toEqual({});
+    });
+
+    // Clearing a token no failure is recorded against would strand a modeling
+    // run that is still in flight: its report is rejected as stale and the real
+    // error never reaches the view.
+    it("keeps a live attempt token on refresh when no failure has been recorded yet", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        }
+      });
+      harness.state.appModelAttemptTokens = { "octo/app::main": "in-flight" };
+
+      const outcome = await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.state.appModelAttemptTokens).toEqual({
+        "octo/app::main": "in-flight"
+      });
+    });
+
+    it("leaves fencing state alone when a newer comparison supersedes the request", async () => {
+      let harness!: Harness;
+      harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        },
+        afterSelect: () => {
+          prepareSourceRefResources(harness.entry, "diff", {
+            repo: "octo/app",
+            baseBranch: "main",
+            headBranch: "feature/y"
+          });
+        }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": { attemptToken: "attempt-1", error: "base failed" }
+      };
+      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+
+      const outcome = await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+      );
+
+      expect(outcome.status).toBe(409);
+      expect(outcome.payload).toEqual({ stale: true });
+      expect(harness.state.appModelFailures).toEqual({
+        "octo/app::main": { attemptToken: "attempt-1", error: "base failed" }
+      });
+      expect(harness.handoffs).toEqual([]);
+    });
+
+    it.each([
+      ["base", "main", "feature/x"],
+      ["head", "feature/x", "main"]
+    ])(
+      "retires the failure recorded for the %s branch whose model has arrived",
+      async (_side, modeled, stillMissing) => {
+        const harness = start({
+          selections: {
+            [modeled]: selectionOf({ branch: modeled }),
+            [stillMissing]: selectionOf({ branch: stillMissing, content: null })
+          }
+        });
+        harness.state.appModelFailures = {
+          [`octo/app::${modeled}`]: {
+            attemptToken: "attempt-1",
+            error: "stale failure"
+          },
+          [`octo/app::${stillMissing}`]: {
+            attemptToken: "attempt-1",
+            error: "still failing"
+          }
+        };
+        harness.state.appModelAttemptTokens = {
+          [`octo/app::${modeled}`]: "attempt-1",
+          [`octo/app::${stillMissing}`]: "attempt-1"
+        };
+
+        await harness.run("diffBranches", diffBody);
+
+        expect(harness.state.appModelFailures).toEqual({
+          [`octo/app::${stillMissing}`]: {
+            attemptToken: "attempt-1",
+            error: "still failing"
+          }
+        });
+        expect(harness.state.appModelAttemptTokens).toEqual({
+          [`octo/app::${stillMissing}`]: "attempt-1"
+        });
+      }
+    );
+
     it("still hands both branches off when only one side lacks a Dockerfile", async () => {
       const harness = start({
         selections: {
