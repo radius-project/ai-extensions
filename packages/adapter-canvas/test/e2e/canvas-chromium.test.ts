@@ -1023,6 +1023,35 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
+  test("dismisses the node menu when the same node is clicked again", async ({
+    page,
+    canvas
+  }) => {
+    await gotoCanvas(page, canvas, "graph");
+    await page.selectOption("#graph-branch", WORKTREE_BRANCH);
+    await expect(page.locator(".rad-node")).toHaveCount(3);
+
+    const panel = page.locator("#node-popup");
+    await expect(panel).toBeHidden();
+
+    const title = page
+      .locator(".rad-node")
+      .filter({ hasText: "web" })
+      .first()
+      .locator(".rad-node__title");
+
+    await title.click();
+    await expect(panel).toBeVisible();
+
+    // The node that opened the menu dismisses it, like any other click outside.
+    await title.click();
+    await expect(panel).toBeHidden();
+
+    // A further click re-opens it, so the node keeps normal toggle behavior.
+    await title.click();
+    await expect(panel).toBeVisible();
+  });
+
   test("opens a node source reference through the real open-source route instead of leaving the workspace @safety", async ({
     page,
     canvas

@@ -70,7 +70,6 @@ export interface NodeCardDeps {
   openLocalSource(relPath: string, line: number, fallbackUrl: string): void;
   // Opens or closes the details panel for a card.
   toggleDetails(data: GraphNodeData, card: DomElement | null): void;
-  openDetails(data: GraphNodeData, card: DomElement | null): void;
 }
 
 interface NodeProps {
@@ -276,8 +275,10 @@ export function createNodeComponent(
           borderWidth: (data.borderWidth || 2.5) + "px",
           borderColor: data.borderColor || "var(--rad-node-border)"
         },
+        // Clicking the card toggles its panel, so a second click on the same
+        // node dismisses the menu it opened.
         onClick: (event: { currentTarget?: unknown }) =>
-          deps.openDetails(data, asElement(event.currentTarget))
+          deps.toggleDetails(data, asElement(event.currentTarget))
       },
       dots,
       badge,
