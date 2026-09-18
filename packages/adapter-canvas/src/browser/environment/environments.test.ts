@@ -212,7 +212,8 @@ describe("environment records and markup", () => {
             config: {
               cluster: "aks-1",
               namespace: "payments",
-              subscriptionId: "sub-1"
+              subscriptionId: "sub-1",
+              clusterResourceGroup: "cluster-rg"
             }
           },
           {
@@ -232,6 +233,7 @@ describe("environment records and markup", () => {
         cluster: "aks-1",
         namespace: "payments",
         subscriptionId: "sub-1",
+        clusterResourceGroup: "cluster-rg",
         resourceGroup: "",
         vpcId: "",
         subnetIds: "",
@@ -245,6 +247,7 @@ describe("environment records and markup", () => {
         region: "us-east-1",
         resourceGroup: "",
         subscriptionId: "",
+        clusterResourceGroup: "",
         vpcId: "",
         subnetIds: ""
       }
@@ -282,6 +285,7 @@ describe("environment records and markup", () => {
           vpcId: "",
           subnetIds: "",
           subscriptionId: "",
+          clusterResourceGroup: "",
           accountId: "",
           region: ""
         }
@@ -1701,6 +1705,80 @@ describe("namespace conflict detection", () => {
         ?.name
     ).toBe("dev");
   });
+
+  // An AKS cluster name is only unique within its resource group, so the same
+  // name in another resource group of one subscription is another cluster.
+  it("allows the same AKS cluster name in another resource group", () => {
+    expect(
+      findNamespaceConflict(
+        [
+          listed({
+            config: {
+              ...baseConfig,
+              subscriptionId: "sub-1",
+              clusterResourceGroup: "cluster-rg-a"
+            }
+          })
+        ],
+        {
+          ...claim,
+          subscriptionId: "sub-1",
+          clusterResourceGroup: "cluster-rg-b"
+        }
+      )
+    ).toBeNull();
+  });
+
+  it("reports a duplicate on the same AKS cluster", () => {
+    expect(
+      findNamespaceConflict(
+        [
+          listed({
+            config: {
+              ...baseConfig,
+              subscriptionId: "sub-1",
+              clusterResourceGroup: "cluster-rg"
+            }
+          })
+        ],
+        {
+          ...claim,
+          subscriptionId: "sub-1",
+          clusterResourceGroup: "cluster-rg"
+        }
+      )?.name
+    ).toBe("dev");
+  });
+
+  // The application's resource group is not part of the key: two environments
+  // on one cluster can deploy to different resource groups and still collide.
+  it("reports a duplicate despite a different application resource group", () => {
+    expect(
+      findNamespaceConflict(
+        [
+          listed({
+            config: {
+              ...baseConfig,
+              resourceGroup: "app-rg-a",
+              clusterResourceGroup: "cluster-rg"
+            }
+          })
+        ],
+        { ...claim, clusterResourceGroup: "cluster-rg" }
+      )?.name
+    ).toBe("dev");
+  });
+
+  // An environment created before the cluster's resource group was stored
+  // reports none, and is no more distinguishable here than on the server.
+  it("still conflicts when the listed environment records no cluster resource group", () => {
+    expect(
+      findNamespaceConflict([listed()], {
+        ...claim,
+        clusterResourceGroup: "cluster-rg-b"
+      })?.name
+    ).toBe("dev");
+  });
 });
 
 describe("environment pane namespace state", () => {
@@ -1737,6 +1815,7 @@ describe("environment pane namespace state", () => {
           vpcId: "",
           subnetIds: "",
           subscriptionId: "",
+          clusterResourceGroup: "",
           accountId: "",
           region: ""
         }

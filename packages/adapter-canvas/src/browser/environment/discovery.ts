@@ -116,6 +116,10 @@ export interface EnvironmentInfrastructure {
   readonly subscriptionId?: string;
   readonly accountId?: string;
   readonly region?: string;
+  // The resource group the AKS cluster lives in, which scopes its name within
+  // the subscription. Separate from `resourceGroup`, which is where the
+  // application deploys.
+  readonly clusterResourceGroup?: string;
 }
 
 export function abandonedOperationError(

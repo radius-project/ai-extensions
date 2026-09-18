@@ -1701,10 +1701,11 @@ describe("environments — list-environments", () => {
   it.each([
     [
       "azure",
-      "AZURE_CLIENT_ID\tabc\nAZURE_RESOURCE_GROUP\tprod-rg\nAZURE_AKS_CLUSTER_NAME\tprod-aks\nRADIUS_NAMESPACE\tpayments\nAZURE_SUBSCRIPTION_ID\tsub-1",
+      "AZURE_CLIENT_ID\tabc\nAZURE_RESOURCE_GROUP\tprod-rg\nAZURE_AKS_CLUSTER_NAME\tprod-aks\nAZURE_AKS_RESOURCE_GROUP\tcluster-rg\nRADIUS_NAMESPACE\tpayments\nAZURE_SUBSCRIPTION_ID\tsub-1",
       {
         resourceGroup: "prod-rg",
         cluster: "prod-aks",
+        clusterResourceGroup: "cluster-rg",
         namespace: "payments",
         subscriptionId: "sub-1"
       }

@@ -47,6 +47,7 @@ describe("applyProviderConfiguration", () => {
       tenantId: "tenant",
       subscriptionId: "sub",
       resourceGroup: "rg",
+      clusterResourceGroup: "cluster-rg",
       cluster: "aks",
       location: "westus2",
       namespace: "radius"
@@ -60,14 +61,50 @@ describe("applyProviderConfiguration", () => {
       ["AZURE_SUBSCRIPTION_ID", "sub"],
       ["AZURE_RESOURCE_GROUP", "rg"],
       ["AZURE_AKS_CLUSTER_NAME", "aks"],
+      ["AZURE_AKS_RESOURCE_GROUP", "cluster-rg"],
       ["AZURE_LOCATION", "westus2"],
       ["KUBERNETES_NAMESPACE", "radius"]
     ]);
     expect(steps).toEqual([
       "Setting environment variables and secrets...",
-      "Set 7 environment value(s) for Azure.",
+      "Set 8 environment value(s) for Azure.",
       'ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: az role assignment create --assignee client --role Contributor --scope /subscriptions/sub/resourceGroups/rg'
     ]);
+  });
+
+  // The cluster's resource group is what tells two same-named AKS clusters in
+  // one subscription apart. It is written from its own request value, never
+  // from the application's resource group, which can differ on the same
+  // cluster.
+  it("writes the cluster resource group separately from the application's", async () => {
+    const { ports, variables } = configurationRecorder();
+
+    await applyProviderConfiguration(
+      "azure",
+      { resourceGroup: "app-rg", clusterResourceGroup: "cluster-rg" },
+      ports
+    );
+
+    expect(variables).toContainEqual(["AZURE_RESOURCE_GROUP", "app-rg"]);
+    expect(variables).toContainEqual([
+      "AZURE_AKS_RESOURCE_GROUP",
+      "cluster-rg"
+    ]);
+  });
+
+  // An empty value is a no-op in `setEnvironmentVariable`, so a cluster whose
+  // resource group could not be resolved leaves any stored one untouched
+  // instead of erasing it.
+  it("passes an empty cluster resource group through rather than substituting one", async () => {
+    const { ports, variables } = configurationRecorder();
+
+    await applyProviderConfiguration(
+      "azure",
+      { resourceGroup: "app-rg" },
+      ports
+    );
+
+    expect(variables).toContainEqual(["AZURE_AKS_RESOURCE_GROUP", ""]);
   });
 
   it("falls back to the shared azure credential for values the request omits", async () => {

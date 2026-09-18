@@ -1223,6 +1223,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         resourceGroup: "rg",
+        clusterResourceGroup: "cluster-rg",
         cluster: "aks",
         tenantId: "11111111-1111-1111-1111-111111111111",
         subscriptionId: "22222222-2222-2222-2222-222222222222",
@@ -1245,6 +1246,9 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       tenantId: "11111111-1111-1111-1111-111111111111",
       subscriptionId: "22222222-2222-2222-2222-222222222222",
       resourceGroup: "rg",
+      // Without this the resumed setup would write an environment that cannot
+      // say which of two same-named clusters it holds.
+      clusterResourceGroup: "cluster-rg",
       origin: { page: "graph" },
       resumeTarget: { page: "planned" },
       resumeBranch: "resume/y"

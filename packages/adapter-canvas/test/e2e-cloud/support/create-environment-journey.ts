@@ -391,6 +391,8 @@ export interface EnvironmentVariableExpectation {
   readonly tenantId: string;
   readonly subscriptionId: string;
   readonly resourceGroup: string;
+  /** The resource group the AKS cluster itself lives in. */
+  readonly clusterResourceGroup: string;
   readonly cluster: string;
   readonly namespace: string;
 }
@@ -443,6 +445,10 @@ export function findEnvironmentIdentityProblems(
     ["AZURE_SUBSCRIPTION_ID", input.expected.subscriptionId, false],
     ["AZURE_RESOURCE_GROUP", input.expected.resourceGroup, false],
     ["AZURE_AKS_CLUSTER_NAME", input.expected.cluster, true],
+    // Without this the environment cannot say which of two same-named AKS
+    // clusters it holds, and the namespace gate refuses a legitimate
+    // environment on the other one.
+    ["AZURE_AKS_RESOURCE_GROUP", input.expected.clusterResourceGroup, false],
     ["KUBERNETES_NAMESPACE", input.expected.namespace, true]
   ] as const) {
     const actual = input.variables.get(name);

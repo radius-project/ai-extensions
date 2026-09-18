@@ -493,6 +493,7 @@ describe("findEnvironmentIdentityProblems", () => {
     tenantId: "tenant-1",
     subscriptionId: "sub-1",
     resourceGroup: "radtest-canvas-abc",
+    clusterResourceGroup: "radtest-canvas-abc",
     cluster: "aks-abc",
     namespace: "default"
   };
@@ -503,6 +504,7 @@ describe("findEnvironmentIdentityProblems", () => {
       ["AZURE_SUBSCRIPTION_ID", expected.subscriptionId],
       ["AZURE_RESOURCE_GROUP", expected.resourceGroup],
       ["AZURE_AKS_CLUSTER_NAME", expected.cluster],
+      ["AZURE_AKS_RESOURCE_GROUP", expected.clusterResourceGroup],
       ["KUBERNETES_NAMESPACE", expected.namespace]
     ]);
 
@@ -587,7 +589,26 @@ describe("findEnvironmentIdentityProblems", () => {
       'AZURE_TENANT_ID is "other-tenant"; expected "tenant-1".',
       'AZURE_RESOURCE_GROUP is "someone-elses-group"; expected "radtest-canvas-abc".',
       'AZURE_AKS_CLUSTER_NAME is absent; expected "aks-abc".',
+      'AZURE_AKS_RESOURCE_GROUP is absent; expected "radtest-canvas-abc".',
       'KUBERNETES_NAMESPACE is absent; expected "default".'
+    ]);
+  });
+
+  // The cluster's resource group and the application's are different values
+  // that happen to match in this fixture, so a product that wrote one where the
+  // other belongs would otherwise pass unnoticed.
+  it("reports a cluster resource group that does not match", () => {
+    const variables = new Map(complete("app-1"));
+    variables.set("AZURE_AKS_RESOURCE_GROUP", "another-group");
+
+    expect(
+      findEnvironmentIdentityProblems({
+        variables,
+        createdAppId: "app-1",
+        expected
+      })
+    ).toEqual([
+      'AZURE_AKS_RESOURCE_GROUP is "another-group"; expected "radtest-canvas-abc".'
     ]);
   });
 });

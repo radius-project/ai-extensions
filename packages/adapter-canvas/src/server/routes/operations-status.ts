@@ -621,6 +621,11 @@ export async function handleCreateOperation(
           tenantId: data.tenantId || "",
           subscriptionId: data.subscriptionId || "",
           resourceGroup: data.resourceGroup || "",
+          // Carried like every other identifying value, so a resumed setup
+          // writes the same cluster resource group the original request did
+          // rather than leaving the environment unable to say which cluster
+          // it holds.
+          clusterResourceGroup: data.clusterResourceGroup || "",
           githubLogin: selection.login,
           origin: data.origin || null,
           resumeTarget: data.resumeTarget || null,

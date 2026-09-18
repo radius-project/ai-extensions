@@ -22,6 +22,7 @@ function azureVariables(
     AZURE_CLIENT_ID: "client-1",
     AZURE_SUBSCRIPTION_ID: "sub-1",
     AZURE_AKS_CLUSTER_NAME: "aks-1",
+    AZURE_AKS_RESOURCE_GROUP: "cluster-rg",
     KUBERNETES_NAMESPACE: "payments",
     ...overrides
   };
@@ -52,6 +53,7 @@ function claimant(
     environment: "dev",
     provider: "azure",
     subscriptionId: "sub-1",
+    clusterResourceGroup: "cluster-rg",
     accountId: "",
     region: "",
     cluster: "aks-1",
@@ -64,6 +66,7 @@ function claim(overrides: Partial<NamespaceClaim> = {}): NamespaceClaim {
   return {
     provider: "azure",
     subscriptionId: "sub-1",
+    clusterResourceGroup: "cluster-rg",
     accountId: "",
     region: "",
     cluster: "aks-1",
@@ -102,11 +105,45 @@ describe("reading a namespace claim from an environment's variables", () => {
         environment: "dev",
         provider: "azure",
         subscriptionId: "sub-1",
+        clusterResourceGroup: "cluster-rg",
         accountId: "",
         region: "",
         cluster: "aks-1",
         namespace: "payments"
       }
+    });
+  });
+
+  // Environments created before the cluster's resource group was stored read as
+  // recording none. That is an unrecorded scope, not a mismatch, and must not
+  // stop the claim from being read at all.
+  it("reads an Azure claim that records no cluster resource group", () => {
+    const variables = azureVariables();
+    delete variables.AZURE_AKS_RESOURCE_GROUP;
+    expect(claimantFromVariables("dev", variables)).toEqual({
+      kind: "claim",
+      claimant: {
+        environment: "dev",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        clusterResourceGroup: "",
+        accountId: "",
+        region: "",
+        cluster: "aks-1",
+        namespace: "payments"
+      }
+    });
+  });
+
+  // The application's resource group is a different value and never stands in
+  // for the cluster's: two environments on one cluster may deploy to different
+  // application resource groups.
+  it("does not read the application resource group as the cluster's", () => {
+    const variables = azureVariables({ AZURE_RESOURCE_GROUP: "app-rg" });
+    delete variables.AZURE_AKS_RESOURCE_GROUP;
+    expect(claimantFromVariables("dev", variables)).toMatchObject({
+      kind: "claim",
+      claimant: { clusterResourceGroup: "" }
     });
   });
 
@@ -117,6 +154,7 @@ describe("reading a namespace claim from an environment's variables", () => {
         environment: "prod",
         provider: "aws",
         subscriptionId: "",
+        clusterResourceGroup: "",
         accountId: "111122223333",
         region: "us-east-1",
         cluster: "eks-1",
@@ -240,7 +278,8 @@ describe("matching a namespace claim", () => {
         claim({
           cluster: " AKS-1 ",
           namespace: "Payments",
-          subscriptionId: "SUB-1"
+          subscriptionId: "SUB-1",
+          clusterResourceGroup: " Cluster-RG "
         })
       )?.environment
     ).toBe("dev");
@@ -254,6 +293,27 @@ describe("matching a namespace claim", () => {
         claim({ subscriptionId: "sub-2" })
       )
     ).toBeNull();
+  });
+
+  // An AKS cluster name is only unique within a resource group, so two
+  // same-named clusters in one subscription are two clusters and their
+  // namespaces are independent.
+  it("allows the same AKS cluster name in another resource group", () => {
+    expect(
+      findNamespaceClaimConflict(
+        [claimant()],
+        claim({ clusterResourceGroup: "other-rg" })
+      )
+    ).toBeNull();
+  });
+
+  it("reports a genuine duplicate on the same AKS cluster", () => {
+    expect(
+      findNamespaceClaimConflict(
+        [claimant({ environment: "staging" })],
+        claim({ clusterResourceGroup: "cluster-rg" })
+      )?.environment
+    ).toBe("staging");
   });
 
   it.each([
@@ -356,6 +416,19 @@ describe("matching a namespace claim", () => {
       "the request carries no subscription",
       { subscriptionId: "sub-1" },
       { subscriptionId: "" }
+    ],
+    // An environment created before the cluster's resource group was stored
+    // records none. It may hold exactly the namespace being requested, so it
+    // still stops the admission.
+    [
+      "the held claim records no cluster resource group",
+      { clusterResourceGroup: "" },
+      { clusterResourceGroup: "cluster-rg" }
+    ],
+    [
+      "the request carries no cluster resource group",
+      { clusterResourceGroup: "cluster-rg" },
+      { clusterResourceGroup: "" }
     ]
   ])("still conflicts when %s", (_label, held, requested) => {
     expect(
@@ -602,6 +675,7 @@ describe("establishing the repository's namespace claims", () => {
           environment: "prod",
           provider: "aws",
           subscriptionId: "",
+          clusterResourceGroup: "",
           accountId: "111122223333",
           region: "us-east-1",
           cluster: "eks-1",

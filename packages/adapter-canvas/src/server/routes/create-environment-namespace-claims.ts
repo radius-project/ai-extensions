@@ -12,9 +12,9 @@
 // creation whose collision would only surface when a later deployment failed.
 //
 // Identity is provider-specific and authoritative, because a cluster name alone
-// is not a cluster. Two AKS clusters in different subscriptions, or two EKS
-// clusters in different accounts or regions, can share a name and a namespace
-// without sharing anything else.
+// is not a cluster. Two AKS clusters in different subscriptions or different
+// resource groups, or two EKS clusters in different accounts or regions, can
+// share a name and a namespace without sharing anything else.
 
 import {
   classifyProvider,
@@ -25,6 +25,7 @@ export interface NamespaceClaimant {
   readonly environment: string;
   readonly provider: string;
   readonly subscriptionId: string;
+  readonly clusterResourceGroup: string;
   readonly accountId: string;
   readonly region: string;
   readonly cluster: string;
@@ -34,6 +35,7 @@ export interface NamespaceClaimant {
 export interface NamespaceClaim {
   readonly provider: string;
   readonly subscriptionId: string;
+  readonly clusterResourceGroup: string;
   readonly accountId: string;
   readonly region: string;
   readonly cluster: string;
@@ -107,6 +109,18 @@ const CLUSTER_VARIABLE_BY_PROVIDER: Record<string, string> = {
   aws: "AWS_EKS_CLUSTER_NAME"
 };
 
+// The resource group the AKS cluster lives in, written at creation alongside
+// the cluster name. Deliberately not `AZURE_RESOURCE_GROUP`, which holds the
+// application's resource group: two environments on one cluster may deploy
+// their applications to different resource groups, and keying on that would
+// stop them from conflicting — the exact duplicate this gate exists to catch.
+//
+// Environments created before this variable existed do not record it. That is
+// an unrecorded scope, not a mismatch, and `sameCluster` already treats an
+// unrecorded scope as no evidence of difference, so they keep failing closed
+// exactly as they did before.
+const AZURE_CLUSTER_RESOURCE_GROUP_VARIABLE = "AZURE_AKS_RESOURCE_GROUP";
+
 export function claimantFromVariables(
   environment: string,
   variables: Record<string, string>
@@ -137,6 +151,8 @@ export function claimantFromVariables(
       environment,
       provider,
       subscriptionId: variables.AZURE_SUBSCRIPTION_ID || "",
+      clusterResourceGroup:
+        variables[AZURE_CLUSTER_RESOURCE_GROUP_VARIABLE] || "",
       accountId: variables.AWS_ACCOUNT_ID || "",
       region: variables.AWS_REGION || "",
       cluster,
@@ -146,9 +162,12 @@ export function claimantFromVariables(
 }
 
 // True when both sides name the same physical cluster. Azure adds the
-// subscription, AWS the account and region.
+// subscription and the cluster's resource group, AWS the account and region.
+// An AKS cluster name is only unique within its resource group, so two
+// same-named clusters in one subscription are two clusters and their
+// namespaces are independent.
 //
-// An account either side did not record cannot distinguish anything, so it is
+// A scope either side did not record cannot distinguish anything, so it is
 // not treated as a difference: two clusters that share a name are held to be
 // the same cluster until something proves otherwise. That is the fail-closed
 // direction for an authoritative gate — the cost is refusing a legitimate
@@ -165,7 +184,13 @@ function sameCluster(
         [normalize(claimant.accountId), normalize(claim.accountId)],
         [normalize(claimant.region), normalize(claim.region)]
       ]
-    : [[normalize(claimant.subscriptionId), normalize(claim.subscriptionId)]];
+    : [
+        [normalize(claimant.subscriptionId), normalize(claim.subscriptionId)],
+        [
+          normalize(claimant.clusterResourceGroup),
+          normalize(claim.clusterResourceGroup)
+        ]
+      ];
   return scopes.every(
     ([held, requested]) => held === "" || requested === "" || held === requested
   );
