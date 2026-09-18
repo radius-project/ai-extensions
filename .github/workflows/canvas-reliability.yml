@@ -51,6 +51,14 @@ jobs:
       - name: Run extended reliability checks
         run: pnpm run test:reliability
 
+      - name: Install Chromium for native browser checks
+        if: runner.os != 'Linux'
+        run: pnpm exec playwright install chromium
+
+      - name: Run cross-platform Chromium checks
+        if: runner.os != 'Linux'
+        run: pnpm run test:chromium --grep "@cross-platform"
+
       - name: Run native Windows process checks
         if: runner.os == 'Windows'
         run: pnpm run test:integration:windows-process

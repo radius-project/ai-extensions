@@ -8,8 +8,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { isMainModule } from "../../../../scripts/plugins.mjs";
 
 const SCRIPT = fileURLToPath(
   new URL("../../../../scripts/plugins.mjs", import.meta.url)
@@ -77,6 +78,27 @@ afterEach(() => {
 });
 
 describe("scripts/plugins.mjs", () => {
+  it("recognizes direct execution through a canonical path alias", () => {
+    const lexical = join(tmpdir(), "alias", "plugins.mjs");
+    const canonical = join(tmpdir(), "canonical", "plugins.mjs");
+    const canonicalize = (candidate) =>
+      candidate === lexical || candidate === canonical ? canonical : candidate;
+
+    expect(isMainModule(lexical, pathToFileURL(canonical), canonicalize)).toBe(
+      true
+    );
+    expect(
+      isMainModule(
+        join(tmpdir(), "other", "plugins.mjs"),
+        pathToFileURL(canonical),
+        canonicalize
+      )
+    ).toBe(false);
+    expect(
+      isMainModule(undefined, pathToFileURL(canonical), canonicalize)
+    ).toBe(false);
+  });
+
   it("discovers every plugin directory in name order", () => {
     const root = writeRepository({
       radius: "radius",
