@@ -419,6 +419,9 @@ describe("cloud-e2e-cleanup.yml", () => {
 
     expect(token?.with?.["permission-actions"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
+    // Deleting a deployment record is a write, and the records outlive the
+    // environment that names them, so environment write alone is not enough.
+    expect(token?.with?.["permission-deployments"]).toBe("write");
     // cloud-e2e.yml mints its journey token with no permission inputs, so any
     // grant added to this installation widens that token too.
     expect(token?.with?.["permission-packages"]).toBeUndefined();
@@ -453,6 +456,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       [
         "Purge stale Entra identities",
         "Purge stale GHCR deployment state",
+        "Purge stale GitHub deployment records",
         "Purge stale GitHub Environments",
         "Purge stale fallback pull requests and branches",
         "Reset an idle fixture repository to the pinned baseline"
@@ -467,6 +471,29 @@ describe("cloud-e2e-cleanup.yml", () => {
       expect(step.if).toContain(
         "steps.radius-app-cleanup.outcome == 'success'"
       );
+  });
+
+  // A deployment record is linked to its environment by name, so deleting the
+  // environment strands the records rather than removing them. Purging them
+  // first means a failure here cannot leave a record no later sweep will
+  // recognize, and GitHub rejects deleting a record that is still active.
+  it("purges deployment records before the environments that name them", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const deploymentsIndex = purge.findIndex(
+      (step) => step.name === "Purge stale GitHub deployment records"
+    );
+    const environmentsIndex = purge.findIndex(
+      (step) => step.name === "Purge stale GitHub Environments"
+    );
+    const script = purge[deploymentsIndex]?.run ?? "";
+
+    expect(deploymentsIndex).toBeGreaterThanOrEqual(0);
+    expect(environmentsIndex).toBeGreaterThan(deploymentsIndex);
+    expect(script).toContain("selectExpiredDeployments");
+    expect(script.indexOf("-f state=inactive")).toBeLessThan(
+      script.indexOf("--method DELETE")
+    );
   });
 
   it("deletes only fixture-linked private GHCR state after Radius cleanup", async () => {

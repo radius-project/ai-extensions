@@ -1414,6 +1414,48 @@ export async function createCloudFixture(
         });
       }
 
+      const deploymentRecords = await listDeploymentRecordIds(
+        commands,
+        repository,
+        environmentName
+      ).catch((error: unknown) => {
+        failures.push(
+          `probe GitHub deployment records for ${environmentName}: ${describeError(error)}`
+        );
+        return null;
+      });
+      if (deploymentRecords && deploymentRecords.length > 0)
+        await attempt(
+          `${deploymentRecords.length} GitHub deployment record(s) for ${environmentName}`,
+          async () => {
+            for (const id of deploymentRecords) {
+              // GitHub refuses to delete a deployment that is still active,
+              // and a record whose job never reported a status is active by
+              // default.
+              expectSuccess(
+                await commands.runGh([
+                  "api",
+                  "--method",
+                  "POST",
+                  `repos/${repository}/deployments/${id}/statuses`,
+                  "-f",
+                  "state=inactive"
+                ]),
+                `gh api POST deployments/${id}/statuses`
+              );
+              expectSuccess(
+                await commands.runGh([
+                  "api",
+                  "--method",
+                  "DELETE",
+                  `repos/${repository}/deployments/${id}`
+                ]),
+                `gh api DELETE deployments/${id}`
+              );
+            }
+          }
+        );
+
       const environment = await commands.runGh([
         "api",
         `repos/${repository}/environments/${environmentName}`
@@ -1833,6 +1875,34 @@ function validateStatePackageForDeletion(
   if (statePackage.linkedRepository.toLowerCase() !== repository.toLowerCase())
     return `it is linked to "${statePackage.linkedRepository}", not "${repository}"`;
   return null;
+}
+
+// Deleting a GitHub Environment leaves its deployment records behind: the two
+// are linked by environment *name*, so the records outlive it. The extension
+// never deletes one, because to the product a deployment record is history
+// rather than a resource it owns, so the suite that caused them has to.
+async function listDeploymentRecordIds(
+  commands: CloudCommandPort,
+  repository: string,
+  environmentName: string
+): Promise<number[]> {
+  const context = `gh api repos/${repository}/deployments?environment=${environmentName}`;
+  const entries = parseJsonArray(
+    await commands.runGh([
+      "api",
+      `repos/${repository}/deployments?environment=${environmentName}&per_page=100`
+    ]),
+    context
+  );
+  return entries.map((entry, index) => {
+    const record = asRecord(entry, context, index);
+    const id = record.id;
+    if (typeof id !== "number" || !Number.isInteger(id))
+      throw new Error(
+        `${context} returned an entry at index ${index} with no usable numeric "id".`
+      );
+    return id;
+  });
 }
 
 async function listAppRegistrations(

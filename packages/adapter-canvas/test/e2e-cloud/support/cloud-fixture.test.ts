@@ -160,6 +160,14 @@ function baselineStubs(): FakeCommandStub[] {
   return [
     {
       tool: "gh",
+      match: [
+        "api",
+        `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
+      ],
+      respond: { stdout: "[]" }
+    },
+    {
+      tool: "gh",
       match: ["api", "--method", "POST", `repos/${REPOSITORY}/git/refs`],
       respond: {}
     },
@@ -3146,6 +3154,95 @@ describe("createCloudFixture", () => {
         ).toThrow(message);
       }
     );
+
+    // Deleting the GitHub Environment leaves its deployment records behind,
+    // because the two are linked by name rather than id. The extension never
+    // removes one -- to the product it is history, not a resource it owns --
+    // so the run that caused them has to.
+    it("purges the deployment records the run left on its environment", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: [
+            "api",
+            `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
+          ],
+          respond: { stdout: '[{"id":41},{"id":42}]' }
+        },
+        {
+          tool: "gh",
+          match: [
+            "api",
+            "--method",
+            "POST",
+            `repos/${REPOSITORY}/deployments/41/statuses`
+          ],
+          respond: {}
+        },
+        {
+          tool: "gh",
+          match: [
+            "api",
+            "--method",
+            "DELETE",
+            `repos/${REPOSITORY}/deployments/41`
+          ],
+          respond: {}
+        },
+        {
+          tool: "gh",
+          match: [
+            "api",
+            "--method",
+            "POST",
+            `repos/${REPOSITORY}/deployments/42/statuses`
+          ],
+          respond: {}
+        },
+        {
+          tool: "gh",
+          match: [
+            "api",
+            "--method",
+            "DELETE",
+            `repos/${REPOSITORY}/deployments/42`
+          ],
+          respond: {}
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        `2 GitHub deployment record(s) for ${ENVIRONMENT}`
+      );
+      // GitHub refuses to delete an active deployment, and a record whose job
+      // never reported a status is active, so the deactivation has to come
+      // first or the delete is rejected.
+      const lines = fake.commands.commandLines("gh");
+      expect(
+        lines.findIndex((line) => line.includes("POST") && line.includes("41"))
+      ).toBeLessThan(
+        lines.findIndex(
+          (line) => line.includes("DELETE") && line.includes("deployments/41")
+        )
+      );
+    });
+
+    it("reports a deployment listing it could not read instead of assuming none", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: [
+            "api",
+            `repos/${REPOSITORY}/deployments?environment=${ENVIRONMENT}&per_page=100`
+          ],
+          respond: { stdout: '[{"environment":"radtest"}]' }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /probe GitHub deployment records for radtest-run0000000a: .*no usable numeric "id"/s
+      );
+    });
 
     it("reports targeted workload cleanup failure and continues reclaiming other artifacts", async () => {
       const { fixture, fake } = await createHarness(
