@@ -98,6 +98,7 @@ describe("pull request application graph diff guard", () => {
   it("does not inherit a modeled worktree when a later hook omits its directory", async () => {
     const { guard, deps } = setup(true);
     await guard.inspectAtSessionStart("/worktrees/widgets");
+    await observeRadiusInteraction(guard);
 
     await expect(
       guard.onPreToolUse({
