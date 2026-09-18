@@ -1066,7 +1066,7 @@ describe("graph planning workflows", () => {
 
       expect(outcome.status).toBe(400);
       expect(outcome.payload).toEqual({
-        error: `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep line 31: The specified "object" declaration is missing the following required properties: "application".`,
+        error: `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep line 31, column 5: The specified "object" declaration is missing the following required properties: "application".`,
         modelingFailed: true,
         attempt: 1,
         maxAttempts: 3,
