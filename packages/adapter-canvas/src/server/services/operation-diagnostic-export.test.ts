@@ -105,6 +105,11 @@ function operation(overrides: Record<string, unknown> = {}) {
     },
     request: { clientSecret: "SECRET_CLIENT_SECRET" },
     resumeRequest: { tenantId: "SECRET_TENANT" },
+    azureAppCreateContinuation: {
+      schemaVersion: 1,
+      rawOutput: "SECRET_CONTINUATION_OUTPUT",
+      credential: "SECRET_CONTINUATION_CREDENTIAL"
+    },
     repo: "SECRET_REPOSITORY",
     environment: "SECRET_ENVIRONMENT",
     ...overrides
