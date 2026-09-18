@@ -2,12 +2,13 @@
 
 // The process-handling core shared by every managed rad/bicep invocation.
 //
-// This lives in plain `.mjs` rather than TypeScript because the application-
-// modeling skill script runs as a bare `node <script>` process from the
-// installed plugin, where the TypeScript sources and workspace package
-// resolution are both unavailable. `packages/adapter-canvas/build.mjs` bundles
-// it into the shipped standalone script, while the TypeScript packages consume
-// it directly through `rad-process.d.mts`.
+// This lives in plain `.mjs` because both the application-modeling resolver and
+// the TypeScript packages execute it directly. The resolver's direct source
+// imports, including TypeScript helpers, run only in the repository-supported
+// Node/test environment. `packages/adapter-canvas/build.mjs` bundles this module
+// and those source dependencies into the shipped standalone resolver, so the
+// installed plugin needs neither TypeScript sources nor workspace resolution.
+// The TypeScript packages consume it through `rad-process.d.mts`.
 //
 // `allowJs` is off and adapter-shared/tsconfig.json only includes `src/**/*.ts`,
 // so `tsc` never checks this file against its hand-written declaration. The
