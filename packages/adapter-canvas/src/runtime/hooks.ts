@@ -142,7 +142,24 @@ export interface HandoffMessage {
 export interface AppModelFailureReportContext {
   readonly attemptToken: string;
   readonly instanceId: string;
-  readonly branch: string;
+  // Every branch this attempt was asked to model: one for the graph and planned
+  // views, two for a diff. The token is minted per branch under the same
+  // single-branch key, so the skill reports each branch it could not model
+  // rather than the attempt gaining a second, two-branch identity.
+  readonly branches: ReadonlyArray<string>;
+}
+
+function failureReportInstruction(
+  repo: string,
+  { attemptToken, instanceId, branches }: AppModelFailureReportContext
+): string {
+  const callArguments =
+    branches.length === 1 ?
+      `instanceId \`${instanceId}\`, repo \`${repo}\`, branch \`${branches[0]}\`, attemptToken \`${attemptToken}\`, and the actionable failure summary`
+    : `instanceId \`${instanceId}\`, repo \`${repo}\`, attemptToken \`${attemptToken}\`, the actionable failure summary, and branch set to each branch it could not model (${branches
+        .map((branch) => `\`${branch}\``)
+        .join(", ")}) — one call per branch`;
+  return `If the radius-app-bicep skill classifies this attempt as a permanent failure and leaves .radius/app.bicep missing, call radius_report_modeling_failure with ${callArguments}. Do not report transient failures, cancellations, or a run that wrote the model.`;
 }
 
 // Prompt sent to the agent when a Radius graph canvas is opened but no
@@ -175,10 +192,8 @@ export function appBicepHandoffPrompt(
     : `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
     "",
     RECIPE_PACK_NOTE,
-    ...(failureReport ?
-      [
-        `If the radius-app-bicep skill classifies this attempt as a permanent failure and leaves .radius/app.bicep missing, call radius_report_modeling_failure with instanceId \`${failureReport.instanceId}\`, repo \`${repo}\`, branch \`${failureReport.branch}\`, attemptToken \`${failureReport.attemptToken}\`, and the actionable failure summary. Do not report transient failures, cancellations, or a run that wrote the model.`
-      ]
+    ...(failureReport && failureReport.branches.length ?
+      [failureReportInstruction(repo, failureReport)]
     : [])
   ].join("\n");
 }

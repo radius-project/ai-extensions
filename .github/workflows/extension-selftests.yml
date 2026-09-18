@@ -54,7 +54,8 @@ jobs:
             git ls-files \
               '.github/extension/**/*.sh' \
               'build/scripts/verify-contrib-consumers*.sh' \
-              'build/scripts/update-radius-installer*.sh'
+              'build/scripts/update-radius-installer*.sh' \
+              'build/scripts/cloud-e2e-lease*.sh'
           )
           if [ "${#scripts[@]}" -eq 0 ]; then
             echo "::error::no extension shell scripts found to lint"
@@ -70,7 +71,8 @@ jobs:
           mapfile -t tests < <(
             git ls-files \
               '.github/extension/**/*_test.sh' \
-              'build/scripts/update-radius-installer_test.sh'
+              'build/scripts/update-radius-installer_test.sh' \
+              'build/scripts/cloud-e2e-lease_test.sh'
           )
           if [ "${#tests[@]}" -eq 0 ]; then
             echo "::error::no extension shell tests found to run"

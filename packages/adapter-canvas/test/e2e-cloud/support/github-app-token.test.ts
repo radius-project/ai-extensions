@@ -3,8 +3,8 @@ import {
   createNodeGitHubAppTokenPorts,
   mintGitHubAppToken,
   readGitHubAppTokenConfig,
+  readPlaywrightGitHubAppTokenConfig,
   refreshProcessGitHubToken,
-  takeGitHubAppTokenConfig,
   type GitHubAppTokenConfig,
   type GitHubAppTokenPorts
 } from "./github-app-token.js";
@@ -108,7 +108,7 @@ describe("readGitHubAppTokenConfig", () => {
     ).toThrow(/owner\/name/);
   });
 
-  it("removes the private key from the process environment after reading it", () => {
+  it("preserves the private key while Playwright discovers tests", () => {
     const env: NodeJS.ProcessEnv = {
       CLOUD_E2E_BOT_CLIENT_ID: "Iv1.fixture",
       CLOUD_E2E_BOT_INSTALLATION_ID: "1234",
@@ -116,17 +116,37 @@ describe("readGitHubAppTokenConfig", () => {
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: "radius-project/cloud-fixture"
     };
 
-    expect(takeGitHubAppTokenConfig(env)).toMatchObject({ privateKey: "key" });
+    expect(readPlaywrightGitHubAppTokenConfig(env)).toMatchObject({
+      privateKey: "key"
+    });
+    expect(env.CLOUD_E2E_BOT_PRIVATE_KEY).toBe("key");
+  });
+
+  it("removes the private key after a Playwright worker reads it", () => {
+    const env: NodeJS.ProcessEnv = {
+      TEST_WORKER_INDEX: "0",
+      CLOUD_E2E_BOT_CLIENT_ID: "Iv1.fixture",
+      CLOUD_E2E_BOT_INSTALLATION_ID: "1234",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "key",
+      AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: "radius-project/cloud-fixture"
+    };
+
+    expect(readPlaywrightGitHubAppTokenConfig(env)).toMatchObject({
+      privateKey: "key"
+    });
     expect(env.CLOUD_E2E_BOT_PRIVATE_KEY).toBeUndefined();
   });
 
-  it("removes the private key even when the refresh configuration is invalid", () => {
+  it("removes the private key when worker refresh configuration is invalid", () => {
     const env: NodeJS.ProcessEnv = {
+      TEST_WORKER_INDEX: "0",
       CLOUD_E2E_BOT_CLIENT_ID: "Iv1.fixture",
       CLOUD_E2E_BOT_PRIVATE_KEY: "key"
     };
 
-    expect(() => takeGitHubAppTokenConfig(env)).toThrow(/is required/);
+    expect(() => readPlaywrightGitHubAppTokenConfig(env)).toThrow(
+      /is required/
+    );
     expect(env.CLOUD_E2E_BOT_PRIVATE_KEY).toBeUndefined();
   });
 });
@@ -156,13 +176,13 @@ describe("mintGitHubAppToken", () => {
       repositories: ["cloud-fixture"],
       permissions: {
         actions: "write",
-        administration: "read",
+        actions_variables: "write",
+        administration: "write",
         contents: "write",
         deployments: "read",
         environments: "write",
         pull_requests: "write",
         secrets: "write",
-        variables: "write",
         workflows: "write"
       }
     });

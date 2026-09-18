@@ -88,12 +88,16 @@ runs:
         #
         # database.enabled=true installs the control-plane PostgreSQL so durable
         # Radius state can be backed up and restored by `rad shutdown`/`rad startup`.
+        # Its default 2-CPU request cannot fit with the rest of the control plane
+        # on a standard private-repository runner, so reserve 500m while retaining
+        # the chart's existing CPU limit, memory, storage, and burst capacity.
         TARGET_FLAGS=()
         if [ -f "$RADIUS_TARGET_KUBECONFIG" ]; then
           TARGET_FLAGS+=(--set global.targetCluster.enabled=true)
         fi
         rad install kubernetes \
           --set database.enabled=true \
+          --set database.resources.requests.cpu=500m \
           --set rp.publicEndpointOverride=localhost \
           --set dynamicrp.buildkit.enabled=true \
           "${TARGET_FLAGS[@]}"

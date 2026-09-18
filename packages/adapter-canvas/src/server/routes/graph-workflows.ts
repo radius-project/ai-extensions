@@ -57,6 +57,29 @@ const MISSING_ENTRY_PAYLOAD = {
 const GENERATING_APP_BICEP_MESSAGE =
   "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
 
+// The terminal text every view shows once modeling has permanently failed. An
+// explicit Canvas refresh is the only retry path, because the failure is fenced
+// by the attempt token that produced it and only a refresh mints a new one.
+function appModelAuthoringFailureDetail(error: string): string {
+  return `Application model generation stopped: ${error} Fix the reported issue, then refresh the Radius Canvas to try modeling again.`;
+}
+
+// The explicit-refresh unfence. `clearAppModelAuthoringFailure` also drops the
+// branch's attempt token, which is only safe once that attempt has reported.
+// Dropping a token no failure is recorded against would strand a modeling run
+// that is still in flight: its eventual report is rejected as stale, so the
+// real error never reaches the view and the wait runs to its timeout instead.
+// A diff makes that reachable from a second view, because it clears both of
+// its branches, either of which another view may already be modeling.
+function retryRecordedAuthoringFailure(
+  state: CanvasState,
+  repo: string,
+  branch: string
+): void {
+  if (!appModelAuthoringFailure(state, repo, branch)) return;
+  clearAppModelAuthoringFailure(state, repo, branch);
+}
+
 // `bare` responses are written without a `Content-Type` header, exactly as the
 // legacy branches wrote them: the missing-entry 503 on all three routes, and
 // load-graph's pre-compile 409. Every other response sets the header first.
@@ -105,7 +128,10 @@ export interface GraphWorkflowDependencies<
     repo: string,
     branches: string | string[],
     page: string,
-    progressView: GraphProgressView
+    progressView: GraphProgressView,
+    // Re-checked inside the handoff, immediately before it mints attempt tokens
+    // and speaks, because it probes and waits long after this route responded.
+    isCurrent?: () => boolean
   ): void;
   triggerGraphRepairHandoff(
     entry: TEntry,
@@ -533,7 +559,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
   ): Promise<GraphWorkflowOutcome> {
     if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
     if (retryAuthoring) {
-      clearAppModelAuthoringFailure(entry.state, repo, branch);
+      retryRecordedAuthoringFailure(entry.state, repo, branch);
     }
     const authoringFailure = appModelAuthoringFailure(
       entry.state,
@@ -541,7 +567,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       branch
     );
     if (authoringFailure) {
-      const detail = `Application model generation stopped: ${authoringFailure.error} Fix the reported issue, then refresh the Radius Canvas to try modeling again.`;
+      const detail = appModelAuthoringFailureDetail(authoringFailure.error);
       reportRefusal(detail);
       return json(200, {
         error: detail,
@@ -1262,21 +1288,24 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         data.restartWait === true
       );
       activeProgressHandle = progressHandle;
+      // True while this request is still the comparison on screen. A selector
+      // change starts a newer request that owns the progress record and the
+      // source-reference token; anything this one writes afterwards — progress
+      // events, authoring-failure state, a handoff — would belong to a
+      // comparison the user already left.
+      const isCurrentRequest = (): boolean =>
+        isCurrentGraphProgress(state, progressHandle) &&
+        dependencies.isCurrentSourceRefToken(
+          state,
+          "diff",
+          sourceRefContext?.token || ""
+        );
       const addEvent = (
         stage: GraphBuildStage,
         eventState: GraphBuildEvent["state"],
         detail: string
       ): void => {
-        if (
-          !isCurrentGraphProgress(state, progressHandle) ||
-          !dependencies.isCurrentSourceRefToken(
-            state,
-            "diff",
-            sourceRefContext?.token || ""
-          )
-        ) {
-          return;
-        }
+        if (!isCurrentRequest()) return;
         appendGraphEvent(progressHandle.record, stage, eventState, detail);
       };
       sourceRefContext = dependencies.prepareSourceRefResources(entry, "diff", {
@@ -1303,6 +1332,22 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         pipeline.selectAppBicep(entry, repo, data.head)
       ]);
 
+      // The selections were awaited, so a newer comparison may now own the
+      // fencing state for these branches. Writing to it from here would clear
+      // or overwrite that comparison's attempt and could either reject its
+      // legitimate failure report as stale or promote an abandoned handoff.
+      if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
+
+      // An explicit refresh is the retry path the failure text names, so it
+      // clears BOTH sides: the user is asking for the whole comparison again,
+      // and leaving either side fenced would end the retry immediately. This
+      // runs before the both-missing check so a refresh still unfences the
+      // missing side of a half-modeled comparison.
+      if (data.restartWait === true) {
+        retryRecordedAuthoringFailure(state, repo, data.base);
+        retryRecordedAuthoringFailure(state, repo, data.head);
+      }
+
       if (!baseSelection.content && !headSelection.content) {
         addEvent(
           "checking_model",
@@ -1314,6 +1359,26 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
+        // A permanent failure on EITHER side ends the diff's wait. Both sides
+        // are missing to have reached here, and both models are produced by the
+        // one handoff that just failed permanently, so a failure recorded
+        // against either branch says the comparison's request failed. Waiting
+        // for both to be reported would also be self-defeating: the next render
+        // would hand off again, mint fresh tokens for both branches, and
+        // invalidate the failure already on record — the loop this closes.
+        const authoringFailure =
+          appModelAuthoringFailure(state, repo, data.base) ??
+          appModelAuthoringFailure(state, repo, data.head);
+        if (authoringFailure) {
+          const detail = appModelAuthoringFailureDetail(authoringFailure.error);
+          addEvent("creating_model", "failed", detail);
+          return json(200, {
+            error: detail,
+            modelingFailed: true,
+            appModelAuthoringFailed: true,
+            repo
+          });
+        }
         const diffRefusal = await diffAppBicepRefusalReason(
           entry,
           repo,
@@ -1328,12 +1393,19 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
             repo
           });
         }
+        // Re-checked after the refusal probe: the handoff mints the attempt
+        // tokens that fence both branches, so a superseded request must not
+        // start one and overwrite the current comparison's attempt. The
+        // predicate goes with it, because the handoff keeps probing and waiting
+        // after this response is written.
+        if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
         dependencies.triggerAppBicepHandoff(
           entry,
           repo,
           [data.base, data.head],
           "graph-diff",
-          "diff"
+          "diff",
+          isCurrentRequest
         );
         // No `branch` key here, unlike the other two routes: the diff spans two.
         return json(200, {
@@ -1341,6 +1413,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           needsAppBicep: true,
           repo
         });
+      }
+      // A model that arrived retires the failure recorded for its own branch,
+      // exactly as the single-branch routes do for theirs.
+      if (baseSelection.content) {
+        clearAppModelAuthoringFailure(state, repo, data.base);
+      }
+      if (headSelection.content) {
+        clearAppModelAuthoringFailure(state, repo, data.head);
       }
       if (modelCreationIsRunning(progressHandle.record)) {
         addEvent(

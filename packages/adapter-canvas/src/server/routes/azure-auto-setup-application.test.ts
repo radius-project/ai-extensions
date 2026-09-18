@@ -1788,6 +1788,7 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         operationId: "op-app"
       });
       const test = harness({
+        sleep: async () => {},
         runAz: async (args) => {
           const line = args.join(" ");
           if (line.startsWith("ad app list ")) {
@@ -1928,7 +1929,11 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
       identityLookup?: AzureAutoSetupCommandResult;
       identityLookups?: AzureAutoSetupCommandResult[];
       ownerAdd?: AzureAutoSetupCommandResult;
+      ownerAdds?: AzureAutoSetupCommandResult[];
       ownerList?: AzureAutoSetupCommandResult;
+      ownerLists?: AzureAutoSetupCommandResult[];
+      tagPatches?: AzureAutoSetupCommandResult[];
+      tagShows?: AzureAutoSetupCommandResult[];
       sleep?: AzureAutoSetupApplicationInput["dependencies"]["sleep"];
     } = {}
   ): { test: Harness; azCalls: string[] } {
@@ -1953,12 +1958,22 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
         if (line.startsWith("ad app create "))
           return command({ stdout: APP_ID });
         if (line.startsWith("ad app owner add "))
-          return overrides.ownerAdd ?? command();
+          return (
+            overrides.ownerAdds?.shift() ?? overrides.ownerAdd ?? command()
+          );
         if (line.startsWith("ad app owner list "))
-          return overrides.ownerList ?? command({ stdout: ownerObjectId });
-        if (line.startsWith("rest --method PATCH ")) return command();
+          return (
+            overrides.ownerLists?.shift() ??
+            overrides.ownerList ??
+            command({ stdout: ownerObjectId })
+          );
+        if (line.startsWith("rest --method PATCH "))
+          return overrides.tagPatches?.shift() ?? command();
         if (line.startsWith("ad app show ") && line.includes("--query tags"))
-          return command({ stdout: JSON.stringify(requiredTags) });
+          return (
+            overrides.tagShows?.shift() ??
+            command({ stdout: JSON.stringify(requiredTags) })
+          );
         throw new Error(`unscripted az call: ${line}`);
       }
     });
@@ -2002,6 +2017,105 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     expect(test.steps).toContain(
       "✅ Azure CLI identity verified as App Registration owner"
     );
+  });
+
+  it("retries owner assignment while the new App Registration propagates", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      ownerAdds: [
+        command({
+          code: 1,
+          stderr:
+            "ERROR: Resource 'app-id' does not exist or one of its queried reference-property objects are not present."
+        }),
+        command()
+      ],
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+    expect(
+      azCalls.filter((line) => line.startsWith("ad app owner add "))
+    ).toHaveLength(2);
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("retries owner verification while the new App Registration propagates", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      ownerLists: [
+        command({
+          code: 1,
+          stderr:
+            "ERROR: Resource 'app-id' does not exist or one of its queried reference-property objects are not present."
+        }),
+        command({ stdout: SP_OBJECT_ID })
+      ],
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+    expect(
+      azCalls.filter((line) => line.startsWith("ad app owner list "))
+    ).toHaveLength(2);
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("retries provenance verification while updated tags propagate", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      tagShows: [
+        command({ stdout: "[]" }),
+        command({ stdout: JSON.stringify(requiredTags) })
+      ],
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+    expect(
+      azCalls.filter(
+        (line) =>
+          line.startsWith("ad app show ") && line.includes("--query tags")
+      )
+    ).toHaveLength(2);
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("retries provenance tag mutation while the new App Registration propagates", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      tagPatches: [
+        command({
+          code: 1,
+          stderr:
+            'ERROR: Not Found({"error":{"code":"Request_ResourceNotFound","message":"Resource \'app-id\' does not exist or one of its queried reference-property objects are not present."}})'
+        }),
+        command()
+      ],
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+    expect(
+      azCalls.filter((line) => line.startsWith("rest --method PATCH "))
+    ).toHaveLength(2);
+    expect(sleeps).toEqual([2000]);
   });
 
   it("resolves the service principal identity once across repeated ownership checks", async () => {
@@ -2263,6 +2377,89 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     );
   });
 
+  it("stops verifying owner propagation at the bounded attempt limit", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      // A successful read that never lists the owner is the shape replication
+      // lag takes once the app exists, so the only thing that can end this loop
+      // is the attempt bound.
+      ownerList: command({ stdout: USER_ID }),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad app owner list "))
+    ).toHaveLength(6);
+    expect(sleeps).toEqual([2000, 4000, 6000, 8000, 10000]);
+    expect(test.failures[0]).toMatchObject({ code: "app-owner-verify-failed" });
+  });
+
+  it("does not retry owner verification after an authorization failure", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      ownerList: command({
+        code: 1,
+        stderr: "ERROR: HTTP 403 Authorization_RequestDenied"
+      }),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad app owner list "))
+    ).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+    // A denied read is a lookup failure, distinct from the verify failure a
+    // successful read that omits the owner produces.
+    expect(test.failures[0]).toMatchObject({ code: "app-owner-lookup-failed" });
+  });
+
+  it("does not retry the owner mutation when propagation requests an excessive delay", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      ownerAdd: command({
+        code: 1,
+        stderr:
+          "ERROR: Resource 'app-id' does not exist or one of its queried reference-property objects are not present.\nRetry-After: 11"
+      }),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad app owner add "))
+    ).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+    expect(test.failures[0]).toMatchObject({ code: "app-owner-add-failed" });
+  });
+
+  it("stops verifying tag propagation at the bounded attempt limit", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      tagShows: Array.from({ length: 6 }, () => command({ stdout: "[]" })),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter(
+        (line) =>
+          line.startsWith("ad app show ") && line.includes("--query tags")
+      )
+    ).toHaveLength(6);
+    expect(sleeps).toEqual([2000, 4000, 6000, 8000, 10000]);
+    expect(test.failures[0]).toMatchObject({ code: "app-tag-verify-failed" });
+  });
+
   it("rolls back when the owner add is denied for a service principal", async () => {
     const { test } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
       ownerAdd: command({
@@ -2281,7 +2478,8 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
 
   it("rolls back when the created application does not list the service principal as an owner", async () => {
     const { test } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
-      ownerList: command({ stdout: USER_ID })
+      ownerList: command({ stdout: USER_ID }),
+      sleep: async () => {}
     });
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
@@ -2315,10 +2513,22 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
   });
 
+  it("accepts string zero exit codes from tag assignment and verification", async () => {
+    const { test } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      tagPatches: [command({ code: "0" })],
+      tagShows: [command({ code: "0", stdout: JSON.stringify(requiredTags) })]
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+  });
+
   it("reconciles an interrupted owner add against the service principal object id", async () => {
     let ownerAdds = 0;
     const test = harness({
       identity: SERVICE_PRINCIPAL,
+      sleep: async () => {},
       runAz: async (args) => {
         const line = args.join(" ");
         if (line.startsWith("ad sp show ")) {
@@ -2350,6 +2560,7 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     let ownerAdds = 0;
     const test = harness({
       identity: SERVICE_PRINCIPAL,
+      sleep: async () => {},
       runAz: async (args) => {
         const line = args.join(" ");
         if (line.startsWith("ad sp show ")) {

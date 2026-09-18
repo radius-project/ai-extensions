@@ -311,6 +311,69 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(harness.state.appModelFailures).toEqual({});
   });
 
+  it("stops asking the diff to generate once modeling failed permanently on one side", async () => {
+    const harness = start({
+      selections: {
+        main: selectionOf("main", null),
+        "feature/x": selectionOf("feature/x", null)
+      }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "The configured Recipe rejects the required credential shape."
+      }
+    };
+    harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/diff-branches",
+      '{"repo":"octo/app","base":"main","head":"feature/x"}'
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      modelingFailed: true,
+      appModelAuthoringFailed: true,
+      repo: "octo/app"
+    });
+    expect(payload.needsAppBicep).toBeUndefined();
+  });
+
+  it("restarts diff modeling after an explicit refresh clears both sides", async () => {
+    const harness = start({
+      selections: {
+        main: selectionOf("main", null),
+        "feature/x": selectionOf("feature/x", null)
+      }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": { attemptToken: "attempt-1", error: "base failed" },
+      "octo/app::feature/x": {
+        attemptToken: "attempt-1",
+        error: "head failed"
+      }
+    };
+    harness.state.appModelAttemptTokens = {
+      "octo/app::main": "attempt-1",
+      "octo/app::feature/x": "attempt-1"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/diff-branches",
+      '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ needsAppBicep: true });
+    expect(harness.state.appModelFailures).toEqual({});
+  });
+
   it("loads the worktree model after an implicit workspace branch is renamed", async () => {
     const harness = start({
       liveWorkspaceBranch: "new-name",
