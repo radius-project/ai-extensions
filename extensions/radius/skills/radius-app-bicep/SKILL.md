@@ -65,6 +65,8 @@ These codes apply only to `validate-bicep.mjs`. The promote script has a separat
 
 When Bicep exits successfully, the checker reports its warnings together with every compiled-output policy finding from the same attempt before returning `1`. If compiled JSON or required policy evidence is unusable, the checker returns `2` even when it also printed a compiler warning, because it could not produce a complete verdict.
 
+Compiler diagnostics retain their primary source location as `uri:line:column` when Bicep supplies a usable column, or `uri:line` when it does not. A missing location is not inferred from another diagnostic or secondary location. Columns improve location accuracy only; they do not change validation decisions or the repair budget.
+
 If `show-radius-type.mjs` fails while locating, querying, or validating the selected Radius CLI or while deriving its extension reference, stop the modeling run, run `node "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"`, and report the exact error. This includes a missing binary, invalid or incomplete version JSON, a noncanonical commit, and an unsupported development, edge, or pull-request version. A CLI-resolution failure is not permission to repair the toolchain: never download, install, upgrade, downgrade, copy, move, rename, back up, delete, or replace a `rad` binary; never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`; and never search `PATH`, `.rad/bin`, or another location for a released fallback. The extension alone owns its managed binary lifecycle. Use a different binary only after the user explicitly changes their configuration and requests a new modeling run.
 
 ## Workflow
