@@ -529,6 +529,26 @@ describe("createGraphProgress", () => {
     );
   });
 
+  it("keeps the caller's title when the build reports model creation", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope, {
+      title: "Planning the deployment"
+    });
+
+    view.sync(
+      [
+        serverEvent(1, "checking_model", "succeeded", "No model yet."),
+        serverEvent(2, "creating_model", "running", "Copilot is authoring.")
+      ],
+      1
+    );
+
+    expect(graphProgressTitle(host)).toBe("Planning the deployment");
+    expect(graphProgressPanel(host)?.getAttribute("aria-label")).toBe(
+      "Planning the deployment"
+    );
+  });
+
   it("titles the panel for loading while no model is being created", () => {
     const { browser, host, scope } = setup();
     const view = createGraphProgress(browser.context, scope);
