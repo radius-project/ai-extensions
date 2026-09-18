@@ -187,6 +187,8 @@ import {
   canResumeInput,
   requireInput,
   resumeAfterInput,
+  getAzureAppCreateContinuation,
+  setAzureAppCreateContinuation,
   setExecutionActive,
   announceOperationTerminal,
   shouldStop,
@@ -1031,7 +1033,9 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       report: (diagnostic) => operations.report?.(diagnostic),
       finish: (operation, state, options) => {
         finish(operation, state, options);
-      }
+      },
+      getAzureAppCreateContinuation,
+      setAzureAppCreateContinuation
     },
     progress: {
       enterStage: (operation, stage) => {
