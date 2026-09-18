@@ -453,7 +453,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       [
         "Purge stale Entra identities",
         "Purge stale GHCR deployment state",
-        "Purge stale GitHub environments",
+        "Purge stale GitHub Environments",
         "Purge stale fallback pull requests and branches",
         "Reset an idle fixture repository to the pinned baseline"
       ].includes(step.name ?? "")
@@ -492,6 +492,92 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain(
       'GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"'
     );
+  });
+
+  it("sweeps every GHCR state package the fixture wrote", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const orphanCleanup = purge.find(
+      (step) => step.name === "Purge orphaned GHCR deployment state"
+    );
+    const script = orphanCleanup?.run ?? "";
+
+    expect(orphanCleanup).toBeDefined();
+    // A failed application delete is one of the ways state is orphaned, so
+    // gating recovery on it would skip exactly the runs that need it.
+    expect(orphanCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    // Enumerating environments is what made orphaned state unreachable.
+    expect(script).not.toContain("environments");
+    expect(orphanCleanup?.env?.GH_PACKAGES_TOKEN).toBe(
+      "${{ secrets.GH_RAD_CI_BOT_PAT }}"
+    );
+    expect(script).toContain("selectStaleStatePackages");
+    expect(script).toContain(
+      'package_prefix="${repository_name,,}-radius-state-"'
+    );
+    expect(script).toContain(
+      '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
+    );
+    expect(script).toContain(
+      '[[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]'
+    );
+    expect(script).toContain('cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago"');
+  });
+
+  it("reclaims leaked cluster workloads with credentials for the shared cluster", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const clusterCleanup = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name === "Reclaim leaked Radius workloads from the shared cluster"
+    );
+    const script = clusterCleanup?.run ?? "";
+
+    expect(clusterCleanup?.if).toContain(
+      "steps.azure-login.outcome == 'success'"
+    );
+    // A workload is stranded here precisely when that delete fails.
+    expect(clusterCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    expect(script).toContain('cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago"');
+    expect(clusterCleanup?.env?.FIXTURE_APPLICATION).toBe(
+      "${{ steps.pin.outputs.fixture-application }}"
+    );
+    expect(clusterCleanup?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(clusterCleanup?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(script).toContain("az aks get-credentials");
+    expect(script).toContain("--selector radapp.io/environment");
+    expect(script).toContain("selectLeakedClusterWorkloads");
+    expect(script).toContain('kubectl delete "${kind,,}/$name"');
+  });
+
+  it("empties the shared resource group of everything but the cluster", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const groupCleanup = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name ===
+        "Reclaim Azure resources left in the shared resource group"
+    );
+    const script = groupCleanup?.run ?? "";
+
+    expect(groupCleanup?.if).toContain(
+      "steps.azure-login.outcome == 'success'"
+    );
+    // A recipe-created resource is stranded here precisely when that fails.
+    expect(groupCleanup?.if).not.toContain("steps.radius-app-cleanup");
+    expect(groupCleanup?.env?.AKS_CLUSTER_NAME).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
+    );
+    expect(groupCleanup?.env?.RESOURCE_GROUP).toBe(
+      "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}"
+    );
+    expect(script).toContain("az resource list \\");
+    expect(script).toContain("selectReclaimableGroupResources");
+    expect(script).toContain('az resource delete --ids "$id"');
+    // Nothing here is tagged, so age cannot be what qualifies a resource.
+    expect(script).not.toContain("MAX_AGE_HOURS");
   });
 
   it("removes only allowlisted assignments before deleting leaked service principals", async () => {

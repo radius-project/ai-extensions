@@ -10,8 +10,9 @@ import {
 } from "../../../src/infra.js";
 import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
 import {
-  applicationNamespace,
+  deploymentNamespace,
   classifyDeploymentPresence,
+  createTolerantProbe,
   DELETE_DEPLOYMENT_WORKFLOW,
   DELETE_ENVIRONMENT_WORKFLOW,
   describeDeployFailure,
@@ -49,6 +50,7 @@ function workload(
   overrides: Partial<KubernetesWorkload> = {}
 ): KubernetesWorkload {
   return {
+    kind: "Deployment",
     name: "demo-frontend",
     application: "demo",
     desiredReplicas: 1,
@@ -602,37 +604,85 @@ describe("classifyDeploymentPresence", () => {
   });
 });
 
-describe("applicationNamespace", () => {
-  it("joins the environment namespace and application, normalized", () => {
-    expect(applicationNamespace("RadTest-NS", "Demo")).toBe("radtest-ns-demo");
+describe("createTolerantProbe", () => {
+  it("passes a successful reading straight through", async () => {
+    const probe = createTolerantProbe(async () => "ready");
+    expect(await probe.read()).toBe("ready");
+    expect(probe.lastFailure()).toBe("");
   });
 
-  it("trims each part before joining", () => {
-    expect(applicationNamespace("  ns  ", "  demo  ")).toBe("ns-demo");
+  it("reports an unreadable answer as undefined so polling continues", async () => {
+    const probe = createTolerantProbe(async () => {
+      throw new Error("The list-deployments endpoint failed: not identifiable");
+    });
+    expect(await probe.read()).toBeUndefined();
+    expect(probe.lastFailure()).toMatch(/not identifiable/);
+  });
+
+  it("forgets a failure once a later attempt succeeds", async () => {
+    let attempt = 0;
+    const probe = createTolerantProbe(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("transient");
+      return "ready";
+    });
+    await probe.read();
+    expect(await probe.read()).toBe("ready");
+    expect(probe.lastFailure()).toBe("");
+  });
+
+  it("describes a thrown non-error rather than reporting no failure", async () => {
+    const probe = createTolerantProbe(async () => {
+      throw "listing rejected";
+    });
+    await probe.read();
+    expect(probe.lastFailure()).toBe("listing rejected");
+  });
+
+  it("puts the last failure back into a timeout", async () => {
+    const probe = createTolerantProbe(async () => {
+      throw new Error("endpoint down");
+    });
+    await probe.read();
+    const explained = probe.explain(new Error("Timed out waiting"));
+    expect(explained).toBeInstanceOf(Error);
+    expect((explained as Error).message).toMatch(/Timed out waiting/);
+    expect((explained as Error).message).toMatch(/endpoint down/);
+    expect((explained as Error).cause).toBeInstanceOf(Error);
+  });
+
+  it("leaves a failure that is not a polling timeout exactly as it is", async () => {
+    const probe = createTolerantProbe(async () => "ready");
+    await probe.read();
+    const assertion = new Error("expected false, received true");
+    expect(probe.explain(assertion)).toBe(assertion);
+  });
+});
+
+describe("deploymentNamespace", () => {
+  it("uses the environment namespace the recipe renders into, normalized", () => {
+    expect(deploymentNamespace("RadTest-NS")).toBe("radtest-ns");
+  });
+
+  it("trims the namespace", () => {
+    expect(deploymentNamespace("  default  ")).toBe("default");
   });
 
   it.each([
-    ["environment namespace", "", "demo", /environment namespace is empty/],
-    [
-      "environment namespace of whitespace",
-      "   ",
-      "demo",
+    ["empty environment namespace", ""],
+    ["environment namespace of whitespace", "   "]
+  ])("rejects an %s", (_label, namespace) => {
+    expect(() => deploymentNamespace(namespace)).toThrow(
       /environment namespace is empty/
-    ],
-    ["application name", "ns", "", /application name is empty/]
-  ])("rejects an empty %s", (_label, namespace, application, expected) => {
-    expect(() => applicationNamespace(namespace, application)).toThrow(
-      expected
     );
   });
 
   it("accepts a namespace of exactly the 63-character limit", () => {
-    const application = "a".repeat(60);
-    expect(applicationNamespace("ns", application)).toHaveLength(63);
+    expect(deploymentNamespace("a".repeat(63))).toHaveLength(63);
   });
 
   it("rejects a namespace one character over the limit Kubernetes accepts", () => {
-    expect(() => applicationNamespace("ns", "a".repeat(61))).toThrow(
+    expect(() => deploymentNamespace("a".repeat(64))).toThrow(
       /is 64 characters; Kubernetes rejects anything longer than 63/
     );
   });
@@ -658,6 +708,7 @@ describe("readKubernetesWorkloads", () => {
       readKubernetesWorkloads({
         items: [
           {
+            kind: "Deployment",
             metadata: {
               name: "  demo-frontend  ",
               labels: { [RADIUS_APPLICATION_LABEL]: "demo" }
@@ -669,6 +720,7 @@ describe("readKubernetesWorkloads", () => {
       })
     ).toEqual([
       {
+        kind: "Deployment",
         name: "demo-frontend",
         application: "demo",
         desiredReplicas: 2,
@@ -752,6 +804,31 @@ describe("readKubernetesWorkloads", () => {
     ]
   ])("refuses to read %s as no workloads", (_label, payload, expected) => {
     expect(() => readKubernetesWorkloads(payload)).toThrow(expected);
+  });
+
+  it("reads a DaemonSet's counts from its own status fields", () => {
+    const [parsed] = readKubernetesWorkloads({
+      items: [
+        {
+          kind: "DaemonSet",
+          metadata: { name: "demo-agent" },
+          spec: { replicas: 0 },
+          status: { desiredNumberScheduled: 3, numberAvailable: 3 }
+        }
+      ]
+    });
+    expect(parsed).toMatchObject({
+      kind: "DaemonSet",
+      desiredReplicas: 3,
+      availableReplicas: 3
+    });
+  });
+
+  it("records an unlabelled kind as empty rather than inventing one", () => {
+    const [parsed] = readKubernetesWorkloads({
+      items: [{ metadata: { name: "demo-frontend" } }]
+    });
+    expect(parsed?.kind).toBe("");
   });
 
   it("names the offending index rather than the first one", () => {
@@ -968,6 +1045,25 @@ describe("isKubernetesWorkloadReady", () => {
       ).toBe(expected);
     }
   );
+
+  it.each(["Service", "HorizontalPodAutoscaler", "Secret", "ConfigMap"])(
+    "counts an existing %s as ready because it has no replicas to await",
+    (kind) => {
+      expect(
+        isKubernetesWorkloadReady(
+          workload({ kind, desiredReplicas: 0, availableReplicas: 0 })
+        )
+      ).toBe(true);
+    }
+  );
+
+  it("still awaits replicas for a kind it does not recognise", () => {
+    expect(
+      isKubernetesWorkloadReady(
+        workload({ kind: "Job", desiredReplicas: 1, availableReplicas: 0 })
+      )
+    ).toBe(false);
+  });
 });
 
 describe("findSurvivingArtifactProblems", () => {
