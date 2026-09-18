@@ -240,6 +240,7 @@ const productionHandlers = {
     buildDeployStatusMap: () => new Map(),
     buildDeployMessageMap: () => new Map(),
     deployStatusKeys: () => [],
+    mergeDeployedGraphDisplayMetadata: (modeled) => modeled,
     mergeDeployedGraphMetadata: (modeled) => modeled,
     projectDeployedGraph: () => [],
     canvasGraphResources: () => [],

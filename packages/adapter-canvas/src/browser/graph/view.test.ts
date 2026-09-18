@@ -44,6 +44,7 @@ function node(overrides: Partial<GraphNodeData> = {}): GraphNodeData {
     icon: "data:image/svg+xml,icon",
     nodeName: "web",
     typeLabel: "Compute/containers",
+    concreteType: "",
     codeRef: "src/web.ts#L4",
     sourceUrl: "https://github.test/o/r/blob/main/src/web.ts#L4",
     srcPath: "src/web.ts",
@@ -172,6 +173,21 @@ describe("node card", () => {
     expect(props(title).title).toBe("web");
     expect(props(findByClass(tree, "rad-node__type")).title).toBe(
       "Compute/containers"
+    );
+  });
+
+  it("shows the exact concrete type in the tooltip without replacing the friendly label", () => {
+    const { tree } = renderCard(
+      node({
+        typeLabel: "Azure Database for MySQL",
+        concreteType: "Microsoft.DBforMySQL/flexibleServers@2025-01-01"
+      })
+    );
+    const type = findByClass(tree, "rad-node__type");
+
+    expect(childrenOf(type)).toEqual(["Azure Database for MySQL"]);
+    expect(props(type).title).toBe(
+      "Microsoft.DBforMySQL/flexibleServers@2025-01-01"
     );
   });
 

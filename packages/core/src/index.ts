@@ -19,6 +19,7 @@ export {
   deployStatusKeys,
   filterGraphVisualizationResources,
   lookupDeployStatus,
+  mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   projectGraphOutputMetadata,
   projectSafeApplicationGraph,
