@@ -9,6 +9,8 @@
 import { describe, it, expect } from "vitest";
 import {
   createGraphProgress,
+  GRAPH_GENERATING_TITLE,
+  GRAPH_LOADING_TITLE,
   GRAPH_PROGRESS_STEPS_ID,
   GRAPH_PROGRESS_TICK_MS,
   GRAPH_STAGE_LABELS,
@@ -525,6 +527,78 @@ describe("createGraphProgress", () => {
     expect(graphProgressPanel(host)?.getAttribute("aria-label")).toBe(
       "Planning the deployment"
     );
+  });
+
+  it("titles the panel for loading while no model is being created", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+
+    view.sync(
+      [
+        serverEvent(1, "checking_model", "succeeded", "Found the model."),
+        serverEvent(2, "building_graph", "running", "Compiling the model.")
+      ],
+      1
+    );
+
+    expect(graphProgressTitle(host)).toBe(GRAPH_LOADING_TITLE);
+    expect(graphProgressPanel(host)?.getAttribute("aria-label")).toBe(
+      GRAPH_LOADING_TITLE
+    );
+  });
+
+  it("switches to the generating title once a model is being created", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+
+    view.sync([serverEvent(1, "checking_model", "running", "Checking.")], 1);
+    expect(graphProgressTitle(host)).toBe(GRAPH_LOADING_TITLE);
+
+    view.sync(
+      [
+        serverEvent(1, "checking_model", "succeeded", "No model yet."),
+        serverEvent(2, "creating_model", "running", "Copilot is authoring.")
+      ],
+      1
+    );
+
+    expect(graphProgressTitle(host)).toBe(GRAPH_GENERATING_TITLE);
+  });
+
+  it("keeps the generating title after model creation finishes", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+
+    view.sync(
+      [
+        serverEvent(1, "creating_model", "succeeded", "Model created."),
+        serverEvent(2, "building_graph", "running", "Compiling the model.")
+      ],
+      1
+    );
+
+    expect(graphProgressTitle(host)).toBe(GRAPH_GENERATING_TITLE);
+  });
+
+  it("returns to the loading title when a new stream reports no model creation", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+    view.sync([serverEvent(1, "creating_model", "running", "Authoring.")], 1);
+    expect(graphProgressTitle(host)).toBe(GRAPH_GENERATING_TITLE);
+
+    view.sync([serverEvent(1, "building_graph", "running", "Compiling.")], 2);
+
+    expect(graphProgressTitle(host)).toBe(GRAPH_LOADING_TITLE);
+  });
+
+  it("uses the generating title for a locally appended model creation stage", () => {
+    const { browser, host, scope } = setup();
+    const view = createGraphProgress(browser.context, scope);
+    view.sync([serverEvent(1, "checking_model", "running", "Checking.")], 1);
+
+    view.append("creating_model", "running", "Copilot is authoring.");
+
+    expect(graphProgressTitle(host)).toBe(GRAPH_GENERATING_TITLE);
   });
 
   it("marks the panel as failed when the latest stage failed", () => {
