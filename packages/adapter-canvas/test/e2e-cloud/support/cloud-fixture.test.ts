@@ -3148,6 +3148,148 @@ describe("createCloudFixture", () => {
     );
 
     it("reports targeted workload cleanup failure and continues reclaiming other artifacts", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          failing("kubectl", ["delete", "all"], "namespace unavailable"),
+          {
+            tool: "kubectl",
+            match: ["get", RADIUS_RENDERED_RESOURCES],
+            respond: {
+              stdout: JSON.stringify({
+                items: [{ kind: "Deployment", metadata: { name: "sleeper" } }]
+              })
+            }
+          },
+          {
+            tool: "gh",
+            match: ["api", MATCHING_REFS_PATH],
+            respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
+          },
+          { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
+        ],
+        {},
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes workloads for demo in default-demo: .*namespace unavailable.*Still present after 2000ms: Deployment\/sleeper.*Reclaimed before failing: Radius application demo in radtest-run0000000a, branch radius\/setup-a/s
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
+      );
+    });
+
+    // Kubernetes keeps finalizing after `kubectl` exits, so the first read
+    // after a killed delete can still see objects that are on their way out.
+    // Reporting that first read as a leak would reintroduce the false failure
+    // this reclaim is meant to avoid.
+    it("waits out workloads still terminating after a killed delete", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["delete", "all"],
+            respond: {
+              code: 1,
+              stdout: 'deployment.apps "sleeper" deleted from default-demo\n'
+            }
+          },
+          {
+            tool: "kubectl",
+            match: ["get", RADIUS_RENDERED_RESOURCES],
+            respond: {
+              stdout: JSON.stringify({
+                items: [{ kind: "Pod", metadata: { name: "sleeper-abc" } }]
+              })
+            },
+            times: 1
+          },
+          {
+            tool: "kubectl",
+            match: ["get", RADIUS_RENDERED_RESOURCES],
+            respond: { stdout: JSON.stringify({ items: [] }) }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 4000, assertionPollIntervalMs: 1000 }
+      );
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        `Radius application demo in ${ENVIRONMENT}`,
+        "Kubernetes workloads for demo in default-demo"
+      ]);
+      expect(fake.waits).toEqual([1000]);
+    });
+
+    // The re-list runs with whatever budget the poll has left, so its last
+    // attempt is killed mid-flight and reports a kill with no output. Raising
+    // that would replace the diagnostic that matters — the delete failure and
+    // what was still standing — with a bare exit code.
+    it("reports a re-list killed by its own deadline as the delete failure", async () => {
+      let clock = NOW.getTime();
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          failing("kubectl", ["delete", "all"], "namespace unavailable"),
+          {
+            tool: "kubectl",
+            match: ["get", RADIUS_RENDERED_RESOURCES],
+            respond: {
+              stdout: JSON.stringify({
+                items: [{ kind: "Deployment", metadata: { name: "sleeper" } }]
+              })
+            },
+            times: 1
+          },
+          {
+            tool: "kubectl",
+            match: ["get", RADIUS_RENDERED_RESOURCES],
+            respond: () => {
+              clock += 2000;
+              return {
+                code: 1,
+                stdout: "",
+                stderr: "Command failed: kubectl --kubeconfig /tmp/k get",
+                timedOut: true
+              };
+            }
+          }
+        ],
+        {
+          readNow: () => new Date(clock),
+          wait: (milliseconds) => {
+            clock += milliseconds;
+            return Promise.resolve();
+          }
+        },
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /namespace unavailable.*Still present after 2000ms: Deployment\/sleeper/s
+      );
+    });
+
+    // Two things went wrong: the delete failed and the check could not run.
+    // Reporting only the listing would hide why cleanup was attempted at all.
+    it("keeps both diagnostics when the follow-up listing itself fails", async () => {
       const { fixture, fake } = await createHarness([
         {
           tool: "az",
@@ -3158,11 +3300,7 @@ describe("createCloudFixture", () => {
         {
           tool: "kubectl",
           match: ["get", RADIUS_RENDERED_RESOURCES],
-          respond: {
-            stdout: JSON.stringify({
-              items: [{ kind: "Deployment", metadata: { name: "sleeper" } }]
-            })
-          }
+          respond: { code: 1, stderr: "Unable to connect to the server" }
         },
         {
           tool: "gh",
@@ -3174,7 +3312,7 @@ describe("createCloudFixture", () => {
       fixture.registerApplicationCleanupTarget("demo", "default-demo");
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /Kubernetes workloads for demo in default-demo: .*namespace unavailable.*Still present: Deployment\/sleeper.*Reclaimed before failing: Radius application demo in radtest-run0000000a, branch radius\/setup-a/s
+        /namespace unavailable.*The follow-up listing also failed: .*Unable to connect to the server/s
       );
       expect(fake.commands.commandLines("gh")).toContain(
         `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
