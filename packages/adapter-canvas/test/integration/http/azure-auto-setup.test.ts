@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { addLegacyStep } from "../../../src/operations.js";
-import { ENTRA_APP_RETENTION_NOTICE } from "../../../src/server/routes/azure-auto-setup-application.js";
+import { ENTRA_APP_RETENTION_NOTICE } from "@radius-project/core/github-radius/environments/azure-auto-setup-application";
 import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
 import { buildRadiusAppProvenanceTags } from "../../../src/azure-oidc.js";
 import { deterministicProviderUuid } from "../../../src/server/services/provider-mutation-recovery.js";

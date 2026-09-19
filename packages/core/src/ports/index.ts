@@ -10,10 +10,16 @@
  * by the `gh` CLI in the canvas adapter; fakeable from recorded fixtures.
  */
 export interface GitHub {
-  /** Decoded UTF-8 contents of a repo file, or null on any error/empty body. */
+  /** Decoded UTF-8 contents (including ""), or null for confirmed absence.
+   * Rejects when source access or response validity cannot be established.
+   */
   getContent(apiPath: string): Promise<string | null>;
-  /** Entry names of a contents directory ([] on error). */
+  /** Directory entry names; [] for empty or confirmed absent directories.
+   * Rejects on access failures or invalid responses.
+   */
   listNames(apiPath: string): Promise<string[]>;
-  /** Recursive list of every path in a repo tree ([] on error). */
+  /** Complete recursive file listing, including [] for a confirmed empty tree.
+   * Rejects on unavailable branches, access failures, or incomplete responses.
+   */
   treePaths(repo: string, branch: string): Promise<string[]>;
 }

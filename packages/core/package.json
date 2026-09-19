@@ -10,6 +10,12 @@
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./github-radius": "./src/github-radius/index.ts",
+    "./github-radius/environments": "./src/github-radius/environments/index.ts",
+    "./github-radius/deployments": "./src/github-radius/deployments/index.ts",
+    "./github-radius/graphs": "./src/github-radius/graphs/index.ts",
+    "./github-radius/environments/*": "./src/github-radius/environments/*.ts",
+    "./github-radius/deployments/*": "./src/github-radius/deployments/*.ts",
     "./graph": "./src/graph/index.ts",
     "./modeling": "./src/modeling/index.ts",
     "./platforms": "./src/platforms/index.ts",

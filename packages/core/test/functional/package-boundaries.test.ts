@@ -305,6 +305,13 @@ describe("core package in a host without HTTP or DOM globals", () => {
     // keeps the same key set.
     expect(manifest.exports).toEqual({
       ".": "./src/index.ts",
+      "./github-radius": "./src/github-radius/index.ts",
+      "./github-radius/environments":
+        "./src/github-radius/environments/index.ts",
+      "./github-radius/deployments": "./src/github-radius/deployments/index.ts",
+      "./github-radius/graphs": "./src/github-radius/graphs/index.ts",
+      "./github-radius/environments/*": "./src/github-radius/environments/*.ts",
+      "./github-radius/deployments/*": "./src/github-radius/deployments/*.ts",
       "./graph": "./src/graph/index.ts",
       "./modeling": "./src/modeling/index.ts",
       "./platforms": "./src/platforms/index.ts",
@@ -318,19 +325,36 @@ describe("core package in a host without HTTP or DOM globals", () => {
         pathToFileURL(join(packageRoot, manifest.exports[subpath])).href
       ) as Promise<Record<string, unknown>>;
 
-    const [barrel, graph, modeling, platforms, remediations] =
-      await Promise.all([
-        load("."),
-        load("./graph"),
-        load("./modeling"),
-        load("./platforms"),
-        load("./remediations")
-      ]);
+    const [
+      barrel,
+      graph,
+      modeling,
+      platforms,
+      remediations,
+      library,
+      environments,
+      deployments,
+      graphs
+    ] = await Promise.all([
+      load("."),
+      load("./graph"),
+      load("./modeling"),
+      load("./platforms"),
+      load("./remediations"),
+      load("./github-radius"),
+      load("./github-radius/environments"),
+      load("./github-radius/deployments"),
+      load("./github-radius/graphs")
+    ]);
 
     expect(typeof barrel.computeGraphDiff).toBe("function");
     expect(typeof graph.filterGraphVisualizationResources).toBe("function");
     expect(typeof modeling.evaluateStagedRun).toBe("function");
     expect(typeof platforms.buildOidcSubject).toBe("function");
     expect(typeof remediations.remediationView).toBe("function");
+    expect(typeof library.requestDeploymentRepair).toBe("function");
+    expect(typeof environments.runCreateEnvironment).toBe("function");
+    expect(typeof deployments.createDeployRequestService).toBe("function");
+    expect(typeof graphs.compareSelectedGraphs).toBe("function");
   });
 });

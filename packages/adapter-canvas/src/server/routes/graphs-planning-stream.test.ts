@@ -209,7 +209,7 @@ function fakes(options: Options = {}): Fakes {
     listBranchPaths: (givenEntry, repo, branch) => {
       calls.push(`listBranchPaths(${repo}|${branch})`);
       expect(givenEntry).toBe(entry);
-      return Promise.resolve(options.paths ?? []);
+      return Promise.resolve(options.paths ?? null);
     },
     workspaceGraphJsonPath: (_state, bicepRepoPath) => {
       calls.push(`workspaceGraphJsonPath(${bicepRepoPath})`);
@@ -448,26 +448,47 @@ describe("graphs-planning load-graph-stream route", () => {
     expect(calls.some((c) => c.startsWith("buildGraphViaRad"))).toBe(false);
   });
 
-  it("refuses a missing model when the source has no usable Dockerfile", async () => {
-    const { deps, calls } = fakes({
-      selection: selection({ content: null }),
-      paths: ["README.md", ".devcontainer/Dockerfile"]
-    });
+  it.each([
+    { paths: [] },
+    { paths: ["README.md", ".devcontainer/Dockerfile"] }
+  ])(
+    "refuses a missing model when the readable source has no usable Dockerfile: $paths",
+    async ({ paths }) => {
+      const { deps, calls } = fakes({
+        selection: selection({ content: null }),
+        paths
+      });
 
+      const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+
+      expect(frames(recording.stream).at(-1)).toEqual({
+        event: "done",
+        data: {
+          error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
+          appBicepUnsupported: true,
+          repo: REPO,
+          branch: DEFAULT_BRANCH
+        }
+      });
+      expect(
+        calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+      ).toBe(false);
+    }
+  );
+
+  it("sends a present empty definition to the compiler instead of treating it as absent", async () => {
+    const { deps, calls } = fakes({ selection: selection({ content: "" }) });
     const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
-
+    expect(calls.some((call) => call.startsWith("buildGraphViaRad("))).toBe(
+      true
+    );
+    expect(calls.some((call) => call.startsWith("listBranchPaths("))).toBe(
+      false
+    );
     expect(frames(recording.stream).at(-1)).toEqual({
       event: "done",
-      data: {
-        error: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
-        appBicepUnsupported: true,
-        repo: REPO,
-        branch: DEFAULT_BRANCH
-      }
+      data: { reload: true }
     });
-    expect(
-      calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
-    ).toBe(false);
   });
 
   it("models the app, commits the source ref, records provenance, and streams a reload done frame", async () => {

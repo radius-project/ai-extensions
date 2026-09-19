@@ -91,8 +91,8 @@ interface PipelineScript {
   recipePackThrows?: Error;
   recipeOutputsThrows?: Error;
   selectThrows?: Record<string, Error>;
-  // Every path on a branch, keyed by branch. Empty models a tree that could not
-  // be read, which is what the default leaves in place.
+  // Every path on a branch, keyed by branch. An omitted listing is unknown;
+  // an empty listing is confirmed absence.
   branchPaths?: Record<string, string[]>;
   afterListBranchPaths?: () => void;
   compileThrows?: Record<string, Error>;
@@ -294,7 +294,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     }),
     clearGraphRepairAttempt: () => {},
     listBranchPaths: (_entry, _repo, branch) => {
-      const paths = harnessScript.branchPaths?.[branch] ?? [];
+      const paths = harnessScript.branchPaths?.[branch] ?? null;
       harnessScript.afterListBranchPaths?.();
       return Promise.resolve(paths);
     },
@@ -398,6 +398,24 @@ function replaceProgressRecord(
 }
 
 describe("graph planning workflows", () => {
+  it.each(["loadGraph", "planGraph"] as const)(
+    "%s compiles a present empty definition instead of reporting it missing",
+    async (workflow) => {
+      const harness = start({
+        selections: { main: selectionOf({ content: "" }) },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [] }
+      });
+      const outcome = await harness.run(
+        workflow,
+        '{"repo":"octo/app","branch":"main","provider":"azure"}'
+      );
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload.needsAppBicep).toBeUndefined();
+      expect(harness.order).toContain("compile:main");
+    }
+  );
+
   it.each(["loadGraph", "planGraph"] as const)(
     "reports an unavailable workspace branch without model lookup or handoff in %s",
     async (workflow) => {
@@ -576,14 +594,27 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs).toHaveLength(1);
     });
 
-    it("still hands off when the branch tree cannot be read", async () => {
+    it("refuses authoring for a confirmed empty branch tree", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) },
         branchPaths: { main: [] }
       });
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
-      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
-      expect(harness.handoffs).toHaveLength(1);
+      expect(outcome.payload).toMatchObject({ appBicepUnsupported: true });
+      expect(harness.handoffs).toHaveLength(0);
+    });
+
+    it("propagates a failed tree read without requesting authoring", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+      harness.dependencies.listBranchPaths = async () => {
+        throw new Error("Source unavailable");
+      };
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.status).toBe(400);
+      expect(outcome.payload.error).toBe("Source unavailable");
+      expect(harness.handoffs).toHaveLength(0);
     });
 
     it("reports a rendered model so drift is still noticed after it exists", async () => {
@@ -2262,6 +2293,27 @@ describe("graph planning workflows", () => {
       ]);
     });
 
+    it("cleans the staged base when the head cannot be staged and retains the route error contract", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main" }),
+          "feature/x": selectionOf({ branch: "feature/x" })
+        },
+        staged: { main: { dir: "staged-base", remote: true } }
+      });
+      const outcome = await harness.run("diffBranches", diffBody);
+      expect(outcome.kind).toBe("json");
+      expect(outcome.status).toBe(400);
+      expect(harness.order).toEqual([
+        "select:main",
+        "select:feature/x",
+        "stage:main",
+        "stage:feature/x",
+        "discard:staged-base"
+      ]);
+      expect(harness.state.diffResources).toBeUndefined();
+    });
+
     it("stages both branches before compiling either", async () => {
       const harness = start({
         selections: {
@@ -2281,9 +2333,24 @@ describe("graph planning workflows", () => {
         }
       });
 
+      const select = vi.spyOn(harness.dependencies.pipeline, "selectAppBicep");
       const outcome = await harness.run("diffBranches", diffBody);
 
       expect(outcome.status).toBe(200);
+      expect(select).toHaveBeenNthCalledWith(
+        1,
+        harness.entry,
+        "octo/app",
+        "main",
+        "committed"
+      );
+      expect(select).toHaveBeenNthCalledWith(
+        2,
+        harness.entry,
+        "octo/app",
+        "feature/x",
+        "committed"
+      );
       // Interleaving stage/compile per side would clean the base temp directory
       // up before the head side is staged, so the order itself is pinned.
       expect(harness.order).toEqual([
@@ -2292,7 +2359,9 @@ describe("graph planning workflows", () => {
         "stage:main",
         "stage:feature/x",
         "compile:main",
-        "compile:feature/x"
+        "compile:feature/x",
+        "discard:/tmp/base",
+        "discard:/tmp/head"
       ]);
       expect(outcome.payload).toEqual({
         message: "Comparing main → feature/x",
@@ -2597,6 +2666,10 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(400);
       // The failure belongs to a selection no longer on screen, so it must not
       // paint an error over the newer one.
+      expect(harness.order).toContain("compile:main");
+      expect(harness.loggedErrors).toEqual([
+        "[radius graph] modeling failed for octo/app@main: BCP035: stale invalid model"
+      ]);
       expect(harness.state.diffError).toBeUndefined();
       expect(repair).not.toHaveBeenCalled();
     });

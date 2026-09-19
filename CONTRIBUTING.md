@@ -45,13 +45,7 @@ The `adapter-` directory prefix is deliberate: it marks a package as an adapter 
 
 ### The dependency rule
 
-`packages/core` never imports from an adapter, the Copilot SDK, `node:http`, or the
-DOM. Anything that touches the outside world goes through a **port**
-(`packages/core/src/ports/index.ts`). Reading a repository is the only side
-effect core's use-cases need today, so `GitHub` is the only port. Adapters depend
-on the core, supply port implementations, and own all UI/transport concerns. This
-keeps the product logic testable in isolation and makes adding a second UI a thin
-layer rather than a fork.
+`packages/core` never imports from an adapter, the Copilot SDK, HTTP implementations, or the DOM. Outside effects go through **ports**: repository access in `packages/core/src/ports/index.ts`, and the narrow dependencies declared by the GitHub Radius coordinators in `packages/core/src/github-radius/`. Adapters supply execution, authorized context, and host interactions while retaining UI and transport concerns. See the [GitHub Radius library](./docs/architecture/github-radius-library.md) for the shared entry points and compatibility requirements.
 
 See [`packages/core/README.md`](./packages/core/README.md) for the architecture and
 step-by-step guides for the three most common changes: **adding a compute

@@ -1,7 +1,5 @@
-import {
-  evaluateAppSource,
-  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
-} from "@radius-project/core";
+import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
+import { evaluateGraphSource } from "@radius-project/core/github-radius/graphs";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -748,7 +746,7 @@ export interface GraphsPlanningStreamDependencies {
     entry: CanvasServerEntry,
     repo: string,
     branch: string
-  ): Promise<string[]>;
+  ): Promise<string[] | null>;
   workspaceGraphJsonPath(state: CanvasState, bicepRepoPath: string): string;
   radArtifactsDirForSelection(
     options: LoadGraphStreamRadArtifactsOptions
@@ -860,14 +858,14 @@ export async function handleLoadGraphStream(
     );
     const content = selection.content;
 
-    if (content) {
+    if (content !== null) {
       sendProgress("Found existing app.bicep — parsing resources...");
       // A model that exists can still no longer describe its source. The runtime
       // classifies it and decides what, if anything, to say; the graph still
       // streams either way.
       dependencies.triggerAppBicepHandoff(entry, repo, branch);
     } else {
-      const source = evaluateAppSource(
+      const source = evaluateGraphSource(
         await dependencies.listBranchPaths(entry, repo, branch)
       );
       if (source.status === "none") {

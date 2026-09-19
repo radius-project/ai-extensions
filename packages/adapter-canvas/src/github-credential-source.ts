@@ -1,5 +1,1 @@
-export function githubCredentialSourceLabel(source: string): string {
-  return source === "injected" || source === "injected-token" ?
-      "the Copilot session token"
-    : "the stored GitHub CLI credential";
-}
+export * from "@radius-project/core/github-radius/environments/github-credential-source";

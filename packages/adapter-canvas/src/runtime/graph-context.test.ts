@@ -257,9 +257,7 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.status).toBe("generator-changed");
   });
 
-  it("does not judge a GitHub-served model against the worktree, even for the workspace branch", async () => {
-    // The worktree has no model on disk, so the branch's committed model is what
-    // renders, and the worktree head commit says nothing about it.
+  it("does not resurrect a remotely committed model deleted from the worktree", async () => {
     const { resolveAppModelStatus, deps } = helpers({
       bicepByRepoBranch: { "remote:acme/widgets@main": MODEL },
       filesByRepoBranch: {
@@ -281,12 +279,8 @@ describe("resolveAppModelStatus", () => {
     );
 
     expect(status.refreshable).toBe(false);
-    expect(status.freshness.status).toBe("up-to-date");
-    expect(deps.appModel.fetchRepoFile).toHaveBeenCalledWith(
-      "acme/widgets",
-      "main",
-      APP_ORIGIN_REPO_PATH
-    );
+    expect(status.freshness.status).toBe("missing");
+    expect(deps.appModel.fetchRepoFile).not.toHaveBeenCalled();
   });
 
   it("reports a model with no origin record as refreshable without confirmation", async () => {
@@ -400,7 +394,7 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.requiresConfirmation).toBe(false);
   });
 
-  it("fails open when the origin record cannot be read", async () => {
+  it("propagates unreadable origin evidence instead of requesting regeneration", async () => {
     const { resolveAppModelStatus, deps } = helpers({
       bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
       headCommits: { "workspace:/workspace": COMMIT }
@@ -409,16 +403,12 @@ describe("resolveAppModelStatus", () => {
       throw new Error("worktree unreadable");
     };
 
-    const status = await resolveAppModelStatus(
-      "acme/widgets",
-      "main",
-      WORKSPACE_STATE
-    );
-
-    expect(status.freshness.status).toBe("unrecorded");
+    await expect(
+      resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("worktree unreadable");
   });
 
-  it("falls back to GitHub when reading the worktree model fails", async () => {
+  it("propagates a failed worktree read without changing source", async () => {
     const { resolveAppModelStatus, deps } = helpers({
       bicepByRepoBranch: { "remote:acme/widgets@main": MODEL }
     });
@@ -426,14 +416,10 @@ describe("resolveAppModelStatus", () => {
       throw new Error("worktree unreadable");
     };
 
-    const status = await resolveAppModelStatus(
-      "acme/widgets",
-      "main",
-      WORKSPACE_STATE
-    );
-
-    expect(status.refreshable).toBe(false);
-    expect(status.freshness.status).toBe("unrecorded");
+    await expect(
+      resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("worktree unreadable");
+    expect(deps.core.fetchBicepFromRepo).not.toHaveBeenCalled();
   });
 
   it("fails open when the head commit cannot be resolved", async () => {
@@ -456,19 +442,15 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.status).toBe("up-to-date");
   });
 
-  it("treats an unreadable model as missing rather than propagating the failure", async () => {
+  it("propagates an unreadable model instead of treating it as missing", async () => {
     const { resolveAppModelStatus, deps } = helpers();
     deps.core.fetchBicepFromRepo = async () => {
       throw new Error("contents unavailable");
     };
 
-    const status = await resolveAppModelStatus(
-      "other/repo",
-      "main",
-      WORKSPACE_STATE
-    );
-
-    expect(status.freshness.status).toBe("missing");
+    await expect(
+      resolveAppModelStatus("other/repo", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("contents unavailable");
   });
 
   it("does not look in the worktree when no repo is known", async () => {
@@ -509,14 +491,14 @@ describe("fetchBicepForBranch", () => {
     ).toBe(MODEL);
   });
 
-  it("falls back to GitHub when the worktree has no model", async () => {
+  it("retains confirmed worktree absence instead of falling back to GitHub", async () => {
     const { fetchBicepForBranch } = helpers({
       bicepByRepoBranch: { "remote:acme/widgets@main": "// committed" }
     });
 
     expect(
       await fetchBicepForBranch("acme/widgets", "main", WORKSPACE_STATE)
-    ).toBe("// committed");
+    ).toBeNull();
   });
 });
 
@@ -530,15 +512,13 @@ describe("listSourceTreeForBranch", () => {
     ).toEqual(["Dockerfile"]);
   });
 
-  it("normalizes an empty listing to null so it cannot read as absent files", async () => {
-    // `treePaths` resolves to [] on failure, which a caller reading the raw
-    // listing could otherwise misread as "this repository has no manifests".
+  it("preserves a successfully read empty tree", async () => {
     const { listSourceTreeForBranch } = helpers({
       remoteTreeByRepoBranch: { "acme/widgets@feat": [] }
     });
     expect(
       await listSourceTreeForBranch("acme/widgets", "feat", WORKSPACE_STATE)
-    ).toBeNull();
+    ).toEqual([]);
   });
 
   it("returns null without listing when there is no repository", async () => {
@@ -549,14 +529,14 @@ describe("listSourceTreeForBranch", () => {
     expect(deps.github.treePaths).not.toHaveBeenCalled();
   });
 
-  it("returns null when the lister rejects", async () => {
+  it("propagates a rejected source listing", async () => {
     const { listSourceTreeForBranch, deps } = helpers();
     vi.mocked(deps.workspace.fetchWorkspaceTree).mockRejectedValueOnce(
       new Error("permission denied")
     );
-    expect(
-      await listSourceTreeForBranch("acme/widgets", "main", WORKSPACE_STATE)
-    ).toBeNull();
+    await expect(
+      listSourceTreeForBranch("acme/widgets", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("permission denied");
   });
 });
 
@@ -614,15 +594,15 @@ describe("evaluateAppSourceForBranch", () => {
     ).toEqual({ status: "none", dockerfiles: [] });
   });
 
-  it("reports unknown when the worktree listing fails", async () => {
+  it("propagates a failed worktree listing", async () => {
     const { evaluateAppSourceForBranch, deps } = helpers();
     (
       deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
     ).mockRejectedValueOnce(new Error("permission denied"));
 
-    expect(
-      await evaluateAppSourceForBranch("acme/widgets", "main", WORKSPACE_STATE)
-    ).toEqual({ status: "unknown", dockerfiles: [] });
+    await expect(
+      evaluateAppSourceForBranch("acme/widgets", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("permission denied");
   });
 
   it("reports unknown when the worktree cannot be listed at all", async () => {
@@ -645,17 +625,17 @@ describe("evaluateAppSourceForBranch", () => {
     expect(deps.workspace.fetchWorkspaceTree).not.toHaveBeenCalled();
   });
 
-  it("reports unknown when the repository tree listing fails or is empty", async () => {
+  it("distinguishes a failed repository tree listing from an empty one", async () => {
     const { evaluateAppSourceForBranch, deps } = helpers();
     (deps.github.treePaths as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("gh unavailable")
     );
 
+    await expect(
+      evaluateAppSourceForBranch("acme/widgets", "feat", WORKSPACE_STATE)
+    ).rejects.toThrow("gh unavailable");
     expect(
       await evaluateAppSourceForBranch("acme/widgets", "feat", WORKSPACE_STATE)
-    ).toEqual({ status: "unknown", dockerfiles: [] });
-    expect(
-      await evaluateAppSourceForBranch("acme/widgets", "feat", WORKSPACE_STATE)
-    ).toEqual({ status: "unknown", dockerfiles: [] });
+    ).toEqual({ status: "none", dockerfiles: [] });
   });
 });

@@ -147,8 +147,25 @@ describe("listWorkflowArtifacts", () => {
     expect(childProcess.execFile).toHaveBeenCalledTimes(1);
   });
 
-  it("returns an empty list when the response is not a listing", async () => {
+  it("rejects a non-listing response instead of reporting deployment absence", async () => {
     serve(['{"message":"Not Found"}']);
+    await expect(listWorkflowArtifacts("octo/app", null)).rejects.toThrow(
+      "GitHub returned an invalid artifact listing."
+    );
+    expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns an empty list only for a valid empty listing", async () => {
+    serve([page([])]);
     expect(await listWorkflowArtifacts("octo/app", null)).toEqual([]);
+    expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates a malformed later page instead of returning partial evidence", async () => {
+    serve([page(noise(ARTIFACT_PAGE_SIZE)), '{"message":"Not Found"}']);
+    await expect(listWorkflowArtifacts("octo/app", null)).rejects.toThrow(
+      "GitHub returned an invalid artifact listing."
+    );
+    expect(childProcess.execFile).toHaveBeenCalledTimes(2);
   });
 });

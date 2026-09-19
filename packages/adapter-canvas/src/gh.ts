@@ -1426,28 +1426,196 @@ export const AWS_REGIONS = [
   "ca-central-1"
 ];
 
+export class SourceAccessError extends Error {
+  constructor(
+    readonly apiPath: string,
+    readonly status: number | null,
+    detail: string
+  ) {
+    super(
+      `Could not read GitHub source ${apiPath}: ${redactGhCredentials(detail)}`
+    );
+    this.name = "SourceAccessError";
+  }
+}
+
+function isSourceObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export interface GitHubSourceReader {
+  getContent(apiPath: string, timeout?: number): Promise<string | null>;
+  listNames(apiPath: string, timeout?: number): Promise<string[]>;
+  treePaths(repo: string, branch?: string): Promise<string[]>;
+}
+
+/** Validates GitHub source responses before they can become absence evidence. */
+export function createGitHubSourceReader(
+  request: typeof ghApiJson = ghApiJson
+): GitHubSourceReader {
+  async function tree(repo: string, branch: string, timeout: number) {
+    const apiPath = `/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`;
+    const result = await request(apiPath, { timeout });
+    if (!result.ok) {
+      throw new SourceAccessError(apiPath, result.status, result.stderr);
+    }
+    const value = result.json;
+    if (
+      !isSourceObject(value) ||
+      value.truncated !== false ||
+      !Array.isArray(value.tree) ||
+      !value.tree.every(
+        (entry: unknown): entry is { path: string; type: string } =>
+          isSourceObject(entry) &&
+          typeof entry.path === "string" &&
+          entry.path.length > 0 &&
+          (entry.type === "blob" ||
+            entry.type === "tree" ||
+            entry.type === "commit")
+      )
+    ) {
+      throw new SourceAccessError(
+        apiPath,
+        result.status,
+        "Invalid or incomplete repository tree"
+      );
+    }
+    return value.tree;
+  }
+
+  async function contents(apiPath: string, timeout: number) {
+    const result = await request(apiPath, { timeout });
+    if (result.ok) return result;
+    if (result.status === 404) {
+      // GitHub also hides inaccessible repositories behind 404. Only a complete,
+      // readable tree on the requested ref can establish that a path is absent.
+      const match = apiPath.match(
+        /^\/repos\/([^/]+\/[^/]+)\/contents\/([^?]+)(?:\?(.*))?$/
+      );
+      if (match) {
+        const [, repo, path, query] = match;
+        let decodedPath: string;
+        try {
+          decodedPath = decodeURIComponent(path).replace(/\/+$/, "");
+        } catch {
+          throw new SourceAccessError(
+            apiPath,
+            result.status,
+            "Invalid repository contents path"
+          );
+        }
+        if (!decodedPath) {
+          throw new SourceAccessError(
+            apiPath,
+            result.status,
+            "Invalid repository contents path"
+          );
+        }
+        let branch = new URLSearchParams(query).get("ref");
+        if (!branch) {
+          const metadata = await request(`/repos/${repo}`, { timeout });
+          if (
+            !metadata.ok ||
+            !isSourceObject(metadata.json) ||
+            typeof metadata.json.default_branch !== "string" ||
+            !metadata.json.default_branch
+          ) {
+            throw new SourceAccessError(
+              apiPath,
+              metadata.status,
+              "Could not establish the repository default branch"
+            );
+          }
+          branch = metadata.json.default_branch;
+        }
+        const entries = await tree(repo, branch, timeout);
+        if (!entries.some((entry) => entry.path === decodedPath)) {
+          return null;
+        }
+      }
+    }
+    throw new SourceAccessError(apiPath, result.status, result.stderr);
+  }
+
+  return {
+    async getContent(apiPath: string, timeout = 15000): Promise<string | null> {
+      const result = await contents(apiPath, timeout);
+      if (result === null) return null;
+      const value = result.json;
+      if (
+        !isSourceObject(value) ||
+        value.type !== "file" ||
+        value.encoding !== "base64" ||
+        typeof value.content !== "string" ||
+        typeof value.size !== "number" ||
+        !Number.isSafeInteger(value.size) ||
+        value.size < 0
+      ) {
+        throw new SourceAccessError(
+          apiPath,
+          result.status,
+          "Invalid file contents response"
+        );
+      }
+      const encoded = value.content.replace(/\s/g, "");
+      if (
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+          encoded
+        ) ||
+        Buffer.from(encoded, "base64").toString("base64") !== encoded
+      ) {
+        throw new SourceAccessError(
+          apiPath,
+          result.status,
+          "Invalid base64 file contents"
+        );
+      }
+      const decoded = Buffer.from(encoded, "base64");
+      if (decoded.length !== value.size) {
+        throw new SourceAccessError(
+          apiPath,
+          result.status,
+          "Incomplete file contents response"
+        );
+      }
+      return decoded.toString("utf8");
+    },
+    async listNames(apiPath: string, timeout = 15000): Promise<string[]> {
+      const result = await contents(apiPath, timeout);
+      if (result === null) return [];
+      if (
+        !Array.isArray(result.json) ||
+        !result.json.every(
+          (entry: unknown): entry is { name: string } =>
+            isSourceObject(entry) &&
+            typeof entry.name === "string" &&
+            entry.name.length > 0
+        )
+      ) {
+        throw new SourceAccessError(
+          apiPath,
+          result.status,
+          "Invalid directory contents response"
+        );
+      }
+      return result.json.map((entry) => entry.name);
+    },
+    async treePaths(repo: string, branch = "main"): Promise<string[]> {
+      const entries = await tree(repo, branch, 30000);
+      return entries
+        .filter((entry) => entry.type === "blob")
+        .map((entry) => entry.path);
+    }
+  };
+}
+
+const sourceReader = createGitHubSourceReader();
+
 export function ghApiGetContent(
   apiPath: string,
   timeout = 15000
 ): Promise<string | null> {
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      ["api", apiPath, "--jq", ".content"],
-      { timeout },
-      (err, stdout) => {
-        if (err || !stdout || !stdout.trim()) {
-          resolve(null);
-          return;
-        }
-        try {
-          resolve(Buffer.from(stdout.trim(), "base64").toString("utf8"));
-        } catch (e) {
-          resolve(null);
-        }
-      }
-    );
-  });
+  return sourceReader.getContent(apiPath, timeout);
 }
 
 // Fetch a file's raw bytes from the GitHub contents API. Resolves a Buffer on
@@ -1492,24 +1660,7 @@ export function ghApiListNames(
   apiPath: string,
   timeout = 15000
 ): Promise<string[]> {
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      ["api", apiPath, "--jq", `[.[].name]`],
-      { timeout },
-      (err, stdout) => {
-        if (err) {
-          resolve([]);
-          return;
-        }
-        try {
-          resolve(JSON.parse(stdout));
-        } catch (e) {
-          resolve([]);
-        }
-      }
-    );
-  });
+  return sourceReader.listNames(apiPath, timeout);
 }
 
 export function fetchFileFromRepo(
@@ -1517,12 +1668,15 @@ export function fetchFileFromRepo(
   path: string,
   branch = "main"
 ): Promise<string | null> {
-  return ghApiGetContent(`/repos/${repo}/contents/${path}?ref=${branch}`);
+  return ghApiGetContent(
+    `/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`
+  );
 }
 
 /**
- * Like ghApiGetContent, but surfaces the underlying failure instead of
- * collapsing everything to null. Resolves `{ content, error }`: on success
+ * Legacy structured-result reader for callers that handle HTTP failures themselves.
+ * Unlike the source port, it does not confirm whether a 404 means path absence.
+ * Resolves `{ content, error }`: on success
  * `content` is the decoded file body and `error` is null; on failure `content`
  * is null and `error` is a human-readable cause (gh stderr, a decode error, or
  * an empty-response note). Never rejects.
@@ -1586,49 +1740,13 @@ export function fetchFileFromRepoResult(
 
 // Repo-relative paths of the FILES on a branch.
 //
-// Resolves an empty array for every failure, and callers must therefore treat an
-// empty result as "could not establish", never as "the repository is empty".
-// A truncated tree is one of those failures: GitHub caps a recursive listing, and
-// a partial listing that happens to omit a file is indistinguishable from one
-// that proves the file is absent, so it must not be used as evidence.
+// Rejects on access failures or truncated/malformed trees. Only a complete
+// successful listing can establish absence.
 export function fetchRepoTree(
   repo: string,
   branch = "main"
 ): Promise<string[]> {
-  return new Promise((resolve) => {
-    const args = [
-      "api",
-      `/repos/${repo}/git/trees/${branch}?recursive=1`,
-      "--jq",
-      // Blobs only: a directory named `Dockerfile` is not a build file, and a
-      // consumer deciding what a repository contains must not count one.
-      `{truncated: (.truncated // false), paths: [.tree[] | select(.type == "blob") | .path]}`
-    ];
-    cliExec("gh", args, { timeout: 30000 }, (err, stdout) => {
-      if (err) {
-        resolve([]);
-        return;
-      }
-      try {
-        const value: unknown = JSON.parse(stdout);
-        if (value === null || typeof value !== "object") {
-          resolve([]);
-          return;
-        }
-        const { truncated, paths } = value as {
-          truncated?: unknown;
-          paths?: unknown;
-        };
-        resolve(
-          truncated !== true && Array.isArray(paths) ?
-            paths.filter((item): item is string => typeof item === "string")
-          : []
-        );
-      } catch (e) {
-        resolve([]);
-      }
-    });
-  });
+  return sourceReader.treePaths(repo, branch);
 }
 
 export const github = {

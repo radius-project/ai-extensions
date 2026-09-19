@@ -1,4 +1,9 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import {
+  compileGraphDefinition,
+  graphDefinitionPath
+} from "@radius-project/core/github-radius/graphs";
+export { DEFAULT_APP_BICEP_PATH } from "@radius-project/core/github-radius/graphs";
 
 // The one modeling pipeline behind every `graphs-planning` write route.
 //
@@ -16,8 +21,6 @@ import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 // ordering that the migration has to preserve. Every stage is pure composition
 // over injected seams — this module spawns nothing, reads no module-level state
 // and owns no cache.
-
-export const DEFAULT_APP_BICEP_PATH = ".radius/app.bicep";
 
 // The instance entry as the graph routes see it. Only `state` is declared: the
 // entry indirection is kept rather than flattened to a state reader because a
@@ -75,7 +78,8 @@ export interface GraphPipelineDependencies<
   fetchBicepSelection(
     entry: TEntry,
     repo: string,
-    branch: string
+    branch: string,
+    sourceMode?: "selection" | "committed"
   ): Promise<AppBicepSelection>;
   resolveRadArtifactsDir(
     request: RadArtifactsRequest
@@ -113,6 +117,7 @@ export interface CompileResourcesInput {
   staged: StagedRadArtifacts;
   log?: (message: string) => void;
   saveGraphJsonTo?: string;
+  cleanupArtifacts?: boolean;
 }
 
 export interface GraphPipeline<
@@ -121,7 +126,8 @@ export interface GraphPipeline<
   selectAppBicep(
     entry: TEntry,
     repo: string,
-    branch: string
+    branch: string,
+    sourceMode?: "selection" | "committed"
   ): Promise<AppBicepSelection>;
   bicepPathOf(selection: AppBicepSelection): string;
   stageArtifacts(
@@ -146,12 +152,23 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
   function bicepPathOf(selection: AppBicepSelection): string {
     // `||` not `??`: an empty `bicepPath` means "not resolved from the
     // workspace" and must fall back, which `??` would not do.
-    return selection.bicepPath || DEFAULT_APP_BICEP_PATH;
+    return graphDefinitionPath(selection);
   }
 
   return {
-    selectAppBicep(entry, repo, branch) {
-      return dependencies.fetchBicepSelection(entry, repo, branch);
+    async selectAppBicep(entry, repo, branch, sourceMode) {
+      const selection = await dependencies.fetchBicepSelection(
+        entry,
+        repo,
+        branch,
+        sourceMode
+      );
+      if (sourceMode === "committed" && selection.fromWorkspace) {
+        throw new Error(
+          "A committed graph comparison cannot use workspace model content."
+        );
+      }
+      return selection;
     },
 
     bicepPathOf,
@@ -171,15 +188,26 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
       });
     },
 
-    compileResources({ selection, staged, log, saveGraphJsonTo }) {
-      return dependencies
-        .buildGraphViaRad(selection.content || "", bicepPathOf(selection), {
+    compileResources({
+      selection,
+      staged,
+      log,
+      saveGraphJsonTo,
+      cleanupArtifacts
+    }) {
+      return compileGraphDefinition(
+        selection,
+        {
           log,
           saveGraphJsonTo,
           radArtifactsDir: staged.dir,
-          cleanupRadArtifactsDir: staged.remote
-        })
-        .then((values) => dependencies.canvasGraphResources(values));
+          cleanupRadArtifactsDir: cleanupArtifacts ?? staged.remote
+        },
+        {
+          buildGraphViaRad: dependencies.buildGraphViaRad,
+          normalizeResources: dependencies.canvasGraphResources
+        }
+      );
     },
 
     toCanvasResources(values) {

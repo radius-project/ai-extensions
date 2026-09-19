@@ -38,6 +38,10 @@ export interface DeployPayload extends CanvasDeployParams {
   attemptId: string;
 }
 
+export type DeployStartResult =
+  | { kind: "started"; repairAttempt?: number; repairAttemptCap?: number }
+  | { kind: "failed"; error: string };
+
 export interface DeployStatusInput {
   status?: string;
   errorKind?: string | null;

@@ -16,7 +16,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, statSync, watch as fsWatch } from "node:fs";
+import { existsSync, rmSync, statSync, watch as fsWatch } from "node:fs";
 import { dirname, join } from "node:path";
 import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
@@ -61,6 +61,9 @@ import {
 } from "./deploy-tools.js";
 import {
   servers,
+  startDeployment,
+  observeDeploymentStatus,
+  applyDeploymentRepairPolicy,
   getOrCreateServer,
   hasActiveEnvironmentTasks,
   markEnvironmentInstanceShuttingDown,
@@ -158,7 +161,9 @@ const dependencies: RadiusExtensionDependencies = {
     ensureRadBinary,
     runRadBicepPublishExtension,
     runRadBicepPublish,
-    radArtifactsDirForSelection
+    radArtifactsDirForSelection,
+    removeArtifactsDirectory: (dir) =>
+      rmSync(dir, { recursive: true, force: true })
   },
   deployTools: {
     selectDeployEntry,
@@ -192,7 +197,9 @@ const dependencies: RadiusExtensionDependencies = {
     execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
   },
   deploy: {
-    fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
+    start: startDeployment,
+    observe: observeDeploymentStatus,
+    applyRepairPolicy: applyDeploymentRepairPolicy
   },
   operations: {
     setupInFlight,

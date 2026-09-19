@@ -8,6 +8,7 @@ Radius Canvas is the application-modeling and deployment product for the GitHub 
 packages/core/      UI-agnostic core (this package). No SDK, no HTTP, no DOM.
   src/
     graph/                    Bicep -> application graph build + diff (pure).
+    github-radius/            Shared environment, graph, deployment, and repair coordination.
     modeling/                 Repo modeling: app.bicep generation, recipe resolution.
     platforms/                Compute-platform abstraction (azure, aws) + registry.
     workflows/                GitHub Actions verify/deploy workflow generation.
@@ -16,27 +17,23 @@ packages/core/      UI-agnostic core (this package). No SDK, no HTTP, no DOM.
 
 packages/adapter-canvas/      The Copilot-canvas UI adapter (thin).
   src/
-    extension.mjs             SDK entry: joinSession() wiring + process lifecycle.
-    server.mjs                Loopback HTTP host: request handler, router, server lifecycle.
-    pages.mjs                 HTML page renderers.
-    client.mjs                Browser-side JS (string constants injected into pages).
-    vendor.mjs                CDN/vendor script caching.
-    deploy.mjs                Deploy monitoring + log parsing helpers.
-    infra.mjs                 OIDC / workflow / portal wrappers over the core.
-    gh.mjs                    Shell + GitHub API port primitives.
-    shared.mjs               escapeHtml + shared credential state.
+    extension.ts              SDK composition root and process lifecycle.
+    runtime/                  Injected actions, tools, hooks, and lifecycle.
+    server.ts, server/        Loopback HTTP host and use-case adapters.
+    pages/                    HTML page renderers.
+    browser/                  Importable browser behavior, bundled into pages.
+    deploy.ts                 GitHub workflow observation adapter.
+    infra.ts                  OIDC / workflow / portal wrappers over the core.
+    gh.ts                     Shell + GitHub API port primitives.
+    shared.ts                 Canvas presentation and instance state.
   build.mjs                   esbuild bundle -> .artifacts/radius/.
 ```
 
 ### The dependency rule
 
-`packages/core` never imports from an adapter, the Copilot SDK, `node:http`, or the
-DOM. Anything that touches the outside world is reached through a **port**
-(`src/ports/index.ts`). Reading a repository is the only side effect core's
-use-cases need today, so `GitHub` is the only port. Adapters depend on the core,
-supply port implementations, and own all UI/transport concerns. This keeps the
-product logic testable in isolation and makes a second UI (guide 3) a thin layer
-rather than a fork.
+`packages/core` never imports from an adapter, the Copilot SDK, HTTP implementations, or the DOM. Anything that touches the outside world is reached through a **port**. Repository access uses `src/ports/index.ts`; GitHub Radius coordinators define narrow execution, progress, state, and interaction ports alongside their use cases in `src/github-radius/`. Adapters supply these implementations and retain transport and presentation concerns.
+
+The `@radius-project/core/github-radius` entry exposes environment, graph, and deployment families, plus shared repair policy. See [GitHub Radius library](../../docs/architecture/github-radius-library.md) for the boundary and caller requirements.
 
 ## Guide 1: Add a compute platform
 
@@ -83,15 +80,11 @@ declared in the `joinSession({ canvases, tools })` block in
 
 ## Guide 3: Add a new UI adapter
 
-Because all product logic is in `packages/core` behind ports, a new front-end
-(browser panel, chat surface, CLI) is a thin adapter:
+The extracted use cases in `packages/core` accept execution and interaction ports. A new frontend can consume them without a Canvas HTTP server:
 
 1. Create `packages/adapter-<name>/` with its own entry and build.
-2. Implement the ports your adapter needs (today just `GitHub`) for that
-   environment. The canvas implementation in `packages/adapter-canvas/src/gh.ts` is a reference.
-3. Import use-cases from `@radius-project/core` and wire them to your transport
-   and rendering. Reuse pure renderers/helpers where the environment allows;
-   keep transport-specific code (HTTP host, SDK surface) in the adapter.
+2. Supply the narrow execution and interaction ports required by the selected use cases. Reuse managed `rad` and Node helpers from `@radius-project/adapter-shared`; do not start a Canvas server to reach them. Keep trusted workspace and GitHub identity context separate from editable user inputs.
+3. Import use cases from `@radius-project/core` or `@radius-project/core/github-radius` and wire them to the transport and presentation. Invoke authoring and repair policy explicitly when the caller supports those interactions; graph reads and status observation must not implicitly initiate them.
 4. Add a build script that bundles the adapter, mirroring
    `packages/adapter-canvas/build.mjs`.
 

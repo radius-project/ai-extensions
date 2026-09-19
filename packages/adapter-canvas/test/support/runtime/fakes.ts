@@ -277,6 +277,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       )
     },
     rad: {
+      removeArtifactsDirectory: vi.fn(),
       buildGraphViaRad: vi.fn(async () => []),
       ensureRadBinary: vi.fn(async () => undefined),
       runRadBicepPublishExtension: vi.fn(async () => undefined),
@@ -330,13 +331,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       execFile: vi.fn(async () => ({ stdout: "", stderr: "" }))
     },
     deploy: {
-      fetch: vi.fn(
-        async () =>
-          new Response(JSON.stringify({}), {
-            status: 200,
-            headers: { "Content-Type": "application/json" }
-          })
-      )
+      start: vi.fn<RadiusExtensionDependencies["deploy"]["start"]>(async () => {
+        throw new Error("Unspecified deployment start");
+      }),
+      observe: vi.fn<RadiusExtensionDependencies["deploy"]["observe"]>(
+        async () => {
+          throw new Error("Unspecified deployment observation");
+        }
+      ),
+      applyRepairPolicy: vi.fn()
     },
     operations: {
       setupInFlight: vi.fn(() => false),

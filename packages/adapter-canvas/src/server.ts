@@ -32,6 +32,23 @@ import {
 import type { Remediation, RemediationView } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import {
+  beginDeploymentAttempt,
+  deploymentHandoffStatus,
+  reportUnconfirmedDeployment,
+  requestDeploymentRepair,
+  resolveDeploymentRepair
+} from "@radius-project/core/github-radius";
+import {
+  createDeployRequestService as createSharedDeploymentRequest,
+  observeDeployment
+} from "@radius-project/core/github-radius/deployments";
+import type {
+  DeployPayload,
+  DeployServerEntry,
+  DeployStartResult
+} from "./deploy-tools.js";
+import { deploymentStartResult } from "./runtime/deployment-result.js";
+import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
   presentedRemediationView,
@@ -305,7 +322,10 @@ import {
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
-import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
+import {
+  azureAutoSetupDependencies,
+  createAzureAutoSetupRoutes
+} from "./server/routes/azure-auto-setup.js";
 import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dependencies.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
@@ -326,7 +346,10 @@ import {
   graphRepairHandoffMessage,
   type GraphRepairRequest
 } from "./graph-model-repair.js";
-import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
+import {
+  createCreateEnvironmentRoutes,
+  environmentSetupDependencies
+} from "./server/routes/create-environment.js";
 import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
@@ -414,7 +437,10 @@ import type {
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
 import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
-import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
+import {
+  environmentSetupContinuations,
+  runEnvironmentOperationWorkflow
+} from "./server/services/environment-operation.js";
 import type { RemediationReference } from "./server/services/environment-operation.js";
 import {
   monitorVerificationWithSelectedAccount,
@@ -1016,114 +1042,110 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });
 
-const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
-  composeAzureAutoSetupDependencies({
-    isServerOwnedRequest: (instanceId, request) =>
-      instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-      false,
-    lifecycle: {
-      get: (operationId) => operations.get(operationId),
-      isStale: (operation) => isStale(operation),
-      create: (input) => createOperation(input),
-      buildStages: () => buildStages(),
-      start: (operation) => operations.start(operation),
-      persist: () => operations.persist(),
-      report: (diagnostic) => operations.report?.(diagnostic),
-      finish: (operation, state, options) => {
-        finish(operation, state, options);
+const azureAutoSetupPorts = composeAzureAutoSetupDependencies({
+  isServerOwnedRequest: (instanceId, request) =>
+    instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
+    false,
+  lifecycle: {
+    get: (operationId) => operations.get(operationId),
+    isStale: (operation) => isStale(operation),
+    create: (input) => createOperation(input),
+    buildStages: () => buildStages(),
+    start: (operation) => operations.start(operation),
+    persist: () => operations.persist(),
+    report: (diagnostic) => operations.report?.(diagnostic),
+    finish: (operation, state, options) => {
+      finish(operation, state, options);
+    }
+  },
+  progress: {
+    enterStage: (operation, stage) => {
+      enterStage(operation, stage);
+    },
+    setStageState: (operation, stage, state) => {
+      setStageState(operation, stage, state);
+    },
+    hasWarnings: (operation) => hasWarnings(operation),
+    addLegacyStep: (operation, text) => {
+      addLegacyStep(operation, text);
+    },
+    setContext: (operation, patch) => {
+      setContext(operation, patch);
+    },
+    setCloudContext: (operation, provider, patch) => {
+      setCloudContext(operation, provider, patch);
+    },
+    requireInput: (operation, input) => {
+      requireInput(operation, input);
+    },
+    resumeAfterInput: (operation) => {
+      resumeAfterInput(operation);
+    }
+  },
+  artifacts: {
+    withCredentialProvenanceLock,
+    recordAzureApp: (operation, patch) => {
+      recordAzureApp(operation, patch);
+    },
+    recordServicePrincipal: (operation, patch) => {
+      recordServicePrincipal(operation, patch);
+    },
+    recordCreatedFederatedCredential: (operation, entry) => {
+      recordCreatedFederatedCredential(operation, entry);
+    },
+    recordFederatedCredentialProvenance: async (operation, entry) => {
+      const recorded = await recordCredentialProvenance({
+        ...entry,
+        operationId: String(operation.operationId || "")
+      });
+      if (!recorded) {
+        throw new Error(
+          `Invalid provenance for federated credential ${entry.name}.`
+        );
       }
     },
-    progress: {
-      enterStage: (operation, stage) => {
-        enterStage(operation, stage);
-      },
-      setStageState: (operation, stage, state) => {
-        setStageState(operation, stage, state);
-      },
-      hasWarnings: (operation) => hasWarnings(operation),
-      addLegacyStep: (operation, text) => {
-        addLegacyStep(operation, text);
-      },
-      setContext: (operation, patch) => {
-        setContext(operation, patch);
-      },
-      setCloudContext: (operation, provider, patch) => {
-        setCloudContext(operation, provider, patch);
-      },
-      requireInput: (operation, input) => {
-        requireInput(operation, input);
-      },
-      resumeAfterInput: (operation) => {
-        resumeAfterInput(operation);
-      }
+    recordCreatedRoleAssignment: (operation, entry) => {
+      recordCreatedRoleAssignment(operation, entry);
+    }
+  },
+  external: {
+    getSelectedGitHubExecutor: (operationId) =>
+      selectedGitHubExecutorsByOperation.get(operationId),
+    getGitHubIdentity,
+    preflightRepoAdmin: (repo, executor) =>
+      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+    preflightGhcrPackageWriteAccess: (executor) =>
+      preflightGhcrPackageWriteAccess(
+        getGhPackageCredentials,
+        getGitHubIdentity,
+        executor,
+        GH_COMMAND_PRESENTATION
+      ),
+    runGitHubJson: (apiPath, executor) =>
+      runGitHubJsonRequest(apiPath, executor),
+    runAz: (args) => runCliCommand("az", args)
+  },
+  tempFile: {
+    createPath: () =>
+      join(tmpdir(), `radius-fed-cred-${randomBytes(12).toString("hex")}.json`),
+    write: (path, contents) => {
+      writeFileSync(path, contents, { mode: 0o600 });
     },
-    artifacts: {
-      withCredentialProvenanceLock,
-      recordAzureApp: (operation, patch) => {
-        recordAzureApp(operation, patch);
-      },
-      recordServicePrincipal: (operation, patch) => {
-        recordServicePrincipal(operation, patch);
-      },
-      recordCreatedFederatedCredential: (operation, entry) => {
-        recordCreatedFederatedCredential(operation, entry);
-      },
-      recordFederatedCredentialProvenance: async (operation, entry) => {
-        const recorded = await recordCredentialProvenance({
-          ...entry,
-          operationId: String(operation.operationId || "")
-        });
-        if (!recorded) {
-          throw new Error(
-            `Invalid provenance for federated credential ${entry.name}.`
-          );
-        }
-      },
-      recordCreatedRoleAssignment: (operation, entry) => {
-        recordCreatedRoleAssignment(operation, entry);
-      }
-    },
-    external: {
-      getSelectedGitHubExecutor: (operationId) =>
-        selectedGitHubExecutorsByOperation.get(operationId),
-      getGitHubIdentity,
-      preflightRepoAdmin: (repo, executor) =>
-        preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
-      preflightGhcrPackageWriteAccess: (executor) =>
-        preflightGhcrPackageWriteAccess(
-          getGhPackageCredentials,
-          getGitHubIdentity,
-          executor,
-          GH_COMMAND_PRESENTATION
-        ),
-      runGitHubJson: (apiPath, executor) =>
-        runGitHubJsonRequest(apiPath, executor),
-      runAz: (args) => runCliCommand("az", args)
-    },
-    tempFile: {
-      createPath: () =>
-        join(
-          tmpdir(),
-          `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
-        ),
-      write: (path, contents) => {
-        writeFileSync(path, contents, { mode: 0o600 });
-      },
-      remove: (path) => {
-        try {
-          unlinkSync(path);
-        } catch {}
-      }
-    },
-    ensureServicePrincipal,
-    finalizeSetupFailure,
-    persistMutationCheckpoint,
-    honorStopBoundary,
-    sleep: (milliseconds) =>
-      new Promise((resolve) => setTimeout(resolve, milliseconds)),
-    stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
-  })
-);
+    remove: (path) => {
+      try {
+        unlinkSync(path);
+      } catch {}
+    }
+  },
+  ensureServicePrincipal,
+  finalizeSetupFailure,
+  persistMutationCheckpoint,
+  honorStopBoundary,
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
+});
+const azureAutoSetupRoutes = createAzureAutoSetupRoutes(azureAutoSetupPorts);
 
 const githubAccountCoordinator = createGitHubAccountCoordinator(
   {
@@ -1302,8 +1324,8 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   commitBranchResolution: (entry, repo, resolution) =>
     commitWorkspaceBranchResolution(entry.state, repo, resolution),
   pipeline: createGraphPipeline<CanvasServerEntry>({
-    fetchBicepSelection: (entry, repo, branch) =>
-      fetchBicepSelection(entry, repo, branch),
+    fetchBicepSelection: (entry, repo, branch, sourceMode) =>
+      fetchBicepSelection(entry, repo, branch, sourceMode),
     resolveRadArtifactsDir: (request) =>
       radArtifactsDirForSelection({ ...request, github }),
     buildGraphViaRad: (content, definitionFile, options) =>
@@ -1602,8 +1624,9 @@ const namespaceClaimsFor = (operationId: string) => {
 // module-level mutable state. `isServerOwnedRequest` is deliberately a
 // per-request function rather than a value: the token is a per-instance
 // `randomUUID()` held by that instance's request coordinator, and this route is
-// reachable only through the internal loopback POST that carries it.
-const createEnvironmentRoutes = createCreateEnvironmentRoutes({
+// authenticated for HTTP callers. Server-owned continuations call the shared
+// coordinator directly with the same execution dependencies.
+const createEnvironmentPorts = {
   ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isServerOwnedRequest: (instanceId, request) =>
     instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
@@ -1753,7 +1776,10 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
   now: () => Date.now()
-});
+} satisfies Parameters<typeof createCreateEnvironmentRoutes>[0];
+const createEnvironmentRoutes = createCreateEnvironmentRoutes(
+  createEnvironmentPorts
+);
 
 // Built once at module initialization so table validation runs a single time
 // and a missing typed handler fails early rather than per instance.
@@ -2581,75 +2607,12 @@ export function classifyDeployDispatchFailure(stderr: string): DeployErrorKind {
 export function resolveDeployRepairLoop(
   state: CanvasState,
   requestedAttemptId: unknown
-): {
-  repairLoop: boolean;
-  attemptId: string;
-  repairAttempt: number;
-  error?: string;
-} {
-  const requested =
-    typeof requestedAttemptId === "string" ? requestedAttemptId : "";
-  if (!requested) return { repairLoop: false, attemptId: "", repairAttempt: 0 };
-  const current = state?.deployAttempt?.id || "";
-  if (current !== requested) {
-    return {
-      repairLoop: false,
-      attemptId: "",
-      repairAttempt: 0,
-      error: `Deploy attempt "${requested}" is no longer the current attempt for this canvas session, so nothing was deployed. A newer deploy has replaced it; ask the user which deploy to repair.`
-    };
-  }
-  // A repair redeploy only makes sense against a deploy that actually failed.
-  // The attempt stays current after it settles, and the agent was told to keep
-  // passing its id, so without this an attempt-bound call could land on a
-  // deploy that is still running (starting a second workflow run and a second
-  // monitor over the same state) or on one that already succeeded (spending
-  // repair budget on a finished loop, and — because a loop redeploy is marked
-  // agent-owned — silently suppressing the handoff if it fails).
-  const deployStatus = state?.deployStatus || "";
-  if (deployStatus !== "failed") {
-    return {
-      repairLoop: false,
-      attemptId: "",
-      repairAttempt: 0,
-      error:
-        deployStatus === "in_progress" ?
-          `Deploy attempt "${requested}" is still running, so nothing was deployed. Poll the radius_deploy_status tool until it reports success or failed before redeploying.`
-        : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
-    };
-  }
-  // "failed" covers two different things, and only one is safe to redeploy.
-  // A confirmed failure — GitHub refused the dispatch, or the run finished and
-  // reported failure — leaves nothing in flight. The rest do not: the dispatch
-  // may have been accepted without us learning of it, or monitoring may have
-  // stopped before the run reported, in which case a redeploy would race a
-  // second run against the same target — exactly what the in_progress check
-  // above prevents, arriving by a different route. Deciding this from stored
-  // state keeps the resolver synchronous; re-querying the run would put an
-  // await in front of beginDeployAttempt, which must not happen.
-  if ((state?.deployErrorKind || "") === DEPLOY_RUN_UNCONFIRMED_KIND) {
-    const runUrl = state?.deployRunUrl || "";
-    return {
-      repairLoop: false,
-      attemptId: "",
-      repairAttempt: 0,
-      error: `Deploy attempt "${requested}" never confirmed what happened to its workflow, so a run may still be in flight and nothing was deployed. Redeploying now could start a second run against the same target.${runUrl ? ` Check the run at ${runUrl}` : " Check the repository's Actions tab"} and tell the user what it shows. To deploy again afterwards, call radius_deploy without an attemptId — this attempt cannot be repaired, because its outcome will never be confirmed.`
-    };
-  }
-  // The cap the handoff prompt states is also enforced here, because prompt
-  // text alone is an instruction the agent can lose track of across a long
-  // repair loop. Refusing before anything is dispatched keeps a runaway loop
-  // from burning CI runs.
-  const repairAttempt = (state.deployRepairAttempts || 0) + 1;
-  if (repairAttempt > DEPLOY_REPAIR_ATTEMPT_CAP) {
-    return {
-      repairLoop: false,
-      attemptId: "",
-      repairAttempt: 0,
-      error: `This repair loop has already used its ${DEPLOY_REPAIR_ATTEMPT_CAP} automatic repair attempts, so nothing was deployed. Stop retrying: report the remaining failure and what you tried to the user, and let them decide whether to deploy again from the canvas.`
-    };
-  }
-  return { repairLoop: true, attemptId: requested, repairAttempt };
+) {
+  return resolveDeploymentRepair(
+    state,
+    requestedAttemptId,
+    DEPLOY_REPAIR_ATTEMPT_CAP
+  );
 }
 
 // Open a new deploy attempt on a reused canvas state. Deliberately
@@ -2662,175 +2625,51 @@ export function beginDeployAttempt(
   state: CanvasState,
   input: DeployAttemptInput
 ): void {
-  state.deployStatus = "in_progress";
-  // Advances on every deploy invocation, including each redeploy inside a
-  // repair loop. Nothing else does: the loop reuses its attempt id, the run id
-  // is cleared here and stays empty when a deploy fails before dispatch, and
-  // `deployFinishedAt` is only written when a run concludes. Without this, two
-  // consecutive pre-dispatch failures in one loop are indistinguishable, and a
-  // notification dismissed for the first would hide the second.
-  state.deployGeneration = (state.deployGeneration || 0) + 1;
-  state.deployError = null;
-  state.deployErrorKind = null;
-  state.deployErrorBranch = null;
-  state.deployErrorPaths = null;
-  state.deployRunUrl = null;
-  state.deployRunId = null;
-  // Concrete outputs belong to one deployment attempt. Keeping the previous
-  // graph would relabel a later failed run with stale resource and portal data.
-  state.deployedGraph = null;
-  state.deployedGraphRepo = undefined;
-  // Only a redeploy inside an existing repair loop is already owned by the
-  // agent. Every other deploy — including the agent's first one, which opens no
-  // loop — must stay eligible to hand its failure off; marking that one as
-  // repairing made triggerDeployRepairHandoff bail out and silently dropped the
-  // repair.
-  state.deployRepairing = input.repairLoop;
-  state.deployHandoffState = input.repairLoop ? "delivered" : "idle";
-  // The delivery budget belongs to the loop, not to a single deploy: resetting
-  // it on every redeploy would let an undeliverable handoff retry forever.
-  state.deployHandoffAttempts =
-    input.repairLoop ? state.deployHandoffAttempts || 0 : 0;
-  // The informational failure notice has no repair loop to inherit a budget
-  // from, so every new deploy attempt resets it unconditionally. Without this
-  // reset a canvas panel — whose CanvasState is reused across deploys — would
-  // keep a "delivered" (or exhausted "failed") notice for its whole life, and
-  // every later run-unconfirmed failure would bail at the trigger's guard and
-  // never reach chat.
-  state.deployNoticeState = "idle";
-  state.deployNoticeAttempts = 0;
-  // Same lifetime as the delivery budget, and counted the way
-  // resolveDeployRepairLoop projected it, so the number the agent is told
-  // matches the one the next call is checked against. A deploy that opens a
-  // new attempt starts a fresh loop with a full budget.
-  state.deployRepairAttempts =
-    input.repairLoop ? (state.deployRepairAttempts || 0) + 1 : 0;
-  state.deployingBranch = input.branch;
-  // Immutable identity for this attempt. A canvas panel is reused across
-  // deploys, so the repair loop binds to this snapshot instead of the panel:
-  // a stale repair cannot redeploy whatever the user started next. A redeploy
-  // inside a loop keeps the id it was handed, so the agent can keep addressing
-  // the same loop across retries instead of being told its attempt is inactive.
-  state.deployAttempt = {
-    id:
-      (input.repairLoop && input.attemptId) ||
-      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    targetRepo: input.repo,
-    environment: input.environment,
-    branch: input.branch,
-    provider: input.provider,
-    appFile: input.appFile
-  };
+  beginDeploymentAttempt(
+    state,
+    input,
+    () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  );
 }
 
-export const DEPLOY_HANDOFF_MAX_ATTEMPTS = 3;
-// Backoff before re-sending a handoff whose delivery was rejected.
-export const DEPLOY_HANDOFF_RETRY_DELAY_MS = 2000;
+export {
+  DEPLOYMENT_HANDOFF_MAX_ATTEMPTS as DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  DEPLOYMENT_HANDOFF_RETRY_DELAY_MS as DEPLOY_HANDOFF_RETRY_DELAY_MS
+} from "@radius-project/core/github-radius";
 
 export function triggerDeployRepairHandoff(
   entry: { state: CanvasState } | undefined,
   instanceId = ""
 ): boolean {
+  const deliver = deployRepairHandoff;
+  if (!entry || typeof deliver !== "function") return false;
+  const state = entry.state;
+  const reportError = (error: unknown) =>
+    console.error(
+      "[radius] Deployment repair handoff failed:",
+      redactGhCredentials(errorMessage(error))
+    );
   try {
-    if (typeof deployRepairHandoff !== "function") return false;
-    const state = entry?.state;
-    if (!state || state.deployStatus !== "failed") return false;
-    if (
-      state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
-      // Refused before dispatch because no federated credential can match the
-      // token GitHub would mint. Repairing the model cannot change that.
-      state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
-      state.deployErrorKind === DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND ||
-      // Cloud auth drifted since the environment verified: only re-verifying
-      // (not a model repair + redeploy) can fix it, so keep it out of the loop.
-      state.deployErrorKind === DEPLOY_CLOUD_AUTH_DRIFT_KIND ||
-      // An attempt whose run may still be in flight can never be repaired: the
-      // resolver refuses its redeploy. Opening a loop only to refuse its first
-      // call would spend a cycle and tell the agent two different things.
-      state.deployErrorKind === DEPLOY_RUN_UNCONFIRMED_KIND
-    )
-      return false;
-    if (state.deployRepairing) return false;
-    if (
-      state.deployHandoffState === "pending" ||
-      state.deployHandoffState === "failed"
-    )
-      return false;
-    const repo =
-      state.deployingRepo || state.plannedRepo || state.contextRepo || "";
-    const branch = state.deployingBranch || "";
-    const error = state.deployError || "";
-    const deployRunUrl = state.deployRunUrl || "";
-    const attemptId = state.deployAttempt?.id || "";
-    state.deployHandoffState = "pending";
-    state.deployHandoffAttempts = (state.deployHandoffAttempts || 0) + 1;
-    // A canvas panel is reused across deploys and these callbacks settle
-    // asynchronously, so a user deploy started in the meantime would otherwise
-    // be mutated by the previous attempt's handoff. Binding to the attempt that
-    // opened this handoff keeps a stale settle from marking the new attempt as
-    // delivered/owned, which would suppress its own handoff for good. Compare
-    // both sides normalized so an attempt-less handoff still settles against an
-    // attempt-less state - refusing to settle there would strand it as pending
-    // and block every later trigger - while a new deploy's id still revokes it.
-    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
-    const delivered = () => {
-      if (!ownsAttempt()) return;
-      state.deployHandoffState = "delivered";
-      state.deployRepairing = true;
-    };
-    // A handoff that never reached the agent must not leave the loop marked as
-    // owned; it becomes retryable until the attempt budget runs out.
-    const failed = () => {
-      if (!ownsAttempt()) return;
-      state.deployRepairing = false;
-      const exhausted =
-        (state.deployHandoffAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
-      state.deployHandoffState = exhausted ? "failed" : "retryable";
-      // Retry from the server too. /api/deploy-status also retries, but only
-      // while the webview polls it, so a transient delivery failure would
-      // otherwise strand the handoff as retryable with budget left over -
-      // exactly the unmounted-panel case this trigger exists to cover.
-      if (exhausted) return;
-      const timer = setTimeout(() => {
-        // The backoff is another window for a new deploy to start, and that
-        // deploy drives its own handoff.
-        if (!ownsAttempt()) return;
-        triggerDeployRepairHandoff(entry, instanceId);
-      }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
-      // Never hold the process open for a retry.
-      timer.unref?.();
-    };
-    try {
-      Promise.resolve(
-        deployRepairHandoff({
-          repo,
-          branch,
-          error,
-          deployRunUrl,
-          attemptId,
-          instanceId
-        })
-      ).then(delivered, failed);
-    } catch {
-      failed();
-      return false;
-    }
-    return true;
-  } catch {
-    /* never let a handoff failure break the response */
+    return requestDeploymentRepair(
+      state,
+      state.deployingRepo || state.plannedRepo || state.contextRepo || "",
+      {
+        deliver: (input) => deliver({ ...input, instanceId }),
+        scheduleRetry: (callback, delay) => {
+          setTimeout(callback, delay).unref?.();
+        },
+        reportError
+      }
+    );
+  } catch (error) {
+    reportError(error);
+    return false;
   }
-  return false;
 }
 
 // What the webview needs to decide whether to keep polling after a failed deploy.
 export function deployHandoffStatus(state: CanvasState): DeployHandoffSummary {
-  const handoffState = state?.deployHandoffState || "idle";
-  return {
-    state: handoffState,
-    attempts: state?.deployHandoffAttempts || 0,
-    maxAttempts: DEPLOY_HANDOFF_MAX_ATTEMPTS,
-    pending: handoffState === "pending" || handoffState === "retryable"
-  };
+  return deploymentHandoffStatus(state);
 }
 
 // Relay a failed canvas deploy whose workflow run could not be confirmed
@@ -2850,66 +2689,31 @@ export function triggerDeployFailureNotice(
   entry: { state: CanvasState } | undefined,
   instanceId = ""
 ): boolean {
+  const deliver = deployFailureNotice;
+  if (!entry || typeof deliver !== "function") return false;
+  const state = entry.state;
+  const reportError = (error: unknown) =>
+    console.error(
+      "[radius] Deployment failure notice failed:",
+      redactGhCredentials(errorMessage(error))
+    );
   try {
-    if (typeof deployFailureNotice !== "function") return false;
-    const state = entry?.state;
-    if (!state || state.deployStatus !== "failed") return false;
-    if (state.deployErrorKind !== DEPLOY_RUN_UNCONFIRMED_KIND) return false;
-    if (
-      state.deployNoticeState === "pending" ||
-      state.deployNoticeState === "delivered" ||
-      state.deployNoticeState === "failed"
-    )
-      return false;
-    const repo =
-      state.deployingRepo || state.plannedRepo || state.contextRepo || "";
-    const branch = state.deployingBranch || "";
-    const error = state.deployError || "";
-    const deployRunUrl = state.deployRunUrl || "";
-    // Bind delivery to the attempt that opened this notice: a canvas panel is
-    // reused across deploys and these callbacks settle asynchronously, so a new
-    // deploy started in the meantime must revoke a stale settle rather than have
-    // it mark the wrong attempt reported. Compare both sides normalized so an
-    // attempt-less notice still settles against attempt-less state.
-    const attemptId = state.deployAttempt?.id || "";
-    state.deployNoticeState = "pending";
-    state.deployNoticeAttempts = (state.deployNoticeAttempts || 0) + 1;
-    const ownsAttempt = () => (state.deployAttempt?.id || "") === attemptId;
-    const delivered = () => {
-      if (!ownsAttempt()) return;
-      state.deployNoticeState = "delivered";
-    };
-    const failed = () => {
-      if (!ownsAttempt()) return;
-      const exhausted =
-        (state.deployNoticeAttempts || 0) >= DEPLOY_HANDOFF_MAX_ATTEMPTS;
-      state.deployNoticeState = exhausted ? "failed" : "retryable";
-      if (exhausted) return;
-      const timer = setTimeout(() => {
-        if (!ownsAttempt()) return;
-        triggerDeployFailureNotice(entry, instanceId);
-      }, DEPLOY_HANDOFF_RETRY_DELAY_MS);
-      timer.unref?.();
-    };
-    try {
-      Promise.resolve(
-        deployFailureNotice({
-          repo,
-          branch,
-          error,
-          deployRunUrl,
-          instanceId
-        })
-      ).then(delivered, failed);
-    } catch {
-      failed();
-      return false;
-    }
-    return true;
-  } catch {
-    /* never let a notice failure break the response */
+    return reportUnconfirmedDeployment(
+      state,
+      state.deployingRepo || state.plannedRepo || state.contextRepo || "",
+      {
+        deliver: ({ repo, branch, error, deployRunUrl }) =>
+          deliver({ repo, branch, error, deployRunUrl, instanceId }),
+        scheduleRetry: (callback, delay) => {
+          setTimeout(callback, delay).unref?.();
+        },
+        reportError
+      }
+    );
+  } catch (error) {
+    reportError(error);
+    return false;
   }
-  return false;
 }
 
 // The workflow that actually runs `rad` deploy commands. The deployments list
@@ -3292,7 +3096,7 @@ const deployMonitorService = createDeployMonitorService({
   now: () => Date.now()
 });
 
-const deployRequestService = createDeployRequestService({
+const deployRequestDependencies = {
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   resolveDeployRepairLoop,
   resolveDeploymentEnvironment,
@@ -3315,7 +3119,62 @@ const deployRequestService = createDeployRequestService({
   unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
   repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
   errorMessage
-});
+} satisfies Parameters<typeof createDeployRequestService>[0];
+
+const deployRequestService = createDeployRequestService(
+  deployRequestDependencies
+);
+
+function deploymentInstanceId(entry: DeployServerEntry): string {
+  for (const [instanceId, candidate] of canvasServer.instances) {
+    if (candidate.state === entry.state) return instanceId;
+  }
+  throw new Error("The selected deployment context is no longer available.");
+}
+
+export function applyDeploymentRepairPolicy(entry: DeployServerEntry): void {
+  const instanceId = deploymentInstanceId(entry);
+  triggerDeployRepairHandoff(entry, instanceId);
+  triggerDeployFailureNotice(entry, instanceId);
+}
+
+export async function startDeployment(
+  entry: DeployServerEntry,
+  payload: DeployPayload
+): Promise<DeployStartResult> {
+  const instanceId = deploymentInstanceId(entry);
+  const service = createSharedDeploymentRequest({
+    ...deployRequestDependencies,
+    redactDiagnostics: redactGhCredentials,
+    onSettled: (settled) => {
+      triggerDeployRepairHandoff(settled, instanceId);
+      triggerDeployFailureNotice(settled, instanceId);
+    }
+  });
+  const result = await service.deploy({
+    state: entry.state,
+    target: {
+      repo: payload.targetRepo,
+      environment: resolveDeploymentEnvironment(
+        entry.state,
+        payload.environment
+      ),
+      provider: payload.provider
+    },
+    source: {
+      repo: payload.targetRepo,
+      branch: payload.branch,
+      appFile: payload.appFile
+    },
+    attemptId: payload.attemptId
+  });
+  return deploymentStartResult(result);
+}
+
+export async function observeDeploymentStatus(entry: DeployServerEntry) {
+  deploymentInstanceId(entry);
+  return observeDeployment(entry.state);
+}
 
 const deploymentAbandonmentService = createDeploymentAbandonmentService({
   ghCommandPresentation: GH_COMMAND_PRESENTATION,
@@ -5477,14 +5336,18 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 async function fetchBicepSelection(
   entry: { state: CanvasState },
   repo: string,
-  branch: string
+  branch: string,
+  sourceMode: "selection" | "committed" = "selection"
 ): Promise<{
   content: string | null;
   fromWorkspace: boolean;
   branch: string;
   bicepPath: string;
 }> {
-  const access = accessForSelection(entry, repo, branch);
+  const access =
+    sourceMode === "committed" ?
+      { useWorkspace: false, branch }
+    : accessForSelection(entry, repo, branch);
   if (access.useWorkspace) {
     const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
     if (local)
@@ -6078,7 +5941,13 @@ export function createInstanceRequestCoordinator(
               });
             },
             getOperation: (id) => operations.get(id),
-            postInternal,
+            ...environmentSetupContinuations({
+              azure: azureAutoSetupDependencies(azureAutoSetupPorts),
+              environment: environmentSetupDependencies(
+                createEnvironmentPorts,
+                instanceId
+              )
+            }),
             now: () => Date.now()
           });
         },

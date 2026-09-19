@@ -280,7 +280,7 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.shutdown("test");
   });
 
-  it("activates PR graph diffs after first-time modeling in the same session", async () => {
+  it("activates PR graph diffs after committing the first model in the same session", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
         workspacePath: "/worktrees/new-app",
@@ -288,7 +288,8 @@ describe("P0-A Radius runtime registration contract", () => {
         branch: "feature"
       },
       bicepByRepoBranch: {
-        "workspace:acme/new-app@feature": "resource app {}"
+        "workspace:acme/new-app@feature": "resource app {}",
+        "remote:acme/new-app@feature": "resource app {}"
       }
     });
     const hasModel = harness.deps.workspace
@@ -647,7 +648,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     ).resolves.toMatchObject({ title: "Radius" });
   });
 
-  it("uses the worktree branch when omitted and explicit base/head for graph diff", async () => {
+  it("compares committed base and head rather than the uncommitted worktree", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
         workspacePath: "/worktrees/widgets",
@@ -656,7 +657,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       },
       bicepByRepoBranch: {
         "remote:acme/widgets@main": "resource base {}",
-        "workspace:acme/widgets@feature/runtime-tests": "resource head {}"
+        "remote:acme/widgets@feature/runtime-tests": "resource head {}",
+        "workspace:acme/widgets@feature/runtime-tests": "uncommitted content"
       }
     });
     harness.deps.rad.buildGraphViaRad = vi
@@ -676,11 +678,12 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       "acme/widgets",
       "main"
     );
-    expect(harness.deps.workspace.fetchWorkspaceBicep).toHaveBeenCalledWith(
-      expect.any(Object),
+    expect(harness.deps.core.fetchBicepFromRepo).toHaveBeenCalledWith(
+      harness.deps.github,
       "acme/widgets",
       "feature/runtime-tests"
     );
+    expect(harness.deps.workspace.fetchWorkspaceBicep).not.toHaveBeenCalled();
     expect(harness.servers.get("radius-panel")?.state).toMatchObject({
       diffTargetRepo: "acme/widgets",
       diffBase: "main",
@@ -1224,9 +1227,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       harness.deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
     ).mockRejectedValue(new Error("permission denied"));
 
-    // Asked before the tool runs: handing the skill over starts a run the
-    // handoff is then right to defer to.
-    expect(await handOff(harness)).toContain("radius_generate_app");
+    await expect(handOff(harness)).rejects.toThrow("permission denied");
+    expect(harness.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
 
     const generated = await generateApp(harness);
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);

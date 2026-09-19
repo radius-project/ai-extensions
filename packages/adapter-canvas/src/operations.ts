@@ -25,6 +25,8 @@
 //      `failure.evidence`, fenced, and never in a label.
 
 import { createHash, randomUUID } from "node:crypto";
+import { createEnvironmentOperationDomain } from "@radius-project/core/github-radius/environments/operation-domain";
+export { PROVIDER_DIAGNOSTIC_MAX_LENGTH } from "@radius-project/core/github-radius/environments/operation-domain";
 import {
   disabledOperationStore,
   PERSISTED_OPERATIONS_VERSION,
@@ -347,27 +349,22 @@ export type ProviderRecoveryRecord = {
 // nonterminal record older than this cannot say what it had in flight.
 export const PROVIDER_JOURNAL_SCHEMA_VERSION = 5;
 
-const PROVIDER_MUTATION_STATUSES = Object.freeze([
-  "prepared",
-  "confirmed",
-  "not_applied",
-  "outcome_unknown",
-  "manual_required"
-]);
+const environmentOperationDomain = createEnvironmentOperationDomain({
+  nowIso,
+  sha256: (value) => createHash("sha256").update(value).digest("hex"),
+  redactDiagnostic: redactGhCredentials,
+  announceTerminal: (operation) => {
+    announceTerminal(operation);
+    return false;
+  }
+});
 
 export function createProviderRecovery(): ProviderRecoveryRecord {
   return { state: "idle", guidance: null, mutations: [] };
 }
 
-export const PROVIDER_DIAGNOSTIC_MAX_LENGTH = 2000;
-
 export function boundedProviderDiagnostic(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const diagnostic = redactGhCredentials(value).trim();
-  if (!diagnostic) return null;
-  return diagnostic.length > PROVIDER_DIAGNOSTIC_MAX_LENGTH ?
-      `${diagnostic.slice(0, PROVIDER_DIAGNOSTIC_MAX_LENGTH)}...`
-    : diagnostic;
+  return environmentOperationDomain.boundedProviderDiagnostic(value);
 }
 
 export function recordProviderMutationDiagnostics(
@@ -378,116 +375,15 @@ export function recordProviderMutationDiagnostics(
     final?: string | null;
   }
 ): boolean {
-  const recovery = readProviderRecovery(op?.providerRecovery);
-  const mutation = recovery.mutations.find(
-    (entry) => entry.mutationId === mutationId
+  return environmentOperationDomain.recordProviderMutationDiagnostics(
+    op,
+    mutationId,
+    diagnostics
   );
-  if (!mutation) return false;
-  const initial = boundedProviderDiagnostic(diagnostics.initial);
-  if (initial && !mutation.initialDiagnostic) {
-    mutation.initialDiagnostic = initial;
-  }
-  const final = boundedProviderDiagnostic(diagnostics.final);
-  if (final) mutation.finalDiagnostic = final;
-  op.providerRecovery = recovery;
-  return true;
 }
 
 function readProviderRecovery(value: any): ProviderRecoveryRecord {
-  const source = value && typeof value === "object" ? value : {};
-  const mutations =
-    Array.isArray(source.mutations) ?
-      source.mutations
-        .filter(
-          (entry: any) =>
-            entry &&
-            typeof entry.mutationId === "string" &&
-            entry.mutationId &&
-            typeof entry.kind === "string" &&
-            entry.kind &&
-            typeof entry.target === "string" &&
-            entry.target &&
-            PROVIDER_MUTATION_STATUSES.includes(entry.status)
-        )
-        .map((entry: any) => ({
-          mutationId: entry.mutationId,
-          kind: entry.kind,
-          target: entry.target,
-          status: entry.status,
-          preparedAt: isoOrNull(entry.preparedAt) || nowIso(),
-          updatedAt: isoOrNull(entry.updatedAt) || nowIso(),
-          providerIdempotencyKey:
-            (
-              typeof entry.providerIdempotencyKey === "string" &&
-              entry.providerIdempotencyKey
-            ) ?
-              entry.providerIdempotencyKey
-            : null,
-          providerId: optionalIdentityString(entry.providerId),
-          ...(typeof entry.createdByOperation === "boolean" ?
-            { createdByOperation: entry.createdByOperation }
-          : {}),
-          ...(entry.intent && typeof entry.intent === "object" ?
-            {
-              intent: Object.fromEntries(
-                Object.entries(entry.intent).filter(
-                  ([key, field]) =>
-                    key &&
-                    (typeof field === "string" ||
-                      typeof field === "number" ||
-                      typeof field === "boolean" ||
-                      field === null)
-                )
-              )
-            }
-          : {}),
-          ...((
-            Number.isFinite(Number(entry.reconcileAttempts)) &&
-            Number(entry.reconcileAttempts) > 0
-          ) ?
-            {
-              reconcileAttempts: Math.floor(Number(entry.reconcileAttempts))
-            }
-          : {}),
-          ...(boundedProviderDiagnostic(entry.initialDiagnostic) ?
-            {
-              initialDiagnostic: boundedProviderDiagnostic(
-                entry.initialDiagnostic
-              )
-            }
-          : {}),
-          ...(boundedProviderDiagnostic(entry.finalDiagnostic) ?
-            {
-              finalDiagnostic: boundedProviderDiagnostic(entry.finalDiagnostic)
-            }
-          : {}),
-          evidence:
-            typeof entry.evidence === "string" && entry.evidence ?
-              entry.evidence
-            : null
-        }))
-    : [];
-  const state =
-    (
-      [
-        "idle",
-        "reconciling",
-        "rollback_pending",
-        "manual_required",
-        "unrecoverable_legacy",
-        "complete"
-      ].includes(source.state)
-    ) ?
-      source.state
-    : "idle";
-  return {
-    state,
-    guidance:
-      typeof source.guidance === "string" && source.guidance ?
-        source.guidance
-      : null,
-    mutations
-  };
+  return environmentOperationDomain.readProviderRecovery(value);
 }
 
 export function providerMutationId(
@@ -495,10 +391,11 @@ export function providerMutationId(
   kind: string,
   target: string
 ): string {
-  return `pm_${createHash("sha256")
-    .update(`${operationId}\0${kind}\0${target}`)
-    .digest("hex")
-    .slice(0, 32)}`;
+  return environmentOperationDomain.providerMutationId(
+    operationId,
+    kind,
+    target
+  );
 }
 
 export function prepareProviderMutation(
@@ -515,45 +412,12 @@ export function prepareProviderMutation(
     intent?: Record<string, string | number | boolean | null> | null;
   }
 ): ProviderMutationRecord {
-  const recovery = readProviderRecovery(op?.providerRecovery);
-  const mutationId = providerMutationId(op.operationId, kind, target);
-  const existing = recovery.mutations.find(
-    (entry) => entry.mutationId === mutationId
-  );
-  if (existing) {
-    op.providerRecovery = recovery;
-    return existing;
-  }
-  const timestamp = nowIso();
-  const mutation: ProviderMutationRecord = {
-    mutationId,
+  return environmentOperationDomain.prepareProviderMutation(op, {
     kind,
     target,
-    status: "prepared",
-    preparedAt: timestamp,
-    updatedAt: timestamp,
-    providerIdempotencyKey:
-      typeof providerIdempotencyKey === "string" && providerIdempotencyKey ?
-        providerIdempotencyKey
-      : null,
-    ...(intent ? { intent: structuredClone(intent) } : {}),
-    evidence: null
-  };
-  if (
-    recovery.state !== "rollback_pending" &&
-    // A legacy quarantine says Radius cannot know what the old record started.
-    // Journalling a new mutation does not answer that question, and the
-    // quarantine cannot be re-armed once entries exist, so clearing it here
-    // would drop the customer's only account of what to review.
-    recovery.state !== "unrecoverable_legacy"
-  ) {
-    recovery.state = "reconciling";
-    recovery.guidance = null;
-  }
-  recovery.mutations.push(mutation);
-  op.providerRecovery = recovery;
-  op.lastActivityAt = timestamp;
-  return mutation;
+    providerIdempotencyKey,
+    intent
+  });
 }
 
 export function settleProviderMutation(
@@ -564,66 +428,21 @@ export function settleProviderMutation(
   providerId: string | null = null,
   createdByOperation?: boolean
 ): boolean {
-  if (!PROVIDER_MUTATION_STATUSES.includes(status)) return false;
-  const recovery = readProviderRecovery(op?.providerRecovery);
-  const rollbackPending = recovery.state === "rollback_pending";
-  const mutation = recovery.mutations.find(
-    (entry) => entry.mutationId === mutationId
+  return environmentOperationDomain.settleProviderMutation(
+    op,
+    mutationId,
+    status,
+    evidence,
+    providerId,
+    createdByOperation
   );
-  if (!mutation) return false;
-  mutation.status = status;
-  mutation.updatedAt = nowIso();
-  // Written here rather than by a follow-up call, so a crash can never land
-  // between "the provider acknowledged this" and "here is what it made".
-  const settledProviderId = optionalIdentityString(providerId);
-  if (settledProviderId) mutation.providerId = settledProviderId;
-  else if (status !== "confirmed") {
-    // Any other status says this mutation did not leave that resource behind,
-    // so the id it once carried is not evidence for anything a later pass
-    // would match against.
-    mutation.providerId = null;
-  }
-  if (typeof createdByOperation === "boolean") {
-    mutation.createdByOperation = createdByOperation;
-  }
-  mutation.evidence =
-    typeof evidence === "string" && evidence.trim() ? evidence.trim() : null;
-  if (rollbackPending) {
-    recovery.state = "rollback_pending";
-    recovery.guidance = null;
-  } else if (status === "manual_required") {
-    recovery.state = "manual_required";
-    recovery.guidance = mutation.evidence;
-  } else if (
-    recovery.mutations.some(
-      (entry) =>
-        entry.status === "prepared" || entry.status === "outcome_unknown"
-    )
-  ) {
-    recovery.state = "reconciling";
-  } else if (
-    recovery.mutations.some((entry) => entry.status === "manual_required")
-  ) {
-    recovery.state = "manual_required";
-  } else {
-    recovery.state = "complete";
-    recovery.guidance = null;
-  }
-  op.providerRecovery = recovery;
-  op.lastActivityAt = mutation.updatedAt;
-  return true;
 }
 
 export function unresolvedProviderMutations(
   op: any,
   kinds?: readonly string[]
 ): ProviderMutationRecord[] {
-  const wanted = kinds ? new Set(kinds) : null;
-  return readProviderRecovery(op?.providerRecovery).mutations.filter(
-    (entry) =>
-      (entry.status === "prepared" || entry.status === "outcome_unknown") &&
-      (!wanted || wanted.has(entry.kind))
-  );
+  return environmentOperationDomain.unresolvedProviderMutations(op, kinds);
 }
 
 export function providerMutationRecord(
@@ -631,13 +450,7 @@ export function providerMutationRecord(
   kind: string,
   target: string
 ): ProviderMutationRecord | null {
-  if (!op?.operationId) return null;
-  const mutationId = providerMutationId(op.operationId, kind, target);
-  return (
-    readProviderRecovery(op.providerRecovery).mutations.find(
-      (entry) => entry.mutationId === mutationId
-    ) || null
-  );
+  return environmentOperationDomain.providerMutationRecord(op, kind, target);
 }
 
 /**
@@ -653,47 +466,21 @@ export function providerMutationsByKind(
   op: any,
   kind: string
 ): ProviderMutationRecord[] {
-  return readProviderRecovery(op?.providerRecovery).mutations.filter(
-    (entry) => entry.kind === kind
-  );
+  return environmentOperationDomain.providerMutationsByKind(op, kind);
 }
 
 export function providerRecoveryManualGuidance(op: any): string | null {
-  const recovery = readProviderRecovery(op?.providerRecovery);
-  const manualMutation = recovery.mutations.find(
-    (entry) => entry.status === "manual_required"
-  );
-  if (recovery.state !== "manual_required" && !manualMutation) return null;
-  return (
-    recovery.guidance ||
-    manualMutation?.evidence ||
-    "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
-  );
+  return environmentOperationDomain.providerRecoveryManualGuidance(op);
 }
 
 export function terminalizeProviderManualRequired(
   op: any,
   guidance: string
 ): void {
-  if (!op || isTerminalState(op.state)) return;
-  const now = nowIso();
-  op.state = "failed_partial";
-  op.endedAt = now;
-  op.lastActivityAt = now;
-  op.executionActive = false;
-  op.failure = {
-    code: "provider-reconciliation-manual-required",
-    stage: op.currentStage,
-    stepSeq: null,
-    message: guidance,
-    classification: "user-fixable",
-    evidence: null
-  };
-  for (const stage of op.stages || []) {
-    if (stage.state === "running") stage.state = "failed";
-    else if (stage.state === "pending") stage.state = "skipped";
-  }
-  op.recoveryState = "manual_required";
+  return environmentOperationDomain.terminalizeProviderManualRequired(
+    op,
+    guidance
+  );
 }
 
 const UNRECOVERABLE_LEGACY_GUIDANCE =
@@ -1081,22 +868,6 @@ export const CANVAS_PAGES = Object.freeze([
   "deploying"
 ]);
 
-const STEP_KINDS = Object.freeze([
-  "preflight",
-  "mutation",
-  "observation",
-  "warning",
-  "prompt"
-]);
-const STEP_STATES = Object.freeze([
-  "pending",
-  "running",
-  "succeeded",
-  "warning",
-  "failed",
-  "skipped"
-]);
-
 /**
  * Build the stage inventory for an operation.
  *
@@ -1410,31 +1181,12 @@ export function createOperation({
 
 /** Move the operation to a stage, closing out any earlier one. */
 export function enterStage(op: any, stageId: any): any {
-  if (!op) return op;
-  let seen = false;
-  for (const stage of op.stages) {
-    if (stage.id === stageId) {
-      stage.state = "running";
-      seen = true;
-    } else if (!seen) {
-      // Anything before the stage we are entering is finished. Leave a
-      // failed/warning verdict alone — only promote work that is still
-      // sitting in pending/running.
-      if (stage.state === "pending" || stage.state === "running")
-        stage.state = "succeeded";
-    }
-  }
-  if (seen) op.currentStage = stageId;
-  op.lastActivityAt = nowIso();
-  return op;
+  return environmentOperationDomain.enterStage(op, stageId);
 }
 
 /** Mark a stage's terminal verdict without moving the cursor. */
 export function setStageState(op: any, stageId: any, state: any): any {
-  if (!op) return op;
-  const stage = op.stages.find((s) => s.id === stageId);
-  if (stage) stage.state = state;
-  return op;
+  return environmentOperationDomain.setStageState(op, stageId, state);
 }
 
 /**
@@ -1445,9 +1197,7 @@ export function setStageState(op: any, stageId: any, state: any): any {
  * workflow is still legitimately running.
  */
 export function touchOperation(op: any, now = nowIso()): any {
-  if (!op || isTerminalState(op.state)) return op;
-  op.lastActivityAt = now;
-  return op;
+  return environmentOperationDomain.touchOperation(op, now);
 }
 
 /** Keep a live operation open while the user supplies information needed to continue. */
@@ -1559,29 +1309,13 @@ export function addStep(
     warning = null
   }: any = {}
 ): any {
-  if (!op) return null;
-  const step = {
-    seq: op.steps.length + 1,
-    stage: stage || op.currentStage,
-    kind: STEP_KINDS.includes(kind) ? kind : "observation",
-    label: String(label == null ? "" : label),
-    state: STEP_STATES.includes(state) ? state : "succeeded",
-    startedAt: nowIso(),
-    endedAt: nowIso()
-  };
-  if (warning) {
-    step.state = "warning";
-    step.warning = {
-      code: warning.code || "unknown",
-      message: warning.message || "",
-      impact: warning.impact || "",
-      remediationCommand: warning.remediationCommand || "",
-      blocksFutureStep: warning.blocksFutureStep || ""
-    };
-  }
-  op.steps.push(step);
-  op.lastActivityAt = step.endedAt;
-  return step;
+  return environmentOperationDomain.addStep(op, {
+    stage,
+    kind,
+    label,
+    state,
+    warning
+  });
 }
 
 /**
@@ -4812,58 +4546,11 @@ export function finish(
   state: any,
   { terminal = null, failure = null, announce = true }: any = {}
 ): any {
-  if (!op) return op;
-  if (!isTerminalState(state))
-    throw new Error(`Unknown terminal state "${state}"`);
-  // Terminal states are latched. A route that fails twice on the way out --
-  // say a throw inside a catch that already closed the record -- must not
-  // announce twice or overwrite the first, more specific, verdict.
-  if (isTerminalState(op.state)) return op;
-  op.state = state;
-  op.endedAt = nowIso();
-  if (terminal) op.terminal = terminal;
-  if (failure) op.failure = failure;
-  for (const stage of op.stages) {
-    if (stage.state === "pending") {
-      // Never entered, so genuinely skipped whatever the outcome.
-      stage.state = "skipped";
-    } else if (stage.state === "running") {
-      // The stage that was in flight when the operation ended. It must not
-      // be left running -- a terminal record showing a spinner is the
-      // defect this whole design exists to remove -- but "skipped" would
-      // deny work that actually happened. On the pull-request path the
-      // environment really is configured; only the merge is outstanding.
-      //
-      // A route that knows better calls setStageState first, and that
-      // verdict survives because only running/pending are touched here.
-      stage.state =
-        state === "failed" || state === "failed_partial" ?
-          "failed"
-        : "succeeded";
-    }
-  }
-  const ledger = getSetupArtifactLedger(op);
-  if (ledger && ledger.cleanup.state === "not_started") {
-    ledger.cleanup.state =
-      state === "failed" || state === "failed_partial" ?
-        hasTrackedSetupArtifacts(ledger) ? "pending"
-        : "not_needed"
-      : "not_needed";
-  }
-  // A terminal record has nothing in flight. The runner that owns a command
-  // usually closes it with its own outcome first; a forward continuation ends
-  // through the setup executor instead, so the outcome closes it here. Leaving
-  // one marked running would let a later duplicate check mistake a finished
-  // attempt for work in progress and silently swallow the customer's click.
-  const control = getOperationControl(op);
-  for (const command of control?.commands ?? []) {
-    if (command.state !== "accepted" && command.state !== "running") continue;
-    command.state = "finished";
-    command.completedAt = nowIso();
-    if (command.outcome == null) command.outcome = state;
-  }
-  if (announce) announceTerminal(op);
-  return op;
+  return environmentOperationDomain.finish(op, state, {
+    terminal,
+    failure,
+    announce
+  });
 }
 
 /**
@@ -4874,15 +4561,12 @@ export function finish(
  * site to remember.
  */
 export function finishSucceeded(op: any, terminal?: any): any {
-  const hasWarning = op && op.steps.some((s) => s.state === "warning");
-  return finish(op, hasWarning ? "succeeded_with_warnings" : "succeeded", {
-    terminal
-  });
+  return environmentOperationDomain.finishSucceeded(op, terminal);
 }
 
 /** True when any step recorded a warning. */
 export function hasWarnings(op: any): boolean {
-  return !!(op && op.steps.some((s) => s.state === "warning"));
+  return environmentOperationDomain.hasWarnings(op);
 }
 
 /**
@@ -4893,20 +4577,11 @@ export function hasWarnings(op: any): boolean {
  * customer's command.
  */
 export function requestStop(op: any): boolean {
-  if (!op) return false;
-  if (isTerminalState(op.state)) return false;
-  const control = getOperationControl(op);
-  if (!control.stop.requestedAt) {
-    control.stop.requestedAt = nowIso();
-    op.lastActivityAt = control.stop.requestedAt;
-  }
-  op.stopRequested = true;
-  return true;
+  return environmentOperationDomain.requestStop(op);
 }
 
 export function shouldStop(op: any): boolean {
-  if (!op || isTerminalState(op.state)) return false;
-  return !!(op.stopRequested || op.control?.stop?.requestedAt);
+  return environmentOperationDomain.shouldStop(op);
 }
 
 /** Whether a stop is recorded but not yet honored at a boundary. */

@@ -13,6 +13,7 @@ import {
   type GhCommandPresentation
 } from "./gh-command-display.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
+export { cloudCredentialsComplete } from "@radius-project/core/github-radius/environments/provider-credentials";
 
 type DeployStatus = "pending" | "in_progress" | "success" | "failed";
 
@@ -840,27 +841,6 @@ export function classifyDeployCloudAuthDrift(
     driftCause,
     "Re-verify the environment's credentials, then redeploy."
   ].join("\n");
-}
-
-// Whether the identifying cloud credentials the verify-credentials workflow
-// needs to authenticate are fully configured for the given provider. Azure OIDC
-// login requires client ID + tenant ID + subscription ID; AWS OIDC requires the
-// IAM role ARN. When these are absent, dispatching verify only produces a run
-// that fails at the cloud-login step (issue #219), so the create-environment
-// handler skips the dispatch and surfaces actionable guidance instead. Pure.
-export function cloudCredentialsComplete(
-  provider: string,
-  creds: {
-    clientId?: string;
-    tenantId?: string;
-    subscriptionId?: string;
-    roleArn?: string;
-  }
-): boolean {
-  if (provider === "azure") {
-    return !!(creds.clientId && creds.tenantId && creds.subscriptionId);
-  }
-  return !!creds.roleArn;
 }
 
 // Given the outcome of reading `gh api repos/{repo}` plus the acting gh login,

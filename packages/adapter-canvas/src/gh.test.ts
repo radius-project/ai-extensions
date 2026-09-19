@@ -38,6 +38,7 @@ interface LoadGhOptions {
     stdout?: string;
     stderr?: string;
   };
+  apiResponses?: Record<string, NonNullable<LoadGhOptions["commandResult"]>>;
   ghVersion?: string;
   prime?: boolean;
 }
@@ -194,6 +195,7 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     apiLogin = "",
     apiUserError,
     commandResult,
+    apiResponses = {},
     ghVersion = "gh version 2.96.0",
     prime = false
   } = opts;
@@ -248,11 +250,13 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
       if (apiUserError) return done(new Error(apiUserError), "", apiUserError);
       return done(null, apiLogin);
     }
-    if (commandResult) {
+    const result =
+      (a[0] === "api" ? apiResponses[a[1]] : undefined) ?? commandResult;
+    if (result) {
       return done(
-        commandResult.error ? new Error(commandResult.error) : null,
-        commandResult.stdout || "",
-        commandResult.stderr || ""
+        result.error ? new Error(result.error) : null,
+        result.stdout || "",
+        result.stderr || ""
       );
     }
     return done(null, "");
@@ -2277,20 +2281,23 @@ describe.sequential("getGhPackageCredentials", () => {
 
 // A branch's file listing is the evidence the modeling gate refuses on, so it
 // must contain only real files and must never present a partial answer as a
-// complete one. Every failure resolves to an empty array, which callers read as
-// "could not establish" rather than "the repository has nothing".
+// complete one. Failed and malformed responses reject rather than report absence.
 describe.sequential("fetchRepoTree", () => {
   afterEach(() => {
     restorePlatform();
     vi.clearAllMocks();
   });
 
-  it("requests blobs only and carries the truncation flag", async () => {
+  it("validates the complete API response and returns blobs only", async () => {
     const { fetchRepoTree } = await loadGh("linux", {
       commandResult: {
         stdout: JSON.stringify({
           truncated: false,
-          paths: ["Dockerfile", "src/index.ts"]
+          tree: [
+            { type: "blob", path: "Dockerfile" },
+            { type: "tree", path: "src" },
+            { type: "blob", path: "src/index.ts" }
+          ]
         })
       }
     });
@@ -2300,18 +2307,23 @@ describe.sequential("fetchRepoTree", () => {
       "src/index.ts"
     ]);
     const args = childProcess.execFile.mock.calls.at(-1)?.[1] as string[];
-    expect(args.join(" ")).toContain('select(.type == "blob")');
+    expect(args).not.toContain("--jq");
     expect(args.join(" ")).toContain("/repos/acme/widgets/git/trees/main");
   });
 
   it("discards a truncated listing rather than reporting a partial tree", async () => {
     const { fetchRepoTree } = await loadGh("linux", {
       commandResult: {
-        stdout: JSON.stringify({ truncated: true, paths: ["src/index.ts"] })
+        stdout: JSON.stringify({
+          truncated: true,
+          tree: [{ type: "blob", path: "src/index.ts" }]
+        })
       }
     });
 
-    expect(await fetchRepoTree("acme/widgets", "main")).toEqual([]);
+    await expect(fetchRepoTree("acme/widgets", "main")).rejects.toThrow(
+      "Invalid or incomplete repository tree"
+    );
   });
 
   it.each([
@@ -2319,20 +2331,132 @@ describe.sequential("fetchRepoTree", () => {
     ["unparsable output", { stdout: "not json" }],
     ["a non-object payload", { stdout: "[]" }],
     ["a null payload", { stdout: "null" }],
-    ["a missing paths field", { stdout: JSON.stringify({ truncated: false }) }]
-  ])("resolves empty for %s", async (_label, commandResult) => {
+    ["a missing tree field", { stdout: JSON.stringify({ truncated: false }) }],
+    ["an inaccessible branch", { error: "gh: Not Found (HTTP 404)" }],
+    ["a permission failure", { error: "gh: Forbidden (HTTP 403)" }]
+  ])("rejects %s", async (_label, commandResult) => {
     const { fetchRepoTree } = await loadGh("linux", { commandResult });
 
-    expect(await fetchRepoTree("acme/widgets", "main")).toEqual([]);
+    await expect(fetchRepoTree("acme/widgets", "main")).rejects.toThrow(
+      "Could not read GitHub source"
+    );
   });
 
-  it("drops non-string entries", async () => {
+  it("rejects invalid entries instead of dropping them", async () => {
     const { fetchRepoTree } = await loadGh("linux", {
       commandResult: {
-        stdout: JSON.stringify({ truncated: false, paths: ["a.ts", 7, null] })
+        stdout: JSON.stringify({
+          truncated: false,
+          tree: [{ type: "blob", path: "a.ts" }, 7, null]
+        })
       }
     });
 
-    expect(await fetchRepoTree("acme/widgets", "main")).toEqual(["a.ts"]);
+    await expect(fetchRepoTree("acme/widgets", "main")).rejects.toThrow(
+      "Invalid or incomplete repository tree"
+    );
+  });
+
+  it("preserves an empty tree through the CLI boundary", async () => {
+    const gh = await loadGh("linux", {
+      commandResult: { stdout: JSON.stringify({ truncated: false, tree: [] }) }
+    });
+    expect(await gh.github.treePaths("acme/widgets")).toEqual([]);
+  });
+});
+
+describe.sequential("GitHub source CLI responses", () => {
+  afterEach(() => {
+    restorePlatform();
+    vi.clearAllMocks();
+  });
+
+  it("preserves a zero-byte file through the public source port", async () => {
+    const gh = await loadGh("linux", {
+      commandResult: {
+        stdout: JSON.stringify({
+          type: "file",
+          encoding: "base64",
+          content: "",
+          size: 0
+        })
+      }
+    });
+    expect(
+      await gh.github.getContent("/repos/acme/app/contents/app.bicep?ref=main")
+    ).toBe("");
+  });
+
+  it("returns null only after the CLI establishes a missing path on a readable branch", async () => {
+    const file = "/repos/acme/app/contents/app.bicep?ref=feature%2Fmodel";
+    const tree = "/repos/acme/app/git/trees/feature%2Fmodel?recursive=1";
+    const gh = await loadGh("linux", {
+      commandResult: { error: "Unexpected source request" },
+      apiResponses: {
+        [file]: { error: "Not Found", stderr: "gh: Not Found (HTTP 404)" },
+        [tree]: {
+          stdout: JSON.stringify({
+            truncated: false,
+            tree: [{ type: "blob", path: "Dockerfile" }]
+          })
+        }
+      }
+    });
+    expect(await gh.github.getContent(file)).toBeNull();
+    expect(childProcess.execFile.mock.calls.at(-1)?.[1]).toEqual(["api", tree]);
+  });
+
+  it("never reports a missing file when the repository or branch is hidden behind 404", async () => {
+    const gh = await loadGh("linux", {
+      commandResult: {
+        error: "Not Found",
+        stderr: "gh: Not Found (HTTP 404)"
+      }
+    });
+    await expect(
+      gh.github.getContent("/repos/acme/app/contents/app.bicep?ref=missing")
+    ).rejects.toMatchObject({ name: "SourceAccessError", status: 404 });
+  });
+
+  it("preserves an empty directory through the public source port", async () => {
+    const gh = await loadGh("linux", { commandResult: { stdout: "[]" } });
+    expect(
+      await gh.github.listNames("/repos/acme/app/contents/.radius?ref=main")
+    ).toEqual([]);
+  });
+
+  it.each([
+    { error: "gh unavailable" },
+    { error: "Forbidden", stderr: "gh: Forbidden (HTTP 403)" },
+    { stdout: "not json" },
+    { stdout: "" }
+  ])(
+    "rejects unreadable or malformed file responses %j",
+    async (commandResult) => {
+      const gh = await loadGh("linux", { commandResult });
+      await expect(
+        gh.github.getContent("/repos/acme/app/contents/app.bicep?ref=main")
+      ).rejects.toThrow("Could not read GitHub source");
+    }
+  );
+
+  it("encodes file refs at the repository wrapper", async () => {
+    const gh = await loadGh("linux", {
+      commandResult: {
+        stdout: JSON.stringify({
+          type: "file",
+          encoding: "base64",
+          content: "YQ==",
+          size: 1
+        })
+      }
+    });
+    expect(
+      await gh.fetchFileFromRepo("acme/app", "app.bicep", "feature/model&x=y")
+    ).toBe("a");
+    expect(childProcess.execFile.mock.calls.at(-1)?.[1]).toEqual([
+      "api",
+      "/repos/acme/app/contents/app.bicep?ref=feature%2Fmodel%26x%3Dy"
+    ]);
   });
 });

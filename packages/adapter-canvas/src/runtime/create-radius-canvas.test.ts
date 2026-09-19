@@ -456,6 +456,217 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
 
 // RU-15: graph/planned bicep resolution + the graph-diff auto-compare preload.
 describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () => {
+  const diffInput = {
+    page: "graph-diff",
+    repo: "acme/widgets",
+    baseBranch: "main",
+    headBranch: "feat"
+  };
+
+  it("reads both diff definitions and their artifacts from committed refs even when head matches the worktree", async () => {
+    const { canvas, deps } = setup({
+      workspaceContext: {
+        workspacePath: "/workspace",
+        repo: "acme/widgets",
+        branch: "feat"
+      },
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "base-committed",
+        "remote:acme/widgets@feat": "head-committed",
+        "workspace:acme/widgets@feat": "uncommitted"
+      }
+    });
+    const order: string[] = [];
+    vi.mocked(deps.rad.radArtifactsDirForSelection).mockImplementation(
+      async (request) => {
+        expect(request.isLocal).toBe(false);
+        expect(request.state).toBeUndefined();
+        order.push(`stage:${request.branch}`);
+        return { dir: `staged-${request.branch}`, remote: true };
+      }
+    );
+    vi.mocked(deps.rad.buildGraphViaRad).mockImplementation(
+      async (content, _path, options) => {
+        order.push(`compile:${content}`);
+        expect(options.cleanupRadArtifactsDir).toBe(false);
+        return [{ id: "api", name: "api" }];
+      }
+    );
+    vi.mocked(deps.rad.removeArtifactsDirectory).mockImplementation(
+      (directory) => {
+        order.push(`remove:${directory}`);
+      }
+    );
+
+    await canvas.open(ctx("radius-panel", diffInput));
+
+    expect(deps.workspace.fetchWorkspaceBicep).not.toHaveBeenCalled();
+    expect(deps.core.fetchBicepFromRepo).toHaveBeenNthCalledWith(
+      1,
+      deps.github,
+      "acme/widgets",
+      "main"
+    );
+    expect(deps.core.fetchBicepFromRepo).toHaveBeenNthCalledWith(
+      2,
+      deps.github,
+      "acme/widgets",
+      "feat"
+    );
+    expect(order).toEqual([
+      "stage:main",
+      "stage:feat",
+      "compile:base-committed",
+      "compile:head-committed",
+      "remove:staged-main",
+      "remove:staged-feat"
+    ]);
+    expect(deps.servers.get("radius-panel")?.state.diffNoChanges).toBe(true);
+  });
+
+  it.each([
+    { base: null, head: "model", expected: "added" },
+    { base: "model", head: null, expected: "removed" }
+  ])(
+    "renders a one-sided $expected model without compiling its absent side",
+    async ({ base, head, expected }) => {
+      const { canvas, deps } = setup({
+        bicepByRepoBranch: {
+          "remote:acme/widgets@main": base,
+          "remote:acme/widgets@feat": head
+        }
+      });
+      vi.mocked(deps.rad.buildGraphViaRad).mockResolvedValue([
+        { id: "api", name: "api" }
+      ]);
+      await canvas.open(ctx("radius-panel", diffInput));
+      expect(deps.rad.buildGraphViaRad).toHaveBeenCalledTimes(1);
+      expect(
+        deps.servers.get("radius-panel")?.state.diffResources
+      ).toMatchObject([{ id: "api", diffStatus: expected }]);
+    }
+  );
+
+  it("does not publish an empty no-changes comparison when neither committed definition exists", async () => {
+    const { canvas, deps } = setup();
+    const entry = await deps.getOrCreateServer("radius-panel");
+    const commit = vi.spyOn(deps.sourceRefs, "setSourceRefResources");
+    entry.state.diffNoChanges = true;
+    await canvas.open(ctx("radius-panel", diffInput));
+    expect(deps.rad.radArtifactsDirForSelection).not.toHaveBeenCalled();
+    expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(entry.state.diffNoChanges).toBeUndefined();
+    expect(entry.state.diffError).toBeUndefined();
+  });
+
+  it("compiles an empty but present definition rather than treating it as a removed application", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "",
+        "remote:acme/widgets@feat": null
+      }
+    });
+    await canvas.open(ctx("radius-panel", diffInput));
+    expect(deps.rad.buildGraphViaRad).toHaveBeenCalledExactlyOnceWith(
+      "",
+      ".radius/app.bicep",
+      expect.objectContaining({ cleanupRadArtifactsDir: false })
+    );
+  });
+
+  it("does not ask the cleanup port to remove a directory when staging acquired no directory", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: { "remote:acme/widgets@main": "model" }
+    });
+    vi.mocked(deps.rad.radArtifactsDirForSelection).mockResolvedValue({
+      dir: "",
+      remote: true
+    });
+    await canvas.open(ctx("radius-panel", diffInput));
+    expect(deps.rad.removeArtifactsDirectory).not.toHaveBeenCalled();
+    expect(deps.servers.get("radius-panel")?.state.diffError).toBeUndefined();
+  });
+
+  it("surfaces an unreadable committed definition without staging or publishing a deletion", async () => {
+    const { canvas, deps } = setup();
+    vi.mocked(deps.core.fetchBicepFromRepo).mockRejectedValue(
+      new Error("Source unavailable")
+    );
+    await canvas.open(ctx("radius-panel", diffInput));
+    expect(deps.rad.radArtifactsDirForSelection).not.toHaveBeenCalled();
+    expect(deps.core.computeGraphDiff).not.toHaveBeenCalled();
+    expect(deps.servers.get("radius-panel")?.state.diffError).toBe(
+      "Source unavailable"
+    );
+  });
+
+  it("releases the staged base when head staging fails and records the original error", async () => {
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "model",
+        "remote:acme/widgets@feat": "model"
+      }
+    });
+    vi.mocked(deps.rad.radArtifactsDirForSelection)
+      .mockResolvedValueOnce({ dir: "staged-base", remote: true })
+      .mockRejectedValueOnce(new Error("head staging failed"));
+    await canvas.open(ctx("radius-panel", diffInput));
+    expect(deps.rad.removeArtifactsDirectory).toHaveBeenCalledExactlyOnceWith(
+      "staged-base"
+    );
+    expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+    expect(deps.servers.get("radius-panel")?.state.diffError).toBe(
+      "head staging failed"
+    );
+  });
+
+  it.each([false, true])(
+    "reports every cleanup failure without hiding compiler diagnostics (compile failure=%s)",
+    async (compileFailure) => {
+      const { canvas, deps } = setup({
+        bicepByRepoBranch: {
+          "remote:acme/widgets@main": "model",
+          "remote:acme/widgets@feat": "model"
+        }
+      });
+      const commit = vi.spyOn(deps.sourceRefs, "setSourceRefResources");
+      vi.mocked(deps.rad.radArtifactsDirForSelection)
+        .mockResolvedValueOnce({ dir: "staged-base", remote: true })
+        .mockResolvedValueOnce({ dir: "staged-head", remote: true });
+      vi.mocked(deps.rad.removeArtifactsDirectory).mockImplementation(
+        (directory) => {
+          throw new Error(`Cannot clean ${directory}`);
+        }
+      );
+      if (compileFailure) {
+        vi.mocked(deps.rad.buildGraphViaRad).mockRejectedValue(
+          new Error("rad app graph failed", {
+            cause: new RadProcessError(
+              "rad exited with code 1",
+              "BCP035: invalid model",
+              ""
+            )
+          })
+        );
+      }
+      await canvas.open(ctx("radius-panel", diffInput));
+      expect(deps.rad.removeArtifactsDirectory).toHaveBeenCalledTimes(2);
+      expect(deps.logError).toHaveBeenCalledWith(
+        expect.stringContaining("Cannot clean staged-base")
+      );
+      expect(deps.logError).toHaveBeenCalledWith(
+        expect.stringContaining("Cannot clean staged-head")
+      );
+      expect(deps.servers.get("radius-panel")?.state.diffError).toBe(
+        compileFailure ?
+          GRAPH_MODELING_FAILURE_MESSAGE
+        : "Graph artifact cleanup failed."
+      );
+      expect(commit).not.toHaveBeenCalled();
+    }
+  );
+
   it("prepares source-ref resources for graph and planned pages using the context repo/branch", async () => {
     const { canvas, deps } = setup();
     await canvas.open(
@@ -627,17 +838,14 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         "remote:acme/widgets@other": "resource db {}"
       }
     });
-    // First compare fails...
-    (
-      deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>
-    ).mockRejectedValueOnce(
-      new Error("rad app graph failed", {
-        cause: new RadProcessError(
-          "rad exited with code 1",
-          "BCP035: stale invalid model",
-          ""
-        )
-      })
+    let rejectFirst: (error: Error) => void = () => {
+      throw new Error("First compile has not started");
+    };
+    vi.mocked(deps.rad.buildGraphViaRad).mockImplementationOnce(
+      () =>
+        new Promise<CanvasGraphResource[]>((_resolve, reject) => {
+          rejectFirst = reject;
+        })
     );
     const firstOpen = canvas.open(
       ctx("radius-panel", {
@@ -647,17 +855,25 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
         headBranch: "feat"
       })
     );
-    // ...but a second compare (different heads) starts and succeeds before the
-    // first one's rejection is observed, changing the live context token.
-    (deps.rad.buildGraphViaRad as ReturnType<typeof vi.fn>).mockResolvedValue(
-      []
+    await vi.waitFor(() =>
+      expect(deps.rad.buildGraphViaRad).toHaveBeenCalledTimes(1)
     );
+    vi.mocked(deps.rad.buildGraphViaRad).mockResolvedValue([]);
     await canvas.open(
       ctx("radius-panel", {
         page: "graph-diff",
         repo: "acme/widgets",
         baseBranch: "main",
         headBranch: "other"
+      })
+    );
+    rejectFirst(
+      new Error("rad app graph failed", {
+        cause: new RadProcessError(
+          "rad exited with code 1",
+          "BCP035: stale invalid model",
+          ""
+        )
       })
     );
     await firstOpen;
@@ -672,7 +888,13 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     const firstResult = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    const { canvas, deps } = setup();
+    const { canvas, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "model",
+        "remote:acme/widgets@old": "old-model",
+        "remote:acme/widgets@new": "new-model"
+      }
+    });
     vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
     vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
       (_instanceId, listener) => {

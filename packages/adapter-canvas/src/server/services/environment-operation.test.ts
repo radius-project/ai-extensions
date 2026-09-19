@@ -63,6 +63,13 @@ function dependencies(
     remediation?: unknown;
   }> = [];
   const posts: Array<{ pathname: string; data: Record<string, unknown> }> = [];
+  const continueSetup = async (pathname: string, data: unknown) => {
+    events.push(`post:${pathname}`);
+    posts.push({ pathname, data: data as Record<string, unknown> });
+    return pathname === "/api/azure-auto-setup" ?
+        { clientId: "client-1" }
+      : { success: true };
+  };
   return {
     events,
     failures,
@@ -132,13 +139,10 @@ function dependencies(
         failures.push(input);
       },
       getOperation: () => op,
-      postInternal: async (pathname, data) => {
-        events.push(`post:${pathname}`);
-        posts.push({ pathname, data: data as Record<string, unknown> });
-        return pathname === "/api/azure-auto-setup" ?
-            { clientId: "client-1" }
-          : { success: true };
-      },
+      provisionAzureCredentials: (data) =>
+        continueSetup("/api/azure-auto-setup", data),
+      configureEnvironment: (data) =>
+        continueSetup("/api/create-environment", data),
       now: () => NOW,
       ...overrides
     }
@@ -370,7 +374,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       readGitHubJson: async () => {
         throw new Error("the durable environment must not be reread");
       },
-      postInternal: async (pathname, data) => {
+      provisionAzureCredentials: async (data) => {
+        const pathname = "/api/azure-auto-setup";
         test.posts.push({ pathname, data: data as Record<string, unknown> });
         return {
           reconciling: true,
@@ -422,7 +427,8 @@ describe("runEnvironmentOperationWorkflow", () => {
       readGitHubJson: async () => {
         throw new Error("the durable environment must not be reread");
       },
-      postInternal: async (pathname, data) => {
+      configureEnvironment: async (data) => {
+        const pathname = "/api/create-environment";
         test.posts.push({ pathname, data: data as Record<string, unknown> });
         return {
           reconciling: true,
@@ -468,7 +474,7 @@ describe("runEnvironmentOperationWorkflow", () => {
       target: "octo/app:production"
     });
     const test = dependencies(op, {
-      postInternal: async () => {
+      provisionAzureCredentials: async () => {
         throw new Error("Azure account state is unavailable");
       }
     });
@@ -746,7 +752,8 @@ describe("runEnvironmentOperationWorkflow", () => {
   it("stops after persisting an input-required Azure response", async () => {
     const op = operation();
     const test = dependencies(op, {
-      postInternal: async (pathname) => {
+      provisionAzureCredentials: async () => {
+        const pathname = "/api/azure-auto-setup";
         test.events.push(`post:${pathname}`);
         return { inputRequired: true };
       }
@@ -767,7 +774,8 @@ describe("runEnvironmentOperationWorkflow", () => {
   it("continues to Create Environment when Azure returns a null body", async () => {
     const op = operation();
     const test = dependencies(op, {
-      postInternal: async (pathname, data) => {
+      provisionAzureCredentials: async (data) => {
+        const pathname = "/api/azure-auto-setup";
         test.events.push(`post:${pathname}`);
         test.posts.push({
           pathname,
@@ -937,7 +945,7 @@ describe("runEnvironmentOperationWorkflow", () => {
   it("does not publish workflows after Azure ends the operation", async () => {
     const op = operation();
     const test = dependencies(op, {
-      postInternal: async () => {
+      provisionAzureCredentials: async () => {
         op.endedAt = "now";
         return { clientId: "client-1" };
       }

@@ -18,6 +18,7 @@ import type {
   DeployServerEntry,
   DeployToolArgs,
   DeployPayload,
+  DeployStartResult,
   DeployStatusInput,
   DeployStatusSummary
 } from "../deploy-tools.js";
@@ -126,6 +127,7 @@ export interface RadDependencies {
   radArtifactsDirForSelection(
     selection: RadArtifactsSelection
   ): Promise<{ dir: string; remote: boolean }>;
+  removeArtifactsDirectory(dir: string): void;
 }
 
 export interface DeployToolsDependencies {
@@ -264,7 +266,12 @@ export interface HostCallbackDependencies {
 }
 
 export interface DeployRunnerDependencies {
-  fetch: typeof globalThis.fetch;
+  start(
+    entry: DeployServerEntry,
+    payload: DeployPayload
+  ): Promise<DeployStartResult>;
+  observe(entry: DeployServerEntry): Promise<DeployStatusInput>;
+  applyRepairPolicy(entry: DeployServerEntry): void;
 }
 
 export interface ProcessDependencies {

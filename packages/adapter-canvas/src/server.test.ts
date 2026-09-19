@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { remediationView } from "@radius-project/core";
 import {
+  servers,
+  startDeployment,
+  observeDeploymentStatus,
+  applyDeploymentRepairPolicy,
   activeDeploymentMutation,
   addGraphProgress,
   beginPlannedGraphRequest,
@@ -99,6 +103,8 @@ import {
   STAGE_DELETE_STATE_PACKAGE
 } from "./operations.js";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import type { DeployPayload, DeployServerEntry } from "./deploy-tools.js";
 import type { CanvasState } from "./shared.js";
 import type {
   DeployRepairHandoffInput,
@@ -109,6 +115,94 @@ import type {
   GitHubIdentityAccount,
   SelectedGhExecutor
 } from "./gh.js";
+
+describe("direct deployment tool composition", () => {
+  const instanceId = "shared-library-tool-test";
+  const payload: DeployPayload = {
+    targetRepo: "example/app",
+    environment: "test",
+    branch: "feature",
+    provider: "azure",
+    appFile: ".radius/app.bicep",
+    agentInitiated: true,
+    attemptId: "old-attempt"
+  };
+
+  function register(state: CanvasState): DeployServerEntry {
+    const entry = {
+      server: createServer(),
+      baseUrl: "http://127.0.0.1:0",
+      url: "http://127.0.0.1:0",
+      page: "deployed",
+      state
+    };
+    servers.set(instanceId, entry);
+    return entry;
+  }
+
+  afterEach(() => {
+    servers.delete(instanceId);
+    setDeployRepairHandoff(null);
+    setDeployFailureNotice(null);
+  });
+
+  it("rejects removed contexts before starting work or observing state", async () => {
+    const entry = { state: {} };
+    await expect(startDeployment(entry, payload)).rejects.toThrow(
+      "no longer available"
+    );
+    await expect(observeDeploymentStatus(entry)).rejects.toThrow(
+      "no longer available"
+    );
+    expect(() => applyDeploymentRepairPolicy(entry)).toThrow(
+      "no longer available"
+    );
+  });
+
+  it("refuses a stale attempt through the real shared coordinator without HTTP", async () => {
+    const entry = register({
+      deployStatus: "failed",
+      deployAttempt: { id: "current-attempt" }
+    });
+    expect(await startDeployment(entry, payload)).toEqual({
+      kind: "failed",
+      error: expect.stringContaining("no longer the current attempt")
+    });
+    expect(entry.state.deployAttempt?.id).toBe("current-attempt");
+    expect(entry.state.deployStatus).toBe("failed");
+  });
+
+  it("observes without delivering repair and invokes repair only explicitly", async () => {
+    const deliver = vi.fn(async () => {});
+    setDeployRepairHandoff(deliver);
+    const entry = register({
+      deployStatus: "failed",
+      deployAttempt: { id: "attempt" },
+      deployingRepo: "example/app",
+      deployingBranch: "feature",
+      deployError: "Failed",
+      deployLogs: ["diagnostic"],
+      deployRunUrl: "https://example.test/run"
+    });
+    expect(await observeDeploymentStatus(entry)).toMatchObject({
+      status: "failed",
+      logs: ["diagnostic"],
+      deployRunUrl: "https://example.test/run"
+    });
+    expect(deliver).not.toHaveBeenCalled();
+    applyDeploymentRepairPolicy(entry);
+    await Promise.resolve();
+    expect(deliver).toHaveBeenCalledExactlyOnceWith({
+      repo: "example/app",
+      branch: "feature",
+      error: "Failed",
+      deployRunUrl: "https://example.test/run",
+      attemptId: "attempt",
+      instanceId
+    });
+    expect(entry.state.deployRepairing).toBe(true);
+  });
+});
 
 describe("DEPLOY_RAD_COMMANDS_STEP", () => {
   it("matches the step name in the upstream run-rad-commands action", () => {
@@ -4902,6 +4996,20 @@ describe("triggerDeployRepairHandoff", () => {
     expect(() => triggerDeployRepairHandoff(failedEntry())).not.toThrow();
   });
 
+  it("reports failed handoff bookkeeping without breaking status polling", () => {
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    const deliver = vi.fn();
+    setDeployRepairHandoff(deliver);
+    const entry = { state: Object.freeze(failedEntry().state) };
+    expect(triggerDeployRepairHandoff(entry)).toBe(false);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(report).toHaveBeenCalledWith(
+      "[radius] Deployment repair handoff failed:",
+      expect.stringContaining("not extensible")
+    );
+    report.mockRestore();
+  });
+
   it("retries delivery on the next status poll when the first send rejects", async () => {
     // The browser stops polling once a deploy is terminal, so a rejected send
     // has to leave the handoff retryable for the poll that is still running.
@@ -5663,12 +5771,18 @@ describe("triggerDeployFailureNotice", () => {
 
   it("never throws if recording the notice bookkeeping fails", () => {
     // A frozen state makes the deployNoticeState assignment throw before the
-    // callback runs; the defensive outer guard must swallow it.
+    // callback runs; the adapter reports it without breaking status polling.
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
     setDeployFailureNotice(() => {
       throw new Error("must not be reached");
     });
     const entry = { state: Object.freeze(unconfirmedEntry().state) };
     expect(triggerDeployFailureNotice(entry)).toBe(false);
+    expect(report).toHaveBeenCalledWith(
+      "[radius] Deployment failure notice failed:",
+      expect.stringContaining("not extensible")
+    );
+    report.mockRestore();
   });
 
   it("retries delivery on the next status poll when the first send rejects", async () => {

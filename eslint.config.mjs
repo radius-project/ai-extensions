@@ -167,5 +167,39 @@ export default [
         }
       ]
     }
+  },
+  {
+    files: ["packages/core/src/github-radius/**/*.ts"],
+    ignores: ["packages/core/src/github-radius/**/*.test.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...restrictedCoreImports,
+        {
+          selector:
+            "ImportDeclaration[importKind!='type'][source.value=/^(?:node:|(?:fs|path|os|crypto|child_process|http|https|stream|timers)(?:$|\\/))/]",
+          message:
+            "GitHub Radius coordination must receive Node execution through a port."
+        },
+        {
+          selector:
+            "ImportExpression[source.value=/^(?:node:|(?:fs|path|os|crypto|child_process|http|https|stream|timers)(?:$|\\/))/]",
+          message:
+            "GitHub Radius coordination must not dynamically load Node execution."
+        },
+        {
+          selector:
+            "MemberExpression[object.name=/^(?:global|globalThis)$/][computed=true][property.value=/^(?:fetch|XMLHttpRequest|document|window)$/]",
+          message:
+            "Core must not access HTTP or DOM implementations through the global object."
+        },
+        {
+          selector:
+            "MemberExpression[object.name=/^(?:global|globalThis)$/][property.name=/^(?:fetch|XMLHttpRequest|document|window)$/]",
+          message:
+            "Core must not access HTTP or DOM implementations through the global object."
+        }
+      ]
+    }
   }
 ];

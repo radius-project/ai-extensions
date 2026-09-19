@@ -451,7 +451,11 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
   });
 
   it("reports the same unchanged model only once per panel", async () => {
-    const { ext, capturedHostCallbacks } = setup();
+    const fake = createFakeDependencies({
+      remoteTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] }
+    });
+    const { capturedHostCallbacks } = fake;
+    const ext = createRadiusExtension(fake.deps);
     const session = createFakeSession();
     ext.attachSession(session);
     const state = {};

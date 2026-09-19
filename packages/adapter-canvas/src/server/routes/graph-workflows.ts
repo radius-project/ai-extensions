@@ -1,7 +1,11 @@
+import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
 import {
-  evaluateAppSource,
-  UNSUPPORTED_NO_DOCKERFILE_MESSAGE
-} from "@radius-project/core";
+  compareSelectedGraphs,
+  evaluateGraphSource,
+  graphSourceBranch,
+  planGraphResources
+} from "@radius-project/core/github-radius/graphs";
+import type { SelectedGraph } from "@radius-project/core/github-radius/graphs";
 import {
   expireGraphProgressWait,
   recordGraphBuildEvent
@@ -138,14 +142,13 @@ export interface GraphWorkflowDependencies<
     request: GraphRepairRequest
   ): GraphRepairAttempt;
   clearGraphRepairAttempt(entry: TEntry, view: GraphProgressView): void;
-  // Every path on a branch, used to answer the one prerequisite the app-bicep
-  // modeling skill enforces before it will model anything. Resolves empty when
-  // the tree cannot be read.
+  // Null is unknown; an empty array is a confirmed empty tree. Read failures
+  // reject instead of authorizing generation against unavailable evidence.
   listBranchPaths(
     entry: TEntry,
     repo: string,
     branch: string
-  ): Promise<string[]>;
+  ): Promise<string[] | null>;
   prepareSourceRefResources(
     entry: TEntry,
     view: GraphView,
@@ -526,7 +529,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     branch: string
   ): Promise<string | null> {
     const paths = await dependencies.listBranchPaths(entry, repo, branch);
-    return evaluateAppSource(paths).status === "none" ?
+    return evaluateGraphSource(paths).status === "none" ?
         UNSUPPORTED_NO_DOCKERFILE_MESSAGE
       : null;
   }
@@ -701,7 +704,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       );
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
       const content = selection.content;
-      if (content) {
+      if (content !== null) {
         clearAppModelAuthoringFailure(state, repo, branch);
         if (modelCreationIsRunning(progressHandle.record)) {
           addEvent(
@@ -1005,7 +1008,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
       if (!isCurrentPlan()) return json(409, STALE_PAYLOAD);
       const content = selection.content;
-      if (!content) {
+      if (content === null) {
         addEvent(
           "checking_model",
           "succeeded",
@@ -1110,35 +1113,37 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "running",
         `Resolving ${provider} recipes for the planned resources.`
       );
-      const recipes: unknown[] = await dependencies.fetchRecipePack(provider);
-
-      // Surface pack recipes we couldn't map to a concrete resource so the gap
-      // is visible (rather than silently rendering the abstract type). Empty
-      // today for the Azure pack; fires if the pack adds a recipe source the
-      // curated map doesn't yet cover.
-      const unmappedRecipes = recipes.filter((recipe) => {
-        const concrete = dependencies.record(recipe).concreteResources;
-        return !Array.isArray(concrete) || concrete.length === 0;
-      });
-      if (unmappedRecipes.length) {
-        addEvent(
-          "resolving_recipes",
-          "running",
-          `Note: ${
-            unmappedRecipes.length
-          } pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes
-            .map((recipe) =>
-              dependencies.optionalString(
-                dependencies.record(recipe).resourceType
-              )
-            )
-            .join(", ")}); those nodes show their abstract Radius type.`
-        );
-      }
-
-      // For each abstract resource, resolve its recipe and concrete outputs.
-      const plannedResources = pipeline.toCanvasResources(
-        await dependencies.resolveRecipeOutputs(resources, recipes, provider)
+      let resolvedRecipes: unknown[] = [];
+      const plannedResources = await planGraphResources(
+        resources,
+        provider,
+        {
+          fetchRecipePack: dependencies.fetchRecipePack,
+          resolveRecipeOutputs: dependencies.resolveRecipeOutputs,
+          normalizeResources: pipeline.toCanvasResources
+        },
+        (recipes) => {
+          resolvedRecipes = recipes;
+          const unmappedRecipes = recipes.filter((recipe) => {
+            const concrete = dependencies.record(recipe).concreteResources;
+            return !Array.isArray(concrete) || concrete.length === 0;
+          });
+          if (unmappedRecipes.length) {
+            addEvent(
+              "resolving_recipes",
+              "running",
+              `Note: ${
+                unmappedRecipes.length
+              } pack recipe(s) have no concrete-resource mapping yet (${unmappedRecipes
+                .map((recipe) =>
+                  dependencies.optionalString(
+                    dependencies.record(recipe).resourceType
+                  )
+                )
+                .join(", ")}); those nodes show their abstract Radius type.`
+            );
+          }
+        }
       );
       addEvent(
         "resolving_recipes",
@@ -1176,7 +1181,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state.plannedFromWorkspace = selection.fromWorkspace;
         state.plannedProvider = provider;
         state.plannedDefinitionHash = definitionHash;
-        state.resolvedRecipes = recipes;
+        state.resolvedRecipes = resolvedRecipes;
         state.activeGraphView = "planned";
       }
       addEvent("rendering_graph", "succeeded", "Rendered the planned graph.");
@@ -1328,8 +1333,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         `Checking ${data.base} and ${data.head} for application models.`
       );
       const [baseSelection, headSelection] = await Promise.all([
-        pipeline.selectAppBicep(entry, repo, data.base),
-        pipeline.selectAppBicep(entry, repo, data.head)
+        pipeline.selectAppBicep(entry, repo, data.base, "committed"),
+        pipeline.selectAppBicep(entry, repo, data.head, "committed")
       ]);
 
       // The selections were awaited, so a newer comparison may now own the
@@ -1348,7 +1353,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         retryRecordedAuthoringFailure(state, repo, data.head);
       }
 
-      if (!baseSelection.content && !headSelection.content) {
+      if (baseSelection.content === null && headSelection.content === null) {
         addEvent(
           "checking_model",
           "succeeded",
@@ -1416,10 +1421,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       }
       // A model that arrived retires the failure recorded for its own branch,
       // exactly as the single-branch routes do for theirs.
-      if (baseSelection.content) {
+      if (baseSelection.content !== null) {
         clearAppModelAuthoringFailure(state, repo, data.base);
       }
-      if (headSelection.content) {
+      if (headSelection.content !== null) {
         clearAppModelAuthoringFailure(state, repo, data.head);
       }
       if (modelCreationIsRunning(progressHandle.record)) {
@@ -1445,72 +1450,75 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "diff"
       );
 
-      // Ordering is load-bearing and matches legacy exactly: BOTH sides are
-      // staged before EITHER is compiled. Interleaving stage/compile per side
-      // would let the base side's staged temp directory be cleaned up before the
-      // head side is staged, which is observable in the artifacts on disk.
-      const baseStaged = await pipeline.stageArtifacts({
-        entry,
-        selection: baseSelection,
-        repo,
-        branch: data.base
+      const selected = (
+        branch: string,
+        definition: typeof baseSelection
+      ): SelectedGraph => ({
+        source: { kind: "committed", repo, ref: branch },
+        definition
       });
-      const headStaged = await pipeline.stageArtifacts({
-        entry,
-        selection: headSelection,
-        repo,
-        branch: data.head
+      const selectionFor = (graph: SelectedGraph): typeof baseSelection => ({
+        ...graph.definition,
+        fromWorkspace: false,
+        branch: graphSourceBranch(graph.source)
       });
-      addEvent(
-        "building_base_graph",
-        "running",
-        `Building the graph for ${data.base}.`
-      );
-      const baseResources = await compileResources(
+      const compared = await compareSelectedGraphs(
+        selected(data.base, baseSelection),
+        selected(data.head, headSelection),
         {
-          selection: baseSelection,
-          staged: baseStaged
+          stage: (graph) =>
+            pipeline.stageArtifacts({
+              entry,
+              selection: selectionFor(graph),
+              repo,
+              branch: graphSourceBranch(graph.source)
+            }),
+          compile: (graph, staged) =>
+            compileResources(
+              {
+                selection: selectionFor(graph),
+                staged,
+                cleanupArtifacts: false
+              },
+              { repo, branch: graphSourceBranch(graph.source) }
+            ),
+          discard: pipeline.discardStagedArtifacts,
+          computeDiff: dependencies.computeGraphDiff
         },
-        { repo, branch: data.base }
-      );
-      addEvent(
-        "building_base_graph",
-        "succeeded",
-        `Built ${baseResources.length} resource(s) from ${data.base}.`
-      );
-      addEvent(
-        "building_head_graph",
-        "running",
-        `Building the graph for ${data.head}.`
-      );
-      const headResources = await compileResources(
         {
-          selection: headSelection,
-          staged: headStaged
-        },
-        { repo, branch: data.head }
+          // Preserve the route's started-build contract: compiler failures
+          // remain 400 even if the selection changes while staging. The final
+          // source-ref commit and error/repair projection fence stale results.
+          progress(event) {
+            if (event.stage === "building" && event.source) {
+              const branch = graphSourceBranch(event.source);
+              addEvent(
+                branch === data.base ?
+                  "building_base_graph"
+                : "building_head_graph",
+                event.status,
+                event.status === "running" ?
+                  `Building the graph for ${branch}.`
+                : `Built ${event.resourceCount} resource(s) from ${branch}.`
+              );
+            } else if (event.stage === "comparing") {
+              addEvent(
+                "comparing_graphs",
+                event.status,
+                event.status === "running" ?
+                  `Comparing ${data.base} with ${data.head}.`
+                : `Compared ${event.resourceCount} resource(s).`
+              );
+            }
+          }
+        }
       );
-      addEvent(
-        "building_head_graph",
-        "succeeded",
-        `Built ${headResources.length} resource(s) from ${data.head}.`
-      );
-
-      // Compute diff using the shared algorithm (see computeGraphDiff).
-      addEvent(
-        "comparing_graphs",
-        "running",
-        `Comparing ${data.base} with ${data.head}.`
-      );
-      const diffResources = dependencies.computeGraphDiff(
-        baseResources,
-        headResources
-      );
-      addEvent(
-        "comparing_graphs",
-        "succeeded",
-        `Compared ${diffResources.length} resource(s).`
-      );
+      if (compared.kind !== "completed") {
+        throw new Error(
+          "Application definitions disappeared before comparison."
+        );
+      }
+      const diffResources = compared.resources;
       addEvent(
         "rendering_graph",
         "running",

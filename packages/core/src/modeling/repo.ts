@@ -16,10 +16,11 @@ export async function fetchBicepFromRepo(
   branch = "main"
 ): Promise<string | null> {
   const ghApiGetContent = (p: string) => gh.getContent(p);
+  const ref = encodeURIComponent(branch);
   // Try .radius/app.bicep first (standard Radius location), then app.bicep at root.
   const radiusPath = await ghApiGetContent(
-    `/repos/${repo}/contents/.radius/app.bicep?ref=${branch}`
+    `/repos/${repo}/contents/.radius/app.bicep?ref=${ref}`
   );
-  if (radiusPath) return radiusPath;
-  return ghApiGetContent(`/repos/${repo}/contents/app.bicep?ref=${branch}`);
+  if (radiusPath !== null) return radiusPath;
+  return ghApiGetContent(`/repos/${repo}/contents/app.bicep?ref=${ref}`);
 }

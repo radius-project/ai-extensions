@@ -21,7 +21,13 @@ import {
   createRadiusCanvasInstanceRegistry,
   type RadiusCanvasInstanceRegistry
 } from "./canvas-instance-registry.js";
-import type { CanvasGraphResource, CanvasState } from "../shared.js";
+import type { CanvasState } from "../shared.js";
+import {
+  compareSelectedGraphs,
+  graphSourceBranch
+} from "@radius-project/core/github-radius/graphs";
+import type { GraphResult } from "@radius-project/core/github-radius/graphs";
+import type { CanvasGraphResource } from "../shared.js";
 import {
   asGraphModelingFailure,
   GraphModelingFailure
@@ -61,8 +67,7 @@ export function createRadiusCanvas(
   canvasInstances: RadiusCanvasInstanceRegistry = createRadiusCanvasInstanceRegistry()
 ) {
   const closeGenerations = new Map<string, number>();
-  const { workspaceState, fetchBicepForBranch } =
-    createGraphContextHelpers(deps);
+  const { workspaceState } = createGraphContextHelpers(deps);
 
   const declarationByName = new Map(
     RADIUS_ACTION_DECLARATIONS.map((decl) => [decl.name, decl])
@@ -291,8 +296,8 @@ export function createRadiusCanvas(
         delete entry.state.diffModelingFailed;
         try {
           const [baseContent, headContent] = await Promise.all([
-            fetchBicepForBranch(repo, baseBranch, entry.state),
-            fetchBicepForBranch(repo, headBranch, entry.state)
+            deps.core.fetchBicepFromRepo(deps.github, repo, baseBranch),
+            deps.core.fetchBicepFromRepo(deps.github, repo, headBranch)
           ]);
 
           const session = deps.session.get();
@@ -302,56 +307,68 @@ export function createRadiusCanvas(
             } catch {}
           };
 
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                entry.state,
-                repo,
-                baseBranch
-              ),
-              state: entry.state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                entry.state,
-                repo,
-                headBranch
-              ),
-              state: entry.state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log
-            });
-          let baseResources: CanvasGraphResource[];
-          let headResources: CanvasGraphResource[];
+          let compared: GraphResult<CanvasGraphResource>;
           try {
-            baseResources = await deps.rad.buildGraphViaRad(
-              baseContent || "",
-              ".radius/app.bicep",
+            compared = await compareSelectedGraphs(
+              {
+                source: { kind: "committed", repo, ref: baseBranch },
+                definition: {
+                  content: baseContent,
+                  bicepPath: ".radius/app.bicep"
+                }
+              },
+              {
+                source: { kind: "committed", repo, ref: headBranch },
+                definition: {
+                  content: headContent,
+                  bicepPath: ".radius/app.bicep"
+                }
+              },
+              {
+                stage: ({ source, definition }) =>
+                  deps.rad.radArtifactsDirForSelection({
+                    isLocal: false,
+                    github: deps.github,
+                    repo: source.repo,
+                    branch: graphSourceBranch(source),
+                    bicepRepoPath: definition.bicepPath,
+                    log
+                  }),
+                compile: ({ definition }, artifacts) =>
+                  deps.rad.buildGraphViaRad(
+                    definition.content || "",
+                    definition.bicepPath,
+                    {
+                      log,
+                      radArtifactsDir: artifacts.dir,
+                      cleanupRadArtifactsDir: false
+                    }
+                  ),
+                discard: (artifacts) => {
+                  if (artifacts.remote && artifacts.dir) {
+                    deps.rad.removeArtifactsDirectory(artifacts.dir);
+                  }
+                },
+                computeDiff: deps.core.computeGraphDiff
+              },
               {
                 log,
-                radArtifactsDir: baseRadArtifactsDir,
-                cleanupRadArtifactsDir: baseRadArtifactsRemote
-              }
-            );
-            headResources = await deps.rad.buildGraphViaRad(
-              headContent || "",
-              ".radius/app.bicep",
-              {
-                log,
-                radArtifactsDir: headRadArtifactsDir,
-                cleanupRadArtifactsDir: headRadArtifactsRemote
+                isCurrent: () =>
+                  isCurrentSourceRefToken(
+                    entry.state,
+                    "diff",
+                    sourceRefContext.token
+                  )
               }
             );
           } catch (error) {
+            if (error instanceof AggregateError) {
+              for (const detail of error.errors) {
+                deps.logError(
+                  `[radius graph] comparison execution or cleanup failed for ${repo}@${baseBranch}...${headBranch}: ${errorMessage(detail)}`
+                );
+              }
+            }
             const failure = asGraphModelingFailure(error);
             if (!(failure instanceof GraphModelingFailure)) throw error;
             deps.logError(
@@ -387,10 +404,13 @@ export function createRadiusCanvas(
             }
             throw failure;
           }
-          const diffResources = deps.core.computeGraphDiff(
-            baseResources,
-            headResources
-          );
+          if (compared.kind !== "completed") {
+            if (compared.kind === "missing-definition") {
+              delete entry.state.diffNoChanges;
+            }
+            return { title: "Radius", url: entry.url };
+          }
+          const diffResources = compared.resources;
           const committed = deps.sourceRefs.setSourceRefResources(
             entry,
             "diff",

@@ -14,16 +14,22 @@ import {
   type DeployMonitorService
 } from "../../../src/server/services/deploy-monitor.js";
 import {
-  activeDeploymentMutation,
-  beginDeployAttempt,
-  DEPLOY_RUN_UNCONFIRMED_KIND,
+  activeDeploymentMutation as activeSharedMutation,
   deploymentStatusBlocksMutation,
-  localDeploymentBlocksMutation,
+  localDeploymentBlocksMutation as localSharedMutationBlocks,
   releaseDeploymentMutation,
-  reserveDeploymentMutation,
-  resolveDeploymentEnvironment,
-  resolveDeployRepairLoop
-} from "../../../src/server.js";
+  reserveDeploymentMutation as reserveSharedMutation,
+  resolveDeploymentEnvironment
+} from "@radius-project/core/github-radius/deployments/mutation";
+import {
+  beginDeploymentAttempt,
+  resolveDeploymentRepair
+} from "@radius-project/core/github-radius/deployments";
+import type { BeginDeploymentInput } from "@radius-project/core/github-radius/deployments";
+import type {
+  DeploymentReservation,
+  DeploymentState
+} from "@radius-project/core/github-radius/deployments/types";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "../../../src/runtime/hooks.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
@@ -37,6 +43,23 @@ import type {
 } from "../../../src/deploy-artifacts.js";
 import type { DeployMonitorRequest } from "../../../src/server/services/deploy-monitor.js";
 import type { CanvasState } from "../../../src/shared.js";
+
+const DEPLOY_RUN_UNCONFIRMED_KIND = "run-unconfirmed";
+const activeDeploymentMutation = (state: DeploymentState) =>
+  activeSharedMutation(state, Date.now());
+const localDeploymentBlocksMutation = (state: DeploymentState) =>
+  localSharedMutationBlocks(state, Date.now());
+const reserveDeploymentMutation = (
+  state: DeploymentState,
+  input: Omit<DeploymentReservation, "expiresAt">
+) => reserveSharedMutation(state, input, Date.now());
+let attemptSequence = 0;
+const beginDeployAttempt = (
+  state: DeploymentState,
+  input: BeginDeploymentInput
+) => beginDeploymentAttempt(state, input, () => `attempt-${++attemptSequence}`);
+const resolveDeployRepairLoop = (state: DeploymentState, id: unknown) =>
+  resolveDeploymentRepair(state, id, DEPLOY_REPAIR_ATTEMPT_CAP);
 
 let container: CanvasServerContainer | undefined;
 
@@ -1470,7 +1493,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     await harness.settleMonitor();
   });
 
-  it.each([
+  it.each<[string, Partial<CanvasState>, RegExp]>([
     [
       "over the repair cap",
       { deployRepairAttempts: DEPLOY_REPAIR_ATTEMPT_CAP },

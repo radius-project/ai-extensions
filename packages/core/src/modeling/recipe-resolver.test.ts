@@ -58,6 +58,22 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
 `;
 
 describe("fetchRecipePack", () => {
+  it("does not turn an unreadable recipe pack into an empty pack", async () => {
+    const gh = fakeGitHub();
+    const error = new Error("GitHub source unavailable");
+    gh.getContent = async () => {
+      throw error;
+    };
+    await expect(fetchRecipePack(gh, "azure")).rejects.toBe(error);
+  });
+
+  it("accepts an empty recipe pack", async () => {
+    const gh = fakeGitHub({
+      content: { [recipePackContentPath("azure")]: "" }
+    });
+    expect(await fetchRecipePack(gh, "azure")).toEqual([]);
+  });
+
   it("returns an empty list when the pack file is absent", async () => {
     const gh = fakeGitHub();
     expect(await fetchRecipePack(gh, "azure")).toEqual([]);

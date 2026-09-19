@@ -43,13 +43,6 @@ function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
   return { ...fake, tools, modelingActivity, missingModelHandoffs };
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" }
-  });
-}
-
 function parseSkillHandoff(value: unknown): Record<string, unknown> {
   if (typeof value !== "string") {
     throw new Error("Expected the skill handoff to be JSON text.");
@@ -514,6 +507,8 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
     const { tools, deps } = setup({
       workspaceTreeByRepoBranch: { "acme/widgets@main": MICROSERVICES }
     });
+    const log = vi.fn();
+    deps.session.get().log = log;
     vi.mocked(deps.workspace.fetchWorkspaceTree)
       .mockImplementationOnce(async () => MICROSERVICES)
       .mockRejectedValueOnce(new Error("permission denied"));
@@ -527,6 +522,9 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
     expect(skillBrief(result)).toContain("`services/api`");
     expect(skillBrief(result)).toContain(UNIDENTIFIED_APPLICATION_MESSAGE);
     expect(skillBrief(result)).not.toContain("`pnpm-workspace.yaml`");
+    expect(log).toHaveBeenCalledWith(
+      "Could not refresh workspace-manifest hints; retaining the known application candidates."
+    );
   });
 
   it("omits the brief when a single Dockerfile makes the location unambiguous", async () => {
@@ -665,7 +663,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
     expect(entry.state.appModelFailures).toBeUndefined();
   });
 
-  it("propagates a model read failure instead of recording an unverified failure", async () => {
+  it("refuses an unverified failure with an explicit model-read error", async () => {
     const { tools, deps, entry } = await currentAttempt();
     vi.mocked(deps.workspace.fetchWorkspaceBicep).mockRejectedValue(
       new Error("workspace unavailable")
@@ -673,7 +671,11 @@ describe("TL-11: radius_report_modeling_failure", () => {
 
     await expect(
       findTool(tools, "radius_report_modeling_failure").handler(report)
-    ).rejects.toThrow("workspace unavailable");
+    ).resolves.toEqual({
+      recorded: false,
+      error:
+        "Could not verify the application model; the failure was not recorded: workspace unavailable"
+    });
     expect(entry.state.appModelFailures).toBeUndefined();
   });
 
@@ -702,31 +704,124 @@ describe("TL-11: radius_report_modeling_failure", () => {
     expect(entry.state.appModelFailures).toBeUndefined();
   });
 
-  it("rejects a stale failure when the application model now exists", async () => {
-    const { tools, entry } = await currentAttempt({
-      bicepByRepoBranch: {
-        "workspace:acme/widgets@main": "extension radius"
-      }
-    });
-    entry.state.appModelFailures = {
-      "acme/widgets::main": {
-        attemptToken: "attempt-1",
-        error: "older failure"
-      }
-    };
+  it.each(["extension radius", ""])(
+    "rejects a stale failure when the application model now exists (%j)",
+    async (content) => {
+      const { tools, entry } = await currentAttempt({
+        bicepByRepoBranch: {
+          "workspace:acme/widgets@main": content
+        }
+      });
+      entry.state.appModelFailures = {
+        "acme/widgets::main": {
+          attemptToken: "attempt-1",
+          error: "older failure"
+        }
+      };
 
-    const result = await findTool(
-      tools,
-      "radius_report_modeling_failure"
-    ).handler(report);
+      const result = await findTool(
+        tools,
+        "radius_report_modeling_failure"
+      ).handler(report);
 
-    expect(result).toMatchObject({ recorded: false });
-    expect(entry.state.appModelFailures).toEqual({});
-    expect(entry.state.appModelAttemptTokens).toEqual({});
-  });
+      expect(result).toMatchObject({ recorded: false });
+      expect(entry.state.appModelFailures).toEqual({});
+      expect(entry.state.appModelAttemptTokens).toEqual({});
+    }
+  );
 });
 
 describe("RU-08: radius_generate_pr_diff_markdown", () => {
+  it("compares committed sources without reading uncommitted workspace content", async () => {
+    const { tools, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "committed base",
+        "remote:acme/widgets@feat": "committed head"
+      }
+    });
+    vi.mocked(deps.workspace.fetchWorkspaceBicep).mockResolvedValue(
+      "uncommitted model"
+    );
+    vi.mocked(deps.rad.radArtifactsDirForSelection)
+      .mockResolvedValueOnce({ dir: "/temporary/base", remote: true })
+      .mockResolvedValueOnce({ dir: "/temporary/head", remote: true });
+
+    await findTool(tools, "radius_generate_pr_diff_markdown").handler({
+      repo: "acme/widgets",
+      baseBranch: "main",
+      headBranch: "feat"
+    });
+
+    expect(deps.workspace.fetchWorkspaceBicep).not.toHaveBeenCalled();
+    expect(deps.rad.radArtifactsDirForSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ isLocal: false, branch: "feat" })
+    );
+    expect(deps.rad.buildGraphViaRad).toHaveBeenNthCalledWith(
+      2,
+      "committed head",
+      ".radius/app.bicep",
+      expect.objectContaining({ cleanupRadArtifactsDir: false })
+    );
+    expect(deps.rad.removeArtifactsDirectory).toHaveBeenNthCalledWith(
+      1,
+      "/temporary/base"
+    );
+    expect(deps.rad.removeArtifactsDirectory).toHaveBeenNthCalledWith(
+      2,
+      "/temporary/head"
+    );
+  });
+
+  it("cleans the first staged source when staging the second source fails", async () => {
+    const { tools, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "base",
+        "remote:acme/widgets@feat": "head"
+      }
+    });
+    vi.mocked(deps.rad.radArtifactsDirForSelection)
+      .mockResolvedValueOnce({ dir: "/temporary/base", remote: true })
+      .mockRejectedValueOnce(new Error("Head source unavailable"));
+
+    const result = await findTool(
+      tools,
+      "radius_generate_pr_diff_markdown"
+    ).handler({
+      repo: "acme/widgets",
+      baseBranch: "main",
+      headBranch: "feat"
+    });
+
+    expect(result).toMatchObject({
+      resultType: "failure",
+      error: expect.stringContaining("Head source unavailable")
+    });
+    expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+    expect(deps.rad.removeArtifactsDirectory).toHaveBeenCalledExactlyOnceWith(
+      "/temporary/base"
+    );
+  });
+
+  it("reports unreadable committed sources without treating them as absent", async () => {
+    const { tools, deps } = setup();
+    vi.mocked(deps.core.fetchBicepFromRepo).mockRejectedValue(
+      new Error("Repository access denied")
+    );
+    const result = await findTool(
+      tools,
+      "radius_generate_pr_diff_markdown"
+    ).handler({
+      repo: "acme/widgets",
+      baseBranch: "main",
+      headBranch: "feat"
+    });
+    expect(result).toMatchObject({
+      resultType: "failure",
+      error: expect.stringContaining("Repository access denied")
+    });
+    expect(deps.rad.radArtifactsDirForSelection).not.toHaveBeenCalled();
+  });
+
   it("reports missing app.bicep on both branches without calling rad", async () => {
     const { tools, deps } = setup();
     const result = await findTool(
@@ -1007,7 +1102,7 @@ describe("RU-11: radius_deploy", () => {
     expect(result).toContain("no longer active");
   });
 
-  it("dispatches the deploy via fetch and reports the started message, identifying repo/branch/environment", async () => {
+  it("calls the deployment coordinator directly and identifies the admitted target", async () => {
     const { tools, deps } = setup();
     deps.servers.set("radius-panel", {
       server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
@@ -1016,18 +1111,20 @@ describe("RU-11: radius_deploy", () => {
       page: "deployed",
       state: {}
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({})
-    );
+    vi.mocked(deps.deploy.start).mockResolvedValue({ kind: "started" });
     const result = await findTool(tools, "radius_deploy").handler({
       repo: "acme/widgets",
       environment: "production",
       branch: "main",
       provider: "azure"
     });
-    expect(deps.deploy.fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:9999/api/deploy",
-      expect.objectContaining({ method: "POST" })
+    expect(deps.deploy.start).toHaveBeenCalledWith(
+      deps.servers.get("radius-panel"),
+      expect.objectContaining({
+        targetRepo: "acme/widgets",
+        environment: "production",
+        branch: "main"
+      })
     );
     expect(result).toContain("acme/widgets");
     expect(result).toContain("production");
@@ -1054,9 +1151,11 @@ describe("RU-11: radius_deploy", () => {
         }
       }
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ ok: true, repairAttempt: 3, repairAttemptCap: 5 })
-    );
+    vi.mocked(deps.deploy.start).mockResolvedValue({
+      kind: "started",
+      repairAttempt: 3,
+      repairAttemptCap: 5
+    });
     const result = await findTool(tools, "radius_deploy").handler({
       attemptId: "attempt-A"
     });
@@ -1081,15 +1180,15 @@ describe("RU-11: radius_deploy", () => {
         deployStartedAt: Date.now()
       }
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({})
-    );
+    vi.mocked(deps.deploy.start).mockResolvedValue({ kind: "started" });
     await findTool(tools, "radius_deploy").handler({});
-    const body = JSON.parse(
-      (deps.deploy.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body
+    expect(deps.deploy.start).toHaveBeenCalledWith(
+      deps.servers.get("radius-panel"),
+      expect.objectContaining({
+        targetRepo: "acme/widgets",
+        environment: "production"
+      })
     );
-    expect(body.targetRepo).toBe("acme/widgets");
-    expect(body.environment).toBe("production");
   });
 
   it("surfaces a dispatch failure returned by the server as a friendly warning", async () => {
@@ -1101,9 +1200,10 @@ describe("RU-11: radius_deploy", () => {
       page: "deployed",
       state: {}
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ error: "workflow dispatch failed" }, 500)
-    );
+    vi.mocked(deps.deploy.start).mockResolvedValue({
+      kind: "failed",
+      error: "workflow dispatch failed"
+    });
     const result = await findTool(tools, "radius_deploy").handler({
       repo: "acme/widgets",
       environment: "production"
@@ -1112,7 +1212,7 @@ describe("RU-11: radius_deploy", () => {
     expect(result).toContain("workflow dispatch failed");
   });
 
-  it("surfaces a deploy transport failure", async () => {
+  it("surfaces a deployment coordinator failure", async () => {
     const { tools, deps } = setup();
     deps.servers.set("radius-panel", {
       server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
@@ -1121,7 +1221,7 @@ describe("RU-11: radius_deploy", () => {
       page: "deployed",
       state: {}
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
+    vi.mocked(deps.deploy.start).mockRejectedValue(
       new Error("connection reset")
     );
 
@@ -1134,7 +1234,7 @@ describe("RU-11: radius_deploy", () => {
     expect(result).toContain("connection reset");
   });
 
-  it("treats an empty successful deploy response as a started deploy", async () => {
+  it("does not claim deployment started when admission cannot be confirmed", async () => {
     const { tools, deps } = setup();
     deps.servers.set("radius-panel", {
       server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
@@ -1143,16 +1243,18 @@ describe("RU-11: radius_deploy", () => {
       page: "deployed",
       state: {}
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response("not json", { status: 200 })
-    );
+    vi.mocked(deps.deploy.start).mockResolvedValue({
+      kind: "failed",
+      error: "Deployment admission could not be confirmed."
+    });
 
     const result = await findTool(tools, "radius_deploy").handler({
       repo: "acme/widgets",
       environment: "production"
     });
 
-    expect(result).toContain("started");
+    expect(result).toContain("Could not start the deploy");
+    expect(result).toContain("could not be confirmed");
   });
 });
 
@@ -1174,14 +1276,12 @@ describe("RU-12: radius_deploy_status", () => {
       state: {}
     });
     const logs = Array.from({ length: 300 }, (_, i) => `line ${i}`);
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({
-        status: "failed",
-        error: "deploy failed",
-        deployRunUrl: "https://github.com/acme/widgets/actions/runs/1",
-        logs
-      })
-    );
+    vi.mocked(deps.deploy.observe).mockResolvedValue({
+      status: "failed",
+      error: "deploy failed",
+      deployRunUrl: "https://github.com/acme/widgets/actions/runs/1",
+      logs
+    });
     const result = await findTool(tools, "radius_deploy_status").handler({});
     const parsed = JSON.parse(result);
     expect(parsed.status).toBe("failed");
@@ -1192,6 +1292,9 @@ describe("RU-12: radius_deploy_status", () => {
     // Default tail cap is 40 lines — "line 259" is the 40th-from-end line.
     expect(parsed.diagnostic).toContain("line 260");
     expect(parsed.diagnostic).not.toContain("line 259\n");
+    expect(deps.deploy.applyRepairPolicy).toHaveBeenCalledExactlyOnceWith(
+      deps.servers.get("radius-panel")
+    );
   });
 
   it("honors a custom logLines count bounded to the max", async () => {
@@ -1204,9 +1307,11 @@ describe("RU-12: radius_deploy_status", () => {
       state: {}
     });
     const logs = Array.from({ length: 300 }, (_, i) => `line ${i}`);
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ status: "failed", error: "x", logs })
-    );
+    vi.mocked(deps.deploy.observe).mockResolvedValue({
+      status: "failed",
+      error: "x",
+      logs
+    });
     const result = await findTool(tools, "radius_deploy_status").handler({
       logLines: 999
     });
@@ -1225,15 +1330,15 @@ describe("RU-12: radius_deploy_status", () => {
       page: "deployed",
       state: {}
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({}, 500)
+    vi.mocked(deps.deploy.observe).mockRejectedValue(
+      new Error("Deployment observation unavailable")
     );
     const result = await findTool(tools, "radius_deploy_status").handler({});
     expect(result).toContain("Could not read the deploy status");
-    expect(result).toContain("HTTP 500");
+    expect(result).toContain("Deployment observation unavailable");
   });
 
-  it("surfaces a deploy-status transport failure", async () => {
+  it("surfaces a deploy-status dependency failure", async () => {
     const { tools, deps } = setup();
     deps.servers.set("radius-panel", {
       server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
@@ -1242,7 +1347,7 @@ describe("RU-12: radius_deploy_status", () => {
       page: "deployed",
       state: {}
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
+    vi.mocked(deps.deploy.observe).mockRejectedValue(
       new Error("status connection reset")
     );
 
@@ -1252,7 +1357,7 @@ describe("RU-12: radius_deploy_status", () => {
     expect(result).toContain("status connection reset");
   });
 
-  it("normalizes an empty successful status response", async () => {
+  it("normalizes a context with no deployment status", async () => {
     const { tools, deps } = setup();
     deps.servers.set("radius-panel", {
       server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
@@ -1261,9 +1366,7 @@ describe("RU-12: radius_deploy_status", () => {
       page: "deployed",
       state: {}
     });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response("not json", { status: 200 })
-    );
+    vi.mocked(deps.deploy.observe).mockResolvedValue({});
 
     const result = JSON.parse(
       await findTool(tools, "radius_deploy_status").handler({})

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildRadiusAppProvenanceTags } from "../../azure-oidc.js";
 import { createOperation, prepareProviderMutation } from "../../operations.js";
 import { createRequestContext } from "../request-context.js";
-import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
+import { ENTRA_APP_RETENTION_NOTICE } from "@radius-project/core/github-radius/environments/azure-auto-setup-application";
 import {
   createAzureAutoSetupRoutes,
   handleAzureAutoSetup,

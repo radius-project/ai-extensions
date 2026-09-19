@@ -140,7 +140,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
           repairExhausted: false
         }),
         clearGraphRepairAttempt: () => {},
-        listBranchPaths: () => Promise.resolve(active.branchPaths ?? []),
+        listBranchPaths: () => Promise.resolve(active.branchPaths ?? null),
         prepareSourceRefResources,
         setSourceRefResources,
         isCurrentSourceRefToken,

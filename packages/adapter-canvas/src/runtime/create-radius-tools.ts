@@ -7,6 +7,7 @@ import {
   ambiguousAppSourceBrief,
   unsupportedAppSourceReport
 } from "@radius-project/core";
+import { compareSelectedGraphs } from "@radius-project/core/github-radius/graphs";
 import { errorMessage, optionalString } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import {
@@ -119,7 +120,12 @@ export function createRadiusTools(
                 state.contextRepo || "",
                 state.contextBranch || "",
                 state
-              )
+              ).catch(() => {
+                logToSession(
+                  "Could not refresh workspace-manifest hints; retaining the known application candidates."
+                );
+                return null;
+              })
             : null;
           // A repoPath naming somewhere INSIDE the worktree is the user's
           // answer to the very question this brief asks. The gate above
@@ -174,8 +180,16 @@ export function createRadiusTools(
               "The Canvas modeling attempt is no longer current; the failure was not recorded."
           };
         }
-        const content = await fetchBicepForBranch(repo, branch, entry.state);
-        if (content) {
+        let content: string | null;
+        try {
+          content = await fetchBicepForBranch(repo, branch, entry.state);
+        } catch (error) {
+          return {
+            recorded: false,
+            error: `Could not verify the application model; the failure was not recorded: ${errorMessage(error)}`
+          };
+        }
+        if (content !== null) {
           clearAppModelAuthoringFailure(entry.state, repo, branch);
           return {
             recorded: false,
@@ -218,71 +232,68 @@ export function createRadiusTools(
           headBranch: string;
         };
         try {
-          const state = await workspaceState();
           const [baseContent, headContent] = await Promise.all([
-            fetchBicepForBranch(repo, baseBranch, state),
-            fetchBicepForBranch(repo, headBranch, state)
+            deps.core.fetchBicepFromRepo(deps.github, repo, baseBranch),
+            deps.core.fetchBicepFromRepo(deps.github, repo, headBranch)
           ]);
 
-          if (!baseContent && !headContent) {
+          const compared = await compareSelectedGraphs(
+            {
+              source: { kind: "committed", repo, ref: baseBranch },
+              definition: {
+                content: baseContent,
+                bicepPath: ".radius/app.bicep"
+              }
+            },
+            {
+              source: { kind: "committed", repo, ref: headBranch },
+              definition: {
+                content: headContent,
+                bicepPath: ".radius/app.bicep"
+              }
+            },
+            {
+              stage: ({ source, definition }) =>
+                deps.rad.radArtifactsDirForSelection({
+                  isLocal: false,
+                  github: deps.github,
+                  repo: source.repo,
+                  branch:
+                    source.kind === "committed" ? source.ref : source.branch,
+                  bicepRepoPath: definition.bicepPath,
+                  log: logToSession
+                }),
+              compile: ({ definition }, artifacts) =>
+                deps.rad.buildGraphViaRad(
+                  definition.content ?? "",
+                  definition.bicepPath,
+                  {
+                    log: logToSession,
+                    radArtifactsDir: artifacts.dir,
+                    cleanupRadArtifactsDir: false
+                  }
+                ),
+              discard: (artifacts) => {
+                if (artifacts.remote && artifacts.dir) {
+                  deps.rad.removeArtifactsDirectory(artifacts.dir);
+                }
+              },
+              computeDiff: deps.core.computeGraphDiff
+            },
+            { log: logToSession }
+          );
+
+          if (compared.kind !== "completed") {
             return unavailableGraphDiffResult(
               `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
             );
           }
-
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                baseBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                headBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const baseResources = await deps.rad.buildGraphViaRad(
-            baseContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: baseRadArtifactsDir,
-              cleanupRadArtifactsDir: baseRadArtifactsRemote
-            }
-          );
-          const headResources = await deps.rad.buildGraphViaRad(
-            headContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: headRadArtifactsDir,
-              cleanupRadArtifactsDir: headRadArtifactsRemote
-            }
-          );
-
-          const diffResources = deps.core.computeGraphDiff(
-            baseResources,
-            headResources
-          );
           return successfulGraphDiffResult(
-            deps.renderPrDiffMarkdown(diffResources, baseBranch, headBranch)
+            deps.renderPrDiffMarkdown(
+              compared.resources,
+              baseBranch,
+              headBranch
+            )
           );
         } catch (err) {
           return failedGraphDiffResult(
@@ -388,20 +399,9 @@ export function createRadiusTools(
           );
           const invalid = deps.deployTools.validateDeployPayload(payload);
           if (invalid) return invalid;
-          const response = await deps.deploy.fetch(
-            `${entry.baseUrl}/api/deploy`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload)
-            }
-          );
-          const result = (await response.json().catch(() => ({}))) as Record<
-            string,
-            unknown
-          >;
-          if (!response.ok || result.error) {
-            return `⚠️ Could not start the deploy: ${result.error || `HTTP ${response.status}`}`;
+          const result = await deps.deploy.start(entry, payload);
+          if (result.kind === "failed") {
+            return `⚠️ Could not start the deploy: ${result.error}`;
           }
           return deps.deployTools.describeDeployStarted(payload, result);
         } catch (err) {
@@ -422,39 +422,11 @@ export function createRadiusTools(
                 `Deploy attempt "${args.attemptId}" is no longer active, so its status is unavailable.`
               : "No Radius canvas session is open, so there is no deploy status to report.";
           }
-          const response = await deps.deploy.fetch(
-            `${entry.baseUrl}/api/deploy-status`
-          );
-          if (!response.ok)
-            return `⚠️ Could not read the deploy status: HTTP ${response.status}`;
-          const d = (await response.json().catch(() => ({}))) as Record<
-            string,
-            unknown
-          >;
+          deps.deploy.applyRepairPolicy(entry);
+          const observation = await deps.deploy.observe(entry);
           return JSON.stringify(
             deps.deployTools.summarizeDeployStatus(
-              {
-                status: typeof d.status === "string" ? d.status : "",
-                errorKind: typeof d.errorKind === "string" ? d.errorKind : null,
-                deployRunUrl:
-                  typeof d.deployRunUrl === "string" ? d.deployRunUrl : null,
-                startedAt:
-                  (
-                    typeof d.startedAt === "string" ||
-                    typeof d.startedAt === "number"
-                  ) ?
-                    d.startedAt
-                  : null,
-                finishedAt:
-                  (
-                    typeof d.finishedAt === "string" ||
-                    typeof d.finishedAt === "number"
-                  ) ?
-                    d.finishedAt
-                  : null,
-                error: d.error,
-                logs: d.logs
-              },
+              observation,
               args.logLines as number | undefined
             )
           );

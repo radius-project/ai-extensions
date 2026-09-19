@@ -9,7 +9,9 @@
   },
   "main": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./github-radius/environments/*": "./src/github-radius/environments/*.ts",
+    "./github-radius/deployments/*": "./src/github-radius/deployments/*.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",

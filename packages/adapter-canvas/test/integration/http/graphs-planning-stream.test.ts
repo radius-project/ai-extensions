@@ -117,7 +117,7 @@ function start(): Harness {
           }
         );
       },
-      listBranchPaths: () => Promise.resolve([]),
+      listBranchPaths: () => Promise.resolve(null),
       workspaceGraphJsonPath: (_current, bicepRepoPath) =>
         `/ws/${bicepRepoPath}.graph.json`,
       radArtifactsDirForSelection: () =>

@@ -1,0 +1,299 @@
+import type { SelectedGhExecutor } from "./execution-ports.js";
+import type { OperationDomain } from "../operations.js";
+import type {
+  CallerIdentity,
+  GitHubJsonResponse,
+  RadiusAppProvenanceInput,
+  ResolveOidcSubjectResult
+} from "./azure-oidc.js";
+
+export interface AzureAutoSetupCommandResult {
+  code: string | number;
+  stdout: string;
+  stderr: string;
+  timedOut?: boolean;
+}
+
+export interface AzureAutoSetupOperation {
+  operationId: string;
+  repo: string;
+  environment: string;
+  provider: string;
+  currentStage: string;
+  state?: string;
+  inputRequired?: unknown;
+  providerRecovery?: unknown;
+  setupArtifacts?: {
+    azureApp?: {
+      origin?: string;
+      appId?: string | null;
+    };
+  };
+}
+
+export interface AzureAutoSetupFailureResponse {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+export interface AzureAutoSetupFailureInput {
+  status: number;
+  error: string;
+  code: string;
+  stage?: string | null;
+  classification?: string;
+  evidence?: string | null;
+  extra?: Record<string, unknown>;
+  steps?: string[];
+  runAz?:
+    ((args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>) | null;
+}
+
+export interface AzureAutoSetupOperationLifecyclePort {
+  get(operationId: string): AzureAutoSetupOperation | undefined;
+  isStale(operation: AzureAutoSetupOperation): boolean;
+  create(input: Record<string, unknown>): AzureAutoSetupOperation;
+  buildStages(): unknown[];
+  start(operation: AzureAutoSetupOperation):
+    | { ok: true }
+    | {
+        ok: false;
+        reason?: "operation-in-progress" | "previous-cleanup-required";
+        conflict: { operationId: string };
+      };
+  persist(): Promise<void>;
+  report(diagnostic: { code: string; message: string }): void;
+  finish(
+    operation: AzureAutoSetupOperation,
+    state: string,
+    options: Record<string, unknown>
+  ): void;
+}
+
+export interface AzureAutoSetupOperationProgressPort {
+  enterStage(operation: AzureAutoSetupOperation, stage: string): void;
+  setStageState(
+    operation: AzureAutoSetupOperation,
+    stage: string,
+    state: string
+  ): void;
+  hasWarnings(operation: AzureAutoSetupOperation): boolean;
+  addLegacyStep(operation: AzureAutoSetupOperation, text: string): void;
+  setContext(
+    operation: AzureAutoSetupOperation,
+    patch: Record<string, unknown>
+  ): void;
+  setCloudContext(
+    operation: AzureAutoSetupOperation,
+    provider: string,
+    patch: Record<string, unknown>
+  ): void;
+  requireInput(
+    operation: AzureAutoSetupOperation,
+    input: Record<string, unknown>
+  ): void;
+  resumeAfterInput(operation: AzureAutoSetupOperation): void;
+}
+
+export interface AzureAutoSetupOperationArtifactPort {
+  withCredentialProvenanceLock<T>(work: () => Promise<T>): Promise<T>;
+  recordAzureApp(
+    operation: AzureAutoSetupOperation,
+    patch: Record<string, unknown>
+  ): void;
+  recordServicePrincipal(
+    operation: AzureAutoSetupOperation,
+    patch: Record<string, unknown>
+  ): void;
+  recordCreatedFederatedCredential(
+    operation: AzureAutoSetupOperation,
+    entry: { name: string; subject: string; providerId?: string | null }
+  ): void;
+  recordFederatedCredentialProvenance(
+    operation: AzureAutoSetupOperation,
+    entry: {
+      repo: string;
+      repoId: number;
+      environment: string;
+      tenantId: string;
+      clientId: string;
+      applicationObjectId: string;
+      credentialId: string;
+      name: string;
+      subject: string;
+      issuer: string;
+      audiences: string[];
+      subjectConfig: ResolveOidcSubjectResult["subjectConfig"];
+      origin: "created" | "reused";
+    }
+  ): Promise<void>;
+  recordCreatedRoleAssignment(
+    operation: AzureAutoSetupOperation,
+    entry: {
+      assignmentId?: string;
+      role: string;
+      scope: string;
+      principalObjectId: string;
+    }
+  ): void;
+}
+
+export type AzureAutoSetupOperationPort = AzureAutoSetupOperationLifecyclePort &
+  AzureAutoSetupOperationProgressPort &
+  AzureAutoSetupOperationArtifactPort;
+
+export interface AzureAutoSetupExternalPort {
+  getSelectedGitHubExecutor(
+    operationId: string
+  ): SelectedGhExecutor | null | undefined;
+  getGitHubIdentity(): Promise<{
+    actingLogin?: string;
+    displayLogin?: string;
+    mismatch?: boolean;
+  } | null>;
+  preflightRepoAdmin(
+    repo: string,
+    executor?: SelectedGhExecutor
+  ): Promise<string>;
+  preflightGhcrPackageWriteAccess(
+    executor?: SelectedGhExecutor
+  ): Promise<
+    { ok: true } | { ok: false; status: number; error: string; code: string }
+  >;
+  runGitHubJson(
+    apiPath: string,
+    executor?: SelectedGhExecutor
+  ): Promise<GitHubJsonResponse>;
+  runAz(args: string[]): Promise<AzureAutoSetupCommandResult>;
+}
+
+export interface AzureAutoSetupTempFilePort {
+  createPath(): string;
+  write(path: string, contents: string): void;
+  remove(path: string): void;
+}
+
+export interface AzureAutoSetupDependencies {
+  operationDomain: OperationDomain;
+  deterministicProviderUuid(seed: string): string;
+  operations: AzureAutoSetupOperationPort;
+  external: AzureAutoSetupExternalPort;
+  tempFile: AzureAutoSetupTempFilePort;
+  ensureServicePrincipal(
+    clientId: string,
+    runAz: (args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>,
+    mutationRecovery:
+      | {
+          operation: object & { operationId: string };
+          persist(): Promise<void>;
+        }
+      | undefined,
+    beforeCreate: () => Promise<boolean>
+  ): Promise<
+    | {
+        ok: true;
+        state: "created" | "reused" | "created_candidate";
+        origin: "unknown" | "pre_existing" | "this_operation";
+        objectId: string | null;
+      }
+    | { ok: false; stopped: true }
+    | { ok: false; stopped?: false; stderr: string }
+  >;
+  finalizeSetupFailure(
+    operation: AzureAutoSetupOperation | null,
+    input: AzureAutoSetupFailureInput
+  ): Promise<AzureAutoSetupFailureResponse>;
+  persistMutationCheckpoint(input: {
+    operation: AzureAutoSetupOperation | null;
+    persist: () => Promise<void>;
+    report: (diagnostic: { code: string; message: string }) => void;
+    fail: (status: number, error: string, code: string) => Promise<void>;
+  }): Promise<boolean>;
+  honorStopBoundary(input: {
+    operation: AzureAutoSetupOperation | null;
+    boundary: string;
+    persist: () => Promise<void>;
+    report: (diagnostic: { code: string; message: string }) => void;
+  }): Promise<boolean>;
+  sleep(milliseconds: number): Promise<void>;
+  stageAuthorizeIdentity: string;
+}
+
+export interface AzureAutoSetupWorkflow {
+  operation: AzureAutoSetupOperation;
+  steps: string[];
+  respond(status: number, payload: Record<string, unknown>): void;
+  runAz(args: string[]): Promise<AzureAutoSetupCommandResult>;
+  runGitHubJson(apiPath: string): Promise<GitHubJsonResponse>;
+  fail(
+    status: number,
+    error: string,
+    code: string,
+    extra?: Record<string, unknown>
+  ): Promise<void>;
+  stopBoundary(boundary: string): Promise<boolean>;
+  checkpoint(boundary: string): Promise<boolean>;
+}
+
+export interface AzureAutoSetupApplicationInput {
+  workflow: AzureAutoSetupWorkflow;
+  dependencies: Pick<
+    AzureAutoSetupDependencies,
+    "sleep" | "operationDomain"
+  > & {
+    operations: Pick<
+      AzureAutoSetupOperationLifecyclePort,
+      "persist" | "report" | "finish"
+    > &
+      Pick<AzureAutoSetupOperationArtifactPort, "recordAzureApp">;
+  };
+  oidc: ResolveOidcSubjectResult;
+  environment: string;
+  explicitAppId: string;
+  createNewApp: boolean;
+  appNameProvided: boolean;
+  requestedAppName: string;
+  requestedClientId: string;
+  serviceManagementReference: string;
+  callerIdentity: CallerIdentity;
+}
+
+export interface AzureAutoSetupApplicationResult {
+  clientId: string;
+  appName: string;
+  state: "created" | "reused";
+}
+
+export interface AzureAutoSetupCredentialInput {
+  workflow: AzureAutoSetupWorkflow;
+  dependencies: Pick<
+    AzureAutoSetupDependencies,
+    | "ensureServicePrincipal"
+    | "sleep"
+    | "tempFile"
+    | "deterministicProviderUuid"
+    | "operationDomain"
+  > & {
+    operations: Pick<
+      AzureAutoSetupOperationArtifactPort &
+        AzureAutoSetupOperationLifecyclePort,
+      | "recordServicePrincipal"
+      | "recordCreatedFederatedCredential"
+      | "recordFederatedCredentialProvenance"
+      | "withCredentialProvenanceLock"
+      | "recordCreatedRoleAssignment"
+      | "persist"
+    >;
+  };
+  oidc: ResolveOidcSubjectResult;
+  oidcSuffix: string;
+  clientId: string;
+  tenantId: string;
+  appName: string;
+  subscriptionId: string;
+  resourceGroup: string;
+  clusterResourceGroup: string;
+  clusterName: string;
+}
+
+export type { RadiusAppProvenanceInput };

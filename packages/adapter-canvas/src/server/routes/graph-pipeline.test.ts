@@ -129,6 +129,20 @@ describe("graph pipeline", () => {
   });
 
   describe("selectAppBicep", () => {
+    it("rejects workspace content returned for an explicitly committed comparison", async () => {
+      const { pipeline } = build({
+        selection: selectionOf({ fromWorkspace: true })
+      });
+      await expect(
+        pipeline.selectAppBicep(
+          { state: {} },
+          "octo/app",
+          "feature/x",
+          "committed"
+        )
+      ).rejects.toThrow("committed graph comparison cannot use workspace");
+    });
+
     it("passes the entry state and selection through to the reader", async () => {
       const selection = selectionOf({ branch: "feature/x" });
       const { pipeline, calls } = build({ selection });

@@ -4192,14 +4192,27 @@ describe("the step-marker convention at the call sites", () => {
   // operation, wherever that site now lives. A route migrating onto the route
   // table carries its `steps.push` sites into `server/routes/`, so scanning
   // `server.ts` alone would let the convention quietly stop being enforced one
-  // slice at a time. The corpus is therefore the legacy dispatcher plus every
-  // route module.
+  // slice at a time. Include shared coordinators and execution helpers after
+  // their extraction from the route modules.
   const SERVER_SRC = [
     new URL("./server.ts", import.meta.url),
-    ...["server/routes", "server/services"].flatMap((directory) =>
-      readdirSync(new URL(`./${directory}/`, import.meta.url))
-        .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
-        .map((name) => new URL(`./${directory}/${name}`, import.meta.url))
+    ...[
+      "./server/routes/",
+      "./server/services/",
+      "../../core/src/github-radius/environments/",
+      "../../core/src/github-radius/deployments/",
+      "../../adapter-shared/src/github-radius/environments/",
+      "../../adapter-shared/src/github-radius/deployments/"
+    ].flatMap((directory) =>
+      readdirSync(new URL(directory, import.meta.url))
+        .filter(
+          (name) =>
+            name.endsWith(".ts") &&
+            !name.endsWith(".test.ts") &&
+            // The domain appends structured steps, not narration strings.
+            name !== "operation-domain.ts"
+        )
+        .map((name) => new URL(`${directory}${name}`, import.meta.url))
     )
   ]
     .map((url) => readFileSync(url, "utf8"))

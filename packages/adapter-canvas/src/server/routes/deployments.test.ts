@@ -1313,7 +1313,7 @@ describe("deployments routes (SU-06)", () => {
       );
     });
 
-    it.each([
+    it.each<[400 | 409 | 503, { error: string }]>([
       [409, { error: "This repair loop has already used its 5 attempts." }],
       [503, { error: "Could not verify whether this environment…" }],
       [400, { error: "targetRepo and environment are required." }]
