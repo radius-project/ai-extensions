@@ -2353,6 +2353,76 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payload.resources[0].deployStatus).toBe("pending");
   });
 
+  it("carries a planned friendly type into final deployment metadata", async () => {
+    const calls: Calls = { log: [] };
+    const modeled = {
+      id: "mysql",
+      name: "mysql",
+      type: "Radius.Data/mySqlDatabases"
+    };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        graphTargetRepo: CONTEXT_REPO,
+        graphBranch: "main",
+        graphResources: [modeled],
+        plannedRepo: CONTEXT_REPO,
+        plannedBranch: "main",
+        plannedEnvironment: DEPLOY_ENV,
+        plannedProvider: "azure",
+        deployProvider: "azure",
+        plannedResources: [
+          {
+            ...modeled,
+            outputResources: [
+              {
+                id: "planned-server",
+                type: "Microsoft.DBforMySQL/flexibleServers@2024-01-01",
+                displayType: "Azure Database for MySQL"
+              }
+            ]
+          }
+        ]
+      },
+      reader: {
+        graph: {
+          graph: {
+            resources: [
+              {
+                ...modeled,
+                outputResources: [
+                  {
+                    id: "deployed-server",
+                    type: "Microsoft.DBforMySQL/flexibleServers@2025-01-01",
+                    portalUrl: "https://portal.azure.com/mysql"
+                  }
+                ]
+              }
+            ]
+          },
+          status: "ok"
+        }
+      }
+    });
+
+    const payload = payloadOf(
+      await run(
+        `/api/deployed-graph?environment=${DEPLOY_ENV}`,
+        handleDeployedGraph,
+        deps
+      )
+    );
+
+    expect(payload.resources[0].outputResources).toEqual([
+      {
+        id: "deployed-server",
+        type: "Microsoft.DBforMySQL/flexibleServers@2025-01-01",
+        displayType: "Azure Database for MySQL",
+        portalUrl: "https://portal.azure.com/mysql"
+      }
+    ]);
+  });
+
   it("does not borrow planned outputs after a failed deployment", async () => {
     const calls: Calls = { log: [] };
     const modeled = {

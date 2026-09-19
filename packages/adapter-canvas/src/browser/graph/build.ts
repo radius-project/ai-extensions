@@ -13,10 +13,10 @@ import {
   buildSourceUrl,
   radiusDeployBadgeKind,
   radiusDeployBadgeSvg,
-  radiusFormatResolvedTypeLabel,
   radiusFormatTypeLabel,
   radiusIsManagedClusterResource,
   radiusResolveIcon,
+  radiusResolvedDisplayLabel,
   radiusSelectResolvedResource,
   srcLineFromRef,
   srcPathFromRef
@@ -110,6 +110,7 @@ export interface GraphNodeData {
   icon: string;
   nodeName: string;
   typeLabel: string;
+  concreteType: string;
   codeRef: string;
   sourceUrl: string;
   sourceBranch?: string;
@@ -374,7 +375,7 @@ export function buildGraph(
       : null;
     const shortType =
       resolved ?
-        radiusFormatResolvedTypeLabel(resolved.type || resolved.displayType)
+        radiusResolvedDisplayLabel(resolved)
       : radiusFormatTypeLabel(resource.type);
     const sourceBranch =
       settings.diffMode && resource.diffStatus === "removed" ?
@@ -389,6 +390,10 @@ export function buildGraph(
       icon: radiusResolveIcon(resource),
       nodeName: resource.name || id,
       typeLabel: shortType,
+      concreteType:
+        resolved && typeof resolved.type === "string" ?
+          resolved.type.trim()
+        : "",
       codeRef: resource.codeReference || "",
       sourceUrl: buildSourceUrl(
         settings.repoUrl,
@@ -460,6 +465,7 @@ export function buildGraph(
         icon: radiusResolveIcon(output),
         nodeName: output.name || outputLabel,
         typeLabel: outputLabel,
+        concreteType: "",
         codeRef: "",
         sourceUrl: "",
         srcPath: "",

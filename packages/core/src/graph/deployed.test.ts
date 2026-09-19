@@ -282,6 +282,141 @@ describe("mergeDeployedGraphMetadata", () => {
     expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
   });
 
+  it("preserves friendly output types when deployed metadata omits them", () => {
+    const previous = [
+      makeResource("Radius.Data/mySqlDatabases", "db", {
+        outputResources: [
+          {
+            id: "same-id",
+            type: "Microsoft.DBforMySQL/flexibleServers@2024-01-01",
+            displayType: "Azure Database for MySQL"
+          },
+          {
+            id: "planned-cluster",
+            type: "Microsoft.ContainerService/managedClusters@2024-02-01",
+            displayType: "Azure Kubernetes Service"
+          }
+        ]
+      })
+    ];
+    const merged = mergeDeployedGraphMetadata(previous, [
+      {
+        ...previous[0],
+        outputResources: [
+          {
+            id: "same-id",
+            type: "Microsoft.DBforMySQL/flexibleServers@2025-01-01",
+            portalUrl: "https://portal.azure.com/mysql"
+          },
+          {
+            id: "deployed-cluster",
+            type: "Microsoft.ContainerService/managedClusters@2025-01-01"
+          }
+        ]
+      }
+    ]);
+
+    expect(merged[0].outputResources).toEqual([
+      {
+        id: "same-id",
+        type: "Microsoft.DBforMySQL/flexibleServers@2025-01-01",
+        displayType: "Azure Database for MySQL",
+        portalUrl: "https://portal.azure.com/mysql"
+      },
+      {
+        id: "deployed-cluster",
+        type: "Microsoft.ContainerService/managedClusters@2025-01-01",
+        displayType: "Azure Kubernetes Service"
+      }
+    ]);
+  });
+
+  it("keeps a deployed friendly type and never borrows one without an identity match", () => {
+    const previous = [
+      makeResource("Radius.Compute/containers", "api", {
+        outputResources: [
+          {
+            id: "planned",
+            type: "apps/Deployment",
+            displayType: "Deployment (K8s)"
+          }
+        ]
+      })
+    ];
+    const merged = mergeDeployedGraphMetadata(previous, [
+      {
+        ...previous[0],
+        outputResources: [
+          {
+            id: "deployed",
+            type: "apps/StatefulSet",
+            displayType: "StatefulSet"
+          },
+          { id: "unknown", type: "batch/Job" }
+        ]
+      }
+    ]);
+
+    expect(merged[0].outputResources).toEqual([
+      {
+        id: "deployed",
+        type: "apps/StatefulSet",
+        displayType: "StatefulSet"
+      },
+      { id: "unknown", type: "batch/Job" }
+    ]);
+  });
+
+  it("prefers an exact output id over a same-type fallback", () => {
+    const previous = [
+      makeResource("Radius.Compute/containers", "api", {
+        outputResources: [
+          {
+            id: "first",
+            type: "apps/Deployment",
+            displayType: "First deployment"
+          },
+          {
+            id: "second",
+            type: "apps/Deployment",
+            displayType: "Second deployment"
+          }
+        ]
+      })
+    ];
+    const merged = mergeDeployedGraphMetadata(previous, [
+      {
+        ...previous[0],
+        outputResources: [{ id: "second", type: "apps/Deployment" }]
+      }
+    ]);
+
+    expect(merged[0].outputResources[0].displayType).toBe("Second deployment");
+  });
+
+  it("falls back to a same-type friendly name when the exact id has none", () => {
+    const previous = [
+      makeResource("Radius.Compute/containers", "api", {
+        outputResources: [
+          { id: "exact", type: "apps/Deployment" },
+          {
+            id: "friendly",
+            type: "apps/Deployment",
+            displayType: "Deployment (K8s)"
+          }
+        ]
+      })
+    ];
+    const merged = mergeDeployedGraphMetadata(previous, [
+      {
+        ...previous[0],
+        outputResources: [{ id: "exact", type: "apps/Deployment" }]
+      }
+    ]);
+
+    expect(merged[0].outputResources[0].displayType).toBe("Deployment (K8s)");
+  });
+
   it("keeps the first duplicate parent and never mutates either input", () => {
     const first = {
       ...modeled[0],
@@ -316,5 +451,42 @@ describe("mergeDeployedGraphMetadata", () => {
       { id: modeled[0].id, outputResources: "invalid" }
     ]);
     expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
+  });
+
+  it("ignores malformed output identity and display fields", () => {
+    const malformedModeled = [
+      makeResource("Radius.Compute/containers", "api", {
+        outputResources: [
+          null,
+          { id: 1, type: 2, displayType: 3 },
+          {
+            id: "duplicate",
+            type: "apps/Deployment",
+            displayType: "Deployment"
+          },
+          {
+            id: "duplicate",
+            type: "apps/Deployment",
+            displayType: "Ignored duplicate"
+          }
+        ]
+      })
+    ];
+    const merged = mergeDeployedGraphMetadata(malformedModeled, [
+      {
+        ...malformedModeled[0],
+        outputResources: [
+          null,
+          { id: 1, type: 2, displayType: 3 },
+          { id: "missing", type: "batch/Job" }
+        ]
+      }
+    ]);
+
+    expect(merged[0].outputResources).toEqual([
+      {},
+      { id: 1, type: 2, displayType: 3 },
+      { id: "missing", type: "batch/Job" }
+    ]);
   });
 });
