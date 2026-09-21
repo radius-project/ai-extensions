@@ -4,7 +4,10 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   defaultNodeExecutable,
+  createNodeVersionProbe,
   listNodeVersionDirectories,
+  MINIMUM_NODE_MAJOR,
+  probeNodeVersion,
   resolveNodeExecutable,
   type NodeExecutableDependencies
 } from "./node-executable.js";
@@ -18,11 +21,15 @@ interface DepsOverrides extends Omit<
 > {
   present?: readonly string[];
   entries?: Readonly<Record<string, readonly string[]>>;
+  // Version each candidate reports; anything unlisted answers as a supported
+  // release, so a test only spells out the versions it is about.
+  versions?: Readonly<Record<string, string | null>>;
 }
 
 function createDeps(overrides: DepsOverrides = {}): NodeExecutableDependencies {
   const present = new Set(overrides.present ?? []);
   const entries = overrides.entries ?? {};
+  const versions = overrides.versions ?? {};
   return {
     platform: overrides.platform ?? "linux",
     env: overrides.env ?? {},
@@ -33,7 +40,12 @@ function createDeps(overrides: DepsOverrides = {}): NodeExecutableDependencies {
     pathExists: vi.fn((filePath: string) => present.has(filePath)),
     listDirectory:
       overrides.listDirectory ??
-      ((directory: string) => entries[directory] ?? [])
+      ((directory: string) => entries[directory] ?? []),
+    probeVersion:
+      overrides.probeVersion ??
+      vi.fn((executable: string) =>
+        executable in versions ? versions[executable] : "v24.20.0"
+      )
   };
 }
 
@@ -45,7 +57,7 @@ describe("resolveNodeExecutable", () => {
       present: ["/usr/local/bin/node", "/usr/bin/node"]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe("/usr/local/bin/node");
+    expect(resolveNodeExecutable(deps).executable).toBe("/usr/local/bin/node");
   });
 
   it("ignores the embedded Copilot runtime, which cannot run a script file", () => {
@@ -55,7 +67,7 @@ describe("resolveNodeExecutable", () => {
       present: ["/usr/bin/node"]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe("/usr/bin/node");
+    expect(resolveNodeExecutable(deps).executable).toBe("/usr/bin/node");
   });
 
   it("scans PATH entries in order and skips directories without node", () => {
@@ -64,7 +76,7 @@ describe("resolveNodeExecutable", () => {
       present: ["/tools/bin/node", "/usr/bin/node"]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe("/tools/bin/node");
+    expect(resolveNodeExecutable(deps).executable).toBe("/tools/bin/node");
   });
 
   it("ignores blank and quoted PATH entries", () => {
@@ -73,7 +85,7 @@ describe("resolveNodeExecutable", () => {
       present: ["/tools/bin/node"]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe("/tools/bin/node");
+    expect(resolveNodeExecutable(deps).executable).toBe("/tools/bin/node");
   });
 
   it.each([
@@ -84,7 +96,7 @@ describe("resolveNodeExecutable", () => {
   ])("falls back to %s when PATH has no node", (_label, expected) => {
     const deps = createDeps({ platform: "darwin", present: [expected] });
 
-    expect(resolveNodeExecutable(deps)).toBe(expected);
+    expect(resolveNodeExecutable(deps).executable).toBe(expected);
   });
 
   it("uses the newest nvm version directory", () => {
@@ -98,7 +110,9 @@ describe("resolveNodeExecutable", () => {
       ]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe(`${versions}/v24.20.0/bin/node`);
+    expect(resolveNodeExecutable(deps).executable).toBe(
+      `${versions}/v24.20.0/bin/node`
+    );
   });
 
   it.each([
@@ -114,7 +128,9 @@ describe("resolveNodeExecutable", () => {
       ]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe(`${versions}/v24.20.0.1/bin/node`);
+    expect(resolveNodeExecutable(deps).executable).toBe(
+      `${versions}/v24.20.0.1/bin/node`
+    );
   });
 
   it("keeps the listed order for version directories that compare equal", () => {
@@ -127,7 +143,9 @@ describe("resolveNodeExecutable", () => {
       ]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe(`${versions}/v24.20.0/bin/node`);
+    expect(resolveNodeExecutable(deps).executable).toBe(
+      `${versions}/v24.20.0/bin/node`
+    );
   });
 
   it("honors NVM_DIR when nvm is installed outside the home directory", () => {
@@ -137,7 +155,7 @@ describe("resolveNodeExecutable", () => {
       present: ["/opt/nvm/versions/node/v24.20.0/bin/node"]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe(
+    expect(resolveNodeExecutable(deps).executable).toBe(
       "/opt/nvm/versions/node/v24.20.0/bin/node"
     );
   });
@@ -150,15 +168,99 @@ describe("resolveNodeExecutable", () => {
       present: ["/usr/bin/node"]
     });
 
-    expect(resolveNodeExecutable(deps)).toBe("/usr/bin/node");
+    expect(resolveNodeExecutable(deps).executable).toBe("/usr/bin/node");
   });
 
   it("returns null when nothing on the machine provides node", () => {
     const deps = createDeps({ env: { PATH: "/usr/bin" } });
 
-    expect(resolveNodeExecutable(deps)).toBeNull();
+    expect(resolveNodeExecutable(deps).executable).toBeNull();
     expect(deps.pathExists).toHaveBeenCalledWith("/usr/bin/node");
     expect(deps.pathExists).toHaveBeenCalledWith("/opt/homebrew/bin/node");
+  });
+
+  describe("version gate", () => {
+    it("skips an installation older than the supported minimum", () => {
+      const deps = createDeps({
+        env: { PATH: "/old/bin:/new/bin" },
+        present: ["/old/bin/node", "/new/bin/node"],
+        versions: { "/old/bin/node": "v16.20.2" }
+      });
+
+      expect(resolveNodeExecutable(deps).executable).toBe("/new/bin/node");
+    });
+
+    it.each([
+      ["the oldest supported release", `v${MINIMUM_NODE_MAJOR}.0.0`],
+      ["a current release", "v24.20.0"],
+      ["a version printed without the v prefix", "22.14.0"]
+    ])("accepts %s", (_label, version) => {
+      const deps = createDeps({
+        env: { PATH: "/usr/bin" },
+        present: ["/usr/bin/node"],
+        versions: { "/usr/bin/node": version }
+      });
+
+      expect(resolveNodeExecutable(deps).executable).toBe("/usr/bin/node");
+    });
+
+    it.each([
+      ["one major below the minimum", `v${MINIMUM_NODE_MAJOR - 1}.20.2`],
+      ["a file that is not node", "GNU coreutils 9.1"],
+      ["a candidate that could not be run", null]
+    ])("refuses %s and reports what it found", (_label, version) => {
+      const deps = createDeps({
+        env: { PATH: "/usr/bin" },
+        present: ["/usr/bin/node"],
+        versions: { "/usr/bin/node": version }
+      });
+
+      expect(resolveNodeExecutable(deps)).toEqual({
+        executable: null,
+        rejected: [{ executable: "/usr/bin/node", version }]
+      });
+    });
+
+    it("reports every refused installation in probe order", () => {
+      const deps = createDeps({
+        env: { PATH: "/first/bin:/second/bin" },
+        present: ["/first/bin/node", "/second/bin/node"],
+        versions: {
+          "/first/bin/node": "v14.21.3",
+          "/second/bin/node": "v16.20.2"
+        }
+      });
+
+      expect(resolveNodeExecutable(deps).rejected).toEqual([
+        { executable: "/first/bin/node", version: "v14.21.3" },
+        { executable: "/second/bin/node", version: "v16.20.2" }
+      ]);
+    });
+
+    it("keeps the refused installations found before a usable one", () => {
+      const deps = createDeps({
+        env: { PATH: "/old/bin:/new/bin" },
+        present: ["/old/bin/node", "/new/bin/node"],
+        versions: { "/old/bin/node": "v16.20.2" }
+      });
+
+      expect(resolveNodeExecutable(deps).rejected).toEqual([
+        { executable: "/old/bin/node", version: "v16.20.2" }
+      ]);
+    });
+
+    it("probes a repeated candidate only once", () => {
+      const deps = createDeps({
+        env: { PATH: "/usr/bin:/usr/bin" },
+        present: ["/usr/bin/node"],
+        versions: { "/usr/bin/node": "v16.20.2" }
+      });
+
+      const resolution = resolveNodeExecutable(deps);
+
+      expect(deps.probeVersion).toHaveBeenCalledTimes(1);
+      expect(resolution.rejected).toHaveLength(1);
+    });
   });
 
   describe("on Windows", () => {
@@ -169,7 +271,9 @@ describe("resolveNodeExecutable", () => {
         present: ["C:\\nodejs\\node.exe"]
       });
 
-      expect(resolveNodeExecutable(deps)).toBe("C:\\nodejs\\node.exe");
+      expect(resolveNodeExecutable(deps).executable).toBe(
+        "C:\\nodejs\\node.exe"
+      );
     });
 
     it.each([
@@ -206,7 +310,7 @@ describe("resolveNodeExecutable", () => {
         present: [expected]
       });
 
-      expect(resolveNodeExecutable(deps)).toBe(expected);
+      expect(resolveNodeExecutable(deps).executable).toBe(expected);
     });
 
     it("uses the newest nvm-windows version directory", () => {
@@ -222,7 +326,7 @@ describe("resolveNodeExecutable", () => {
         ]
       });
 
-      expect(resolveNodeExecutable(deps)).toBe(
+      expect(resolveNodeExecutable(deps).executable).toBe(
         "C:\\Users\\radius\\AppData\\Roaming\\nvm\\v24.20.0\\node.exe"
       );
     });
@@ -235,7 +339,7 @@ describe("resolveNodeExecutable", () => {
         }
       });
 
-      expect(resolveNodeExecutable(deps)).toBeNull();
+      expect(resolveNodeExecutable(deps).executable).toBeNull();
     });
 
     it("accepts the extension runtime named node.exe in any casing", () => {
@@ -245,7 +349,9 @@ describe("resolveNodeExecutable", () => {
         present: ["C:\\nodejs\\NODE.EXE"]
       });
 
-      expect(resolveNodeExecutable(deps)).toBe("C:\\nodejs\\NODE.EXE");
+      expect(resolveNodeExecutable(deps).executable).toBe(
+        "C:\\nodejs\\NODE.EXE"
+      );
     });
   });
 });
@@ -276,10 +382,51 @@ describe("listNodeVersionDirectories", () => {
   });
 });
 
+describe("probeNodeVersion", () => {
+  it("reports the version a real interpreter prints", () => {
+    expect(probeNodeVersion(process.execPath)).toBe(process.version);
+  });
+
+  it("returns null for a path that cannot be executed", () => {
+    expect(
+      probeNodeVersion(path.join(tmpdir(), "radius-not-an-executable"))
+    ).toBeNull();
+  });
+
+  it.each([
+    [
+      "the command could not be started",
+      { error: new Error("ENOENT"), status: null, stdout: null }
+    ],
+    ["the command exited nonzero", { status: 1, stdout: "" }],
+    ["the command produced no output stream", { status: 0, stdout: null }],
+    ["the command printed only whitespace", { status: 0, stdout: "  \n" }]
+  ])("returns null when %s", (_label, result) => {
+    const probe = createNodeVersionProbe(() => result);
+
+    expect(probe("/usr/bin/node")).toBeNull();
+  });
+
+  it("trims the version the command printed", () => {
+    const probe = createNodeVersionProbe(() => ({
+      status: 0,
+      stdout: "v24.20.0\n"
+    }));
+
+    expect(probe("/usr/bin/node")).toBe("v24.20.0");
+  });
+
+  it("returns null when the command fails", () => {
+    // `node --version` on a directory exits nonzero rather than printing a
+    // version, which is exactly the shape a non-Node candidate produces.
+    expect(probeNodeVersion(tmpdir())).toBeNull();
+  });
+});
+
 describe("defaultNodeExecutable", () => {
   it("finds the interpreter this test run is using", () => {
     // Vitest runs under a real node, so the process runtime itself is the
     // highest-precedence candidate and resolves without a filesystem search.
-    expect(defaultNodeExecutable()).toBe(process.execPath);
+    expect(defaultNodeExecutable().executable).toBe(process.execPath);
   });
 });

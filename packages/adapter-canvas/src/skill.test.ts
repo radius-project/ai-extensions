@@ -1,7 +1,10 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import type { NodeResolution } from "./node-executable.js";
 import { createRadiusAppBicepSkill, radiusAppBicepSkill } from "./skill.js";
+
+const NO_NODE: NodeResolution = { executable: null, rejected: [] };
 
 const MODULE_DIR = path.join(
   path.parse(process.cwd()).root,
@@ -52,7 +55,7 @@ function createSkill(
   presentFiles: ReadonlyArray<string>,
   skillVersion = "1.2.3",
   moduleDir = MODULE_DIR,
-  node: string | null = NODE
+  node: NodeResolution = { executable: NODE, rejected: [] }
 ) {
   const present = new Set(presentFiles);
   const pathExists = vi.fn((filePath: string) => present.has(filePath));
@@ -239,7 +242,7 @@ describe("radiusAppBicepSkill", () => {
         requiredPaths(CANDIDATES.installed),
         "1.2.3",
         MODULE_DIR,
-        null
+        NO_NODE
       );
 
       const handoff = parseHandoff(skill("/workspace"));
@@ -254,7 +257,7 @@ describe("radiusAppBicepSkill", () => {
     });
 
     it("forbids obtaining a runtime and requires asking the user", () => {
-      const { skill } = createSkill([], "1.2.3", MODULE_DIR, null);
+      const { skill } = createSkill([], "1.2.3", MODULE_DIR, NO_NODE);
 
       const instruction = String(parseHandoff(skill()).instruction);
 
@@ -265,12 +268,45 @@ describe("radiusAppBicepSkill", () => {
       expect(instruction).toContain("Do not start the modeling run");
     });
 
+    it("names the installations it found and refused", () => {
+      const { skill } = createSkill(
+        requiredPaths(CANDIDATES.installed),
+        "1.2.3",
+        MODULE_DIR,
+        {
+          executable: null,
+          rejected: [
+            { executable: "/usr/bin/node", version: "v12.22.9" },
+            { executable: "/opt/fake/node", version: null }
+          ]
+        }
+      );
+
+      expect(parseHandoff(skill("/workspace")).rejectedRuntimes).toEqual([
+        "/usr/bin/node (v12.22.9, older than Node.js 18)",
+        "/opt/fake/node (did not report a Node.js version)"
+      ]);
+    });
+
+    it("omits the refused list when the machine had no candidate at all", () => {
+      const { skill } = createSkill(
+        requiredPaths(CANDIDATES.installed),
+        "1.2.3",
+        MODULE_DIR,
+        NO_NODE
+      );
+
+      expect(parseHandoff(skill("/workspace"))).not.toHaveProperty(
+        "rejectedRuntimes"
+      );
+    });
+
     it("sanitizes the repository path in the refusal", () => {
       const { skill } = createSkill(
         requiredPaths(CANDIDATES.installed),
         "1.2.3",
         MODULE_DIR,
-        null
+        NO_NODE
       );
 
       expect(parseHandoff(skill(" \t```")).repoPath).toBe(

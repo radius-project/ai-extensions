@@ -777,7 +777,7 @@ describe("P0-C built Radius extension artifact", () => {
       /Never download, install, unpack, build, or vendor a Node\.js runtime/u
     );
     expect(skillGuidance).toMatch(
-      /ask the user to install Node\.js 24 or newer/u
+      /ask the user to install Node\.js 18 or newer/u
     );
     // Every script invocation goes through the resolved interpreter; a bare
     // `node` is what sent an agent looking for a runtime to download.

@@ -55,7 +55,7 @@ Every bundled script in this skill runs under a Node.js interpreter, and `<loade
 
 Never download, install, unpack, build, or vendor a Node.js runtime, and never install `nvm`, a package manager, or any other tool in order to obtain one. Installing software on the user's machine is not part of modeling, it is never done without the user asking for it, and it is unnecessary here because the extension already resolved the interpreter. Do not search for or substitute another runtime either.
 
-If the handoff reports `nodeCommand: null`, or `<loaded-node>` is missing, empty, still the literal placeholder, or fails to run, the run cannot proceed: abort any staged run (see [When a step fails](#when-a-step-fails)), report exactly what failed, state that nothing was written, and ask the user to install Node.js 24 or newer — or to make their existing installation visible to the Copilot app — then stop and wait. Only a fresh user request may start another run.
+If the handoff reports `nodeCommand: null`, or `<loaded-node>` is missing, empty, still the literal placeholder, or fails to run, the run cannot proceed: abort any staged run (see [When a step fails](#when-a-step-fails)), report exactly what failed, state that nothing was written, and ask the user to install Node.js 18 or newer — or to make their existing installation visible to the Copilot app — then stop and wait. Only a fresh user request may start another run.
 
 ## Radius CLI execution boundary
 

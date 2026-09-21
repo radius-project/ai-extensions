@@ -6,10 +6,20 @@
 // skill therefore never names a bare `node`: it runs the interpreter this
 // resolver found, and stops and asks the user when there is none. Resolution is
 // read-only — it locates an existing installation and never installs one.
+//
+// A candidate must also prove it is a usable Node: the scripts use only
+// `node:` builtin imports, `import.meta.url`, and logical assignment, so
+// MINIMUM_NODE_MAJOR is the oldest release that can run them. An installation
+// below it, or a file named `node` that is not Node at all, is rejected here so
+// the user is told what was found instead of meeting a parse error mid-run.
 
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+
+export const MINIMUM_NODE_MAJOR = 18;
+const VERSION_PROBE_TIMEOUT_MS = 10_000;
 
 export interface NodeExecutableDependencies {
   platform: NodeJS.Platform;
@@ -20,6 +30,27 @@ export interface NodeExecutableDependencies {
   homeDir: string;
   pathExists(filePath: string): boolean;
   listDirectory(directory: string): readonly string[];
+  // Reports what `<candidate> --version` printed, or null when the candidate
+  // could not be run or did not answer with a Node version.
+  probeVersion(executable: string): string | null;
+}
+
+export interface RejectedNodeRuntime {
+  executable: string;
+  // The reported version, or null when the file did not answer as Node.
+  version: string | null;
+}
+
+export interface NodeResolution {
+  executable: string | null;
+  // Installations that were found and refused, so the refusal can say what is
+  // on the machine rather than "no Node.js found".
+  rejected: readonly RejectedNodeRuntime[];
+}
+
+function majorVersion(version: string | null): number | null {
+  const match = /^v?(\d+)\./u.exec(version?.trim() ?? "");
+  return match ? Number(match[1]) : null;
 }
 
 function platformPath(platform: NodeJS.Platform): path.PlatformPath {
@@ -130,13 +161,13 @@ function posixCandidates(deps: NodeExecutableDependencies): readonly string[] {
 }
 
 /**
- * Returns the absolute path of an existing Node.js interpreter, or `null` when
- * the machine has none that this process can see. Never downloads or installs
- * anything.
+ * Returns the first existing Node.js interpreter that is new enough to run the
+ * skill scripts, together with every installation that was found and refused.
+ * Never downloads or installs anything.
  */
 export function resolveNodeExecutable(
   deps: NodeExecutableDependencies
-): string | null {
+): NodeResolution {
   const { platform } = deps;
   const join = platformPath(platform).join;
   const candidates: string[] = [];
@@ -146,7 +177,21 @@ export function resolveNodeExecutable(
   candidates.push(
     ...(platform === "win32" ? windowsCandidates(deps) : posixCandidates(deps))
   );
-  return candidates.find((candidate) => deps.pathExists(candidate)) ?? null;
+  const rejected: RejectedNodeRuntime[] = [];
+  const probed = new Set<string>();
+  for (const candidate of candidates) {
+    // A duplicate PATH entry or an install location that repeats a PATH
+    // directory would otherwise spawn the same probe twice.
+    if (probed.has(candidate)) continue;
+    probed.add(candidate);
+    if (!deps.pathExists(candidate)) continue;
+    const version = deps.probeVersion(candidate);
+    const major = majorVersion(version);
+    if (major !== null && major >= MINIMUM_NODE_MAJOR)
+      return { executable: candidate, rejected };
+    rejected.push({ executable: candidate, version });
+  }
+  return { executable: null, rejected };
 }
 
 /**
@@ -166,13 +211,46 @@ export function listNodeVersionDirectories(
   }
 }
 
-export function defaultNodeExecutable(): string | null {
+/** Outcome of asking a candidate to print its version. */
+export interface VersionProbeResult {
+  error?: Error;
+  status: number | null;
+  stdout: string | null;
+}
+
+/**
+ * Builds a probe that runs `<executable> --version` and returns what it
+ * printed. A candidate that cannot be executed, exits nonzero, or prints
+ * nothing is simply not a usable runtime, so failure is a null answer rather
+ * than an exception.
+ */
+export function createNodeVersionProbe(
+  runVersionCommand: (executable: string) => VersionProbeResult
+): (executable: string) => string | null {
+  return (executable) => {
+    const result = runVersionCommand(executable);
+    if (result.error || result.status !== 0) return null;
+    const printed = (result.stdout ?? "").trim();
+    return printed === "" ? null : printed;
+  };
+}
+
+export const probeNodeVersion = createNodeVersionProbe((executable) =>
+  spawnSync(executable, ["--version"], {
+    encoding: "utf8",
+    timeout: VERSION_PROBE_TIMEOUT_MS,
+    windowsHide: true
+  })
+);
+
+export function defaultNodeExecutable(): NodeResolution {
   return resolveNodeExecutable({
     platform: process.platform,
     env: process.env,
     execPath: process.execPath,
     homeDir: homedir(),
     pathExists: existsSync,
-    listDirectory: listNodeVersionDirectories
+    listDirectory: listNodeVersionDirectories,
+    probeVersion: probeNodeVersion
   });
 }
