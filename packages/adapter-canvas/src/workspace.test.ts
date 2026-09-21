@@ -15,6 +15,7 @@ import {
   resolvePersistedSessionId,
   workspaceFileExists,
   hasRadiusApplicationModel,
+  canonicalWorkspacePath,
   fetchWorkspaceTree,
   isWorkspacePath,
   modelingRunLastActivityAtMs,
@@ -865,6 +866,63 @@ describe("hasRadiusApplicationModel", () => {
     } finally {
       await Promise.all([emptyWorkspace.cleanup(), missingWorkspace.cleanup()]);
     }
+  });
+});
+
+describe("canonicalWorkspacePath", () => {
+  it("collapses trailing separators and relative segments to one identity", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-canonical-"));
+    try {
+      const canonical = await canonicalWorkspacePath(dir);
+      const nested = path.join(dir, "nested");
+      await fs.mkdir(nested);
+
+      expect(await canonicalWorkspacePath(`${dir}${path.sep}`)).toBe(canonical);
+      expect(await canonicalWorkspacePath(`  ${dir}  `)).toBe(canonical);
+      expect(await canonicalWorkspacePath(path.join(nested, ".."))).toBe(
+        canonical
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a symlinked worktree to the same path as its target", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-canonical-link-"));
+    try {
+      const target = path.join(dir, "worktree");
+      const link = path.join(dir, "link");
+      await fs.mkdir(target);
+      try {
+        await fs.symlink(target, link, "junction");
+      } catch {
+        // Unprivileged Windows accounts cannot create links; the realpath
+        // behavior itself is what this case proves, so skip rather than assert
+        // a platform capability the account does not have.
+        return;
+      }
+
+      expect(await canonicalWorkspacePath(link)).toBe(
+        await canonicalWorkspacePath(target)
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to lexical normalization for a path that cannot be resolved", async () => {
+    const missing = path.join(os.tmpdir(), "rad-canonical-missing", "worktree");
+
+    expect(await canonicalWorkspacePath(`${missing}${path.sep}`)).toBe(
+      path.resolve(missing)
+    );
+  });
+
+  it("reports no identity for an absent worktree path", async () => {
+    expect(await canonicalWorkspacePath("")).toBe("");
+    expect(await canonicalWorkspacePath("   ")).toBe("");
+    expect(await canonicalWorkspacePath(null)).toBe("");
+    expect(await canonicalWorkspacePath(undefined)).toBe("");
   });
 });
 

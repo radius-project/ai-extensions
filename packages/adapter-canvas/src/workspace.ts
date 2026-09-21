@@ -3,9 +3,10 @@
 // checkout for generated app model files on the active branch.
 
 import { execFile } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { promises as fs, realpath } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   GENERATED_MODEL_PATHS,
   IGNORED_SOURCE_DIRS,
@@ -26,6 +27,8 @@ export interface WorkspaceMetadata {
 }
 
 export type PathProbe = (candidate: string) => Promise<boolean>;
+
+const realpathNative = promisify(realpath.native);
 
 export interface WorkspaceGitHub {
   getContent(apiPath: string): Promise<string | null>;
@@ -74,6 +77,28 @@ function runGitResult(
       }
     );
   });
+}
+
+// Session hooks can spell the same worktree several ways: with a trailing
+// separator, with `.` or `..` segments, through a symlinked parent (macOS
+// reports `/var/...` for `/private/var/...`), or with different casing on a
+// case-insensitive filesystem. Anything that keys state by worktree has to
+// compare canonical paths or it silently treats one worktree as two. The native
+// realpath also reports the on-disk casing, which a lexical normalization
+// cannot. A path that cannot be resolved — one that no longer exists, or that
+// the process cannot stat — falls back to lexical normalization, which is the
+// best answer available and is still stable for equal inputs.
+export async function canonicalWorkspacePath(
+  workspacePath: string | null | undefined
+): Promise<string> {
+  const trimmed = typeof workspacePath === "string" ? workspacePath.trim() : "";
+  if (!trimmed) return "";
+  const resolved = path.resolve(trimmed);
+  try {
+    return await realpathNative(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 export function parseRepoFromRemote(remoteUrl: unknown): string {

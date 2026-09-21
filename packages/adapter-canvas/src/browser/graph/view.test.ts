@@ -63,7 +63,6 @@ interface Recorded {
   external: string[];
   local: Array<[string, number, string]>;
   toggled: Array<[string, DomElement | null]>;
-  opened: Array<[string, DomElement | null]>;
 }
 
 function renderCard(
@@ -78,15 +77,13 @@ function renderCard(
   const recorded: Recorded = {
     external: [],
     local: [],
-    toggled: [],
-    opened: []
+    toggled: []
   };
   const component = createNodeComponent(vendor, resolveGraphSettings(options), {
     openExternal: (url) => recorded.external.push(url),
     openLocalSource: (path, line, fallback) =>
       recorded.local.push([path, line, fallback]),
-    toggleDetails: (value, card) => recorded.toggled.push([value.id, card]),
-    openDetails: (value, card) => recorded.opened.push([value.id, card])
+    toggleDetails: (value, card) => recorded.toggled.push([value.id, card])
   });
   return { tree: component({ data }), recorded, vendor };
 }
@@ -198,6 +195,39 @@ describe("node card", () => {
     expect(findByClass(tree, "rad-node__icon")).toBeUndefined();
   });
 
+  it("paints a monochrome icon through a themed css mask, not an image", () => {
+    const { tree } = renderCard(
+      node({ icon: "data:image/svg+xml,%3Csvg%3E", iconMonochrome: true })
+    );
+    expect(findByClass(tree, "rad-node__icon")).toBeUndefined();
+    const masked = findByClass(
+      tree,
+      "rad-node__icon rad-node__icon--themed"
+    ) as RenderedElement;
+    expect(masked.type).toBe("span");
+    expect(props(masked)["aria-hidden"]).toBe("true");
+    expect(props(masked).src).toBeUndefined();
+    expect(props(masked).style).toEqual({
+      WebkitMaskImage: 'url("data:image/svg+xml,%3Csvg%3E")',
+      maskImage: 'url("data:image/svg+xml,%3Csvg%3E")'
+    });
+  });
+
+  it("keeps a hostile masked icon inside the css url token", () => {
+    const { tree } = renderCard(
+      node({
+        icon: 'data:image/svg+xml,a") ;background:red;--x:url("',
+        iconMonochrome: true
+      })
+    );
+    const masked = findByClass(tree, "rad-node__icon rad-node__icon--themed");
+    const style = props(masked).style as Record<string, string>;
+    expect(style.maskImage).toBe(
+      'url("data:image/svg+xml,a%22%29%20%3Bbackground:red%3B--x:url%28%22")'
+    );
+    expect(style.maskImage).not.toContain(";background");
+  });
+
   it("opts the interactive children out of the pane's drag, pan and key handling", () => {
     const { tree } = renderCard(node());
     // React Flow treats Space and Enter as node-selection keys and cancels the
@@ -211,13 +241,19 @@ describe("node card", () => {
     ).toBeDefined();
   });
 
-  it("opens the details panel from the card and toggles it from the dots", () => {
+  it("toggles the details panel from both the card and the dots", () => {
     const { tree, recorded } = renderCard(node());
     const card = createFakeElement("card");
     callHandler(findByClass(tree, "rad-node"), "onClick", {
       currentTarget: card
     });
-    expect(recorded.opened).toEqual([["app/web", card]]);
+    callHandler(findByClass(tree, "rad-node"), "onClick", {
+      currentTarget: card
+    });
+    expect(recorded.toggled).toEqual([
+      ["app/web", card],
+      ["app/web", card]
+    ]);
 
     const dots = createFakeElement("dots");
     const owner = createFakeElement("owner");
@@ -229,7 +265,7 @@ describe("node card", () => {
         currentTarget: dots
       }
     );
-    expect(recorded.toggled).toEqual([["app/web", owner]]);
+    expect(recorded.toggled[2]).toEqual(["app/web", owner]);
   });
 
   it("renders a deployed node's concrete portal URL as a native link", () => {
@@ -246,7 +282,7 @@ describe("node card", () => {
       "aria-label": "Open web in Azure Portal"
     });
     callHandler(link, "onClick");
-    expect(recorded.opened).toEqual([]);
+    expect(recorded.toggled).toEqual([]);
   });
 
   it("does not render an unsafe deployed portal link", () => {
@@ -260,7 +296,7 @@ describe("node card", () => {
     expect(
       findByClass(tree, "rad-node__portal nodrag nopan nokey")
     ).toBeUndefined();
-    expect(recorded.opened).toEqual([["app/web", null]]);
+    expect(recorded.toggled).toEqual([["app/web", null]]);
   });
 
   it("falls back to the clicked element when there is no card ancestor", () => {
@@ -691,7 +727,6 @@ describe("mountGraph", () => {
       deps: {
         openExternal: () => undefined,
         openLocalSource: () => undefined,
-        openDetails: () => undefined,
         toggleDetails: () => undefined
       },
       reload: () => undefined,

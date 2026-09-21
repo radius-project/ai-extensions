@@ -700,6 +700,90 @@ function plainEnvironmentValues(env) {
   return values;
 }
 
+// Any expression whose outermost call is reference(...) and whose result is
+// .properties.secrets.name is a managed Secret name. The argument may select a
+// literal resource or a loop instance through format(...). Expressions wrapped
+// in another operation remain outside this deliberately narrow match.
+//
+// This assumes the predefined Radius producer semantics documented by the
+// skill. A future expression parser could identify a direct producer's type and
+// distinguish custom Radius.Resources/* properties without broadening this rule.
+const MANAGED_SECRET_NAME_REFERENCE =
+  /^\[reference\(.+\)\.properties\.secrets\.name\]$/u;
+
+// resolveTemplateString follows whole string parameters and the one supported
+// format pass-through. It deliberately does not trace object properties, module
+// outputs, variables, or general ARM expression data flow.
+function checkConnectionSources(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (isPlainObject(nestedTemplate)) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkConnectionSources(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    // #676 is scoped to the container connection projection that consumes
+    // producer IDs. Other Radius resource types remain outside this check.
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.Compute/containers@")
+    ) {
+      continue;
+    }
+    const connections = resource?.properties?.properties?.connections;
+    if (!isPlainObject(connections)) {
+      continue;
+    }
+    for (const [name, connection] of Object.entries(connections)) {
+      if (!isPlainObject(connection)) {
+        continue;
+      }
+      const source = resolveTemplateString(
+        connection.source,
+        template,
+        parameterValues
+      );
+      if (
+        typeof source !== "string" ||
+        !MANAGED_SECRET_NAME_REFERENCE.test(source)
+      ) {
+        continue;
+      }
+      report(
+        `${app}: error connection-source: ${resourcePath}.properties.connections.${name}.source: this Radius container connection uses a managed Kubernetes Secret name; use the producer resource ID (<producer>.id) as the connection source instead. Use <producer>.properties.secrets.name only as valueFrom.secretKeyRef.secretName for an explicit Kubernetes environment binding.`
+      );
+      failed = true;
+    }
+  }
+  return failed;
+}
+
 function checkRuntimeVariableExpansion(
   template,
   app,
@@ -1077,6 +1161,7 @@ function check(app, staged) {
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
   const invalidSourceReference = checkSourceCodeReferences(template, app);
+  const invalidConnectionSource = checkConnectionSources(template, app);
   const unresolvedRuntimeVariable = checkRuntimeVariableExpansion(
     template,
     app
@@ -1090,6 +1175,7 @@ function check(app, staged) {
       compilerFailed ||
         invalidBuildSource ||
         invalidSourceReference ||
+        invalidConnectionSource ||
         unresolvedRuntimeVariable ||
         misplacedSecureParameter
     ) ?
