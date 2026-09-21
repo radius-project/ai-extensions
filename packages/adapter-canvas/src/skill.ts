@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveGeneratorVersion } from "./generator-version.js";
+import { defaultNodeExecutable } from "./node-executable.js";
 import { resolvePluginRoot } from "./plugin-root.js";
 
 const REQUIRED_SKILL_FILES = [
@@ -13,13 +14,22 @@ const REQUIRED_SKILL_FILES = [
   path.join("references", "source-code-references.md")
 ];
 const SKILL_INSTRUCTION =
-  "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";
+  "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute nodeCommand for <loaded-node>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";
+// Returned instead of the handoff when the machine has no Node.js interpreter.
+// The run cannot start, and the only permitted next step is to ask the user —
+// never to download or install a runtime on their behalf.
+const MISSING_NODE_INSTRUCTION =
+  "Do not start the modeling run: the skill's scripts need a Node.js interpreter and this machine has none that the Radius extension can see. Never download, install, unpack, or otherwise obtain a Node.js runtime, and never run the scripts through another runtime. Report this to the user, ask them to install Node.js 24 or newer (or to make their existing installation visible to the Copilot app), and stop. Only a fresh user request may start another run.";
 
 export interface RadiusAppBicepSkillDependencies {
   moduleDir: string;
   homeDir: string;
   pathExists(filePath: string): boolean;
   generatorVersion(): string;
+  // Absolute path of an existing Node.js interpreter, or null when the machine
+  // has none. The skill scripts are never invoked as a bare `node`, because the
+  // Copilot app's own runtime is not on the agent's PATH.
+  nodeExecutable(): string | null;
 }
 
 interface RadiusAppBicepHandoff {
@@ -27,8 +37,16 @@ interface RadiusAppBicepHandoff {
   repoPath: string;
   skillBase: string;
   skillVersion?: string;
+  nodeCommand: string;
   instruction: string;
   brief?: string;
+}
+
+interface RadiusAppBicepNodeMissing {
+  skill: "radius-app-bicep";
+  repoPath: string;
+  nodeCommand: null;
+  instruction: string;
 }
 
 function sanitizeRepoPath(repoPath: unknown): string {
@@ -75,6 +93,16 @@ export function createRadiusAppBicepSkill(
   );
 
   return (repoPath?: string, brief?: string): string => {
+    const nodeCommand = dependencies.nodeExecutable();
+    if (!nodeCommand) {
+      const missing: RadiusAppBicepNodeMissing = {
+        skill: "radius-app-bicep",
+        repoPath: sanitizeRepoPath(repoPath),
+        nodeCommand: null,
+        instruction: MISSING_NODE_INSTRUCTION
+      };
+      return JSON.stringify(missing);
+    }
     const skillBase = candidates.find((candidate) =>
       REQUIRED_SKILL_FILES.every((requiredFile) =>
         dependencies.pathExists(path.join(candidate, requiredFile))
@@ -99,6 +127,7 @@ export function createRadiusAppBicepSkill(
       repoPath: sanitizeRepoPath(repoPath),
       skillBase,
       ...(skillVersion ? { skillVersion } : {}),
+      nodeCommand,
       instruction: SKILL_INSTRUCTION,
       ...(brief ? { brief } : {})
     };
@@ -110,7 +139,8 @@ const defaultRadiusAppBicepSkill = createRadiusAppBicepSkill({
   moduleDir: path.dirname(fileURLToPath(import.meta.url)),
   homeDir: homedir(),
   pathExists: existsSync,
-  generatorVersion: resolveGeneratorVersion
+  generatorVersion: resolveGeneratorVersion,
+  nodeExecutable: defaultNodeExecutable
 });
 
 export function radiusAppBicepSkill(repoPath?: string, brief?: string): string {

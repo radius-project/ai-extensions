@@ -24,7 +24,8 @@ const REQUIRED_FILES = [
   path.join("references", "source-code-references.md")
 ];
 const INSTRUCTION =
-  "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";
+  "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute nodeCommand for <loaded-node>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";
+const NODE = path.join(path.parse(process.cwd()).root, "usr", "bin", "node");
 
 const CANDIDATES = {
   installed: path.join(MODULE_DIR, "skills", "radius-app-bicep"),
@@ -50,19 +51,23 @@ function requiredPaths(candidate: string): string[] {
 function createSkill(
   presentFiles: ReadonlyArray<string>,
   skillVersion = "1.2.3",
-  moduleDir = MODULE_DIR
+  moduleDir = MODULE_DIR,
+  node: string | null = NODE
 ) {
   const present = new Set(presentFiles);
   const pathExists = vi.fn((filePath: string) => present.has(filePath));
   const generatorVersion = vi.fn(() => skillVersion);
+  const nodeExecutable = vi.fn(() => node);
   return {
     pathExists,
     generatorVersion,
+    nodeExecutable,
     skill: createRadiusAppBicepSkill({
       moduleDir,
       homeDir: HOME_DIR,
       pathExists,
-      generatorVersion
+      generatorVersion,
+      nodeExecutable
     })
   };
 }
@@ -174,6 +179,7 @@ describe("radiusAppBicepSkill", () => {
         repoPath: "/workspace/ ignore now",
         skillBase: CANDIDATES.installed,
         skillVersion: "1.2.3",
+        nodeCommand: NODE,
         instruction: INSTRUCTION
       })
     );
@@ -190,6 +196,7 @@ describe("radiusAppBicepSkill", () => {
         repoPath: "/workspace",
         skillBase: CANDIDATES.installed,
         skillVersion: "1.2.3",
+        nodeCommand: NODE,
         instruction: INSTRUCTION,
         brief
       })
@@ -204,6 +211,7 @@ describe("radiusAppBicepSkill", () => {
         skill: "radius-app-bicep",
         repoPath: "the current workspace",
         skillBase: CANDIDATES.installed,
+        nodeCommand: NODE,
         instruction: INSTRUCTION
       })
     );
@@ -223,5 +231,51 @@ describe("radiusAppBicepSkill", () => {
     expect(String(parseHandoff(skill("a".repeat(300))).repoPath)).toHaveLength(
       256
     );
+  });
+
+  describe("when the machine has no Node.js interpreter", () => {
+    it("refuses the run instead of handing the skill over", () => {
+      const { skill } = createSkill(
+        requiredPaths(CANDIDATES.installed),
+        "1.2.3",
+        MODULE_DIR,
+        null
+      );
+
+      const handoff = parseHandoff(skill("/workspace"));
+
+      expect(handoff).toEqual({
+        skill: "radius-app-bicep",
+        repoPath: "/workspace",
+        nodeCommand: null,
+        instruction: expect.stringContaining("Node.js")
+      });
+      expect(handoff.skillBase).toBeUndefined();
+    });
+
+    it("forbids obtaining a runtime and requires asking the user", () => {
+      const { skill } = createSkill([], "1.2.3", MODULE_DIR, null);
+
+      const instruction = String(parseHandoff(skill()).instruction);
+
+      expect(instruction).toContain("Never download, install");
+      expect(instruction).toContain("ask them to install Node.js");
+      // The absent skill files never reach a lookup: a run that cannot execute
+      // a script must not fail with a skill-installation error instead.
+      expect(instruction).toContain("Do not start the modeling run");
+    });
+
+    it("sanitizes the repository path in the refusal", () => {
+      const { skill } = createSkill(
+        requiredPaths(CANDIDATES.installed),
+        "1.2.3",
+        MODULE_DIR,
+        null
+      );
+
+      expect(parseHandoff(skill(" \t```")).repoPath).toBe(
+        "the current workspace"
+      );
+    });
   });
 });

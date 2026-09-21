@@ -763,6 +763,29 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
+  it("packages the no-install Node runtime boundary", () => {
+    assertCurrentArtifact();
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+
+    expect(skillGuidance).toContain(
+      '"<loaded-node>" "<loaded-skill-base>/scripts/<script>.mjs"'
+    );
+    expect(skillGuidance).toMatch(
+      /never as a bare `node`, `npx`, or `npm` command/u
+    );
+    expect(skillGuidance).toMatch(
+      /Never download, install, unpack, build, or vendor a Node\.js runtime/u
+    );
+    expect(skillGuidance).toMatch(
+      /ask the user to install Node\.js 24 or newer/u
+    );
+    // Every script invocation goes through the resolved interpreter; a bare
+    // `node` is what sent an agent looking for a runtime to download.
+    expect(skillGuidance).not.toMatch(
+      /(?:^|[^-])\bnode "<loaded-skill-base>\/scripts\//u
+    );
+  });
+
   it("packages the Bicep checker exit-code contract", () => {
     assertCurrentArtifact();
     const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
@@ -774,7 +797,7 @@ describe("P0-C built Radius extension artifact", () => {
       "Only exit `1` permits a model edit in response to checker output."
     );
     expect(exitTwoRow).toContain(
-      'node "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"'
+      '"<loaded-node>" "<loaded-skill-base>/scripts/promote-app-model.mjs" --abort --staging "<staging-dir>"'
     );
     expect(exitTwoRow).toContain(
       "report the exact checker failure, and state that no application model was written."
@@ -792,10 +815,10 @@ describe("P0-C built Radius extension artifact", () => {
       "An unavailable check still consumes its reserved attempt."
     );
     expect(skillGuidance).toContain(
-      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" <staging-dir>/app.bicep'
+      '"<loaded-node>" "<loaded-skill-base>/scripts/validate-bicep.mjs" <staging-dir>/app.bicep'
     );
     expect(skillGuidance).not.toContain(
-      'node "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep'
+      '"<loaded-node>" "<loaded-skill-base>/scripts/validate-bicep.mjs" .radius/app.bicep'
     );
   });
 

@@ -287,13 +287,15 @@
       "repoPath",
       "skillBase",
       "skillVersion",
+      "nodeCommand",
       "instruction"
     ],
     "skill": "radius-app-bicep",
     "repoPathMatchesWorkspace": true,
     "skillBaseRelativeToArtifact": "skills/radius-app-bicep",
     "skillVersionMatchesPackage": true,
-    "instruction": "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.",
+    "nodeCommandRunsScripts": true,
+    "instruction": "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute nodeCommand for <loaded-node>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.",
     "requiredFiles": [
       "SKILL.md",
       "scripts/promote-app-model.mjs",

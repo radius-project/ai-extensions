@@ -1083,6 +1083,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       "repoPath",
       "skillBase",
       "skillVersion",
+      "nodeCommand",
       "instruction",
       "brief"
     ]);
@@ -1090,7 +1091,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       skill: "radius-app-bicep",
       repoPath: "/workspace",
       skillBase: "/test/skills/radius-app-bicep",
-      skillVersion: "0.1.0-test"
+      skillVersion: "0.1.0-test",
+      nodeCommand: "/test/bin/node"
     });
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
 
@@ -1254,13 +1256,15 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       "repoPath",
       "skillBase",
       "skillVersion",
+      "nodeCommand",
       "instruction"
     ]);
     expect(handoff).toMatchObject({
       skill: "radius-app-bicep",
       repoPath: "/workspace",
       skillBase: "/test/skills/radius-app-bicep",
-      skillVersion: "0.1.0-test"
+      skillVersion: "0.1.0-test",
+      nodeCommand: "/test/bin/node"
     });
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith(
