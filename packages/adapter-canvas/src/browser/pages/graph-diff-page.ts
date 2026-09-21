@@ -14,13 +14,13 @@ import type {
   DomSelectElement
 } from "../ports.js";
 import { readPageState } from "./state.js";
+import { GRAPH_DIFF_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   showGraphModelingFailure,
   unsupportedGraphModelMessage
 } from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "graph-diff-page";
-export const GRAPH_DIFF_STATE_ID = "radius-graph-diff-state";
 export const DIFF_DEBOUNCE_MS = 500;
 export const DIFF_PROGRESS_MS = 800;
 // How long to wait before asking again while Copilot authors the model. The

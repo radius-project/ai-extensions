@@ -58,8 +58,8 @@ import {
   DEPLOYMENT_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
-  refreshProcessGitHubToken,
-  takeGitHubAppTokenConfig
+  readPlaywrightGitHubAppTokenConfig,
+  refreshProcessGitHubToken
 } from "./support/github-app-token.js";
 import {
   classifyWorkflowPublication,
@@ -90,8 +90,9 @@ import {
   findDeleteEnvironmentSuccessProblems
 } from "./support/delete-environment-journey.js";
 import {
-  applicationNamespace,
+  deploymentNamespace,
   classifyDeploymentPresence,
+  createTolerantProbe,
   DELETE_DEPLOYMENT_WORKFLOW,
   DELETE_ENVIRONMENT_WORKFLOW,
   describeDeployFailure,
@@ -115,6 +116,7 @@ import {
 import {
   describeUnprovisionedFixtureRepository,
   isFixtureRepositoryProvisioned,
+  resolveFixtureClusterTarget,
   resolveFixtureLocation
 } from "./support/fixture-repository.js";
 
@@ -125,7 +127,7 @@ const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
 const githubPackagesUser = process.env.GH_PACKAGES_USER?.trim() ?? "";
-const githubAppTokenConfig = takeGitHubAppTokenConfig();
+const githubAppTokenConfig = readPlaywrightGitHubAppTokenConfig();
 
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKFLOW_QUIESCENCE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -329,6 +331,11 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       throw new Error(
         "GH_PACKAGES_USER is required for the cloud lifecycle journey."
       );
+    const clusterTarget = resolveFixtureClusterTarget(
+      process.env.AIEXT_CLOUD_E2E_RESOURCE_GROUP,
+      process.env.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME,
+      process.env.CI === "true"
+    );
     fixture = await createCloudFixture({
       subscriptionId,
       // CI publishes the region; locally it is absent and the fixture's own
@@ -337,6 +344,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       location: resolveFixtureLocation(
         process.env.AIEXT_CLOUD_E2E_AZURE_LOCATION
       ),
+      resourceGroup: clusterTarget?.resourceGroup,
+      clusterName: clusterTarget?.clusterName,
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
@@ -570,7 +579,6 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             subscriptionId: cloud.subscriptionId,
             resourceGroup: cloud.resourceGroup,
             cluster: cloud.clusterName,
-            location: cloud.location,
             namespace: KUBERNETES_NAMESPACE
           }
         })
@@ -666,9 +674,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         }, applicationListingPath)
       );
       deployedApplication = requireSingleApplication(applications);
-      deployedNamespace = applicationNamespace(
-        KUBERNETES_NAMESPACE,
-        deployedApplication
+      deployedNamespace = deploymentNamespace(KUBERNETES_NAMESPACE);
+      cloud.registerApplicationCleanupTarget(
+        deployedApplication,
+        deployedNamespace
       );
 
       await page
@@ -763,19 +772,32 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         cloud.repository,
         true
       );
-      const rows = readDeploymentRows(
-        await page.evaluate(async (path) => {
-          const response = await fetch(path);
-          return (await response.json()) as unknown;
-        }, deploymentListingPath)
-      );
-      expect(
-        classifyDeploymentPresence(
+      // Read the same way stage three waits: a listing answered while GitHub
+      // has not yet attached a status to the deploy's own deployment record is
+      // a transient the canvas client absorbs, not a failed deploy.
+      const deployPresence = createTolerantProbe(async () => {
+        const rows = readDeploymentRows(
+          await page.evaluate(async (path) => {
+            const response = await fetch(path);
+            return (await response.json()) as unknown;
+          }, deploymentListingPath)
+        );
+        return classifyDeploymentPresence(
           rows,
           deployedApplication,
           cloud.environmentName
-        ).present
-      ).toBe(true);
+        ).present;
+      });
+      try {
+        await expect
+          .poll(deployPresence.read, {
+            timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+            intervals: [5_000]
+          })
+          .toBe(true);
+      } catch (error) {
+        throw deployPresence.explain(error);
+      }
     } catch (error) {
       primaryError = error;
       throw error;
@@ -936,31 +958,36 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         throw error;
       }
 
-      await expect
-        .poll(
-          async () => {
-            const rows = readDeploymentRows(
-              await page.evaluate(
-                async (path) => {
-                  const response = await fetch(path);
-                  return (await response.json()) as unknown;
-                },
-                repositoryListingPath(
-                  "/api/list-deployments",
-                  cloud.repository,
-                  true
-                )
-              )
-            );
-            return classifyDeploymentPresence(
-              rows,
-              deployedApplication,
-              cloud.environmentName
-            ).present;
-          },
-          { timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS, intervals: [5_000] }
-        )
-        .toBe(false);
+      const deletionPresence = createTolerantProbe(async () => {
+        const rows = readDeploymentRows(
+          await page.evaluate(
+            async (path) => {
+              const response = await fetch(path);
+              return (await response.json()) as unknown;
+            },
+            repositoryListingPath(
+              "/api/list-deployments",
+              cloud.repository,
+              true
+            )
+          )
+        );
+        return classifyDeploymentPresence(
+          rows,
+          deployedApplication,
+          cloud.environmentName
+        ).present;
+      });
+      try {
+        await expect
+          .poll(deletionPresence.read, {
+            timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+            intervals: [5_000]
+          })
+          .toBe(false);
+      } catch (error) {
+        throw deletionPresence.explain(error);
+      }
 
       await cloud.assertApplicationWorkloadsAbsent(
         deployedApplication,

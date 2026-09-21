@@ -10,7 +10,8 @@ import {
   ENVIRONMENT_PAGE_STATE_ID
 } from "./browser-state-ids.js";
 import { pageShell } from "./shell.js";
-import { inlineJson, safeExternalHref } from "./encoding.js";
+import { safeExternalHref } from "./encoding.js";
+import { renderPageState } from "./page-state.js";
 import { environmentsPaneMarkup } from "./environment/environments-pane.js";
 import { credentialsPaneMarkup } from "./environment/credentials-pane.js";
 import { confirmDialogMarkup } from "./environment/confirm-dialog.js";
@@ -54,9 +55,9 @@ ${
 }
 <button id="back-btn" style="margin-top:16px; padding:8px 16px; background:var(--rad-neutral-bg); color:var(--rad-neutral-text); border:1px solid var(--rad-neutral-border); border-radius:6px; font-size:13px; cursor:pointer;">← Back to Deploy</button>
 <div id="deploy-reset-status" class="status error" role="alert" style="display:none; margin-top:12px;"></div>
-<div hidden id="${DEPLOY_RESULT_STATE_ID}">${escapeHtml(
-        inlineJson({ attemptId: state?.deployAttempt?.id || "" })
-      )}</div>
+${renderPageState(DEPLOY_RESULT_STATE_ID, {
+  attemptId: state?.deployAttempt?.id || ""
+})}
 ${browserScriptTag("deploy-result-page")}`
     );
   }
@@ -322,18 +323,16 @@ ${confirmDialogMarkup()}
 }
 </style>
 
-<div hidden id="${ENVIRONMENT_PAGE_STATE_ID}">${escapeHtml(
-      inlineJson({
-        repo: ctxRepo,
-        branch: ctxBranch,
-        activeSubtab,
-        ghCommandPresentation: state.ghCommandPresentation,
-        mutationNonce:
-          typeof state.browserMutationNonce === "string" ?
-            state.browserMutationNonce
-          : ""
-      })
-    )}</div>
+${renderPageState(ENVIRONMENT_PAGE_STATE_ID, {
+  repo: ctxRepo,
+  branch: ctxBranch,
+  activeSubtab,
+  ghCommandPresentation: state.ghCommandPresentation,
+  mutationNonce:
+    typeof state.browserMutationNonce === "string" ?
+      state.browserMutationNonce
+    : ""
+})}
 ${browserScriptTag("environment-page")}`
   );
 }

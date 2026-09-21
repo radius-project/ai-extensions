@@ -14,11 +14,23 @@ interface CleanupApplication {
 
 interface CleanupServicePrincipal {
   readonly id: string;
+  readonly appId: string;
 }
 
 interface CleanupResourceGroup {
   readonly name: string;
   readonly runId: string;
+}
+
+export interface CleanupRoleAssignment {
+  readonly id: string;
+  readonly roleDefinitionName: string;
+  readonly scope: string;
+}
+
+export interface ExpectedRoleAssignment {
+  readonly roleDefinitionName: string;
+  readonly scope: string;
 }
 
 const ISO_INSTANT_PATTERN =
@@ -28,6 +40,21 @@ const GENERATED_FALLBACK_BRANCH_PATTERN =
 const RADIUS_MANAGED_APP_TAG = "radius-managed";
 const RADIUS_REPO_APP_TAG_PREFIX = "radius-repo:";
 const RADIUS_ENVIRONMENT_APP_TAG_PREFIX = "radius-environment:";
+const RADIUS_ENVIRONMENT_LABEL = "radapp.io/environment";
+const RADIUS_APPLICATION_LABEL = "radapp.io/application";
+// `radius-system` holds the control plane this suite installs, so an object
+// mislabelled into it must be refused rather than reclaimed.
+const SYSTEM_NAMESPACES = new Set([
+  "kube-system",
+  "kube-public",
+  "kube-node-lease",
+  "radius-system"
+]);
+// The writer appends the environment slug and twelve hex characters of the
+// environment identity, so a package sharing only the prefix is not state.
+const STATE_PACKAGE_SUFFIX = /^[a-z0-9-]+-[0-9a-f]{12}$/;
+// Azure reports resource types in mixed case, so comparisons are lowercased.
+const MANAGED_CLUSTER_TYPE = "microsoft.containerservice/managedclusters";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ?
@@ -196,9 +223,46 @@ export function selectExpiredServicePrincipals(
       allowedAppIds.has(item.appId) &&
       expired(item.createdDateTime, cutoffMilliseconds)
     )
-      principals.push({ id: item.id });
+      principals.push({ id: item.id, appId: item.appId });
   }
   return principals;
+}
+
+/**
+ * The appIds whose application must not be deleted because a matching service
+ * principal was never selected for deletion.
+ *
+ * `selectExpiredServicePrincipals` deliberately excludes a principal whose own
+ * creation time is newer than the cutoff or was not returned by Graph. Deleting
+ * the parent application anyway cascade-deletes that principal, which strands
+ * its role assignments with no object left to match them against. Fail closed
+ * on the raw inventory rather than on the selection.
+ */
+export function selectAppIdsWithUnprocessedServicePrincipals(
+  payload: unknown,
+  displayName: string,
+  applicationAppIds: readonly string[],
+  selectedPrincipals: readonly CleanupServicePrincipal[]
+): string[] {
+  const candidateAppIds = new Set(applicationAppIds);
+  const selectedIds = new Set(selectedPrincipals.map((entry) => entry.id));
+  const blocked = new Set<string>();
+  for (const entry of requireArray(
+    payload,
+    "Microsoft Graph service principals"
+  )) {
+    const item = asRecord(entry);
+    if (
+      item?.displayName === displayName &&
+      typeof item.id === "string" &&
+      item.id !== "" &&
+      typeof item.appId === "string" &&
+      candidateAppIds.has(item.appId) &&
+      !selectedIds.has(item.id)
+    )
+      blocked.add(item.appId);
+  }
+  return [...blocked];
 }
 
 export function selectExpiredEnvironments(
@@ -229,8 +293,10 @@ export function selectExpiredEnvironments(
 
 export function selectTestResourceGroups(
   payload: unknown,
-  prefix: string
+  prefix: string,
+  excludedResourceGroup?: string
 ): CleanupResourceGroup[] {
+  const excluded = excludedResourceGroup?.trim().toLowerCase();
   const groups: CleanupResourceGroup[] = [];
   for (const entry of requireArray(payload, "Azure resource groups")) {
     const item = asRecord(entry);
@@ -239,12 +305,56 @@ export function selectTestResourceGroups(
     if (
       typeof item?.name === "string" &&
       item.name.startsWith(prefix) &&
+      item.name.toLowerCase() !== excluded &&
       tags?.["radius-canvas-e2e"] === "true" &&
       /^\d+$/.test(runId)
     )
       groups.push({ name: item.name, runId });
   }
   return groups;
+}
+
+export function selectExpectedRoleAssignments(
+  payload: unknown,
+  principalId: string,
+  expected: readonly ExpectedRoleAssignment[]
+): CleanupRoleAssignment[] {
+  const normalizedPrincipalId = principalId.trim().toLowerCase();
+  if (!normalizedPrincipalId)
+    throw new Error("A service-principal id is required for RBAC cleanup.");
+  const expectedKeys = new Set(
+    expected.map(
+      (assignment) =>
+        `${assignment.scope.toLowerCase()}\n${assignment.roleDefinitionName.toLowerCase()}`
+    )
+  );
+  const assignments: CleanupRoleAssignment[] = [];
+  for (const [index, entry] of requireArray(
+    payload,
+    "Azure role assignments"
+  ).entries()) {
+    const item = asRecord(entry);
+    if (
+      requireString(item?.principalId).toLowerCase() !== normalizedPrincipalId
+    )
+      continue;
+    const assignment = {
+      id: requireString(item?.id),
+      roleDefinitionName: requireString(item?.roleDefinitionName),
+      scope: requireString(item?.scope)
+    };
+    if (!assignment.id || !assignment.roleDefinitionName || !assignment.scope)
+      throw new Error(
+        `Azure role assignment ${index} did not include id, roleDefinitionName, and scope.`
+      );
+    const key = `${assignment.scope.toLowerCase()}\n${assignment.roleDefinitionName.toLowerCase()}`;
+    if (!expectedKeys.has(key))
+      throw new Error(
+        `Refusing to delete unexpected role assignment "${assignment.roleDefinitionName}" at ${assignment.scope} for principal ${principalId}.`
+      );
+    assignments.push(assignment);
+  }
+  return assignments;
 }
 
 export function selectExpiredFallbackPullRequests(
@@ -301,4 +411,178 @@ export function selectExpiredFallbackBranches(
       branches.push(ref);
   }
   return branches;
+}
+
+/**
+ * Every GHCR state package the fixture has left behind.
+ *
+ * The other state sweep walks the fixture's GitHub Environments and derives the
+ * package name from each one, so it can only ever see state whose environment
+ * still exists. A journey deletes its environment during teardown and can then
+ * fail before deleting the package, and because the name ends in twelve hex
+ * characters of the environment identity, the name is unrecoverable once the
+ * environment is gone. That state is then unreachable forever.
+ *
+ * Cleanup returns the fixture to a pristine baseline and no run shares it, so
+ * anything older than the threshold is simply reclaimed: there is no live state
+ * worth keeping. The age check exists only so a sweep cannot delete state out
+ * from under a run that is still going. The name must match the full shape the
+ * writer produces - prefix, environment slug, then twelve hex characters -
+ * because an unrelated package may share the prefix. A package with no readable
+ * `updated_at` is skipped rather than deleted: an unparseable timestamp must
+ * fail towards keeping data.
+ */
+export function selectStaleStatePackages(
+  payload: unknown,
+  prefix: string,
+  cutoff: string
+): string[] {
+  if (!prefix.trim())
+    throw new Error(
+      "A state package prefix is required to select stale state packages."
+    );
+  const cutoffMilliseconds = requireCutoff(cutoff);
+  const names: string[] = [];
+  for (const entry of flattenPages(payload, "GHCR packages")) {
+    const item = asRecord(entry);
+    const name = requireString(item?.name);
+    if (
+      name.startsWith(prefix) &&
+      STATE_PACKAGE_SUFFIX.test(name.slice(prefix.length)) &&
+      expired(item?.updated_at, cutoffMilliseconds)
+    )
+      names.push(name);
+  }
+  return names;
+}
+
+export interface ReclaimableGroupResource {
+  readonly id: string;
+  readonly name: string;
+  readonly type: string;
+}
+
+/**
+ * Everything in the shared resource group except the cluster itself.
+ *
+ * A recipe provisions real Azure resources - the suite's Postgres becomes a
+ * flexible server - into whichever resource group the environment names. When
+ * that is a per-run `radtest-*` group, deleting the group reclaims them. When
+ * it is the long-lived group that holds the cluster, nothing does: Radius tags
+ * none of them, so no sweep can tell one apart from an unrelated resource, and
+ * a failed application delete strands it there indefinitely.
+ *
+ * This group exists only to run the Cloud E2E suite, so its contents are
+ * reclaimed wholesale rather than identified individually. Age is not consulted
+ * for the same reason the per-run groups are deleted on sight: the shared
+ * concurrency group means a purge never runs beside a journey, so anything
+ * still here is left over from one that has already finished.
+ *
+ * The cluster is refused, and so is every other managed cluster, since deleting
+ * one would strand its node resource group and break every later run. The
+ * configured cluster must actually be present: a group without it is not the
+ * group this sweep was pointed at, and emptying it would destroy something
+ * nobody intended.
+ */
+export function selectReclaimableGroupResources(
+  payload: unknown,
+  clusterName: string
+): ReclaimableGroupResource[] {
+  if (!clusterName.trim())
+    throw new Error(
+      "A cluster name is required to select reclaimable resource group contents."
+    );
+  const reclaimable: ReclaimableGroupResource[] = [];
+  let clusterFound = false;
+  for (const entry of requireArray(payload, "Azure resources")) {
+    const item = asRecord(entry);
+    const id = requireString(item?.id);
+    const name = requireString(item?.name);
+    const type = requireString(item?.type);
+    if (!id || !name || !type)
+      throw new Error(
+        "An Azure resource in the shared resource group is missing an id, name or type."
+      );
+    if (type.toLowerCase() === MANAGED_CLUSTER_TYPE) {
+      if (name === clusterName) clusterFound = true;
+      continue;
+    }
+    reclaimable.push({ id, name, type });
+  }
+  if (!clusterFound)
+    throw new Error(
+      `The resource group does not contain cluster "${clusterName}", so it is not the shared Cloud E2E ` +
+        "group; refusing to delete any of its contents."
+    );
+  return reclaimable;
+}
+
+export interface LeakedClusterWorkload {
+  readonly kind: string;
+  readonly name: string;
+  readonly namespace: string;
+  readonly environment: string;
+}
+
+/**
+ * Radius-rendered objects the fixture has left running on the shared cluster.
+ *
+ * Deleting the Radius application is meant to remove these, and when that
+ * fails, nothing else does: no other sweep reads the cluster, so a rendered
+ * workload outlives its run indefinitely and keeps consuming shared capacity.
+ * Worse, a later run rendering the same application reuses the same object, so
+ * a single leak silently absorbs every subsequent run instead of showing up as
+ * a new one - which is exactly how one Deployment survived three runs.
+ *
+ * An object qualifies on identity, not on whether its environment still exists:
+ * the fixture's environment prefix and its exact application label. Nothing
+ * else on this cluster carries both, and no run shares the fixture, so every
+ * match is the fixture's to reclaim. Age is the only thing that protects a run
+ * in flight, and a reused object keeps the creation timestamp of the run that
+ * first rendered it, so a leak stays reclaimable no matter how often it is
+ * rolled. An object with no readable `creationTimestamp` is left alone. System
+ * namespaces are refused outright; nothing this suite creates belongs in one,
+ * so a match there means the label is being misread.
+ */
+export function selectLeakedClusterWorkloads(
+  payload: unknown,
+  environmentPrefix: string,
+  application: string,
+  cutoff: string
+): LeakedClusterWorkload[] {
+  if (!environmentPrefix.trim())
+    throw new Error(
+      "An environment prefix is required to select leaked cluster workloads."
+    );
+  if (!application.trim())
+    throw new Error(
+      "An application name is required to select leaked cluster workloads."
+    );
+  const cutoffMilliseconds = requireCutoff(cutoff);
+  const items = asRecord(payload)?.items;
+  const leaked: LeakedClusterWorkload[] = [];
+  for (const entry of requireArray(items, "Kubernetes objects")) {
+    const item = asRecord(entry);
+    const metadata = asRecord(item?.metadata);
+    const labels = asRecord(metadata?.labels);
+    const environment = requireString(labels?.[RADIUS_ENVIRONMENT_LABEL]);
+    if (!environment.startsWith(environmentPrefix)) continue;
+    if (requireString(labels?.[RADIUS_APPLICATION_LABEL]) !== application)
+      continue;
+    if (!expired(metadata?.creationTimestamp, cutoffMilliseconds)) continue;
+
+    const kind = requireString(item?.kind);
+    const name = requireString(metadata?.name);
+    const namespace = requireString(metadata?.namespace);
+    if (!kind || !name || !namespace)
+      throw new Error(
+        `Kubernetes object labelled for environment "${environment}" is missing a kind, name or namespace.`
+      );
+    if (SYSTEM_NAMESPACES.has(namespace))
+      throw new Error(
+        `Refusing to reclaim ${kind} "${name}" from system namespace "${namespace}".`
+      );
+    leaked.push({ kind, name, namespace, environment });
+  }
+  return leaked;
 }

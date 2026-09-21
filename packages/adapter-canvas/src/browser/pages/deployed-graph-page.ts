@@ -34,9 +34,9 @@ import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
+import { DEPLOYED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 
 const ENTRY_KEY = "deployed-graph-page";
-export const DEPLOYED_GRAPH_STATE_ID = "radius-deployed-graph-state";
 export const DEPLOYED_GRAPH_POLL_MS = 15_000;
 export const DEPLOYED_PROGRESS_STEPS_ID = "deployed-progress-steps";
 export const DEPLOYED_STATE_POLL_MS = 4_000;

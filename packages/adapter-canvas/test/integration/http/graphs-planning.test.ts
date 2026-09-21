@@ -19,9 +19,11 @@ import type {
   WorkflowArtifact
 } from "../../../src/deploy-artifacts.js";
 import {
+  applyDeployMessages,
   buildDeployMessageMap,
   buildDeployStatusMap,
   createDeployStatusReader,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   DEPLOY_STATUS_FILES,
   settleDeployStatuses
 } from "../../../src/deploy-artifacts.js";
@@ -61,11 +63,6 @@ interface Harness {
 // production produces rather than a fixture the fakes invented. Only the
 // artifact reader is scripted: it is the sole seam that would otherwise reach
 // the network.
-function keysOf(resource: unknown): string[] {
-  const value = (resource ?? {}) as { id?: unknown; name?: unknown };
-  return [String(value.id ?? ""), String(value.name ?? "")].filter(Boolean);
-}
-
 function start(actualReader?: DeployedGraphStatusReader): Harness {
   const state: CanvasState = {};
   const reader: ReaderScript = {};
@@ -116,12 +113,7 @@ function start(actualReader?: DeployedGraphStatusReader): Harness {
       mergeDeployedGraphMetadata,
       projectDeployedGraph,
       canvasGraphResources: (values) => values as CanvasGraphResource[],
-      applyDeployMessages: (resources, messageMap) => {
-        for (const resource of resources) {
-          const message = messageMap.get(keysOf(resource)[0] ?? "");
-          if (message) resource.deployMessage = message;
-        }
-      },
+      applyDeployMessages,
       settleDeployStatuses,
       errorMessage: (error) =>
         error instanceof Error ? error.message : String(error),
@@ -172,6 +164,279 @@ function start(actualReader?: DeployedGraphStatusReader): Harness {
 }
 
 describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
+  it.each([
+    ["cancelled", "", undefined, "Deployment cancelled"],
+    ["timed_out", "", undefined, "Deployment timed out"],
+    [
+      "failure",
+      "Error: recipe quota exceeded",
+      undefined,
+      "Error: recipe quota exceeded"
+    ],
+    [
+      "monitor_timed_out",
+      "",
+      "run-unconfirmed",
+      DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+    ],
+    [
+      "failure",
+      "Quota exceeded.\n".repeat(300),
+      undefined,
+      "Quota exceeded.\n".repeat(300).slice(0, 497) + "..."
+    ]
+  ] as const)(
+    "retains the settled %s message through HTTP with error kind %s",
+    async (conclusion, detail, errorKind, expected) => {
+      const harness = start();
+      harness.state.contextRepo = "octo/app";
+      harness.state.deployRunId = 7;
+      harness.state.deployStatus = "failed";
+      harness.state.deployErrorKind = errorKind;
+      harness.state.deployingResources = [
+        {
+          id: "db",
+          name: "db",
+          deployStatus: "in_progress",
+          deployMessage: "creating"
+        },
+        {
+          id: "api",
+          name: "api",
+          deployStatus: "success",
+          deployMessage: "creating"
+        },
+        {
+          id: "cache",
+          name: "cache",
+          deployStatus: "failed",
+          deployMessage: "cache quota exceeded"
+        }
+      ];
+      settleDeployStatuses(
+        harness.state.deployingResources,
+        conclusion,
+        detail
+      );
+      harness.modeledResources.push(
+        ...["db", "api", "cache"].map((id) => ({ id, name: id }))
+      );
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+      const payload = (await response.json()) as {
+        mode: string;
+        resources: CanvasGraphResource[];
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.mode).toBe("terminal");
+      expect(
+        payload.resources.map((resource) => [
+          resource.deployStatus,
+          resource.deployMessage
+        ])
+      ).toEqual([
+        ["failed", expected],
+        ["success", undefined],
+        ["failed", "cache quota exceeded"]
+      ]);
+      expect(harness.state.deployErrorKind).toBe(errorKind);
+    }
+  );
+
+  it("does not revive timed-out nodes from the last in-progress artifact", async () => {
+    const harness = start();
+    harness.state.contextRepo = "octo/app";
+    harness.state.deployRunId = 7;
+    harness.state.deployStatus = "failed";
+    harness.state.deployErrorKind = "run-unconfirmed";
+    harness.state.deployingResources = [
+      { id: "db", name: "db", deployStatus: "in_progress" },
+      { id: "api", name: "api", deployStatus: "success" }
+    ];
+    settleDeployStatuses(harness.state.deployingResources, "monitor_timed_out");
+    harness.modeledResources.push(
+      { id: "db", name: "db" },
+      { id: "api", name: "api" }
+    );
+    harness.reader.progress = {
+      schemaVersion: 1,
+      application: "test-app",
+      environment: "default",
+      sequence: 1,
+      runId: 7,
+      state: "in_progress",
+      resources: ["db", "api"].map((id) => ({
+        id,
+        name: id,
+        type: "Radius.Compute/containers",
+        status: "in_progress",
+        message: "creating"
+      }))
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+    const payload = (await response.json()) as {
+      mode: string;
+      resources: CanvasGraphResource[];
+    };
+
+    expect(payload.mode).toBe("terminal");
+    expect(
+      payload.resources.map((resource) => [
+        resource.deployStatus,
+        resource.deployMessage
+      ])
+    ).toEqual([
+      ["failed", DEPLOY_MONITOR_TIMED_OUT_MESSAGE],
+      ["success", undefined]
+    ]);
+    expect(harness.state.deployErrorKind).toBe("run-unconfirmed");
+  });
+
+  it.each([
+    [undefined, "Monitoring stopped"],
+    [6, "Monitoring stopped"],
+    [7, "Final Radius error"]
+  ] as const)(
+    "uses artifact workflow identity %s when a terminal payload omits runId",
+    async (artifactRunId, expectedMessage) => {
+      const harness = start();
+      Object.assign(harness.state, {
+        contextRepo: "octo/app",
+        deployRunId: 7,
+        deployStatus: "failed",
+        deployErrorKind: "run-unconfirmed",
+        deployingResources: [
+          {
+            id: "db",
+            name: "db",
+            deployStatus: "failed",
+            deployMessage: "Monitoring stopped"
+          }
+        ]
+      });
+      harness.modeledResources.push({ id: "db", name: "db" });
+      harness.reader.graph = {
+        graph: null,
+        status: "ok",
+        artifact: {
+          id: 1,
+          name: "radius-deploy-status",
+          workflow_run:
+            artifactRunId == null ? undefined : { id: artifactRunId }
+        }
+      };
+      harness.reader.progress = {
+        schemaVersion: 1,
+        application: "test-app",
+        environment: "default",
+        sequence: 2,
+        state: "failed",
+        resources: [
+          {
+            id: "db",
+            name: "db",
+            type: "Radius.Data/sqlDatabases",
+            status: "failed",
+            message: "Final Radius error"
+          }
+        ]
+      };
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        mode: "terminal",
+        resources: [{ deployStatus: "failed", deployMessage: expectedMessage }]
+      });
+      expect(harness.state.deployErrorKind).toBe("run-unconfirmed");
+    }
+  );
+
+  it.each(["failed", "succeeded"] as const)(
+    "replaces the timeout presentation when the same run publishes a %s artifact",
+    async (artifactState) => {
+      const harness = start();
+      harness.state.contextRepo = "octo/app";
+      harness.state.deployRunId = 7;
+      harness.state.deployStatus = "failed";
+      harness.state.deployErrorKind = "run-unconfirmed";
+      harness.state.deployingResources = [
+        { id: "db", name: "db", deployStatus: "in_progress" },
+        { id: "api", name: "api", deployStatus: "success" }
+      ];
+      settleDeployStatuses(
+        harness.state.deployingResources,
+        "monitor_timed_out"
+      );
+      harness.modeledResources.push(
+        { id: "db", name: "db" },
+        { id: "api", name: "api" }
+      );
+      const entry = await container!.getOrCreate("panel-a");
+      const before = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+      expect(before.status).toBe(200);
+      expect(await before.json()).toMatchObject({
+        resources: [
+          {
+            deployStatus: "failed",
+            deployMessage: DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+          },
+          { deployStatus: "success" }
+        ]
+      });
+
+      harness.reader.progress = {
+        schemaVersion: 1,
+        application: "test-app",
+        environment: "default",
+        sequence: 2,
+        runId: 7,
+        state: artifactState,
+        resources: [
+          {
+            id: "db",
+            name: "db",
+            type: "Radius.Data/sqlDatabases",
+            status: artifactState === "failed" ? "failed" : "success",
+            message:
+              artifactState === "failed" ? "Radius quota exceeded" : undefined
+          },
+          {
+            id: "api",
+            name: "api",
+            type: "Radius.Compute/containers",
+            status: "success"
+          }
+        ]
+      };
+      const after = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+      const payload = (await after.json()) as {
+        mode: string;
+        resources: CanvasGraphResource[];
+      };
+
+      expect(after.status).toBe(200);
+      expect(payload.mode).toBe("terminal");
+      expect(
+        payload.resources.map((resource) => [
+          resource.deployStatus,
+          resource.deployMessage
+        ])
+      ).toEqual([
+        artifactState === "failed" ?
+          ["failed", "Radius quota exceeded"]
+        : ["success", undefined],
+        ["success", undefined]
+      ]);
+      expect(harness.state.deployErrorKind).toBe("run-unconfirmed");
+    }
+  );
   it("keeps revalidated inventory across reader TTLs but rejects regressions and failed refreshes", async () => {
     let clock = 0;
     let sequence = 2;
@@ -336,6 +601,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
           name: "never-created",
           type: "Radius.Resources/containers",
           deployStatus: "failed",
+          deployMessage: "Deployment failed",
           connections: [],
           outputResources: []
         }

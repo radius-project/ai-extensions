@@ -357,6 +357,7 @@ export async function handleDeployedGraph(
     namedSelectionPartMatches(state.deployAppName || "", requestedApp);
   const deploying =
     state.deployStatus === "in_progress" && sessionMatchesSelection;
+  const monitorRunId = state.deployRunId;
 
   const statusByKey = new Map<string, DeployStatus>();
   // Seed the resources the deploy monitor tracks so an empty artifact read keeps
@@ -375,6 +376,7 @@ export async function handleDeployedGraph(
   let readOk = false;
   let updatedAt: string | null = null;
   let progress: DeployProgress | null = null;
+  let artifactRunId: string | number | null = null;
   let deletionInventory: DeletionInventory | null = null;
   const inventoryApplication = (
     url.searchParams.get("application") || ""
@@ -409,11 +411,13 @@ export async function handleDeployedGraph(
     publishedGraph = result.graph;
     readOk = result.status === "ok" || result.status === "stale";
     progress = await reader.progress();
+    artifactRunId =
+      progress?.runId ?? result.artifact?.workflow_run?.id ?? null;
     const artifactRunMismatchesSession =
       sessionMatchesSelection &&
       state.deployRunId != null &&
-      progress?.runId != null &&
-      String(progress.runId) !== String(state.deployRunId);
+      artifactRunId != null &&
+      String(artifactRunId) !== String(state.deployRunId);
     const attemptBoundary = Math.max(
       state.deployStartedAt ?? 0,
       state.deployFinishedAt ?? 0
@@ -425,18 +429,25 @@ export async function handleDeployedGraph(
         attemptBoundary > 0 &&
         Number.isFinite(artifactCreatedAt) &&
         artifactCreatedAt > attemptBoundary);
+    const terminalArtifactNeedsIdentity =
+      sessionMatchesSelection &&
+      state.deployRunId != null &&
+      state.deployErrorKind === "run-unconfirmed" &&
+      (progress?.state === "failed" || progress?.state === "succeeded");
     const activeArtifactMatchesRun =
       deploying ?
         state.deployRunId != null &&
-        progress?.runId != null &&
-        String(progress.runId) === String(state.deployRunId)
-      : mismatchedArtifactIsNewer;
+        artifactRunId != null &&
+        String(artifactRunId) === String(state.deployRunId)
+      : mismatchedArtifactIsNewer &&
+        (!terminalArtifactNeedsIdentity || artifactRunId != null);
     if (!activeArtifactMatchesRun) {
-      // Run discovery has not completed, or an unscoped read found a previous
-      // run. Keep the active monitor state and do not expose stale graph metadata.
+      // Unknown or older artifact identity cannot establish the tracked run's
+      // outcome. Keep monitor state without exposing unrelated graph metadata.
       publishedGraph = null;
       readOk = false;
       progress = null;
+      artifactRunId = null;
     } else {
       updatedAt = progress?.updatedAt || null;
       if (progress?.application) resolvedApp = progress.application;
@@ -446,8 +457,7 @@ export async function handleDeployedGraph(
       for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
         statusByKey.set(key, status);
       }
-      // Messages have no in-session seed, so first-wins only protects duplicate
-      // weaker identity keys within this one snapshot.
+      // First-wins protects duplicate weaker identity keys in this snapshot.
       for (const [key, message] of dependencies.buildDeployMessageMap(
         progress
       )) {
@@ -487,9 +497,40 @@ export async function handleDeployedGraph(
     publishedGraph != null ||
     (sessionMatchesSelection && state.deployedGraph != null);
   const artifactMatchesSessionRun =
-    progress?.runId == null ||
+    artifactRunId == null ||
     state.deployRunId == null ||
-    String(progress.runId) === String(state.deployRunId);
+    String(artifactRunId) === String(state.deployRunId);
+
+  // A terminal monitor snapshot includes the run-level explanation that an
+  // incomplete artifact cannot carry. Overlay it after the read: the monitor
+  // may have finished while that read was pending. A terminal artifact from
+  // this run or a newer deployment must supersede the snapshot. An unconfirmed
+  // run keeps its existing repair guard rather than acquiring a made-up conclusion.
+  if (
+    sessionMatchesSelection &&
+    artifactMatchesSessionRun &&
+    progress?.state !== "failed" &&
+    progress?.state !== "succeeded" &&
+    monitorRunId != null &&
+    state.deployRunId === monitorRunId &&
+    (state.deployStatus === "complete" || state.deployStatus === "failed") &&
+    Array.isArray(state.deployingResources)
+  ) {
+    const settledKeys = new Set<string>();
+    for (const resource of state.deployingResources) {
+      const status = resource.deployStatus;
+      if (status !== "success" && status !== "failed") continue;
+      for (const key of dependencies.deployStatusKeys(resource)) {
+        if (settledKeys.has(key)) continue;
+        settledKeys.add(key);
+        statusByKey.set(key, status);
+        messageByKey.delete(key);
+        if (status === "failed" && resource.deployMessage?.trim()) {
+          messageByKey.set(key, resource.deployMessage);
+        }
+      }
+    }
+  }
 
   const terminalConclusion =
     (

@@ -34,14 +34,15 @@ const STAGING_RESOLVED_TYPES = "resolved-types.json";
 const RESOLVED_TYPES_CONTRACT_VERSION = 1;
 const REPAIR_ATTEMPT_BUDGET = 5;
 const REPAIR_COMPILE_LIMIT = REPAIR_ATTEMPT_BUDGET + 1;
+const EXIT_SUCCESS = 0;
+const EXIT_MODEL_INVALID = 1;
+const EXIT_CHECK_UNAVAILABLE = 2;
 
 function repairBudgetSpentMessage(attempts) {
   return (
-    `The application model was compiled ${attempts} times in this modeling run and still does not build, ` +
-    `so the repair budget of ${REPAIR_ATTEMPT_BUDGET} is spent and it was not compiled again. ` +
-    "Stop repairing: do not write the origin record and do not publish the run. " +
-    "Report to the user which resource and property the compiler rejected, quote the last compiler output verbatim, " +
-    "and say that no application definition was written."
+    `This modeling run has reserved ${attempts} validation attempts, so the limit of ${REPAIR_COMPILE_LIMIT} has been reached. ` +
+    "No new validation was run. Abort the staged run: do not write the origin record and do not publish the run. " +
+    "Report this exact refusal to the user and say that no application definition was written."
   );
 }
 
@@ -62,8 +63,8 @@ function parseRepairState(value) {
   const attempts = value.attempts;
   const fingerprint = value.fingerprint;
   // The two fields are read as one fact, not two. A fingerprint only means
-  // "what the previous attempt failed with", so without a usable count there is
-  // no previous attempt for it to describe, and keeping it would report the
+  // "the most recent actionable model failure", so without a usable count there
+  // is no earlier attempt for it to describe, and keeping it would report the
   // first compile of the run as a repeat.
   if (
     typeof attempts !== "number" ||
@@ -194,9 +195,33 @@ function reserveAttempt(run, fingerprint) {
 function brokenRecordMessage(file, detail) {
   return (
     `The repair budget for this modeling run could not be recorded in ${file}${detail ? `: ${detail}` : ""}. ` +
-    "The application model was not compiled, because a budget that cannot be counted cannot be enforced, " +
+    "Validation did not run, because a budget that cannot be counted cannot be enforced, " +
     "and an uncounted repair loop is what this limit exists to prevent. " +
-    "Start the modeling run again with promote-app-model.mjs --begin."
+    "Abort the staged run: do not retry validation, do not modify the current model, do not start another modeling run, " +
+    "do not write the origin record, and do not publish the run. " +
+    "Report this exact failure to the user and say that no application definition was written."
+  );
+}
+
+function isUsableDiagnostic(result) {
+  if (!isPlainObject(result) || !isPlainObject(result.message)) {
+    return false;
+  }
+
+  const hasText =
+    typeof result.message.text === "string" &&
+    result.message.text.trim() !== "";
+  const informational = result.level === "note" || result.level === "none";
+  return (
+    (result.level === undefined ||
+      ["none", "note", "warning", "error"].includes(result.level)) &&
+    (result.ruleId === undefined || typeof result.ruleId === "string") &&
+    (hasText ||
+      (informational &&
+        ((typeof result.message.markdown === "string" &&
+          result.message.markdown.trim() !== "") ||
+          (typeof result.message.id === "string" &&
+            result.message.id.trim() !== ""))))
   );
 }
 
@@ -212,20 +237,13 @@ function diagnostics(output) {
       if (run === null || typeof run !== "object" || Array.isArray(run)) {
         return null;
       }
-      const runResults = run.results ?? [];
+      const runResults = run.results === undefined ? [] : run.results;
       if (!Array.isArray(runResults)) {
         return null;
       }
       results.push(...runResults);
     }
-    if (
-      !results.every(
-        (result) =>
-          result !== null &&
-          typeof result === "object" &&
-          !Array.isArray(result)
-      )
-    ) {
+    if (!results.every(isUsableDiagnostic)) {
       return null;
     }
     return results;
@@ -241,6 +259,42 @@ const reported = [];
 function report(message) {
   reported.push(message);
   console.error(message);
+}
+
+// What to write instead, for the diagnostics that have one correct answer.
+//
+// Bicep says what is wrong but not what to replace it with, and the linter
+// findings below carry no SARIF `level`, so they print as "warning" while
+// `isFailure` still fails the build. A model that reads one as advice spends
+// repair attempts rediscovering a rule the schema already stated, so the remedy
+// travels on the line that reports the problem.
+//
+// The secure-value wording is deliberately exact about what Bicep accepts: a
+// `@secure()` parameter referenced by name, directly or through a variable that
+// aliases it, stays secure, while any interpolation loses secureness even when
+// every operand is secure. Saying "use a variable" or "never use a variable"
+// would both send the model at a fix that does not compile.
+//
+// It is also careful about what it claims to know. These hints key on the rule
+// Bicep reported, not on the staged schema, so the remedy describes the
+// compiled type's own annotation and names `x-radius-sensitive` only as what
+// produces it for a Radius type. Asserting the schema flag outright would state
+// a fact this function never checked, and would misattribute the cause for any
+// secure-annotated type that does not derive it from `x-radius-sensitive`.
+function repairHint(ruleId, text) {
+  if (ruleId === "BCP037" && /\bcodeReference\b/u.test(text)) {
+    return " For a Radius.Resources custom type, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz before compiling again.";
+  }
+  if (ruleId === "use-secure-value-for-secure-inputs") {
+    return " The compiled type marks this property secure — for a Radius type, from x-radius-sensitive in its schema — so it takes the value of a @secure() parameter referenced by name. A literal, a parameter declared without @secure(), and any string interpolation — including one whose operands are all secure — are not secure values. Declare a @secure() parameter and assign it directly. A value that must combine the credential with other parts, such as a connection string, cannot be assembled here: bind the parts separately and compose them only through a path the pinned application source proves it supports, and report the contract gap when it supports none.";
+  }
+  if (ruleId === "secure-secrets-in-params") {
+    return " This rule reads the parameter's name, not its value, so it has two different repairs. If the parameter carries the credential itself, add the @secure() decorator. If it carries the resource ID of a Radius.Security/secrets resource, rename it instead — adding @secure() there only trades this finding for a secure-parameter-target failure, because a reference property is not sensitive and must not receive a secure parameter.";
+  }
+  if (ruleId === "secure-parameter-default") {
+    return " Remove the default value: a @secure() parameter is supplied at deployment time, and a default would commit the credential to the application definition.";
+  }
+  return "";
 }
 
 function printDiagnostic(result) {
@@ -262,12 +316,8 @@ function printDiagnostic(result) {
     typeof result.message?.text === "string" && result.message.text ?
       result.message.text
     : "Bicep reported a diagnostic.";
-  const customTypeHint =
-    result.ruleId === "BCP037" && /\bcodeReference\b/u.test(text) ?
-      " For a Radius.Resources custom type, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz before compiling again."
-    : "";
   report(
-    `${location ? `${location}: ` : ""}${level}${rule}: ${text}${customTypeHint}`
+    `${location ? `${location}: ` : ""}${level}${rule}: ${text}${repairHint(result.ruleId, text)}`
   );
 }
 
@@ -941,18 +991,6 @@ function scanSecureParameterTargets(template, app, contract, parentPath = "") {
 }
 
 function checkSecureParameterTargets(template, app, contract) {
-  // A staged contract that exists but cannot be read fails the compile whether
-  // or not the model assigns a secure parameter anywhere. The file is this
-  // check's only evidence, and reporting nothing would be indistinguishable
-  // from having inspected the model and found it correct.
-  if (contract.status === "unusable") {
-    report(
-      `${app}: error secure-parameter-target: the resolved type schemas staged in ${contract.file} could not be read: ${contract.detail}. ` +
-        "No @secure() parameter could be checked against the schema that decides where it may go. " +
-        "Rerun show-radius-type.mjs for every predefined type the model uses, or start the modeling run again with promote-app-model.mjs --begin."
-    );
-    return true;
-  }
   if (contract.status === "unstaged") {
     return false;
   }
@@ -968,8 +1006,9 @@ const bicep = path.join(
   executable
 );
 
-// Compiles the model and reports what Bicep rejected. Unchanged from what this
-// script has always done; the budget wraps it rather than living inside it.
+// Compiles the model and distinguishes model diagnostics from a check that
+// could not produce a reliable verdict. The budget wraps it rather than living
+// inside it.
 function check(app, staged) {
   const compiled = spawnSync(
     bicep,
@@ -985,7 +1024,7 @@ function check(app, staged) {
   );
   if (compiled.error) {
     report(compiled.error.message);
-    return 1;
+    return EXIT_CHECK_UNAVAILABLE;
   }
 
   const compilerFindings = diagnostics(compiled.stderr ?? "");
@@ -994,12 +1033,20 @@ function check(app, staged) {
       (compiled.stderr ?? "").trim() ||
         "Bicep did not return valid SARIF diagnostics."
     );
-    return 1;
+    return EXIT_CHECK_UNAVAILABLE;
   }
 
   compilerFindings.forEach(printDiagnostic);
-  if (compiled.status !== 0) {
-    return compiled.status || 1;
+  const compilerFailed = compilerFindings.some(isFailure);
+  if (compiled.status !== EXIT_SUCCESS) {
+    if (compilerFailed) {
+      return EXIT_MODEL_INVALID;
+    }
+    report(
+      `Bicep exited with status ${compiled.status === null ? "null" : compiled.status}` +
+        `${compiled.signal ? ` after receiving signal ${compiled.signal}` : ""} without returning an actionable warning or error diagnostic.`
+    );
+    return EXIT_CHECK_UNAVAILABLE;
   }
 
   let template;
@@ -1014,7 +1061,18 @@ function check(app, staged) {
     Array.isArray(template)
   ) {
     report(`${app}: error: Bicep did not return valid compiled JSON.`);
-    return 1;
+    return EXIT_CHECK_UNAVAILABLE;
+  }
+
+  const resolvedTypes = readResolvedTypes(app, staged);
+  if (resolvedTypes.status === "unusable") {
+    report(
+      `${app}: error checker-unavailable: the resolved type schemas staged in ${resolvedTypes.file} could not be read: ${resolvedTypes.detail}. ` +
+        "No model-policy verdict was produced. Abort the staged run: do not retry validation, do not modify the current model, " +
+        "do not start another modeling run, do not write the origin record, and do not publish the run. " +
+        "Report this exact failure to the user and say that no application definition was written."
+    );
+    return EXIT_CHECK_UNAVAILABLE;
   }
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
@@ -1026,17 +1084,17 @@ function check(app, staged) {
   const misplacedSecureParameter = checkSecureParameterTargets(
     template,
     app,
-    readResolvedTypes(app, staged)
+    resolvedTypes
   );
   return (
-      compilerFindings.some(isFailure) ||
+      compilerFailed ||
         invalidBuildSource ||
         invalidSourceReference ||
         unresolvedRuntimeVariable ||
         misplacedSecureParameter
     ) ?
-      1
-    : 0;
+      EXIT_MODEL_INVALID
+    : EXIT_SUCCESS;
 }
 
 function main() {
@@ -1050,16 +1108,15 @@ function main() {
   // trustworthy count, and compiling anyway would grant it an unlimited one.
   if (run.unusable) {
     console.error(brokenRecordMessage(run.file, ""));
-    return 1;
+    return EXIT_CHECK_UNAVAILABLE;
   }
 
-  // Refused before the compiler is spawned: once the budget is spent there is
-  // nothing more to learn from another identical failure, and compiling anyway
-  // would invite one more repair.
+  // Refused before the compiler is spawned: every reserved validation counts,
+  // including an unavailable one, so another compile would exceed the cap.
   const decision = evaluateRepairAttempt(run.state);
   if (!decision.allowed) {
     console.error(decision.reason);
-    return 1;
+    return EXIT_CHECK_UNAVAILABLE;
   }
 
   // The attempt is charged before the compile, and the run stops if it cannot
@@ -1067,13 +1124,22 @@ function main() {
   const reserved = reserveAttempt(run, run.state.fingerprint);
   if (reserved) {
     console.error(brokenRecordMessage(run.file, reserved));
-    return 1;
+    return EXIT_CHECK_UNAVAILABLE;
   }
 
   const status = check(app, true);
+  // An unavailable check produced no new model verdict, so keep the last model
+  // failure for comparison with the next completed validation. Success clears
+  // it because there is no longer a failed model to compare.
   const fingerprint =
-    status === 0 ? null : fingerprintCompilerOutput(reported.join("\n"));
-  if (isRepeatedFailure(run.state, fingerprint)) {
+    status === EXIT_MODEL_INVALID ?
+      fingerprintCompilerOutput(reported.join("\n"))
+    : status === EXIT_SUCCESS ? null
+    : run.state.fingerprint;
+  if (
+    status === EXIT_MODEL_INVALID &&
+    isRepeatedFailure(run.state, fingerprint)
+  ) {
     console.error(REPEATED_FAILURE_MESSAGE);
   }
 
@@ -1091,7 +1157,10 @@ function main() {
     );
   }
 
-  if (status !== 0 && decision.attempt >= REPAIR_COMPILE_LIMIT) {
+  if (
+    status === EXIT_MODEL_INVALID &&
+    decision.attempt >= REPAIR_COMPILE_LIMIT
+  ) {
     console.error(
       `This was compile ${decision.attempt} of ${REPAIR_COMPILE_LIMIT}; the repair budget is now spent and the checker will refuse to compile this run again.`
     );
@@ -1099,4 +1168,9 @@ function main() {
   return status;
 }
 
-process.exitCode = main();
+try {
+  process.exitCode = main();
+} catch (error) {
+  console.error(error);
+  process.exitCode = EXIT_CHECK_UNAVAILABLE;
+}

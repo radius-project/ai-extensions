@@ -6,6 +6,7 @@ import {
 } from "./github-account-readiness.js";
 import { createGitHubAccountCoordinator } from "./github-account-coordinator.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
+import { gitHubAppAccessProbePaths } from "../../github-app-installation.js";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountLeaseResult
@@ -106,6 +107,154 @@ describe("GitHub account readiness", () => {
         packages: { state: "ready" }
       }
     });
+  });
+
+  it("accepts a GitHub App installation with setup permissions and a separate package credential", async () => {
+    const login = "radius-cloud-e2e[bot]";
+    const probed: string[] = [];
+    const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
+      if (args[1] === "repos/octo/app") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ permissions: { admin: false } }),
+          stderr: ""
+        };
+      }
+      if (gitHubAppAccessProbePaths("octo/app").includes(args[1] ?? "")) {
+        probed.push(args[1] ?? "");
+        return { code: 0, stdout: "[]", stderr: "" };
+      }
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    };
+    const executor: SelectedGhExecutor = {
+      login,
+      credentialSource: "injected",
+      requiresKeyringSwitch: false,
+      scopes: [],
+      run,
+      runOrThrow: run,
+      verifyIdentity: async () => {},
+      packageCredentials: () => ({
+        username: "package-publisher",
+        token: "synthetic-package-credential",
+        source: "injected-token",
+        scopes: ["read:packages", "write:packages"]
+      }),
+      redact: (value) => value,
+      errorMessage: (error) =>
+        error instanceof Error ? error.message : String(error)
+    };
+    const service = readinessService(coordinator(executor));
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login
+    });
+
+    expect(result).toMatchObject({
+      ready: true,
+      checks: {
+        identity: { state: "ready" },
+        repository: { state: "ready" },
+        workflow: { state: "ready" },
+        environment: { state: "ready" },
+        packages: { state: "ready" }
+      }
+    });
+    expect(probed).toEqual(gitHubAppAccessProbePaths("octo/app"));
+  });
+
+  it("does not infer GitHub App repository access when the token cannot read the repository", async () => {
+    const login = "radius-cloud-e2e[bot]";
+    const run = async (): Promise<SelectedGhCommandResult> => ({
+      code: 1,
+      stdout: "",
+      stderr: "gh: Not Found (HTTP 404)"
+    });
+    const executor: SelectedGhExecutor = {
+      ...selectedExecutor({ login }),
+      credentialSource: "injected",
+      requiresKeyringSwitch: false,
+      scopes: [],
+      run,
+      runOrThrow: run,
+      packageCredentials: () => ({
+        username: "package-publisher",
+        token: "synthetic-package-credential",
+        source: "injected-token",
+        scopes: ["write:packages"]
+      })
+    };
+    const service = readinessService(coordinator(executor));
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks.repository).toEqual({
+      state: "error",
+      detail: "gh: Not Found (HTTP 404)"
+    });
+  });
+
+  it("rejects a GitHub App installation granted only the permission the first probe reads", async () => {
+    const login = "radius-cloud-e2e[bot]";
+    // Exactly the misconfiguration a single environments probe would pass: the
+    // installation can read Actions resources but was never granted Secrets.
+    const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
+      if (args[1] === "repos/octo/app") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ permissions: { admin: false } }),
+          stderr: ""
+        };
+      }
+      if (args[1] === "repos/octo/app/actions/secrets") {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Resource not accessible by integration (HTTP 403)"
+        };
+      }
+      return { code: 0, stdout: "[]", stderr: "" };
+    };
+    const executor: SelectedGhExecutor = {
+      ...selectedExecutor({ login }),
+      credentialSource: "injected",
+      requiresKeyringSwitch: false,
+      scopes: [],
+      run,
+      runOrThrow: run,
+      packageCredentials: () => ({
+        username: "package-publisher",
+        token: "synthetic-package-credential",
+        source: "injected-token",
+        scopes: ["write:packages"]
+      })
+    };
+    const service = readinessService(coordinator(executor));
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks.environment.state).toBe("error");
+    expect(result.checks.environment.detail).toContain(
+      "cannot exercise its Secrets permission on octo/app"
+    );
+    // The login still looks like a bot, so an unverified installation must not
+    // keep claiming workflow access on the strength of its name alone.
+    expect(result.checks.workflow.state).toBe("missing");
   });
 
   it("verifies and restores a mocked inactive keyring account", async () => {
@@ -527,7 +676,7 @@ describe("GHCR package access probe", () => {
     expect(result).toEqual({
       ok: true,
       detail:
-        "GitHub Packages accepted push authorization for the state package."
+        "GitHub Packages accepted push authorization for the state package from @octocat. The deploy workflow's own token is checked separately when credentials are verified."
     });
     expect(requests[0]?.url).toContain(
       "repository%3Aocto%2Fapp-radius-state-dev-"
@@ -681,7 +830,7 @@ describe("GHCR package access probe", () => {
       expect(result).toEqual({
         ok: true,
         detail:
-          "GitHub Packages accepted push authorization. The empty upload session could not be cancelled and will expire without creating a package artifact."
+          "GitHub Packages accepted push authorization from @octocat. The empty upload session could not be cancelled and will expire without creating a package artifact."
       });
     }
   );
@@ -713,7 +862,7 @@ describe("GHCR package access probe", () => {
     expect(result).toEqual({
       ok: true,
       detail:
-        "GitHub Packages accepted push authorization for the state package."
+        "GitHub Packages accepted push authorization for the state package from @octocat. The deploy workflow's own token is checked separately when credentials are verified."
     });
   });
 

@@ -68,4 +68,18 @@ describe("readPageState", () => {
       'Radius browser page state "state-id" is not an object.'
     );
   });
+
+  it.each(['"text"', "42", "true"])(
+    "rejects the JSON primitive %s rather than treating it as state",
+    (source) => {
+      const browser = createFakeBrowser();
+      const element = createFakeElement("state-id");
+      element.textContent = source;
+      browser.document.add(element);
+
+      expect(() => readPageState(browser.context, "state-id")).toThrow(
+        'Radius browser page state "state-id" is not an object.'
+      );
+    }
+  );
 });

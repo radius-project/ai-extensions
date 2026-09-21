@@ -637,7 +637,47 @@ export function applyDeployStatusToResources(
 }
 
 /**
- * settleDeployStatuses - apply the run's terminal conclusion to the graph.
+ * The messages a node carries when the run's conclusion — not the producer —
+ * decided its outcome (Exception 5.1). A cancelled or timed-out run publishes no
+ * per-resource failure, so without these the graph turns red and says nothing.
+ */
+export const DEPLOY_CANCELLED_MESSAGE = "Deployment cancelled";
+export const DEPLOY_TIMED_OUT_MESSAGE = "Deployment timed out";
+export const DEPLOY_MONITOR_TIMED_OUT_MESSAGE =
+  "Deployment monitoring timed out; the workflow may still be running.";
+export const DEPLOY_FAILED_MESSAGE = "Deployment failed";
+export const MAX_DEPLOY_MESSAGE_LENGTH = 500;
+
+/**
+ * unfinishedDeployMessage - the message for a node the run's conclusion failed.
+ *
+ * Cancellation and workflow timeout describe the run; `monitor_timed_out` only
+ * means monitoring stopped before its outcome was confirmed. Other non-success
+ * conclusions prefer a bounded copy of the extracted Radius error. The caller
+ * retains the full diagnostics; only text copied onto graph nodes is shortened.
+ */
+export function unfinishedDeployMessage(
+  conclusion?: string | null,
+  radiusError?: string
+): string {
+  if (conclusion === "cancelled") return DEPLOY_CANCELLED_MESSAGE;
+  if (conclusion === "timed_out") return DEPLOY_TIMED_OUT_MESSAGE;
+  if (conclusion === "monitor_timed_out")
+    return DEPLOY_MONITOR_TIMED_OUT_MESSAGE;
+  const detail = typeof radiusError === "string" ? radiusError.trim() : "";
+  if (detail.length > MAX_DEPLOY_MESSAGE_LENGTH)
+    return detail.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "...";
+  return detail || DEPLOY_FAILED_MESSAGE;
+}
+
+export interface SettleableResource {
+  deployStatus?: DeployStatus;
+  deployMessage?: string;
+}
+
+/**
+ * settleDeployStatuses - apply a workflow conclusion or `monitor_timed_out`
+ * to the graph without claiming an unconfirmed workflow has stopped.
  *
  * On success every node is forced green: the run concluded successfully, so
  * every resource provisioned, whatever the last snapshot happened to say. This
@@ -649,21 +689,48 @@ export function applyDeployStatusToResources(
  * while nodes already terminal keep the status the producer reported — the run
  * conclusion decides the overall label, not an individual resource's outcome
  * that was already observed.
+ *
+ * Every node this leaves red also gets a message, because a red node with no
+ * explanation is the one state the user most needs detail in (Exception 5.1).
+ * Which message depends on who decided the outcome. A node the producer already
+ * reported `failed` keeps its own message: it names that resource's own failure,
+ * which is more specific than anything derived from the run's conclusion. A node
+ * this function flips from pending or in progress had its outcome decided by the
+ * run, so it takes the conclusion's message even if it already carried one — the
+ * message it carried describes work in flight ("creating…"), and leaving that on
+ * a red node would report progress on a resource that never finished.
+ *
+ * Output resources are not walked here: they take their status from their parent
+ * through the caller's own propagation.
  */
 export function settleDeployStatuses(
-  resources: Array<{ deployStatus?: DeployStatus }>,
-  conclusion?: string | null
+  resources: SettleableResource[],
+  conclusion?: string | null,
+  radiusError?: string
 ): void {
   if (!Array.isArray(resources)) return;
   const succeeded = conclusion === "success";
+  const message =
+    succeeded ? "" : unfinishedDeployMessage(conclusion, radiusError);
   for (const resource of resources) {
     if (succeeded) {
       resource.deployStatus = "success";
+      // Documented above: a green node must not carry a stale failure message
+      // from an earlier snapshot of this same run.
+      delete resource.deployMessage;
       continue;
     }
     const current = resource.deployStatus || "pending";
-    if (current === "pending" || current === "in_progress")
-      resource.deployStatus = "failed";
+    const unfinished = current === "pending" || current === "in_progress";
+    if (unfinished) resource.deployStatus = "failed";
+    if (resource.deployStatus !== "failed") continue;
+    // A node the run just failed takes the run's message, replacing any
+    // in-flight progress text. A node the producer already reported failed keeps
+    // its own message, and one it reported failed without a message — incomplete
+    // artifact reporting — finally gets an explanation instead of being red and
+    // silent.
+    if (unfinished || !(resource.deployMessage ?? "").trim())
+      resource.deployMessage = message;
   }
 }
 

@@ -72,6 +72,25 @@ describe(".github/extension release assets", () => {
     }
   });
 
+  it("requests 500m CPU for the control-plane database", () => {
+    const action = parseYaml(
+      readFileSync(
+        join(EXTENSION_ROOT, "actions", "setup-control-plane", "action.yml"),
+        "utf8"
+      )
+    );
+    const installStep = action.runs.steps.find(
+      (step) => step.name === "Install Radius on control plane"
+    );
+
+    expect(installStep).toBeDefined();
+    expect(
+      installStep.run.match(
+        /--set database\.resources\.requests\.cpu=[^\s\\]+/gu
+      ) ?? []
+    ).toEqual(["--set database.resources.requests.cpu=500m"]);
+  });
+
   // A `workflow_dispatch` boolean input arrives as the string "true"/"false"
   // (including its declared default), so handing it straight to a reusable
   // workflow's `type: boolean` input passes a string where a boolean is
