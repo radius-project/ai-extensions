@@ -4,17 +4,17 @@
 - **Date**: 2026-09
 - **Status**: Draft
 
+**Example implementation:** See the [source at revision `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) for concrete APIs, module layout, and integration details. This proposal describes the intended architecture; the example is not evidence that every requirement is complete or that the design is approved.
+
 ## Overview
 
 Extract GitHub Radius's existing application and environment functionality from Canvas-specific code into a reusable library in `radius-project/ai-extensions`. Canvas becomes a consumer of that library, and other GitHub frontends can use the same implementation.
 
-At the original proposal baseline, GitHub Radius creates GitHub environments, coordinates Radius application authoring and deployment, calls the Radius CLI, and reports workflow results through the Copilot App's Canvas integration. Some of this functionality is reusable, but much of the coordination still lives in the Canvas adapter and depends on its server, request types, or panel state.
+GitHub Radius currently creates GitHub environments, coordinates Radius application authoring and deployment, calls the Radius CLI, and reports workflow results through the Copilot App's Canvas integration. Some of this functionality is reusable, but much of the coordination still lives in the Canvas adapter and depends on its server, request types, or panel state.
 
 That coupling makes another frontend expensive to build. A Copilot CLI integration, for example, would have to reproduce the Canvas implementation's decisions about environment setup, command execution, workflow dispatch, progress, and failures, or depend on Canvas being open. Copies of this logic would drift: a deployment fix in Canvas would not necessarily fix the same problem in another frontend.
 
 Note - this proposal is not a competing proposal to [docs: design common Radius graph libraries](https://github.com/nicolejms/ai-extensions/pull/2). These would both work quite well together.
-
-**Implementation reconciliation:** This revision compares the [original proposal at `f111b79`](https://github.com/radius-project/ai-extensions/blob/f111b79abc9e08269cd6c0211a31d43294b3a6bd/docs/design/2026-09-github-radius.md) with implementation commit [`40dd675`](https://github.com/radius-project/ai-extensions/commit/40dd6755ab9217b55e96e556d1c725dc29519b86). The original goals and historical diagrams remain; implementation notes below record concrete choices, deviations, and remaining limits. They do not change this proposal's Draft status or establish design approval, merge readiness, or production qualification.
 
 ## Terms and definitions
 
@@ -28,15 +28,11 @@ A **Radius application definition** is `.radius/app.bicep` and its supporting mo
 
 ## Objectives
 
-> **Issue Reference:** N/A; this proposal continues the review from [radius-project/radius#12967](https://github.com/radius-project/radius/pull/12967), rather than a separate implementation issue.
-
 ### Goals
 
 **The goal is to implement GitHub Radius functionality once and reuse it across frontends, including Canvas.** Move the application logic into a library with a clear API contract. Frontends collect input, call that API, and present results. The library performs the shared work through existing GitHub, workspace, agent, and `rad` integrations.
 
 The result should be that adding a frontend means writing an adapter for its interaction model, not reimplementing environment creation or deployment.
-
-The implementation work is primarily in **`radius-project/ai-extensions`**: extract existing functionality, remove Canvas dependencies from it, and route Canvas through the extracted library. **`radius-project/radius`** continues to provide the CLI, control plane, resource APIs, graph construction, and deployment engine. This document lives in `radius-project/ai-extensions`, which owns the proposed library extraction and Canvas migration; it explains the cross-repository boundary without proposing to move the Go implementation into the extension library.
 
 | In scope                           | What it means                                                                                                                                                           |
 |------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -70,17 +66,16 @@ Canvas retains its supported workflows and presentation. The new boundary is int
 
 ### Quick reference
 
-| Topic                                         | Start Here                                                                            |
-|-----------------------------------------------|---------------------------------------------------------------------------------------|
-| Why this refactor and what it includes        | [Overview](#overview), [Objectives](#objectives)                                      |
-| Existing reusable code and Canvas coupling    | [Current Architecture](#current-architecture)                                         |
-| Proposed library and dependency direction     | [Proposed Architecture](#proposed-architecture)                                       |
-| Implemented choices and remaining limits      | [Implementation at the inspected revision](#implementation-at-the-inspected-revision) |
-| What moves and what stays                     | [Key Components](#key-components)                                                     |
-| Contract between the library and frontends    | [API design](#api-design)                                                             |
-| Environment, application, and graph flows     | [Implementation details](#implementation-details)                                     |
-| Workflow failures and user-facing diagnostics | [Error handling](#error-handling)                                                     |
-| Behavior preservation and completion criteria | [Development plan](#development-plan), [Test plan](#test-plan)                        |
+| Topic                                         | Start Here                                                     |
+|-----------------------------------------------|----------------------------------------------------------------|
+| Why this refactor and what it includes        | [Overview](#overview), [Objectives](#objectives)               |
+| Existing reusable code and Canvas coupling    | [Current Architecture](#current-architecture)                  |
+| Proposed library and dependency direction     | [Proposed Architecture](#proposed-architecture)                |
+| What moves and what stays                     | [Key Components](#key-components)                              |
+| Contract between the library and frontends    | [API design](#api-design)                                      |
+| Environment, application, and graph flows     | [Implementation details](#implementation-details)              |
+| Workflow failures and user-facing diagnostics | [Error handling](#error-handling)                              |
+| Behavior preservation and completion criteria | [Development plan](#development-plan), [Test plan](#test-plan) |
 
 ## Design
 
@@ -88,7 +83,7 @@ Canvas retains its supported workflows and presentation. The new boundary is int
 
 #### Current Architecture
 
-This section describes the historical source baseline inspected for the original proposal: `radius-project/radius` at `c8ad9211a25699c377c45268890e4f67070aa114` and `radius-project/ai-extensions` at `6f1fec8f282f96100e58f780987f6a697b65056f`. Original extension links remain pinned to that revision; implementation notes explicitly link to `40dd6755ab9217b55e96e556d1c725dc29519b86`.
+This section describes the source baseline before extraction: `radius-project/radius` at `c8ad9211a25699c377c45268890e4f67070aa114` and `radius-project/ai-extensions` at `6f1fec8f282f96100e58f780987f6a697b65056f`. Its source links remain pinned to those revisions.
 
 ```mermaid
 graph TD
@@ -151,19 +146,6 @@ graph TD
     GitHub -->|"existing workflows"| Rad
 ```
 
-#### Implementation at the inspected revision
-
-The implementation follows the library-extraction option, not a hosted service or a Canvas-route facade. The conceptual library above is implemented within the existing packages: UI-independent coordination under `packages/core/src/github-radius`, Node execution helpers under `packages/adapter-shared/src/github-radius`, and Canvas composition and presentation under `packages/adapter-canvas`. Core reuses its existing helpers; it does not import the shared adapter or Canvas. Callers bind execution ports to concrete integrations.
-
-The principal qualifications to the proposed boundary are:
-
-- **API compatibility before result redesign:** Typed results and dependency ports exist, but some calls retain `status`/`body` envelopes, diagnostic strings, and progress steps from the existing workflows. This is an in-process API, not a universal versioned wire protocol or a finished presentation-neutral response redesign.
-- **Shared transitions, caller-owned operation state:** The canonical environment operation domain owns journal and lifecycle transitions. Canvas retains its live-record registry, serialized versions, restoration, quarantine, storage, and acknowledgement-sensitive notification delivery.
-- **Explicit read and mutation policies:** Graph reads, model authoring/freshness policy, deployment observation, and repair policy are separately callable. Branch comparisons read both committed revisions, not the working tree. Ordinary reads select the workspace where appropriate, but Canvas's workspace readers still have an absence/error distinction gap described below.
-- **Host composition remains necessary:** Canvas wrappers and compatibility forwarders remain. Direct deployment and setup continuation paths invoke shared coordinators without loopback HTTP, but automatic recovery rollback scheduling still has a Canvas-owned loopback callback. The shared helpers are not a turnkey adapter for every provider or host.
-
-The [implementation architecture reference](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) describes the extracted modules. The sections below identify the concrete contracts and the work not established by this extraction.
-
 ### Detailed design
 
 #### Option 1: Extract a reusable library and migrate Canvas
@@ -213,7 +195,7 @@ The library need not implement every capability afresh. Some work is relocation,
 
 ### API design
 
-The contract describes **existing use cases first**. The table below retains the original contract goals. The implementation exposes `environments`, `graphs`, and `deployments` namespaces from [`@radius-project/core/github-radius`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/index.ts), with repair functions such as `resolveDeploymentRepair` and `requestDeploymentRepair` exported at the root. The examples and sequence diagrams remain illustrative, not promises of a single future facade with those exact method names.
+The contract describes **existing use cases first**: environment setup and deletion, application authoring and deployment, graph reads and comparison, and status and repair coordination. Define typed in-process calls for these capabilities without requiring a Canvas server. The examples and sequence diagrams describe behavior rather than prescribing exact method names.
 
 | Contract element      | Requirement                                                                                                                                                                                                               |
 |-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -228,13 +210,13 @@ For example, environment creation should accept a repository and setup options, 
 
 Preserve current execution references and cancellation boundaries during extraction. Do not promise cross-session recovery, exactly-once dispatch, or stronger revision/phase verification merely because a result now has a TypeScript type. Where the current implementation lacks evidence, the contract must expose that limitation.
 
-**Implemented contract qualification:** [`EnvironmentSetupResult`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/environments/execution-ports.ts) and [`DeployRequestResult`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/deployments/deploy-request.ts) retain typed `status`/`body` envelopes. Environment coordination also retains diagnostic/progress steps and a completion callback. No Node HTTP response object is required, but the results remain shaped by the existing transport and presentation contracts. A cleaner domain-result vocabulary would be follow-up API work, not an interface already delivered unchanged from this proposal.
+Existing result shapes may be retained during migration to preserve compatibility, provided callers do not need Canvas or HTTP runtime objects. Separating the coordination does not require redesigning every response.
 
-#### Schemas and Adapter Conformance
+#### Shared types and behavior-preservation tests
 
-**Machine-readable schemas define the data.** Shared TypeScript types can define the library calls; runtime schemas are useful where an adapter accepts untrusted tool or network input. JSON Schema is one option for validating those messages or generating bindings, not a commitment to a network service. Maintain the definitions together in `ai-extensions` rather than letting each adapter invent its own shapes.
+**Shared TypeScript types define the library calls.** Maintain input and result types with the library in `ai-extensions` rather than letting each adapter invent its own shapes. Validate untrusted data at entry points, such as tool arguments and GitHub responses. This in-process extraction does not require JSON Schema, generated bindings, or a new protocol.
 
-**Adapter conformance fixtures define test scenarios.** Each fixture supplies inputs, controlled dependency responses, and expected results and side effects. Run shared scenarios against Canvas and a non-Canvas caller to prove that extracting the logic preserves behavior.
+**Ordinary tests demonstrate reuse and preserve behavior.** Use a small non-Canvas harness to exercise the library without a Canvas server, and focused Canvas integration tests to check that existing workflows still use it correctly. Shared scenarios supply inputs, controlled dependency responses, and expected results and side effects. This requires no new conformance framework or full second frontend.
 
 | Scenario                                            | Expected behavior in either caller                                                                                      |
 |-----------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------|
@@ -245,23 +227,23 @@ Preserve current execution references and cancellation boundaries during extract
 | Compare graphs with a definition absent on one side | Preserve the added or removed application diff; confirmed absence contributes no resources.                             |
 | Compare graphs when a source cannot be read         | Report an unavailable comparison, not an added/removed application or an empty diff.                                    |
 
-The App can render a panel while a CLI prints text; their presentation differs, but the meaning and side effects of the library call must agree. These types, schemas, and fixtures become the implementation's source of truth for the contract. They do not replace authorization checks or integration tests.
+The App can render a panel while a CLI prints text; their presentation differs, but the meaning and side effects of the library call must agree. Test the real adapter bindings as well as mocked library dependencies. A correct shared contract alone does not establish correct Canvas behavior, and tests do not replace authorization checks.
 
 ### Implementation details
 
 #### Core package - packages/core
 
-The implementation reuses the existing graph transformations and workflow generation described in [Current Architecture](#current-architecture). Coordination lives in `packages/core/src/github-radius`, with environment, graph, deployment, and repair modules. Its [package exports](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/package.json) provide the root `github-radius` entry and environment, graph, and deployment family entries. Core accepts execution ports rather than importing Canvas, the Copilot SDK, or Node execution helpers.
+Place UI-independent environment, application, graph, and deployment coordination in the core package, reusing its existing graph transformations and workflow generation. Accept caller-supplied execution interfaces rather than importing Canvas, the Copilot SDK, or process-execution code.
 
 #### Canvas adapter - packages/adapter-canvas
 
 Move the coordination identified in the [Extraction Boundary](#extraction-boundary) behind explicit library inputs and execution interfaces. Keep Canvas tools, routes, instance lookup, rendering, and host interactions in the adapter, and route its existing use cases through the library rather than maintaining a second implementation.
 
-At the inspected revision, [environment route bindings](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server/routes/create-environment.ts) and runtime composition call the shared coordinators. Canvas still supplies account selection, live state, persistence checkpoints, agent callbacks, and UI updates. Legacy helper paths can forward to the extracted implementation; their continued existence is not a second copy of the coordination.
+Canvas supplies account selection, workspace access, state ownership, and user or agent interactions. Other frontends supply their own implementations of these interfaces without depending on Canvas.
 
 #### Shared adapter - packages/adapter-shared
 
-The implementation reuses managed `rad` execution and graph-building helpers, and adds [GitHub Radius execution helpers](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-shared/package.json) for environment setup and deployment artifacts. [`SelectedGhExecutor`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/environments/execution-ports.ts) carries the authorized account and credential source across an operation. Callers still supply concrete GitHub, provider, workspace, `rad`, and interaction adapters; these helpers do not constitute a complete all-provider host implementation.
+Reuse shared helpers for managed `rad` execution, GitHub commands, and deployment artifacts. Preserve the selected account and authorized target throughout an operation. Callers connect these helpers to their execution environment; the extraction does not require a complete adapter for every provider or frontend.
 
 #### Plugin - plugins/radius
 
@@ -269,7 +251,7 @@ Preserve the user-facing plugin entry points and authoring skill behavior while 
 
 #### Build & packaging
 
-The core and shared-adapter packages remain private internal workspaces, [excluded from independent Changesets releases](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/.changeset/config.json); `radius` remains the release unit. The [Canvas build](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/build.mjs) bundles their implementation into `.artifacts/radius/com.github.copilot/extensions/radius/extension.mjs`, leaving the Copilot SDK external for the loader. This is not a separately published library product, service, or new plugin. These are observations of the implementation branch; this proposal update changes no manifests or release behavior.
+Keep the shared packages internal and bundle them through the existing Radius plugin build. The plugin remains the release unit; this proposal does not require a separately published library product, service, or new plugin.
 
 #### Creating Environments and Applications
 
@@ -291,9 +273,7 @@ sequenceDiagram
     F-->>U: Show outcome and next step
 ```
 
-[`createEnvironmentOperationDomain`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/environments/operation-domain.ts) provides canonical provider-journal, stage, step, stop-request, and terminal transitions, with an injected clock, digest, diagnostic redactor, and terminal notifier. The coordinator and caller share the same mutable live operation record through the [`OperationDomain` contract](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/operations.ts). Direct writes to fields such as `verification` and `providerRecovery` do not automatically persist or notify; callers must preserve the explicit checkpoints used by the coordinators.
-
-The [Canvas operation owner](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/operations.ts) retains the registry, serialized-version compatibility, restoration and legacy quarantine, storage integration, and acknowledgement-sensitive notifications. `OperationDomain` is a transition boundary, not a new operation store. Another host must bind that ownership explicitly; sharing transition code does not give it durable history, restart recovery, or exactly-once execution.
+The library owns shared setup sequencing, progress, cancellation, and completion decisions. The frontend owns operation storage and user notifications, preserving Canvas's existing persistence and recovery behavior. Another frontend must supply that ownership explicitly; sharing coordination does not create a new operation store or stronger durability guarantees.
 
 For Radius applications, reuse the existing authoring skill and deployment path. Authoring produces the application-definition files; deployment calls the existing workflow and `rad` to create or update resources. The library coordinates those steps, while the frontend handles agent interaction and presentation. A completed agent response does not by itself prove that the files are valid or authorize their publication or deployment.
 
@@ -328,15 +308,13 @@ sequenceDiagram
     end
 ```
 
-The original graph entry points combine reads with application-definition authoring or freshness checks through the agent. The implementation separates [`createGraphReader` and comparison](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/graphs/pipeline.ts) from [`requestModelAuthoring` and refresh policy](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/graphs/authoring.ts). Canvas retains its composite flow: it may request authoring when both definitions are absent, while one-sided absence produces an addition/removal diff. A pure read neither authors nor publishes files; an acknowledged agent request is not proof of a validated model. Authoring triggers and refusals remain distinct from read outcomes.
+Separate graph reads and comparison from agent-driven authoring and freshness checks. Canvas can retain its combined experience by explicitly composing these capabilities. A pure read neither authors nor publishes files; an acknowledged agent request is not proof of a validated model.
 
-The diagram distinguishes confirmed absence from an unreadable source. At the original baseline, remote content reads can return `null` for both missing files and retrieval failures. The shared graph pipeline and [remote textual source reader](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/gh.ts) correct that behavior: `null` means confirmed absence, empty content is a present definition, and read errors propagate. Confirmed absence contributes no resources to first-addition/last-removal comparisons. Both sides are staged before either is compiled, and shared comparison cleanup failures are surfaced rather than silently ignored. These rules are not yet enforced by every Canvas workspace binding.
+Ordinary reads use the selected workspace, including uncommitted changes where appropriate. Branch comparisons use both explicit committed revisions and ignore working-tree edits. Stage both sides before compiling either. No read should commit or push source to make it available.
 
-**Source-selection clarification:** Ordinary graph/model reads select the session's actual worktree where appropriate, including uncommitted definition changes; another repository or branch uses its committed source. In contrast, branch comparisons use both explicit committed base/head revisions and ignore uncommitted edits, even when one side names the session branch. The [Canvas comparison path](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server/routes/graph-workflows.ts) and shared reader enforce committed comparison inputs. No graph read commits or pushes source to make it readable. Managed `rad` execution retains its temporary-directory and `GITHUB_ACTIONS` isolation.
+Distinguish confirmed absence, an empty definition, and a read failure. At the original baseline, some reads return `null` for both absence and failure; the extraction must correct that ambiguity. Confirmed absence contributes no resources to first-addition/last-removal comparisons. If neither definition exists, authoring is a separate interaction. Unreadable sources must fail visibly, and missing or unreadable workspace content must not fall back to an older remote copy.
 
-**Incomplete workspace integration:** At the inspected revision, [`readWorkspaceFile`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/workspace.ts#L478-L488) still catches all read errors as `null`, and [`resolveWorkspaceBicep`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/workspace.ts#L603-L624) tests content truthiness, so an empty definition is treated as absent. [`fetchBicepSelection`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server.ts#L5336-L5368) can then fall back to remote content for the server's [ordinary graph](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server/routes/graph-workflows.ts#L705-L707) and [planned-graph](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server/routes/graph-workflows.ts#L1008-L1011) paths. The [runtime graph context](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/runtime/graph-context.ts#L62-L72) avoids that remote fallback but consumes the same lossy workspace reader. The [explicit committed diff path](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server/routes/graph-workflows.ts#L1335-L1338) bypasses workspace selection and is not subject to this fallback.
-
-The intended requirement is unchanged: an unreadable selected source must fail visibly, an empty definition must remain present, and missing or unreadable workspace content must not fall back to an older remote copy. Completing these bindings and testing their real source adapters is remaining integration work, not a deliberate relaxation of the architecture; the shared-port fixtures alone do not prove it.
+**Example limitation:** The linked example does not yet meet that requirement in all Canvas workspace bindings: empty or unreadable files can be treated as absent, and ordinary/planned graph reads can [fall back to remote content](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server.ts#L5336-L5368). Its [explicit committed comparisons](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server/routes/graph-workflows.ts#L1335-L1338) bypass that fallback. This is incomplete integration, not a change to the intended architecture.
 
 Graph comparison already has complementary implementations: Radius's [`ComputeDiffHash`](https://github.com/radius-project/radius/blob/c8ad9211a25699c377c45268890e4f67070aa114/pkg/cli/graph/diffhash.go) defines the authored-property/dependency hash, and the extension's [`computeGraphDiff`](https://github.com/radius-project/ai-extensions/blob/6f1fec8f282f96100e58f780987f6a697b65056f/packages/core/src/graph/diff.ts) compares fields, connections, and that hash. Extract their orchestration, not their algorithms.
 
@@ -348,9 +326,7 @@ The library reuses the [canonical workflows](https://github.com/radius-project/a
 
 Preserve the existing command allow-list and workflow input compatibility. Resolve the intended repository and source explicitly and correlate available results to the requested execution, not simply the newest run. If dispatch or completion cannot be established, report uncertainty instead of retrying the mutation or inventing success.
 
-The implementation exposes [`deployments.createDeployRequestService`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/deployments/deploy-request.ts) for admission and coordination, and [`deployments.observeDeployment`](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/deployments/observation.ts) for reading existing state without initiating repair. Root repair exports hold the shared policy; the host supplies agent handoff and notification callbacks. Canvas explicitly composes observation and repair to retain its intended experience. The library is not a standalone status-polling service, and another host still has to bind monitoring and interactions.
-
-The [Canvas composition root](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server.ts) calls shared coordinators directly for deployment tools and environment-setup continuations rather than routing those calls through its own HTTP server. This does not remove every Canvas loopback: `scheduleAutomaticRecoveryRollback` still invokes `postInternal` for the Canvas-owned rollback endpoint. That owner-specific scheduling callback is not a hidden library dependency or evidence of a complete host-neutral rollback adapter.
+Keep deployment requests, status observation, and repair policy separately callable. Reading status must not initiate repair. Canvas can explicitly combine observation and repair to preserve its experience, while supplying agent interactions and notifications. Callers invoke the shared coordination directly rather than needing a Canvas server; frontend-specific scheduling and presentation remain outside the library.
 
 Similarly, the existing dispatcher can start deployment after credential verification. Preserve an intentionally requested composite flow; do not silently reinterpret it as a configuration-only call. A new configuration-only operation or a new workflow result schema would be a separate feature, not a requirement of this library extraction.
 
@@ -385,7 +361,7 @@ Shared tests should assert dependency calls and side effects, not just matching 
 
 Error fixtures should cover rejected and ambiguous dispatches, status API outages/rate limits, failed or cancelled runs without artifacts, mismatched artifact identity, conflicting phase evidence, deployment failure followed by cleanup failure, state-save failure, and secret-bearing diagnostics. Check that both callers preserve the primary failure and do not leak secrets or trigger duplicate mutations.
 
-The inspected implementation includes a [transitive import-boundary test](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/test/ci/library-boundary.test.ts) that bundles the public core entry and rejects Canvas/SDK imports and core-to-Node execution dependencies, plus [independent-caller graph/authoring conformance fixtures](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/core/src/github-radius/graphs/conformance.test.ts). These support the reusable boundary; controlled-port tests do not establish real-host qualification, a completed second frontend, or successful full CI. The criteria above remain the validation requirements, not a claim that every proposed scenario has passed.
+Exercise actual frontend bindings as well as controlled dependencies, especially source selection and authorization. The example implementation informs these tests; its existence does not establish that every criterion has passed.
 
 ## Security
 
@@ -401,7 +377,7 @@ Keep GitHub identity and workspace authorization in trusted execution context ra
 
 Preserve existing Canvas tool and route contracts, workflow inputs, and intended composite authoring, verification, deployment, and repair flows. Keep graph reads and status observation separately callable without silently removing those composite experiences. Corrections such as distinguishing source read failures from confirmed absence require explicit behavior tests, not an assumption that relocation provides new guarantees.
 
-The implementation records deliberate behavior corrections separately from mechanical extraction: [selected graph sources and read/cleanup failures](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/.changeset/confirmed-graph-sources.md), [terminal modeling failures in the compare flow](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/.changeset/diff-modeling-failure.md), and [deployment evidence and uncertain deletion outcomes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/.changeset/preserve-deployment-execution-evidence.md). These patch notes are not new workflow protocols or stronger durable-execution guarantees.
+Document and test necessary behavior corrections separately from mechanical extraction. Neither should introduce a new workflow protocol or imply stronger durable-execution guarantees.
 
 ## Monitoring and logging
 
@@ -409,25 +385,23 @@ Use the existing workflow run/job outcomes, execution references, and bounded, r
 
 ## Development plan
 
-The following is the original migration sequence, retained as review context rather than a claim that implementation has not started. At the inspected commit, coordinators and Canvas bindings exist across the environment, graph, deployment, and repair families. Concrete package choices are recorded above; host qualification and any further API cleanup remain separate work.
+Migrate one complete capability at a time, using the example implementation to inform the work rather than treating it as proof of completion.
 
 1. **Inventory and characterize existing behavior.** Map each Canvas use case to shared helpers, side effects, inputs, results, and host dependencies. Add tests around successful, failed, cancelled, and partially completed flows before moving code. Use the current extension revision at implementation time.
 2. **Extract one complete use case.** Start with environment setup or another bounded flow. Move its coordination behind typed inputs and dependency interfaces, reuse existing execution helpers, and replace its Canvas implementation with a library call. Keep the old user-facing tool/route contract during migration.
 3. **Repeat across the existing capability set.** Extract application authoring/deployment, graphs, status and repair coordination, and deletion in reviewable changes. Do not leave Canvas on a separate copy of the logic. Separate necessary behavior changes from mechanical moves and test both explicitly.
 4. **Prove reuse without Canvas.** Run the same library calls from a non-Canvas test harness or a thin adapter. Verify that environment setup, `rad` invocation, result interpretation, and errors do not require a Canvas instance. A full Copilot CLI integration can follow when needed.
-5. **Remove superseded implementations.** Retire duplicate implementations after parity checks; compatibility forwarders and Canvas-owned wrappers can remain. The inspected implementation retains such paths rather than deleting every old filename. Roll back a migration slice by reverting adapter routing only when its dependencies and in-flight work remain compatible; never dual-run a mutation to compare old and new implementations.
+5. **Remove superseded implementations.** Retire duplicate implementations after parity checks; compatibility forwarders and Canvas-owned wrappers can remain. Roll back a migration slice only when its dependencies and in-flight work remain compatible; never dual-run a mutation to compare old and new implementations.
 
-The original proposal did not establish an effort estimate or delivery date. This reconciliation does not retroactively supply one or mark every migration criterion complete.
+Effort estimates and delivery dates remain to be agreed during review.
 
 ## Open questions
 
-Package placement and initial extraction scope are no longer open implementation choices. Remaining questions concern how another host binds execution and operation ownership, whether to simplify compatibility-shaped result contracts, and where additional runtime validation is useful. Additional frontend delivery, transport adapters, new operation catalogs, stronger execution guarantees, and operation-history architecture remain follow-up work, not capabilities supplied by this refactor.
+**Q: How much should existing result shapes change during extraction?** A: Preserve compatibility first. Review whether any Canvas-specific shapes prevent reuse; defer unrelated response redesign.
 
-**Q: Which package and exports expose the library?** A: `@radius-project/core/github-radius` and its family entries expose coordination; `@radius-project/adapter-shared` supplies Node execution helpers. They remain internal private packages bundled into the `radius` plugin, not independently released public packages.
+**Q: What must another frontend supply?** A: Authorized execution, workspace access, operation storage, and user or agent interactions. A small independent caller should establish that these responsibilities can be supplied without Canvas. A full additional frontend remains separate work.
 
-**Q: Is the work still limited to choosing a first extraction slice?** A: No. The inspected implementation includes environment setup/deletion, graph reads/comparison and authoring policy, deployment coordination/observation/deletion, and repair policy. A complete additional frontend and its real-host qualification are not established by those extracted modules or their controlled-port tests.
-
-**Q: Where are runtime schemas and host execution interfaces needed?** A: Shared TypeScript contracts and execution ports exist, but callers still bind trusted integrations and validate untrusted ingress. The retained result envelopes and mutable operation ownership need explicit treatment in any new adapter. Further domain-result redesign or runtime schemas should follow demonstrated caller and trust-boundary needs, not a new universal protocol requirement.
+**Q: What remains to qualify the example implementation?** A: Verify it against the behavior and integration requirements above, including the known workspace source-read gap. The example does not replace design review or acceptance testing.
 
 ## Alternatives considered
 
@@ -440,7 +414,7 @@ Package placement and initial extraction scope are no longer open implementation
 
 ## Design review notes
 
-Review is pending. The [prior review discussion](https://github.com/radius-project/radius/pull/12967) is preserved; discussion continues in [radius-project/ai-extensions#845](https://github.com/radius-project/ai-extensions/pull/845). The original plan called for approval and merge before implementation; implementation now exists at the pinned revision while this proposal remains Draft. This update records that fact without retroactively asserting approval. Record the review outcome and agreed decisions here before merge.
+Review is pending. The [prior review discussion](https://github.com/radius-project/radius/pull/12967) is preserved; discussion continues in [radius-project/ai-extensions#845](https://github.com/radius-project/ai-extensions/pull/845). An example implementation exists, but this proposal remains Draft. Record the review outcome and agreed decisions here before merge.
 
 ## Related Documentation and Source
 
