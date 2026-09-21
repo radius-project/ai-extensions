@@ -8,6 +8,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { screen, waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
+// The card is a draggable React Flow node, so its clicks must be real browser
+// input: React Flow's d3 drag gesture rejects the library's synthetic
+// mousedown, which carries no view.
+import { userEvent as browserUser } from "@vitest/browser/context";
 import {
   buildGraph,
   resolveGraphSettings
@@ -317,6 +321,20 @@ describe("graph view in a real browser", () => {
     expect(recorded.toggled).toEqual(["app/web:card", "app/web:card"]);
     // The control keeps focus, so the next key still reaches the same card.
     expect(document.activeElement).toBe(details);
+  });
+
+  it("toggles the card's details on every click that bubbles from its content", async () => {
+    const { recorded } = mount();
+    const web = await card("web");
+    const title = within(web).getByTitle("web");
+
+    await browserUser.click(title);
+    expect(recorded.toggled).toEqual(["app/web:card"]);
+
+    // A second click on the same node must reach the handler again so the menu
+    // it opened is dismissed rather than re-opened.
+    await browserUser.click(title);
+    expect(recorded.toggled).toEqual(["app/web:card", "app/web:card"]);
   });
 
   it("opens the workspace file from the source link without following the href", async () => {
