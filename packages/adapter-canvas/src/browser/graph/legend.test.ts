@@ -74,7 +74,7 @@ describe("category legend", () => {
 
   it("files an unrecognized type under the catch-all category", () => {
     expect(collectLegendCategories([{ name: "x" }])).toEqual([
-      { name: "Other", icon: "" }
+      { name: "Other", icon: "", monochrome: false }
     ]);
   });
 
@@ -88,6 +88,34 @@ describe("category legend", () => {
     expect(html.split('class="legend-item"').length - 1).toBe(2);
   });
 
+  it("paints a monochrome icon through a themed mask instead of an image", () => {
+    const categories = collectLegendCategories([
+      {
+        name: "web",
+        type: "Radius.Compute/containers",
+        icon: '<svg viewBox="0 0 8 8"><rect fill="currentColor" /></svg>'
+      }
+    ]);
+    expect(categories[0]?.monochrome).toBe(true);
+    const html = buildCategoryLegendHtml(categories);
+    expect(html).not.toContain("<img");
+    expect(html).toContain('aria-hidden="true"');
+    expect(html).toContain("background-color:var(--rad-text, currentColor);");
+    expect(html).toContain("-webkit-mask:url(&quot;data:image/svg+xml,");
+    expect(html).toContain("center/contain no-repeat");
+  });
+
+  it("keeps a multi-color built-in glyph as an unmasked image", () => {
+    const categories = collectLegendCategories([
+      { name: "web", type: "Radius.Compute/containers" }
+    ]);
+    expect(categories[0]?.monochrome).toBe(false);
+    const html = buildCategoryLegendHtml(categories);
+    expect(html).toContain('<img src="data:image/svg+xml,');
+    expect(html).not.toContain("mask:");
+    expect(decodeURIComponent(html)).toContain('fill="#326ce5"');
+  });
+
   it("escapes a category name and icon so neither can become markup", () => {
     const html = buildCategoryLegendHtml([
       { name: "<b>x</b>", icon: 'data:"><img onerror=1' }
@@ -95,5 +123,17 @@ describe("category legend", () => {
     expect(html).not.toContain("<b>x</b>");
     expect(html).toContain("&lt;b&gt;x&lt;/b&gt;");
     expect(html).toContain("&quot;&gt;&lt;img");
+  });
+
+  it("keeps a hostile monochrome icon inside the css url token", () => {
+    const html = buildCategoryLegendHtml([
+      {
+        name: "x",
+        icon: 'data:image/svg+xml,a") ;background:red;--x:url("',
+        monochrome: true
+      }
+    ]);
+    expect(html).not.toContain(";background:red");
+    expect(html).toContain("a%22%29%20%3Bbackground:red");
   });
 });
