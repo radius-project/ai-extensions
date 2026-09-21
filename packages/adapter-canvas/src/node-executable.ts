@@ -35,10 +35,20 @@ export interface NodeExecutableDependencies {
   probeVersion(executable: string): string | null;
 }
 
+// Why a found installation cannot be used.
+export type NodeRejectionReason =
+  // Answered as Node, but older than MINIMUM_NODE_MAJOR.
+  | "unsupported-version"
+  // Exists, but did not answer with a Node version at all.
+  | "not-node"
+  // Sits at a path that cannot be safely handed to a shell command line.
+  | "unsafe-path";
+
 export interface RejectedNodeRuntime {
   executable: string;
   // The reported version, or null when the file did not answer as Node.
   version: string | null;
+  reason: NodeRejectionReason;
 }
 
 export interface NodeResolution {
@@ -51,6 +61,22 @@ export interface NodeResolution {
 function majorVersion(version: string | null): number | null {
   const match = /^v?(\d+)\./u.exec(version?.trim() ?? "");
   return match ? Number(match[1]) : null;
+}
+
+// The skill substitutes nodeCommand into a double-quoted argument of a shell
+// command line, so a path carrying shell syntax could change that command. Such
+// a path is refused rather than escaped: no real installation contains these
+// characters, and rewriting one would be a guess about the user's shell.
+const POSIX_UNSAFE = /["`$\\]|[\u0000-\u001F]/u;
+const WINDOWS_UNSAFE = /["`$%]|[\u0000-\u001F]/u;
+
+function isShellSafePath(
+  candidate: string,
+  platform: NodeJS.Platform
+): boolean {
+  return !(platform === "win32" ? WINDOWS_UNSAFE : POSIX_UNSAFE).test(
+    candidate
+  );
 }
 
 function platformPath(platform: NodeJS.Platform): path.PlatformPath {
@@ -184,12 +210,28 @@ export function resolveNodeExecutable(
     // directory would otherwise spawn the same probe twice.
     if (probed.has(candidate)) continue;
     probed.add(candidate);
+    // A relative PATH entry is legal but resolves against whatever directory
+    // the agent happens to be in, so it can never back the absolute path the
+    // handoff promises.
+    if (!platformPath(platform).isAbsolute(candidate)) continue;
     if (!deps.pathExists(candidate)) continue;
+    if (!isShellSafePath(candidate, platform)) {
+      rejected.push({
+        executable: candidate,
+        version: null,
+        reason: "unsafe-path"
+      });
+      continue;
+    }
     const version = deps.probeVersion(candidate);
     const major = majorVersion(version);
     if (major !== null && major >= MINIMUM_NODE_MAJOR)
       return { executable: candidate, rejected };
-    rejected.push({ executable: candidate, version });
+    rejected.push({
+      executable: candidate,
+      version,
+      reason: major === null ? "not-node" : "unsupported-version"
+    });
   }
   return { executable: null, rejected };
 }

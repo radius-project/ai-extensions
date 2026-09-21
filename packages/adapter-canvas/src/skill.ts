@@ -59,11 +59,13 @@ function describeRejected(
   resolution: NodeResolution
 ): readonly string[] | undefined {
   if (resolution.rejected.length === 0) return undefined;
-  return resolution.rejected.map(({ executable, version }) =>
-    version ?
-      `${executable} (${version}, older than Node.js ${MINIMUM_NODE_MAJOR})`
-    : `${executable} (did not report a Node.js version)`
-  );
+  return resolution.rejected.map(({ executable, version, reason }) => {
+    if (reason === "unsupported-version")
+      return `${executable} (${version}, older than Node.js ${MINIMUM_NODE_MAJOR})`;
+    if (reason === "unsafe-path")
+      return `${executable} (path contains characters that are unsafe in a shell command)`;
+    return `${executable} (did not report a Node.js version)`;
+  });
 }
 
 function sanitizeRepoPath(repoPath: unknown): string {

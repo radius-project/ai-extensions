@@ -276,15 +276,25 @@ describe("radiusAppBicepSkill", () => {
         {
           executable: null,
           rejected: [
-            { executable: "/usr/bin/node", version: "v12.22.9" },
-            { executable: "/opt/fake/node", version: null }
+            {
+              executable: "/usr/bin/node",
+              version: "v12.22.9",
+              reason: "unsupported-version"
+            },
+            { executable: "/opt/fake/node", version: null, reason: "not-node" },
+            {
+              executable: "/opt/we ird/$(id)/node",
+              version: null,
+              reason: "unsafe-path"
+            }
           ]
         }
       );
 
       expect(parseHandoff(skill("/workspace")).rejectedRuntimes).toEqual([
         "/usr/bin/node (v12.22.9, older than Node.js 18)",
-        "/opt/fake/node (did not report a Node.js version)"
+        "/opt/fake/node (did not report a Node.js version)",
+        "/opt/we ird/$(id)/node (path contains characters that are unsafe in a shell command)"
       ]);
     });
 

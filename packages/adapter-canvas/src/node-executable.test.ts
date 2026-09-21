@@ -205,10 +205,14 @@ describe("resolveNodeExecutable", () => {
     });
 
     it.each([
-      ["one major below the minimum", `v${MINIMUM_NODE_MAJOR - 1}.20.2`],
-      ["a file that is not node", "GNU coreutils 9.1"],
-      ["a candidate that could not be run", null]
-    ])("refuses %s and reports what it found", (_label, version) => {
+      [
+        "one major below the minimum",
+        `v${MINIMUM_NODE_MAJOR - 1}.20.2`,
+        "unsupported-version"
+      ],
+      ["a file that is not node", "GNU coreutils 9.1", "not-node"],
+      ["a candidate that could not be run", null, "not-node"]
+    ])("refuses %s and reports what it found", (_label, version, reason) => {
       const deps = createDeps({
         env: { PATH: "/usr/bin" },
         present: ["/usr/bin/node"],
@@ -217,7 +221,7 @@ describe("resolveNodeExecutable", () => {
 
       expect(resolveNodeExecutable(deps)).toEqual({
         executable: null,
-        rejected: [{ executable: "/usr/bin/node", version }]
+        rejected: [{ executable: "/usr/bin/node", version, reason }]
       });
     });
 
@@ -232,8 +236,16 @@ describe("resolveNodeExecutable", () => {
       });
 
       expect(resolveNodeExecutable(deps).rejected).toEqual([
-        { executable: "/first/bin/node", version: "v14.21.3" },
-        { executable: "/second/bin/node", version: "v16.20.2" }
+        {
+          executable: "/first/bin/node",
+          version: "v14.21.3",
+          reason: "unsupported-version"
+        },
+        {
+          executable: "/second/bin/node",
+          version: "v16.20.2",
+          reason: "unsupported-version"
+        }
       ]);
     });
 
@@ -245,7 +257,11 @@ describe("resolveNodeExecutable", () => {
       });
 
       expect(resolveNodeExecutable(deps).rejected).toEqual([
-        { executable: "/old/bin/node", version: "v16.20.2" }
+        {
+          executable: "/old/bin/node",
+          version: "v16.20.2",
+          reason: "unsupported-version"
+        }
       ]);
     });
 
@@ -260,6 +276,89 @@ describe("resolveNodeExecutable", () => {
 
       expect(deps.probeVersion).toHaveBeenCalledTimes(1);
       expect(resolution.rejected).toHaveLength(1);
+    });
+  });
+
+  describe("path safety", () => {
+    it("ignores a relative PATH entry", () => {
+      const deps = createDeps({
+        env: { PATH: "tools:../bin:/usr/bin" },
+        present: ["tools/node", "../bin/node", "/usr/bin/node"]
+      });
+
+      expect(resolveNodeExecutable(deps)).toEqual({
+        executable: "/usr/bin/node",
+        rejected: []
+      });
+      expect(deps.probeVersion).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores a relative PATH entry on Windows", () => {
+      const deps = createDeps({
+        platform: "win32",
+        env: { PATH: "tools;C:\\Program Files\\nodejs" },
+        present: ["tools\\node.exe", "C:\\Program Files\\nodejs\\node.exe"]
+      });
+
+      expect(resolveNodeExecutable(deps).executable).toBe(
+        "C:\\Program Files\\nodejs\\node.exe"
+      );
+    });
+
+    it.each([
+      ["a command substitution", "/opt/$(whoami)/bin/node"],
+      ["a backquote", "/opt/`id`/bin/node"],
+      ["an embedded double quote", '/opt/we"ird/bin/node'],
+      ["a backslash escape", "/opt/we\\ird/bin/node"],
+      ["a control character", "/opt/we\u0007ird/bin/node"]
+    ])("refuses a path containing %s without running it", (_label, unsafe) => {
+      const deps = createDeps({
+        env: { PATH: `${path.posix.dirname(unsafe)}:/usr/bin` },
+        present: [unsafe]
+      });
+
+      expect(resolveNodeExecutable(deps)).toEqual({
+        executable: null,
+        rejected: [{ executable: unsafe, version: null, reason: "unsafe-path" }]
+      });
+      expect(deps.probeVersion).not.toHaveBeenCalled();
+    });
+
+    it("refuses a Windows path that cmd would expand", () => {
+      const deps = createDeps({
+        platform: "win32",
+        env: { PATH: "C:\\%USERNAME%\\nodejs" },
+        present: ["C:\\%USERNAME%\\nodejs\\node.exe"]
+      });
+
+      expect(resolveNodeExecutable(deps).rejected).toEqual([
+        {
+          executable: "C:\\%USERNAME%\\nodejs\\node.exe",
+          version: null,
+          reason: "unsafe-path"
+        }
+      ]);
+    });
+
+    it("keeps a Windows path whose only backslashes are separators", () => {
+      const deps = createDeps({
+        platform: "win32",
+        env: { PATH: "C:\\Program Files\\nodejs" },
+        present: ["C:\\Program Files\\nodejs\\node.exe"]
+      });
+
+      expect(resolveNodeExecutable(deps).executable).toBe(
+        "C:\\Program Files\\nodejs\\node.exe"
+      );
+    });
+
+    it("continues past an unsafe path to a usable installation", () => {
+      const deps = createDeps({
+        env: { PATH: "/opt/$(id)/bin:/usr/bin" },
+        present: ["/opt/$(id)/bin/node", "/usr/bin/node"]
+      });
+
+      expect(resolveNodeExecutable(deps).executable).toBe("/usr/bin/node");
     });
   });
 
