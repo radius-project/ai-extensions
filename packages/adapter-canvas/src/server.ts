@@ -188,6 +188,8 @@ import {
   canResumeInput,
   requireInput,
   resumeAfterInput,
+  getAzureAppCreateContinuation,
+  setAzureAppCreateContinuation,
   setExecutionActive,
   announceOperationTerminal,
   shouldStop,
@@ -584,6 +586,9 @@ interface AppBicepHandoffInput {
   // against the same workspace context the route just rendered from, and so it
   // can deduplicate against the handoff it last performed for this panel.
   state?: CanvasState;
+  // Whether the render that raised this handoff is still on screen, re-checked
+  // by the runtime just before it mints attempt tokens and speaks.
+  isCurrent?: () => boolean;
 }
 
 export interface DeployRepairHandoffInput {
@@ -1029,7 +1034,9 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       report: (diagnostic) => operations.report?.(diagnostic),
       finish: (operation, state, options) => {
         finish(operation, state, options);
-      }
+      },
+      getAzureAppCreateContinuation,
+      setAzureAppCreateContinuation
     },
     progress: {
       enterStage: (operation, stage) => {
@@ -2464,7 +2471,8 @@ function triggerAppBicepHandoff(
   repo: string,
   branches: string | string[],
   page: string,
-  progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph"
+  progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph",
+  isCurrent?: () => boolean
 ): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
@@ -2478,7 +2486,8 @@ function triggerAppBicepHandoff(
         branches: list,
         page,
         progressView,
-        state: entry?.state
+        state: entry?.state,
+        isCurrent
       })
     ).catch(() => {});
   } catch {

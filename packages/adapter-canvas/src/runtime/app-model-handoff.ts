@@ -26,6 +26,7 @@ import type { CanvasState } from "../shared.js";
 import type { GraphProgressView } from "../shared.js";
 import type { AppSourceEvaluation } from "@radius-project/core";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
+import { missingModelHandoffTarget } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 import { appModelTargetKey } from "../app-model-authoring-failure.js";
 
@@ -39,6 +40,12 @@ export interface AppModelHandoffRequest {
   // The canvas instance's state: the branch context the readers resolve against,
   // the latest request for cancellation, and delivered handoffs keyed by target.
   state?: CanvasState;
+  // Answers whether the render that raised this handoff is still the one on
+  // screen. The handoff probes sources and waits out a grace window before it
+  // speaks, and the user can change the selection throughout: without this the
+  // work started by an abandoned render still mints attempt tokens and asks the
+  // agent to model branches nobody is looking at.
+  isCurrent?: () => boolean;
 }
 
 export interface AppModelHandoffDependencies {
@@ -133,8 +140,7 @@ export function appModelHandoffKey(
 export function createAppModelHandoff(
   deps: AppModelHandoffDependencies
 ): AppModelHandoff {
-  const targetKey = (repo: string, branches: ReadonlyArray<string>): string =>
-    `${repo}::${branches.join(",")}`;
+  const targetKey = missingModelHandoffTarget;
 
   // Polls for an in-flight modeling run across the grace window. Answers true
   // as soon as one is observed, so the common case where the agent starts
@@ -161,9 +167,11 @@ export function createAppModelHandoff(
     branches,
     page,
     progressView,
-    state
+    state,
+    isCurrent
   }: AppModelHandoffRequest): Promise<void> {
     if (!repo) return;
+    const stillCurrent = (): boolean => isCurrent === undefined || isCurrent();
     const targets = branches.filter((branch): branch is string =>
       Boolean(branch)
     );
@@ -308,17 +316,31 @@ export function createAppModelHandoff(
         releaseReservation();
         return;
       }
+      // Last check before this handoff becomes observable. Everything above is
+      // reversible; minting the tokens and sending the turn are not, and both
+      // the source probe and the grace window gave the user time to move on.
+      if (!stillCurrent()) {
+        releaseReservation();
+        return;
+      }
 
+      // One token per attempt, recorded under every branch the attempt covers.
+      // A diff hands off two branches at once and deliberately reuses this
+      // single-branch fencing protocol — an attempt token and a recorded
+      // failure are always keyed `repo::branch` — rather than gaining a second,
+      // two-branch protocol that could disagree with the first.
       const attemptToken =
-        state && state.canvasInstanceId && targets.length === 1 ?
+        state && state.canvasInstanceId ?
           `${state.canvasInstanceId}::attempt-${(state.appModelAttemptGeneration ?? 0) + 1}`
         : undefined;
       if (state && attemptToken) {
         state.appModelAttemptGeneration =
           (state.appModelAttemptGeneration ?? 0) + 1;
         state.appModelAttemptTokens ??= {};
-        state.appModelAttemptTokens[appModelTargetKey(repo, targets[0])] =
-          attemptToken;
+        for (const branch of targets) {
+          state.appModelAttemptTokens[appModelTargetKey(repo, branch)] =
+            attemptToken;
+        }
       }
       try {
         await deps.send(
@@ -331,21 +353,19 @@ export function createAppModelHandoff(
               {
                 attemptToken,
                 instanceId: state.canvasInstanceId,
-                branch: targets[0]
+                branches: targets
               }
             : undefined
           )
         );
       } catch (sendError) {
-        if (
-          state &&
-          attemptToken &&
-          state.appModelAttemptTokens?.[appModelTargetKey(repo, targets[0])] ===
-            attemptToken
-        ) {
-          delete state.appModelAttemptTokens[
-            appModelTargetKey(repo, targets[0])
-          ];
+        if (state && attemptToken) {
+          for (const branch of targets) {
+            const tokenKey = appModelTargetKey(repo, branch);
+            if (state.appModelAttemptTokens?.[tokenKey] === attemptToken) {
+              delete state.appModelAttemptTokens[tokenKey];
+            }
+          }
         }
         releaseReservation();
         throw sendError;

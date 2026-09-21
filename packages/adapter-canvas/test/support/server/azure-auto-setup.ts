@@ -7,6 +7,7 @@ import type {
   AzureAutoSetupTempFilePort
 } from "../../../src/server/routes/azure-auto-setup-types.js";
 import { successfulSelectedGhExecutor } from "./selected-gh.js";
+import { normalizeAzureAppCreateContinuation } from "../../../src/azure-app-create-continuation.js";
 
 /**
  * How a fake `az` should answer the caller-identity projection.
@@ -80,6 +81,19 @@ export function createAzureAutoSetupTestDependencies(
       persist: async () => {},
       report: () => {},
       finish: () => {},
+      getAzureAppCreateContinuation: (candidate) =>
+        normalizeAzureAppCreateContinuation(
+          candidate.azureAppCreateContinuation
+        ),
+      setAzureAppCreateContinuation: (candidate, continuation) => {
+        const normalized = normalizeAzureAppCreateContinuation(continuation);
+        if (normalized) {
+          candidate.azureAppCreateContinuation = normalized;
+          return normalized;
+        }
+        delete candidate.azureAppCreateContinuation;
+        return null;
+      },
       enterStage: () => {},
       setStageState: () => {},
       hasWarnings: () => false,
