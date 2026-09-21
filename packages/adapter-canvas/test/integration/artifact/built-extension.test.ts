@@ -926,7 +926,7 @@ describe("P0-C built Radius extension artifact", () => {
     );
     expect(skillGuidance).toContain("`aggregate-secret-alias`");
     expect(secretsGuidance).toContain(
-      "As a fail-closed backstop, `validate-bicep.mjs` rejects a direct Recipe-managed aggregate secret key"
+      "As a conservative executable backstop, `validate-bicep.mjs` rejects a Recipe-managed aggregate secret key"
     );
     for (const guidance of guidanceDocs) {
       expect(guidance).not.toContain("StackExchange.Redis");

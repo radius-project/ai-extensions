@@ -1,0 +1,91 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "3456066684772495100"
+    }
+  },
+  "parameters": {
+    "environment": {
+      "type": "string"
+    }
+  },
+  "imports": {
+    "radius": {
+      "provider": "Radius",
+      "version": "latest"
+    }
+  },
+  "resources": {
+    "app": {
+      "import": "radius",
+      "type": "Radius.Core/applications@2025-08-01-preview",
+      "properties": {
+        "name": "test-app",
+        "properties": {
+          "environment": "[parameters('environment')]"
+        }
+      }
+    },
+    "redisCache": {
+      "import": "radius",
+      "type": "Radius.Data/redisCaches@2025-08-01-preview",
+      "properties": {
+        "name": "test-cache",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('app').id]"
+        }
+      },
+      "dependsOn": [
+        "app"
+      ]
+    },
+    "web": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "web",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('app').id]",
+          "codeReference": "src/web.ts#L1",
+          "containers": {
+            "web": {
+              "image": "example.invalid/web:latest",
+              "env": {
+                "CACHE_URL_HELPER": {
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "secretName": "[reference('redisCache').properties.secrets.name]",
+                      "key": "url"
+                    }
+                  }
+                },
+                "REDIS_ADDR": {
+                  "value": "$(CACHE_URL_HELPER)"
+                },
+                "REDIS_HOST": {
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "secretName": "[reference('redisCache').properties.secrets.name]",
+                      "key": "url"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "app",
+        "redisCache"
+      ]
+    }
+  }
+}

@@ -685,6 +685,14 @@ function emittedAtOrAfter(referenced, name) {
   );
 }
 
+function emittedBefore(referenced, name) {
+  return (
+    referenced < name &&
+    referenced.toUpperCase() < name.toUpperCase() &&
+    referenced.toLowerCase() < name.toLowerCase()
+  );
+}
+
 function plainEnvironmentValues(env) {
   const values = new Map();
   for (const [name, entry] of Object.entries(env)) {
@@ -808,6 +816,10 @@ const AGGREGATE_SECRET_KEYS = new Set([
   "uri",
   "url"
 ]);
+// Both vocabularies are deliberately exact and conservative. They do not infer
+// embedded words such as `primaryConnectionString` or undelimited names such as
+// `REDISADDR`; adding one requires evidence that it identifies the same contract
+// across generated models rather than merely containing a familiar substring.
 const ADDRESS_PART_TOKENS = new Set([
   "addr",
   "address",
@@ -827,7 +839,7 @@ function configurationNameTokens(name) {
     .filter((token) => token !== "");
 }
 
-function aggregateSecretAliasFinding(name, entry, template, parameterValues) {
+function managedAggregateSecretFinding(entry, template, parameterValues) {
   if (!isPlainObject(entry) || !isPlainObject(entry.valueFrom)) {
     return null;
   }
@@ -840,25 +852,85 @@ function aggregateSecretAliasFinding(name, entry, template, parameterValues) {
     template,
     parameterValues
   );
+  const key = resolveTemplateString(reference.key, template, parameterValues);
   if (
     typeof secretName !== "string" ||
     MANAGED_SECRET_REFERENCE.exec(secretName) === null ||
-    typeof reference.key !== "string"
+    typeof key !== "string"
   ) {
     return null;
   }
-  const secretKey = reference.key.toLowerCase().replace(/[^a-z0-9]/gu, "");
+  const secretKey = key.toLowerCase().replace(/[^a-z0-9]/gu, "");
   if (!AGGREGATE_SECRET_KEYS.has(secretKey)) {
     return null;
   }
+  return {
+    key,
+    secretName
+  };
+}
+
+function managedAggregateSecretSource(
+  name,
+  env,
+  template,
+  parameterValues,
+  visited = new Set()
+) {
+  if (visited.has(name)) {
+    return null;
+  }
+  const entry = env[name];
+  const direct = managedAggregateSecretFinding(
+    entry,
+    template,
+    parameterValues
+  );
+  if (direct !== null) {
+    return { ...direct, helpers: [], passThrough: true };
+  }
+  if (!isPlainObject(entry) || !("value" in entry)) {
+    return null;
+  }
+  const value = resolveTemplateString(entry.value, template, parameterValues);
+  if (typeof value !== "string") {
+    return null;
+  }
+  const nextVisited = new Set(visited);
+  nextVisited.add(name);
+  for (const helper of expandedVariableNames(value)) {
+    const helperEntry = env[helper];
+    if (
+      isPlainObject(helperEntry) &&
+      "value" in helperEntry &&
+      !emittedBefore(helper, name)
+    ) {
+      continue;
+    }
+    const finding = managedAggregateSecretSource(
+      helper,
+      env,
+      template,
+      parameterValues,
+      nextVisited
+    );
+    if (finding !== null) {
+      return {
+        ...finding,
+        helpers: [helper, ...finding.helpers],
+        passThrough: finding.passThrough && value.trim() === `$(${helper})`
+      };
+    }
+  }
+  return null;
+}
+
+function aggregateSecretAliasFinding(name, env, template, parameterValues) {
   const targetTokens = configurationNameTokens(name);
   if (!targetTokens.some((token) => ADDRESS_PART_TOKENS.has(token))) {
     return null;
   }
-  return {
-    key: reference.key,
-    secretName
-  };
+  return managedAggregateSecretSource(name, env, template, parameterValues);
 }
 
 function checkAggregateSecretAliases(
@@ -909,18 +981,26 @@ function checkAggregateSecretAliases(
       if (!isPlainObject(container) || !isPlainObject(container.env)) {
         continue;
       }
-      for (const [name, entry] of Object.entries(container.env)) {
+      for (const name of Object.keys(container.env)) {
         const finding = aggregateSecretAliasFinding(
           name,
-          entry,
+          container.env,
           template,
           parameterValues
         );
         if (finding === null) {
           continue;
         }
+        const binding =
+          finding.helpers.length === 0 ?
+            ""
+          : ` through helper chain ${finding.helpers.map((helper) => JSON.stringify(helper)).join(" -> ")}`;
+        const transformationAdvice =
+          finding.passThrough ?
+            "A pass-through helper does not convert the value."
+          : "Embedding the aggregate in a larger value does not prove that the resulting syntax is compatible.";
         report(
-          `${app}: error aggregate-secret-alias: ${resourcePath}.properties.containers.${containerKey}.env.${name}: Recipe-managed secret key ${JSON.stringify(finding.key)} is an aggregate value, but ${JSON.stringify(name)} names an address part. The model cannot establish that the application parser accepts the aggregate syntax. Trace the setting through checked-in source and either bind a matching aggregate input, safely compose the app-native value from schema-declared parts at runtime, or stop without publishing the model.`
+          `${app}: error aggregate-secret-alias: ${resourcePath}.properties.containers.${containerKey}.env.${name}: Recipe-managed secret key ${JSON.stringify(finding.key)} is an aggregate value${binding}, but ${JSON.stringify(name)} names an address part. The model cannot establish that the application parser accepts the aggregate syntax. Trace the setting through checked-in source and either bind a matching aggregate input, perform a real runtime transformation from schema-declared parts, or stop without publishing the model. ${transformationAdvice} If the fixed address-shaped name itself accepts the aggregate syntax, use another source-supported aggregate input or report this conservative checker limitation rather than renaming either side.`
         );
         failed = true;
       }
