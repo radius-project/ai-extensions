@@ -4,7 +4,7 @@
 - **Date**: 2026-09
 - **Status**: Draft
 
-**Example implementation:** See the [source at revision `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) for concrete APIs, module layout, and integration details. This proposal describes the intended architecture; the example is not evidence that every requirement is complete or that the design is approved.
+**Example implementation:** See the [source at revision `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) for examples APIs, module layout, and integration details. This is not the final implementation, it may change based on review and will be implemented in stages.
 
 ## Overview
 
@@ -12,7 +12,7 @@ Extract GitHub Radius's existing application and environment functionality from 
 
 GitHub Radius currently creates GitHub environments, coordinates Radius application authoring and deployment, calls the Radius CLI, and reports workflow results through the Copilot App's Canvas integration. Some of this functionality is reusable, but much of the coordination still lives in the Canvas adapter and depends on its server, request types, or panel state.
 
-That coupling makes another frontend expensive to build. A Copilot CLI integration, for example, would have to reproduce the Canvas implementation's decisions about environment setup, command execution, workflow dispatch, progress, and failures, or depend on Canvas being open. Copies of this logic would drift: a deployment fix in Canvas would not necessarily fix the same problem in another frontend.
+That coupling makes another frontend expensive to build. A VSCode integration, for example, would have to reproduce the Canvas implementation's decisions about environment setup, command execution, workflow dispatch, progress, and failures, or depend on Canvas being open. Copies of this logic would drift: a deployment fix in Canvas would not necessarily fix the same problem in another frontend.
 
 Note - this proposal is not a competing proposal to [docs: design common Radius graph libraries](https://github.com/nicolejms/ai-extensions/pull/2). These would both work quite well together.
 
@@ -156,7 +156,7 @@ Every frontend uses the same implementation. Shared fixes apply to Canvas and ot
 
 ##### Disadvantages
 
-Extraction requires careful dependency separation and regression coverage across existing workflows. Moving files alone does not remove their host dependencies.
+Extraction requires careful dependency separation and regression coverage across existing workflows.
 
 #### Option 2: Wrap existing Canvas routes
 
@@ -206,7 +206,7 @@ The contract describes **existing use cases first**: environment setup and delet
 | Required interactions | Explicit requests for user decisions or agent work, with responses tied to the relevant request. Preserve authorization and output validation; unsupported interactions produce a visible limitation.                     |
 | Dependencies          | Narrow interfaces for host-provided capabilities such as authorized workspace access and agent execution. Shared GitHub and `rad` helpers remain reusable implementations.                                                |
 
-For example, environment creation should accept a repository and setup options, run the existing setup sequence, and report progress plus a result or error. Canvas translates form values into those inputs and renders the result. A CLI adapter translates a prompt or tool invocation into the same inputs and formats the same result. Neither frontend should duplicate the GitHub environment creation or workflow publication sequence.
+For example, environment creation should accept a repository and setup options, run the existing setup sequence, and report progress plus a result or error. Canvas translates form values into those inputs and renders the result. A VSCode adapter translates a prompt or tool invocation into the same inputs and formats the same result. Neither frontend should duplicate the GitHub environment creation or workflow publication sequence.
 
 Preserve current execution references and cancellation boundaries during extraction. Do not promise cross-session recovery, exactly-once dispatch, or stronger revision/phase verification merely because a result now has a TypeScript type. Where the current implementation lacks evidence, the contract must expose that limitation.
 
@@ -214,7 +214,7 @@ Existing result shapes may be retained during migration to preserve compatibilit
 
 #### Shared types and behavior-preservation tests
 
-**Shared TypeScript types define the library calls.** Maintain input and result types with the library in `ai-extensions` rather than letting each adapter invent its own shapes. Validate untrusted data at entry points, such as tool arguments and GitHub responses. This in-process extraction does not require JSON Schema, generated bindings, or a new protocol.
+**Shared TypeScript types define the library calls.** Maintain input and result types with the library in `ai-extensions` rather than letting each adapter invent its own shapes. Validate untrusted data at entry points, such as tool arguments and GitHub responses.
 
 **Ordinary tests demonstrate reuse and preserve behavior.** Use a small non-Canvas harness to exercise the library without a Canvas server, and focused Canvas integration tests to check that existing workflows still use it correctly. Shared scenarios supply inputs, controlled dependency responses, and expected results and side effects. This requires no new conformance framework or full second frontend.
 
@@ -293,13 +293,13 @@ sequenceDiagram
     participant G as rad and existing graph helpers
     F->>L: Compare explicit base and head sources
     loop Each source independently
-        L->>S: Resolve explicit committed revision
+        L->>S: Resolve matching workspace or selected GitHub source
         S-->>L: Definition files and source identity, confirmed absence, or unreadable
     end
     alt A source cannot be read
         L-->>F: Unavailable with affected source and reason
     else At least one definition exists and both source reads succeeded
-        L->>S: Stage both revisions before either compilation
+        L->>S: Stage both sources before either compilation
         L->>G: Build graphs and compare, with no resources for an absent definition
         G-->>L: Typed graph diff
         L-->>F: Diff and source information
@@ -310,11 +310,11 @@ sequenceDiagram
 
 Separate graph reads and comparison from agent-driven authoring and freshness checks. Canvas can retain its combined experience by explicitly composing these capabilities. A pure read neither authors nor publishes files; an acknowledged agent request is not proof of a validated model.
 
-Ordinary reads use the selected workspace, including uncommitted changes where appropriate. Branch comparisons use both explicit committed revisions and ignore working-tree edits. Stage both sides before compiling either. No read should commit or push source to make it available.
+Ordinary reads and branch comparisons preserve Canvas's workspace-aware source selection: use the authorized workspace, including uncommitted changes, for a source matching its repository and branch; read other sources from GitHub. Resolve each comparison side independently and report its source information. Stage both sides before compiling either. No read should commit or push source to make it available.
 
 Distinguish confirmed absence, an empty definition, and a read failure. At the original baseline, some reads return `null` for both absence and failure; the extraction must correct that ambiguity. Confirmed absence contributes no resources to first-addition/last-removal comparisons. If neither definition exists, authoring is a separate interaction. Unreadable sources must fail visibly, and missing or unreadable workspace content must not fall back to an older remote copy.
 
-**Example limitation:** The linked example does not yet meet that requirement in all Canvas workspace bindings: empty or unreadable files can be treated as absent, and ordinary/planned graph reads can [fall back to remote content](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server.ts#L5336-L5368). Its [explicit committed comparisons](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server/routes/graph-workflows.ts#L1335-L1338) bypass that fallback. This is incomplete integration, not a change to the intended architecture.
+**Example limitations:** The linked example does not yet meet that requirement in all Canvas workspace bindings: empty or unreadable files can be treated as absent, and ordinary/planned graph reads can [fall back to remote content](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server.ts#L5336-L5368). Its [committed-only comparison selection](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/packages/adapter-canvas/src/server/routes/graph-workflows.ts#L1335-L1338) must also be adjusted to preserve workspace-aware comparisons. These are remaining integration gaps, not changes to the intended architecture.
 
 Graph comparison already has complementary implementations: Radius's [`ComputeDiffHash`](https://github.com/radius-project/radius/blob/c8ad9211a25699c377c45268890e4f67070aa114/pkg/cli/graph/diffhash.go) defines the authored-property/dependency hash, and the extension's [`computeGraphDiff`](https://github.com/radius-project/ai-extensions/blob/6f1fec8f282f96100e58f780987f6a697b65056f/packages/core/src/graph/diff.ts) compares fields, connections, and that hash. Extract their orchestration, not their algorithms.
 
@@ -357,7 +357,7 @@ Keep retries of status reads separate from retries of deployments. Use bounded b
 
 The extraction is complete when Canvas uses the library for the migrated capability set, that library has no Canvas imports or instance requirements, and a non-Canvas caller can exercise the same logic. Import-boundary checks should cover both direct and transitive dependencies so a helper does not bring Canvas back into the library.
 
-Shared tests should assert dependency calls and side effects, not just matching UI messages. Cover environment creation, command construction, workflow dispatch, source selection, unsupported agent interactions, cancellation boundaries, and destructive-action authorization. Graph fixtures should include first addition, last removal, neither side having a definition, retrieval failures, staging order, and explicit authoring/freshness handoffs. Use controlled GitHub/process/agent dependencies for tests; demonstrate successful integration separately with the existing supported workflows.
+Shared tests should assert dependency calls and side effects, not just matching UI messages. Cover environment creation, command construction, workflow dispatch, source selection, unsupported agent interactions, cancellation boundaries, and destructive-action authorization. Graph fixtures should include uncommitted workspace changes on either matching comparison side, GitHub reads for nonmatching sources, first addition, last removal, neither side having a definition, retrieval failures, staging order, and explicit authoring/freshness handoffs. Use controlled GitHub/process/agent dependencies for tests; demonstrate successful integration separately with the existing supported workflows.
 
 Error fixtures should cover rejected and ambiguous dispatches, status API outages/rate limits, failed or cancelled runs without artifacts, mismatched artifact identity, conflicting phase evidence, deployment failure followed by cleanup failure, state-save failure, and secret-bearing diagnostics. Check that both callers preserve the primary failure and do not leak secrets or trigger duplicate mutations.
 
