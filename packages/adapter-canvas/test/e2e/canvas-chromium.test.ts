@@ -1470,6 +1470,89 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#progress-steps")).toHaveCount(0);
   });
 
+  // The shipped panel titles are what the user reads while they wait, and a
+  // bundling or wiring regression could leave the compiled Graph entry on the
+  // old label with the unit tests still green. This drives the real modeled
+  // Graph page across the boundary that selects the title — a progress stream
+  // that begins by checking for an existing model and then reports
+  // creating_model — and pins the visible text and the progress region's
+  // accessible name in both states.
+  test("retitles the modeled progress panel when the build starts creating a model", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/load-graph", async () => {
+      // Never fulfilled: the panel must stay up for the whole transition.
+    });
+    let creatingModel = false;
+    await page.route("**/api/progress**", async (route) => {
+      const events =
+        creatingModel ?
+          [
+            {
+              sequence: 1,
+              stage: "checking_model",
+              state: "succeeded",
+              detail: "No application model exists yet."
+            },
+            {
+              sequence: 2,
+              stage: "creating_model",
+              state: "running",
+              detail: "Copilot is creating .radius/app.bicep."
+            }
+          ]
+        : [
+            {
+              sequence: 1,
+              stage: "checking_model",
+              state: "running",
+              detail: "Checking the selected branch for .radius/app.bicep."
+            }
+          ];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          active: true,
+          view: "graph",
+          generation: 1,
+          events
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    const panel = page.locator(".rad-graph-progress");
+    await expect(panel.locator(".rad-graph-progress__title")).toHaveText(
+      "Loading the application graph"
+    );
+    // Resolved through the accessibility tree rather than the attribute, so
+    // the region really is reachable under the name a screen reader announces.
+    await expect(
+      page.getByRole("region", { name: "Loading the application graph" })
+    ).toBeVisible();
+    await expect(page.locator("#progress-steps")).toContainText(
+      "Check for an application model"
+    );
+
+    creatingModel = true;
+
+    await expect(panel.locator(".rad-graph-progress__title")).toHaveText(
+      "Generating the application graph"
+    );
+    await expect(
+      page.getByRole("region", { name: "Generating the application graph" })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Loading the application graph" })
+    ).toHaveCount(0);
+    await expect(page.locator("#progress-steps")).toContainText(
+      "Create .radius/app.bicep"
+    );
+  });
+
   test("stops the planned graph after a terminal modeling refusal @safety", async ({
     page,
     canvas
