@@ -266,7 +266,7 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
   return gh;
 }
 
-describe.sequential("cliExec", () => {
+describe("cliExec", { concurrent: false }, () => {
   // Real directories because the adapter resolves a bare Windows command name
   // through the filesystem. Supplying PATH and PATHEXT explicitly keeps the
   // resolution independent of whichever CLIs the host machine has installed.
@@ -976,7 +976,7 @@ describe.sequential("cliExec", () => {
   });
 });
 
-describe.sequential("commitFileToRepo", () => {
+describe("commitFileToRepo", { concurrent: false }, () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();
@@ -1076,7 +1076,7 @@ describe.sequential("commitFileToRepo", () => {
   });
 });
 
-describe.sequential("ghApiJson", () => {
+describe("ghApiJson", { concurrent: false }, () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();
@@ -1281,7 +1281,7 @@ describe("getInjectedGhToken", () => {
   );
 });
 
-describe.sequential("ghCommandCredentialSource", () => {
+describe("ghCommandCredentialSource", { concurrent: false }, () => {
   it("reports the injected credential when the resolved strategy keeps it", async () => {
     const gh = await loadGh("linux", {
       token: "session-token",
@@ -1364,7 +1364,7 @@ describe("GitHub CLI version compatibility", () => {
   );
 });
 
-describe.sequential("selected GitHub executor", () => {
+describe("selected GitHub executor", { concurrent: false }, () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();
@@ -1875,7 +1875,7 @@ describe.sequential("selected GitHub executor", () => {
   });
 });
 
-describe.sequential("getGitHubIdentity", () => {
+describe("getGitHubIdentity", { concurrent: false }, () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();
@@ -2028,7 +2028,7 @@ describe.sequential("getGitHubIdentity", () => {
   });
 });
 
-describe.sequential("getGhPackageCredentials", () => {
+describe("getGhPackageCredentials", { concurrent: false }, () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();
@@ -2279,7 +2279,7 @@ describe.sequential("getGhPackageCredentials", () => {
 // must contain only real files and must never present a partial answer as a
 // complete one. Every failure resolves to an empty array, which callers read as
 // "could not establish" rather than "the repository has nothing".
-describe.sequential("fetchRepoTree", () => {
+describe("fetchRepoTree", { concurrent: false }, () => {
   afterEach(() => {
     restorePlatform();
     vi.clearAllMocks();
