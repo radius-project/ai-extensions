@@ -28,7 +28,9 @@ describe("Azure auto-setup dependency composition", () => {
       start: vi.fn(() => ({ ok: true as const })),
       persist: vi.fn(async () => {}),
       report: vi.fn(),
-      finish: vi.fn()
+      finish: vi.fn(),
+      getAzureAppCreateContinuation: vi.fn(() => null),
+      setAzureAppCreateContinuation: vi.fn(() => null)
     };
     const progress: AzureAutoSetupOperationProgressPort = {
       enterStage: vi.fn(),

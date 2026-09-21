@@ -204,6 +204,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       hasRadiusApplicationModel: vi.fn(
         async () => options.radiusEnabled ?? false
       ),
+      canonicalWorkspacePath: vi.fn(async (workspacePath) =>
+        typeof workspacePath === "string" ? workspacePath.trim() : ""
+      ),
       detectWorkspaceContext: vi.fn(async () => workspaceContext),
       defaultBranchForState: vi.fn(
         (state) => (state?.contextBranch as string) || "main"

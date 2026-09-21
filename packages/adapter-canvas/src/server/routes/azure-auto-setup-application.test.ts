@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   prepareProviderMutation,
   settleProviderMutation
@@ -134,6 +134,9 @@ function harness(
         return true;
       })
   };
+  const callerIdentity = parseCallerIdentity(
+    callerIdentityResult(options.identity).stdout
+  );
   return {
     calls,
     recorded,
@@ -154,9 +157,7 @@ function harness(
       requestedAppName: "",
       requestedClientId: "",
       serviceManagementReference: "",
-      callerIdentity: parseCallerIdentity(
-        callerIdentityResult(options.identity).stdout
-      ),
+      callerIdentity,
       ...options.overrides
     }
   };
@@ -693,6 +694,120 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         ]
       }
     });
+  });
+
+  it("checks matching app ownership with concurrency four and preserves candidate order", async () => {
+    const candidates = Array.from({ length: 6 }, (_, index) => ({
+      appId: `33333333-3333-3333-3333-33333333333${index}`,
+      displayName: `Radius ${index}`
+    }));
+    const active = new Set<string>();
+    const admitted: string[] = [];
+    const resolvers = new Map<string, () => void>();
+    let maximumActive = 0;
+    let identityLookups = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({ stdout: JSON.stringify(candidates) });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          identityLookups += 1;
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          const appId = args[args.indexOf("--id") + 1];
+          admitted.push(appId);
+          active.add(appId);
+          maximumActive = Math.max(maximumActive, active.size);
+          await new Promise<void>((resolve) => {
+            resolvers.set(appId, () => {
+              active.delete(appId);
+              resolve();
+            });
+          });
+          return command({ stdout: USER_ID });
+        }
+        if (line.includes("federated-credential list")) {
+          return command({ stdout: "[]" });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    const pending = resolveAzureAutoSetupApplication(test.input);
+    await vi.waitFor(() => expect(admitted).toHaveLength(4));
+    expect(maximumActive).toBe(4);
+    resolvers.get(candidates[3].appId)?.();
+    resolvers.get(candidates[1].appId)?.();
+    await vi.waitFor(() => expect(admitted).toHaveLength(6));
+    resolvers.get(candidates[5].appId)?.();
+    resolvers.get(candidates[4].appId)?.();
+    resolvers.get(candidates[2].appId)?.();
+    resolvers.get(candidates[0].appId)?.();
+
+    await expect(pending).resolves.toBeNull();
+    expect(maximumActive).toBe(4);
+    expect(identityLookups).toBe(1);
+    expect(
+      (
+        test.failures[0].extra as {
+          candidates: Array<{ appId: string }>;
+        }
+      ).candidates.map((candidate) => candidate.appId)
+    ).toEqual(candidates.map((candidate) => candidate.appId));
+  });
+
+  it("awaits every admitted ownership lookup and fails closed on any error", async () => {
+    const candidates = Array.from({ length: 5 }, (_, index) => ({
+      appId: `33333333-3333-3333-3333-33333333333${index}`,
+      displayName: `Radius ${index}`
+    }));
+    const admitted: string[] = [];
+    const completed: string[] = [];
+    let releaseLast: (() => void) | undefined;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({ stdout: JSON.stringify(candidates) });
+        }
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          const appId = args[args.indexOf("--id") + 1];
+          admitted.push(appId);
+          if (appId === candidates[4].appId) {
+            await new Promise<void>((resolve) => {
+              releaseLast = resolve;
+            });
+          }
+          completed.push(appId);
+          return appId === candidates[1].appId ?
+              command({ code: 1, stderr: "owners unavailable" })
+            : command({ stdout: USER_ID });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    let settled = false;
+    const pending = resolveAzureAutoSetupApplication(test.input).finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(admitted).toHaveLength(5));
+    expect(settled).toBe(false);
+    releaseLast?.();
+    await expect(pending).resolves.toBeNull();
+
+    expect(completed).toHaveLength(5);
+    expect(test.failures).toHaveLength(1);
+    expect(test.failures[0]).toMatchObject({
+      code: "app-owner-lookup-failed"
+    });
+    expect(test.calls.some((call) => call === "record:reused")).toBe(false);
   });
 
   it("reuses the sole owned name match and skips malformed lookup entries", async () => {
@@ -1908,8 +2023,13 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     });
     expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
     expect(test.failures[0]).toMatchObject({
-      code: "service-management-reference-required"
+      code: "service-management-reference-required",
+      extra: {
+        appCreateContinuationAppName: "radius-deploy-octo-app",
+        appCreateContinuationCallerObjectId: USER_ID
+      }
     });
+    expect(test.failures[0].extra).not.toHaveProperty("appCreateContinuation");
   });
 });
 

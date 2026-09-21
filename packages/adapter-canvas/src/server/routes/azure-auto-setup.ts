@@ -1,5 +1,8 @@
 import { buildEnvironmentSuffix } from "@radius-project/core";
+import { isDeepStrictEqual } from "node:util";
 import {
+  buildServicePrincipalObjectIdArgs,
+  buildSignedInUserObjectIdArgs,
   isAksClusterName,
   isResourceGroupName,
   isUuid,
@@ -11,6 +14,13 @@ import type {
   CallerIdentity,
   ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
+import type { SelectedGhExecutor } from "../../gh.js";
+import {
+  createAzureAppCreateContinuation,
+  matchAzureAppCreateContinuation,
+  type AzureAppCreateContinuation,
+  type AzureAppCreateContinuationSeed
+} from "../../azure-app-create-continuation.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import { unresolvedProviderMutations } from "../../operations.js";
@@ -21,6 +31,7 @@ import {
 import { configureAzureAutoSetupCredentials } from "./azure-auto-setup-credentials.js";
 import type {
   AzureAutoSetupDependencies,
+  AzureAutoSetupExternalPort,
   AzureAutoSetupOperation,
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
@@ -67,6 +78,66 @@ export function parseAzureAccountIdentity(
   }
 }
 
+async function continuationMatchesLiveContext(
+  continuation: AzureAppCreateContinuation,
+  targetRepo: string,
+  environment: string,
+  external: AzureAutoSetupExternalPort,
+  selectedExecutor: SelectedGhExecutor
+): Promise<boolean> {
+  const accountResult = await external.runAz([
+    "account",
+    "show",
+    "--output",
+    "json"
+  ]);
+  if (accountResult.code !== 0 && accountResult.code !== "0") return false;
+  const account = parseAzureAccountIdentity(accountResult.stdout);
+  if (
+    !account ||
+    account.subscriptionId.toLowerCase() !==
+      continuation.resolved.subscriptionId ||
+    account.tenantId.toLowerCase() !== continuation.resolved.tenantId ||
+    !isDeepStrictEqual(
+      account.callerIdentity,
+      continuation.resolved.callerIdentity
+    ) ||
+    account.callerIdentity.kind === "unsupported"
+  ) {
+    return false;
+  }
+
+  const callerResult = await external.runAz(
+    account.callerIdentity.kind === "servicePrincipal" ?
+      buildServicePrincipalObjectIdArgs({
+        appId: account.callerIdentity.appId
+      })
+    : buildSignedInUserObjectIdArgs()
+  );
+  const callerObjectId = callerResult.stdout.trim().toLowerCase();
+  if (
+    (callerResult.code !== 0 && callerResult.code !== "0") ||
+    !isUuid(callerObjectId) ||
+    callerObjectId !== continuation.resolved.callerObjectId
+  ) {
+    return false;
+  }
+
+  try {
+    const oidcSuffix = buildEnvironmentSuffix(environment);
+    const oidc = await resolveOidcSubject(
+      { targetRepo, envName: environment, suffix: oidcSuffix },
+      (apiPath) => external.runGitHubJson(apiPath, selectedExecutor)
+    );
+    return (
+      oidcSuffix === continuation.resolved.oidcSuffix &&
+      isDeepStrictEqual(oidc, continuation.resolved.oidc)
+    );
+  } catch {
+    return false;
+  }
+}
+
 const OPERATION_FUNCTIONS = [
   "get",
   "isStale",
@@ -76,6 +147,8 @@ const OPERATION_FUNCTIONS = [
   "persist",
   "report",
   "finish",
+  "getAzureAppCreateContinuation",
+  "setAzureAppCreateContinuation",
   "enterStage",
   "setStageState",
   "hasWarnings",
@@ -162,6 +235,9 @@ function sanitizeFailureExtra(
   const safe = { ...extra };
   delete safe.azError;
   delete safe.ghError;
+  delete safe.appCreateContinuation;
+  delete safe.appCreateContinuationAppName;
+  delete safe.appCreateContinuationCallerObjectId;
   return safe;
 }
 
@@ -224,6 +300,24 @@ export async function handleAzureAutoSetup(
     const appNameProvided = typeof data.appName === "string";
     const requestedAppName = appNameProvided ? data.appName : "";
     const requestedSubscriptionId = (data.subscriptionId || "").trim();
+    const requestedTenantId = (data.tenantId || "").trim();
+    const requestedClientId = (data.clientId || "").trim();
+    const continuationRequest = {
+      repo: targetRepo,
+      environment,
+      operationEnvironment,
+      requestedSubscriptionId,
+      requestedTenantId,
+      resourceGroup,
+      clusterResourceGroup,
+      clusterName,
+      explicitAppId,
+      createNewApp,
+      appNameProvided,
+      requestedAppName,
+      requestedClientId
+    };
+    let appCreateContinuationSeed: AzureAppCreateContinuationSeed | null = null;
     const fail = async (
       status: number,
       error: string,
@@ -250,6 +344,27 @@ export async function handleAzureAutoSetup(
               }
             : null
         });
+        if (code === "service-management-reference-required") {
+          const inputRequired = record(operation.inputRequired);
+          const appName = extra.appCreateContinuationAppName;
+          const callerObjectId = extra.appCreateContinuationCallerObjectId;
+          dependencies.operations.setAzureAppCreateContinuation(
+            operation,
+            (
+              appCreateContinuationSeed &&
+                typeof appName === "string" &&
+                typeof callerObjectId === "string" &&
+                typeof inputRequired.requestedAt === "string"
+            ) ?
+              createAzureAppCreateContinuation(
+                appCreateContinuationSeed,
+                appName,
+                callerObjectId,
+                inputRequired.requestedAt
+              )
+            : null
+          );
+        }
         await dependencies.operations.persist();
         if (!(await stopBoundary("input_prompt"))) return;
         respond(context, status, {
@@ -361,6 +476,7 @@ export async function handleAzureAutoSetup(
     }
 
     steps = [];
+    let appCreateContinuation: AzureAppCreateContinuation | null = null;
     const continuationId =
       typeof data.operationId === "string" ? data.operationId : "";
     if (continuationId) {
@@ -381,9 +497,6 @@ export async function handleAzureAutoSetup(
         return;
       }
       operation = existing;
-      if (existing.inputRequired) {
-        dependencies.operations.resumeAfterInput(operation);
-      }
     } else {
       operation = dependencies.operations.create({
         provider: "azure",
@@ -441,6 +554,11 @@ export async function handleAzureAutoSetup(
         return;
       }
     }
+    const continuationInputRequired = operation.inputRequired;
+    const continuationOperationState = operation.state;
+    if (operation.inputRequired) {
+      dependencies.operations.resumeAfterInput(operation);
+    }
     dependencies.operations.enterStage(
       operation,
       dependencies.stageAuthorizeIdentity
@@ -456,7 +574,35 @@ export async function handleAzureAutoSetup(
       );
       return;
     }
+    const savedAppCreateContinuation =
+      dependencies.operations.getAzureAppCreateContinuation(operation);
+    if (continuationInputRequired || savedAppCreateContinuation) {
+      appCreateContinuation = matchAzureAppCreateContinuation(
+        savedAppCreateContinuation,
+        {
+          operationId: operation.operationId,
+          operationState: continuationOperationState,
+          inputRequired: continuationInputRequired,
+          request: continuationRequest,
+          serviceManagementReference,
+          githubExecutor: selectedExecutor
+        }
+      );
+      dependencies.operations.setAzureAppCreateContinuation(operation, null);
+    }
     await selectedExecutor.verifyIdentity();
+    if (
+      appCreateContinuation &&
+      !(await continuationMatchesLiveContext(
+        appCreateContinuation,
+        targetRepo,
+        environment,
+        dependencies.external,
+        selectedExecutor
+      ))
+    ) {
+      appCreateContinuation = null;
+    }
 
     const activeOperation = operation;
     const rawPush = steps.push.bind(steps);
@@ -483,7 +629,7 @@ export async function handleAzureAutoSetup(
 
     const reconcilingProviderMutation =
       unresolvedProviderMutations(operation).length > 0;
-    if (!reconcilingProviderMutation) {
+    if (!reconcilingProviderMutation && !appCreateContinuation) {
       const accessMessage = await dependencies.external.preflightRepoAdmin(
         targetRepo,
         selectedExecutor
@@ -520,118 +666,148 @@ export async function handleAzureAutoSetup(
       checkpoint
     };
 
-    let tenantId = (data.tenantId || "").trim();
-    let subscriptionId = requestedSubscriptionId;
-    steps.push(`Selecting subscription ${subscriptionId}...`);
-    if (!(await stopBoundary("before-azure-subscription-selection"))) return;
-    const setResult = await workflow.runAz([
-      "account",
-      "set",
-      "--subscription",
-      subscriptionId
-    ]);
-    if (setResult.code !== 0) {
-      const detail = (setResult.stderr || "").trim();
-      await fail(
-        400,
-        `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${
-          detail ? " Azure CLI: " + detail : ""
-        }`,
-        "az-subscription-set-failed",
-        { steps }
-      );
-      return;
-    }
-    steps.push("Checking Azure CLI login...");
-    const accountResult = await workflow.runAz([
-      "account",
-      "show",
-      "--output",
-      "json"
-    ]);
-    if (accountResult.code !== 0) {
-      await fail(
-        400,
-        'Azure CLI not logged in. Run "az login" first.',
-        "az-not-logged-in",
-        { steps }
-      );
-      return;
-    }
-    const account = parseAzureAccountIdentity(accountResult.stdout);
-    if (!account) {
-      await fail(
-        400,
-        'Azure CLI returned an invalid account identity from "az account show".',
-        "az-account-parse",
-        { steps }
-      );
-      return;
-    }
-    const activeTenantId = account.tenantId;
-    subscriptionId = account.subscriptionId;
-    if (
-      tenantId &&
-      activeTenantId &&
-      tenantId.toLowerCase() !== activeTenantId.toLowerCase()
-    ) {
-      await fail(
-        400,
-        `Azure CLI is signed in to tenant ${activeTenantId}, but tenant ${tenantId} was requested. ` +
-          `Run "az login --tenant ${tenantId}" and retry.`,
-        "az-tenant-mismatch",
-        { steps }
-      );
-      return;
-    }
-    tenantId = tenantId || activeTenantId;
-    if (!isUuid(subscriptionId)) {
-      await fail(
-        400,
-        `Resolved subscription id "${subscriptionId}" is not a valid GUID.`,
-        "invalid-subscription",
-        { steps }
-      );
-      return;
-    }
-    if (!isUuid(activeTenantId)) {
-      await fail(
-        400,
-        'Could not determine a valid active Azure tenant. Run "az login" and "az account set --subscription <id>", then try again.',
-        "az-account-incomplete",
-        { steps }
-      );
-      return;
-    }
-    steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
-
-    steps.push("Resolving GitHub OIDC subject...");
-    const oidcSuffix = buildEnvironmentSuffix(environment);
+    let tenantId: string;
+    let subscriptionId: string;
+    let oidcSuffix: string;
     let oidc: ResolveOidcSubjectResult;
-    try {
-      oidc = await resolveOidcSubject(
-        {
-          targetRepo,
-          envName: environment,
-          suffix: oidcSuffix
-        },
-        (apiPath) => workflow.runGitHubJson(apiPath)
-      );
-    } catch (error) {
-      await fail(
-        400,
-        errorMessage(error),
-        errorCode(error, "oidc-subject-failed"),
-        { steps }
-      );
-      return;
-    }
-    steps.push(
-      `✅ OIDC subject(s): ${oidc.federatedCredentials
-        .map((credential) => credential.subject)
-        .join(", ")}`
-    );
+    let callerIdentity: CallerIdentity;
+    if (appCreateContinuation) {
+      tenantId = appCreateContinuation.resolved.tenantId;
+      subscriptionId = appCreateContinuation.resolved.subscriptionId;
+      oidcSuffix = appCreateContinuation.resolved.oidcSuffix;
+      oidc = appCreateContinuation.resolved.oidc;
+      callerIdentity = appCreateContinuation.resolved.callerIdentity;
+    } else {
+      tenantId = requestedTenantId;
+      subscriptionId = requestedSubscriptionId;
+      steps.push(`Selecting subscription ${subscriptionId}...`);
+      if (!(await stopBoundary("before-azure-subscription-selection"))) return;
+      const setResult = await workflow.runAz([
+        "account",
+        "set",
+        "--subscription",
+        subscriptionId
+      ]);
+      if (setResult.code !== 0) {
+        const detail = (setResult.stderr || "").trim();
+        await fail(
+          400,
+          `Could not select subscription ${subscriptionId}. Ensure you are logged in ("az login") to an account with access, then try again.${
+            detail ? " Azure CLI: " + detail : ""
+          }`,
+          "az-subscription-set-failed",
+          { steps }
+        );
+        return;
+      }
+      steps.push("Checking Azure CLI login...");
+      const accountResult = await workflow.runAz([
+        "account",
+        "show",
+        "--output",
+        "json"
+      ]);
+      if (accountResult.code !== 0) {
+        await fail(
+          400,
+          'Azure CLI not logged in. Run "az login" first.',
+          "az-not-logged-in",
+          { steps }
+        );
+        return;
+      }
+      const account = parseAzureAccountIdentity(accountResult.stdout);
+      if (!account) {
+        await fail(
+          400,
+          'Azure CLI returned an invalid account identity from "az account show".',
+          "az-account-parse",
+          { steps }
+        );
+        return;
+      }
+      const activeTenantId = account.tenantId;
+      subscriptionId = account.subscriptionId;
+      if (
+        tenantId &&
+        activeTenantId &&
+        tenantId.toLowerCase() !== activeTenantId.toLowerCase()
+      ) {
+        await fail(
+          400,
+          `Azure CLI is signed in to tenant ${activeTenantId}, but tenant ${tenantId} was requested. ` +
+            `Run "az login --tenant ${tenantId}" and retry.`,
+          "az-tenant-mismatch",
+          { steps }
+        );
+        return;
+      }
+      tenantId = tenantId || activeTenantId;
+      if (!isUuid(subscriptionId)) {
+        await fail(
+          400,
+          `Resolved subscription id "${subscriptionId}" is not a valid GUID.`,
+          "invalid-subscription",
+          { steps }
+        );
+        return;
+      }
+      if (!isUuid(activeTenantId)) {
+        await fail(
+          400,
+          'Could not determine a valid active Azure tenant. Run "az login" and "az account set --subscription <id>", then try again.',
+          "az-account-incomplete",
+          { steps }
+        );
+        return;
+      }
+      callerIdentity = account.callerIdentity;
+      steps.push(`✅ Using subscription=${subscriptionId}, tenant=${tenantId}`);
 
+      steps.push("Resolving GitHub OIDC subject...");
+      oidcSuffix = buildEnvironmentSuffix(environment);
+      try {
+        oidc = await resolveOidcSubject(
+          {
+            targetRepo,
+            envName: environment,
+            suffix: oidcSuffix
+          },
+          (apiPath) => workflow.runGitHubJson(apiPath)
+        );
+      } catch (error) {
+        await fail(
+          400,
+          errorMessage(error),
+          errorCode(error, "oidc-subject-failed"),
+          { steps }
+        );
+        return;
+      }
+      steps.push(
+        `✅ OIDC subject(s): ${oidc.federatedCredentials
+          .map((credential) => credential.subject)
+          .join(", ")}`
+      );
+    }
+
+    appCreateContinuationSeed = {
+      operationId: operation.operationId,
+      request: continuationRequest,
+      githubExecutor: {
+        login: selectedExecutor.login,
+        credentialSource: selectedExecutor.credentialSource,
+        requiresKeyringSwitch: selectedExecutor.requiresKeyringSwitch,
+        scopes: selectedExecutor.scopes
+      },
+      resolved: {
+        subscriptionId,
+        tenantId,
+        oidcSuffix,
+        callerIdentity,
+        oidc
+      }
+    };
     const application = await resolveAzureAutoSetupApplication({
       workflow,
       dependencies,
@@ -641,9 +817,17 @@ export async function handleAzureAutoSetup(
       createNewApp,
       appNameProvided,
       requestedAppName,
-      requestedClientId: (data.clientId || "").trim(),
+      requestedClientId,
       serviceManagementReference,
-      callerIdentity: account.callerIdentity
+      callerIdentity,
+      ...(appCreateContinuation ?
+        {
+          resumeAtCreate: {
+            appName: appCreateContinuation.resolved.appName,
+            callerObjectId: appCreateContinuation.resolved.callerObjectId
+          }
+        }
+      : {})
     });
     if (!application) return;
 

@@ -33,6 +33,11 @@ export interface WorkspaceDependencies {
   hasRadiusApplicationModel(
     workspacePath: string | null | undefined
   ): Promise<boolean>;
+  // Canonical form of a worktree path, used as a stable identity key when the
+  // same worktree can be reported through different spellings.
+  canonicalWorkspacePath(
+    workspacePath: string | null | undefined
+  ): Promise<string>;
   detectWorkspaceContext(session: {
     cwd?: string;
     workspacePath?: string;
