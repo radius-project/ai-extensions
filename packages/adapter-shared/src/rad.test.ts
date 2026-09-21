@@ -450,7 +450,7 @@ describe("resolveRadiusExtensionRef", () => {
     );
   });
 
-  it("rejects and reports an unsupported release", async () => {
+  it("returns null and reports an unsupported release", async () => {
     const log = vi.fn();
     await expect(
       resolveRadiusExtensionRef({
@@ -458,15 +458,15 @@ describe("resolveRadiusExtensionRef", () => {
         radPath: "/bin/rad",
         readVersion: async () => "stable"
       })
-    ).rejects.toThrow(
-      /Unsupported Radius release "stable".*supported stamped release/iu
-    );
-    expect(log.mock.calls[0][0]).toContain(
-      'Unsupported Radius release "stable"'
+    ).resolves.toBeNull();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /Unsupported Radius release "stable".*no Radius Bicep extension reference could be derived/iu
+      )
     );
   });
 
-  it("rejects when the selected binary has no release identity", async () => {
+  it("returns null when the selected binary has no release identity", async () => {
     const log = vi.fn();
     await expect(
       resolveRadiusExtensionRef({
@@ -474,10 +474,12 @@ describe("resolveRadiusExtensionRef", () => {
         radPath: "/bin/rad",
         readVersion: async () => null
       })
-    ).rejects.toThrow(
-      /Could not determine the Radius release of \/bin\/rad.*supported stamped release/iu
+    ).resolves.toBeNull();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /Could not determine the Radius release of \/bin\/rad.*no Radius Bicep extension reference could be derived/iu
+      )
     );
-    expect(log.mock.calls[0][0]).toContain("/bin/rad");
   });
 
   it("propagates an injected release-reader failure", async () => {
@@ -531,30 +533,31 @@ describe("resolveRadiusExtensionRef", () => {
     [
       "a stable channel with a usable version",
       JSON.stringify({ release: "stable", version: "v0.60.0" }),
-      /Unsupported Radius release "stable".*supported stamped release/iu
+      /Unsupported Radius release "stable".*no Radius Bicep extension reference could be derived/iu
     ],
     [
       "a missing release with a usable version",
       JSON.stringify({ version: "v0.60.0" }),
-      /Could not determine the Radius release.*supported stamped release/iu
+      /Could not determine the Radius release.*no Radius Bicep extension reference could be derived/iu
     ],
     [
       "non-object JSON",
       "[]",
-      /Could not determine the Radius release.*supported stamped release/iu
+      /Could not determine the Radius release.*no Radius Bicep extension reference could be derived/iu
     ],
     [
       "invalid JSON",
       "not-json",
-      /Could not determine the Radius release.*supported stamped release/iu
+      /Could not determine the Radius release.*no Radius Bicep extension reference could be derived/iu
     ]
   ])(
-    "rejects %s without falling back to version",
+    "returns null for %s without falling back to version",
     async (_label, output, expected) => {
       const directory = fs.mkdtempSync(
         path.join(os.tmpdir(), "rad-release-output-")
       );
       const previousDirectory = process.cwd();
+      const log = vi.fn();
       try {
         fs.writeFileSync(
           path.join(directory, "version"),
@@ -562,8 +565,9 @@ describe("resolveRadiusExtensionRef", () => {
         );
         process.chdir(directory);
         await expect(
-          resolveRadiusExtensionRef({ radPath: process.execPath })
-        ).rejects.toThrow(expected);
+          resolveRadiusExtensionRef({ log, radPath: process.execPath })
+        ).resolves.toBeNull();
+        expect(log).toHaveBeenCalledWith(expect.stringMatching(expected));
       } finally {
         process.chdir(previousDirectory);
         fs.rmSync(directory, { recursive: true, force: true });
@@ -932,27 +936,38 @@ describe("buildGraphViaRad", () => {
     expect(await buildGraphViaRad("")).toEqual([]);
   });
 
-  it("rejects an unsupported release before honoring a pinned extension or invoking graph", async () => {
-    const root = fs.mkdtempSync(
-      path.join(os.tmpdir(), "rad-unsupported-graph-")
-    );
-    const workspace = path.join(root, "workspace");
-    const preload = path.join(root, "fake-rad.cjs");
-    const graphMarker = path.join(root, "graph-invoked");
-    const savedGraph = path.join(root, "saved-graph.json");
-    const previousBinary = process.env.RADIUS_RAD_BINARY;
-    const previousNodeOptions = process.env.NODE_OPTIONS;
-    const previousTmpdir = process.env.TMPDIR;
-    const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
-    try {
+  describe("unsupported release repository pin precedence", () => {
+    let root: string;
+    let home: string;
+    let workspace: string;
+    let preload: string;
+    let releaseMarker: string;
+    let graphMarker: string;
+    let capturedConfig: string;
+    let savedGraph: string;
+    let previousHome: string | undefined;
+    let previousUserProfile: string | undefined;
+    let previousBinary: string | undefined;
+    let previousNodeOptions: string | undefined;
+    let previousTmpdir: string | undefined;
+    let mod: typeof import("./rad.js");
+
+    beforeEach(async () => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-unsupported-graph-"));
+      home = path.join(root, "home");
+      workspace = path.join(root, "workspace");
+      preload = path.join(root, "fake-rad.cjs");
+      releaseMarker = path.join(root, "release-read");
+      graphMarker = path.join(root, "graph-invoked");
+      capturedConfig = path.join(root, "effective-bicepconfig.json");
+      savedGraph = path.join(root, "saved-graph.json");
+      previousHome = process.env.HOME;
+      previousUserProfile = process.env.USERPROFILE;
+      previousBinary = process.env.RADIUS_RAD_BINARY;
+      previousNodeOptions = process.env.NODE_OPTIONS;
+      previousTmpdir = process.env.TMPDIR;
+      fs.mkdirSync(home);
       fs.mkdirSync(workspace);
-      fs.writeFileSync(
-        path.join(workspace, "bicepconfig.json"),
-        JSON.stringify({
-          experimentalFeaturesEnabled: { extensibility: true },
-          extensions: { radius: "br:biceptypes.azurecr.io/radius:0.60" }
-        })
-      );
       fs.writeFileSync(
         preload,
         [
@@ -960,47 +975,114 @@ describe("buildGraphViaRad", () => {
           'const path = require("node:path");',
           'require("node:module").runMain = () => {',
           '  if (path.basename(process.argv[1] || "") === "version") {',
+          `    fs.writeFileSync(${JSON.stringify(releaseMarker)}, "");`,
           '    fs.writeSync(1, JSON.stringify({ release: "stable", version: "v0.60.0" }));',
           "    return;",
           "  }",
+          '  const bicepFile = process.argv.find((arg) => arg.endsWith(".bicep"));',
+          '  if (!bicepFile) throw new Error("missing bicep path");',
           `  fs.writeFileSync(${JSON.stringify(graphMarker)}, process.argv.join("\\n"));`,
+          `  fs.writeFileSync(${JSON.stringify(capturedConfig)}, fs.readFileSync(path.join(path.dirname(bicepFile), "bicepconfig.json"), "utf8"));`,
           '  fs.writeFileSync("app-graph.json", JSON.stringify({ resources: [] }));',
           "};"
         ].join("\n")
       );
+      process.env.HOME = home;
+      process.env.USERPROFILE = home;
       process.env.RADIUS_RAD_BINARY = process.execPath;
+      const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
       process.env.NODE_OPTIONS =
         previousNodeOptions ?
           `${previousNodeOptions} ${preloadOption}`
         : preloadOption;
       process.env.TMPDIR = root;
+      vi.resetModules();
+      mod = await import("./rad.js");
+      fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
+      fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+      if (process.platform !== "win32") {
+        fs.chmodSync(mod.MANAGED_BICEP_PATH, 0o755);
+      }
+    });
 
-      await expect(
-        buildGraphViaRad(
-          "resource app 'Radius.Core/applications@2023-10-01-preview' = {}",
-          ".radius/app.bicep",
-          {
-            radArtifactsDir: workspace,
-            cleanupRadArtifactsDir: true,
-            saveGraphJsonTo: savedGraph
-          }
-        )
-      ).rejects.toThrow(
-        /Unsupported Radius release "stable".*supported stamped release/iu
-      );
-      expect(fs.existsSync(graphMarker)).toBe(false);
-      expect(fs.existsSync(savedGraph)).toBe(false);
-      expect(fs.existsSync(workspace)).toBe(false);
-      expect(fs.readdirSync(root)).toEqual(["fake-rad.cjs"]);
-    } finally {
+    afterEach(() => {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = previousUserProfile;
       if (previousBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
       else process.env.RADIUS_RAD_BINARY = previousBinary;
       if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
       else process.env.NODE_OPTIONS = previousNodeOptions;
       if (previousTmpdir === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = previousTmpdir;
+      vi.resetModules();
       fs.rmSync(root, { recursive: true, force: true });
-    }
+    });
+
+    it("honors the repository pin and passes it through the graph process boundary", async () => {
+      const pinned = "br:biceptypes.azurecr.io/radius:0.48";
+      fs.writeFileSync(
+        path.join(workspace, "bicepconfig.json"),
+        JSON.stringify({
+          experimentalFeaturesEnabled: { extensibility: true },
+          extensions: { radius: pinned }
+        })
+      );
+      const log = vi.fn();
+      await expect(
+        mod.buildGraphViaRad(
+          "resource app 'Radius.Core/applications@2023-10-01-preview' = {}",
+          ".radius/app.bicep",
+          {
+            log,
+            radArtifactsDir: workspace,
+            cleanupRadArtifactsDir: true,
+            saveGraphJsonTo: savedGraph
+          }
+        )
+      ).resolves.toEqual([]);
+      const effectiveConfig: BicepCompileConfig = JSON.parse(
+        fs.readFileSync(capturedConfig, "utf8")
+      );
+      expect(effectiveConfig.extensions.radius).toBe(pinned);
+      expect(fs.existsSync(releaseMarker)).toBe(true);
+      expect(fs.readFileSync(graphMarker, "utf8")).toContain("app\ngraph");
+      expect(fs.existsSync(savedGraph)).toBe(true);
+      expect(fs.existsSync(workspace)).toBe(false);
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/Unsupported Radius release "stable"/iu)
+      );
+      expect(log).toHaveBeenCalledWith(
+        `Compiling with radius extension: ${pinned}`
+      );
+    });
+
+    it("fails without a repository pin and does not invoke graph", async () => {
+      const log = vi.fn();
+      await expect(
+        mod.buildGraphViaRad(
+          "resource app 'Radius.Core/applications@2023-10-01-preview' = {}",
+          ".radius/app.bicep",
+          {
+            log,
+            radArtifactsDir: workspace,
+            cleanupRadArtifactsDir: true,
+            saveGraphJsonTo: savedGraph
+          }
+        )
+      ).rejects.toThrow(
+        /Cannot determine which Radius Bicep extension to compile with.*Pin it/iu
+      );
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/Unsupported Radius release "stable"/iu)
+      );
+      expect(fs.existsSync(releaseMarker)).toBe(true);
+      expect(fs.existsSync(graphMarker)).toBe(false);
+      expect(fs.existsSync(capturedConfig)).toBe(false);
+      expect(fs.existsSync(savedGraph)).toBe(false);
+      expect(fs.existsSync(workspace)).toBe(false);
+    });
   });
 
   it("rejects a pull-request rad before honoring a pinned extension or invoking graph", async () => {
