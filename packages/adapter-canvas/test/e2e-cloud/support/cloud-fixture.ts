@@ -1223,11 +1223,58 @@ export async function createCloudFixture(
               ],
               assertionTimeoutMs
             );
-            if (result.code !== 0 && !isMissingNamespace(result))
-              expectSuccess(
-                result,
-                `kubectl delete all -n ${target.namespace}`
-              );
+            if (result.code === 0 || isMissingNamespace(result)) return;
+            // `kubectl delete --wait=true` prints its "deleted" lines and then
+            // blocks until every object is finalized, so a delete that removed
+            // everything can still be killed by this step's own budget.
+            // Deciding on the exit code alone failed a whole run for a reclaim
+            // that had in fact succeeded. Kubernetes also keeps finalizing
+            // after the client exits, so a single re-list can still see
+            // terminating objects; poll for their absence the same way the
+            // delete assertion does and report the delete only if something
+            // outlives the deadline.
+            const failure = new CloudCommandError(
+              `kubectl delete all -n ${target.namespace}`,
+              result
+            );
+            let lastSeen: readonly string[] = [];
+            await pollForValue({
+              ports,
+              timeoutMs: assertionTimeoutMs,
+              intervalMs: assertionPollIntervalMs,
+              probe: async (remainingMs) => {
+                let survivors: readonly string[] | "no-namespace";
+                try {
+                  survivors = await listApplicationResources(
+                    target.application,
+                    target.namespace,
+                    remainingMs
+                  );
+                } catch (listFailure) {
+                  // A listing killed by the poll's own budget is left for
+                  // `pollForValue` to translate, because the timeout message
+                  // below already carries the delete failure. Anything else is
+                  // a second diagnostic, and both are worth keeping: the
+                  // delete said why it failed, and the listing says why that
+                  // could not be checked.
+                  if (
+                    listFailure instanceof CloudCommandError &&
+                    listFailure.timedOut
+                  )
+                    throw listFailure;
+                  throw new Error(
+                    `${failure.message}\n  The follow-up listing also failed: ${describeError(listFailure)}`,
+                    { cause: listFailure }
+                  );
+                }
+                if (survivors === "no-namespace") return true;
+                lastSeen = survivors;
+                return survivors.length === 0 ? true : undefined;
+              },
+              timeoutMessage: () =>
+                `${failure.message}\n  Still present after ${assertionTimeoutMs}ms: ` +
+                lastSeen.join(", ")
+            });
           }
         );
 

@@ -22,6 +22,14 @@ import type { BrowserContext, DomElement } from "../ports.js";
 export const GRAPH_PROGRESS_STEPS_ID = "progress-steps";
 export const GRAPH_PROGRESS_TICK_MS = 1000;
 
+// The default panel titles. A build that only reads an existing
+// .radius/app.bicep is loading, not generating: saying "generating" there
+// implies the model is being authored or rewritten when nothing is being
+// written. The title therefore follows the build's own stages — it becomes the
+// generating title only once a `creating_model` stage is reported.
+export const GRAPH_LOADING_TITLE = "Loading the application graph";
+export const GRAPH_GENERATING_TITLE = "Generating the application graph";
+
 export type GraphBuildStage =
   | "checking_model"
   | "creating_model"
@@ -164,6 +172,9 @@ export interface GraphProgressView {
 export interface GraphProgressOptions {
   readonly hostId?: string;
   readonly initial?: GraphBuildEvent;
+  // A fixed title for a panel whose operation is known up front, such as the
+  // diff or deployed views. Omit it to follow the modeled loading/generating
+  // distinction described above.
   readonly title?: string;
 }
 
@@ -176,7 +187,7 @@ export function createGraphProgress(
   options: GraphProgressOptions = {}
 ): GraphProgressView {
   const hostId = options.hostId ?? GRAPH_PROGRESS_STEPS_ID;
-  const title = options.title ?? "Generating application graph";
+  const fixedTitle = options.title ?? null;
   // The clock is expressed as an offset from a baseline rather than from a
   // fixed client start time, so the server can correct it. A build outlives the
   // page that started it: navigating away and back mounts a brand new panel
@@ -213,6 +224,16 @@ export function createGraphProgress(
   const elapsedText = (): string =>
     formatElapsed(baselineElapsedMs + (context.clock.now() - baselineAtMs));
 
+  // Without a caller-supplied title, the panel describes the operation the
+  // build is actually performing: authoring a model only happens once a
+  // `creating_model` stage is reported, so everything before that is a load of
+  // the existing .radius/app.bicep.
+  const currentTitle = (): string => {
+    if (fixedTitle !== null) return fixedTitle;
+    const creating = events.some((event) => event.stage === "creating_model");
+    return creating ? GRAPH_GENERATING_TITLE : GRAPH_LOADING_TITLE;
+  };
+
   // Adopt the server's measurement of how long this build has been running.
   // Only a finite, non-negative number is accepted: a payload without the field
   // leaves the local clock alone rather than snapping it to zero.
@@ -225,9 +246,11 @@ export function createGraphProgress(
   };
 
   const render = (force = false): void => {
+    const title = currentTitle();
     const signature = JSON.stringify([
       events.map((event) => [event.stage, event.state]),
-      latestEvent?.detail ?? ""
+      latestEvent?.detail ?? "",
+      title
     ]);
     if (!force && signature === renderedSignature) return;
     const container = host();

@@ -12,6 +12,7 @@ import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.
 import {
   deploymentNamespace,
   classifyDeploymentPresence,
+  createTolerantProbe,
   DELETE_DEPLOYMENT_WORKFLOW,
   DELETE_ENVIRONMENT_WORKFLOW,
   describeDeployFailure,
@@ -600,6 +601,61 @@ describe("classifyDeploymentPresence", () => {
     expect(classifyDeploymentPresence(rows, "demo", "other-env").present).toBe(
       false
     );
+  });
+});
+
+describe("createTolerantProbe", () => {
+  it("passes a successful reading straight through", async () => {
+    const probe = createTolerantProbe(async () => "ready");
+    expect(await probe.read()).toBe("ready");
+    expect(probe.lastFailure()).toBe("");
+  });
+
+  it("reports an unreadable answer as undefined so polling continues", async () => {
+    const probe = createTolerantProbe(async () => {
+      throw new Error("The list-deployments endpoint failed: not identifiable");
+    });
+    expect(await probe.read()).toBeUndefined();
+    expect(probe.lastFailure()).toMatch(/not identifiable/);
+  });
+
+  it("forgets a failure once a later attempt succeeds", async () => {
+    let attempt = 0;
+    const probe = createTolerantProbe(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("transient");
+      return "ready";
+    });
+    await probe.read();
+    expect(await probe.read()).toBe("ready");
+    expect(probe.lastFailure()).toBe("");
+  });
+
+  it("describes a thrown non-error rather than reporting no failure", async () => {
+    const probe = createTolerantProbe(async () => {
+      throw "listing rejected";
+    });
+    await probe.read();
+    expect(probe.lastFailure()).toBe("listing rejected");
+  });
+
+  it("puts the last failure back into a timeout", async () => {
+    const probe = createTolerantProbe(async () => {
+      throw new Error("endpoint down");
+    });
+    await probe.read();
+    const explained = probe.explain(new Error("Timed out waiting"));
+    expect(explained).toBeInstanceOf(Error);
+    expect((explained as Error).message).toMatch(/Timed out waiting/);
+    expect((explained as Error).message).toMatch(/endpoint down/);
+    expect((explained as Error).cause).toBeInstanceOf(Error);
+  });
+
+  it("leaves a failure that is not a polling timeout exactly as it is", async () => {
+    const probe = createTolerantProbe(async () => "ready");
+    await probe.read();
+    const assertion = new Error("expected false, received true");
+    expect(probe.explain(assertion)).toBe(assertion);
   });
 });
 

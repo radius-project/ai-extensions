@@ -92,6 +92,7 @@ import {
 import {
   deploymentNamespace,
   classifyDeploymentPresence,
+  createTolerantProbe,
   DELETE_DEPLOYMENT_WORKFLOW,
   DELETE_ENVIRONMENT_WORKFLOW,
   describeDeployFailure,
@@ -771,19 +772,32 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         cloud.repository,
         true
       );
-      const rows = readDeploymentRows(
-        await page.evaluate(async (path) => {
-          const response = await fetch(path);
-          return (await response.json()) as unknown;
-        }, deploymentListingPath)
-      );
-      expect(
-        classifyDeploymentPresence(
+      // Read the same way stage three waits: a listing answered while GitHub
+      // has not yet attached a status to the deploy's own deployment record is
+      // a transient the canvas client absorbs, not a failed deploy.
+      const deployPresence = createTolerantProbe(async () => {
+        const rows = readDeploymentRows(
+          await page.evaluate(async (path) => {
+            const response = await fetch(path);
+            return (await response.json()) as unknown;
+          }, deploymentListingPath)
+        );
+        return classifyDeploymentPresence(
           rows,
           deployedApplication,
           cloud.environmentName
-        ).present
-      ).toBe(true);
+        ).present;
+      });
+      try {
+        await expect
+          .poll(deployPresence.read, {
+            timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+            intervals: [5_000]
+          })
+          .toBe(true);
+      } catch (error) {
+        throw deployPresence.explain(error);
+      }
     } catch (error) {
       primaryError = error;
       throw error;
@@ -944,31 +958,36 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         throw error;
       }
 
-      await expect
-        .poll(
-          async () => {
-            const rows = readDeploymentRows(
-              await page.evaluate(
-                async (path) => {
-                  const response = await fetch(path);
-                  return (await response.json()) as unknown;
-                },
-                repositoryListingPath(
-                  "/api/list-deployments",
-                  cloud.repository,
-                  true
-                )
-              )
-            );
-            return classifyDeploymentPresence(
-              rows,
-              deployedApplication,
-              cloud.environmentName
-            ).present;
-          },
-          { timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS, intervals: [5_000] }
-        )
-        .toBe(false);
+      const deletionPresence = createTolerantProbe(async () => {
+        const rows = readDeploymentRows(
+          await page.evaluate(
+            async (path) => {
+              const response = await fetch(path);
+              return (await response.json()) as unknown;
+            },
+            repositoryListingPath(
+              "/api/list-deployments",
+              cloud.repository,
+              true
+            )
+          )
+        );
+        return classifyDeploymentPresence(
+          rows,
+          deployedApplication,
+          cloud.environmentName
+        ).present;
+      });
+      try {
+        await expect
+          .poll(deletionPresence.read, {
+            timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+            intervals: [5_000]
+          })
+          .toBe(false);
+      } catch (error) {
+        throw deletionPresence.explain(error);
+      }
 
       await cloud.assertApplicationWorkloadsAbsent(
         deployedApplication,
