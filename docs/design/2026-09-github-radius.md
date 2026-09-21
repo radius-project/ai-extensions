@@ -359,13 +359,13 @@ Shared tests should assert dependency calls and side effects, not just matching 
 
 Error fixtures should cover rejected and ambiguous dispatches, status API outages/rate limits, failed or cancelled runs without artifacts, mismatched artifact identity, conflicting phase evidence, deployment failure followed by cleanup failure, state-save failure, and secret-bearing diagnostics. Check that both callers preserve the primary failure and do not leak secrets or trigger duplicate mutations.
 
-Exercise actual frontend bindings as well as controlled dependencies, especially source selection and authorization. The example implementation informs these tests; its existence does not establish that every criterion has passed.
+Exercise actual frontend bindings as well as controlled dependencies, especially source selection and authorization.
 
 ## Security
 
 This is a behavior-preserving extraction by default, not permission to remove safeguards that complicate the move. Keep workspace change checks, authorization, command validation, cancellation boundaries, destructive-action confirmation, and deployment-state protection in the shared path. A frontend-supplied approval flag cannot replace GitHub environment protection or backend permission checks.
 
-The existing [application-definition promotion script](https://github.com/radius-project/ai-extensions/blob/6f1fec8f282f96100e58f780987f6a697b65056f/extensions/radius/skills/radius-app-bicep/scripts/promote-app-model.mjs) stages output and guards the managed files it might replace. Reuse it; do not equate a completed agent response with permission to overwrite current files. Broader fingerprinting of every effective input would be additional work, not an existing guarantee.
+The existing [application-definition promotion script](https://github.com/radius-project/ai-extensions/blob/6f1fec8f282f96100e58f780987f6a697b65056f/extensions/radius/skills/radius-app-bicep/scripts/promote-app-model.mjs) stages output and guards the managed files it might replace. Reuse it; do not equate a completed agent response with permission to overwrite current files.
 
 The inspected [teardown action](https://github.com/radius-project/ai-extensions/blob/6f1fec8f282f96100e58f780987f6a697b65056f/.github/extension/actions/teardown/action.yml) attempts state saving after later command failures only when restore succeeded. Saving after failed or skipped restore could replace valid deployment state with uninitialized state. Preserve that guard. Cancellation does not promise rollback or a completed save.
 
@@ -383,15 +383,13 @@ Use the existing workflow run/job outcomes, execution references, and bounded, r
 
 ## Development plan
 
-Migrate one complete capability at a time, using the example implementation to inform the work rather than treating it as proof of completion.
+Migrate one complete capability at a time.
 
 1. **Inventory and characterize existing behavior.** Map each Canvas use case to shared helpers, side effects, inputs, results, and host dependencies. Add tests around successful, failed, cancelled, and partially completed flows before moving code. Use the current extension revision at implementation time.
 2. **Extract one complete use case.** Start with environment setup or another bounded flow. Move its coordination behind typed inputs and dependency interfaces, reuse existing execution helpers, and replace its Canvas implementation with a library call. Keep the old user-facing tool/route contract during migration.
 3. **Repeat across the existing capability set.** Extract application authoring/deployment, graphs, status and repair coordination, and deletion in reviewable changes. Do not leave Canvas on a separate copy of the logic. Separate necessary behavior changes from mechanical moves and test both explicitly.
-4. **Prove reuse without Canvas.** Run the same library calls from a non-Canvas test harness or a thin adapter. Verify that environment setup, `rad` invocation, result interpretation, and errors do not require a Canvas instance. A full Copilot CLI integration can follow when needed.
+4. **Prove reuse without Canvas.** Run the same library calls from a non-Canvas test harness or a thin adapter. Verify that environment setup, `rad` invocation, result interpretation, and errors do not require a Canvas instance. A full VSCode (or GitHub Copilot CLI) integration can follow when needed.
 5. **Remove superseded implementations.** Retire duplicate implementations after parity checks; compatibility forwarders and Canvas-owned wrappers can remain. Roll back a migration slice only when its dependencies and in-flight work remain compatible; never dual-run a mutation to compare old and new implementations.
-
-Effort estimates and delivery dates remain to be agreed during review.
 
 ## Open questions
 
@@ -412,7 +410,7 @@ Effort estimates and delivery dates remain to be agreed during review.
 
 ## Design review notes
 
-Review is pending. The [prior review discussion](https://github.com/radius-project/radius/pull/12967) is preserved; discussion continues in [radius-project/ai-extensions#845](https://github.com/radius-project/ai-extensions/pull/845). An example implementation exists, but this proposal remains Draft. Record the review outcome and agreed decisions here before merge.
+TBD
 
 ## Related Documentation and Source
 
