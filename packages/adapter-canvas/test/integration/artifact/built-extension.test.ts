@@ -749,9 +749,15 @@ describe("P0-C built Radius extension artifact", () => {
     expect(skillGuidance).toMatch(
       /show-radius-type\.mjs` fails while locating, querying, or validating.*stop the modeling run.*promote-app-model\.mjs.*--abort.*report the exact error/su
     );
+    expect(skillGuidance).toMatch(
+      /This includes a missing binary, invalid or incomplete version JSON, a missing or unsupported stamped release identity, a noncanonical commit, and a pull-request release, for which no Radius Bicep types are published\./u
+    );
     for (const guidance of [skillGuidance, graphGuidance]) {
       expect(guidance).toMatch(
         /never (?:download|install).*(?:rename|back up).*(?:delete|replace) a `rad` binary/isu
+      );
+      expect(guidance).toMatch(
+        /never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`/iu
       );
       expect(guidance).toMatch(/never search.*PATH.*\.rad\/bin.*fallback/isu);
     }

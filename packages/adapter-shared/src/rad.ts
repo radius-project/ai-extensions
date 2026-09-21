@@ -561,10 +561,15 @@ export function radiusExtensionRefForVersion(
  * the `rad` binary that will run the compile.
  *
  * Reading the release is a local spawn, so this stays correct offline and in
- * air-gapped use: no releases API call is involved. Returns null only when no
- * binary can be located. Once a binary has been selected, an unreadable,
- * unsupported, or pull-request release rejects before repository configuration
- * can bypass identity validation.
+ * air-gapped use: no releases API call is involved. Returns null with a
+ * diagnostic when no binary can be located or the selected binary's release is
+ * missing, unreadable, or unsupported, leaving an explicit repository pin to
+ * provide the compile reference.
+ *
+ * Explicitly prohibited releases still reject: pull-request releases are never
+ * supported, and edge is allowed only for the selected executable
+ * `RADIUS_RAD_BINARY` override. A managed edge binary is rejected even when the
+ * repository pins `extensions.radius`.
  *
  * `readVersion` retains its compatibility name but reads the canonical release
  * identity. It is injected so tests can drive the mapping deterministically.
@@ -595,9 +600,12 @@ export async function resolveRadiusExtensionRef({
       release ?
         `Unsupported Radius release "${release}" reported by ${binary}`
       : `Could not determine the Radius release of ${binary}`;
-    const detail = `${identity}; the Radius Bicep extension cannot be derived. Use a Radius CLI with a supported stamped release.`;
+    const detail =
+      `${identity}; no Radius Bicep extension reference could be derived from ` +
+      "the selected CLI. A readable, nonblank repository extensions.radius " +
+      "pin can still provide the compile reference.";
     log(detail);
-    throw new Error(detail);
+    return null;
   }
   if (isRadiusEdgeRelease(release)) {
     if (!isSelectedExecutableRadOverride(binary)) {
@@ -1479,9 +1487,9 @@ function readRepositoryBicepConfig(
  * callers routinely run with the default no-op logger (issue #173).
  *
  * The message states only what is known here — that no reference was available.
- * A caller may omit the derived reference, while {@link resolveRadiusExtensionRef}
- * can return null only when it locates no binary, so this must not assert a
- * single cause on their behalf.
+ * A caller may omit the derived reference, while
+ * {@link resolveRadiusExtensionRef} returns null for several derivation
+ * failures, so this must not assert a single cause on their behalf.
  */
 function requireRadiusExtensionRef(ref: string, reason: string): string {
   if (ref) return ref;
