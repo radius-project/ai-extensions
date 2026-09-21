@@ -222,12 +222,12 @@ describe("RU-03: tool declarations", () => {
   });
 
   describe("RU-19: conditional PR graph diff guidance", () => {
-    it("limits generation to pull requests following an explicit Radius interaction", () => {
+    it("limits generation to worktrees that contain a Radius model", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "after an explicit Radius tool or Radius Canvas action"
+        "Only when the pull request's worktree contains a Radius app.bicep model"
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "current repository contains a Radius app.bicep model"
+        "either already present when this session started, or created by a Radius tool or Radius Canvas action in this session"
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
         "Do not call radius_generate_pr_diff_markdown for unrelated pull requests"

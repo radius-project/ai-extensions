@@ -212,15 +212,6 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.hooks.onSessionStart({
       workingDirectory: "/worktrees/widgets"
     });
-    await harness.extension.hooks.onPostToolUse({
-      toolName: "open_canvas",
-      toolArgs: {
-        canvasId: "radius",
-        instanceId: "radius-panel",
-        input: { page: "graph", repo: "acme/widgets" }
-      },
-      workingDirectory: "/worktrees/widgets"
-    });
     const pullRequest = {
       toolName: "create_pull_request",
       toolArgs: { title: "Add cache", body: "" },
@@ -289,9 +280,33 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.shutdown("test");
   });
 
-  it("does not intercept a modeled worktree PR before an explicit Radius interaction", async () => {
+  it("intercepts a PR in a worktree already modeled when the session started", async () => {
     const harness = await createRuntimeSdkHarness({
       radiusEnabled: true,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const result = await harness.extension.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Fix typo", body: "Summary" },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    expect(result).toMatchObject({ permissionDecision: "deny" });
+    expect(harness.session.rpc.canvas.open).not.toHaveBeenCalled();
+    await harness.extension.shutdown("test");
+  });
+
+  it("does not intercept a PR in a worktree with no Radius model", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: false,
       workspaceContext: {
         workspacePath: "/worktrees/widgets",
         repo: "acme/widgets",

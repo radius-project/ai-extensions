@@ -155,6 +155,8 @@ export function createRadiusExtension(
   const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
     hasRadiusApplicationModel: (workspacePath) =>
       deps.workspace.hasRadiusApplicationModel(workspacePath),
+    canonicalWorkspacePath: (workspacePath) =>
+      deps.workspace.canonicalWorkspacePath(workspacePath),
     workspaceContext: async () => {
       const state = await workspaceState();
       return {
@@ -562,7 +564,7 @@ export function createRadiusExtension(
       onSessionStart: async (input) => {
         let modeled = false;
         try {
-          modeled = await pullRequestGraphDiffGuard.inspectAtSessionStart(
+          modeled = await pullRequestGraphDiffGuard.observeSessionStart(
             input.workingDirectory
           );
         } catch (error) {
