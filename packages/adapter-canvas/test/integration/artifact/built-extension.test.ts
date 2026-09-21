@@ -1005,6 +1005,16 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
+  it("packages the connection-source validator", () => {
+    assertCurrentArtifact();
+    const checkerScript = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+
+    expect(checkerScript).toContain("connection-source");
+  });
+
   it("packages each page module exactly once", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");
