@@ -4,18 +4,18 @@ This folder holds two kinds of document for the `radius-project/ai-extensions` r
 
 ## Which one to write
 
-| You want to…                                                  | Write a…            | Template                                                       | Skill                                                                            |
-|---------------------------------------------------------------|---------------------|----------------------------------------------------------------|----------------------------------------------------------------------------------|
-| Settle the user experience of a new capability                | **functional spec** | [`functional-spec-template.md`](./functional-spec-template.md) | [`radius-functional-spec`](../../.github/skills/radius-functional-spec/SKILL.md) |
-| Settle the mechanism — options, trade-offs, a chosen approach | **design doc**      | [`template.md`](./template.md)                                 | [`radius-design-doc`](../../.github/skills/radius-design-doc/SKILL.md)           |
+| You want to…                                                       | Write a…            | Template                                                       | Skill                                                                            |
+|--------------------------------------------------------------------|---------------------|----------------------------------------------------------------|----------------------------------------------------------------------------------|
+| Decide what to build and what the developer gets, screen by screen | **functional spec** | [`functional-spec-template.md`](./functional-spec-template.md) | [`radius-functional-spec`](../../.github/skills/radius-functional-spec/SKILL.md) |
+| Decide how to build it — options, trade-offs, a chosen approach    | **design doc**      | [`template.md`](./template.md)                                 | [`radius-design-doc`](../../.github/skills/radius-design-doc/SKILL.md)           |
 
-Where a capability needs both, the functional spec comes first and is the input to the design doc. Do not merge them into one document: a design doc carries `Design`, `API design`, `Implementation details`, `Test plan`, `Security`, `Compatibility`, `Monitoring and logging`, and `Development plan`, and a functional spec carries none of them.
+A functional spec sets product direction as well as experience: what the team is building and who for, what is deliberately out of scope, and what the developer meets on each screen. Where a capability needs both documents, write the functional spec first — agreeing on what the developer gets is what makes the build options comparable. Do not merge them into one document: a design doc contains `Design`, `API design`, `Implementation details`, `Test plan`, `Security`, `Compatibility`, `Monitoring and logging`, and `Development plan`, and a functional spec contains none of them.
 
 ## When to write one
 
 Write a **design doc** for a new capability or a significant change to an existing one (a new canvas page/action, a new compute platform in `packages/core`, a change to how the plugin is packaged and shipped), for a change to a public contract (a canvas action/tool surface, the plugin manifest, the marketplace entry, an API in `packages/core`), or for a change with meaningful security, compatibility, or cross-component impact.
 
-Write a **functional spec** when the risk is ambiguity about behavior rather than uncertainty about implementation — a new cloud provider, a new onboarding flow, or a change that alters the screens, controls, or messages a developer meets. The AWS support spec in [pull request #839](https://github.com/radius-project/ai-extensions/pull/839) is a worked example.
+Write a **functional spec** when the risk is ambiguity about what to build rather than uncertainty about how to build it — a new cloud provider, a new onboarding flow, a change that alters the screens, controls, or messages a developer meets, or a product-direction decision the team needs on record: which scenarios a capability serves, how far it goes in its first release, what it leaves out. The AWS support spec in [pull request #839](https://github.com/radius-project/ai-extensions/pull/839) is a worked example.
 
 You need **neither** for minor changes such as documentation updates, small bug fixes, or refactors with no behavioral change — use a GitHub issue and pull request instead.
 

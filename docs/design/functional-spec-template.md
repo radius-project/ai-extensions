@@ -49,7 +49,7 @@ TODO
 
 1. TODO
 
-**Definition of done.** TODO — the observable condition that settles whether this is complete.
+**Definition of done.** TODO — what a developer can do when this is complete, stated so anyone can check it.
 
 ### Non-goals
 
@@ -78,7 +78,8 @@ TODO
 ## User experience
 
 <!--
-  The heart of the document. Every screen, in the order the developer meets them.
+  The longest section, and where the direction set in Objectives becomes concrete.
+  Every screen, in the order the developer meets them.
   Number the steps. Each step: the developer's situation, what they do, what the
   product does, a screenshot, and at most one parity table of six rows or fewer.
 -->
