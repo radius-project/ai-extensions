@@ -668,6 +668,35 @@ describe("node interactions", () => {
     });
   });
 
+  it("dismisses the panel when the same card is clicked again", () => {
+    const harness = setup();
+    harness.surface.render("graph-container", RESOURCES, {
+      repoUrl: "https://github.test/o/r"
+    });
+    const panel = harness.container.appended[1] as FakeElement;
+    const app = childComponent<{ initialNodes: Array<{ data: unknown }> }>(
+      harness.vendor!.reactDom.roots[0].rendered[0]
+    );
+    const nodeData = app.props.initialNodes[0].data;
+    const tree = app.type(app.props) as { props: Record<string, unknown> };
+    const nodeTypes = tree.props.nodeTypes as {
+      rad: (props: { data: unknown }) => unknown;
+    };
+    const card = findByClass(nodeTypes.rad({ data: nodeData }), "rad-node");
+    const owner = createFakeElement("card");
+    const click = card?.props.onClick as (event: unknown) => void;
+
+    click({ currentTarget: owner });
+    expect(panel.style.display).toBe("");
+
+    click({ currentTarget: owner });
+    expect(panel.style.display).toBe("none");
+
+    // A third click re-opens, so the node keeps normal toggle behavior.
+    click({ currentTarget: owner });
+    expect(panel.style.display).toBe("");
+  });
+
   it("does not create or open a details panel when popups are disabled", () => {
     const harness = setup();
     harness.surface.render("graph-container", RESOURCES, {

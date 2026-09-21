@@ -29,6 +29,7 @@ interface PullRequestIdentity {
 
 interface PullRequestGraphDiffGuardDependencies {
   hasRadiusApplicationModel(workspacePath: string): Promise<boolean>;
+  canonicalWorkspacePath(workspacePath: string): Promise<string>;
   workspaceContext(): Promise<{ repo: string; branch: string }>;
   getDefaultBranch(repo: string): Promise<string>;
   openGraphDiff(identity: PullRequestIdentity): Promise<unknown>;
@@ -56,7 +57,7 @@ interface GraphDiffAttempt extends PullRequestIdentity {
 }
 
 export interface PullRequestGraphDiffGuard {
-  activateAtSessionStart(workingDirectory: unknown): Promise<boolean>;
+  observeSessionStart(workingDirectory: unknown): Promise<boolean>;
   onPreToolUse(
     input: ToolUseInput
   ): Promise<DeniedToolUse | ToolUseGuidance | undefined>;
@@ -173,11 +174,43 @@ function rememberBoundedSet(set: Set<string>, key: string): void {
 export function createPullRequestGraphDiffGuard(
   deps: PullRequestGraphDiffGuardDependencies
 ): PullRequestGraphDiffGuard {
-  let active = false;
+  // Keyed by worktree rather than a single session-wide flag, so an explicit
+  // Radius interaction in one worktree does not cause PR interception to leak
+  // into an unrelated worktree/repo opened in the same session. Keys are
+  // canonical paths: the same worktree reported with a trailing separator, a
+  // symlinked parent, or different casing must not register as two worktrees,
+  // because a missed lookup silently suppresses the graph diff.
+  const radiusActiveWorktrees = new Set<string>();
   const attempts = new Map<string, GraphDiffAttempt>();
   const requestedDiffs = new Set<string>();
   const pendingPullRequests = new Set<string>();
   const defaultBranches = new Map<string, string>();
+
+  async function worktreeKey(workingDirectory: unknown): Promise<string> {
+    const workspacePath = optionalString(workingDirectory);
+    if (!workspacePath) return "";
+    try {
+      return (
+        (await deps.canonicalWorkspacePath(workspacePath)) || workspacePath
+      );
+    } catch {
+      // Canonicalization is an identity refinement, not a precondition. If it
+      // fails, the raw path still matches itself, so degrade to it rather than
+      // failing a hook that was only trying to decide whether Radius applies.
+      return workspacePath;
+    }
+  }
+
+  async function isRadiusActive(input: ToolUseInput): Promise<boolean> {
+    const key = await worktreeKey(input.workingDirectory);
+    return key !== "" && radiusActiveWorktrees.has(key);
+  }
+
+  async function markRadiusActive(workingDirectory: unknown): Promise<void> {
+    const key = await worktreeKey(workingDirectory);
+    if (!key) return;
+    rememberBoundedSet(radiusActiveWorktrees, key);
+  }
 
   async function modelExists(input: ToolUseInput): Promise<boolean | null> {
     const workspacePath = optionalString(input.workingDirectory);
@@ -208,13 +241,21 @@ export function createPullRequestGraphDiffGuard(
     return { repo, baseBranch, headBranch };
   }
 
-  async function activateAtSessionStart(
+  // A worktree that already holds a Radius application model is Radius work
+  // whether or not this particular session has touched a Radius tool yet: the
+  // model was authored by an earlier session, or committed and checked out by
+  // hand. Rederiving the marker from worktree state at every session start is
+  // what keeps the guard working across session boundaries and extension-host
+  // restarts, instead of silently skipping the graph diff for a modeled app.
+  // Repositories with no Radius model still mark nothing and stay untouched.
+  async function observeSessionStart(
     workingDirectoryInput: unknown
   ): Promise<boolean> {
     const workspacePath = optionalString(workingDirectoryInput);
     if (!workspacePath) return false;
-    active = await deps.hasRadiusApplicationModel(workspacePath);
-    return active;
+    const modeled = await deps.hasRadiusApplicationModel(workspacePath);
+    if (modeled) await markRadiusActive(workspacePath);
+    return modeled;
   }
 
   async function onPreToolUse(
@@ -229,19 +270,20 @@ export function createPullRequestGraphDiffGuard(
     // This hook can enforce known PR tools. Shell commands such as
     // `gh pr create` are opaque to extensions and require a host-level PR hook.
     if (!isPullRequestCreationTool(input.toolName)) return undefined;
+    if (!(await isRadiusActive(input))) return undefined;
 
     let modeled: boolean | null;
     try {
       modeled = await modelExists(input);
     } catch (error) {
-      if (!active) return undefined;
       return unavailableGuidance(
         `Radius could not verify the current application model: ${errorMessage(error)}`
       );
     }
-    if (modeled === null) return undefined;
-    active = modeled;
-    if (!active) return undefined;
+    // A null model verdict means the hook reported no worktree, which
+    // `isRadiusActive` has already rejected above; a false verdict means the
+    // model is gone. Neither warrants a graph diff.
+    if (!modeled) return undefined;
 
     let identity: PullRequestIdentity | null;
     try {
@@ -296,14 +338,14 @@ export function createPullRequestGraphDiffGuard(
   ): Promise<PostToolUseGuidance | undefined> {
     const attempt = graphDiffAttempt(input);
     if (attempt) {
-      active = true;
+      await markRadiusActive(input.workingDirectory);
       rememberBounded(attempts, proofKey(attempt), attempt);
       requestedDiffs.delete(proofKey(attempt));
       return undefined;
     }
 
     if (isPullRequestCreationTool(input.toolName)) {
-      if (!active) return undefined;
+      if (!(await isRadiusActive(input))) return undefined;
       let identity: PullRequestIdentity | null;
       try {
         identity = await resolvePullRequestIdentity(input.toolArgs);
@@ -328,12 +370,12 @@ export function createPullRequestGraphDiffGuard(
     }
 
     if (isRadiusToolUse(input.toolName, input.toolArgs)) {
+      await markRadiusActive(input.workingDirectory);
       try {
-        const modeled = await modelExists(input);
-        if (modeled !== null) active = modeled;
+        await modelExists(input);
       } catch (error) {
         return {
-          additionalContext: `Radius could not verify whether this explicit Radius operation activated the current session: ${errorMessage(error)}. The operation completed, but automatic application graph diffs will remain inactive until the model can be verified.`
+          additionalContext: `Radius could not verify the application model after this explicit Radius operation: ${errorMessage(error)}. The operation completed, and Radius will verify the model again before the next pull request.`
         };
       }
     }
@@ -349,7 +391,7 @@ export function createPullRequestGraphDiffGuard(
       optionalString(input.error) || "The graph-diff tool failed."
     );
     if (attempt) {
-      active = true;
+      await markRadiusActive(input.workingDirectory);
       rememberBounded(attempts, proofKey(attempt), attempt);
       requestedDiffs.delete(proofKey(attempt));
     }
@@ -357,7 +399,7 @@ export function createPullRequestGraphDiffGuard(
   }
 
   return {
-    activateAtSessionStart,
+    observeSessionStart,
     onPreToolUse,
     onPostToolUse,
     onPostToolUseFailure

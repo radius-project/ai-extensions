@@ -1409,33 +1409,146 @@ export async function createCloudFixture(
             "--output",
             "none"
           ]);
-          if (!isAzureResourceNotFound(deletion))
+          const notFound = isAzureResourceNotFound(deletion);
+          if (!notFound)
             expectSuccess(deletion, `az ad app delete ${app.objectId}`);
+          // Neither a zero exit nor a not-found is proof the object is gone.
+          // A run reported this step reclaimed while the app registration was
+          // still live and absent from Entra's deleted items, which wedged the
+          // next run's clean-slate check. Entra also deletes asynchronously,
+          // so confirm absence the same way the workload step does rather than
+          // trusting the command that claimed to have done it.
+          let survivors: readonly string[] = [app.appId];
+          await pollForValue({
+            ports,
+            timeoutMs: assertionTimeoutMs,
+            intervalMs: assertionPollIntervalMs,
+            probe: async () => {
+              const remaining = await listAppRegistrations(
+                commands,
+                expectedAppName
+              );
+              survivors = remaining
+                .filter((candidate) => candidate.objectId === app.objectId)
+                .map((candidate) => candidate.appId);
+              return survivors.length === 0 ? true : undefined;
+            },
+            timeoutMessage: () =>
+              `az ad app delete ${app.objectId} ` +
+              `${notFound ? "reported the app registration was already absent" : "succeeded"}, ` +
+              `but app registration ${survivors.join(", ")} was still listed after ${assertionTimeoutMs}ms.`
+          });
         });
       }
 
-      const environment = await commands.runGh([
-        "api",
-        `repos/${repository}/environments/${environmentName}`
-      ]);
-      if (environment.code === 0)
-        await attempt(`GitHub environment ${environmentName}`, async () => {
-          expectSuccess(
-            await commands.runGh([
-              "api",
-              "--method",
-              "DELETE",
-              `repos/${repository}/environments/${environmentName}`
-            ]),
-            `gh api DELETE environments/${environmentName}`
+      // Verified only after the app registrations are gone: deleting an
+      // application cascade-deletes its principal, so probing immediately
+      // after `az ad sp delete` would race that cascade and fail a reclaim
+      // that was about to succeed. An orphaned principal wedges every later
+      // clean-slate check, and `az ad sp delete` reports success without
+      // proving the object is gone, so confirm the end state here. Deliberate
+      // preservation is not a leak, so skip the check when anything was held
+      // back for recovery.
+      if (!preserveAllApplications && blockedApplicationIds.size === 0) {
+        let survivingPrincipals: readonly string[] = [];
+        await pollForValue({
+          ports,
+          timeoutMs: assertionTimeoutMs,
+          intervalMs: assertionPollIntervalMs,
+          probe: async () => {
+            survivingPrincipals = (
+              await listServicePrincipals(commands, expectedAppName)
+            ).map((principal) => principal.objectId);
+            return survivingPrincipals.length === 0 ? true : undefined;
+          },
+          timeoutMessage: () =>
+            `service principal(s) ${survivingPrincipals.join(", ")} for ${expectedAppName} ` +
+            `were still listed ${assertionTimeoutMs}ms after their application was deleted.`
+        }).catch((error: unknown) => {
+          failures.push(
+            `verify no service principal for ${expectedAppName} survives: ${describeError(error)}`
           );
         });
-      else if (!isGitHubApiNotFound(environment))
+      }
+
+      // A deployment record names the environment it deployed to, but outlives
+      // it. Deleting the environment while its records are still present
+      // strands them behind a name nothing will ever match again, so track
+      // whether this step actually cleared them and hold the environment back
+      // if it did not.
+      const failureCountBeforeDeploymentRecords = failures.length;
+      const deploymentRecords = await listDeploymentRecordIds(
+        commands,
+        repository,
+        environmentName
+      ).catch((error: unknown) => {
         failures.push(
-          `probe GitHub environment ${environmentName}: gh exited ${environment.code}: ${(
-            environment.stderr || environment.stdout
-          ).trim()}`
+          `probe GitHub deployment records for ${environmentName}: ${describeError(error)}`
         );
+        return null;
+      });
+      if (deploymentRecords && deploymentRecords.length > 0)
+        await attempt(
+          `${deploymentRecords.length} GitHub deployment record(s) for ${environmentName}`,
+          async () => {
+            for (const id of deploymentRecords) {
+              // GitHub refuses to delete a deployment that is still active,
+              // and a record whose job never reported a status is active by
+              // default.
+              expectSuccess(
+                await commands.runGh([
+                  "api",
+                  "--method",
+                  "POST",
+                  `repos/${repository}/deployments/${id}/statuses`,
+                  "-f",
+                  "state=inactive"
+                ]),
+                `gh api POST deployments/${id}/statuses`
+              );
+              expectSuccess(
+                await commands.runGh([
+                  "api",
+                  "--method",
+                  "DELETE",
+                  `repos/${repository}/deployments/${id}`
+                ]),
+                `gh api DELETE deployments/${id}`
+              );
+            }
+          }
+        );
+
+      if (failures.length !== failureCountBeforeDeploymentRecords)
+        failures.push(
+          `preserve GitHub environment ${environmentName}: its deployment records could not be ` +
+            "reclaimed, and deleting the environment now would strand them behind a name nothing " +
+            "will match again"
+        );
+      else {
+        const environment = await commands.runGh([
+          "api",
+          `repos/${repository}/environments/${environmentName}`
+        ]);
+        if (environment.code === 0)
+          await attempt(`GitHub environment ${environmentName}`, async () => {
+            expectSuccess(
+              await commands.runGh([
+                "api",
+                "--method",
+                "DELETE",
+                `repos/${repository}/environments/${environmentName}`
+              ]),
+              `gh api DELETE environments/${environmentName}`
+            );
+          });
+        else if (!isGitHubApiNotFound(environment))
+          failures.push(
+            `probe GitHub environment ${environmentName}: gh exited ${environment.code}: ${(
+              environment.stderr || environment.stdout
+            ).trim()}`
+          );
+      }
 
       const packageRecord = await readStatePackage(
         commands,
@@ -1833,6 +1946,47 @@ function validateStatePackageForDeletion(
   if (statePackage.linkedRepository.toLowerCase() !== repository.toLowerCase())
     return `it is linked to "${statePackage.linkedRepository}", not "${repository}"`;
   return null;
+}
+
+// Deleting a GitHub Environment leaves its deployment records behind: the two
+// are linked by environment *name*, so the records outlive it. The extension
+// never deletes one, because to the product a deployment record is history
+// rather than a resource it owns, so the suite that caused them has to.
+async function listDeploymentRecordIds(
+  commands: CloudCommandPort,
+  repository: string,
+  environmentName: string
+): Promise<number[]> {
+  const context = `gh api repos/${repository}/deployments?environment=${environmentName}`;
+  // Paginated: a run creates a deployment record per deploy, and an
+  // environment can accumulate more than one page of them. Stopping at the
+  // first page would report success while stranding the rest.
+  const result = await commands.runGh([
+    "api",
+    "--paginate",
+    "--slurp",
+    `repos/${repository}/deployments?environment=${environmentName}&per_page=100`
+  ]);
+  expectSuccess(result, context);
+  if (!result.stdout.trim())
+    throw new Error(`${context} returned an empty response instead of JSON.`);
+  const pages = parseJsonArray(result, context);
+  const entries = pages.flatMap((page, index) => {
+    if (!Array.isArray(page))
+      throw new Error(
+        `${context} returned page ${index} with JSON type "${typeof page}" where an array was expected.`
+      );
+    return page;
+  });
+  return entries.map((entry, index) => {
+    const record = asRecord(entry, context, index);
+    const id = record.id;
+    if (typeof id !== "number" || !Number.isInteger(id))
+      throw new Error(
+        `${context} returned an entry at index ${index} with no usable numeric "id".`
+      );
+    return id;
+  });
 }
 
 async function listAppRegistrations(

@@ -306,12 +306,6 @@ export function createGraphSurface(
       : null;
     record.panel = panel;
 
-    const openDetails = (
-      data: GraphNodeData,
-      card: DomElement | null
-    ): void => {
-      if (panel && card) panel.open(data, card);
-    };
     const toggleDetails = (
       data: GraphNodeData,
       card: DomElement | null
@@ -324,7 +318,7 @@ export function createGraphSurface(
       clock: context.clock,
       host,
       settings,
-      deps: { openExternal, openLocalSource, openDetails, toggleDetails },
+      deps: { openExternal, openLocalSource, toggleDetails },
       reload: () => context.nav.reload(),
       nodes: built.nodes,
       edges: built.edges
