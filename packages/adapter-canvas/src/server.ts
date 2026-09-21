@@ -22,6 +22,7 @@ import {
   isKubernetesNamespace,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
+  projectSafeApplicationGraph,
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
@@ -187,6 +188,8 @@ import {
   canResumeInput,
   requireInput,
   resumeAfterInput,
+  getAzureAppCreateContinuation,
+  setAzureAppCreateContinuation,
   setExecutionActive,
   announceOperationTerminal,
   shouldStop,
@@ -1031,7 +1034,9 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       report: (diagnostic) => operations.report?.(diagnostic),
       finish: (operation, state, options) => {
         finish(operation, state, options);
-      }
+      },
+      getAzureAppCreateContinuation,
+      setAzureAppCreateContinuation
     },
     progress: {
       enterStage: (operation, stage) => {
@@ -3249,6 +3254,8 @@ const deployDispatchService = createDeployDispatchService({
 });
 
 const deployOutcomeService = createDeployOutcomeService({
+  projectSafeGraphResources: (graph) =>
+    canvasGraphResources(projectSafeApplicationGraph(graph).resources),
   settleDeployStatuses,
   fetchRunLog,
   extractGitHubActionsStepLog,

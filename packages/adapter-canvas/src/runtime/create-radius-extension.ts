@@ -155,6 +155,8 @@ export function createRadiusExtension(
   const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
     hasRadiusApplicationModel: (workspacePath) =>
       deps.workspace.hasRadiusApplicationModel(workspacePath),
+    canonicalWorkspacePath: (workspacePath) =>
+      deps.workspace.canonicalWorkspacePath(workspacePath),
     workspaceContext: async () => {
       const state = await workspaceState();
       return {
@@ -560,9 +562,9 @@ export function createRadiusExtension(
         return await pullRequestGraphDiffGuard.onPostToolUseFailure(input);
       },
       onSessionStart: async (input) => {
-        let active = false;
+        let modeled = false;
         try {
-          active = await pullRequestGraphDiffGuard.activateAtSessionStart(
+          modeled = await pullRequestGraphDiffGuard.observeSessionStart(
             input.workingDirectory
           );
         } catch (error) {
@@ -571,7 +573,7 @@ export function createRadiusExtension(
             pendingStartupDiagnostic = "";
           }
         }
-        if (!active) return undefined;
+        if (!modeled) return undefined;
         return { additionalContext: RADIUS_SESSION_START_CONTEXT };
       }
     },

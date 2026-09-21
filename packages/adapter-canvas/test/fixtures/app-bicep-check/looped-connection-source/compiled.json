@@ -1,0 +1,92 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "9615734090904166388"
+    }
+  },
+  "parameters": {
+    "idx": {
+      "type": "int",
+      "defaultValue": 1
+    }
+  },
+  "imports": {
+    "radius": {
+      "provider": "Radius",
+      "version": "latest"
+    }
+  },
+  "resources": {
+    "caches": {
+      "copy": {
+        "name": "caches",
+        "count": "[length(range(0, 2))]"
+      },
+      "import": "radius",
+      "type": "Radius.Data/redisCaches@2025-08-01-preview",
+      "properties": {
+        "name": "[format('cache-{0}', range(0, 2)[copyIndex()])]",
+        "properties": {
+          "application": "test-app",
+          "environment": "test",
+          "codeReference": "src/cache.ts"
+        }
+      }
+    },
+    "literalIndex": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "literal-index",
+        "properties": {
+          "application": "test-app",
+          "environment": "test",
+          "codeReference": "src/literal-index.ts",
+          "containers": {
+            "web": {
+              "image": "example/web:latest"
+            }
+          },
+          "connections": {
+            "cache": {
+              "source": "[reference(format('caches[{0}]', 0)).properties.secrets.name]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[format('caches[{0}]', 0)]"
+      ]
+    },
+    "parameterIndex": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "parameter-index",
+        "properties": {
+          "application": "test-app",
+          "environment": "test",
+          "codeReference": "src/parameter-index.ts",
+          "containers": {
+            "web": {
+              "image": "example/web:latest"
+            }
+          },
+          "connections": {
+            "cache": {
+              "source": "[reference(format('caches[{0}]', parameters('idx'))).properties.secrets.name]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[format('caches[{0}]', parameters('idx'))]"
+      ]
+    }
+  }
+}

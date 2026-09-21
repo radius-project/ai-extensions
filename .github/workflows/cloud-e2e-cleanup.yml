@@ -147,7 +147,7 @@ jobs:
       - name: Sign in to Azure
         if: steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true'
         id: azure-login
-        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -164,6 +164,10 @@ jobs:
           repositories: ${{ steps.pin.outputs.name }}
           permission-actions: write
           permission-contents: write
+          # Deleting a deployment record is a write. The records are linked to
+          # their environment by name, so deleting the environment strands them
+          # rather than removing them, and nothing else ever will.
+          permission-deployments: write
           permission-environments: write
           permission-pull-requests: write
 
@@ -838,12 +842,80 @@ jobs:
             exit 1
           fi
 
+      # A deployment record survives the environment it names, because the two
+      # are linked by name rather than by id. The extension never deletes one
+      # -- to the product it is history, not a resource -- so these accumulate
+      # on the fixture until the suite that created them removes them. Purge
+      # them before the environments so a failure here cannot orphan a record
+      # whose environment has already gone.
+      - name: Purge stale GitHub deployment records
+        id: deployment-records-cleanup
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          deployments="$RUNNER_TEMP/deployments.json"
+          expired_deployments="$RUNNER_TEMP/expired-deployments.json"
+          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/deployments?per_page=100" >"$deployments"
+
+          node --input-type=module - \
+            "$deployments" "$ENVIRONMENT_PREFIX" "$cutoff" "$expired_deployments" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [deploymentsFile, prefix, cutoff, outputFile] = process.argv.slice(2);
+          const { selectExpiredDeployments } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const deployments = JSON.parse(await readFile(deploymentsFile, "utf8"));
+          await writeFile(
+            outputFile,
+            JSON.stringify(selectExpiredDeployments(deployments, prefix, cutoff))
+          );
+          NODE
+
+          purged=0
+          failures=()
+          while read -r id; do
+            [[ -n "$id" ]] || continue
+            echo "Deleting stale deployment record $id, created before $cutoff."
+            # GitHub refuses to delete a deployment that is still active, and a
+            # record whose job never reported a status is active by default.
+            if ! gh api --method POST \
+                "repos/$FIXTURE_REPOSITORY/deployments/$id/statuses" \
+                -f state=inactive >/dev/null; then
+              failures+=("deactivate deployment $id")
+              continue
+            fi
+            if ! gh api --method DELETE "repos/$FIXTURE_REPOSITORY/deployments/$id"; then
+              failures+=("delete deployment $id")
+              continue
+            fi
+            purged=$((purged + 1))
+          done < <(jq -r '.[]' "$expired_deployments")
+
+          echo "- GitHub deployment records purged: $purged" >>"$GITHUB_STEP_SUMMARY"
+          if (( ${#failures[@]} > 0 )); then
+            printf 'GitHub deployment record cleanup failures:\n' >&2
+            printf '  - %s\n' "${failures[@]}" >&2
+            exit 1
+          fi
+
       # Environments are per-run (`radtest-<uid>`), so unlike the application
       # there is more than one candidate. Still matched by the suite's own
       # prefix and still age-gated, so a live run's environment is never a
       # candidate.
+      #
+      # Gated on the deployment-record purge as well: a deployment record names
+      # the environment it deployed to but outlives it, so deleting the
+      # environment while its records are still present strands them behind a
+      # name nothing will match again. Leaving the environment in place instead
+      # lets the next sweep retry both.
       - name: Purge stale GitHub Environments
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success' && steps.deployment-records-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
