@@ -250,14 +250,13 @@ describe("resolveRecipeOutputs", () => {
         name: "rabbitMQ",
         resourceType: "Radius.Messaging/rabbitMQ",
         templateKind: "bicep",
-        templatePath:
-          "mcr.microsoft.com/bicep/avm/res/service-bus/namespace:0.16.2",
+        templatePath: "ghcr.io/radius-project/kube-recipes/rabbitmq:latest",
         concreteResources: [
           {
-            name: "namespace",
-            type: "Microsoft.ServiceBus/namespaces",
-            provider: "azure",
-            displayType: "Service Bus"
+            name: "rabbitmq",
+            type: "apps/Deployment",
+            provider: "kubernetes",
+            displayType: "Deployment"
           }
         ]
       }
@@ -272,9 +271,7 @@ describe("resolveRecipeOutputs", () => {
       "azure"
     );
     expect(resolved[0].recipe?.name).toBe("rabbitMQ");
-    expect(resolved[0].outputResources[0].type).toBe(
-      "Microsoft.ServiceBus/namespaces"
-    );
+    expect(resolved[0].outputResources[0].type).toBe("apps/Deployment");
   });
 
   it("produces no outputs when no recipe matches", async () => {

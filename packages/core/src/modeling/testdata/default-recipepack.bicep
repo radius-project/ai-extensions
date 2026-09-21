@@ -1,7 +1,8 @@
 // Default Radius recipe pack
 //
-// Deploy with:
-//   rad deploy recipe-packs/kubernetes/default-recipepack.bicep
+// Deploy into an existing Environment, then associate the pack:
+//   rad deploy recipe-packs/kubernetes/default-recipepack.bicep --environment default
+//   rad env update default --recipe-packs default --preview
 //
 // This mirrors /planes/radius/local/resourceGroups/default/providers/Radius.Core/recipePacks/default
 
@@ -38,6 +39,10 @@ resource defaultRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
       'Radius.Data/redisCaches': {
         kind: 'bicep'
         source: 'ghcr.io/radius-project/kube-recipes/rediscaches:latest'
+      }
+      'Radius.Messaging/rabbitMQ': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/kube-recipes/rabbitmq:latest'
       }
     }
   }

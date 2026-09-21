@@ -127,6 +127,11 @@ const SOURCE_CONCRETE_MAP: Record<
     displayType: "Deployment",
     provider: "kubernetes"
   },
+  "kube-recipes/rabbitmq": {
+    type: "apps/Deployment",
+    displayType: "Deployment",
+    provider: "kubernetes"
+  },
   "kube-recipes/persistentvolumes": {
     type: "core/PersistentVolumeClaim",
     displayType: "PersistentVolumeClaim",
