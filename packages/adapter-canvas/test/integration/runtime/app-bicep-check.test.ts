@@ -635,7 +635,7 @@ describe("managed Secret connection sources", () => {
     const directory = temporaryDirectory();
     const result = runChecker(
       directory,
-      fakeBicep(directory, sarif([]), 0, compiledBicepFixture(fixture))
+      fakeBicep(directory, sarif([]), 0, bicepFixture(fixture))
     );
 
     assert.equal(result.status, 1);
@@ -2770,7 +2770,7 @@ describe("diagnostic locations", () => {
       prefix: `${uri}:7: `
     },
     {
-      name: "invalid standard column with usable Bicep fallback",
+      name: "the absence of a column when an invalid standard column is not replaced by the Bicep field",
       locations: diagnostic("BCP236", text, 7, {
         startColumn: 0,
         charOffset: 17

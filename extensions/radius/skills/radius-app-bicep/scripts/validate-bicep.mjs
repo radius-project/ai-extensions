@@ -302,7 +302,7 @@ function printDiagnostic(result) {
   const source = physical?.artifactLocation?.uri;
   const region = physical?.region;
   const line = region?.startLine;
-  // Bicep 0.42.1 and 0.44.1 put the 1-based display column in `charOffset`
+  // Bicep 0.42.1, 0.44.1, and 0.47.16 put the 1-based display column in `charOffset`
   // instead of SARIF's `startColumn`. Prefer the standard field when present.
   const column = region?.startColumn ?? region?.charOffset;
   const hasLine = Number.isSafeInteger(line) && line > 0;
