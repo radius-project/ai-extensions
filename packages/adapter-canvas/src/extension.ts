@@ -35,6 +35,7 @@ import { github, fetchFileFromRepo, getBranchHeadSha } from "./gh.js";
 import {
   defaultBranchForState,
   detectWorkspaceContext,
+  canonicalWorkspacePath,
   fetchWorkspaceBicep,
   fetchWorkspaceFile,
   hasRadiusApplicationModel,
@@ -134,6 +135,7 @@ const dependencies: RadiusExtensionDependencies = {
   getLastWebviewActivityAt,
   workspace: {
     hasRadiusApplicationModel,
+    canonicalWorkspacePath,
     detectWorkspaceContext,
     defaultBranchForState,
     isWorkspaceSelection,

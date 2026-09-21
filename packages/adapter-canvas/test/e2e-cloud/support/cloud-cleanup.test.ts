@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   selectExpiredApplications,
   selectExpiredDirectoryObjects,
+  selectExpiredDeployments,
   selectExpiredEnvironments,
   selectExpiredFallbackBranches,
   selectExpiredFallbackPullRequests,
@@ -276,6 +277,61 @@ describe("selectExpiredEnvironments", () => {
       "GitHub Environments page did not include an environments array"
     );
     expect(() => selectExpiredEnvironments(null, "radtest-", CUTOFF)).toThrow(
+      "did not return a JSON array"
+    );
+  });
+});
+
+describe("selectExpiredDeployments", () => {
+  it("selects old prefixed deployment records from paginated API data", () => {
+    expect(
+      selectExpiredDeployments(
+        [
+          [
+            { id: 1, environment: "radtest-old", created_at: OLD },
+            { id: 2, environment: "radtest-new", created_at: NEW },
+            { id: 3, environment: "production", created_at: OLD }
+          ],
+          [{ id: 4, environment: "radtest-older", created_at: OLD }]
+        ],
+        "radtest-",
+        CUTOFF
+      )
+    ).toEqual([1, 4]);
+  });
+
+  it.each([
+    ["missing", {}],
+    ["null", { created_at: null }],
+    ["malformed", { created_at: "not-a-date" }]
+  ])("does not select a record with %s creation data", (_label, fields) => {
+    expect(
+      selectExpiredDeployments(
+        [[{ id: 9, environment: "radtest-unsafe", ...fields }]],
+        "radtest-",
+        CUTOFF
+      )
+    ).toEqual([]);
+  });
+
+  // The id addresses the record for deletion, so anything that is not a whole
+  // number is not something this may act on.
+  it.each([
+    ["absent", {}],
+    ["a string", { id: "12" }],
+    ["fractional", { id: 1.5 }]
+  ])("does not select a record whose id is %s", (_label, fields) => {
+    expect(
+      selectExpiredDeployments(
+        [[{ environment: "radtest-old", created_at: OLD, ...fields }]],
+        "radtest-",
+        CUTOFF
+      )
+    ).toEqual([]);
+  });
+
+  it("rejects a response that is not an array", () => {
+    expect(() => selectExpiredDeployments(null, "radtest-", CUTOFF)).toThrow(
       "did not return a JSON array"
     );
   });
