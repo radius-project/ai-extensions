@@ -34,7 +34,13 @@
           lock: {
             kind: 'None'
           }
-          configurations: postgreSqlServerConfigurations
+          configurations: concat(postgreSqlServerConfigurations, postgreSqlOperatorSetsSecureTransport ? [] : [
+            {
+              name: 'require_secure_transport'
+              source: 'user-override'
+              value: '{{context.resource.properties.tls == "optional" ? "OFF" : "ON"}}'
+            }
+          ])
         }
         outputs: {
           host: 'fqdn'

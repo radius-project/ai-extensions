@@ -194,6 +194,7 @@ run_action() {
     (
         export APP_FILE BICEP_BIN="${BICEP_STUB}" COMPILED_FIXTURE
         export ENVIRONMENT PATH="${STUB_BIN}:${PATH}" RAD_CALLS
+        export GITHUB_ACTION_PATH="${SCRIPT_DIR}"
         TMPDIR="${TEST_ROOT}"
         export TMPDIR
         bash "${BODY_SCRIPT}"
@@ -247,14 +248,14 @@ run_action
 assert_success "first deploy"
 assert_call_present "recipe-pack show custom -o json"
 assert_call_absent "recipe-pack list"
-assert_update_packs "${CUSTOM_PACK_ID},${DEFAULT_PACK_ID}"
+assert_update_packs "${DEFAULT_PACK_ID},${CUSTOM_PACK_ID}"
 
 # A restored-state redeploy resolves the same authored identity even though the
 # deploy is idempotent and no globally new resource exists.
 reset_case
 run_action
 assert_success "repeat deploy after state restore"
-assert_update_packs "${CUSTOM_PACK_ID},${DEFAULT_PACK_ID}"
+assert_update_packs "${DEFAULT_PACK_ID},${CUSTOM_PACK_ID}"
 
 # Packs already attached for another purpose remain attached. Globally known
 # packs are irrelevant because the action never lists them.
@@ -269,7 +270,7 @@ export ENV_RESOURCE_JSON
 run_action
 assert_success "preserve unrelated attached pack"
 assert_update_packs \
-    "${CUSTOM_PACK_ID},${DEFAULT_PACK_ID},${OTHER_PACK_ID}"
+    "${DEFAULT_PACK_ID},${OTHER_PACK_ID},${CUSTOM_PACK_ID}"
 
 # Every authored recipe-pack resource is resolved and attached.
 reset_case
@@ -290,7 +291,7 @@ assert_success "multiple authored packs"
 assert_call_present "recipe-pack show custom -o json"
 assert_call_present "recipe-pack show other -o json"
 assert_update_packs \
-    "${CUSTOM_PACK_ID},${DEFAULT_PACK_ID},${OTHER_PACK_ID}"
+    "${DEFAULT_PACK_ID},${CUSTOM_PACK_ID},${OTHER_PACK_ID}"
 
 # Existing recipe-pack resources are references, not packs authored by this
 # template, so they are not resolved or attached.
@@ -312,7 +313,7 @@ run_action
 assert_success "ignore existing recipe-pack reference"
 assert_call_absent "recipe-pack show shared -o json"
 assert_call_present "recipe-pack show custom -o json"
-assert_update_packs "${CUSTOM_PACK_ID},${DEFAULT_PACK_ID}"
+assert_update_packs "${DEFAULT_PACK_ID},${CUSTOM_PACK_ID}"
 
 # Legacy array-shaped bicep output (languageVersion 1.x) with a top-level name
 # is discovered the same way as symbolic-name object output.
@@ -327,7 +328,7 @@ write_compiled_template '[
 run_action
 assert_success "array-shaped compiled template"
 assert_call_present "recipe-pack show custom -o json"
-assert_update_packs "${CUSTOM_PACK_ID},${DEFAULT_PACK_ID}"
+assert_update_packs "${DEFAULT_PACK_ID},${CUSTOM_PACK_ID}"
 reset_case
 rm -f "${RECIPE_PACK_BICEP}"
 touch "${CUSTOM_TYPES_YAML}"
