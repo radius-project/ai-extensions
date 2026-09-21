@@ -76,7 +76,7 @@ assert_call() {
 }
 
 assert_no_call() {
-    if grep -Fq "$1" "${CALLS}"; then
+    if grep -Fq -- "$1" "${CALLS}"; then
         fail "unexpected call containing '$1'; calls: $(cat "${CALLS}")"
     fi
 }
@@ -88,6 +88,25 @@ assert_output() {
 
 PACK_ID="/planes/radius/local/resourceGroups/default/providers/Radius.Core/recipePacks/azure-avm"
 CUSTOM_PACK_ID="/planes/radius/local/resourceGroups/default/providers/Radius.Core/recipePacks/custom"
+DEFAULT_PACK_ID="/planes/radius/local/resourceGroups/default/providers/Radius.Core/recipePacks/default"
+run_script success \
+    ENVIRONMENT=production \
+    RECIPE_PACK=azure-avm \
+    REMOVE_DEFAULT_RECIPE_PACK=true \
+    PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
+    ENV_JSON="{\"properties\":{\"recipePacks\":[\"${DEFAULT_PACK_ID}\",\"${CUSTOM_PACK_ID}\"]}}"
+assert_call \
+    "rad env update production --recipe-packs ${CUSTOM_PACK_ID},${PACK_ID} --preview"
+assert_no_call "--recipe-packs ${DEFAULT_PACK_ID}"
+
+run_script success \
+    ENVIRONMENT=production \
+    RECIPE_PACK=azure-avm \
+    PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
+    ENV_JSON="{\"properties\":{\"recipePacks\":[\"${DEFAULT_PACK_ID}\"]}}"
+assert_call \
+    "rad env update production --recipe-packs ${DEFAULT_PACK_ID},${PACK_ID} --preview"
+
 run_script success \
     ENVIRONMENT=production \
     RECIPE_PACK=azure-avm \
@@ -115,8 +134,28 @@ assert_call "rad recipe-pack show azure-avm -o json"
 assert_call "rad recipe-pack show custom -o json"
 assert_call "rad env update production --recipe-packs ${PACK_ID} --preview"
 
+for empty_recipe_packs in \
+    '{"properties":{}}' \
+    '{"properties":{"recipePacks":null}}'; do
+    run_script success \
+        ENVIRONMENT=production \
+        RECIPE_PACK=azure-avm \
+        PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
+        ENV_JSON="${empty_recipe_packs}"
+    assert_call \
+        "rad env update production --recipe-packs ${PACK_ID} --preview"
+done
+
 run_script failure RECIPE_PACK=azure-avm PACK_JSON='{"id":"pack"}'
 assert_output "Radius environment name is required"
+assert_no_call "rad "
+
+run_script failure \
+    ENVIRONMENT=production \
+    RECIPE_PACK=azure-avm \
+    REMOVE_DEFAULT_RECIPE_PACK=yes \
+    PACK_JSON='{"id":"pack"}'
+assert_output "REMOVE_DEFAULT_RECIPE_PACK must be 'true' or 'false'"
 assert_no_call "rad "
 
 run_script failure ENVIRONMENT=production PACK_JSON='{"id":"pack"}'
@@ -162,8 +201,6 @@ assert_no_call "rad env update"
 
 for invalid_env_json in \
     '{}' \
-    '{"properties":{}}' \
-    '{"properties":{"recipePacks":null}}' \
     '{"properties":{"recipePacks":"pack"}}' \
     '{"properties":{"recipePacks":[42]}}' \
     '{"properties":{"recipePacks":[""]}}' \
@@ -233,6 +270,8 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
     grep -qF \
         'actions/attach-recipe-pack@{{RADIUS_REF}}' "${workflow}" ||
         fail "${workflow}: exact provider pack is not attached"
+    grep -qF 'remove-default-recipe-pack: "true"' "${workflow}" ||
+        fail "${workflow}: auto-injected default pack is not removed"
 done
 
 for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do

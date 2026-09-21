@@ -10,6 +10,10 @@ inputs:
   recipe-pack:
     description: Exact name of the deployed recipe pack to attach.
     required: true
+  remove-default-recipe-pack:
+    description: Remove Radius's auto-injected default Kubernetes recipe pack.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -19,4 +23,5 @@ runs:
       env:
         ENVIRONMENT: ${{ inputs.environment }}
         RECIPE_PACK: ${{ inputs.recipe-pack }}
+        REMOVE_DEFAULT_RECIPE_PACK: ${{ inputs.remove-default-recipe-pack }}
       run: bash "${GITHUB_ACTION_PATH}/attach-recipe-pack.sh"

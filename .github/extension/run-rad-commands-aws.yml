@@ -408,6 +408,7 @@ jobs:
         with:
           environment: ${{ inputs.environment }}
           recipe-pack: ${{ steps.provider-setup.outputs.provider-pack }}
+          remove-default-recipe-pack: "true"
 
       - name: Apply custom recipe packs
         uses: radius-project/ai-extensions/.github/extension/actions/apply-custom-recipe-packs@{{RADIUS_REF}}

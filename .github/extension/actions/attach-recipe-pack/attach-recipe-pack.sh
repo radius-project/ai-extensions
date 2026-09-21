@@ -6,6 +6,13 @@ set -euo pipefail
     echo "ERROR: Radius environment name is required." >&2
     exit 1
 }
+case "${REMOVE_DEFAULT_RECIPE_PACK:-false}" in
+    true | false) ;;
+    *)
+        echo "ERROR: REMOVE_DEFAULT_RECIPE_PACK must be 'true' or 'false'." >&2
+        exit 1
+        ;;
+esac
 if [[ -n "${RECIPE_PACKS_JSON:-}" ]]; then
     if ! RECIPE_PACK_NAMES="$(
         jq -cer '
@@ -48,15 +55,20 @@ if ! EXISTING_PACKS="$(
         jq -sce '
           if length == 0 or (.[0] | type) != "object" then
             error("environment response must begin with an object")
-          elif (.[0].properties.recipePacks | type) != "array" then
+          elif (.[0].properties | type) != "object" then
+            error("environment properties must be an object")
+          elif (
+            .[0].properties.recipePacks != null and
+            (.[0].properties.recipePacks | type) != "array"
+          ) then
             error("environment recipePacks must be an array")
           elif any(
-            .[0].properties.recipePacks[];
+            (.[0].properties.recipePacks // [])[];
             type != "string" or length == 0
           ) then
             error("environment recipePacks must contain non-empty strings")
           else
-            .[0].properties.recipePacks
+            .[0].properties.recipePacks // []
           end
         '
 )"; then
@@ -64,11 +76,21 @@ if ! EXISTING_PACKS="$(
     exit 1
 fi
 
+# Radius injects this exact pack when an environment template omits recipePacks.
 PACK_IDS="$(
     jq -nr \
         --argjson existing "${EXISTING_PACKS}" \
-        --argjson resolved "${RESOLVED_PACKS}" '
-          reduce ($existing + $resolved)[] as $id
+        --argjson resolved "${RESOLVED_PACKS}" \
+        --arg remove_default "${REMOVE_DEFAULT_RECIPE_PACK:-false}" \
+        --arg default_pack_id \
+          "/planes/radius/local/resourceGroups/default/providers/Radius.Core/recipePacks/default" '
+          $existing |
+          if $remove_default == "true" then
+            map(select(ascii_downcase != ($default_pack_id | ascii_downcase)))
+          else
+            .
+          end |
+          reduce (. + $resolved)[] as $id
             ([]; if index($id) then . else . + [$id] end) |
           join(",")
         '
