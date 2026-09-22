@@ -209,7 +209,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_generate_app",
     description:
-      "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, instruction, optional generator version, and optional ambiguity brief. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
+      "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, the absolute path of the Node.js interpreter the skill's scripts must run under (nodeCommand), instruction, optional generator version, and optional ambiguity brief. When the machine has no supported Node.js installation, returns a JSON object with nodeCommand set to null, the installations that were found and refused, and an instruction to stop and ask the user to install Node.js — never to download or install a runtime. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
     parameters: {
       type: "object",
       properties: {
