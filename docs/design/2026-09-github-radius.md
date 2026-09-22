@@ -251,6 +251,8 @@ Reuse shared helpers for managed `rad` execution, GitHub commands, and deploymen
 
 Preserve the user-facing plugin entry points and authoring skill behavior while their backing coordination moves to the library. Reuse the existing application-definition promotion and deployment paths; this proposal does not introduce a new plugin or require a second frontend to ship.
 
+Follow the `radius-deploy` pattern for `radius-environment` and `radius-delete`: skills should request operations through tools backed by the shared library rather than require `open_canvas` or Canvas actions. The frontend decides how to collect input and present results; Canvas remains a supported presentation, not a prerequisite for performing the operation. Preserve existing authorization, confirmation, and progress reporting, including explicit confirmation for destructive actions.
+
 #### Build & packaging
 
 Keep the shared packages internal and bundle them through the existing Radius plugin build. The plugin remains the release unit; this proposal does not require a separately published library product, service, or new plugin.
@@ -364,6 +366,8 @@ Error fixtures should cover rejected and ambiguous dispatches, status API outage
 Exercise actual frontend bindings as well as controlled dependencies, especially source selection and authorization.
 
 Test the tool result fields and status values that existing skills depend on, not just the library's internal results. For example, verify that `radius-deploy` continues polling while deployment status is `in_progress` and stops when it is `success` or `failed`. Changes to internal library results must not silently change these tool-facing contracts.
+
+Verify that environment setup and deletion can run through their tool entry points without opening Canvas, while preserving required user interactions and safeguards.
 
 ## Security
 
