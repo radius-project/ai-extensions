@@ -93,16 +93,30 @@ const VISUAL_FONT_PATH =
 const VISUAL_FONT = fs.readFile(VISUAL_FONT_PATH, "base64");
 // Pinned copies of the built-in Radius icons from resource-types-contrib
 // commit 18142182e52e19a46b0ed172037357e8e142dcd2 keep this suite hermetic.
-const [CONTAINERS_ICON, REDIS_CACHES_ICON] = await Promise.all([
-  fs.readFile(
-    new URL("../fixtures/resource-type-icons/containers.svg", import.meta.url),
-    "utf8"
-  ),
-  fs.readFile(
-    new URL("../fixtures/resource-type-icons/redisCaches.svg", import.meta.url),
-    "utf8"
-  )
-]);
+const [CONTAINERS_ICON, POSTGRESQL_DATABASES_ICON, REDIS_CACHES_ICON] =
+  await Promise.all([
+    fs.readFile(
+      new URL(
+        "../fixtures/resource-type-icons/containers.svg",
+        import.meta.url
+      ),
+      "utf8"
+    ),
+    fs.readFile(
+      new URL(
+        "../fixtures/resource-type-icons/postgreSqlDatabases.svg",
+        import.meta.url
+      ),
+      "utf8"
+    ),
+    fs.readFile(
+      new URL(
+        "../fixtures/resource-type-icons/redisCaches.svg",
+        import.meta.url
+      ),
+      "utf8"
+    )
+  ]);
 const AZURE_CLUSTER = {
   id: "fixture-aks",
   name: "fixture-aks",
@@ -136,7 +150,8 @@ const GRAPH_RESOURCES: CanvasGraphResource[] = [
   {
     id: "azure/database",
     name: "orders-db",
-    type: "Microsoft.DBforPostgreSQL/flexibleServers",
+    type: "Radius.Data/postgreSqlDatabases",
+    icon: POSTGRESQL_DATABASES_ICON,
     connections: []
   }
 ];
@@ -523,7 +538,7 @@ test.describe("Radius Canvas visual baselines", () => {
     await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
     await expectWorktreeBranchRequests(requests.loadGraph);
     await expect(page.locator("#node-popup")).toBeHidden();
-    await expectBuiltInResourceTypeIcons(page, 2);
+    await expectBuiltInResourceTypeIcons(page, 3);
     await screenshot(page, "vi-01-modeled-graph-light.png");
   });
 
@@ -543,7 +558,7 @@ test.describe("Radius Canvas visual baselines", () => {
     await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
     await expectWorktreeBranchRequests(requests.loadGraph);
     await expect(page.locator("#node-popup")).toBeHidden();
-    await expectBuiltInResourceTypeIcons(page, 2);
+    await expectBuiltInResourceTypeIcons(page, 3);
     await screenshot(page, "vi-01-modeled-graph-dark.png");
   });
 
@@ -562,7 +577,7 @@ test.describe("Radius Canvas visual baselines", () => {
       await expect(page.locator("#graph-app")).toHaveValue("radius-app");
       await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
       await expectWorktreeBranchRequests(requests.loadGraph);
-      await expectBuiltInResourceTypeIcons(page, 2);
+      await expectBuiltInResourceTypeIcons(page, 3);
       await page
         .locator(".rad-node")
         .filter({ hasText: "web" })
@@ -643,7 +658,7 @@ test.describe("Radius Canvas visual baselines", () => {
       );
       await expect(page.locator(".rad-node")).toHaveCount(5);
       await expect(page.getByText("+1 added")).toBeVisible();
-      await expectBuiltInResourceTypeIcons(page, 3);
+      await expectBuiltInResourceTypeIcons(page, 4);
       await screenshot(page, `vi-04-graph-diff-all-statuses-${theme}.png`);
     });
   }
@@ -753,8 +768,8 @@ test.describe("Radius Canvas visual baselines", () => {
           {
             id: "app/db",
             name: "db",
-            type: "Radius.Data/redisCaches",
-            icon: REDIS_CACHES_ICON,
+            type: "Radius.Data/postgreSqlDatabases",
+            icon: POSTGRESQL_DATABASES_ICON,
             codeReference: "src/web/app.ts#L12"
           }
         ];
