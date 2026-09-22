@@ -688,7 +688,11 @@ const AZURE_CONFIG_VARIABLES = {
   // The account the cluster name is scoped to. Reported so the wizard can tell
   // two same-named clusters apart when it checks whether a namespace is already
   // claimed, rather than refusing a legitimate environment on a name collision.
-  subscriptionId: ["AZURE_SUBSCRIPTION_ID"]
+  subscriptionId: ["AZURE_SUBSCRIPTION_ID"],
+  // The cluster's own resource group, which scopes the cluster name within the
+  // subscription. Reported for the same reason, and kept separate from
+  // `resourceGroup` above, which is the application's.
+  clusterResourceGroup: ["AZURE_AKS_RESOURCE_GROUP"]
 } as const;
 const AWS_CONFIG_VARIABLES = {
   cluster: ["AWS_EKS_CLUSTER_NAME"],

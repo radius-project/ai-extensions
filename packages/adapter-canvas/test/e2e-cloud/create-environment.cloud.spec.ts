@@ -578,6 +578,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             tenantId: account.tenantId,
             subscriptionId: cloud.subscriptionId,
             resourceGroup: cloud.resourceGroup,
+            // The fixture creates its AKS cluster in that same resource group.
+            clusterResourceGroup: cloud.resourceGroup,
             cluster: cloud.clusterName,
             namespace: KUBERNETES_NAMESPACE
           }

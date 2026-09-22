@@ -945,6 +945,52 @@ describe("initializeEnvironmentPage", () => {
     ).toHaveLength(1);
   });
 
+  // An AKS cluster name is only unique within its resource group, so the
+  // wizard must not refuse a same-named cluster in another one. The discovered
+  // cluster here lives in "cluster-rg"; the listed environment's is elsewhere.
+  it("creates when the namespace is only taken on a same-named cluster in another resource group", async () => {
+    const page = fixture();
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [
+            {
+              name: "dev",
+              status: "verified",
+              provider: "azure",
+              config: {
+                cluster: "aks-1",
+                namespace: "default",
+                subscriptionId: "sub-1",
+                clusterResourceGroup: "other-cluster-rg"
+              }
+            }
+          ]
+        })
+    );
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    pageInput(page, "azure-namespace-select").value = "default";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () =>
+      jsonResponse({ operationId: "op-1" }, true, 202)
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(page.elements["deploy-status"].textContent).not.toContain(
+      "already belongs to environment"
+    );
+    expect(
+      page.browser.net.calls.filter(
+        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+      )
+    ).toHaveLength(1);
+  });
+
   it.each([
     [
       "Azure",

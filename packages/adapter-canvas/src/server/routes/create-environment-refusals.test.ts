@@ -647,6 +647,122 @@ describe("the create-environment refusal ladder", () => {
     expect(result.outcome).toBe("admitted");
   });
 
+  // The issue this change fixes: an AKS cluster name is only unique within a
+  // resource group, so a same-named cluster in another resource group of the
+  // same subscription is another cluster and its namespace is free.
+  it("rung 7 — admits the same namespace on a same-named AKS cluster in another resource group", async () => {
+    const recorder = ports({
+      existing: operation({ environment: "prod" }),
+      claimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          AZURE_AKS_RESOURCE_GROUP: "cluster-rg-a",
+          KUBERNETES_NAMESPACE: "payments"
+        }
+      },
+      start: { ok: true } as OperationStartResult
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "prod",
+        operationEnvironment: "prod",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        clusterResourceGroup: "cluster-rg-b",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result.outcome).toBe("admitted");
+  });
+
+  // Two environments on one cluster can deploy their applications to different
+  // resource groups. That is not a different cluster, so the duplicate is still
+  // refused.
+  it("rung 7 — refuses a duplicate on the same AKS cluster despite a different application resource group", async () => {
+    const recorder = ports({
+      existing: operation({ environment: "prod" }),
+      claimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_RESOURCE_GROUP: "app-rg-a",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          AZURE_AKS_RESOURCE_GROUP: "cluster-rg",
+          KUBERNETES_NAMESPACE: "payments"
+        }
+      }
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "prod",
+        operationEnvironment: "prod",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        resourceGroup: "app-rg-b",
+        clusterResourceGroup: "cluster-rg",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result).toMatchObject({
+      outcome: "refused",
+      refusal: { body: { code: "namespace-already-claimed" } }
+    });
+  });
+
+  // An environment created before the cluster's resource group was stored
+  // records none, so it cannot prove it is a different cluster and still stops
+  // the admission.
+  it("rung 7 — still refuses when the holding environment records no cluster resource group", async () => {
+    const recorder = ports({
+      existing: operation({ environment: "prod" }),
+      claimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          KUBERNETES_NAMESPACE: "payments"
+        }
+      }
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "prod",
+        operationEnvironment: "prod",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        clusterResourceGroup: "cluster-rg-b",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result).toMatchObject({
+      outcome: "refused",
+      refusal: { body: { code: "namespace-already-claimed" } }
+    });
+  });
+
   it("descends the ladder in order, so a malformed slug is refused before any operation lookup", async () => {
     // `getOperation` is unscripted here and throws if reached, which is how the
     // ordering is pinned rather than by reading the source.

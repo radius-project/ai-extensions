@@ -164,6 +164,7 @@ export async function applyProviderConfiguration(
     const subscriptionId =
       data.subscriptionId || ports.optionalString(azureCreds.subscriptionId);
     const rg = data.resourceGroup || "";
+    const clusterRg = data.clusterResourceGroup || "";
     const k8s = data.cluster || "";
 
     await ports.setEnvironmentVariable("AZURE_CLIENT_ID", clientId);
@@ -171,6 +172,13 @@ export async function applyProviderConfiguration(
     await ports.setEnvironmentVariable("AZURE_SUBSCRIPTION_ID", subscriptionId);
     await ports.setEnvironmentVariable("AZURE_RESOURCE_GROUP", rg);
     await ports.setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", k8s);
+    // The cluster's own resource group, which is not `AZURE_RESOURCE_GROUP`:
+    // that one holds the application's resource group. An AKS cluster name is
+    // only unique within a resource group, so this is what lets the namespace
+    // gate tell two same-named clusters in one subscription apart. An empty
+    // value is a no-op in `setEnvironmentVariable`, so a cluster whose resource
+    // group could not be resolved never erases a previously stored one.
+    await ports.setEnvironmentVariable("AZURE_AKS_RESOURCE_GROUP", clusterRg);
     await ports.setEnvironmentVariable("AZURE_LOCATION", data.location);
     await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
 
@@ -180,6 +188,7 @@ export async function applyProviderConfiguration(
       subscriptionId,
       rg,
       k8s,
+      clusterRg,
       data.location,
       data.namespace
     ].filter(Boolean).length;
