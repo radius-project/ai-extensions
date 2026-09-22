@@ -306,7 +306,7 @@ sequenceDiagram
         G-->>L: Typed graph diff
         L-->>F: Diff and source information
     else Neither source contains a definition
-        L-->>F: Definitions absent; authoring is a separate interaction
+        L-->>F: Definitions absent. Authoring is a separate interaction
     end
 ```
 
