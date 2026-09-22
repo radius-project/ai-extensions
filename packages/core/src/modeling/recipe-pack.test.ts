@@ -94,6 +94,11 @@ describe("deriveConcreteResource", () => {
         "ghcr.io/radius-project/kube-recipes/routes:latest"
       )?.type
     ).toBe("gateway.networking.k8s.io/HTTPRoute");
+    expect(
+      deriveConcreteResource(
+        "ghcr.io/radius-project/kube-recipes/rabbitmq:latest"
+      )?.type
+    ).toBe("apps/Deployment");
   });
 
   it("returns null for an unrecognized source", () => {
@@ -350,7 +355,7 @@ describe("committed recipe-pack snapshots", () => {
     "Radius.Data/postgreSqlDatabases":
       "Microsoft.DBforPostgreSQL/flexibleServers",
     "Radius.Data/sqlServerDatabases": "Microsoft.Sql/servers",
-    "Radius.Messaging/rabbitMQ": "Microsoft.ServiceBus/namespaces",
+    "Radius.Messaging/rabbitMQ": "apps/Deployment",
     "Radius.Messaging/kafka": "Microsoft.EventHub/namespaces",
     "Radius.Storage/objectStorage": "Microsoft.Storage/storageAccounts",
     "Radius.Compute/containers": "Microsoft.ContainerService/managedClusters",
@@ -366,7 +371,8 @@ describe("committed recipe-pack snapshots", () => {
     "Radius.Compute/routes": "gateway.networking.k8s.io/HTTPRoute",
     "Radius.Security/secrets": "core/Secret",
     "Radius.Data/mySqlDatabases": "apps/Deployment",
-    "Radius.Data/redisCaches": "apps/Deployment"
+    "Radius.Data/redisCaches": "apps/Deployment",
+    "Radius.Messaging/rabbitMQ": "apps/Deployment"
   };
 
   it.each([
@@ -383,7 +389,10 @@ describe("committed recipe-pack snapshots", () => {
   ])(
     "resolves every entry in the $provider pack to a concrete resource",
     ({ provider, fixture, expected }) => {
-      const entries = parseRecipePack(readFixture(fixture));
+      const source = readFixture(fixture);
+      const entries = parseRecipePack(source);
+
+      expect(source).not.toContain("Radius.Core/environments");
 
       // Every entry the pack declares must derive a concrete resource: an
       // unresolved entry means the curated SOURCE_CONCRETE_MAP is missing a source.
