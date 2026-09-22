@@ -431,6 +431,21 @@ async function routeGraphControls(
       )
     });
   });
+  await page.route(`${canvas.baseUrl}/api/diff-branches`, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ refreshed: true })
+    });
+  });
+  await page.route(
+    `${canvas.baseUrl}/api/progress?view=diff`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ events: [] })
+      });
+    }
+  );
   await page.route(
     `${canvas.baseUrl}/api/list-applications?*`,
     async (route) => {
@@ -623,6 +638,10 @@ test.describe("Radius Canvas visual baselines", () => {
       await expect(page.locator(".react-flow__edge")).toHaveCount(3);
       await expect(page.locator("#base-branch")).toHaveValue("main");
       await expect(page.locator("#head-branch")).toHaveValue(WORKTREE_BRANCH);
+      await expect(page.locator("#diff-status")).toHaveText(
+        "The graph comparison is current."
+      );
+      await expect(page.locator(".rad-node")).toHaveCount(5);
       await expect(page.getByText("+1 added")).toBeVisible();
       await expectBuiltInResourceTypeIcons(page, 3);
       await screenshot(page, `vi-04-graph-diff-all-statuses-${theme}.png`);
