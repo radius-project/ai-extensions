@@ -4,7 +4,7 @@
 - **Date**: 2026-09
 - **Status**: Draft
 
-**Example implementation:** See the [source at revision `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) for examples APIs, module layout, and integration details. This is not the final implementation, just an example that will change based on review and will be implemented in stages.
+**Example implementation:** See the [source at revision `40dd675`](https://github.com/radius-project/ai-extensions/tree/40dd6755ab9217b55e96e556d1c725dc29519b86) and its [architecture notes](https://github.com/radius-project/ai-extensions/blob/40dd6755ab9217b55e96e556d1c725dc29519b86/docs/architecture/github-radius-library.md) for example API designs, module layout, and integration details. This is not the final implementation, just an example that will change based on review and will be implemented in stages.
 
 ## Overview
 
