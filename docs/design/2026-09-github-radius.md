@@ -8,6 +8,8 @@
 
 ## Overview
 
+Lay the groundwork for additional front ends for GitHub Radius (including VSCode, GitHub Copilot CLI, and more).
+
 Extract GitHub Radius's existing application and environment functionality from Canvas-specific code into a reusable library in `radius-project/ai-extensions`. Canvas becomes a consumer of that library, and other GitHub frontends can use the same implementation.
 
 GitHub Radius currently creates GitHub environments, coordinates Radius application authoring and deployment, calls the Radius CLI, and reports workflow results through the Copilot App's Canvas integration. Some of this functionality is reusable, but much of the coordination still lives in the Canvas adapter and depends on its server, request types, or panel state.
