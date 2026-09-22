@@ -1397,6 +1397,62 @@ describe("discoverResources", () => {
     expect(handle?.currentInfraSelection("azure").namespace).toBe("team-a");
   });
 
+  // The cluster picker is filtered by the resource group the cluster lives in,
+  // not the application's. Filtering on the application's would leave the
+  // environment's own cluster out of the list whenever the two differ, so
+  // editing it would silently drop the cluster selection.
+  it("restores a cluster that lives in a different resource group from the application", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        azurePayload({
+          clusters: [
+            { id: "aks-1", name: "AKS One", resourceGroup: "cluster-rg" }
+          ],
+          resourceGroups: [
+            { id: "app-rg", name: "app-rg" },
+            { id: "cluster-rg", name: "cluster-rg" }
+          ]
+        })
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      {
+        resourceGroup: "app-rg",
+        clusterResourceGroup: "cluster-rg",
+        cluster: "aks-1"
+      },
+      "azure"
+    );
+
+    await handle?.discoverResources("azure", "", "");
+    await flushPromises();
+
+    expect(page.selects["azure-rg-select"].value).toBe("app-rg");
+    expect(page.selects["azure-cluster-select"].value).toBe("aks-1");
+  });
+
+  // An environment saved before the cluster's resource group was recorded has
+  // none, so the application's still selects the cluster exactly as it did.
+  it("falls back to the application resource group when no cluster resource group was stored", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      { resourceGroup: "rg-1", cluster: "aks-1" },
+      "azure"
+    );
+
+    await handle?.discoverResources("azure", "", "");
+    await flushPromises();
+
+    expect(page.selects["azure-rg-select"].value).toBe("rg-1");
+    expect(page.selects["azure-cluster-select"].value).toBe("aks-1");
+  });
+
   it("leaves the cluster unselected when the saved one is gone", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>

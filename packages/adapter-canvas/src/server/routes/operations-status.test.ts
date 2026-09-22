@@ -1011,6 +1011,60 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     }
   );
 
+  // The cluster's resource group is written to a GitHub environment variable,
+  // so a malformed one is refused. It is reported on its own rather than
+  // through the message above, which names four other fields and would send
+  // the user to look at values that are fine.
+  it("rejects azure setup with 400 when the cluster resource group is malformed", async () => {
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        resourceGroup: "rg",
+        clusterResourceGroup: "bad/group",
+        cluster: "aks",
+        tenantId: "t",
+        subscriptionId: "s"
+      }),
+      createDependencies({
+        isValidRepoSlug: () => true,
+        isResourceGroupName: (value) => value !== "bad/group",
+        isAksClusterName: () => true,
+        isUuid: () => true
+      })
+    );
+
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: 'Invalid cluster resource group name "bad/group".',
+      code: "invalid-cluster-resource-group"
+    });
+  });
+
+  // The wizard cannot always work out which resource group a cluster lives in,
+  // and an unrecorded one is already handled by the namespace check failing
+  // closed. Refusing an absent value would block a create that works today.
+  it.each([
+    ["absent", {}],
+    ["empty", { clusterResourceGroup: "" }]
+  ])(
+    "admits azure setup when the cluster resource group is %s",
+    async (_label, input) => {
+      const recording = await runCreate(
+        JSON.stringify({
+          repo: "octo/app",
+          resourceGroup: "rg",
+          cluster: "aks",
+          tenantId: "t",
+          subscriptionId: "s",
+          ...input
+        }),
+        happyPathCreate(emptyCapture(), newOperationRecord())
+      );
+
+      expect(recording.status).toBe(202);
+    }
+  );
+
   it.each([
     ["roleArn", { roleArn: "", accountId: "a", region: "r", cluster: "c" }],
     ["accountId", { roleArn: "arn", accountId: "", region: "r", cluster: "c" }],

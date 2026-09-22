@@ -1035,8 +1035,14 @@ export function initializeDiscoveryPanel(
           false
         );
         selectOfferedValue(context, "azure-rg-select", deploymentResourceGroup);
+        // Filter the cluster list by the resource group the selected cluster
+        // lives in, not the application's, so a cluster outside the
+        // application's resource group is not dropped from the picker. With no
+        // cluster selected there is nothing to scope by and the resource group
+        // dropdown decides, exactly as before.
         renderClustersForResourceGroup(
-          context.dom.selectById("azure-rg-select")?.value ?? "",
+          clusterResourceGroup ||
+            (context.dom.selectById("azure-rg-select")?.value ?? ""),
           cluster
         );
         restoreAzureClusterValue(cluster, clusterResourceGroup);
@@ -1174,8 +1180,18 @@ export function initializeDiscoveryPanel(
       );
       const resourceGroup =
         context.dom.selectById("azure-rg-select")?.value ?? "";
-      renderClustersForResourceGroup(resourceGroup, config.cluster ?? "");
-      restoreAzureClusterValue(config.cluster ?? "", resourceGroup);
+      // The cluster list is filtered by the resource group the cluster lives
+      // in, not the application's. Those are separate values, and filtering on
+      // the application's would leave the environment's own cluster out of the
+      // picker whenever the two differ. An environment stored before the
+      // cluster's resource group was recorded has none, so it falls back to the
+      // application's and behaves exactly as it did before.
+      const clusterResourceGroup = config.clusterResourceGroup || resourceGroup;
+      renderClustersForResourceGroup(
+        clusterResourceGroup,
+        config.cluster ?? ""
+      );
+      restoreAzureClusterValue(config.cluster ?? "", clusterResourceGroup);
       restoreInfrastructureValue(
         "azure-namespace-select",
         "azure-namespace-custom",
