@@ -351,7 +351,7 @@ Error handling is part of the functionality being shared. Workflows expose execu
 
 For example: "The deployment command succeeded, but saving Radius state failed. Resources may have changed. Inspect the workflow's state-save failure before attempting another deployment." Return that interpretation only when the available evidence supports it. If the workflow cannot confirm state-save status, say so rather than manufacture a phase result.
 
-Keep retries of status reads separate from retries of deployments. Use bounded backoff for transient read errors and respect GitHub rate limits; do not blindly repeat mutations after timeouts or initiate repairs as a side effect of reading status. Redact secrets before diagnostic publication and before returning data to a frontend or agent, disclose truncation, and keep detailed-log access subject to GitHub permissions.
+Keep retries of status reads separate from retries of deployments. Use bounded backoff with jitter for transient read errors so concurrent pollers do not retry in lockstep. Honor GitHub's retry and rate-limit timing instructions; jitter must not cause an earlier retry. Do not blindly repeat mutations after timeouts or initiate repairs as a side effect of reading status. Redact secrets before diagnostic publication and before returning data to a frontend or agent, disclose truncation, and keep detailed-log access subject to GitHub permissions.
 
 ## Test plan
 
