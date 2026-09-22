@@ -3,7 +3,7 @@
 set -euo pipefail
 
 readonly CATALOG_REPO="${CATALOG_REPO:-radius-project/radius}"
-readonly CATALOG_REF="${CATALOG_REF:-745ce9cc0fa6391a7de73cf9eb894521b1cb3053}"
+readonly CATALOG_REF="${CATALOG_REF:-9cdf55cdddec5ff5d382ca49877606e2b9fff3e8}"
 readonly DEFAULTS_YAML="${DEFAULTS_YAML:-}"
 readonly CATALOG_HELPER="${CATALOG_HELPER:-.github/extension/scripts/contrib-catalog.sh}"
 readonly EXTENSION_DIR="${EXTENSION_DIR:-.github/extension}"

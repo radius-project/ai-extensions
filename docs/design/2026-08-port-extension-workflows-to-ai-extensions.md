@@ -145,7 +145,7 @@ Change `load-contrib-catalog` to `curl` the single catalog file from `radius-pro
 The `load-contrib-catalog` composite action gains three optional inputs (`.github/extension/actions/load-contrib-catalog/action.yml`):
 
 - `catalog-repo` — default `radius-project/radius`. Repository hosting `deploy/manifest/defaults.yaml`.
-- `catalog-ref` — default `745ce9cc0fa6391a7de73cf9eb894521b1cb3053`. Immutable Radius commit containing the catalog validated with this extension tree.
+- `catalog-ref` — default `9cdf55cdddec5ff5d382ca49877606e2b9fff3e8`. Immutable Radius commit containing the catalog validated with this extension tree.
 - `yq-version` — default `v4.53.3`. Pinned `yq` installed to read the catalog (matches the version pinned in radius's `build/tools.yaml`).
 
 The action's exported environment contract is unchanged: it still writes `RADIUS_DEFAULTS_YAML` and `RADIUS_CONTRIB_CATALOG_HELPER` to `GITHUB_ENV` for later steps and `scripts/contrib-catalog.sh` to consume.
