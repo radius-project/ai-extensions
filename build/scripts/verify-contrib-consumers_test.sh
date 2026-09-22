@@ -126,9 +126,16 @@ recipePacks:
 YAML
 else
     cat >"${output}" <<'BICEP'
-'Radius.Test/widgets': {
-  kind: 'bicep'
-  source: 'ghcr.io/radius-project/kube-recipes/widgets:latest'
+resource pack 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'sample'
+  properties: {
+    recipes: {
+      'Radius.Test/widgets': {
+        kind: 'bicep'
+        source: 'ghcr.io/radius-project/kube-recipes/widgets:latest'
+      }
+    }
+  }
 }
 BICEP
 fi
@@ -188,6 +195,8 @@ grep -Fq "radius-project/radius/${REF}/deploy/manifest/defaults.yaml" "${CURL_LO
     fail "verifier did not fetch defaults.yaml at the immutable catalog ref"
 grep -Fq "manifest inspect ghcr.io/radius-project/kube-recipes/widgets:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "${DOCKER_LOG}" ||
     fail "verifier did not inspect the catalog-pinned OCI recipe"
+[[ "$(grep -c '/recipe-packs/sample/pack.bicep' "${CURL_LOG}")" -eq 1 ]] ||
+    fail "verifier downloaded the recipe pack more than once"
 if find "${TEST_ROOT}/tmp" -mindepth 1 -print -quit | grep -q .; then
     fail "verifier leaked its temporary checkout or catalog"
 fi
