@@ -92,7 +92,7 @@ const VISUAL_FONT_PATH =
   require.resolve("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2");
 const VISUAL_FONT = fs.readFile(VISUAL_FONT_PATH, "base64");
 // Pinned copies of the built-in Radius icons from resource-types-contrib
-// commit 99394fc03ba40571a3116a28f6a569ae2f120961 keep this suite hermetic.
+// commit 18142182e52e19a46b0ed172037357e8e142dcd2 keep this suite hermetic.
 const [CONTAINERS_ICON, REDIS_CACHES_ICON] = await Promise.all([
   fs.readFile(
     new URL("../fixtures/resource-type-icons/containers.svg", import.meta.url),
