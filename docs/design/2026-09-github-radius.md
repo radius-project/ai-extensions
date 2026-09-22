@@ -363,6 +363,8 @@ Error fixtures should cover rejected and ambiguous dispatches, status API outage
 
 Exercise actual frontend bindings as well as controlled dependencies, especially source selection and authorization.
 
+Test the tool result fields and status values that existing skills depend on, not just the library's internal results. For example, verify that `radius-deploy` continues polling while deployment status is `in_progress` and stops when it is `success` or `failed`. Changes to internal library results must not silently change these tool-facing contracts.
+
 ## Security
 
 This is a behavior-preserving extraction by default, not permission to remove safeguards that complicate the move. Keep workspace change checks, authorization, command validation, cancellation boundaries, destructive-action confirmation, and deployment-state protection in the shared path. A frontend-supplied approval flag cannot replace GitHub environment protection or backend permission checks.
