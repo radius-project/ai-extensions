@@ -291,6 +291,33 @@ export function selectExpiredEnvironments(
   return names;
 }
 
+// Deleting a GitHub Environment does not delete the deployment records that
+// reference it: the link is the environment *name*, not an id, so the records
+// outlive the environment and accumulate forever. The extension never deletes
+// them either, since a deployment record is history the product has no reason
+// to revoke. Only the suite that created them can, so sweep them by the same
+// prefix and age gate used for the environments themselves.
+export function selectExpiredDeployments(
+  payload: unknown,
+  prefix: string,
+  cutoff: string
+): number[] {
+  const cutoffMilliseconds = requireCutoff(cutoff);
+  const ids: number[] = [];
+  for (const entry of flattenPages(payload, "GitHub deployments")) {
+    const item = asRecord(entry);
+    if (
+      typeof item?.environment === "string" &&
+      item.environment.startsWith(prefix) &&
+      typeof item.id === "number" &&
+      Number.isInteger(item.id) &&
+      expired(item.created_at, cutoffMilliseconds)
+    )
+      ids.push(item.id);
+  }
+  return ids;
+}
+
 export function selectTestResourceGroups(
   payload: unknown,
   prefix: string,
