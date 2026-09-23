@@ -155,7 +155,7 @@ The terms are stated in help text below the field, filled in with the repository
 
 That text sets the developer's expectation: the role creates and manages resources across AWS services in its region, not only the ones this application declares, and its cluster access is administrative over the whole cluster, not the environment's namespace. A role that provisions databases and queues on a developer's behalf is disclosed where the choice is made, not in a confirmation that follows it.
 
-The help text states two further facts. The region boundary exempts global services — IAM, STS, Route 53, and CloudFront — which the role reaches from any region. And an additional environment widens the role to another region and another cluster, not only to another trusted subject.
+Two further properties of the boundary are not in the help text and belong there. The deny exempts the services where a region is meaningless, or where denying it would lock the role out of its own job: IAM, STS, Organizations describe calls, Route 53, CloudFront, and Support. `sts:AssumeRoleWithWebIdentity` is the one that matters most — denied outside the region, the role could never be assumed at all. And because one role serves the whole repository, a second environment in a second region widens the boundary to cover both regions and adds access to the second cluster, leaving the first environment able to deploy.
 
 The default is a new role proposed as `radius-deploy-<owner>-<repo>`. The name is editable and a typed name is never overwritten — the field re-proposes only while it is empty or still holds the previous proposal. Because the name carries the repository and not the environment, editing the environment name leaves the role name alone.
 
