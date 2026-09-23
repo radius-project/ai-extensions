@@ -11,6 +11,7 @@
 import { addInboundConnections } from "./model.js";
 
 const DIFF_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const ICON_HASH_PATTERN = /^[0-9a-f]{64}$/;
 const DEFINITION_KEY_SEPARATOR = "\u0000";
 const SECRET_RESOURCE_TYPE = "radius.security/secrets";
 
@@ -81,7 +82,7 @@ export function projectGraphOutputMetadata(
   }
   if (
     typeof value.iconHash === "string" &&
-    DIFF_HASH_PATTERN.test(value.iconHash)
+    ICON_HASH_PATTERN.test(value.iconHash)
   ) {
     projected.iconHash = value.iconHash;
   }
@@ -124,7 +125,7 @@ export function projectGraphResourceMetadata(
   }
   if (
     typeof value.iconHash === "string" &&
-    DIFF_HASH_PATTERN.test(value.iconHash)
+    ICON_HASH_PATTERN.test(value.iconHash)
   ) {
     projected.iconHash = value.iconHash;
   }
@@ -182,7 +183,7 @@ export function projectSafeApplicationGraph(
   const icons = Object.create(null) as Record<string, string>;
   for (const [key, value] of Object.entries(appGraph.icons)) {
     if (
-      DIFF_HASH_PATTERN.test(key) &&
+      ICON_HASH_PATTERN.test(key) &&
       referencedIconHashes.has(key) &&
       typeof value === "string"
     ) {

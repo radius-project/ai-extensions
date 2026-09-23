@@ -241,7 +241,10 @@ describe("graphs-planning writes real-loopback HIT", () => {
 
   it("does not expose rejected icon entries in the modeled graph response", async () => {
     const sentinel = "fixture-private-field";
-    const iconHash = `sha256:${"a".repeat(64)}`;
+    const iconHash =
+      "1e8500bafa3c1523488304fe478d570e4f518b8347f42a0796abd560fa08c7e5";
+    const icon =
+      '<svg viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg"><mask id="resource-icon" maskUnits="userSpaceOnUse" x="0" y="0" width="8" height="8"><path d="M1 1h6v6H1z" fill="white"/></mask><rect x="0" y="0" width="8" height="8" fill="currentColor" mask="url(#resource-icon)"/></svg>';
     const projected = projectSafeApplicationGraph({
       resources: [
         {
@@ -253,7 +256,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
         }
       ],
       icons: {
-        [iconHash]: "<svg>safe</svg>",
+        [iconHash]: icon,
         "not-a-hash": sentinel,
         [`sha256:${"c".repeat(64)}`]: sentinel
       }
@@ -274,7 +277,8 @@ describe("graphs-planning writes real-loopback HIT", () => {
     const body = await response.text();
 
     expect(response.status).toBe(200);
-    expect(body).toContain("<svg>safe</svg>");
+    expect(body).toContain('fill=\\"currentColor\\"');
+    expect(body).toContain('mask=\\"url(#resource-icon)\\"');
     expect(body).not.toContain(sentinel);
     expect(body).not.toContain("not-a-hash");
   });
