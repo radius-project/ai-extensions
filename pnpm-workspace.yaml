@@ -23,13 +23,13 @@ catalog:
   # typechecking cannot reach APIs missing from the supported runtime.
   "@types/node": ^24.13.3
   # Must track the "vitest" version below; browser mode ships with the runner.
-  "@vitest/browser": ^4.1.11
-  "@vitest/coverage-v8": ^4.1.11
+  "@vitest/browser": ^5.0.1
+  "@vitest/coverage-v8": ^5.0.1
   typescript: ^7.0.2
-  vitest: ^4.1.11
+  vitest: ^5.0.1
   # YAML parser used only by @radius-project/core tests to assert generated
   # workflow files parse as valid YAML (dev-only; core ships no runtime deps).
   # Caret range compatible with the 2.9.0 already resolved in the lockfile.
-  yaml: ^2.9.0
+  yaml: ^2.9.1
 
 minimumReleaseAge: 11520   # 8 days
