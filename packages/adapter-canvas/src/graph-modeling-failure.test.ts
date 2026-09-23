@@ -31,6 +31,7 @@ describe("graph modeling failure classification", () => {
     ["app.bicep(7,17)", "line 7, column 17"],
     ["app.bicep(7)", "line 7"],
     ["app.bicep(7,0)", "line 7"],
+    ["app.bicep(0,17)", null],
     ["app.bicep(7,9007199254740992)", "line 7"],
     ["app.bicep(9007199254740992,17)", null]
   ])("uses only safe positions from %s", (location, position) => {
@@ -68,14 +69,6 @@ describe("graph modeling failure classification", () => {
     expect(
       graphModelingFailureMessage(
         "Error BCP236: Invalid syntax.\napp.bicep(7,41): Error BCP236: Invalid syntax."
-      )
-    ).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
-  });
-
-  it("falls back when the producer supplies an invalid line", () => {
-    expect(
-      graphModelingFailureMessage(
-        "app.bicep(0,17): Error BCP236: Invalid syntax."
       )
     ).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
   });
