@@ -400,14 +400,14 @@ Most failures land here, because this is where Radius first writes to the develo
 
 **Step 4 · Reviewing the application graph**
 
-| Condition                                                | What the developer is told                                                                                                                                                                        |
-|----------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| The branch carries no model yet                          | `No application model exists yet.` with the offer to create one, rather than an empty graph                                                                                                       |
-| The model does not compile                               | `Application model compilation failed.` with the compiler's own output, so the failure is attributable to a line in the repository rather than to the environment                                 |
-| The repository cannot be modeled at all                  | `The repository cannot be modeled.` — the permanent outcome from modeling, repeated here rather than presented as a graph error                                                                   |
-| The graph cannot be drawn                                | `The application graph could not be rendered. Reload the graph to try again.` and `The graph library failed to load. Reload the graph to try again.`, separating a data failure from a client one |
-| A recipe in the pack has no known AWS resource behind it | Reported as a note on the graph naming the unmapped recipes, so a node shown without a concrete AWS type is explained rather than silently generic                                                |
-| The deployed view cannot be read from the environment    | Named as a failure to read deployment state, and the view falls back to the modeled topology under its notice rather than claiming nothing is deployed                                            |
+| Condition                                                | What the developer is told                                                                                                                                                                         |
+|----------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| The branch carries no model yet                          | `No application model exists yet.` with the offer to create one, rather than an empty graph                                                                                                        |
+| The model does not compile                               | The compiler's own output, rendered as it stands rather than replaced by a canvas-authored sentence, so the failure is attributable to a line in the repository rather than to the environment     |
+| The repository holds nothing that can be modeled         | `I could not find a Dockerfile in this repository. I can only create application definitions for containerized applications. Add a Dockerfile first, then I can create an application definition.` |
+| The graph cannot be drawn                                | `The application graph could not be rendered. Reload the graph to try again.` and `The graph library failed to load. Reload the graph to try again.`, separating a data failure from a client one  |
+| A recipe in the pack has no known AWS resource behind it | Reported as a note on the graph naming the unmapped recipes, so a node shown without a concrete AWS type is explained rather than silently generic                                                 |
+| The deployed view cannot be read from the environment    | Named as a failure to read deployment state, and the view falls back to the modeled topology under its notice rather than claiming nothing is deployed                                             |
 
 **Step 5 · Deploying**
 
