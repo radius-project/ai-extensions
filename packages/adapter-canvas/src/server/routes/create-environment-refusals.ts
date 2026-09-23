@@ -58,6 +58,10 @@ export interface CreateEnvironmentRequestData {
   tenantId?: string;
   subscriptionId?: string;
   resourceGroup?: string;
+  // The resource group the AKS cluster itself lives in, which is not the
+  // application's `resourceGroup`. An AKS cluster name is only unique within a
+  // resource group, so this is part of what identifies the cluster.
+  clusterResourceGroup?: string;
   cluster?: string;
   location?: string;
   namespace?: string;
@@ -157,6 +161,7 @@ async function refuseClaimedNamespace(
   const conflict = findNamespaceClaimConflict(claims.claims, {
     provider,
     subscriptionId: data.subscriptionId ?? "",
+    clusterResourceGroup: data.clusterResourceGroup ?? "",
     accountId: data.accountId ?? "",
     region: data.region ?? "",
     cluster: data.cluster ?? "",

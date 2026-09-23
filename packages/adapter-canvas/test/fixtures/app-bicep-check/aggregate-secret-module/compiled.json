@@ -1,0 +1,139 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "3710092988754648436"
+    }
+  },
+  "parameters": {
+    "environment": {
+      "type": "string"
+    }
+  },
+  "imports": {
+    "radius": {
+      "provider": "Radius",
+      "version": "latest"
+    }
+  },
+  "resources": {
+    "app": {
+      "import": "radius",
+      "type": "Radius.Core/applications@2025-08-01-preview",
+      "properties": {
+        "name": "test-app",
+        "properties": {
+          "environment": "[parameters('environment')]"
+        }
+      }
+    },
+    "redisCache": {
+      "import": "radius",
+      "type": "Radius.Data/redisCaches@2025-08-01-preview",
+      "properties": {
+        "name": "test-cache",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('app').id]"
+        }
+      },
+      "dependsOn": [
+        "app"
+      ]
+    },
+    "child": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "child",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "application": {
+            "value": "[reference('app').id]"
+          },
+          "environment": {
+            "value": "[parameters('environment')]"
+          },
+          "outputName": {
+            "value": "url"
+          },
+          "secretName": {
+            "value": "[reference('redisCache').properties.secrets.name]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "languageVersion": "2.0",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.42.1.51946",
+              "templateHash": "558810023997611070"
+            }
+          },
+          "parameters": {
+            "application": {
+              "type": "string"
+            },
+            "environment": {
+              "type": "string"
+            },
+            "secretName": {
+              "type": "string"
+            },
+            "outputName": {
+              "type": "string"
+            }
+          },
+          "imports": {
+            "radius": {
+              "provider": "Radius",
+              "version": "latest"
+            }
+          },
+          "resources": {
+            "web": {
+              "import": "radius",
+              "type": "Radius.Compute/containers@2025-08-01-preview",
+              "properties": {
+                "name": "web",
+                "properties": {
+                  "environment": "[parameters('environment')]",
+                  "application": "[parameters('application')]",
+                  "codeReference": "src/web.ts#L1",
+                  "containers": {
+                    "web": {
+                      "image": "example.invalid/web:latest",
+                      "env": {
+                        "REDIS_ADDR": {
+                          "valueFrom": {
+                            "secretKeyRef": {
+                              "secretName": "[parameters('secretName')]",
+                              "key": "[parameters('outputName')]"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "app",
+        "redisCache"
+      ]
+    }
+  }
+}

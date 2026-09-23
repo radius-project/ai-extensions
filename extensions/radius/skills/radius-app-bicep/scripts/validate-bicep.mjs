@@ -685,6 +685,14 @@ function emittedAtOrAfter(referenced, name) {
   );
 }
 
+function emittedBefore(referenced, name) {
+  return (
+    referenced < name &&
+    referenced.toUpperCase() < name.toUpperCase() &&
+    referenced.toLowerCase() < name.toLowerCase()
+  );
+}
+
 function plainEnvironmentValues(env) {
   const values = new Map();
   for (const [name, entry] of Object.entries(env)) {
@@ -698,6 +706,90 @@ function plainEnvironmentValues(env) {
     }
   }
   return values;
+}
+
+// Any expression whose outermost call is reference(...) and whose result is
+// .properties.secrets.name is a managed Secret name. The argument may select a
+// literal resource or a loop instance through format(...). Expressions wrapped
+// in another operation remain outside this deliberately narrow match.
+//
+// This assumes the predefined Radius producer semantics documented by the
+// skill. A future expression parser could identify a direct producer's type and
+// distinguish custom Radius.Resources/* properties without broadening this rule.
+const MANAGED_SECRET_NAME_REFERENCE =
+  /^\[reference\(.+\)\.properties\.secrets\.name\]$/u;
+
+// resolveTemplateString follows whole string parameters and the one supported
+// format pass-through. It deliberately does not trace object properties, module
+// outputs, variables, or general ARM expression data flow.
+function checkConnectionSources(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (isPlainObject(nestedTemplate)) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkConnectionSources(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    // #676 is scoped to the container connection projection that consumes
+    // producer IDs. Other Radius resource types remain outside this check.
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.Compute/containers@")
+    ) {
+      continue;
+    }
+    const connections = resource?.properties?.properties?.connections;
+    if (!isPlainObject(connections)) {
+      continue;
+    }
+    for (const [name, connection] of Object.entries(connections)) {
+      if (!isPlainObject(connection)) {
+        continue;
+      }
+      const source = resolveTemplateString(
+        connection.source,
+        template,
+        parameterValues
+      );
+      if (
+        typeof source !== "string" ||
+        !MANAGED_SECRET_NAME_REFERENCE.test(source)
+      ) {
+        continue;
+      }
+      report(
+        `${app}: error connection-source: ${resourcePath}.properties.connections.${name}.source: this Radius container connection uses a managed Kubernetes Secret name; use the producer resource ID (<producer>.id) as the connection source instead. Use <producer>.properties.secrets.name only as valueFrom.secretKeyRef.secretName for an explicit Kubernetes environment binding.`
+      );
+      failed = true;
+    }
+  }
+  return failed;
 }
 
 function checkRuntimeVariableExpansion(
@@ -785,6 +877,216 @@ function checkRuntimeVariableExpansion(
           );
           failed = true;
         }
+      }
+    }
+  }
+  return failed;
+}
+
+// A Recipe-managed secret key can name an aggregate representation while an
+// app-native variable names one of its parts. Those values are both strings, so
+// Bicep accepts the assignment even though the application parser receives the
+// wrong syntax. The source-reading rules remain authoritative; this check is a
+// conservative backstop for the contradiction the compiled model itself proves.
+//
+// It intentionally applies only to a `properties.secrets.name` reference. An
+// authored Secret may use any key chosen to match the application contract, so
+// its key name alone says nothing about the value's representation.
+const MANAGED_SECRET_REFERENCE =
+  /^\[reference\('([^']+)'(?:,[^)]*)?\)\.properties\.secrets\.name\]$/u;
+const AGGREGATE_SECRET_KEYS = new Set([
+  "connectionstring",
+  "dsn",
+  "uri",
+  "url"
+]);
+// Both vocabularies are deliberately exact and conservative. They do not infer
+// embedded words such as `primaryConnectionString` or undelimited names such as
+// `REDISADDR`; adding one requires evidence that it identifies the same contract
+// across generated models rather than merely containing a familiar substring.
+const ADDRESS_PART_TOKENS = new Set([
+  "addr",
+  "address",
+  "host",
+  "hostname",
+  "port"
+]);
+
+function configurationNameTokens(name) {
+  if (typeof name !== "string") {
+    return [];
+  }
+  return name
+    .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter((token) => token !== "");
+}
+
+function managedAggregateSecretFinding(entry, template, parameterValues) {
+  if (!isPlainObject(entry) || !isPlainObject(entry.valueFrom)) {
+    return null;
+  }
+  const reference = entry.valueFrom.secretKeyRef;
+  if (!isPlainObject(reference)) {
+    return null;
+  }
+  const secretName = resolveTemplateString(
+    reference.secretName,
+    template,
+    parameterValues
+  );
+  const key = resolveTemplateString(reference.key, template, parameterValues);
+  if (
+    typeof secretName !== "string" ||
+    MANAGED_SECRET_REFERENCE.exec(secretName) === null ||
+    typeof key !== "string"
+  ) {
+    return null;
+  }
+  const secretKey = key.toLowerCase().replace(/[^a-z0-9]/gu, "");
+  if (!AGGREGATE_SECRET_KEYS.has(secretKey)) {
+    return null;
+  }
+  return {
+    key,
+    secretName
+  };
+}
+
+function managedAggregateSecretSource(
+  name,
+  env,
+  template,
+  parameterValues,
+  visited = new Set()
+) {
+  if (visited.has(name)) {
+    return null;
+  }
+  const entry = env[name];
+  const direct = managedAggregateSecretFinding(
+    entry,
+    template,
+    parameterValues
+  );
+  if (direct !== null) {
+    return { ...direct, helpers: [], passThrough: true };
+  }
+  if (!isPlainObject(entry) || !("value" in entry)) {
+    return null;
+  }
+  const value = resolveTemplateString(entry.value, template, parameterValues);
+  if (typeof value !== "string") {
+    return null;
+  }
+  const nextVisited = new Set(visited);
+  nextVisited.add(name);
+  for (const helper of expandedVariableNames(value)) {
+    const helperEntry = env[helper];
+    if (
+      isPlainObject(helperEntry) &&
+      "value" in helperEntry &&
+      !emittedBefore(helper, name)
+    ) {
+      continue;
+    }
+    const finding = managedAggregateSecretSource(
+      helper,
+      env,
+      template,
+      parameterValues,
+      nextVisited
+    );
+    if (finding !== null) {
+      return {
+        ...finding,
+        helpers: [helper, ...finding.helpers],
+        passThrough: finding.passThrough && value.trim() === `$(${helper})`
+      };
+    }
+  }
+  return null;
+}
+
+function aggregateSecretAliasFinding(name, env, template, parameterValues) {
+  const targetTokens = configurationNameTokens(name);
+  if (!targetTokens.some((token) => ADDRESS_PART_TOKENS.has(token))) {
+    return null;
+  }
+  return managedAggregateSecretSource(name, env, template, parameterValues);
+}
+
+function checkAggregateSecretAliases(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (isPlainObject(nestedTemplate)) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkAggregateSecretAliases(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.Compute/containers@")
+    ) {
+      continue;
+    }
+    const containers = resource?.properties?.properties?.containers;
+    if (!isPlainObject(containers)) {
+      continue;
+    }
+    for (const [containerKey, container] of Object.entries(containers)) {
+      if (!isPlainObject(container) || !isPlainObject(container.env)) {
+        continue;
+      }
+      for (const name of Object.keys(container.env)) {
+        const finding = aggregateSecretAliasFinding(
+          name,
+          container.env,
+          template,
+          parameterValues
+        );
+        if (finding === null) {
+          continue;
+        }
+        const binding =
+          finding.helpers.length === 0 ?
+            ""
+          : ` through helper chain ${finding.helpers.map((helper) => JSON.stringify(helper)).join(" -> ")}`;
+        const transformationAdvice =
+          finding.passThrough ?
+            "A pass-through helper does not convert the value."
+          : "Embedding the aggregate in a larger value does not prove that the resulting syntax is compatible.";
+        report(
+          `${app}: error aggregate-secret-alias: ${resourcePath}.properties.containers.${containerKey}.env.${name}: Recipe-managed secret key ${JSON.stringify(finding.key)} is an aggregate value${binding}, but ${JSON.stringify(name)} names an address part. The model cannot establish that the application parser accepts the aggregate syntax. Trace the setting through checked-in source and either bind a matching aggregate input, perform a real runtime transformation from schema-declared parts, or stop without publishing the model. ${transformationAdvice} If the fixed address-shaped name itself accepts the aggregate syntax, use another source-supported aggregate input or report this conservative checker limitation rather than renaming either side.`
+        );
+        failed = true;
       }
     }
   }
@@ -1077,7 +1379,12 @@ function check(app, staged) {
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
   const invalidSourceReference = checkSourceCodeReferences(template, app);
+  const invalidConnectionSource = checkConnectionSources(template, app);
   const unresolvedRuntimeVariable = checkRuntimeVariableExpansion(
+    template,
+    app
+  );
+  const incompatibleAggregateSecretAlias = checkAggregateSecretAliases(
     template,
     app
   );
@@ -1090,7 +1397,9 @@ function check(app, staged) {
       compilerFailed ||
         invalidBuildSource ||
         invalidSourceReference ||
+        invalidConnectionSource ||
         unresolvedRuntimeVariable ||
+        incompatibleAggregateSecretAlias ||
         misplacedSecureParameter
     ) ?
       EXIT_MODEL_INVALID

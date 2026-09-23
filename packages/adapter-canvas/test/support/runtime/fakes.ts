@@ -204,6 +204,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       hasRadiusApplicationModel: vi.fn(
         async () => options.radiusEnabled ?? false
       ),
+      canonicalWorkspacePath: vi.fn(async (workspacePath) =>
+        typeof workspacePath === "string" ? workspacePath.trim() : ""
+      ),
       detectWorkspaceContext: vi.fn(async () => workspaceContext),
       defaultBranchForState: vi.fn(
         (state) => (state?.contextBranch as string) || "main"
@@ -380,6 +383,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         repoPath: repoPath || ".",
         skillBase: "/test/skills/radius-app-bicep",
         skillVersion: "0.1.0-test",
+        nodeCommand: "/test/bin/node",
         instruction: `SKILL.md content for ${repoPath || "."}`,
         ...(brief ? { brief } : {})
       })

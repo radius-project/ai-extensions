@@ -1,17 +1,5 @@
 extension radius
 
-@description('Name of the Radius environment to create.')
-param environmentName string = 'default'
-
-@description('Kubernetes namespace the Radius environment deploys resources into.')
-param environmentNamespace string = 'default'
-
-@description('Azure subscription ID the environment provisions resources into.')
-param azureSubscriptionId string
-
-@description('Azure resource group the environment provisions resources into. Must already exist.')
-param azureResourceGroup string
-
 @description('Name of the Kubernetes Gateway resource that Radius.Compute/routes attach to. Must already exist in the cluster.')
 param routesGatewayName string
 
@@ -24,15 +12,25 @@ param containerImagesRegistry string
 @description('Name of the Kubernetes Secret holding registry credentials for Radius.Compute/containerImages. Leave empty for an unauthenticated registry.')
 param containerImagesRegistrySecretName string = ''
 
+@description('Server parameters forwarded to the AVM PostgreSQL flexible server configurations array for Radius.Data/postgreSqlDatabases, using the AVM item shape with name, source, and value fields. Commonly used to allow-list extensions via the azure.extensions parameter (for example to enable pgvector). Setting require_secure_transport here overrides the transport policy the resource requests through its tls property. See recipe-packs/azure/README.md for an example and a link to the supported extensions. Defaults to an empty array (no extra server configuration).')
+param postgreSqlServerConfigurations array = []
+
+// An operator-set require_secure_transport value takes precedence over the resource's tls.
+// Names are compared exactly: Require_Secure_Transport is not recognized as an override,
+// so the derived entry is still added. Use canonical lowercase Azure parameter names.
+// Safe navigation does not validate entries; they are forwarded for downstream validation.
+var postgreSqlOperatorSetsSecureTransport = !empty(filter(postgreSqlServerConfigurations, config => config.?name == 'require_secure_transport'))
+
 resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'azure-avm'
   properties: {
+    // Globally unique Azure names use the Cloud Adoption Framework resource abbreviation as a prefix, plus a stable hash.
     recipes: {
       'Radius.Data/redisCaches': {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'amr-{{context.azure.resourceNameHash}}'
           skuName: '{{context.resource.properties.size == "S" ? "Balanced_B0" : "Balanced_B1"}}'
           highAvailability: 'Disabled'
           database: {
@@ -49,6 +47,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
           host: 'hostName'
           port: 'port'
           secrets: {
+            accessKey: 'primaryAccessKey'
             url: 'primaryConnectionString'
           }
         }
@@ -57,10 +56,10 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/cognitive-services/account:0.15.0'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'oai-{{context.azure.resourceNameHash}}'
           kind: 'OpenAI'
           sku: 'S0'
-          customSubDomainName: '{{context.resource.name}}'
+          customSubDomainName: 'oai-{{context.azure.resourceNameHash}}'
           disableLocalAuth: false
           publicNetworkAccess: 'Enabled'
           deployments: [
@@ -93,7 +92,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/search/search-service:0.12.2'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'srch-{{context.azure.resourceNameHash}}'
           sku: 'basic'
           disableLocalAuth: false
           replicaCount: 1
@@ -114,7 +113,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/document-db/database-account:0.19.0'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'cosmon-{{context.azure.resourceNameHash}}'
           capabilitiesToAdd: [
             'EnableMongo'
           ]
@@ -143,12 +142,12 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.3'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'mysql-{{context.azure.resourceNameHash}}'
           administratorLogin: '{{context.resource.properties.username}}'
           administratorLoginPassword: '{{context.resource.properties.password}}'
           skuName: 'Standard_B1ms'
           tier: 'Burstable'
-          version: '{{context.resource.properties.version == "5.7" ? "5.7" : "8.0.21"}}'
+          version: '{{context.resource.properties.version == "5.7" ? "5.7" : context.resource.properties.version == "8.0" ? "8.0.21" : "8.4"}}'
           databases: [
             {
               name: '{{context.resource.properties.database}}'
@@ -166,6 +165,13 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
               endIpAddress: '255.255.255.255'
             }
           ]
+          configurations: [
+            {
+              name: 'require_secure_transport'
+              source: 'user-override'
+              value: '{{context.resource.properties.tls == "optional" ? "OFF" : "ON"}}'
+            }
+          ]
           enableTelemetry: false
           lock: {
             kind: 'None'
@@ -179,7 +185,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/db-for-postgre-sql/flexible-server:0.15.2'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'pgsql-{{context.azure.resourceNameHash}}'
           administratorLogin: '{{context.resource.properties.username}}'
           administratorLoginPassword: '{{context.resource.properties.password}}'
           authConfig: {
@@ -211,6 +217,13 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
           lock: {
             kind: 'None'
           }
+          configurations: concat(postgreSqlServerConfigurations, postgreSqlOperatorSetsSecureTransport ? [] : [
+            {
+              name: 'require_secure_transport'
+              source: 'user-override'
+              value: '{{context.resource.properties.tls == "optional" ? "OFF" : "ON"}}'
+            }
+          ])
         }
         outputs: {
           host: 'fqdn'
@@ -220,7 +233,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/sql/server:0.21.4'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'sql-{{context.azure.resourceNameHash}}'
           administratorLogin: '{{context.resource.properties.username}}'
           administratorLoginPassword: '{{context.resource.properties.password}}'
           publicNetworkAccess: 'Enabled'
@@ -252,38 +265,20 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
           host: 'fullyQualifiedDomainName'
         }
       }
+      // Azure has no first-party managed RabbitMQ, and Azure Service Bus speaks
+      // AMQP 1.0 (with an `Endpoint=sb://...` connection string) rather than the
+      // AMQP 0-9-1 protocol RabbitMQ clients require. So this type deploys an actual
+      // RabbitMQ broker container onto the AKS cluster via the Kubernetes recipe,
+      // the same way the compute recipes above run on the cluster.
       'Radius.Messaging/rabbitMQ': {
         kind: 'bicep'
-        source: 'mcr.microsoft.com/bicep/avm/res/service-bus/namespace:0.16.2'
-        parameters: {
-          name: '{{context.resource.name}}'
-          skuObject: {
-            name: 'Standard'
-          }
-          zoneRedundant: false
-          disableLocalAuth: false
-          queues: [
-            {
-              name: '{{context.resource.properties.queue}}'
-            }
-          ]
-          enableTelemetry: false
-          lock: {
-            kind: 'None'
-          }
-        }
-        outputs: {
-          host: 'name'
-          secrets: {
-            connectionString: 'primaryConnectionString'
-          }
-        }
+        source: 'ghcr.io/radius-project/kube-recipes/rabbitmq:latest'
       }
       'Radius.Messaging/kafka': {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/event-hub/namespace:0.14.2'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'evhns-{{context.azure.resourceNameHash}}'
           skuName: 'Standard'
           skuCapacity: 1
           disableLocalAuth: false
@@ -308,7 +303,7 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         kind: 'bicep'
         source: 'mcr.microsoft.com/bicep/avm/res/storage/storage-account:0.32.1'
         parameters: {
-          name: '{{context.resource.name}}'
+          name: 'st{{context.azure.resourceNameHash}}'
           kind: 'StorageV2'
           skuName: 'Standard_LRS'
           allowBlobPublicAccess: false
@@ -371,23 +366,5 @@ resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
         }
       }
     }
-  }
-}
-
-resource env 'Radius.Core/environments@2025-08-01-preview' = {
-  name: environmentName
-  properties: {
-    providers: {
-      azure: {
-        subscriptionId: azureSubscriptionId
-        resourceGroupName: azureResourceGroup
-      }
-      kubernetes: {
-        namespace: environmentNamespace
-      }
-    }
-    recipePacks: [
-      recipes.id
-    ]
   }
 }

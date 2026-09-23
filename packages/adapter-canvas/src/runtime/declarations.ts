@@ -170,12 +170,13 @@ export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (can
 3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 In every example below, "<radius-instance>" means the existing Radius Canvas instanceId when one is open, or "${RADIUS_CANVAS_INSTANCE_ID}" only when none is open.
 
-IMPORTANT — Automatic PR Graph Diff: When a pull request is created (via create_pull_request tool or any PR creation action):
+IMPORTANT — Conditional PR Graph Diff: Only when the pull request's worktree contains a Radius app.bicep model — either already present when this session started, or created by a Radius tool or Radius Canvas action in this session:
 1. FIRST, call the radius_generate_pr_diff_markdown tool with the repo, base branch, and head branch.
 2. If it returns a Mermaid application graph diff diagram and summary, include the exact returned markdown at the TOP of the PR description/body (before any other content), and THEN open the Radius Canvas to the graph-diff page:
    open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph-diff", repo: "<current-repo>", baseBranch: "<pr-base-branch>", headBranch: "<pr-head-branch>" } })
    The PR description will show the app graph diff inline on GitHub, and the canvas provides the interactive version.
 3. If the call is denied, the graph is unavailable, branch resolution fails, or the tool reports an error, create the pull request without a graph diff section. Do not add a sentence to the PR body explaining why the graph is missing. Report the reason in chat, and do not open the graph-diff Canvas. This rule governs only the graph diff section; describe the change itself normally, including any Radius modeling changes.
+Do not call radius_generate_pr_diff_markdown for unrelated pull requests from a worktree that contains no Radius application model.
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
@@ -208,7 +209,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_generate_app",
     description:
-      "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, instruction, optional generator version, and optional ambiguity brief. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
+      "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, the absolute path of the Node.js interpreter the skill's scripts must run under (nodeCommand), instruction, optional generator version, and optional ambiguity brief. When the machine has no supported Node.js installation, returns a JSON object with nodeCommand set to null, the installations that were found and refused, and an instruction to stop and ask the user to install Node.js — never to download or install a runtime. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
     parameters: {
       type: "object",
       properties: {

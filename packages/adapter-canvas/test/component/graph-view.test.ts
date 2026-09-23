@@ -8,6 +8,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { screen, waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
+// The card is a draggable React Flow node, so its clicks must be real browser
+// input: React Flow's d3 drag gesture rejects the library's synthetic
+// mousedown, which carries no view.
+import { userEvent as browserUser } from "@vitest/browser/context";
 import {
   buildGraph,
   resolveGraphSettings
@@ -40,7 +44,6 @@ interface Recorded {
   external: string[];
   local: Array<[string, number, string]>;
   toggled: string[];
-  opened: string[];
   reloads: number;
 }
 
@@ -84,7 +87,6 @@ function mount(
     external: [],
     local: [],
     toggled: [],
-    opened: [],
     reloads: 0
   };
   const graph = mountGraph({
@@ -102,8 +104,7 @@ function mount(
       openLocalSource: (path, line, fallback) =>
         recorded.local.push([path, line, fallback]),
       toggleDetails: (data: GraphNodeData, card: DomElement | null) =>
-        recorded.toggled.push(`${data.id}:${card ? "card" : "none"}`),
-      openDetails: (data: GraphNodeData) => recorded.opened.push(data.id)
+        recorded.toggled.push(`${data.id}:${card ? "card" : "none"}`)
     }
   });
   disposers.push(() => {
@@ -287,7 +288,7 @@ describe("graph view in a real browser", () => {
       "https://portal.azure.com/#@tenant/resource/server"
     );
     expect(portal.getAttribute("target")).toBe("_blank");
-    expect(recorded.opened).toEqual([]);
+    expect(recorded.toggled).toEqual([]);
   });
 
   it("places connected nodes on separate rows using the real dagre layout", async () => {
@@ -322,6 +323,20 @@ describe("graph view in a real browser", () => {
     expect(document.activeElement).toBe(details);
   });
 
+  it("toggles the card's details on every click that bubbles from its content", async () => {
+    const { recorded } = mount();
+    const web = await card("web");
+    const title = within(web).getByTitle("web");
+
+    await browserUser.click(title);
+    expect(recorded.toggled).toEqual(["app/web:card"]);
+
+    // A second click on the same node must reach the handler again so the menu
+    // it opened is dismissed rather than re-opened.
+    await browserUser.click(title);
+    expect(recorded.toggled).toEqual(["app/web:card", "app/web:card"]);
+  });
+
   it("opens the workspace file from the source link without following the href", async () => {
     const { recorded } = mount({ localSource: true });
     const web = await card("web");
@@ -337,7 +352,7 @@ describe("graph view in a real browser", () => {
     // A real navigation would have torn the document down.
     expect(document.body.contains(link)).toBe(true);
     // The card's own click handler must not also fire for a source click.
-    expect(recorded.opened).toEqual([]);
+    expect(recorded.toggled).toEqual([]);
   });
 
   it("opens a remote source link through the host without navigating the webview", async () => {
@@ -353,7 +368,7 @@ describe("graph view in a real browser", () => {
       "https://github.test/o/r/blob/feature-branch/src/web.ts#L4"
     ]);
     expect(document.body.contains(link)).toBe(true);
-    expect(recorded.opened).toEqual([]);
+    expect(recorded.toggled).toEqual([]);
   });
 
   it("opens an exact GitHub source URL externally from a worktree graph", async () => {

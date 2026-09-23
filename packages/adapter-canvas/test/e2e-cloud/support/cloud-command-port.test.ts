@@ -101,6 +101,47 @@ describe("normalizeCommandResult", () => {
     });
   });
 
+  // A `kubectl delete --wait=true` prints its "deleted" lines and then blocks
+  // until finalization, so a kill lands with stdout full of successful output
+  // and stderr empty. Dropping execFile's message there reported the kill as a
+  // bare exit code beside three lines saying the delete worked.
+  it("keeps the kill diagnostic when only stdout carried output", () => {
+    expect(
+      normalizeCommandResult(
+        {
+          code: null,
+          killed: true,
+          message: "Command failed: kubectl delete all"
+        },
+        'deployment.apps "sleeper" deleted\n',
+        ""
+      )
+    ).toEqual({
+      code: 1,
+      stdout: 'deployment.apps "sleeper" deleted\n',
+      stderr: "Command failed: kubectl delete all",
+      timedOut: true
+    });
+  });
+
+  // The counterpart: a tool that failed on its own terms and wrote its reason
+  // to stdout keeps saying so. Replacing it with execFile's generic "Command
+  // failed" wrapper would discard the only diagnostic there is.
+  it("leaves a self-reported failure on stdout untouched", () => {
+    expect(
+      normalizeCommandResult(
+        { code: 1, message: "Command failed: kubectl get pods" },
+        "error: You must be logged in to the server",
+        ""
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "error: You must be logged in to the server",
+      stderr: "",
+      timedOut: false
+    });
+  });
+
   it("does not record an ordinary non-zero exit as a timeout", () => {
     expect(
       normalizeCommandResult({ code: 1, killed: false }, "", "boom").timedOut

@@ -365,6 +365,19 @@ function compiledBicepFixture(name: string): string {
   );
 }
 
+test.each([
+  "aggregate-secret-alias",
+  "aggregate-secret-module",
+  "interpolated-ref",
+  "local-module-ref"
+])("keeps captured %s output on the documented Bicep version", (fixture) => {
+  const compiled = JSON.parse(compiledBicepFixture(fixture)) as {
+    metadata?: { _generator?: { version?: string } };
+  };
+
+  assert.equal(compiled.metadata?._generator?.version, "0.42.1.51946");
+});
+
 const containerImageType = "Radius.Compute/containerImages@2025-08-01-preview";
 const fullSha = "a".repeat(40);
 const interpolatedGitRef =
@@ -545,6 +558,278 @@ function containerEnv(env: object, containerKey = "web") {
   });
 }
 
+function containerConnections(connections: unknown) {
+  return radiusResource(containersType, {
+    containers: { web: { image: "example/web:latest" } },
+    connections
+  });
+}
+
+describe("managed Secret connection sources", () => {
+  const managedSecretName = "[reference('cache').properties.secrets.name]";
+
+  it.each([
+    managedSecretName,
+    "[reference(format('caches[{0}]', 0)).properties.secrets.name]",
+    "[reference(format('caches[{0}]', parameters('idx'))).properties.secrets.name]"
+  ])("rejects an exact managed Secret name connection source", (source) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerConnections({
+        cache: { source }
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /connection-source/u);
+    assert.match(result.stderr, /web\.properties\.connections\.cache\.source/u);
+    assert.match(result.stderr, /managed Kubernetes Secret name/u);
+    assert.match(result.stderr, /producer resource ID \(<producer>\.id\)/u);
+    assert.match(
+      result.stderr,
+      /valueFrom\.secretKeyRef\.secretName.*explicit Kubernetes environment binding/u
+    );
+    assert.doesNotMatch(result.stderr, /\[reference\(/u);
+  });
+
+  it("resolves a synthesized template's top-level parameter default", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template(
+      {
+        web: containerConnections({
+          cache: { source: "[parameters('cacheSource')]" }
+        })
+      },
+      {
+        cacheSource: { type: "string", defaultValue: managedSecretName }
+      }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /connection-source/u);
+  });
+
+  it.each([
+    {
+      fixture: "direct-connection-source",
+      paths: ["web.properties.connections.cache.source"]
+    },
+    {
+      fixture: "looped-connection-source",
+      paths: [
+        "literalIndex.properties.connections.cache.source",
+        "parameterIndex.properties.connections.cache.source"
+      ]
+    }
+  ])("rejects compiler-generated $fixture fixture", ({ fixture, paths }) => {
+    const directory = temporaryDirectory();
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledBicepFixture(fixture))
+    );
+
+    assert.equal(result.status, 1);
+    for (const resourcePath of paths) {
+      assert.match(
+        result.stderr,
+        new RegExp(`connection-source: ${escapeRegExp(resourcePath)}`, "u")
+      );
+    }
+  });
+
+  it("resolves a local module parameter", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      service: localModuleResources(
+        {
+          web: containerConnections({
+            cache: { source: "[parameters('cacheSource')]" }
+          })
+        },
+        { cacheSource: { type: "string" } },
+        { cacheSource: { value: managedSecretName } }
+      )
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /service\.web\.properties\.connections\.cache\.source/u
+    );
+  });
+
+  it("resolves parameter pass-through across nested local modules", () => {
+    const directory = temporaryDirectory();
+    const innerModule = localModuleResources(
+      {
+        web: containerConnections({
+          cache: { source: "[parameters('innerSource')]" }
+        })
+      },
+      { innerSource: { type: "string" } },
+      { innerSource: { value: "[parameters('outerSource')]" } }
+    );
+    const outerModule = localModuleResources(
+      { inner: innerModule },
+      { outerSource: { type: "string" } },
+      { outerSource: { value: "[parameters('rootSource')]" } }
+    );
+    const compiledOutput = template(
+      { outer: outerModule },
+      { rootSource: { type: "string", defaultValue: managedSecretName } }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /outer\.inner\.web\.properties\.connections\.cache\.source/u
+    );
+  });
+
+  it.each([
+    {
+      name: "a producer resource ID",
+      source: "[reference('cache').id]"
+    },
+    {
+      name: "an authored Secret resource ID",
+      source: "[reference('credentials').id]"
+    },
+    { name: "a literal", source: "cache" },
+    { name: "a URL", source: "https://example.test/cache" },
+    {
+      name: "an unresolved parameter",
+      source: "[parameters('unknownSource')]"
+    },
+    {
+      name: "a concat expression",
+      source: "[concat(reference('cache').properties.secrets.name, '-suffix')]"
+    },
+    {
+      name: "a condition expression",
+      source:
+        "[if(parameters('enabled'), reference('cache').properties.secrets.name, resourceId('Radius.Data/redisCaches', 'cache'))]"
+    },
+    {
+      name: "a trim expression",
+      source: "[trim(reference('cache').properties.secrets.name)]"
+    },
+    {
+      name: "an outer format expression",
+      source: "[format('{0}', reference('cache').properties.secrets.name)]"
+    },
+    {
+      name: "a different reference property",
+      source: "[reference('cache').properties.secrets.id]"
+    },
+    { name: "a non-string source", source: 42 }
+  ])("accepts $name", ({ source }) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerConnections({ cache: { source } })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it.each([
+    { name: "a non-object connections value", connections: "cache" },
+    { name: "a non-object connection entry", connections: { cache: null } }
+  ])("ignores $name", ({ connections }) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerConnections(connections)
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("ignores source fields outside Radius container connections", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      queue: radiusResource("Radius.Messaging/rabbitMQ@2025-08-01-preview", {
+        source: managedSecretName
+      }),
+      deployment: {
+        type: "Microsoft.Resources/deployments",
+        properties: { source: managedSecretName, template: "not a template" }
+      }
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("accepts managed and authored Secret names in secretKeyRef", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerEnv({
+        MANAGED_PASSWORD: {
+          valueFrom: {
+            secretKeyRef: {
+              secretName: managedSecretName,
+              key: "password"
+            }
+          }
+        },
+        AUTHORED_PASSWORD: {
+          valueFrom: {
+            secretKeyRef: {
+              secretName: "[reference('credentials').name]",
+              key: "password"
+            }
+          }
+        }
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+});
+
 test("fails when a plain value reads a plain helper that does not sort before it", () => {
   const directory = temporaryDirectory();
   const compiledOutput = template({
@@ -617,6 +902,267 @@ test("accepts a secretKeyRef helper regardless of its key", () => {
 
   assert.equal(result.status, 0);
   assert.equal(result.stderr, "");
+});
+
+describe("aggregate Recipe secret aliases", () => {
+  function managedSecret(key: string) {
+    return {
+      valueFrom: {
+        secretKeyRef: {
+          secretName: "[reference('cache').properties.secrets.name]",
+          key
+        }
+      }
+    };
+  }
+
+  test.each(["REDIS_ADDR", "REDIS_ADDRESS", "RedisHost", "redis-port"])(
+    "rejects aggregate Recipe output assigned to address-shaped %s",
+    (name) => {
+      const directory = temporaryDirectory();
+      const compiledOutput = template({
+        cache: radiusResource("Radius.Data/redisCaches@2025-08-01-preview", {}),
+        web: containerEnv({ [name]: managedSecret("url") })
+      });
+
+      const result = runChecker(
+        directory,
+        fakeBicep(directory, sarif([]), 0, compiledOutput)
+      );
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /aggregate-secret-alias/u);
+      assert.match(result.stderr, new RegExp(`env\\.${name}`, "u"));
+      assert.match(result.stderr, /Recipe-managed secret key "url"/u);
+      assert.match(result.stderr, /names an address part/u);
+      assert.match(result.stderr, /stop without publishing/u);
+    }
+  );
+
+  test.each(["url", "URI", "connectionString", "connection-string", "dsn"])(
+    "recognizes aggregate secret key %s",
+    (key) => {
+      const directory = temporaryDirectory();
+      const compiledOutput = template({
+        cache: radiusResource("Radius.Data/redisCaches@2025-08-01-preview", {}),
+        web: containerEnv({ REDIS_ADDR: managedSecret(key) })
+      });
+
+      const result = runChecker(
+        directory,
+        fakeBicep(directory, sarif([]), 0, compiledOutput)
+      );
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /aggregate-secret-alias/u);
+    }
+  );
+
+  test.each([
+    {
+      name: "a matching aggregate-shaped target",
+      env: { REDIS_URL: managedSecret("url") }
+    },
+    {
+      name: "a discrete managed secret",
+      env: { REDIS_ADDR: managedSecret("accessKey") }
+    },
+    {
+      name: "an authored Secret",
+      env: {
+        REDIS_ADDR: {
+          valueFrom: {
+            secretKeyRef: { secretName: "app-config", key: "url" }
+          }
+        }
+      }
+    },
+    {
+      name: "a plain environment value",
+      env: { REDIS_ADDR: { value: "redis:6379" } }
+    },
+    {
+      name: "an alias to an authored Secret",
+      env: {
+        APP_URL_HELPER: {
+          valueFrom: {
+            secretKeyRef: { secretName: "app-config", key: "url" }
+          }
+        },
+        REDIS_ADDR: { value: "$(APP_URL_HELPER)" }
+      }
+    },
+    {
+      name: "an aggregate-shaped alias target",
+      env: {
+        CACHE_URL_HELPER: managedSecret("url"),
+        REDIS_URL: { value: "$(CACHE_URL_HELPER)" }
+      }
+    },
+    {
+      name: "an unresolved plain parameter",
+      env: { REDIS_ADDR: { value: "[parameters('missing')]" } }
+    },
+    {
+      name: "a malformed environment entry",
+      env: { REDIS_ADDR: null }
+    }
+  ])("does not report $name", ({ env }) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerEnv(env)
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.doesNotMatch(result.stderr, /aggregate-secret-alias/u);
+  });
+
+  test("rejects an aggregate Recipe secret passed through a helper", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerEnv({
+        CACHE_URL_HELPER: managedSecret("url"),
+        REDIS_ADDR: { value: "$(CACHE_URL_HELPER)" }
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /aggregate-secret-alias/u);
+    assert.match(result.stderr, /through helper chain "CACHE_URL_HELPER"/u);
+    assert.match(result.stderr, /pass-through helper does not convert/u);
+  });
+
+  test("rejects an aggregate Recipe secret passed through multiple helpers", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerEnv({
+        CACHE_URL_HELPER: managedSecret("url"),
+        INTERMEDIATE_URL: { value: "$(CACHE_URL_HELPER)" },
+        REDIS_ADDR: { value: "$(INTERMEDIATE_URL)" }
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /through helper chain "INTERMEDIATE_URL" -> "CACHE_URL_HELPER"/u
+    );
+    assert.match(result.stderr, /pass-through helper does not convert/u);
+  });
+
+  test("describes an aggregate embedded in a larger value conservatively", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerEnv({
+        CACHE_URL_HELPER: managedSecret("url"),
+        REDIS_ADDR: { value: "$(CACHE_URL_HELPER),abortConnect=false" }
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /Embedding the aggregate in a larger value does not prove/u
+    );
+    assert.doesNotMatch(result.stderr, /pass-through helper/u);
+  });
+
+  test("checks aggregate secret names and keys passed into a local module", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      service: localModuleResources(
+        {
+          web: containerEnv({
+            REDIS_ADDR: {
+              valueFrom: {
+                secretKeyRef: {
+                  secretName: "[parameters('cacheSecretName')]",
+                  key: "[parameters('outputName')]"
+                }
+              }
+            }
+          })
+        },
+        {
+          cacheSecretName: { type: "string" },
+          outputName: { type: "string" }
+        },
+        {
+          cacheSecretName: {
+            value: "[reference('cache').properties.secrets.name]"
+          },
+          outputName: { value: "url" }
+        }
+      )
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /service\.web\.properties/u);
+  });
+
+  test("rejects direct and helper aliases in captured Bicep output", () => {
+    const directory = temporaryDirectory();
+    const result = runChecker(
+      directory,
+      fakeBicep(
+        directory,
+        sarif([]),
+        0,
+        compiledBicepFixture("aggregate-secret-alias")
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /env\.REDIS_HOST: Recipe-managed/u);
+    assert.match(
+      result.stderr,
+      /env\.REDIS_ADDR: Recipe-managed.*through helper chain "CACHE_URL_HELPER"/u
+    );
+  });
+
+  test("rejects a module-provided secret name and key in captured Bicep output", () => {
+    const directory = temporaryDirectory();
+    const result = runChecker(
+      directory,
+      fakeBicep(
+        directory,
+        sarif([]),
+        0,
+        compiledBicepFixture("aggregate-secret-module")
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /child\.web\.properties.*Recipe-managed secret key "url"/u
+    );
+  });
 });
 
 test.each([

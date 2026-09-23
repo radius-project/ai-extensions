@@ -392,6 +392,12 @@ export function normalizeAzureCommandResult(
  * with an empty stdout and stderr, which is otherwise identical to a command
  * that failed on its own with nothing to say; a caller that wants to treat the
  * two differently cannot recover the difference later.
+ *
+ * A command killed part-way through says so only in `execFile`'s own message,
+ * so that message is kept whenever the tool itself wrote nothing to stderr —
+ * not only when both streams are empty. A `kubectl delete --wait=true` prints
+ * its "deleted" lines before it blocks, and reporting that kill as a bare exit
+ * code next to successful output is unexplainable.
  */
 export function normalizeCommandResult(
   error: CloudCommandFailure | null,
@@ -400,15 +406,16 @@ export function normalizeCommandResult(
 ): CloudCommandResult {
   const normalizedStdout = stdout || "";
   const normalizedStderr = stderr || "";
+  const timedOut =
+    error ? error.killed === true || error.code === "ETIMEDOUT" : false;
   return {
     code: error ? Number(error.code ?? 1) || 1 : 0,
     stdout: normalizedStdout,
     stderr:
-      !normalizedStdout && !normalizedStderr ?
-        error?.message || ""
-      : normalizedStderr,
-    timedOut:
-      error ? error.killed === true || error.code === "ETIMEDOUT" : false
+      normalizedStderr ? normalizedStderr
+      : timedOut || !normalizedStdout ? error?.message || ""
+      : "",
+    timedOut
   };
 }
 

@@ -517,6 +517,15 @@ export function initializeEnvironmentPage(
       );
       return;
     }
+    // The resource group the chosen AKS cluster lives in, which scopes its name
+    // within the subscription. Resolved once: the same value identifies the
+    // cluster for the conflict check below and is sent for the environment to
+    // store, so the wizard and the server cannot disagree about which cluster
+    // this is.
+    const clusterResourceGroup =
+      provider === "azure" ?
+        discovery.findAzureClusterResourceGroup(cluster)
+      : "";
     const namespaceConflict = findNamespaceConflict(
       environments.listedEnvironments(),
       {
@@ -524,6 +533,7 @@ export function initializeEnvironmentPage(
         cluster,
         namespace,
         subscriptionId,
+        clusterResourceGroup,
         accountId,
         region,
         excludeEnvironment: environments.editingEnvironment()
@@ -556,8 +566,7 @@ export function initializeEnvironmentPage(
       body.tenantId = tenantId;
       body.subscriptionId = subscriptionId;
       body.resourceGroup = resourceGroup;
-      body.clusterResourceGroup =
-        discovery.findAzureClusterResourceGroup(cluster);
+      body.clusterResourceGroup = clusterResourceGroup;
       body.appName = appNameInput.value.trim();
       body.appId = appIdInput.value;
     } else {

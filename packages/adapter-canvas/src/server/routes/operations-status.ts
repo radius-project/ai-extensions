@@ -502,6 +502,24 @@ export async function handleCreateOperation(
       });
       return;
     }
+    // The cluster's resource group is optional, because the wizard cannot
+    // always resolve which resource group a cluster lives in, and an
+    // unrecorded one is already handled by the namespace check failing closed.
+    // A value that is present must still be a resource group name, since it is
+    // written to a GitHub environment variable. Reported on its own rather than
+    // folded into the message above, which names four other fields and would
+    // misdiagnose this one. Same rule and code as azure-auto-setup.
+    const clusterResourceGroup = String(data.clusterResourceGroup || "");
+    if (
+      clusterResourceGroup !== "" &&
+      !dependencies.isResourceGroupName(clusterResourceGroup)
+    ) {
+      jsonError(context, 400, {
+        error: `Invalid cluster resource group name "${clusterResourceGroup}".`,
+        code: "invalid-cluster-resource-group"
+      });
+      return;
+    }
   } else if (
     !String(data.roleArn || "").trim() ||
     !String(data.accountId || "").trim() ||
@@ -621,6 +639,11 @@ export async function handleCreateOperation(
           tenantId: data.tenantId || "",
           subscriptionId: data.subscriptionId || "",
           resourceGroup: data.resourceGroup || "",
+          // Carried like every other identifying value, so a resumed setup
+          // writes the same cluster resource group the original request did
+          // rather than leaving the environment unable to say which cluster
+          // it holds.
+          clusterResourceGroup: data.clusterResourceGroup || "",
           githubLogin: selection.login,
           origin: data.origin || null,
           resumeTarget: data.resumeTarget || null,

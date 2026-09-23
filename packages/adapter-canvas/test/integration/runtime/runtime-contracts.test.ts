@@ -280,6 +280,89 @@ describe("P0-A Radius runtime registration contract", () => {
     await harness.extension.shutdown("test");
   });
 
+  it("intercepts a PR in a worktree already modeled when the session started", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: true,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const result = await harness.extension.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Fix typo", body: "Summary" },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    expect(result).toMatchObject({ permissionDecision: "deny" });
+    expect(harness.session.rpc.canvas.open).not.toHaveBeenCalled();
+    await harness.extension.shutdown("test");
+  });
+
+  it("does not intercept a PR in a worktree with no Radius model", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: false,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const result = await harness.extension.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Fix typo", body: "Summary" },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    expect(result).toBeUndefined();
+    expect(harness.deps.github.getDefaultBranch).not.toHaveBeenCalled();
+    expect(harness.session.rpc.canvas.open).not.toHaveBeenCalled();
+    await harness.extension.shutdown("test");
+  });
+
+  it("does not intercept a PR in an unrelated worktree after a Radius interaction elsewhere", async () => {
+    const harness = await createRuntimeSdkHarness({
+      radiusEnabled: true,
+      workspaceContext: {
+        workspacePath: "/worktrees/widgets",
+        repo: "acme/widgets",
+        branch: "feature"
+      }
+    });
+    await harness.extension.hooks.onSessionStart({
+      workingDirectory: "/worktrees/widgets"
+    });
+    await harness.extension.hooks.onPostToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "graph", repo: "acme/widgets" }
+      },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    const result = await harness.extension.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Unrelated change", body: "Summary" },
+      workingDirectory: "/worktrees/other-repo"
+    });
+
+    expect(result).toBeUndefined();
+    expect(harness.deps.github.getDefaultBranch).not.toHaveBeenCalled();
+    expect(harness.session.rpc.canvas.open).not.toHaveBeenCalled();
+    await harness.extension.shutdown("test");
+  });
+
   it("activates PR graph diffs after first-time modeling in the same session", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
@@ -293,13 +376,21 @@ describe("P0-A Radius runtime registration contract", () => {
     });
     const hasModel = harness.deps.workspace
       .hasRadiusApplicationModel as ReturnType<typeof vi.fn>;
-    hasModel.mockResolvedValueOnce(false).mockResolvedValue(true);
+    hasModel
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
 
     await expect(
       harness.extension.hooks.onSessionStart({
         workingDirectory: "/worktrees/new-app"
       })
     ).resolves.toBeUndefined();
+    await harness.extension.hooks.onPostToolUse({
+      toolName: "radius_generate_app",
+      toolArgs: { repoPath: "/worktrees/new-app" },
+      workingDirectory: "/worktrees/new-app"
+    });
 
     const pullRequest = {
       toolName: "create_pull_request",
@@ -1083,6 +1174,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       "repoPath",
       "skillBase",
       "skillVersion",
+      "nodeCommand",
       "instruction",
       "brief"
     ]);
@@ -1090,7 +1182,8 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       skill: "radius-app-bicep",
       repoPath: "/workspace",
       skillBase: "/test/skills/radius-app-bicep",
-      skillVersion: "0.1.0-test"
+      skillVersion: "0.1.0-test",
+      nodeCommand: "/test/bin/node"
     });
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
 
@@ -1254,13 +1347,15 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       "repoPath",
       "skillBase",
       "skillVersion",
+      "nodeCommand",
       "instruction"
     ]);
     expect(handoff).toMatchObject({
       skill: "radius-app-bicep",
       repoPath: "/workspace",
       skillBase: "/test/skills/radius-app-bicep",
-      skillVersion: "0.1.0-test"
+      skillVersion: "0.1.0-test",
+      nodeCommand: "/test/bin/node"
     });
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith(
@@ -1333,6 +1428,45 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
     expect(
       entry.state.appModelFailures?.["acme/widgets::main"]?.error
     ).toContain("configured Recipe");
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("records a diff attempt per branch so either side can end the comparison's wait", async () => {
+    const harness = await createRuntimeSdkHarness();
+    const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
+    Object.assign(entry.state, {
+      contextRepo: "acme/widgets",
+      contextBranch: "main",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "main",
+      workspacePath: "/workspace",
+      appModelAttemptTokens: {
+        "acme/widgets::main": "attempt-1",
+        "acme/widgets::feature/x": "attempt-1"
+      }
+    });
+    const tool = harness.extension.tools.find(
+      (candidate) => candidate.name === "radius_report_modeling_failure"
+    );
+    if (!tool) throw new Error("radius_report_modeling_failure not registered");
+
+    await expect(
+      tool.handler({
+        instanceId: "radius-panel",
+        repo: "acme/widgets",
+        branch: "feature/x",
+        attemptToken: "attempt-1",
+        error: "The configured Recipe rejects the required credential shape."
+      })
+    ).resolves.toEqual({ recorded: true });
+
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::feature/x"]?.error
+    ).toContain("configured Recipe");
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::main"]
+    ).toBeUndefined();
 
     await harness.extension.shutdown("test");
   });
