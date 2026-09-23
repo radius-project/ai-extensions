@@ -80,6 +80,7 @@ jobs:
   verify:
     steps:
       - run: |
+          PACK_NAME="sample"
           radius_contrib_recipe_pack_url sample pack.bicep
           radius_contrib_kube_recipe_source Radius.Test/widgets widgets
           radius_contrib_resource_git_source Radius.Test/widgets recipes/terraform
@@ -125,9 +126,9 @@ recipePacks:
     ref: cccccccccccccccccccccccccccccccccccccccc
 YAML
 else
-    cat >"${output}" <<'BICEP'
+    cat >"${output}" <<BICEP
 resource pack 'Radius.Core/recipePacks@2025-08-01-preview' = {
-  name: 'sample'
+  name: '${PACK_DECLARED_NAME:-sample}'
   properties: {
     recipes: {
       'Radius.Test/widgets': {
@@ -199,6 +200,19 @@ grep -Fq "manifest inspect ghcr.io/radius-project/kube-recipes/widgets:bbbbbbbbb
     fail "verifier downloaded the recipe pack more than once"
 if find "${TEST_ROOT}/tmp" -mindepth 1 -print -quit | grep -q .; then
     fail "verifier leaked its temporary checkout or catalog"
+fi
+
+# A pack that no longer declares the name the workflow attaches would otherwise
+# only fail at deploy time, when `rad recipe-pack show` cannot resolve it.
+: >"${CURL_LOG}"
+: >"${DOCKER_LOG}"
+if PATH="${TEST_ROOT}/bin:${PATH}" \
+    PACK_DECLARED_NAME=renamed \
+    CATALOG_REF="${REF}" \
+    CATALOG_HELPER="${HELPER_PATH}" \
+    EXTENSION_DIR="${TEST_ROOT}/extension" \
+    bash "${VERIFIER}" >/dev/null 2>&1; then
+    fail "verifier accepted a pack that does not declare the attached pack name"
 fi
 
 echo "contrib consumer verifier tests passed"
