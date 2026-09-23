@@ -303,12 +303,13 @@ describe("radiusNormalizeIcon", () => {
 });
 
 describe("radiusNormalizeIconSource", () => {
-  it("marks raw svg markup that paints in currentColor as monochrome", () => {
+  it("recognizes the Radius v0.61 mask and currentColor icon format", () => {
     const out = radiusNormalizeIconSource(
-      '<svg viewBox="0 0 8 8"><rect fill="currentColor" /></svg>'
+      '<svg viewBox="0 0 8 8" fill="none"><mask id="resource-icon"><path d="M1 1h6v6H1z" fill="white"/></mask><rect width="8" height="8" fill="currentColor" mask="url(#resource-icon)"/></svg>'
     );
     expect(out.monochrome).toBe(true);
     expect(decodeURIComponent(out.src)).toContain('fill="currentColor"');
+    expect(decodeURIComponent(out.src)).toContain('mask="url(#resource-icon)"');
   });
 
   it("recognizes currentColor paint attributes case-insensitively", () => {
