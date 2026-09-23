@@ -75,7 +75,7 @@ None of the following is needed for Azure parity, so none is in scope.
 |-------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | AWS CLI 2.15.3 or later on the developer's machine, with a live session | Required for discovery, verification, and identity setup. EKS access entries, which the canvas uses to grant cluster access, were added to the CLI in 2.15.3 | Reported when the profile is verified, so a profile is never saved that cannot go on to create an environment. The message names the installed version, the required one, and the upgrade link |
 | A target EKS cluster the canvas is allowed to grant access to           | Required to set up an environment on that cluster                                                                                                            | The cluster cannot be chosen. It is listed as unusable at the point of selection, with the reason and the command its owner runs                                                               |
-| A GitHub IAM identity provider in the AWS account                       | Required for passwordless role assumption. It is created once per account and shared by every repository in it, so the canvas never creates it               | Setup stops in `Authorize deploy identity` with the command the account owner runs. No supported fallback; access keys are out of scope                                                        |
+| A GitHub IAM identity provider in the AWS account                       | Required for passwordless role assumption. One provider serves every repository in the account. Environment creation creates it when absent                  | Only when the developer cannot create it: setup stops in `Authorize deploy identity` and hands over the `aws iam create-open-id-connect-provider` command for an IAM administrator to run      |
 | Published AWS recipe pack in `radius-project/resource-types-contrib`    | Provides the Tier 1 and Kubernetes resource-type catalog, applied by the deploy workflow                                                                     | Deployment is unavailable; environment creation is unaffected, since the pack is applied at deploy                                                                                             |
 
 ## User experience
@@ -207,11 +207,15 @@ Four rules govern them.
 Progress is reported through the canvas's existing three stages — `Authorize deploy identity`, `Configure environment`, and `Verify credentials`. `Authorize deploy identity` runs for both paths: it creates a new role or applies the confirmed changes to the selected role. Within that stage the developer sees, in order:
 
 - The CLI version confirmed.
-- The account's GitHub identity provider located.
+- The account's GitHub identity provider found, or created when the account has none.
 - The subject the role will trust.
 - The IAM role created or selected.
 - The deploy permission policy attached, and the region restriction applied.
 - The target cluster checked, and cluster access granted.
+
+Two AWS objects carry the deploy identity, and only one of them belongs to this repository. The **IAM role** is created per repository and trusts this repository's workflows. The **identity provider** is the account-level object that makes AWS willing to accept a GitHub token at all — one per account, shared by every repository in it, and named as the principal in the role's trust policy. A role cannot be created before it exists.
+
+Environment creation creates the provider when the account has none, rather than stopping to hand the developer a command. It is created once per account and is never deleted, because a later repository's role may come to depend on it. Deleting an environment says so: the provider is reported as retained, with that reason. Where the signed-in identity is not permitted to create it — the governed-account case — setup stops and hands over the command for an IAM administrator, as it does for a denied role creation.
 
 `Configure environment` then commits `run-rad-commands-aws.yml`, and `Verify credentials` runs last.
 
@@ -252,7 +256,6 @@ The renderer, the icon set, and the `Diff` views are provider-neutral and need n
 
 | Capability                            | Azure today                                                      | What AWS requires                                      |
 |---------------------------------------|------------------------------------------------------------------|--------------------------------------------------------|
-| The type shown on a node              | Broad ARM type map                                               | The concrete AWS type produced by the selected recipe  |
 | Where the console link points         | Built from Azure resource IDs and types, with a cluster fallback | Built from the ARN                                     |
 | Cloud resources in the details drawer | Only IDs starting `/subscriptions/`                              | ARNs recognized, so AWS resources appear in the drawer |
 
@@ -325,7 +328,7 @@ A developer tearing down work needs to know what leaves their AWS account and wh
 
 Deleting an environment states the AWS consequences before the developer confirms. It names the cluster the environment is removed from, the trust removed from the role, any region or cluster access no remaining environment needs, and whether the role itself is deleted or retained. If applications remain in the environment, deletion is blocked and names the applications the developer deletes first.
 
-Deleting an environment removes it from the role, then narrows what the role carries to what the environments still on it need — the region and the cluster access go only if no remaining environment names them. The role itself is deleted only when Radius created it *and* removing this environment leaves no environment on it at all, from this repository or any other. A role selected through the picker is never deleted, however many environments remain. Where ownership or shared use cannot be established, the object is retained and reported as requiring manual action rather than removed on an assumption.
+Deleting an environment removes it from the role, then narrows what the role carries to what the environments still on it need — the region and the cluster access go only if no remaining environment names them. The role itself is deleted only when Radius created it *and* removing this environment leaves no environment on it at all, from this repository or any other. A role selected through the picker is never deleted, however many environments remain. The account's GitHub identity provider is always retained, including one Radius created, because every repository in the account depends on it. Where ownership or shared use cannot be established, the object is retained and reported as requiring manual action rather than removed on an assumption.
 
 **Parity with Azure**
 
@@ -375,24 +378,25 @@ Each condition carries its own remediation rather than being folded into a gener
 
 Most failures land here, because this is where Radius first writes to the developer's account.
 
-| Condition                                                           | What the developer is told                                                                                                                                                                                                                                  |
-|---------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| AWS CLI older than 2.15.3                                           | `AWS CLI 2.7.31 is installed, which cannot grant the deploy role access to an EKS cluster. Radius needs AWS CLI 2.15.3 or newer, the first release with EKS access entries.` alongside `Upgrade the AWS CLI, then retry:` and the install link              |
-| AWS CLI cannot be run                                               | `Could not run the AWS CLI:` followed by the CLI's own output, and the same upgrade link                                                                                                                                                                    |
-| Account has no GitHub IAM OIDC identity provider                    | `This AWS account has no IAM identity provider for token.actions.githubusercontent.com. It is shared by every repository in the account, so Radius does not create it automatically.` with the `aws iam create-open-id-connect-provider` command to hand on |
-| Cluster grants access through `aws-auth` rather than access entries | `Cluster <name> uses CONFIG_MAP authentication, which does not support access entries. Radius grants cluster access through an access entry, so it cannot authorize the deploy role on this cluster.` with the `aws eks update-cluster-config` command      |
-| Role of the expected name is not Radius-managed                     | Names the matching role, says that no change was made, and offers the two valid paths: select that role explicitly through the picker or choose a different name                                                                                            |
-| Ownership of a same-named role cannot be established                | Named, with what could not be established, and setup stops rather than guessing whether Radius created it                                                                                                                                                   |
-| Identity creation denied by IAM                                     | `The signed-in AWS identity is not permitted to create IAM roles.` with a choice to return and select an existing role or hand the denied action to an IAM administrator                                                                                    |
-| Selected role cannot be updated                                     | Setup names the trust, permission, or cluster-access change that was denied and leaves the role as it was before setup began                                                                                                                                |
-| Two environments are set up at the same time                        | Both finish, and neither displaces the other on the shared role                                                                                                                                                                                             |
-| Identity creation partially succeeds                                | The existing partial-state summary, with rollback offered; created objects are named rather than silently retained                                                                                                                                          |
-| Discovery is denied, or returns nothing                             | Each list says whether it is empty because the account holds none or because the signed-in identity cannot read them, and offers a typed value meanwhile                                                                                                    |
-| No two subnets in different availability zones                      | Named against the chosen VPC, since a VPC-bound service cannot be placed in it as it stands                                                                                                                                                                 |
-| A typed cluster, VPC, or subnet does not fit the selection          | Rejected at the field, naming whether it belongs to another account, another region, or another VPC                                                                                                                                                         |
-| Namespace already backs another environment                         | Named at the field with the environment already using it                                                                                                                                                                                                    |
-| The GitHub environment or workflow cannot be written                | Named as the stage that failed, separately from anything created in AWS, so it is clear which cloud the failure is in                                                                                                                                       |
-| Any setup stage fails for a reason Radius does not recognize        | The stage is named alongside AWS's own output — `Failed to update the role's trust policy:`, `Failed to attach the deploy permission policy:`, `Failed to create the cluster access entry:` — rather than a generic setup failure                           |
+| Condition                                                           | What the developer is told                                                                                                                                                                                                                             |
+|---------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| AWS CLI older than 2.15.3                                           | `AWS CLI 2.7.31 is installed, which cannot grant the deploy role access to an EKS cluster. Radius needs AWS CLI 2.15.3 or newer, the first release with EKS access entries.` alongside `Upgrade the AWS CLI, then retry:` and the install link         |
+| AWS CLI cannot be run                                               | `Could not run the AWS CLI:` followed by the CLI's own output, and the same upgrade link                                                                                                                                                               |
+| Identity provider creation denied by IAM                            | Names the account, states that the GitHub identity provider is missing and could not be created by the signed-in identity, and hands over the `aws iam create-open-id-connect-provider` command for an IAM administrator to run                        |
+| Identity provider created concurrently by another setup             | The existing provider is used and setup continues. Two environments created at the same time in one account never collide over it                                                                                                                      |
+| Cluster grants access through `aws-auth` rather than access entries | `Cluster <name> uses CONFIG_MAP authentication, which does not support access entries. Radius grants cluster access through an access entry, so it cannot authorize the deploy role on this cluster.` with the `aws eks update-cluster-config` command |
+| Role of the expected name is not Radius-managed                     | Names the matching role, says that no change was made, and offers the two valid paths: select that role explicitly through the picker or choose a different name                                                                                       |
+| Ownership of a same-named role cannot be established                | Named, with what could not be established, and setup stops rather than guessing whether Radius created it                                                                                                                                              |
+| Identity creation denied by IAM                                     | `The signed-in AWS identity is not permitted to create IAM roles.` with a choice to return and select an existing role or hand the denied action to an IAM administrator                                                                               |
+| Selected role cannot be updated                                     | Setup names the trust, permission, or cluster-access change that was denied and leaves the role as it was before setup began                                                                                                                           |
+| Two environments are set up at the same time                        | Both finish, and neither displaces the other on the shared role                                                                                                                                                                                        |
+| Identity creation partially succeeds                                | The existing partial-state summary, with rollback offered; created objects are named rather than silently retained                                                                                                                                     |
+| Discovery is denied, or returns nothing                             | Each list says whether it is empty because the account holds none or because the signed-in identity cannot read them, and offers a typed value meanwhile                                                                                               |
+| No two subnets in different availability zones                      | Named against the chosen VPC, since a VPC-bound service cannot be placed in it as it stands                                                                                                                                                            |
+| A typed cluster, VPC, or subnet does not fit the selection          | Rejected at the field, naming whether it belongs to another account, another region, or another VPC                                                                                                                                                    |
+| Namespace already backs another environment                         | Named at the field with the environment already using it                                                                                                                                                                                               |
+| The GitHub environment or workflow cannot be written                | Named as the stage that failed, separately from anything created in AWS, so it is clear which cloud the failure is in                                                                                                                                  |
+| Any setup stage fails for a reason Radius does not recognize        | The stage is named alongside AWS's own output — `Failed to update the role's trust policy:`, `Failed to attach the deploy permission policy:`, `Failed to create the cluster access entry:` — rather than a generic setup failure                      |
 
 **Step 4 · Reviewing the application graph**
 
@@ -429,13 +433,13 @@ However a step fails, three rules hold.
 
 **Parity with Azure**
 
-| Capability             | Azure today                      | What AWS requires                                                        |
-|------------------------|----------------------------------|--------------------------------------------------------------------------|
-| CLI not installed      | `azure-cli-install`              | An `aws-cli-install` equivalent                                          |
-| CLI not signed in      | `azure-cli-login`                | `aws-cli-login`                                                          |
-| CLI too old            | Not applicable                   | A first-class remediation, since AWS alone carries a minimum CLI version |
-| Wrong scope selected   | `azure-subscription-set`         | A region and profile selection equivalent                                |
-| Identity misconfigured | Diagnosed by the verify workflow | Access-entry and trust-policy remediations                               |
+| Capability             | Azure today                      | What AWS requires                                                     |
+|------------------------|----------------------------------|-----------------------------------------------------------------------|
+| CLI not signed in      | `azure-cli-login`                | `aws-cli-login`, which runs `aws sso login`                           |
+| CLI not installed      | `azure-cli-install`              | An AWS CLI install remediation                                        |
+| CLI too old            | Not applicable                   | An upgrade remediation, since AWS alone carries a minimum CLI version |
+| Wrong scope selected   | `azure-subscription-set`         | A region and profile selection remediation                            |
+| Identity misconfigured | Diagnosed by the verify workflow | Access-entry and trust-policy remediations                            |
 
 ## Open questions
 
@@ -449,7 +453,7 @@ Each question below changes something the developer sees. They are grouped by wh
 
   Dropping the VPC field while still asking for subnets is one possible middle position.
 
-- **Q2.** The account's GitHub identity provider is only checked once setup is running, so a developer can complete the wizard, click **Create Environment**, and then be blocked on an account-level object only an admin can create. Whether the canvas should check it earlier — when the credential profile is verified, where the AWS account is already known — is open. Checking earlier costs a call on every profile verification and reports a problem the developer may never hit; checking late spends the developer's whole wizard run first.
+- **Q2.** Creating the account's GitHub identity provider removes this obstacle for a developer who holds IAM permissions, but not for one who does not: they still complete the wizard, click **Create Environment**, and only then learn the account is missing an object an IAM administrator must supply. Whether the canvas should check for it earlier — when the credential profile is verified, where the AWS account is already known — is open. Checking earlier costs a call on every profile verification and reports a problem most developers never hit.
 
 ### Step 6 · Deleting
 
