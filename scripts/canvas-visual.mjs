@@ -5,7 +5,7 @@ import path, { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const CANONICAL_VISUAL_IMAGE =
-  "radius-canvas-visual:playwright-1.62.1-node-24.19.0";
+  "radius-canvas-visual:playwright-1.63.0-node-24.19.0";
 const dockerArchitectureAliases = new Map([
   ["aarch64", "arm64"],
   ["arm64", "arm64"],

@@ -11,7 +11,7 @@ import userEvent from "@testing-library/user-event";
 // The card is a draggable React Flow node, so its clicks must be real browser
 // input: React Flow's d3 drag gesture rejects the library's synthetic
 // mousedown, which carries no view.
-import { userEvent as browserUser } from "@vitest/browser/context";
+import { userEvent as browserUser } from "vitest/browser";
 import {
   buildGraph,
   resolveGraphSettings

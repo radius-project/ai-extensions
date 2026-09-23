@@ -142,9 +142,13 @@ describe("canonical Canvas visual runner", () => {
     ).toBeNull();
   });
 
-  it("keeps the canonical image aligned with the locked Playwright version", () => {
+  it("keeps CI and canonical images aligned with the locked Playwright version", () => {
     const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
     const lockfile = readFileSync(`${repoRoot}/pnpm-lock.yaml`, "utf8");
+    const workflow = readFileSync(
+      `${repoRoot}/.github/workflows/build.yml`,
+      "utf8"
+    );
     const dockerfile = readFileSync(
       `${repoRoot}/packages/adapter-canvas/test/visual/Dockerfile`,
       "utf8"
@@ -154,11 +158,19 @@ describe("canonical Canvas visual runner", () => {
         (match) => match[1]
       )
     );
-    const imageVersion = dockerfile.match(
-      /mcr\.microsoft\.com\/playwright:v([^-]+)-/
+    const dockerImage = dockerfile.match(
+      /^FROM (mcr\.microsoft\.com\/playwright:v[^\s]+)/m
+    )?.[1];
+    const workflowImage = workflow.match(
+      /^      image: (mcr\.microsoft\.com\/playwright:v[^\s]+)/m
+    )?.[1];
+    const imageVersion = dockerImage?.match(
+      /^mcr\.microsoft\.com\/playwright:v([^-]+)-/
     )?.[1];
 
     expect([...lockedVersions]).toEqual([imageVersion]);
+    expect(workflowImage).toBe(dockerImage);
+    expect(CANONICAL_VISUAL_IMAGE).toContain(`playwright-${imageVersion}-`);
     expect(dockerfile).not.toMatch(/playwright:v[^ \n]+-(?:amd64|arm64)@/);
   });
 

@@ -520,14 +520,14 @@ describe("P0-C built Radius extension artifact", () => {
     expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
     for (const marker of [
-      "===== react@19.2.8 =====",
-      "===== react-dom@19.2.8 =====",
+      "===== react@19.3.0 =====",
+      "===== react-dom@19.3.0 =====",
       "===== reactflow@11.11.4 =====",
       "===== dagre@0.8.5 =====",
       "===== @reactflow/core@11.11.4 =====",
       "===== graphlib@2.1.8 =====",
       "===== lodash@4.18.1 =====",
-      "===== yaml@2.9.0 ====="
+      "===== yaml@2.9.1 ====="
     ]) {
       expect(notices).toContain(marker);
     }
