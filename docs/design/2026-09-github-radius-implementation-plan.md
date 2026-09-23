@@ -1,9 +1,9 @@
 # GitHub Radius library: staged implementation plan
 
-- **Status**: Stage 0 inventory and characterization implemented; awaiting the Windows process-integration gate. Extraction stages have not started.
+- **Status**: Stage 0 inventory and characterization implemented; Extraction stages have not started.
 - **Design**: [GitHub Radius: Extracting a Reusable Library from Canvas](./2026-09-github-radius.md), approved and merged in [#845](https://github.com/radius-project/ai-extensions/pull/845).
 - **Planning baseline**: `c1c9e938963bbca923984138c82173ec3f0d8b08`, inspected on September 23, 2026. Recheck the current code and concurrent work before starting each slice.
-- **Implementation basis**: The approved design and current production code only. Do not copy, cherry-pick, or use the linked sample implementation as a scaffold.
+- **Implementation basis**: The approved design and current production code only.
 
 ## Delivery strategy
 
@@ -53,9 +53,9 @@ Coordination starts in stage 1, not only in the graph stage. Its deployed-graph 
 
 ## Stage 0: inventory contracts and protect the first seam
 
-**Delivery record:** The [migration inventory](./2026-09-github-radius-migration-inventory.md#stage-0-execution-evidence) records current owners, contracts, known gaps, and execution evidence. Focused characterization, typecheck, lint, formatting, build, artifact, component, and Canvas Windows-process checks pass. Full coverage and Chromium journeys also pass in an isolated Linux environment using the pinned toolchain and CI browser image. The unchanged shared Windows process-tree test exceeded its timeout; that failure remains visible rather than being retried to claim a green gate. Stage 0 is implementation-ready but awaits the Windows gate before being marked complete. No extraction or production behavior change is included.
+**Delivery record:** The [migration inventory](./2026-09-github-radius-migration-inventory.md#stage-0-execution-evidence) records current owners, contracts, known gaps, and execution evidence. Focused characterization, typecheck, lint, formatting, build, artifact, component, and Canvas Windows-process checks pass. Full coverage and Chromium journeys also pass in an isolated Linux environment using the pinned toolchain and CI browser image. No extraction or production behavior change is included.
 
-**Outcome:** A migration checklist grounded in the implementation at the time work starts, plus characterization tests for the first slice. This is not a months-long test project: inventory the full scope now, then add detailed characterization just before each capability moves.
+**Outcome:** A migration checklist grounded in the implementation at the time work starts, plus characterization tests for the first slice. Inventory the full scope now, then add detailed characterization just before each capability moves.
 
 Record each capability's entry points, owning helpers, source/target identity, mutations, permission checks, persistence, cancellation, errors, required interactions, and observable result contracts. Give each row an owner and status, with links to its tests and migration PR. Track both residual business logic and compatibility forwarders so completion is measurable.
 
