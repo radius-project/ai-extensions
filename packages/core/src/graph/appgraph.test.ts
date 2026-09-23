@@ -16,10 +16,13 @@ const frontendHash = `sha256:${"a".repeat(64)}`;
 const cacheHash = `sha256:${"b".repeat(64)}`;
 const databaseHash = `sha256:${"c".repeat(64)}`;
 const alternateHash = `sha256:${"d".repeat(64)}`;
-const frontendIconHash = `sha256:${"e".repeat(64)}`;
-const frontendIcon = '<svg><path d="M0 0h16v16H0z"/></svg>';
-const outputIconHash = `sha256:${"f".repeat(64)}`;
+const frontendIconHash =
+  "1e8500bafa3c1523488304fe478d570e4f518b8347f42a0796abd560fa08c7e5";
+const frontendIcon =
+  '<svg viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg"><mask id="resource-icon" maskUnits="userSpaceOnUse" x="0" y="0" width="8" height="8"><path d="M1 1h6v6H1z" fill="white"/></mask><rect x="0" y="0" width="8" height="8" fill="currentColor" mask="url(#resource-icon)"/></svg>';
+const outputIconHash = "f".repeat(64);
 const outputIcon = '<svg><circle cx="8" cy="8" r="8"/></svg>';
+const unreferencedIconHash = "d".repeat(64);
 
 function sampleAppGraph(): { resources: any[]; icons: Record<string, string> } {
   return {
@@ -427,7 +430,7 @@ describe("applicationGraphToResources — icon resolution", () => {
 
   it("resolves no icon when the hash is absent from the map", () => {
     const resources = graphWithIcons(
-      { iconHash: `sha256:${"9".repeat(64)}` },
+      { iconHash: "9".repeat(64) },
       { [frontendIconHash]: frontendIcon }
     );
 
@@ -510,7 +513,7 @@ describe("applicationGraphToResources — icon resolution", () => {
         ],
         icons: {
           [frontendIconHash]: frontendIcon,
-          [alternateHash]: "unreferenced-icon",
+          [unreferencedIconHash]: "unreferenced-icon",
           ignored: 7
         },
         unknown: "do-not-serialize"
@@ -566,10 +569,11 @@ describe("applicationGraphToResources — icon resolution", () => {
       expect(Object.getPrototypeOf(projected.icons)).toBeNull();
     });
 
-    it("keeps only referenced SHA-256 icon entries and drops invalid icon hashes", () => {
+    it("keeps only referenced raw SHA-256 icon entries and drops invalid icon hashes", () => {
       const icons = Object.create(null) as Record<string, string>;
       icons[frontendIconHash] = frontendIcon;
-      icons[alternateHash] = "unreferenced-icon";
+      icons[unreferencedIconHash] = "unreferenced-icon";
+      icons[frontendHash] = "prefixed-icon";
       icons["not-a-hash"] = "invalid-icon";
       icons.__proto__ = "magic-icon";
 
@@ -581,6 +585,7 @@ describe("applicationGraphToResources — icon resolution", () => {
             iconHash: frontendIconHash,
             outputResources: [
               { id: "valid-output", iconHash: outputIconHash },
+              { id: "prefixed-output", iconHash: frontendHash },
               { id: "invalid-output", iconHash: "not-a-hash" }
             ]
           },
@@ -601,6 +606,7 @@ describe("applicationGraphToResources — icon resolution", () => {
           connections: [],
           outputResources: [
             { id: "valid-output", iconHash: outputIconHash },
+            { id: "prefixed-output" },
             { id: "invalid-output" }
           ]
         },
@@ -614,6 +620,7 @@ describe("applicationGraphToResources — icon resolution", () => {
       expect(projected.icons).toEqual({ [frontendIconHash]: frontendIcon });
       expect(Object.getPrototypeOf(projected.icons)).toBeNull();
       expect(JSON.stringify(projected)).not.toContain("unreferenced-icon");
+      expect(JSON.stringify(projected)).not.toContain("prefixed-icon");
       expect(JSON.stringify(projected)).not.toContain("invalid-icon");
       expect(JSON.stringify(projected)).not.toContain("magic-icon");
     });

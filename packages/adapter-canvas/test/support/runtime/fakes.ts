@@ -383,6 +383,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         repoPath: repoPath || ".",
         skillBase: "/test/skills/radius-app-bicep",
         skillVersion: "0.1.0-test",
+        nodeCommand: "/test/bin/node",
         instruction: `SKILL.md content for ${repoPath || "."}`,
         ...(brief ? { brief } : {})
       })

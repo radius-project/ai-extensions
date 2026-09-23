@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
@@ -13,6 +14,18 @@ const REQUIRED_SKILL_FILES = [
 ];
 const LEGACY_INLINED_HEADING =
   "# radius-app-bicep skill (bundled with the Radius extension)";
+
+// The skill scripts are launched through the interpreter the bootstrap names,
+// so the artifact contract is that the named path really runs a script rather
+// than merely existing.
+function runsScripts(nodeCommand) {
+  if (typeof nodeCommand !== "string" || nodeCommand === "") return false;
+  const result = spawnSync(nodeCommand, ["-e", "process.exit(0)"], {
+    stdio: "ignore",
+    timeout: 10_000
+  });
+  return !result.error && result.status === 0;
+}
 
 function json(value) {
   return JSON.parse(JSON.stringify(value));
@@ -84,6 +97,7 @@ export async function joinSession(declaration) {
           skillBase
         ).replaceAll("\\", "/"),
         skillVersionMatchesPackage: bootstrap.skillVersion === packageVersion,
+        nodeCommandRunsScripts: runsScripts(bootstrap.nodeCommand),
         instruction: bootstrap.instruction,
         requiredFiles: REQUIRED_SKILL_FILES.filter((requiredFile) =>
           existsSync(join(skillBase, requiredFile))

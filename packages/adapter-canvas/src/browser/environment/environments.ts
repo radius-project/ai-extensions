@@ -134,6 +134,7 @@ export function parseEnvironmentRecords(payload: unknown): EnvironmentRecord[] {
           vpcId: readString(config, "vpcId"),
           subnetIds: readString(config, "subnetIds"),
           subscriptionId: readString(config, "subscriptionId"),
+          clusterResourceGroup: readString(config, "clusterResourceGroup"),
           accountId: readString(config, "accountId"),
           region: readString(config, "region")
         }
@@ -147,6 +148,7 @@ export interface NamespaceClaim {
   readonly cluster: string;
   readonly namespace: string;
   readonly subscriptionId?: string;
+  readonly clusterResourceGroup?: string;
   readonly accountId?: string;
   readonly region?: string;
   readonly excludeEnvironment?: string;
@@ -157,11 +159,12 @@ function normalizeIdentifier(value: string | undefined): string {
 }
 
 // True when both sides name the same physical cluster. A cluster name alone is
-// not a cluster: the same name can exist in two Azure subscriptions or two AWS
-// account/region pairs. An account either side did not record distinguishes
-// nothing, so the two are held to be the same cluster until something proves
-// otherwise. The server's rung applies the same rule, so this check stays no
-// stricter than the authority it defers to.
+// not a cluster: the same name can exist in two Azure subscriptions, in two
+// resource groups of one subscription, or in two AWS account/region pairs. A
+// scope either side did not record distinguishes nothing, so the two are held
+// to be the same cluster until something proves otherwise. The server's rung
+// applies the same rule, so this check stays no stricter than the authority it
+// defers to.
 function sameCluster(
   config: EnvironmentInfrastructure | undefined,
   claim: NamespaceClaim
@@ -183,6 +186,10 @@ function sameCluster(
         [
           normalizeIdentifier(config?.subscriptionId),
           normalizeIdentifier(claim.subscriptionId)
+        ],
+        [
+          normalizeIdentifier(config?.clusterResourceGroup),
+          normalizeIdentifier(claim.clusterResourceGroup)
         ]
       ];
   return scopes.every(
@@ -216,11 +223,11 @@ function normalizeNamespace(value: string | undefined): string {
 // closed, and this check is deliberately no stricter than that one so it can
 // never refuse an environment the server would admit.
 //
-// The environment's stored resource group is the application's, not the
-// cluster's, so it is not part of the key: including it would stop two
-// environments that genuinely share a cluster from conflicting whenever their
-// application resource groups differ — the exact duplicate this guard exists to
-// catch.
+// The environment's stored application resource group is not part of the key:
+// including it would stop two environments that genuinely share a cluster from
+// conflicting whenever their application resource groups differ — the exact
+// duplicate this guard exists to catch. The cluster's own resource group is
+// part of the key, because it is what scopes an AKS cluster's name.
 export function findNamespaceConflict(
   environments: readonly EnvironmentRecord[],
   claim: NamespaceClaim

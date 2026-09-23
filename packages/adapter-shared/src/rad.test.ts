@@ -853,8 +853,11 @@ describe("runRadAppGraph artifact completion", () => {
 
   it("persists and returns only safety-projected graph metadata", async () => {
     const sentinel = "fixture-plaintext-value";
-    const iconHash = `sha256:${"e".repeat(64)}`;
-    const unreferencedIconHash = `sha256:${"f".repeat(64)}`;
+    const iconHash =
+      "1e8500bafa3c1523488304fe478d570e4f518b8347f42a0796abd560fa08c7e5";
+    const icon =
+      '<svg viewBox="0 0 8 8" fill="none" xmlns="http://www.w3.org/2000/svg"><mask id="resource-icon" maskUnits="userSpaceOnUse" x="0" y="0" width="8" height="8"><path d="M1 1h6v6H1z" fill="white"/></mask><rect x="0" y="0" width="8" height="8" fill="currentColor" mask="url(#resource-icon)"/></svg>';
+    const unreferencedIconHash = "f".repeat(64);
     process.env.FAKE_RAD_GRAPH = JSON.stringify({
       resources: [
         {
@@ -885,7 +888,7 @@ describe("runRadAppGraph artifact completion", () => {
         }
       ],
       icons: {
-        [iconHash]: "<svg>safe</svg>",
+        [iconHash]: icon,
         [unreferencedIconHash]: sentinel,
         "not-a-hash": sentinel,
         __proto__: sentinel
@@ -908,6 +911,7 @@ describe("runRadAppGraph artifact completion", () => {
       resources: [
         {
           properties: { codeReference: "src/index.ts#L1" },
+          iconHash,
           connections: [
             {
               id: "database",
@@ -918,7 +922,7 @@ describe("runRadAppGraph artifact completion", () => {
           outputResources: [{ id: "provider/output", type: "Provider/type" }]
         }
       ],
-      icons: { [iconHash]: "<svg>safe</svg>" }
+      icons: { [iconHash]: icon }
     });
     if (
       !result ||
