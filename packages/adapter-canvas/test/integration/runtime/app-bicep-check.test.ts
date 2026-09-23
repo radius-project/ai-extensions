@@ -371,7 +371,7 @@ test.each([
   "interpolated-ref",
   "local-module-ref"
 ])("keeps captured %s output on the documented Bicep version", (fixture) => {
-  const compiled = JSON.parse(compiledBicepFixture(fixture)) as {
+  const compiled = JSON.parse(bicepFixture(fixture)) as {
     metadata?: { _generator?: { version?: string } };
   };
 
@@ -1129,12 +1129,7 @@ describe("aggregate Recipe secret aliases", () => {
     const directory = temporaryDirectory();
     const result = runChecker(
       directory,
-      fakeBicep(
-        directory,
-        sarif([]),
-        0,
-        compiledBicepFixture("aggregate-secret-alias")
-      )
+      fakeBicep(directory, sarif([]), 0, bicepFixture("aggregate-secret-alias"))
     );
 
     assert.equal(result.status, 1);
@@ -1153,7 +1148,7 @@ describe("aggregate Recipe secret aliases", () => {
         directory,
         sarif([]),
         0,
-        compiledBicepFixture("aggregate-secret-module")
+        bicepFixture("aggregate-secret-module")
       )
     );
 
