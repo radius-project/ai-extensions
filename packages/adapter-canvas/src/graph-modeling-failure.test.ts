@@ -3,7 +3,8 @@ import { RadProcessError } from "@radius-project/adapter-shared";
 import {
   asGraphModelingFailure,
   graphModelingDiagnostic,
-  GraphModelingFailure
+  GraphModelingFailure,
+  graphModelingFailureMessage
 } from "./graph-modeling-failure.js";
 import { GRAPH_MODELING_FAILURE_MESSAGE } from "./graph-progress-contract.js";
 
@@ -20,10 +21,56 @@ describe("graph modeling failure classification", () => {
 
     expect(result).toBeInstanceOf(GraphModelingFailure);
     expect((result as Error).message).toBe(
-      `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep line 4: Missing required property.`
+      `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep line 4, column 2: Missing required property.`
     );
     expect((result as Error).cause).toBe(error);
     expect(graphModelingDiagnostic(error)).toContain("BCP035");
+  });
+
+  it.each([
+    ["app.bicep(7,17)", "line 7, column 17"],
+    ["app.bicep(7)", "line 7"],
+    ["app.bicep(7,0)", "line 7"],
+    ["app.bicep(0,17)", null],
+    ["app.bicep(7,9007199254740992)", "line 7"],
+    ["app.bicep(9007199254740992,17)", null]
+  ])("uses only safe positions from %s", (location, position) => {
+    expect(
+      graphModelingFailureMessage(
+        `${location}: Warning BCP236: Invalid syntax. [https://example.test/diagnostic]`
+      )
+    ).toBe(
+      position === null ?
+        GRAPH_MODELING_FAILURE_MESSAGE
+      : `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep ${position}: Invalid syntax.`
+    );
+  });
+
+  it("retains every diagnostic and summarizes the first precise location", () => {
+    const diagnostic = [
+      "/fixture/app.bicep(7,17) : error BCP236: Invalid syntax.",
+      "/fixture/app.bicep(7,41) : error BCP236: Invalid syntax."
+    ].join("\n");
+    const result = asGraphModelingFailure(
+      new RadProcessError("rad exited with code 1", diagnostic, "")
+    );
+
+    expect(result).toBeInstanceOf(GraphModelingFailure);
+    if (!(result instanceof GraphModelingFailure)) {
+      throw new Error("Expected a structured modeling failure");
+    }
+    expect(result.diagnostic).toBe(diagnostic);
+    expect(result.message).toBe(
+      `${GRAPH_MODELING_FAILURE_MESSAGE} app.bicep line 7, column 17: Invalid syntax.`
+    );
+  });
+
+  it("does not borrow a later location when the first diagnostic has none", () => {
+    expect(
+      graphModelingFailureMessage(
+        "Error BCP236: Invalid syntax.\napp.bicep(7,41): Error BCP236: Invalid syntax."
+      )
+    ).toBe(GRAPH_MODELING_FAILURE_MESSAGE);
   });
 
   it("falls back to the concise message when a BCP diagnostic has no source location", () => {

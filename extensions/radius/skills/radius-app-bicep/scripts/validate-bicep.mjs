@@ -300,11 +300,20 @@ function repairHint(ruleId, text) {
 function printDiagnostic(result) {
   const physical = result.locations?.[0]?.physicalLocation;
   const source = physical?.artifactLocation?.uri;
-  const line = physical?.region?.startLine;
+  const region = physical?.region;
+  const line = region?.startLine;
+  // Bicep 0.42.1, 0.44.1, and 0.47.16 put the 1-based display column in `charOffset`
+  // instead of SARIF's `startColumn`. Prefer the standard field when present.
+  const column = region?.startColumn ?? region?.charOffset;
+  const hasLine = Number.isSafeInteger(line) && line > 0;
+  const hasColumn = Number.isSafeInteger(column) && column > 0;
   let location = "";
   if (typeof source === "string") {
-    location = `${source}${Number.isInteger(line) ? `:${line}` : ""}`;
-  } else if (Number.isInteger(line)) {
+    location = `${source}${hasLine ? `:${line}` : ""}`;
+    if (hasLine && hasColumn) {
+      location += `:${column}`;
+    }
+  } else if (hasLine) {
     location = `line ${line}`;
   }
   const level = typeof result.level === "string" ? result.level : "warning";
