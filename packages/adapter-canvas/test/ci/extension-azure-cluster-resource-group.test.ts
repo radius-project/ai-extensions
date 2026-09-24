@@ -96,37 +96,43 @@ function environmentBinding(source: string, name: string): string | null {
 }
 
 /**
- * The expression a `--resource-group` argument ultimately resolves to.
+ * The expression a reference ultimately resolves to.
  *
- * Two shapes are legitimate. The argument either carries the expression
- * directly, or it reads a shell variable that an `env:` entry bound to the
- * expression — which is how `delete-environment-azure.yml` keeps
- * environment-controlled values out of its shell source.
+ * Two shapes are legitimate. The text either carries the expression directly,
+ * or it reads a shell variable that an `env:` entry bound to the expression —
+ * which is how these workflows keep environment-controlled values out of their
+ * shell source.
  *
  * Following the indirection is what makes this answer the question being
- * asked. Reading the argument line alone would see `"$AZURE_AKS_RESOURCE_GROUP"`
- * and stop, without ever learning which group that name was bound to.
+ * asked. Reading the line alone would see `"$AZURE_AKS_RESOURCE_GROUP"` and
+ * stop, without ever learning which group that name was bound to.
+ *
+ * `null` means the shape was not recognised, which the callers treat as a
+ * failure rather than a pass: a reference this cannot read is one it cannot
+ * vouch for.
+ */
+function resolveReference(source: string, text: string): string | null {
+  const interpolated = /(\$\{\{.*?\}\})/.exec(text);
+  if (interpolated) return interpolated[1];
+  const shellVariable = /\$([A-Za-z_][A-Za-z0-9_]*)/.exec(text);
+  if (shellVariable) return environmentBinding(source, shellVariable[1]);
+  return null;
+}
+
+/**
+ * The expression a `--resource-group` argument resolves to.
  *
  * Resolution deliberately starts from the argument rather than from the file,
  * so an `env:` binding belonging to some other step is not mistaken for part of
  * the cluster lookup. Hardening an unrelated step the same way is a change this
  * test has no business failing.
- *
- * `null` means the shape was not recognised, which the callers treat as a
- * failure rather than a pass: an argument this cannot read is one it cannot
- * vouch for.
  */
 function resolvedResourceGroup(
   source: string,
   argument: string
 ): string | null {
-  const interpolated = /--resource-group\s+"(\$\{\{.*?\}\})"/.exec(argument);
-  if (interpolated) return interpolated[1];
-  const shellVariable = /--resource-group\s+"\$([A-Za-z_][A-Za-z0-9_]*)"/.exec(
-    argument
-  );
-  if (shellVariable) return environmentBinding(source, shellVariable[1]);
-  return null;
+  const value = /--resource-group\s+"([^"]+)"/.exec(argument);
+  return value ? resolveReference(source, value[1]) : null;
 }
 
 describe("the generated Azure workflows' AKS cluster lookup", () => {
@@ -173,6 +179,11 @@ describe("the generated Azure workflows' AKS cluster lookup", () => {
 describe("the generated Azure workflows' application resource group", () => {
   // The opposite substitution, which would move where an application's
   // resources are created rather than break a lookup.
+  //
+  // Resolved rather than matched literally, so the assertion keeps holding
+  // once a value reaches the shell through an `env:` binding instead of being
+  // interpolated. What matters is which group the value ends up being, not the
+  // shape it travels in.
   it.each([
     ["the environment's Azure provider", "resourceGroupName:"],
     [
@@ -180,14 +191,16 @@ describe("the generated Azure workflows' application resource group", () => {
       "append_pack_parameter_if_declared azureResourceGroup"
     ]
   ])("keeps %s on the application's resource group", (_label, marker) => {
-    const uses = workflows
-      .flatMap(([, source]) => source.split(/\r?\n/))
-      .filter((line) => line.includes(marker));
+    const uses = workflows.flatMap(([, source]) =>
+      source
+        .split(/\r?\n/)
+        .filter((line) => line.includes(marker))
+        .map((line) => [source, line] as const)
+    );
 
     expect(uses.length).toBeGreaterThan(0);
-    for (const line of uses) {
-      expect(line).toContain("vars.AZURE_RESOURCE_GROUP");
-      expect(line).not.toContain("AZURE_AKS_RESOURCE_GROUP");
+    for (const [source, line] of uses) {
+      expect(resolveReference(source, line)).toBe(APPLICATION_RESOURCE_GROUP);
     }
   });
 });
