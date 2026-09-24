@@ -179,15 +179,17 @@ pack_parameters() {
                     pack = parts[2]
                     file = parts[3]
                 }
-                /PACK_PARAMETERS=\(/ { in_array = 1 }
-                in_array && /^[ \t]*\)[ \t]*$/ { in_array = 0 }
-                (in_array || /PACK_PARAMETERS\+=\(/) &&
-                match($0, /--parameters "?[A-Za-z0-9_]+=/) {
+                /PACK_PARAMETERS\+?=\(/ { in_array = 1 }
+                in_array && match($0, /--parameters "?[A-Za-z0-9_]+=/) {
                     name = substr($0, RSTART, RLENGTH)
                     sub(/^--parameters "?/, "", name)
                     sub(/=$/, "", name)
                     if (pack != "") { print pack, file, name }
                 }
+                # Closes both the multi-line array and a single-line
+                # `PACK_PARAMETERS+=(--parameters name=value)`. Anchored to the
+                # end of the line so a value containing `)` does not close it.
+                in_array && /\)[ \t]*$/ { in_array = 0 }
             '
     done < <(extension_yaml_files) | sort -u
 }
