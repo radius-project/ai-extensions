@@ -411,7 +411,8 @@ describe("extractErrorLines", () => {
         );
       }
     );
-    it("returns degraded evidence on unexpected log failure without reading later evidence", async () => {
+    it("retains observed failure and explicitly reports both secondary read failures without leaking exceptions", async () => {
+      const calls: string[] = [];
       const result = await collectWorkflowFailure(
         target,
         { ...run, steps: [...run.steps] },
@@ -421,24 +422,31 @@ describe("extractErrorLines", () => {
         },
         {
           readLog: () => {
-            throw new Error("unreadable");
+            calls.push("log");
+            throw new Error("fixture-private-log-detail");
           },
           readControlPlaneLog: () => {
-            throw new Error("must not be read");
+            calls.push("control-plane");
+            throw new Error("fixture-private-artifact-detail");
           }
         }
       );
       expect(result.message).toBe(
-        "Deployment failed (failure). The failure details could not be read; see the full run: https://github.com/org/app/actions/runs/41."
+        "Deployment failed (failure). Failed step: Azure Login (OIDC).\n\nThe workflow log could not be read.\n\nThe control-plane log could not be read.\n\nView the full run: https://github.com/org/app/actions/runs/41"
       );
+      expect(calls).toEqual(["log", "control-plane"]);
+      expect(JSON.stringify(result)).not.toContain("fixture-private");
       expect(result.authDriftMessage).toContain("Cloud authentication");
       expect(result.radiusError).toBe("");
-      expect(result.narration).toEqual([]);
+      expect(result.narration).toEqual([
+        "The workflow log could not be read.",
+        "The control-plane log could not be read."
+      ]);
     });
     it("keeps the normal failure when the best-effort control-plane read throws", async () => {
       const result = await collectWorkflowFailure(
         target,
-        { conclusion: null, steps: [] },
+        { conclusion: "failure", steps: [] },
         {
           resourcesTouched: false
         },
@@ -450,16 +458,182 @@ describe("extractErrorLines", () => {
         }
       );
       expect(result.message).toBe(
-        "Deployment failed.\n\nError: recipe failed\n\nView the full run: https://github.com/org/app/actions/runs/41"
+        "Deployment failed (failure).\n\nError: recipe failed\n\nThe control-plane log could not be read.\n\nView the full run: https://github.com/org/app/actions/runs/41"
       );
       expect(result.radiusError).toBe("Error: recipe failed");
       expect(result.narration).toEqual([
         "",
         "──────── failure details ────────",
         "  Error: recipe failed",
-        "─────────────────────────────────"
+        "─────────────────────────────────",
+        "The control-plane log could not be read."
       ]);
     });
+    it("does not retain prior details or narration when a later collection loses both reads", async () => {
+      const observed = {
+        conclusion: "failure",
+        steps: [{ name: "Run rad commands", conclusion: "failure" }]
+      };
+      const first = await collectWorkflowFailure(
+        target,
+        observed,
+        { resourcesTouched: true },
+        {
+          readLog: async () => "Error: earlier recipe failed",
+          readControlPlaneLog: async () => "earlier control-plane evidence"
+        }
+      );
+      const originalNarration = [...first.narration];
+      expect(first.radiusError).toBe("Error: earlier recipe failed");
+      expect(first.narration).toContain("  earlier control-plane evidence");
+
+      const second = await collectWorkflowFailure(
+        { ...target, runId: 42 },
+        observed,
+        { resourcesTouched: true },
+        {
+          readLog: async () => {
+            throw new Error("fixture-private-log-detail");
+          },
+          readControlPlaneLog: async () => {
+            throw new Error("fixture-private-artifact-detail");
+          }
+        }
+      );
+      expect(second).toEqual({
+        message:
+          "Deployment failed (failure). Failed step: Run rad commands.\n\nThe workflow log could not be read.\n\nThe control-plane log could not be read.\n\nView the full run: https://github.com/org/app/actions/runs/42",
+        radiusError: "",
+        authDriftMessage: "",
+        narration: [
+          "The workflow log could not be read.",
+          "The control-plane log could not be read."
+        ]
+      });
+      expect(second.narration).not.toBe(first.narration);
+      expect(first.narration).toEqual(originalNarration);
+    });
+    it.each([null, undefined, "", "future_conclusion"])(
+      "does not let diagnostics manufacture a failure from %j",
+      async (conclusion) => {
+        const result = await collectWorkflowFailure(
+          target,
+          {
+            conclusion,
+            steps: [{ name: "Azure Login (OIDC)", conclusion: "failure" }]
+          },
+          { provider: "azure", resourcesTouched: false },
+          {
+            readLog: () => {
+              throw new Error("must not read diagnostics without outcome");
+            },
+            readControlPlaneLog: () => {
+              throw new Error("must not read artifacts without outcome");
+            }
+          }
+        );
+        expect(result).toEqual({
+          message:
+            "Workflow outcome is unconfirmed. View the full run: https://github.com/org/app/actions/runs/41",
+          radiusError: "",
+          authDriftMessage: "",
+          narration: []
+        });
+      }
+    );
+    it("still collects control-plane evidence after the run log throws", async () => {
+      const result = await collectWorkflowFailure(
+        target,
+        {
+          conclusion: "failure",
+          steps: [{ name: "Run rad commands", conclusion: "failure" }]
+        },
+        { resourcesTouched: true },
+        {
+          readLog: () => Promise.reject(new Error("fixture-private")),
+          readControlPlaneLog: async () => "recipe provisioning failed"
+        }
+      );
+      expect(result.message).toContain("Failed step: Run rad commands.");
+      expect(result.message).toContain("recipe provisioning failed");
+      expect(result.message).toContain("The workflow log could not be read.");
+      expect(result.radiusError).toBe("");
+    });
+    it.each([
+      {
+        names: ["Run rad commands", "Persist Radius state (rad shutdown)"],
+        logs: [
+          "deploy\tRun rad commands\t2026-01-01 Error: { primary quota }",
+          "deploy\tPersist Radius state (rad shutdown)\t2026-01-01 Error: { secondary shutdown }"
+        ],
+        expected: "Error: { primary quota }"
+      },
+      {
+        names: ["Run rad commands", "Cleanup control plane cluster"],
+        logs: [
+          "deploy\tRun rad commands\t2026-01-01 deployment output",
+          "deploy\tCleanup control plane cluster\t2026-01-01 Error: { cleanup only }"
+        ],
+        expected: "Error: { cleanup only }"
+      },
+      {
+        names: ["Run rad commands"],
+        logs: ["deploy\tUNKNOWN STEP\t2026-01-01 Error: { unattributed }"],
+        expected: "Error: { unattributed }"
+      },
+      {
+        names: ["Run rad commands"],
+        logs: ["Error: { unprefixed }"],
+        expected: "Error: { unprefixed }"
+      },
+      {
+        names: ["Persist Radius state (rad shutdown)"],
+        logs: [
+          "deploy\tPersist Radius state (rad shutdown)\t2026-01-01 Error: { persistence failed }"
+        ],
+        expected: "Error: { persistence failed }"
+      },
+      {
+        names: ["Run rad commands", "Run rad commands"],
+        logs: [
+          "first\tRun rad commands\t2026-01-01 Error: { first job }",
+          "second\tRun rad commands\t2026-01-01 Error: { second job }"
+        ],
+        expected: "Error: { second job }"
+      },
+      {
+        names: ["Run rad commands"],
+        logs: [
+          "first\tRun rad commands\t2026-01-01 Error: { first job }",
+          "second\tRun rad commands\t2026-01-01 Error: { second job }"
+        ],
+        expected: "Error: { second job }"
+      }
+    ])(
+      "uses only unambiguous primary attribution for $names / $logs",
+      async ({ names, logs, expected }) => {
+        const result = await collectWorkflowFailure(
+          target,
+          {
+            conclusion: "failure",
+            steps: names.map((name) => ({ name, conclusion: "failure" })),
+            jobs: [
+              {
+                name: "deploy",
+                steps: names.map((name) => ({ name, conclusion: "failure" }))
+              }
+            ]
+          },
+          { resourcesTouched: true },
+          {
+            readLog: async () => logs.join("\n"),
+            readControlPlaneLog: async () => null
+          }
+        );
+        expect(result.radiusError).toBe(expected);
+        for (const name of names) expect(result.message).toContain(name);
+      }
+    );
     it("keeps the 40-line tail and narration order", async () => {
       const lines = Array.from({ length: 41 }, (_, index) => `line-${index}`);
       const result = await collectWorkflowFailure(
@@ -487,6 +661,66 @@ describe("extractErrorLines", () => {
         "───────────────────────────────────"
       ]);
     });
+
+    it.each([
+      undefined,
+      [],
+      [{}],
+      [
+        {
+          name: "renamed display name",
+          steps: [{ name: "Run rad commands", conclusion: "failure" }]
+        }
+      ],
+      [{ name: "deploy" }],
+      [
+        {
+          name: "deploy",
+          steps: [{ name: "Run rad commands", conclusion: "success" }]
+        }
+      ],
+      [
+        {
+          name: "deploy",
+          steps: [{ name: "Different command", conclusion: "failure" }]
+        }
+      ],
+      [
+        {
+          name: "deploy",
+          steps: [{ name: "Run rad commands", conclusion: "failure" }]
+        },
+        {
+          name: "deploy",
+          steps: [{ name: "Run rad commands", conclusion: "failure" }]
+        }
+      ]
+    ])(
+      "retains unscoped evidence when job attribution is absent or conflicting: %j",
+      async (jobs) => {
+        const result = await collectWorkflowFailure(
+          target,
+          {
+            conclusion: "failure",
+            steps: [{ name: "Run rad commands", conclusion: "failure" }],
+            jobs
+          },
+          { resourcesTouched: true },
+          {
+            readLog: async () =>
+              [
+                "deploy\tRun rad commands\t2026-01-01 Error: { unattributed deploy }",
+                "deploy\tCleanup\t2026-01-01 Error: { available teardown evidence }"
+              ].join("\n"),
+            readControlPlaneLog: async () => null
+          }
+        );
+        expect(result.radiusError).toBe(
+          "Error: { available teardown evidence }"
+        );
+        expect(result.message).toContain("Failed step: Run rad commands.");
+      }
+    );
   });
 
   it("returns [] for empty input", () => {

@@ -136,6 +136,65 @@ function settleRecorder() {
   };
 }
 
+describe("workflow evidence uncertainty", () => {
+  it.each([null, undefined, "", "future_conclusion"])(
+    "keeps completed+%j unconfirmed for the existing bound",
+    async (conclusion) => {
+      const { request: input, state } = request({
+        resources: [{ name: "db", deployStatus: "pending" }]
+      });
+      let reads = 0;
+      let sleeps = 0;
+      await createDeployMonitorService(
+        dependencies({
+          getRunDetail: async () => {
+            reads++;
+            return { status: "completed", conclusion, steps: [] };
+          },
+          sleep: async (ms) => {
+            expect(ms).toBe(5000);
+            sleeps++;
+          },
+          settleDeployStatuses
+        })
+      ).run(input);
+      expect(reads).toBe(240);
+      expect(sleeps).toBe(240);
+      expect(state.deployStatus).toBe("failed");
+      expect(state.deployErrorKind).toBe("run-unconfirmed");
+      expect(state.deployError).toContain("It may still be running");
+      expect(state.deployError).not.toContain("Deployment failed");
+    }
+  );
+
+  it("waits through approval-like, unavailable and conflicting observations until a readable conclusion arrives", async () => {
+    const { request: input, state } = request({ resources: [{ name: "db" }] });
+    const observations: Array<DeployRunDetail | null> = [
+      { status: "waiting", conclusion: null, steps: [] },
+      null,
+      { status: "completed", conclusion: null, steps: [] },
+      { status: "in_progress", conclusion: "failure", steps: [] },
+      completedRun()
+    ];
+    const recorder = settleRecorder();
+    await createDeployMonitorService(
+      dependencies({
+        getRunDetail: async (repo, runId) => {
+          expect([repo, runId]).toEqual(["acme/widgets", 77]);
+          const detail = observations.shift();
+          if (detail === undefined) throw new Error("unexpected read");
+          return detail;
+        },
+        outcome: recorder.outcome
+      })
+    ).run(input);
+    expect(recorder.calls).toHaveLength(1);
+    expect(recorder.calls[0].conclusion).toBe("success");
+    expect(state.deployErrorKind).toBeUndefined();
+    expect(observations).toEqual([]);
+  });
+});
+
 describe("deploy monitor construction", () => {
   it.each([
     "findWorkflowRun",

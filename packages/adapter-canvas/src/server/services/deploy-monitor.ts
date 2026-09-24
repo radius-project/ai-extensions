@@ -1,5 +1,8 @@
 import type { DeployProgress } from "../../deploy-artifacts.js";
-import type { WorkflowRunDetail } from "@radius-project/core";
+import {
+  confirmedWorkflowConclusion,
+  type WorkflowRunDetail
+} from "@radius-project/core";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { DeployDispatchService } from "./deploy-dispatch.js";
 import type {
@@ -27,7 +30,8 @@ export interface DeployMonitorInstanceEntry {
 export type DeployRunDetail = Pick<
   WorkflowRunDetail,
   "status" | "conclusion" | "steps"
->;
+> &
+  Partial<Pick<WorkflowRunDetail, "jobs">>;
 
 export interface DeployMonitorStatusReader extends DeployOutcomeStatusReader {
   progress(): Promise<DeployProgress | null>;
@@ -440,7 +444,7 @@ export function createDeployMonitorService(
           }
         }
 
-        if (detail.status === "completed") {
+        if (confirmedWorkflowConclusion(detail)) {
           await dependencies.outcome.settle({
             entry,
             repo,
@@ -449,6 +453,7 @@ export function createDeployMonitorService(
             resources,
             conclusion: detail.conclusion,
             steps: detail.steps,
+            jobs: detail.jobs,
             statusReader,
             deployStepStartedAt,
             log,

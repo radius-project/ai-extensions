@@ -121,7 +121,10 @@ export type {
   DeleteWorkflowFiles
 } from "./workflows/index.js";
 export type { GitHub } from "./ports/index.js";
-export { observeWorkflowRun } from "./workflow-observation.js";
+export {
+  observeWorkflowRun,
+  confirmedWorkflowConclusion
+} from "./workflow-observation.js";
 export type {
   WorkflowJob,
   WorkflowRunDetail,
