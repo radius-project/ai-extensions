@@ -484,6 +484,58 @@ describe("securitySuppressions", () => {
   ])("ignores %s", (_name, source) => {
     expect(rules.securitySuppressions(source)).toEqual([]);
   });
+
+  // Each case was checked against Bicep 0.42.1: the directive-shaped line is
+  // not a directive to the compiler, and the rule still reports.
+  const directive = `#disable-diagnostics ${secureValueRule}`;
+  it.each([
+    ["a multiline string", `var s = '''\n${directive}\n'''`],
+    ["a block comment", `/*\n${directive}\n*/`],
+    [
+      "a block comment opened after a directive's codes",
+      `#disable-next-line no-unused-params /* note\n${directive}\n*/`
+    ],
+    ["a line after a block comment closes", `/* a\nb */ ${directive}`],
+    [
+      "a multiline string that holds an interpolation marker",
+      `var s = '''\${\n${directive}\n'''`
+    ],
+    ["an unterminated block comment", `/*\n${directive}`],
+    ["an unterminated multiline string", `var s = '''\n${directive}`]
+  ])("ignores a directive inside %s", (_name, source) => {
+    expect(rules.securitySuppressions(source)).toEqual([]);
+  });
+
+  it.each([
+    ["an escaped quote", "var s = 'it\\'s'"],
+    ["an escaped backslash before the closing quote", "var s = 'a\\\\'"],
+    ["an escaped interpolation marker", "var s = 'a\\${b'"],
+    ["comment markers inside a string", "var s = '/*'"],
+    ["comment markers inside a multiline string", "var s = '''/*'''"],
+    ["a quote inside a line comment", "// it's"],
+    ["a quote inside a block comment", "/* it's */"],
+    ["a multiline string closed by extra quotes", "var s = '''a''''''"],
+    ["an interpolation holding a string", "var s = 'x${'y${'}'}'}z'"],
+    ["an interpolation holding a multiline string", "var s = 'x${'''}'''}z'"],
+    ["an interpolation holding braces", "var s = 'x${ {b: 2}.b }y'"],
+    ["braces outside any string", "var o = {\n  a: {}\n}"],
+    [
+      "a single-line string left open at the line break",
+      "var s = 'unterminated"
+    ]
+  ])("finds a directive on the line after %s", (_name, before) => {
+    expect(rules.securitySuppressions(`${before}\n${directive}\n`)).toEqual([
+      {
+        line: before.split("\n").length + 1,
+        directive: "disable-diagnostics",
+        rules: [secureValueRule]
+      }
+    ]);
+  });
+
+  it("stops at the end of an unterminated string", () => {
+    expect(rules.securitySuppressions("var s = 'open\\")).toEqual([]);
+  });
 });
 
 describe("decodeText", () => {
@@ -887,7 +939,12 @@ describe("inspectSecurityRules", () => {
     });
   });
 
-  it("says when the configuration is outside the modeling run", () => {
+  const inheritedAdvice = (config: string) =>
+    `${config} is outside this modeling run's staging directory, and the staged model inherits it only because the run has no bicepconfig.json of its own: do not edit it in place, but give the run a staged bicepconfig.json without this setting, which takes precedence over it. show-radius-type.mjs writes one.`;
+  const moduleAdvice = (file: string) =>
+    `${file} belongs to a module outside this modeling run's staging directory, which the run cannot change: do not edit it, and do not try to repair it in the staged bicepconfig.json, which does not apply to that module. Stop referencing the module, or stop and report that it turns off a security rule.`;
+
+  it("tells a run without its own configuration to stage one", () => {
     const config = path.join(radiusDir, "bicepconfig.json");
     const files = fakeFiles({ [stagedApp]: "", [config]: offConfig });
 
@@ -897,8 +954,69 @@ describe("inspectSecurityRules", () => {
     }).findings;
 
     expect(finding).toBe(
-      `${config}: error security-rule-disabled: analyzers.core.rules.${secureValueRule}.level is "off", which turns the rule off. ${remedy} ${config} is outside this modeling run's staging directory, so do not edit it in place: make the change in the run's staged copy.`
+      `${config}: error security-rule-disabled: analyzers.core.rules.${secureValueRule}.level is "off", which turns the rule off. ${remedy} ${inheritedAdvice(config)}`
     );
+  });
+
+  it("picks the nearest listed configuration as the one the model inherits", () => {
+    const repoConfig = path.join(workspace, "bicepconfig.json");
+    const radiusConfig = path.join(radiusDir, "bicepconfig.json");
+    const files = fakeFiles({
+      [stagedApp]: "",
+      [repoConfig]: offConfig,
+      [radiusConfig]: offConfig
+    });
+
+    const findings = rules.inspectSecurityRules(
+      [stagedApp, repoConfig, radiusConfig],
+      { stagingDir, readFile: files.readFile }
+    ).findings;
+
+    expect(findings[0]).toContain(moduleAdvice(repoConfig));
+    expect(findings[1]).toContain(inheritedAdvice(radiusConfig));
+  });
+
+  // Bicep applies a module's own configuration even when the staged model has
+  // a clean one, so changing the staged configuration cannot clear it.
+  it("tells the run not to repair a module outside it in the staged configuration", () => {
+    const shared = path.join(workspace, "shared");
+    const module = path.join(shared, "db.bicep");
+    const moduleConfig = path.join(shared, "bicepconfig.json");
+    const files = fakeFiles({
+      [stagedApp]: "",
+      [stagedConfig]: "{}",
+      [module]: `#disable-next-line ${secureValueRule}\n`,
+      [moduleConfig]: offConfig
+    });
+
+    expect(
+      rules.inspectSecurityRules(
+        [stagedApp, stagedConfig, module, moduleConfig],
+        {
+          stagingDir,
+          readFile: files.readFile
+        }
+      ).findings
+    ).toEqual([
+      `${module}:1: error security-rule-suppressed: #disable-next-line suppresses ${secureValueRule}. ${remedy} ${moduleAdvice(module)}`,
+      `${moduleConfig}: error security-rule-disabled: analyzers.core.rules.${secureValueRule}.level is "off", which turns the rule off. ${remedy} ${moduleAdvice(moduleConfig)}`
+    ]);
+  });
+
+  it("treats an ancestor configuration as a module's once the run stages its own", () => {
+    const radiusConfig = path.join(radiusDir, "bicepconfig.json");
+    const files = fakeFiles({
+      [stagedApp]: "",
+      [stagedConfig]: "{}",
+      [radiusConfig]: offConfig
+    });
+
+    const [finding] = rules.inspectSecurityRules(
+      [stagedApp, stagedConfig, radiusConfig],
+      { stagingDir, readFile: files.readFile }
+    ).findings;
+
+    expect(finding).toContain(moduleAdvice(radiusConfig));
   });
 
   it("omits the staging advice for a compile outside a modeling run", () => {
@@ -930,6 +1048,26 @@ describe("inspectSecurityRules", () => {
     ).toEqual([
       `${stagedApp}:2: error security-rule-suppressed: #disable-next-line suppresses ${secureValueRule}. ${remedy}`,
       `${module}:1: error security-rule-suppressed: #disable-diagnostics suppresses secure-parameter-default. ${remedy}`
+    ]);
+  });
+
+  // Bicep's list does not say which files are loaded as data, so a data file
+  // holding a directive naming a security rule is refused too. Telling data
+  // from source by reading the model would reopen the bypasses this avoids.
+  it("reads a listed data file as source", () => {
+    const asset = path.join(stagingDir, "snippet.txt");
+    const files = fakeFiles({
+      [stagedApp]: "var s = loadTextContent('snippet.txt')\n",
+      [asset]: `#disable-next-line ${secureValueRule}\n`
+    });
+
+    expect(
+      rules.inspectSecurityRules([stagedApp, asset], {
+        stagingDir,
+        readFile: files.readFile
+      }).findings
+    ).toEqual([
+      `${asset}:1: error security-rule-suppressed: #disable-next-line suppresses ${secureValueRule}. ${remedy}`
     ]);
   });
 
