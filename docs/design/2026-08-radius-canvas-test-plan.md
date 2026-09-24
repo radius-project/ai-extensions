@@ -137,7 +137,7 @@ Complete when every host case passes before release. Skipped, simulated, or clea
 
 A phase starts only after the previous phase is green and its records are available. Keep each pull request reviewable and limited to its phase.
 
-The full plan is complete when every requirement in the appendices has a passing test or an approved deferral, all required pull-request and publish checks pass, screenshots are reviewed, real-host qualification passes, no live credential or external mutation is needed, and the build still produces one loadable `plugins/radius/dist/extension.mjs`.
+The full plan is complete when every requirement in the appendices has a passing test or an approved deferral, all required pull-request and publish checks pass, screenshots are reviewed, real-host qualification passes, no live credential or external mutation is needed, and the build still produces one loadable `.artifacts/radius/com.github.copilot/extensions/radius/extension.mjs`. Release branches publish that bundle at `plugins/radius/com.github.copilot/extensions/radius/extension.mjs`, following the [source, assembly, and publication layout](./2026-08-radius-canvas-test-architecture.md#compatibility-and-packaging).
 
 ## Open decisions
 
