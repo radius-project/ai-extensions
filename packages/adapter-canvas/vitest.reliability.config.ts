@@ -15,7 +15,8 @@ export default defineConfig({
       "src/browser/graph/**/*.test.ts",
       "test/e2e-cloud/support/{cloud-command-port,cloud-fixture}.test.ts",
       "test/e2e/support/**/*.test.ts",
-      "test/integration/http/**/*.test.ts"
+      "test/integration/http/**/*.test.ts",
+      "test/integration/runtime/bicep-security-rules.test.ts"
     ],
     environment: "node",
     testTimeout: 15_000

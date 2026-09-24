@@ -11,6 +11,7 @@ export default defineConfig({
         "packages/*/src/**/*.ts",
         "packages/*/src/**/*.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs",
+        "extensions/radius/skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs"
       ],
@@ -18,6 +19,13 @@ export default defineConfig({
       thresholds: {
         ...coverageBaseline.aggregate,
         "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "extensions/radius/skills/radius-app-bicep/scripts/bicep-security-rules.mjs":
           {
             statements: 100,
             branches: 100,

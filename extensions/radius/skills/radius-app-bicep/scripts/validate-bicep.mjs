@@ -18,9 +18,19 @@
 // agree.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  inspectSecurityRules,
+  requestFileReferences
+} from "./bicep-security-rules.mjs";
 
 const STAGING_RUN_RECORD = "run.json";
 // The resolved type contract show-radius-type.mjs stages for this run: a map of
@@ -1317,10 +1327,43 @@ const bicep = path.join(
   executable
 );
 
+// Whether every Bicep security rule runs for the files this compile reads. A
+// model that does not exist has nothing to inspect, and the compile reports it
+// exactly as it did before this check existed.
+async function inspectCompiledFiles(app, staged) {
+  if (!existsSync(app)) {
+    return { findings: [], unavailable: null };
+  }
+  const references = await requestFileReferences(bicep, app);
+  if (references.error !== undefined) {
+    return { findings: [], unavailable: references.error };
+  }
+  return inspectSecurityRules(references.filePaths, {
+    stagingDir: staged ? path.dirname(app) : null
+  });
+}
+
 // Compiles the model and distinguishes model diagnostics from a check that
 // could not produce a reliable verdict. The budget wraps it rather than living
 // inside it.
-function check(app, staged) {
+async function check(app, staged) {
+  // Established before compiling, because a security rule that was turned off
+  // reports nothing, so a clean compile is only evidence once the rules are
+  // known to have run. A finding still lets the compile run, so one attempt
+  // reports everything the model has to fix.
+  const securityRules = await inspectCompiledFiles(app, staged);
+  securityRules.findings.forEach(report);
+  if (securityRules.unavailable !== null) {
+    report(
+      `${app}: error checker-unavailable: whether the Bicep security rules run could not be established: ${securityRules.unavailable}. ` +
+        "No model-policy verdict was produced. Abort the staged run: do not retry validation, do not modify the current model, " +
+        "do not start another modeling run, do not write the origin record, and do not publish the run. " +
+        "Report this exact failure to the user and say that no application definition was written."
+    );
+    return EXIT_CHECK_UNAVAILABLE;
+  }
+  const securityRuleDisabled = securityRules.findings.length > 0;
+
   const compiled = spawnSync(
     bicep,
     ["build", app, "--diagnostics-format", "sarif", "--stdout"],
@@ -1403,7 +1446,8 @@ function check(app, staged) {
     resolvedTypes
   );
   return (
-      compilerFailed ||
+      securityRuleDisabled ||
+        compilerFailed ||
         invalidBuildSource ||
         invalidSourceReference ||
         invalidConnectionSource ||
@@ -1415,11 +1459,11 @@ function check(app, staged) {
     : EXIT_SUCCESS;
 }
 
-function main() {
+async function main() {
   const app = path.resolve(process.argv[2] || ".radius/app.bicep");
   const run = readRunRecord(app);
   if (run === null) {
-    return check(app, false);
+    return await check(app, false);
   }
 
   // Fail closed: a staged run whose record cannot be parsed or read has no
@@ -1445,7 +1489,7 @@ function main() {
     return EXIT_CHECK_UNAVAILABLE;
   }
 
-  const status = check(app, true);
+  const status = await check(app, true);
   // An unavailable check produced no new model verdict, so keep the last model
   // failure for comparison with the next completed validation. Success clears
   // it because there is no longer a failed model to compare.
@@ -1487,7 +1531,7 @@ function main() {
 }
 
 try {
-  process.exitCode = main();
+  process.exitCode = await main();
 } catch (error) {
   console.error(error);
   process.exitCode = EXIT_CHECK_UNAVAILABLE;
