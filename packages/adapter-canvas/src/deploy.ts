@@ -1,3 +1,28 @@
+import {
+  observeWorkflowRun,
+  type WorkflowRunDetail
+} from "@radius-project/core";
+import {
+  readWorkflowRun,
+  readWorkflowLog,
+  selectedWorkflowJson,
+  type WorkflowExecution
+} from "@radius-project/adapter-shared";
+export {
+  SelectedGhAuthorizationError,
+  isSelectedGhAuthorizationError,
+  isGitHubRateLimitError,
+  selectedCommandAuthorizationError
+} from "@radius-project/adapter-shared";
+export {
+  extractErrorLines,
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  classifyDeployCloudAuthDrift,
+  extractRadDeployError
+} from "@radius-project/core";
+export type { DeployCloudAuthDriftInput } from "@radius-project/core";
+
 // Canvas adapter — deploy monitoring + log parsing.
 // Polls GitHub Actions runs for the deploy's step lifecycle and terminal
 // conclusion, and extracts a readable failure cause from the completed run log.
@@ -40,49 +65,12 @@ export interface DeployedResource {
   deployStatus?: DeployStatus;
 }
 
-interface WorkflowStep {
-  name?: string;
-  status?: string;
-  conclusion?: string | null;
-}
-
-interface WorkflowJob {
-  steps?: WorkflowStep[];
-}
-
 interface WorkflowRun {
   databaseId?: number;
   createdAt?: string;
   status?: string;
   conclusion?: string | null;
   displayTitle?: string;
-}
-
-interface WorkflowRunDetail extends WorkflowRun {
-  jobs: WorkflowJob[];
-  steps: WorkflowStep[];
-}
-
-export class SelectedGhAuthorizationError extends Error {
-  readonly login: string;
-  readonly status: 401 | 403 | 404;
-
-  constructor(login: string, status: 401 | 403 | 404, detail: string) {
-    super(
-      `GitHub rejected @${login} while reading workflow state (HTTP ${status})${
-        detail ? `: ${detail}` : "."
-      }`
-    );
-    this.name = "SelectedGhAuthorizationError";
-    this.login = login;
-    this.status = status;
-  }
-}
-
-export function isSelectedGhAuthorizationError(
-  error: unknown
-): error is SelectedGhAuthorizationError {
-  return error instanceof SelectedGhAuthorizationError;
 }
 
 interface RepoPermissions {
@@ -121,189 +109,6 @@ function parseWorkflowRun(value: unknown): WorkflowRun | null {
       : undefined,
     displayTitle: stringField(value.displayTitle)
   };
-}
-
-function selectedAuthorizationStatus(
-  stdout: string,
-  stderr: string
-): 401 | 403 | null {
-  const detail = `${stderr}\n${stdout}`;
-  const match = /\bHTTP\s+(401|403)\b/i.exec(detail);
-  if (!match) return isSamlAuthorizationFailure(detail) ? 403 : null;
-  return match[1] === "401" ? 401 : 403;
-}
-
-function isSamlAuthorizationFailure(detail: string): boolean {
-  return /Resource protected by organization SAML enforcement|grant your OAuth token access/i.test(
-    detail
-  );
-}
-
-function selectedFailureStatus(
-  stdout: string,
-  stderr: string
-): 401 | 403 | 404 | 429 | null {
-  const detail = `${stderr}\n${stdout}`;
-  const match = /\bHTTP\s+(401|403|404|429)\b/i.exec(detail);
-  if (!match) return isSamlAuthorizationFailure(detail) ? 403 : null;
-  const status = Number(match[1]);
-  if (status === 401 || status === 403 || status === 404 || status === 429) {
-    return status;
-  }
-  return null;
-}
-
-function isRateLimitFailure(stdout: string, stderr: string): boolean {
-  const detail = `${stderr}\n${stdout}`;
-  return (
-    /\bHTTP\s+429\b/i.test(detail) ||
-    /\bRetry-After\s*:/i.test(detail) ||
-    /\bX-RateLimit-Remaining\s*:\s*0\b/i.test(detail) ||
-    /\bsecondary rate limit\b/i.test(detail) ||
-    /\b(?:API|primary) rate limit (?:exceeded|reached)\b/i.test(detail) ||
-    /\brate limit\b[\s\S]*\b(?:reset|resets|retry|try again)\b/i.test(detail)
-  );
-}
-
-export function isGitHubRateLimitError(error: unknown): boolean {
-  const detail = error instanceof Error ? error.message : String(error);
-  return isRateLimitFailure("", detail);
-}
-
-function selectedAuthorizationError(
-  executor: SelectedGhExecutor,
-  stdout: string,
-  stderr: string
-): SelectedGhAuthorizationError | null {
-  const status = selectedAuthorizationStatus(stdout, stderr);
-  if (status === 403 && isRateLimitFailure(stdout, stderr)) return null;
-  return status === null ? null : (
-      new SelectedGhAuthorizationError(
-        executor.login,
-        status,
-        (stderr || stdout).trim()
-      )
-    );
-}
-
-function rejectedSelectedAuthorizationError(
-  executor: SelectedGhExecutor,
-  error: unknown
-): SelectedGhAuthorizationError | null {
-  if (isSelectedGhAuthorizationError(error)) return error;
-  const detail = executor.errorMessage(error);
-  const status = selectedAuthorizationStatus("", detail);
-  if (status === 403 && isRateLimitFailure("", detail)) return null;
-  return status === null ? null : (
-      new SelectedGhAuthorizationError(executor.login, status, detail)
-    );
-}
-
-async function selectedRepositoryAccessError(
-  executor: SelectedGhExecutor,
-  repo: string
-): Promise<SelectedGhAuthorizationError | null> {
-  try {
-    const result = await executor.run(
-      ["api", `repos/${repo}`, "--jq", ".full_name"],
-      { timeout: 15000 }
-    );
-    if (Number(result.code) === 0) return null;
-    if (isRateLimitFailure(result.stdout, result.stderr)) return null;
-    const status = selectedFailureStatus(result.stdout, result.stderr);
-    if (status === 401 || status === 403 || status === 404) {
-      return new SelectedGhAuthorizationError(
-        executor.login,
-        status,
-        (result.stderr || result.stdout).trim()
-      );
-    }
-    return null;
-  } catch (error) {
-    if (isSelectedGhAuthorizationError(error)) return error;
-    const detail = executor.errorMessage(error);
-    if (isRateLimitFailure("", detail)) return null;
-    const status = selectedFailureStatus("", detail);
-    return status === 401 || status === 403 || status === 404 ?
-        new SelectedGhAuthorizationError(executor.login, status, detail)
-      : null;
-  }
-}
-
-export async function selectedCommandAuthorizationError(
-  executor: SelectedGhExecutor,
-  repo: string,
-  result: { code: string | number; stdout: string; stderr: string }
-): Promise<SelectedGhAuthorizationError | null> {
-  if (Number(result.code) === 0) return null;
-  if (isRateLimitFailure(result.stdout, result.stderr)) return null;
-  const status = selectedFailureStatus(result.stdout, result.stderr);
-  if (status === 404) {
-    return selectedRepositoryAccessError(executor, repo);
-  }
-  return status === 401 || status === 403 ?
-      new SelectedGhAuthorizationError(
-        executor.login,
-        status,
-        (result.stderr || result.stdout).trim()
-      )
-    : null;
-}
-
-type SelectedWorkflowJsonRead =
-  | { state: "value"; value: unknown }
-  | { state: "missing" }
-  | { state: "fallback" };
-
-async function selectedWorkflowJson(
-  executor: SelectedGhExecutor,
-  repo: string,
-  args: string[],
-  timeout = 15000
-): Promise<SelectedWorkflowJsonRead> {
-  try {
-    const result = await executor.run(args, { timeout });
-    if (Number(result.code) !== 0) {
-      const status = selectedFailureStatus(result.stdout, result.stderr);
-      if (status === 404) {
-        const repositoryError = await selectedRepositoryAccessError(
-          executor,
-          repo
-        );
-        if (repositoryError) throw repositoryError;
-        return { state: "missing" };
-      }
-      const authorizationError = selectedAuthorizationError(
-        executor,
-        result.stdout,
-        result.stderr
-      );
-      if (authorizationError) throw authorizationError;
-      return { state: "fallback" };
-    }
-    try {
-      return { state: "value", value: JSON.parse(result.stdout.trim()) };
-    } catch {
-      return { state: "fallback" };
-    }
-  } catch (error) {
-    if (isSelectedGhAuthorizationError(error)) throw error;
-    const detail = executor.errorMessage(error);
-    if (selectedFailureStatus("", detail) === 404) {
-      const repositoryError = await selectedRepositoryAccessError(
-        executor,
-        repo
-      );
-      if (repositoryError) throw repositoryError;
-      return { state: "missing" };
-    }
-    const authorizationError = rejectedSelectedAuthorizationError(
-      executor,
-      error
-    );
-    if (authorizationError) throw authorizationError;
-    throw error;
-  }
 }
 
 export function ghJson(
@@ -460,263 +265,26 @@ export function selectWorkflowRunId(
   return null;
 }
 
-export async function getRunDetail(
+export function getRunDetail(
   repo: string,
   runId: number | string,
   executor?: SelectedGhExecutor
 ): Promise<WorkflowRunDetail | null> {
-  const detailArgs = [
-    "run",
-    "view",
-    String(runId),
-    "--json",
-    "status,conclusion,jobs",
-    "--repo",
-    repo
-  ];
-  const selectedDetail =
-    executor ? await selectedWorkflowJson(executor, repo, detailArgs) : null;
-  if (selectedDetail?.state === "missing") return null;
-  let data =
-    selectedDetail ?
-      selectedDetail.state === "value" ?
-        selectedDetail.value
-      : null
-    : await ghJson(detailArgs, null);
-  // The jobs sub-resource (/actions/runs/<id>/jobs) is intermittently flaky
-  // (HTTP 503) and, when included, fails the whole `gh run view` call — which
-  // would otherwise report the run's status/conclusion just fine. The jobs
-  // (steps) are only needed for progress/failure detail, not for detecting
-  // completion, so fall back to a status-only read when the combined call
-  // fails. This keeps completion detection (e.g. verify-status → success)
-  // working even while the jobs endpoint is unavailable.
-  if (!isRecord(data)) {
-    const statusArgs = [
-      "run",
-      "view",
-      String(runId),
-      "--json",
-      "status,conclusion",
-      "--repo",
-      repo
-    ];
-    const selectedStatus =
-      executor ? await selectedWorkflowJson(executor, repo, statusArgs) : null;
-    if (selectedStatus?.state === "missing") return null;
-    data =
-      selectedStatus ?
-        selectedStatus.state === "value" ?
-          selectedStatus.value
-        : null
-      : await ghJson(statusArgs, null);
-    if (!isRecord(data)) return null;
-    return {
-      status: stringField(data.status),
-      conclusion:
-        typeof data.conclusion === "string" || data.conclusion === null ?
-          data.conclusion
-        : undefined,
-      jobs: [],
-      steps: []
-    };
-  }
-  const jobs: WorkflowJob[] =
-    Array.isArray(data.jobs) ?
-      data.jobs.filter((job): job is WorkflowJob => isRecord(job))
-    : [];
-  const steps: WorkflowStep[] = [];
-  for (const job of jobs) {
-    for (const s of job.steps || []) {
-      steps.push({ name: s.name, status: s.status, conclusion: s.conclusion });
+  return observeWorkflowRun(
+    { repo, runId },
+    {
+      readRun: (targetRepo, targetRunId) =>
+        readWorkflowRun(workflowExecution(executor), targetRepo, targetRunId)
     }
-  }
-  return {
-    status: stringField(data.status),
-    conclusion:
-      typeof data.conclusion === "string" || data.conclusion === null ?
-        data.conclusion
-      : undefined,
-    jobs,
-    steps
-  };
+  );
 }
 
-export async function fetchRunLog(
+export function fetchRunLog(
   repo: string,
   runId: number | string,
   executor?: SelectedGhExecutor
 ): Promise<string | null> {
-  if (executor) {
-    try {
-      const result = await executor.run(
-        ["run", "view", String(runId), "--log", "--repo", repo],
-        {
-          timeout: 30000,
-          maxBuffer: 1024 * 1024 * 20
-        }
-      );
-      if (Number(result.code) !== 0) {
-        if (selectedFailureStatus("", result.stderr) === 404) {
-          const repositoryError = await selectedRepositoryAccessError(
-            executor,
-            repo
-          );
-          if (repositoryError) throw repositoryError;
-          return null;
-        }
-        const authorizationError = selectedAuthorizationError(
-          executor,
-          "",
-          result.stderr
-        );
-        if (authorizationError) throw authorizationError;
-        return null;
-      }
-      return result.stdout || null;
-    } catch (error) {
-      if (isSelectedGhAuthorizationError(error)) throw error;
-      const detail = executor.errorMessage(error);
-      if (selectedFailureStatus("", detail) === 404) {
-        const repositoryError = await selectedRepositoryAccessError(
-          executor,
-          repo
-        );
-        if (repositoryError) throw repositoryError;
-        return null;
-      }
-      const authorizationError = rejectedSelectedAuthorizationError(
-        executor,
-        error
-      );
-      if (authorizationError) throw authorizationError;
-      throw error;
-    }
-  }
-  return new Promise((resolve) => {
-    cliExec(
-      "gh",
-      ["run", "view", String(runId), "--log", "--repo", repo],
-      { timeout: 30000, maxBuffer: 1024 * 1024 * 20 },
-      (err, stdout) => {
-        if (err || !stdout) {
-          resolve(null);
-          return;
-        }
-        resolve(stdout);
-      }
-    );
-  });
-}
-
-export function extractErrorLines(logText?: string | null, max = 12): string[] {
-  if (!logText) return [];
-  const out: string[] = [];
-  const re =
-    /\b(error|errors|failed|failure|fatal|denied|unauthorized|forbidden|not\s+found|cannot|unable|panic|exception|invalid|timed?\s*out)\b/i;
-  for (const raw of logText.split(/\r?\n/)) {
-    const line = raw.replace(/\s+$/, "");
-    if (!line.trim()) continue;
-    if (re.test(line)) out.push(line.trim());
-  }
-  return out.slice(-max);
-}
-
-export function extractGitHubActionsStepLog(
-  logText: string | null | undefined,
-  stepName: string
-): string {
-  if (!logText || !stepName) return "";
-  const lines = logText.split(/\r?\n/);
-  const exact = lines.filter((line) => {
-    const fields = line.split("\t");
-    return fields.length >= 3 && fields[1] === stepName;
-  });
-  if (exact.length > 0) return exact.join("\n");
-
-  // `gh run view --log` can label every row UNKNOWN STEP even though the jobs
-  // API reports real step names. In that format action boundaries survive as
-  // runner group markers. Recognize the Azure Login action itself, then retain
-  // its group and the adjacent ungrouped CLI-login output until the next group.
-  if (stepName !== "Azure Login (OIDC)") return "";
-  const out: string[] = [];
-  let capturing = false;
-  let groupEnded = false;
-  for (const line of lines) {
-    const fields = line.split("\t");
-    if (fields.length < 3 || fields[1] !== "UNKNOWN STEP") continue;
-    const message = fields.slice(2).join("\t");
-    if (/##\[group\]Run azure\/login@/i.test(message)) {
-      capturing = true;
-      groupEnded = false;
-    } else if (capturing && groupEnded && /##\[group\]/.test(message)) {
-      break;
-    }
-    if (capturing) {
-      out.push(line);
-      if (/##\[endgroup\]/.test(message)) groupEnded = true;
-    }
-  }
-  return out.join("\n");
-}
-
-// Detects the Entra "enterprise claim" rejection (AADSTS7002381) that GitHub
-// Actions OIDC hits when a repo is NOT owned by an org in a GitHub Enterprise.
-// Tenant-agnostic: the accepted enterprise values and the actual value are parsed
-// out of the error text itself, so this works for any tenant policy, not just
-// Microsoft's. Returns a friendly multi-line explanation, or '' if not applicable.
-export function explainOidcEnterpriseClaim(logText?: string | null): string {
-  if (!logText) return "";
-  if (
-    !/AADSTS7002381/.test(logText) &&
-    !/must contain the enterprise claim/i.test(logText)
-  )
-    return "";
-  // Parse: "...enterprise claim with value 'a', 'b' or 'c' but actual value is 'x'..."
-  let accepted: string[] = [];
-  let actual: string | null = null;
-  const m =
-    /enterprise claim with value\s+(.+?)\s+but actual value is\s+'([^']*)'/i.exec(
-      logText
-    );
-  if (m) {
-    accepted = (m[1].match(/'([^']*)'/g) || []).map((s) => s.replace(/'/g, ""));
-    actual = m[2];
-  }
-  const acceptedLabel =
-    accepted.length ?
-      accepted.join(", ")
-    : "a value required by the target Azure tenant";
-  let leadLine: string, actualLabel: string;
-  if (actual === "") {
-    // Claim present in the issuer config but empty — the classic personal-repo case.
-    leadLine =
-      'Azure Login (OIDC) was rejected because this repository\u2019s GitHub OIDC token is missing the required "enterprise" claim.';
-    actualLabel = "empty (this repository is not part of a GitHub Enterprise)";
-  } else if (actual) {
-    // Claim present but not one the tenant trusts.
-    leadLine =
-      'Azure Login (OIDC) was rejected because this repository\u2019s GitHub "enterprise" OIDC claim ("' +
-      actual +
-      '") is not trusted by the target Azure tenant.';
-    actualLabel = '"' + actual + '"';
-  } else {
-    // Could not parse the actual value from the error text.
-    leadLine =
-      'Azure Login (OIDC) was rejected by the target Azure tenant over the GitHub OIDC "enterprise" claim.';
-    actualLabel = "not reported";
-  }
-  return [
-    leadLine,
-    "The target Azure tenant only trusts GitHub Actions tokens whose enterprise claim is one of: " +
-      acceptedLabel +
-      " (actual: " +
-      actualLabel +
-      ").",
-    "GitHub only includes the enterprise claim for repositories owned by an organization that belongs to a GitHub Enterprise \u2014 personal-account repositories cannot satisfy this policy.",
-    "Fix: host this repository under an organization that is part of one of the accepted GitHub Enterprises (" +
-      acceptedLabel +
-      "), then re-run Create Environment so the federated credential is recreated for the new owner/repo."
-  ].join("\n");
+  return readWorkflowLog(workflowExecution(executor), repo, runId);
 }
 
 // Detects the Azure Login (azure/login) "No subscriptions found" failure that
@@ -733,112 +301,6 @@ export function explainNoSubscriptions(logText?: string | null): string {
     "Azure Login succeeded, but the configured identity has no subscriptions it can see, so credential verification failed (\u201cNo subscriptions found\u201d).",
     "This means the app registration / service principal has no Azure role assignment granting access to the subscription \u2014 signing in works, but it has no effective RBAC.",
     "Fix: grant the identity a role (for example, Contributor) scoped to the subscription (or a resource group within it), then re-run credential verification. If you set up credentials manually, assign the role to the same app registration whose client ID is configured on the environment; if you used auto-setup, re-run it so the role assignment is (re)created."
-  ].join("\n");
-}
-
-// The deploy workflow signs in to the cloud in a single, named step that runs
-// *before* any Radius/cluster mutation: "Azure Login (OIDC)" for Azure and
-// "Configure AWS Credentials (OIDC)" (or an assume-role step) for AWS. These are
-// matched exactly rather than with a broad keyword regex, because the deploy
-// workflow's *mutation* steps also mention "credentials"/"oidc" (for example
-// "Register cloud credentials with Radius" or "Project cloud OIDC tokens into
-// Radius pods"), and a broad match would misread a failure in one of those —
-// which happens after state has already been changed — as pre-mutation drift.
-const AZURE_LOGIN_STEP = /^\s*azure login(?:\s*\(oidc\))?\s*$/i;
-const AWS_LOGIN_STEP =
-  /^\s*(?:configure aws credentials(?:\s*\(oidc\))?|assume[\s-]*role)\s*$/i;
-
-// Steps that mutate cluster or Radius control-plane state. They all run after
-// cloud login and up to / including "Run rad commands". If any of them is among
-// the failed steps, a mutation was attempted, so the run is not a clean
-// pre-mutation credential drift regardless of the login step's outcome.
-const DEPLOY_MUTATION_STEPS: readonly RegExp[] = [
-  /project cloud oidc tokens/i,
-  /refresh external deployment target credentials/i,
-  /restore radius state/i,
-  /register cloud credentials with radius/i,
-  /create radius environment/i,
-  /apply custom recipe pack/i,
-  /prepare live deployment progress/i,
-  /run rad commands/i,
-  /publish deployed graph/i
-];
-
-export interface DeployCloudAuthDriftInput {
-  // "aws" or "azure". Any other value cannot be tied to a provider-specific
-  // login step and is never classified as drift.
-  provider?: string | null;
-  // Whether `rad deploy` began touching resources. When true this is a
-  // mid-deploy resource failure (exception 5.1), never auth drift.
-  resourcesTouched: boolean;
-  // Names of the run's failed (non-success, non-skipped) steps.
-  failedStepNames: readonly (string | undefined)[];
-  // Whether the environment previously passed credential verification. Drift
-  // (5.2) means credentials that *worked before* stopped working; an environment
-  // that never verified (its verification failed and was bypassed) has no prior
-  // good state to drift from, so when this is explicitly false the failure is not
-  // classified as drift. Undefined leaves the classification to the step
-  // evidence, preserving the caller that cannot determine prior state.
-  environmentPreviouslyVerified?: boolean;
-}
-
-// Exception 5.2: a redeploy to an environment that verified earlier now fails
-// cloud authentication or authorization *before any resource is touched*,
-// meaning the trust or permissions drifted since setup (the IAM role's trust
-// policy or permissions, or the Azure federated credential or role assignment,
-// was changed or removed). Detected from the run shape — the provider's cloud
-// login step failed, no mutation step ran, and `rad deploy` never touched a
-// resource — so it is distinct from a mid-deploy resource failure (5.1). Returns
-// a readable, actionable message, or '' when the failure is not auth drift.
-// Pure — no I/O, never throws.
-export function classifyDeployCloudAuthDrift(
-  input: DeployCloudAuthDriftInput
-): string {
-  if (input.resourcesTouched) return "";
-  if (input.environmentPreviouslyVerified === false) return "";
-  const failedNames = input.failedStepNames.filter(
-    (name): name is string => !!name
-  );
-  // A failed mutation step means state was already being changed — not drift.
-  if (
-    failedNames.some((name) =>
-      DEPLOY_MUTATION_STEPS.some((pattern) => pattern.test(name))
-    )
-  ) {
-    return "";
-  }
-  const loginStep =
-    input.provider === "aws" ? AWS_LOGIN_STEP
-    : input.provider === "azure" ? AZURE_LOGIN_STEP
-    : null;
-  if (!loginStep) return "";
-  const failedAtLogin = failedNames.some((name) => loginStep.test(name));
-  if (!failedAtLogin) return "";
-  const cloud = input.provider === "aws" ? "AWS" : "Azure";
-  const drift =
-    input.provider === "aws" ?
-      "the IAM role's trust policy or permissions were changed or removed"
-    : "the federated credential or role assignment was changed or removed";
-  // Only assert that the environment verified earlier when the caller can prove
-  // it. An environment can now be deployable via the "bypassed" status without
-  // ever passing verification, so when prior success is unknown the message must
-  // not claim a good state that may never have existed.
-  const driftCause =
-    input.environmentPreviouslyVerified === true ?
-      "This environment verified earlier, so its " +
-      cloud +
-      " credentials appear to have drifted since setup (for example " +
-      drift +
-      ")."
-    : "If this environment authenticated before, its " +
-      cloud +
-      " credentials may have drifted since setup (for example " +
-      drift +
-      ").";
-  return [
-    "Cloud authentication or authorization failed before any resource was deployed.",
-    driftCause,
-    "Re-verify the environment's credentials, then redeploy."
   ].join("\n");
 }
 
@@ -942,39 +404,16 @@ export function isRepoNotFoundError(errText?: string | null): boolean {
   return /\bHTTP 404\b/i.test(errText) || /\bnot found\b/i.test(errText);
 }
 
-export function extractRadDeployError(
-  logText?: string | null,
-  maxChars = 4000
-): string {
-  if (!logText) return "";
-  // Strip the "job\tstep\ttimestamp " prefix `gh run view --log` adds, if present,
-  // so the structured block is detectable regardless of the log source.
-  const lines = logText.split(/\r?\n/).map((raw) => {
-    let l = raw.replace(/\s+$/, "");
-    // gh run log prefix: tabs separate job/step, then "<ISO timestamp> <text>".
-    const m = l.match(/^[^\t]*\t[^\t]*\t\S+\s(.*)$/);
-    if (m) l = m[1];
-    return l;
-  });
-  // Find the LAST structured rad error block ("Error: {").
-  let start = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/^\s*Error:\s*\{/.test(lines[i])) {
-      start = i;
-      break;
-    }
-  }
-  if (start >= 0) {
-    const block = [];
-    for (let i = start; i < lines.length; i++) {
-      const l = lines[i];
-      if (/^\s*Error:\s*Process completed/.test(l)) break; // GitHub Actions wrapper line
-      block.push(l);
-      if (/^\s*TraceId:/.test(l)) break; // end of the rad error
-    }
-    const out = block.join("\n").trim();
-    if (out) return out.slice(0, maxChars);
-  }
-  // Fallback: collect trailing error-ish lines.
-  return extractErrorLines(lines.join("\n"), 20).join("\n").slice(0, maxChars);
+function workflowExecution(executor?: SelectedGhExecutor): WorkflowExecution {
+  return executor ?
+      { mode: "selected", executor }
+    : {
+        mode: "ambient",
+        run: (args, options) =>
+          new Promise((resolve) => {
+            cliExec("gh", args, options, (error, stdout, stderr) => {
+              resolve({ code: error ? 1 : 0, stdout, stderr });
+            });
+          })
+      };
 }
