@@ -285,11 +285,26 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
         "${workflow}" ||
         fail "${workflow}: attach step does not consume the provider pack output"
 done
+# The pack-only recipe pack artifact owns exactly these parameters, so each is
+# passed unconditionally rather than probed for in the downloaded pack.
+for pack_parameter in \
+    routesGatewayName routesGatewayNamespace \
+    containerImagesRegistry containerImagesRegistrySecretName; do
+    grep -qF -- "--parameters ${pack_parameter}=" "${AZURE_WORKFLOW}" ||
+        fail "Azure workflow does not pass ${pack_parameter} to the recipe pack"
+done
+
+# The legacy combined environment/recipe-pack artifact declared these; the
+# pack-only shape does not. Neither the compatibility shim nor the parameters
+# themselves may come back.
+if grep -qF 'append_pack_parameter_if_declared' "${AZURE_WORKFLOW}"; then
+    fail "Azure workflow still carries the legacy recipe-pack parameter shim"
+fi
 for removed_parameter in \
     environmentName environmentNamespace azureSubscriptionId azureResourceGroup; do
-    grep -qF "append_pack_parameter_if_declared ${removed_parameter}" \
-        "${AZURE_WORKFLOW}" ||
-        fail "Azure workflow does not conditionally pass ${removed_parameter}"
+    if grep -qF -- "--parameters ${removed_parameter}=" "${AZURE_WORKFLOW}"; then
+        fail "Azure workflow still passes legacy parameter ${removed_parameter}"
+    fi
 done
 
 echo "provider recipe-pack lifecycle tests passed"

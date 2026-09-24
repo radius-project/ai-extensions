@@ -356,26 +356,15 @@ jobs:
           cat "$RECIPE_PACK_BICEP"
           echo ""
           echo "Deploying provider recipe pack..."
+          # Every parameter here is owned by the pack-only recipe pack artifact.
+          # build/scripts/verify-contrib-consumers.sh fails when the catalog is
+          # pinned to a pack that does not declare one of them.
           PACK_PARAMETERS=(
             --parameters routesGatewayName="$ROUTES_GATEWAY_NAME"
             --parameters routesGatewayNamespace="$ROUTES_GATEWAY_NAMESPACE"
             --parameters containerImagesRegistry="$BUILD_REGISTRY"
             --parameters containerImagesRegistrySecretName="$REGISTRY_SECRET_NAME"
           )
-          append_pack_parameter_if_declared() {
-            local name="$1" value="$2"
-            if grep -Eq "^[[:space:]]*param[[:space:]]+${name}[[:space:]]+" \
-              "$RECIPE_PACK_BICEP"; then
-              PACK_PARAMETERS+=(--parameters "${name}=${value}")
-            fi
-          }
-          # Released packs still declare the legacy environment parameters; the
-          # pack-only shape removes them. Pass each only when its declaration is
-          # present so both immutable catalog revisions remain deployable.
-          append_pack_parameter_if_declared environmentName "$ENVIRONMENT"
-          append_pack_parameter_if_declared environmentNamespace "$NAMESPACE"
-          append_pack_parameter_if_declared azureSubscriptionId "${{ vars.AZURE_SUBSCRIPTION_ID }}"
-          append_pack_parameter_if_declared azureResourceGroup "${{ vars.AZURE_RESOURCE_GROUP }}"
 
           rad deploy "$RECIPE_PACK_BICEP" \
             --environment "$ENVIRONMENT" \

@@ -84,6 +84,10 @@ jobs:
           radius_contrib_recipe_pack_url sample pack.bicep
           radius_contrib_kube_recipe_source Radius.Test/widgets widgets
           radius_contrib_resource_git_source Radius.Test/widgets recipes/terraform
+          PACK_PARAMETERS=(
+            --parameters routesGatewayName="$ROUTES_GATEWAY_NAME"
+          )
+          rad deploy "$RECIPE_PACK_BICEP" "${PACK_PARAMETERS[@]}"
 YAML
 
 cat >"${TEST_ROOT}/bin/curl" <<'BASH'
@@ -127,6 +131,7 @@ recipePacks:
 YAML
 else
     cat >"${output}" <<BICEP
+param ${PACK_DECLARED_PARAMETER:-routesGatewayName} string
 resource pack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: '${PACK_DECLARED_NAME:-sample}'
   properties: {
@@ -213,6 +218,19 @@ if PATH="${TEST_ROOT}/bin:${PATH}" \
     EXTENSION_DIR="${TEST_ROOT}/extension" \
     bash "${VERIFIER}" >/dev/null 2>&1; then
     fail "verifier accepted a pack that does not declare the attached pack name"
+fi
+
+# A pack that no longer declares a parameter the workflow passes would otherwise
+# only fail at deploy time, when `rad deploy` rejects the unknown parameter.
+: >"${CURL_LOG}"
+: >"${DOCKER_LOG}"
+if PATH="${TEST_ROOT}/bin:${PATH}" \
+    PACK_DECLARED_PARAMETER=renamedGatewayName \
+    CATALOG_REF="${REF}" \
+    CATALOG_HELPER="${HELPER_PATH}" \
+    EXTENSION_DIR="${TEST_ROOT}/extension" \
+    bash "${VERIFIER}" >/dev/null 2>&1; then
+    fail "verifier accepted a pack that does not declare a passed parameter"
 fi
 
 echo "contrib consumer verifier tests passed"
