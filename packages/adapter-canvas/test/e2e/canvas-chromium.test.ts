@@ -4089,6 +4089,47 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#deploy-progress-modal")).toBeAttached();
   });
 
+  test("preserves primary failure with unavailable diagnostics and keyboard dismissal @safety", async ({
+    page,
+    canvas
+  }) => {
+    const error =
+      "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
+      "Error: recipe quota <img src=x>\n\nThe control-plane log could not be read.";
+    await page.route("**/api/deploy-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          active: false,
+          error,
+          errorKind: null,
+          deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+          repairing: false,
+          handoff: { pending: false, state: "idle" },
+          attempt: { targetRepo: "", environment: "" }
+        })
+      });
+    });
+    await page.goto(
+      `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
+    );
+    await expect(page.locator("#deploy-progress-title")).toContainText(
+      "failed"
+    );
+    await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+      error
+    );
+    await expect(page.locator("#deploy-progress-subtitle img")).toHaveCount(0);
+    await expectNoWcagViolations(page);
+    const back = page.locator("#deploy-fail-back");
+    await back.focus();
+    await expect(back).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#deploy-progress-modal")).toBeHidden();
+  });
+
   test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({
     page,
     canvas

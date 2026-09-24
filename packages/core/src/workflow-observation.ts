@@ -5,6 +5,7 @@ export interface WorkflowStep {
 }
 
 export interface WorkflowJob {
+  name?: string;
   steps?: WorkflowStep[];
 }
 
@@ -30,6 +31,26 @@ export interface WorkflowObservationReads {
     repo: string,
     runId: number | string
   ): Promise<WorkflowRunRead | null>;
+}
+
+export function confirmedWorkflowConclusion(
+  run: Pick<WorkflowRunDetail, "status" | "conclusion">
+): string | null {
+  if (run.status !== "completed") return null;
+  switch (run.conclusion) {
+    case "success":
+    case "failure":
+    case "cancelled":
+    case "timed_out":
+    case "action_required":
+    case "neutral":
+    case "skipped":
+    case "stale":
+    case "startup_failure":
+      return run.conclusion;
+    default:
+      return null;
+  }
 }
 
 export async function observeWorkflowRun(
