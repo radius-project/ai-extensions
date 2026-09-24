@@ -10,7 +10,7 @@
 
 Radius Canvas is the visual part of the Radius Copilot extension. It opens a panel where a developer can inspect an application graph, compare branches, configure cloud credentials, create a Radius environment, and deploy or delete an application. The host talks to the extension through the Copilot SDK; the extension starts a private HTTP server on `127.0.0.1`; that server renders one of seven pages; and browser code on the page calls the declared local API routes to read or change state.
 
-The extension is built as one generated, loadable file at `plugins/radius/dist/extension.mjs`. The test architecture must preserve that packaging contract and the existing server-rendered interface.
+The extension is built as one generated, loadable bundle at `.artifacts/radius/com.github.copilot/extensions/radius/extension.mjs`. The test architecture must preserve that packaging contract and the existing server-rendered interface.
 
 ### A normal request
 
@@ -81,7 +81,7 @@ The current accepted runtime surface is two actions, `get_graph_resources` and `
 - Add real Chromium coverage for browser behavior, keyboard operation, automated WCAG 2.2 A/AA checks, and a small set of stable screenshots.
 - Keep pull-request tests deterministic, secret-free, and independent of live GitHub, Azure, AWS, GHCR, and public asset availability.
 - Track aggregate and per-package coverage without allowing percentage targets to replace safety scenarios.
-- Prove that the build still emits one loadable `plugins/radius/dist/extension.mjs`.
+- Prove that the build still emits one loadable `.artifacts/radius/com.github.copilot/extensions/radius/extension.mjs`.
 
 ### Non-goals
 
@@ -195,7 +195,9 @@ The only approved public-surface change was the Phase 0 removal of four legacy p
 
 Every later slice is behavior-preserving. A request-body limit, new `413`, global JSON `500`, centralized error envelope, or other response change is a separate hardening decision with before-and-after HTTP tests; it must not appear as a side effect of moving a route.
 
-The build continues to use Node 24, pnpm 11.19.0, and esbuild. The Copilot SDK remains external, Markdown skill content remains bundled as text, and the output remains `plugins/radius/dist/extension.mjs`.
+The build continues to use Node 24, pnpm 11.19.0, and esbuild. The Copilot SDK remains external, Markdown skill content remains bundled as text, and the extension bundle is emitted at `.artifacts/radius/com.github.copilot/extensions/radius/extension.mjs`.
+
+The source release-unit manifest is [`extensions/radius/package.json`](../../extensions/radius/package.json), whose `main` is `com.github.copilot/extensions/radius/extension.mjs`. The owning build, [`packages/adapter-canvas/build.mjs`](../../packages/adapter-canvas/build.mjs), assembles the plugin under `.artifacts/radius/`, including its generated `package.json` and extension bundle. As defined by [`scripts/plugins.mjs`](../../scripts/plugins.mjs), release branches publish that assembled tree at `plugins/radius/`, where the bundle is `plugins/radius/com.github.copilot/extensions/radius/extension.mjs`. This published layout is distinct from the tracked `plugins/radius/` source metadata on `main`; builds do not write into that source directory. [`scripts/validate-plugin-dist.mjs`](../../scripts/validate-plugin-dist.mjs) checks the assembled manifest's `main` and the bundle's presence before publication.
 
 ## Error handling
 

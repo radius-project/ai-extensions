@@ -11,10 +11,10 @@ graph TD
         Panel["Canvas side panel"]
     end
 
-    subgraph Plugin["plugins/radius"]
+    subgraph Plugin["plugins/radius (published on release branches)"]
         Manifest["plugin.json"]
         Skills["skills/"]
-        Ext["plugins/radius/dist/extension.mjs<br/>(built bundle)"]
+        Ext["com.github.copilot/extensions/radius/extension.mjs<br/>(built bundle, relative to plugin root)"]
     end
 
     subgraph Adapters["packages/adapter-*"]
@@ -79,13 +79,13 @@ graph TD
         Build["packages/adapter-canvas/build.mjs<br/>(esbuild)"]
     end
 
-    subgraph Output["Generated"]
-        Bundle["plugins/radius/dist/extension.mjs"]
+    subgraph Output["Generated plugin: .artifacts/radius"]
+        Bundle["com.github.copilot/extensions/radius/extension.mjs<br/>(relative to assembled plugin root)"]
     end
 
     CoreTS -->|transpiled + inlined| Build
     CanvasSrc -->|bundled| Build
-    Build -->|emits single file| Bundle
+    Build -->|emits single extension bundle| Bundle
     Bundle -->|loaded by| App["Copilot app / CLI"]
 ```
 
