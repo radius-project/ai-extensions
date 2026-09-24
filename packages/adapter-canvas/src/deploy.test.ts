@@ -1,16 +1,177 @@
-import { describe, expect, it } from "vitest";
+import { ChildProcess } from "node:child_process";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   explainNoSubscriptions,
   cloudCredentialsComplete,
   explainRepoAccessForEnvSetup,
   isRepoNotFoundError,
   findWorkflowRun,
+  fetchRunLog,
   getRunDetail,
   isSelectedGhAuthorizationError,
   selectWorkflowRunId
 } from "./deploy.js";
+import * as gh from "./gh.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
+
+describe("ambient workflow callback binding", () => {
+  beforeEach(() => {
+    vi.spyOn(gh, "cliExec").mockImplementation(() => {
+      throw new Error("Unexpected ambient CLI invocation");
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const detailArgs = [
+    "run",
+    "view",
+    "41",
+    "--json",
+    "status,conclusion,jobs",
+    "--repo",
+    "contoso/store"
+  ];
+  const statusArgs = [
+    "run",
+    "view",
+    "41",
+    "--json",
+    "status,conclusion",
+    "--repo",
+    "contoso/store"
+  ];
+
+  it("reads and normalizes ambient run details from callback stdout", async () => {
+    const steps = [
+      { name: "Deploy", status: "completed", conclusion: "failure" }
+    ];
+    const jobs = [{ steps }];
+    vi.mocked(gh.cliExec).mockImplementationOnce((_cmd, _args, _opts, cb) => {
+      queueMicrotask(() =>
+        cb(
+          null,
+          JSON.stringify({ status: "completed", conclusion: "failure", jobs }),
+          "diagnostic stderr is not run JSON"
+        )
+      );
+      return new ChildProcess();
+    });
+
+    await expect(getRunDetail("contoso/store", 41)).resolves.toEqual({
+      status: "completed",
+      conclusion: "failure",
+      jobs,
+      steps
+    });
+    expect(gh.cliExec).toHaveBeenCalledExactlyOnceWith(
+      "gh",
+      detailArgs,
+      { timeout: 15000 },
+      expect.any(Function)
+    );
+  });
+
+  it("ignores partial stdout on callback failure and reads status-only fallback", async () => {
+    vi.mocked(gh.cliExec)
+      .mockImplementationOnce((_cmd, _args, _opts, cb) => {
+        queueMicrotask(() =>
+          cb(
+            new Error("detail read failed"),
+            '{"status":"completed","conclusion":"success"}',
+            "gh: Forbidden (HTTP 403)"
+          )
+        );
+        return new ChildProcess();
+      })
+      .mockImplementationOnce((_cmd, _args, _opts, cb) => {
+        queueMicrotask(() =>
+          cb(null, '{"status":"in_progress","conclusion":null}', "")
+        );
+        return new ChildProcess();
+      });
+
+    await expect(getRunDetail("contoso/store", "41")).resolves.toEqual({
+      status: "in_progress",
+      conclusion: null,
+      jobs: [],
+      steps: []
+    });
+    expect(
+      vi.mocked(gh.cliExec).mock.calls.map((call) => call.slice(0, 3))
+    ).toEqual([
+      ["gh", detailArgs, { timeout: 15000 }],
+      ["gh", statusArgs, { timeout: 15000 }]
+    ]);
+  });
+
+  it("returns unavailable detail when both callbacks fail without a selected-account probe", async () => {
+    const fail: typeof gh.cliExec = (_cmd, _args, _opts, cb) => {
+      queueMicrotask(() =>
+        cb(
+          new Error("run unavailable"),
+          '{"status":"completed","conclusion":"success"}',
+          "gh: Not Found (HTTP 404)"
+        )
+      );
+      return new ChildProcess();
+    };
+    vi.mocked(gh.cliExec)
+      .mockImplementationOnce(fail)
+      .mockImplementationOnce(fail);
+
+    await expect(getRunDetail("contoso/store", "41")).resolves.toBeNull();
+    expect(
+      vi.mocked(gh.cliExec).mock.calls.map((call) => call.slice(0, 3))
+    ).toEqual([
+      ["gh", detailArgs, { timeout: 15000 }],
+      ["gh", statusArgs, { timeout: 15000 }]
+    ]);
+  });
+
+  it.each([
+    {
+      name: "preserves successful log stdout",
+      error: null,
+      stdout: "  workflow output: HTTP 401\n",
+      stderr: "CLI warning",
+      expected: "  workflow output: HTTP 401\n"
+    },
+    {
+      name: "returns unavailable for empty stdout",
+      error: null,
+      stdout: "",
+      stderr: "stderr is not workflow output",
+      expected: null
+    },
+    {
+      name: "discards partial stdout on callback error",
+      error: new Error("log read failed"),
+      stdout: "partial workflow output",
+      stderr: "gh: Not Found (HTTP 404)",
+      expected: null
+    }
+  ])(
+    "$name without a selected-account probe",
+    async ({ error, stdout, stderr, expected }) => {
+      vi.mocked(gh.cliExec).mockImplementationOnce((_cmd, _args, _opts, cb) => {
+        queueMicrotask(() => cb(error, stdout, stderr));
+        return new ChildProcess();
+      });
+
+      await expect(fetchRunLog("contoso/store", 41)).resolves.toBe(expected);
+      expect(gh.cliExec).toHaveBeenCalledExactlyOnceWith(
+        "gh",
+        ["run", "view", "41", "--log", "--repo", "contoso/store"],
+        { timeout: 30000, maxBuffer: 20 * 1024 * 1024 },
+        expect.any(Function)
+      );
+    }
+  );
+});
 
 describe("selected-account workflow discovery", () => {
   it.each([["run discovery", 401, "gh: Unauthorized (HTTP 401)", "list"]])(
