@@ -13,6 +13,7 @@ import {
 } from "../../../src/runtime/create-radius-extension.js";
 import {
   createFakeDependencies,
+  createFakeServerEntry,
   createFakeSession
 } from "../../support/runtime/fakes.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
@@ -41,6 +42,67 @@ function parseSkillHandoff(value: unknown): Record<string, unknown> {
 }
 
 describe("P0-A Radius runtime registration contract", () => {
+  it("routes the registered status tool to its named attempt and preserves the Canvas completion value", async () => {
+    const harness = await createRuntimeSdkHarness();
+    try {
+      const selected = createFakeServerEntry("selected-panel", "deployed");
+      selected.state = {
+        deployAttempt: { id: "selected-attempt" },
+        deployStatus: "complete",
+        deployStartedAt: 1700000000000
+      };
+      const newer = createFakeServerEntry("newer-panel", "deployed");
+      newer.state = {
+        deployAttempt: { id: "newer-attempt" },
+        deployStatus: "in_progress",
+        deployStartedAt: 1700000120000
+      };
+      harness.servers.set("newer-panel", newer);
+      harness.servers.set("selected-panel", selected);
+      const statusUrl = `${selected.baseUrl}/api/deploy-status`;
+      const fetchStatus = vi.mocked(harness.deps.deploy.fetch);
+      fetchStatus.mockImplementation(async (input, init) => {
+        if (input !== statusUrl || (init?.method && init.method !== "GET")) {
+          throw new Error(`Unexpected status request: ${String(input)}`);
+        }
+        return Response.json({
+          status: "complete",
+          errorKind: null,
+          deployRunUrl: "https://github.com/acme/widgets/actions/runs/42",
+          startedAt: 1700000000000,
+          finishedAt: 1700000060000,
+          attempt: selected.state.deployAttempt,
+          repairing: false,
+          handoff: { state: "idle" },
+          resources: [{ id: "resource-1", deployStatus: "success" }],
+          active: false
+        });
+      });
+      const tool = harness.extension.tools.find(
+        ({ name }) => name === "radius_deploy_status"
+      );
+      if (!tool) throw new Error("Deploy status tool was not registered");
+
+      const result = await tool.handler({ attemptId: "selected-attempt" });
+      if (typeof result !== "string") {
+        throw new Error("Deploy status tool did not return JSON text");
+      }
+
+      expect(JSON.parse(result)).toEqual({
+        status: "complete",
+        errorKind: null,
+        deployRunUrl: "https://github.com/acme/widgets/actions/runs/42",
+        startedAt: 1700000000000,
+        finishedAt: 1700000060000
+      });
+      expect(fetchStatus).toHaveBeenCalledExactlyOnceWith(statusUrl);
+      expect(harness.routedOpens).toEqual([]);
+      expect(harness.getOrCreateServer).not.toHaveBeenCalled();
+    } finally {
+      await harness.extension.shutdown("test");
+    }
+  });
+
   it("imports and constructs real factories without production joinSession, then bootstraps exactly once", async () => {
     vi.resetModules();
     const productionJoinSession = vi.fn();
