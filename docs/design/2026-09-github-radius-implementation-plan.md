@@ -89,6 +89,8 @@ Do not mistake existing dependency injection for the completed extraction. Link 
 
 **Outcome:** The first complete call works through both Canvas and a small caller with no Canvas server.
 
+**Prerequisite (not yet satisfied):** Before production extraction begins, merge a separate documentation-only PR correcting the obsolete `plugins/radius/dist/extension.mjs` references in the [code-quality policy](../../.github/skills/radius-code-quality/SKILL.md), [test architecture](./2026-08-radius-canvas-test-architecture.md), and [test plan](./2026-08-radius-canvas-test-plan.md) to match the current build/manifest layout recorded in stage 7. Preserve all behavioral, single-bundle, SDK-externalization, and test requirements. Record the cleanup PR link here and confirm it has merged before marking this prerequisite satisfied; adding this gate does not complete the cleanup.
+
 Start with observing an explicitly identified workflow execution and interpreting the available evidence. Trace `deploy.ts` monitoring/log parsing and `deploy-diagnostics.ts` alongside the deploy monitor/outcome services. Extract only the relevant decisions, not entire files: the services currently mutate `CanvasState` and graph presentation. Keep state projection and refresh scheduling in Canvas.
 
 Define the smallest needed core inputs and results: authorized target, execution identity, observation, structured diagnostics, and uncertainty. Distinguish workflow execution outcome from failure to read that outcome. Add narrowly scoped read/clock ports and reusable execution bindings as needed. Do not move all of `gh.ts` or `deploy-artifacts.ts` merely to extract a small reader.
@@ -219,7 +221,7 @@ Preserve the current release layout rather than restoring the design's historica
 
 Follow the repository's [code-quality policy](../../.github/skills/radius-code-quality/SKILL.md), [test architecture](./2026-08-radius-canvas-test-architecture.md), and [test plan](./2026-08-radius-canvas-test-plan.md). Identify the exact affected requirements from the plan when preparing each PR rather than inventing new requirement IDs here.
 
-Those documents still mention the historical `plugins/radius/dist/extension.mjs` path. For this migration, validate the current build/manifest layout recorded in stage 7, not that obsolete location. Correct the stale policy references in a separate documentation-only PR before implementation; all behavioral, single-bundle, SDK-externalization, and test requirements continue to apply.
+Those documents still mention the historical `plugins/radius/dist/extension.mjs` path. For this migration, validate the current build/manifest layout recorded in stage 7, not that obsolete location. The documentation cleanup is an explicit [Stage 1 prerequisite](#stage-1-extract-read-only-workflow-observation); all behavioral, single-bundle, SDK-externalization, and test requirements continue to apply.
 
 | Changed boundary                                      | Evidence                                                                                                                                                                |
 |-------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
