@@ -13,10 +13,11 @@ import {
   buildSourceUrl,
   radiusDeployBadgeKind,
   radiusDeployBadgeSvg,
-  radiusFormatResolvedTypeLabel,
   radiusFormatTypeLabel,
   radiusIsManagedClusterResource,
   radiusResolveIconSource,
+  radiusResolvedConcreteType,
+  radiusResolvedDisplayLabel,
   radiusSelectResolvedResource,
   srcLineFromRef,
   srcPathFromRef
@@ -111,6 +112,7 @@ export interface GraphNodeData {
   iconMonochrome?: boolean;
   nodeName: string;
   typeLabel: string;
+  concreteType: string;
   codeRef: string;
   sourceUrl: string;
   sourceBranch?: string;
@@ -366,16 +368,16 @@ export function buildGraph(
   for (const [resourceIndex, resource] of visibleResources.entries()) {
     const id = resourceId(resource, resourceIndex);
     const colors = nodeColors(settings, resource);
-    // Planned and deploying graphs share the same shape: the modeled resource
-    // keeps its identity (name, icon) and only the type label changes to the
-    // concrete type the recipe pack resolves to.
+    // Planned and deploying graphs preserve the modeled resource's identity and
+    // topology. The selected output supplies a friendly label when available
+    // and retains its exact concrete type for diagnostics.
     const resolved =
       settings.resolvedMode ?
         radiusSelectResolvedResource(resource, ownedOutputIds, id)
       : null;
     const shortType =
       resolved ?
-        radiusFormatResolvedTypeLabel(resolved.type || resolved.displayType)
+        radiusResolvedDisplayLabel(resolved)
       : radiusFormatTypeLabel(resource.type);
     const sourceBranch =
       settings.diffMode && resource.diffStatus === "removed" ?
@@ -392,6 +394,7 @@ export function buildGraph(
       iconMonochrome: resourceIcon.monochrome,
       nodeName: resource.name || id,
       typeLabel: shortType,
+      concreteType: radiusResolvedConcreteType(resolved),
       codeRef: resource.codeReference || "",
       sourceUrl: buildSourceUrl(
         settings.repoUrl,
@@ -465,6 +468,7 @@ export function buildGraph(
         iconMonochrome: outputIcon.monochrome,
         nodeName: output.name || outputLabel,
         typeLabel: outputLabel,
+        concreteType: radiusResolvedConcreteType(output),
         codeRef: "",
         sourceUrl: "",
         srcPath: "",

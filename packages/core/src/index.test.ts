@@ -19,6 +19,7 @@ const EXPECTED_FUNCTIONS = [
   "filterGraphVisualizationResources",
   "isStagingDirName",
   "lookupDeployStatus",
+  "mergeDeployedGraphDisplayMetadata",
   "mergeDeployedGraphMetadata",
   "projectGraphOutputMetadata",
   "projectSafeApplicationGraph",

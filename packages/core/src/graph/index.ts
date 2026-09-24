@@ -13,6 +13,7 @@ export { filterGraphVisualizationResources } from "./visualization.js";
 export {
   deployStatusKeys,
   lookupDeployStatus,
+  mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   projectDeployedGraph
 } from "./deployed.js";

@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deployStatusKeys,
+  mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   projectDeployedGraph
 } from "@radius-project/core";
@@ -110,6 +111,7 @@ function start(actualReader?: DeployedGraphStatusReader): Harness {
       buildDeployStatusMap,
       buildDeployMessageMap,
       deployStatusKeys,
+      mergeDeployedGraphDisplayMetadata,
       mergeDeployedGraphMetadata,
       projectDeployedGraph,
       canvasGraphResources: (values) => values as CanvasGraphResource[],
@@ -1198,6 +1200,71 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     ]);
   });
 
+  it("serves planned friendly types with final deployment metadata", async () => {
+    const harness = start();
+    harness.state.contextRepo = "octo/app";
+    harness.state.plannedRepo = "octo/app";
+    harness.state.plannedBranch = "main";
+    harness.state.plannedEnvironment = "prod";
+    harness.state.plannedProvider = "azure";
+    harness.state.deployProvider = "azure";
+    harness.state.plannedResources = [
+      {
+        id: "postgres",
+        name: "postgres",
+        type: "Radius.Data/postgreSqlDatabases",
+        outputResources: [
+          {
+            id: "planned-server",
+            type: "Microsoft.DBforPostgreSQL/flexibleServers@2024-01-01",
+            displayType: "Azure Database for PostgreSQL"
+          }
+        ]
+      }
+    ];
+    harness.modeledResources.push({
+      id: "postgres",
+      name: "postgres",
+      type: "Radius.Data/postgreSqlDatabases"
+    });
+    harness.reader.graph = {
+      graph: {
+        resources: [
+          {
+            id: "postgres",
+            name: "postgres",
+            outputResources: [
+              {
+                id: "deployed-server",
+                type: "Microsoft.DBforPostgreSQL/flexibleServers@2025-01-01",
+                portalUrl: "https://portal.azure.com/postgres"
+              }
+            ]
+          }
+        ]
+      },
+      status: "ok"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/deployed-graph?environment=prod`
+    );
+    const payload = (await response.json()) as {
+      resources: CanvasGraphResource[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.resources[0].outputResources).toEqual([
+      {
+        id: "deployed-server",
+        type: "Microsoft.DBforPostgreSQL/flexibleServers@2025-01-01",
+        displayType: "Azure Database for PostgreSQL",
+        portalUrl: "https://portal.azure.com/postgres"
+      }
+    ]);
+  });
+
   it("does not serve planned-only provider links after deployment failure", async () => {
     const harness = start();
     harness.state.contextRepo = "octo/app";
@@ -1206,6 +1273,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     harness.state.plannedEnvironment = "prod";
     harness.state.plannedProvider = "azure";
     harness.state.deployProvider = "azure";
+    harness.state.deployEnvName = "prod";
     harness.state.deployStatus = "failed";
     harness.state.deployRunId = 7;
     harness.state.plannedResources = [
@@ -1222,6 +1290,21 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
         ]
       }
     ];
+    harness.state.deployingResources = [
+      {
+        id: "mysql",
+        name: "mysql",
+        type: "Radius.Data/mySqlDatabases",
+        outputResources: [
+          {
+            id: "attempt-server",
+            type: "Microsoft.DBforMySQL/flexibleServers@2024-01-01",
+            displayType: "Azure Database for MySQL",
+            portalUrl: "https://portal.azure.com/#attempt-only"
+          }
+        ]
+      }
+    ];
     harness.modeledResources.push({
       id: "mysql",
       name: "mysql",
@@ -1229,7 +1312,15 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     });
     harness.reader.graph = {
       graph: {
-        resources: [{ id: "mysql", name: "mysql", outputResources: [] }]
+        resources: [
+          {
+            id: "mysql",
+            name: "mysql",
+            outputResources: [
+              { id: "secret", type: "core/Secret", displayType: "Secret" }
+            ]
+          }
+        ]
       },
       status: "ok"
     };
@@ -1242,7 +1333,15 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       resources: CanvasGraphResource[];
     };
 
-    expect(payload.resources[0].outputResources ?? []).toEqual([]);
+    expect(payload.resources[0].outputResources).toEqual([
+      { id: "secret", type: "core/Secret", displayType: "Secret" },
+      {
+        type: "Microsoft.DBforMySQL/flexibleServers@2024-01-01",
+        displayType: "Azure Database for MySQL"
+      }
+    ]);
+    expect(JSON.stringify(payload.resources)).not.toContain("attempt-only");
+    expect(JSON.stringify(payload.resources)).not.toContain("missing");
     expect(payload.resources[0].deployStatus).toBe("failed");
   });
 

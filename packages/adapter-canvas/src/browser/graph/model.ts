@@ -506,11 +506,35 @@ export function radiusFormatTypeLabel(type?: string): string {
   return ns + "/" + name;
 }
 
-// Planned and deployed nodes keep the modeled graph's names and topology, but
-// show a concrete resource type selected from explicit recipe/deployment
-// outputs. Preserve the provider namespace so users can see the exact target.
+// Normalize a concrete type for the card-label fallback and output ranking.
 export function radiusFormatResolvedTypeLabel(type?: string): string {
   return type ? String(type).split("@")[0] : "";
+}
+
+function resolvedOutputLabelSource(output: ResourceOutput | null | undefined): {
+  type: string;
+  displayType: string;
+} {
+  return {
+    type: typeof output?.type === "string" ? output.type.trim() : "",
+    displayType:
+      typeof output?.displayType === "string" ? output.displayType.trim() : ""
+  };
+}
+
+export function radiusResolvedConcreteType(
+  output: ResourceOutput | null | undefined
+): string {
+  return resolvedOutputLabelSource(output).type;
+}
+
+// Planned and deployed nodes keep the modeled graph's names and topology, but
+// present the recipe pack's friendly service name when available.
+export function radiusResolvedDisplayLabel(
+  output: ResourceOutput | null | undefined
+): string {
+  const { type, displayType } = resolvedOutputLabelSource(output);
+  return displayType || radiusFormatResolvedTypeLabel(type);
 }
 
 // Recipes emit the primary workload or managed service alongside supporting
@@ -542,7 +566,8 @@ const RADIUS_SUPPORTING_OUTPUT_KINDS: Record<string, boolean> = {
 };
 
 export function radiusResolvedOutputRank(out: ResourceOutput): number {
-  const type = radiusFormatResolvedTypeLabel(out.type || out.displayType);
+  const source = resolvedOutputLabelSource(out);
+  const type = radiusFormatResolvedTypeLabel(source.type || source.displayType);
   const segments = type.split("/");
   // Nested child resources such as flexibleServers/firewallRules are supporting.
   if (segments.length >= 3) return 0;
@@ -559,7 +584,9 @@ export function radiusSelectResolvedResource(
   const outputs =
     resource && resource.outputResources ? resource.outputResources : [];
   const typedOutputs = outputs.filter((out): out is ResourceOutput => {
-    if (!out || !(out.type || out.displayType)) return false;
+    if (!out) return false;
+    const source = resolvedOutputLabelSource(out);
+    if (!source.type && !source.displayType) return false;
     // Exclude concrete outputs that are owned by a different top-level resource.
     if (
       ownedOutputIds &&
