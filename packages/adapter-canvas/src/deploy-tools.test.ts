@@ -256,6 +256,26 @@ describe("validateDeployPayload", () => {
 });
 
 describe("summarizeDeployStatus", () => {
+  it.each(["pending", "in_progress", "complete", "failed"])(
+    "passes through the Canvas attempt status %s without normalizing it",
+    (status) => {
+      expect(
+        summarizeDeployStatus({
+          status,
+          deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+          startedAt: 1700000000000,
+          finishedAt: 1700000060000
+        })
+      ).toEqual({
+        status,
+        errorKind: null,
+        deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+        startedAt: 1700000000000,
+        finishedAt: 1700000060000
+      });
+    }
+  );
+
   const status = {
     status: "failed",
     error: "BCP037",
