@@ -1,3 +1,7 @@
+import {
+  collectWorkflowFailure,
+  type WorkflowStep
+} from "@radius-project/core";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 
@@ -14,11 +18,7 @@ export interface DeployOutcomeInstanceEntry {
   state: CanvasState;
 }
 
-export interface DeployRunStep {
-  name?: string;
-  status?: string;
-  conclusion?: string | null;
-}
+export type DeployRunStep = WorkflowStep;
 
 export interface DeployGraphRead {
   graph: unknown | null;
@@ -40,20 +40,6 @@ export interface DeployOutcomeDependencies {
     radiusError?: string
   ): void;
   fetchRunLog(repo: string, runId: number | string): Promise<string | null>;
-  extractGitHubActionsStepLog(
-    logText: string | null | undefined,
-    stepName: string
-  ): string;
-  explainOidcEnterpriseClaim(logText: string | null | undefined): string;
-  extractRadDeployError(logText: string | null | undefined): string;
-  // Exception 5.2: classify a deploy that failed at the cloud login/credentials
-  // step before any resource was touched as credential drift. Returns the
-  // user-facing message, or '' when the failure is not auth drift.
-  classifyDeployCloudAuthDrift(input: {
-    provider?: string | null;
-    resourcesTouched: boolean;
-    failedStepNames: readonly (string | undefined)[];
-  }): string;
   // The deployErrorKind stamped on an auth-drift failure so the repair guard
   // leaves it for the user to re-verify rather than auto-redeploying it.
   cloudAuthDriftKind: CanvasState["deployErrorKind"];
@@ -89,10 +75,6 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployOutcomeDependencies)[] = [
   "projectSafeGraphResources",
   "settleDeployStatuses",
   "fetchRunLog",
-  "extractGitHubActionsStepLog",
-  "explainOidcEnterpriseClaim",
-  "extractRadDeployError",
-  "classifyDeployCloudAuthDrift",
   "sleep",
   "now"
 ];
@@ -144,83 +126,6 @@ export function createDeployOutcomeService(
       if (g < 2) await dependencies.sleep(5000);
     }
     return { deployed, graphStatus };
-  };
-
-  // The failure description plus the exact Radius error it extracted. The error
-  // is returned rather than re-derived by the caller because both come from the
-  // same run-log read, and reading it twice would double the terminal stage's
-  // slowest external call.
-  interface FailureDescription {
-    message: string;
-    radiusError: string;
-  }
-
-  const describeFailure = async (
-    request: DeployOutcomeRequest
-  ): Promise<FailureDescription> => {
-    const { repo, runId, conclusion, steps, statusReader, log } = request;
-    // Build a user-facing error from the failed step(s) + log.
-    const failedSteps = steps.filter(
-      (s) =>
-        s.conclusion && s.conclusion !== "success" && s.conclusion !== "skipped"
-    );
-    let dErr =
-      "Deployment failed" + (conclusion ? " (" + conclusion + ")" : "") + ".";
-    if (failedSteps.length)
-      dErr +=
-        " Failed step: " + failedSteps.map((s) => s.name).join(", ") + ".";
-    // Surface the FULL detailed rad deploy failure block (root cause:
-    // recipe/terraform/ARM operation errors). The run is complete by now, so
-    // its log is readable in full — this is the one signal the artifact
-    // transport does not carry.
-    const failLog = await dependencies.fetchRunLog(repo, runId);
-    // The OIDC "enterprise claim" rejection (AADSTS7002381) happens at the
-    // Azure Login step, before rad runs, so scope the check to that step's log
-    // rather than the whole run.
-    const azureLoginLog = dependencies.extractGitHubActionsStepLog(
-      failLog,
-      "Azure Login (OIDC)"
-    );
-    const claimHelp = dependencies.explainOidcEnterpriseClaim(azureLoginLog);
-    if (claimHelp) dErr = claimHelp + "\n\n\u2014 raw error \u2014\n" + dErr;
-    const detailBlock = dependencies.extractRadDeployError(failLog);
-    if (detailBlock) {
-      dErr += "\n\n" + detailBlock;
-      log("");
-      log("──────── failure details ────────");
-      detailBlock.split("\n").forEach((l) => log("  " + l));
-      log("─────────────────────────────────");
-    }
-    // The producer ships a dedicated control-plane/recipe log in the status
-    // artifact. It carries the precise recipe/terraform failure cause, which
-    // the summarized run-log block above can miss, so surface its tail.
-    let cpLog: string | null = null;
-    try {
-      cpLog = await statusReader.controlPlaneLog();
-    } catch {
-      // Best-effort: a missing/unreadable control-plane log must not mask the
-      // run-log failure details above.
-    }
-    if (cpLog) {
-      const cpTail = cpLog
-        .replace(/\s+$/, "")
-        .split("\n")
-        .slice(-40)
-        .join("\n");
-      if (cpTail.trim()) {
-        dErr += "\n\n— control-plane log —\n" + cpTail;
-        log("");
-        log("──────── control-plane log ────────");
-        cpTail.split("\n").forEach((l) => log("  " + l));
-        log("───────────────────────────────────");
-      }
-    }
-    dErr +=
-      "\n\nView the full run: https://github.com/" +
-      repo +
-      "/actions/runs/" +
-      runId;
-    return { message: dErr, radiusError: detailBlock };
   };
 
   return {
@@ -315,62 +220,20 @@ export function createDeployOutcomeService(
       }
       log("");
       log("❌ Deployment failed. Conclusion: " + conclusion);
-      // Exception 5.2: a redeploy whose cloud login/credentials step failed
-      // before "Run rad commands" ever started touched no resource, so classify
-      // it as credential drift. `deployStepStartedAt` is 0 until that step is
-      // observed running, which is the "no resource touched" signal. Computed
-      // here (before the guarded describeFailure read) so the degraded-message
-      // path below still gets the drift prefix and kind. Only a genuine
-      // "failure" conclusion can be drift: a "cancelled" or "timed_out" run that
-      // happened to stop at the cloud-login step must not be stamped as drift.
-      const authDriftMessage =
-        conclusion === "failure" ?
-          dependencies.classifyDeployCloudAuthDrift({
-            provider,
-            resourcesTouched: deployStepStartedAt > 0,
-            failedStepNames: request.steps
-              .filter(
-                (s) =>
-                  s.conclusion &&
-                  s.conclusion !== "success" &&
-                  s.conclusion !== "skipped"
-              )
-              .map((s) => s.name)
-          })
-        : "";
-      // Assemble the error BEFORE flipping the status to "failed". The webview's
-      // /api/deploy-status poll fires triggerDeployRepairHandoff the instant it
-      // observes "failed", and describeFailure awaits network reads (run log +
-      // control-plane log) that take seconds. Setting the status first opens a
-      // window where a poll relays a handoff with an empty deployError and marks
-      // it delivered, permanently locking out the real error — the "flaky error
-      // logs" symptom. Publishing the error first closes that window for both
-      // the webview trigger and the deploy-request `.finally()` trigger.
-      //
-      // The run-log read inside describeFailure is unguarded, so guard it here:
-      // if it throws we must still settle this run as "failed" with a degraded
-      // message rather than let settle() reject. A rejection would both leave
-      // the panel
-      // non-terminal AND reach the monitor's `.catch`, which reclassifies the
-      // run as run-unconfirmed — sending a run that actually concluded "failure"
-      // down the informational notice path and telling the user it could not be
-      // confirmed, instead of down the repair path it belongs to.
-      let radiusError = "";
-      try {
-        const described = await describeFailure(request);
-        entry.state.deployError = described.message;
-        radiusError = described.radiusError;
-      } catch {
-        entry.state.deployError =
-          "Deployment failed" +
-          (conclusion ? " (" + conclusion + ")" : "") +
-          ". The failure details could not be read; see the full run: " +
-          "https://github.com/" +
-          repo +
-          "/actions/runs/" +
-          request.runId +
-          ".";
-      }
+      // Complete diagnostic collection before publishing failed: status polling
+      // may immediately start a repair handoff using this error and graph.
+      const failure = await collectWorkflowFailure(
+        { repo, runId: request.runId },
+        { conclusion, steps: [...request.steps] },
+        { provider, resourcesTouched: deployStepStartedAt > 0 },
+        {
+          readLog: dependencies.fetchRunLog,
+          readControlPlaneLog: () => statusReader.controlPlaneLog()
+        }
+      );
+      failure.narration.forEach(log);
+      entry.state.deployError = failure.message;
+      const { radiusError, authDriftMessage } = failure;
       // Settle the graph now that the exact Radius error is known, so every red
       // node carries it — or "Deployment cancelled" / "Deployment timed out"
       // when the run's conclusion, not a resource, decided the outcome

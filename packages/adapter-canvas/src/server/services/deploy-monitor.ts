@@ -1,9 +1,9 @@
 import type { DeployProgress } from "../../deploy-artifacts.js";
+import type { WorkflowRunDetail } from "@radius-project/core";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { DeployDispatchService } from "./deploy-dispatch.js";
 import type {
   DeployOutcomeService,
-  DeployRunStep,
   DeployOutcomeStatusReader
 } from "./deploy-outcome.js";
 import type { PlannedGraphRecoveryService } from "./deploy-planned-graph.js";
@@ -24,11 +24,10 @@ export interface DeployMonitorInstanceEntry {
   state: CanvasState;
 }
 
-export interface DeployRunDetail {
-  status?: string;
-  conclusion?: string | null;
-  steps: DeployRunStep[];
-}
+export type DeployRunDetail = Pick<
+  WorkflowRunDetail,
+  "status" | "conclusion" | "steps"
+>;
 
 export interface DeployMonitorStatusReader extends DeployOutcomeStatusReader {
   progress(): Promise<DeployProgress | null>;

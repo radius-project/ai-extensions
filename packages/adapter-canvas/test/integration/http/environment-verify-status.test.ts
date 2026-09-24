@@ -7,6 +7,17 @@ import { createTestRouteTable } from "../../support/server/route-table.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { EnvironmentsDependencies } from "../../../src/server/routes/environments.js";
+import {
+  getRunDetail,
+  fetchRunLog,
+  extractErrorLines,
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  explainNoSubscriptions,
+  isSelectedGhAuthorizationError,
+  SelectedGhAuthorizationError
+} from "../../../src/deploy.js";
+import { SelectedGhAuthorizationError as SharedAuthorizationError } from "@radius-project/adapter-shared";
 
 // HTTP-integration coverage for the verify-status route's failure-classification
 // contract (issue #99). The classifier itself is proven at the unit level; this
@@ -133,24 +144,59 @@ describe("verify-status HTTP contract — failure classification", () => {
       verification: { dispatchedAt: 1, runId: "91" }
     };
     let finished: unknown;
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "octocat",
+      run: async (args, options) => {
+        calls.push(args);
+        if (
+          args.join(" ") ===
+          "run view 91 --json status,conclusion,jobs --repo octo/app"
+        ) {
+          expect(options).toEqual({ timeout: 15000 });
+          return {
+            code: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              status: "completed",
+              conclusion: "failure",
+              jobs: [
+                {
+                  steps: [
+                    { name: "Check AKS cluster access", conclusion: "failure" }
+                  ]
+                }
+              ]
+            })
+          };
+        }
+        if (args.join(" ") === "run view 91 --log --repo octo/app") {
+          expect(options).toEqual({
+            timeout: 30000,
+            maxBuffer: 20 * 1024 * 1024
+          });
+          return {
+            code: 0,
+            stderr: "",
+            stdout:
+              "Error: AuthorizationFailed. The client does not have permission to perform action 'Microsoft.ContainerService/managedClusters/read'."
+          };
+        }
+        throw new Error("Unexpected selected read: " + args.join(" "));
+      }
+    });
     const baseUrl = await startVerifyStatusServer({
       readInstanceEntry: () => undefined,
       getOperation: () => operation,
       hasCompleteVerificationIdentity: () => true,
-      getRunDetail: () =>
-        Promise.resolve({
-          status: "completed",
-          conclusion: "failure",
-          steps: [{ name: "Check AKS cluster access", conclusion: "failure" }]
-        }),
-      fetchRunLog: () =>
-        Promise.resolve(
-          "Error: AuthorizationFailed. The client does not have permission to perform action 'Microsoft.ContainerService/managedClusters/read'."
-        ),
-      extractErrorLines: () => ["denied"],
-      extractGitHubActionsStepLog: () => "",
-      explainOidcEnterpriseClaim: () => "",
-      explainNoSubscriptions: () => "",
+      getSelectedGitHubExecutor: () => executor,
+      isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+      getRunDetail,
+      fetchRunLog,
+      extractErrorLines,
+      extractGitHubActionsStepLog,
+      explainOidcEnterpriseClaim,
+      explainNoSubscriptions,
       finish: (_op: unknown, state: unknown) => {
         finished = state;
       },
@@ -194,5 +240,12 @@ describe("verify-status HTTP contract — failure classification", () => {
       "Microsoft.ContainerService/managedClusters/read"
     ]);
     expect(finished).toBe("failed_partial");
+    expect(calls).toHaveLength(2);
+    expect(SelectedGhAuthorizationError).toBe(SharedAuthorizationError);
+    expect(
+      isSelectedGhAuthorizationError(
+        new SharedAuthorizationError("octocat", 403, "denied")
+      )
+    ).toBe(true);
   });
 });

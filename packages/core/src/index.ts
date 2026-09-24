@@ -120,3 +120,24 @@ export type {
   DeleteWorkflowFiles
 } from "./workflows/index.js";
 export type { GitHub } from "./ports/index.js";
+export { observeWorkflowRun } from "./workflow-observation.js";
+export type {
+  WorkflowRunDetail,
+  WorkflowRunRead,
+  WorkflowStep,
+  WorkflowTarget,
+  WorkflowObservationReads
+} from "./workflow-observation.js";
+export {
+  extractErrorLines,
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  classifyDeployCloudAuthDrift,
+  extractRadDeployError,
+  collectWorkflowFailure
+} from "./workflow-diagnostics.js";
+export type {
+  DeployCloudAuthDriftInput,
+  WorkflowFailure,
+  WorkflowFailureReads
+} from "./workflow-diagnostics.js";
