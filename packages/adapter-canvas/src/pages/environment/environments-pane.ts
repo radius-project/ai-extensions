@@ -416,7 +416,7 @@ export function environmentsPaneMarkup(
             <label for="azure-namespace-select">Namespace</label>
             <select id="azure-namespace-select" aria-describedby="azure-namespace-help azure-namespace-error"><option value="" disabled selected>Loading…</option></select>
             <input id="azure-namespace-custom" type="text" maxlength="63" pattern="${KUBERNETES_NAMESPACE_PATTERN}" aria-label="Namespace (custom)" aria-describedby="azure-namespace-help azure-namespace-error" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
-            <div class="rad-field__help" id="azure-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
+            <div class="rad-field__help" id="azure-namespace-help">Throwaway e2e test: a namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
             <div id="azure-namespace-error" class="status error" role="alert" hidden></div>
           </div>
         </div>
