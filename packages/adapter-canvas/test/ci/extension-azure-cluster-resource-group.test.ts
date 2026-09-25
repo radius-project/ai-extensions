@@ -5,10 +5,9 @@
 // `az aks get-credentials --resource-group` names the group the cluster itself
 // lives in. That is `AZURE_AKS_RESOURCE_GROUP`. It is not
 // `AZURE_RESOURCE_GROUP`, which is where the application's own resources are
-// created: the same variable is passed to the environment's
-// `providers.azure.resourceGroupName` and to the recipe pack's
-// `azureResourceGroup` parameter, and Radius does not require an application to
-// deploy into the group its cluster happens to sit in.
+// created: that variable is passed to the environment's
+// `providers.azure.resourceGroupName`, and Radius does not require an
+// application to deploy into the group its cluster happens to sit in.
 //
 // The two are equal for every environment the wizard creates today, so a
 // workflow that confuses them still works and no run would report this. These
@@ -173,21 +172,24 @@ describe("the generated Azure workflows' AKS cluster lookup", () => {
 describe("the generated Azure workflows' application resource group", () => {
   // The opposite substitution, which would move where an application's
   // resources are created rather than break a lookup.
-  it.each([
-    ["the environment's Azure provider", "resourceGroupName:"],
-    [
-      "the recipe pack's parameter",
-      "append_pack_parameter_if_declared azureResourceGroup"
-    ]
-  ])("keeps %s on the application's resource group", (_label, marker) => {
-    const uses = workflows
-      .flatMap(([, source]) => source.split(/\r?\n/))
-      .filter((line) => line.includes(marker));
+  //
+  // The environment's provider is the only place the value is conveyed. The
+  // recipe pack used to take it as an `azureResourceGroup` parameter too, but
+  // the pack-only artifact reads the group from the environment it deploys
+  // into, so that second marker was removed with the parameter rather than
+  // left behind to match nothing.
+  it.each([["the environment's Azure provider", "resourceGroupName:"]])(
+    "keeps %s on the application's resource group",
+    (_label, marker) => {
+      const uses = workflows
+        .flatMap(([, source]) => source.split(/\r?\n/))
+        .filter((line) => line.includes(marker));
 
-    expect(uses.length).toBeGreaterThan(0);
-    for (const line of uses) {
-      expect(line).toContain("vars.AZURE_RESOURCE_GROUP");
-      expect(line).not.toContain("AZURE_AKS_RESOURCE_GROUP");
+      expect(uses.length).toBeGreaterThan(0);
+      for (const line of uses) {
+        expect(line).toContain("vars.AZURE_RESOURCE_GROUP");
+        expect(line).not.toContain("AZURE_AKS_RESOURCE_GROUP");
+      }
     }
-  });
+  );
 });
