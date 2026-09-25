@@ -26,6 +26,10 @@
 // An expression in one of their `run:` steps is the same vulnerability reached
 // one level down.
 //
+// What counts as a workflow or an action is decided by content, not by name or
+// extension: both `.yml` and `.yaml` are collected, since GitHub Actions
+// accepts either and a file must not be exempted by its spelling.
+//
 // Only `run:` scripts are inspected. An expression in `if:`, `with:`, or an
 // `env:` value is evaluated by GitHub Actions rather than by a shell, and
 // `env:` is where the hardened values are supposed to live.
@@ -97,11 +101,32 @@ function injectableSteps(source: string): string[] {
 }
 
 /**
- * Every workflow and composite action under `.github/extension`.
+ * Whether a YAML file is a workflow or a composite action.
+ *
+ * Decided by content rather than by filename, because neither the extension
+ * nor the name says what a file is. `.github/extension` also holds a
+ * `pnpm-lock.yaml` belonging to a bundled action, and a lockfile counted as a
+ * covered workflow would inflate the coverage assertion below with a file that
+ * can never contain a `run:` script.
+ *
+ * A file that fails to parse throws rather than being skipped, so a malformed
+ * workflow fails this suite instead of quietly leaving itself unchecked.
+ */
+function isWorkflowOrAction(source: string): boolean {
+  const parsed = parse(source) as Parsed | null;
+  return parsed?.jobs !== undefined || parsed?.runs !== undefined;
+}
+
+/**
+ * Every YAML file under `.github/extension`.
  *
  * Walked recursively rather than one level deep: at least one action keeps its
  * definition in a nested directory, and an action this failed to find would be
  * an action nobody checks.
+ *
+ * Both YAML extensions are collected. GitHub Actions accepts either, so a
+ * workflow added as `.yaml` has to be held to the same rule as its `.yml`
+ * siblings rather than being exempted by spelling.
  */
 async function collectYamlFiles(directory: string): Promise<string[]> {
   const entries = await readdir(path.join(EXTENSION_DIRECTORY, directory), {
@@ -112,7 +137,7 @@ async function collectYamlFiles(directory: string): Promise<string[]> {
     const relative = path.join(directory, entry.name);
     if (entry.isDirectory()) {
       files.push(...(await collectYamlFiles(relative)));
-    } else if (entry.name.endsWith(".yml")) {
+    } else if (entry.name.endsWith(".yml") || entry.name.endsWith(".yaml")) {
       files.push(relative);
     }
   }
@@ -123,7 +148,7 @@ async function readExtensionFiles(): Promise<
   ReadonlyArray<readonly [string, string]>
 > {
   const files = await collectYamlFiles(".");
-  return Promise.all(
+  const read = await Promise.all(
     files
       .filter((file) => !KNOWN_UNHARDENED.has(path.basename(file)))
       .map(
@@ -134,25 +159,33 @@ async function readExtensionFiles(): Promise<
           ] as const
       )
   );
+  return read.filter(([, source]) => isWorkflowOrAction(source));
 }
 
 const extensionFiles = await readExtensionFiles();
 
 describe("the generated workflows' shell inputs", () => {
   // Guards the discovery: a reader that found nothing, or that quietly skipped
-  // a directory, would leave every assertion below vacuously true. Asserted
-  // against what is actually on disk, so the only files not checked are the
-  // ones named in the deny list.
-  it("checks every extension YAML file except those explicitly excluded", async () => {
+  // a directory or a file extension, would leave every assertion below
+  // vacuously true. Asserted against what is actually on disk, so the only
+  // workflows and actions not checked are the ones named in the deny list.
+  it("checks every extension workflow and action except those explicitly excluded", async () => {
     const names = extensionFiles.map(([name]) => name);
-    const onDisk = (await collectYamlFiles(".")).map((file) =>
-      path.normalize(file)
+    const onDisk = await Promise.all(
+      (await collectYamlFiles(".")).map(
+        async (file) =>
+          [
+            path.normalize(file),
+            await readFile(path.join(EXTENSION_DIRECTORY, file), "utf8")
+          ] as const
+      )
     );
+    const expected = onDisk
+      .filter(([, source]) => isWorkflowOrAction(source))
+      .map(([name]) => name)
+      .filter((name) => !KNOWN_UNHARDENED.has(path.basename(name)));
 
-    expect(
-      onDisk.filter((file) => !KNOWN_UNHARDENED.has(path.basename(file)))
-    ).toEqual(expect.arrayContaining(names));
-    expect(names.length).toBe(onDisk.length - KNOWN_UNHARDENED.size);
+    expect(names.sort()).toEqual(expected.sort());
     // The dispatcher whose name says neither "azure" nor "rad-commands", and
     // which a name-based rule would have missed.
     expect(names).toContain("delete-application.yml");
@@ -160,6 +193,9 @@ describe("the generated workflows' shell inputs", () => {
     expect(names).toContain(
       path.join("actions", "restore-state", "action.yml")
     );
+    // A bundled action's lockfile is YAML in the same tree but is not a
+    // workflow, so it is classified out rather than counted as covered.
+    expect(names.some((name) => name.endsWith("pnpm-lock.yaml"))).toBe(false);
   });
 
   it.each(extensionFiles)(
