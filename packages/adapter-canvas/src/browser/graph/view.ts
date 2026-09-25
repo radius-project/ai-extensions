@@ -259,7 +259,11 @@ export function createNodeComponent(
     );
     const type = h(
       "div",
-      { className: "rad-node__type", ref: typeRef, title: data.typeLabel },
+      {
+        className: "rad-node__type",
+        ref: typeRef,
+        title: data.concreteType || data.typeLabel
+      },
       data.typeLabel
     );
     const mainContent =

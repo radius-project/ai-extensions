@@ -105,6 +105,10 @@ export interface GraphsPlanningReadsDependencies {
     statusByKey: Map<string, DeployStatus>
   ): unknown[];
   mergeDeployedGraphMetadata(modeled: unknown[], deployed: unknown): unknown[];
+  mergeDeployedGraphDisplayMetadata(
+    modeled: unknown[],
+    displaySource: unknown
+  ): unknown[];
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
   applyDeployMessages(
     resources: CanvasGraphResource[],
@@ -599,8 +603,18 @@ export async function handleDeployedGraph(
     providerResolvedTopology,
     deploymentMetadata
   );
+  const displayedTopology = dependencies.mergeDeployedGraphDisplayMetadata(
+    enrichedTopology,
+    (
+      sessionMatchesSelection &&
+        artifactMatchesSessionRun &&
+        Array.isArray(state.deployingResources)
+    ) ?
+      state.deployingResources
+    : null
+  );
   const resources = dependencies.canvasGraphResources(
-    dependencies.projectDeployedGraph(enrichedTopology, statusByKey)
+    dependencies.projectDeployedGraph(displayedTopology, statusByKey)
   );
   // Attach the producer's per-resource message so a red node can explain itself
   // in the popup instead of just being red.

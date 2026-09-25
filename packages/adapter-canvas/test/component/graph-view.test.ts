@@ -212,6 +212,32 @@ describe("graph view in a real browser", () => {
     expect(db.getBoundingClientRect().height).toBeGreaterThan(0);
   });
 
+  it("keeps an expanded output's exact type in the tooltip", async () => {
+    mount({
+      resources: [
+        {
+          id: "app/db",
+          name: "db",
+          type: "Radius.Data/mySqlDatabases",
+          outputResources: [
+            {
+              id: "server",
+              name: "server",
+              type: "Microsoft.DBforMySQL/flexibleServers@2025-01-01",
+              displayType: "Azure Database for MySQL"
+            }
+          ]
+        }
+      ]
+    });
+
+    const server = await card("server");
+    const type = within(server).getByText("Azure Database for MySQL");
+    expect(type.getAttribute("title")).toBe(
+      "Microsoft.DBforMySQL/flexibleServers@2025-01-01"
+    );
+  });
+
   it("keeps long resource names inside the card", async () => {
     const name = "recommendationservice-".repeat(8);
     const style = document.createElement("style");
@@ -260,6 +286,7 @@ describe("graph view in a real browser", () => {
             {
               id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/server",
               type: "Microsoft.DBforMySQL/flexibleServers",
+              displayType: "Azure Database for MySQL",
               portalUrl: "https://portal.azure.com/#@tenant/resource/server"
             },
             {
@@ -272,9 +299,10 @@ describe("graph view in a real browser", () => {
     });
 
     const mysql = await card("mysql");
-    expect(
-      within(mysql).getByTitle("Microsoft.DBforMySQL/flexibleServers")
-    ).toBeTruthy();
+    const type = within(mysql).getByText("Azure Database for MySQL");
+    expect(type.getAttribute("title")).toBe(
+      "Microsoft.DBforMySQL/flexibleServers"
+    );
     expect(mysql.getAttribute("data-node-id")).toBe("mysql");
 
     const portal = mysql.querySelector("a.rad-node__portal");

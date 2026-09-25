@@ -30,6 +30,10 @@ const SUBTITLE_STYLE =
   "color:var(--rad-text-tertiary); font-size:11px; margin-top:2px; margin-left:20px; word-break:break-all;";
 const LINK_STYLE =
   "color:var(--rad-link); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;";
+const DETAIL_LABEL_STYLE =
+  "color:var(--rad-text-tertiary); font-size:11px; font-weight:600;";
+const DETAIL_VALUE_STYLE =
+  "color:var(--rad-text-secondary); font-size:12px; margin-top:2px; word-break:break-all;";
 
 // Every external row built here, including source, app-definition, portal, and
 // cloud-output links, carries delegated metadata so the Canvas host opens it.
@@ -150,6 +154,13 @@ export function buildDetailRows(
   data: GraphNodeData
 ): string[] {
   const rows: string[] = [];
+  if (data.concreteType) {
+    rows.push(
+      '<div style="padding:6px 4px;">' +
+        `<div style="${DETAIL_LABEL_STYLE}">Concrete type</div>` +
+        `<div style="${DETAIL_VALUE_STYLE}">${escapeBrowserHtml(data.concreteType)}</div></div>`
+    );
+  }
   if (isLocalSourceNode(settings, data)) {
     if (data.srcPath) {
       rows.push(

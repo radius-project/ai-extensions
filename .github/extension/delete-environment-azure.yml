@@ -109,12 +109,18 @@ jobs:
           # Pass environment-controlled values through the environment rather
           # than interpolating them into the shell source, so a crafted value
           # cannot execute commands in this OIDC + write job.
-          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          #
+          # The resource group here is the one the cluster lives in, which is
+          # not AZURE_RESOURCE_GROUP: that one is where the application's
+          # resources are created, and the two are allowed to differ. Falls back
+          # to it for environments created before AZURE_AKS_RESOURCE_GROUP was
+          # recorded.
+          AZURE_AKS_RESOURCE_GROUP: ${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}
           AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           az aks get-credentials \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
             --name "$AZURE_AKS_CLUSTER_NAME" \
             --subscription "$AZURE_SUBSCRIPTION_ID" \
             --file "$RADIUS_TARGET_KUBECONFIG"

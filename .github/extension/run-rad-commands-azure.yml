@@ -107,8 +107,12 @@ jobs:
       - name: Connect to AKS cluster
         if: ${{ vars.AZURE_AKS_CLUSTER_NAME != '' }}
         run: |
+          # The resource group the cluster lives in, which is not
+          # AZURE_RESOURCE_GROUP: that one is where the application's resources
+          # are created, and the two are allowed to differ. Falls back to it for
+          # environments created before AZURE_AKS_RESOURCE_GROUP was recorded.
           az aks get-credentials \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --resource-group "${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}" \
             --name "${{ vars.AZURE_AKS_CLUSTER_NAME }}" \
             --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}" \
             --file "$RADIUS_TARGET_KUBECONFIG"

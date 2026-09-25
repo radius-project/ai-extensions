@@ -20,6 +20,7 @@ import {
   fetchBicepFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
+  mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
   projectSafeApplicationGraph,
@@ -1399,6 +1400,7 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   buildDeployStatusMap,
   buildDeployMessageMap,
   deployStatusKeys,
+  mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   projectDeployedGraph: (modeled, statusByKey) =>
     projectDeployedGraph(modeled as any[], statusByKey),
