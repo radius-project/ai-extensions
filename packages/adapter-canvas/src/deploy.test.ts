@@ -1,65 +1,180 @@
-import { describe, expect, it } from "vitest";
+import { ChildProcess } from "node:child_process";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  explainOidcEnterpriseClaim,
   explainNoSubscriptions,
-  classifyDeployCloudAuthDrift,
   cloudCredentialsComplete,
   explainRepoAccessForEnvSetup,
   isRepoNotFoundError,
-  extractErrorLines,
-  extractGitHubActionsStepLog,
-  fetchRunLog,
   findWorkflowRun,
+  fetchRunLog,
   getRunDetail,
   isSelectedGhAuthorizationError,
-  selectedCommandAuthorizationError,
   selectWorkflowRunId
 } from "./deploy.js";
+import * as gh from "./gh.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 
-describe("selected-account workflow reads", () => {
-  it.each([
-    ["gh: Forbidden (HTTP 403)", 403],
-    [
-      "Resource protected by organization SAML enforcement. You must grant your OAuth token access.",
-      403
-    ]
-  ])(
-    "classifies direct selected-account command authorization failure %j",
-    async (stderr, status) => {
-      const executor = successfulSelectedGhExecutor({ login: "alice" });
+describe("ambient workflow callback binding", () => {
+  beforeEach(() => {
+    vi.spyOn(gh, "cliExec").mockImplementation(() => {
+      throw new Error("Unexpected ambient CLI invocation");
+    });
+  });
 
-      await expect(
-        selectedCommandAuthorizationError(executor, "contoso/store", {
-          code: 1,
-          stdout: "",
-          stderr
-        })
-      ).resolves.toMatchObject({
-        name: "SelectedGhAuthorizationError",
-        login: "alice",
-        status
-      });
-    }
-  );
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
-  it("does not classify rate limiting as selected-account authorization failure", async () => {
-    const executor = successfulSelectedGhExecutor({ login: "alice" });
+  const detailArgs = [
+    "run",
+    "view",
+    "41",
+    "--json",
+    "status,conclusion,jobs",
+    "--repo",
+    "contoso/store"
+  ];
+  const statusArgs = [
+    "run",
+    "view",
+    "41",
+    "--json",
+    "status,conclusion",
+    "--repo",
+    "contoso/store"
+  ];
 
-    await expect(
-      selectedCommandAuthorizationError(executor, "contoso/store", {
-        code: 1,
-        stdout: "",
-        stderr: "gh: Too Many Requests (HTTP 429)"
+  it("reads and normalizes ambient run details from callback stdout", async () => {
+    const steps = [
+      { name: "Deploy", status: "completed", conclusion: "failure" }
+    ];
+    const jobs = [{ steps }];
+    vi.mocked(gh.cliExec).mockImplementationOnce((_cmd, _args, _opts, cb) => {
+      queueMicrotask(() =>
+        cb(
+          null,
+          JSON.stringify({ status: "completed", conclusion: "failure", jobs }),
+          "diagnostic stderr is not run JSON"
+        )
+      );
+      return new ChildProcess();
+    });
+
+    await expect(getRunDetail("contoso/store", 41)).resolves.toEqual({
+      status: "completed",
+      conclusion: "failure",
+      jobs,
+      steps
+    });
+    expect(gh.cliExec).toHaveBeenCalledExactlyOnceWith(
+      "gh",
+      detailArgs,
+      { timeout: 15000 },
+      expect.any(Function)
+    );
+  });
+
+  it("ignores partial stdout on callback failure and reads status-only fallback", async () => {
+    vi.mocked(gh.cliExec)
+      .mockImplementationOnce((_cmd, _args, _opts, cb) => {
+        queueMicrotask(() =>
+          cb(
+            new Error("detail read failed"),
+            '{"status":"completed","conclusion":"success"}',
+            "gh: Forbidden (HTTP 403)"
+          )
+        );
+        return new ChildProcess();
       })
-    ).resolves.toBeNull();
+      .mockImplementationOnce((_cmd, _args, _opts, cb) => {
+        queueMicrotask(() =>
+          cb(null, '{"status":"in_progress","conclusion":null}', "")
+        );
+        return new ChildProcess();
+      });
+
+    await expect(getRunDetail("contoso/store", "41")).resolves.toEqual({
+      status: "in_progress",
+      conclusion: null,
+      jobs: [],
+      steps: []
+    });
+    expect(
+      vi.mocked(gh.cliExec).mock.calls.map((call) => call.slice(0, 3))
+    ).toEqual([
+      ["gh", detailArgs, { timeout: 15000 }],
+      ["gh", statusArgs, { timeout: 15000 }]
+    ]);
+  });
+
+  it("returns unavailable detail when both callbacks fail without a selected-account probe", async () => {
+    const fail: typeof gh.cliExec = (_cmd, _args, _opts, cb) => {
+      queueMicrotask(() =>
+        cb(
+          new Error("run unavailable"),
+          '{"status":"completed","conclusion":"success"}',
+          "gh: Not Found (HTTP 404)"
+        )
+      );
+      return new ChildProcess();
+    };
+    vi.mocked(gh.cliExec)
+      .mockImplementationOnce(fail)
+      .mockImplementationOnce(fail);
+
+    await expect(getRunDetail("contoso/store", "41")).resolves.toBeNull();
+    expect(
+      vi.mocked(gh.cliExec).mock.calls.map((call) => call.slice(0, 3))
+    ).toEqual([
+      ["gh", detailArgs, { timeout: 15000 }],
+      ["gh", statusArgs, { timeout: 15000 }]
+    ]);
   });
 
   it.each([
-    ["run discovery", 401, "gh: Unauthorized (HTTP 401)", "list"],
-    ["run detail", 403, "gh: Forbidden (HTTP 403)", "detail"]
+    {
+      name: "preserves successful log stdout",
+      error: null,
+      stdout: "  workflow output: HTTP 401\n",
+      stderr: "CLI warning",
+      expected: "  workflow output: HTTP 401\n"
+    },
+    {
+      name: "returns unavailable for empty stdout",
+      error: null,
+      stdout: "",
+      stderr: "stderr is not workflow output",
+      expected: null
+    },
+    {
+      name: "discards partial stdout on callback error",
+      error: new Error("log read failed"),
+      stdout: "partial workflow output",
+      stderr: "gh: Not Found (HTTP 404)",
+      expected: null
+    }
   ])(
+    "$name without a selected-account probe",
+    async ({ error, stdout, stderr, expected }) => {
+      vi.mocked(gh.cliExec).mockImplementationOnce((_cmd, _args, _opts, cb) => {
+        queueMicrotask(() => cb(error, stdout, stderr));
+        return new ChildProcess();
+      });
+
+      await expect(fetchRunLog("contoso/store", 41)).resolves.toBe(expected);
+      expect(gh.cliExec).toHaveBeenCalledExactlyOnceWith(
+        "gh",
+        ["run", "view", "41", "--log", "--repo", "contoso/store"],
+        { timeout: 30000, maxBuffer: 20 * 1024 * 1024 },
+        expect.any(Function)
+      );
+    }
+  );
+});
+
+describe("selected-account workflow discovery", () => {
+  it.each([["run discovery", 401, "gh: Unauthorized (HTTP 401)", "list"]])(
     "surfaces %s HTTP %i instead of degrading to pending",
     async (_label, status, stderr, operation) => {
       const calls: string[][] = [];
@@ -169,24 +284,6 @@ describe("selected-account workflow reads", () => {
     ]);
   });
 
-  it("keeps a not-yet-visible run detail pending when the selected account still reads the repository", async () => {
-    const calls: string[][] = [];
-    const executor = successfulSelectedGhExecutor({
-      login: "alice",
-      run: async (args) => {
-        calls.push(args);
-        return args[0] === "api" ?
-            { code: 0, stdout: "contoso/store", stderr: "" }
-          : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
-      }
-    });
-
-    await expect(
-      getRunDetail("contoso/store", "41", executor)
-    ).resolves.toBeNull();
-    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
-  });
-
   it("keeps a masked run 404 pending when its repository probe is rate-limited", async () => {
     const executor = successfulSelectedGhExecutor({
       login: "alice",
@@ -206,10 +303,7 @@ describe("selected-account workflow reads", () => {
     ).resolves.toBeNull();
   });
 
-  it.each([
-    ["run discovery", 401, "list"],
-    ["run detail", 403, "detail"]
-  ])(
+  it.each([["run discovery", 401, "list"]])(
     "surfaces rejected selected-account %s identity check HTTP %i",
     async (_label, status, operation) => {
       const executor = successfulSelectedGhExecutor({
@@ -256,248 +350,6 @@ describe("selected-account workflow reads", () => {
     await expect(
       findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
     ).rejects.toThrow("HTTP 503");
-  });
-
-  it("keeps transient selected-account run detail pollable after its fallback", async () => {
-    let calls = 0;
-    const executor = successfulSelectedGhExecutor({
-      login: "alice",
-      run: async () => {
-        calls += 1;
-        return {
-          code: 1,
-          stdout: "",
-          stderr: "gh: Service Unavailable (HTTP 503)"
-        };
-      }
-    });
-
-    await expect(
-      getRunDetail("contoso/store", "41", executor)
-    ).resolves.toBeNull();
-    expect(calls).toBe(2);
-  });
-
-  it("surfaces selected-account authorization failure while reading a failed run log", async () => {
-    const executor = successfulSelectedGhExecutor({
-      login: "alice",
-      run: async () => ({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Unauthorized (HTTP 401)"
-      })
-    });
-
-    await expect(
-      fetchRunLog("contoso/store", "41", executor)
-    ).rejects.toMatchObject({
-      name: "SelectedGhAuthorizationError",
-      login: "alice",
-      status: 401
-    });
-  });
-
-  it("does not read workflow log stdout as a GitHub authorization failure", async () => {
-    const executor = successfulSelectedGhExecutor({
-      login: "alice",
-      run: async () => ({
-        code: 1,
-        stdout: "curl failed against a service endpoint (HTTP 403)",
-        stderr: "gh: could not retrieve the workflow log"
-      })
-    });
-
-    await expect(
-      fetchRunLog("contoso/store", "41", executor)
-    ).resolves.toBeNull();
-  });
-
-  it("keeps transient selected-account run log failure pollable", async () => {
-    const executor = successfulSelectedGhExecutor({
-      login: "alice",
-      run: async () => ({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Service Unavailable (HTTP 503)"
-      })
-    });
-
-    await expect(
-      fetchRunLog("contoso/store", "41", executor)
-    ).resolves.toBeNull();
-  });
-
-  it("terminalizes a selected-account log 404 when the repository probe also loses access", async () => {
-    const calls: string[][] = [];
-    const executor = successfulSelectedGhExecutor({
-      login: "alice",
-      run: async (args) => {
-        calls.push(args);
-        return {
-          code: 1,
-          stdout: "",
-          stderr: "gh: Not Found (HTTP 404)"
-        };
-      }
-    });
-
-    await expect(
-      fetchRunLog("contoso/store", "41", executor)
-    ).rejects.toMatchObject({
-      name: "SelectedGhAuthorizationError",
-      login: "alice",
-      status: 404
-    });
-    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
-  });
-
-  it("keeps a missing selected-account log ordinary when the repository probe succeeds", async () => {
-    const calls: string[][] = [];
-    const executor = successfulSelectedGhExecutor({
-      login: "alice",
-      run: async (args) => {
-        calls.push(args);
-        return args[0] === "api" ?
-            { code: 0, stdout: "contoso/store", stderr: "" }
-          : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
-      }
-    });
-
-    await expect(
-      fetchRunLog("contoso/store", "41", executor)
-    ).resolves.toBeNull();
-    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
-  });
-
-  it.each([
-    ["returns the selected-account run log", "workflow log", "workflow log"],
-    ["treats an empty selected-account run log as unavailable", "", null]
-  ])("%s", async (_label, stdout, expected) => {
-    const executor = successfulSelectedGhExecutor({
-      login: "alice",
-      run: async () => ({ code: 0, stdout, stderr: "" })
-    });
-
-    await expect(fetchRunLog("contoso/store", "41", executor)).resolves.toBe(
-      expected
-    );
-  });
-});
-
-// The exact rejection surfaced by GitHub Actions' "Azure Login (OIDC)" step when
-// a personal-account repo hits a tenant that enforces the enterprise claim.
-const MS_ERROR =
-  "AADSTS7002381: Federated identity credentials issued by " +
-  "'https://token.actions.githubusercontent.com/' for applications or managed " +
-  "identities registered in this tenant must contain the enterprise claim with " +
-  "value 'microsoft', 'github' or 'microsoftopensource' but actual value is ''.";
-
-describe("explainOidcEnterpriseClaim", () => {
-  it("explains the Microsoft-tenant rejection, parsing accepted + empty actual value", () => {
-    const out = explainOidcEnterpriseClaim(MS_ERROR);
-    expect(out).not.toBe("");
-    // All three accepted values are surfaced dynamically (parsed, not hardcoded).
-    expect(out).toContain("microsoft");
-    expect(out).toContain("github");
-    expect(out).toContain("microsoftopensource");
-    // Frames it as the missing "enterprise" claim.
-    expect(out.toLowerCase()).toContain("enterprise");
-    expect(out).toContain("missing");
-    // Explains the personal-account root cause and the empty actual value.
-    expect(out.toLowerCase()).toContain("personal");
-    expect(out).toContain("empty");
-  });
-
-  describe("extractGitHubActionsStepLog", () => {
-    it("isolates the actual Azure Login step from advisory text that mentions AADSTS7002381", () => {
-      const log = [
-        "verify\tAzure Login (OIDC)\t2026-08-07T04:04:47Z ##[error]No subscriptions found.",
-        'verify\tReport possible GitHub enterprise-claim mismatch\t2026-08-07T04:04:48Z echo "Check for AADSTS7002381"',
-        'verify\tReport possible GitHub enterprise-claim mismatch\t2026-08-07T04:04:48Z echo "must contain the enterprise claim"'
-      ].join("\n");
-      const azureLogin = extractGitHubActionsStepLog(log, "Azure Login (OIDC)");
-      expect(azureLogin).toContain("No subscriptions found");
-      expect(azureLogin).not.toContain("AADSTS7002381");
-      expect(explainOidcEnterpriseClaim(azureLogin)).toBe("");
-    });
-
-    it("returns an empty string when structured step prefixes are unavailable", () => {
-      expect(
-        extractGitHubActionsStepLog(
-          "AADSTS7002381 was mentioned outside a structured step log",
-          "Azure Login (OIDC)"
-        )
-      ).toBe("");
-    });
-
-    it("isolates Azure Login when gh labels every log row UNKNOWN STEP", () => {
-      const log = [
-        "verify\tUNKNOWN STEP\t2026-08-07T04:04:46Z ##[group]Run azure/login@abc123",
-        "verify\tUNKNOWN STEP\t2026-08-07T04:04:47Z Running Azure CLI Login.",
-        `verify\tUNKNOWN STEP\t2026-08-07T04:04:48Z ##[error]${MS_ERROR}`,
-        "verify\tUNKNOWN STEP\t2026-08-07T04:04:49Z ##[endgroup]",
-        "verify\tUNKNOWN STEP\t2026-08-07T04:04:50Z Logout succeeded.",
-        'verify\tUNKNOWN STEP\t2026-08-07T04:04:51Z ##[group]Run echo "Check for AADSTS7002381"',
-        "verify\tUNKNOWN STEP\t2026-08-07T04:04:52Z must contain the enterprise claim"
-      ].join("\n");
-
-      const azureLogin = extractGitHubActionsStepLog(log, "Azure Login (OIDC)");
-      expect(azureLogin).toContain("AADSTS7002381");
-      expect(azureLogin).toContain("Logout succeeded");
-      expect(azureLogin).not.toContain('Run echo "Check for AADSTS7002381"');
-      expect(explainOidcEnterpriseClaim(azureLogin)).toContain(
-        "GitHub Enterprise"
-      );
-    });
-  });
-
-  it("is tenant-agnostic: surfaces a non-Microsoft tenant's accepted + actual values", () => {
-    const log =
-      "AADSTS7002381: ... must contain the enterprise claim with value " +
-      "'contoso' or 'fabrikam' but actual value is 'personal-acct'.";
-    const out = explainOidcEnterpriseClaim(log);
-    expect(out).not.toBe("");
-    expect(out).toContain("contoso");
-    expect(out).toContain("fabrikam");
-    expect(out).toContain("personal-acct");
-    // Proves nothing is hardcoded to Microsoft's values.
-    expect(out).not.toContain("microsoft");
-  });
-
-  it("distinguishes a present-but-untrusted claim value (not 'missing')", () => {
-    const log =
-      "AADSTS7002381: ... must contain the enterprise claim with value " +
-      "'microsoft' or 'github' but actual value is 'fabrikam'.";
-    const out = explainOidcEnterpriseClaim(log);
-    expect(out).not.toBe("");
-    // The claim IS present, just not trusted — must not say it's "missing".
-    expect(out).toContain("not trusted");
-    expect(out).toContain("fabrikam");
-    expect(out).not.toContain("missing");
-  });
-
-  it("returns '' for an unrelated error", () => {
-    expect(explainOidcEnterpriseClaim("some unrelated error: forbidden")).toBe(
-      ""
-    );
-  });
-
-  it("falls back to a generic accepted label and 'not reported' when only the AADSTS code is present", () => {
-    const log =
-      "Login failed: AADSTS7002381 was returned by the token endpoint.";
-    const out = explainOidcEnterpriseClaim(log);
-    expect(out).not.toBe("");
-    expect(out).toContain("a value required by the target Azure tenant");
-    // Actual value was not parseable — don't assert a definite empty/personal value.
-    expect(out).toContain("not reported");
-    expect(out).not.toContain("missing");
-    expect(out).not.toContain("empty (this repository");
-  });
-
-  it("returns '' for empty / undefined input", () => {
-    expect(explainOidcEnterpriseClaim("")).toBe("");
-    expect(explainOidcEnterpriseClaim(undefined)).toBe("");
-    expect(explainOidcEnterpriseClaim(null)).toBe("");
   });
 });
 
@@ -577,150 +429,6 @@ describe("cloudCredentialsComplete", () => {
   });
 });
 
-describe("classifyDeployCloudAuthDrift", () => {
-  // Exception 5.2: a redeploy whose cloud login/credentials step fails before
-  // `rad deploy` touches a resource is credential drift, not a resource failure.
-  it("classifies an Azure login-step failure before any resource was touched", () => {
-    const out = classifyDeployCloudAuthDrift({
-      provider: "azure",
-      resourcesTouched: false,
-      failedStepNames: ["Azure Login (OIDC)"]
-    });
-    expect(out).toContain("Cloud authentication or authorization failed");
-    expect(out).toContain("Azure");
-    expect(out).toContain("federated credential or role assignment");
-    expect(out).toContain("Re-verify the environment's credentials");
-    // Prior verification is unknown here, so the message must not assert it.
-    expect(out).toContain("If this environment authenticated before");
-    expect(out).not.toContain("verified earlier");
-  });
-
-  it("classifies an AWS configure-credentials / assume-role failure", () => {
-    expect(
-      classifyDeployCloudAuthDrift({
-        provider: "aws",
-        resourcesTouched: false,
-        failedStepNames: ["Configure AWS Credentials"]
-      })
-    ).toContain("AWS");
-    const assume = classifyDeployCloudAuthDrift({
-      provider: "aws",
-      resourcesTouched: false,
-      failedStepNames: ["Assume role"]
-    });
-    expect(assume).toContain("IAM role's trust policy or permissions");
-  });
-
-  it("uses a provider-agnostic label for an unknown provider", () => {
-    // An unknown provider cannot be tied to a provider-specific login step, so
-    // its failure is no longer force-classified as drift.
-    const out = classifyDeployCloudAuthDrift({
-      provider: "gcp",
-      resourcesTouched: false,
-      failedStepNames: ["OIDC login"]
-    });
-    expect(out).toBe("");
-  });
-
-  it("returns '' once a resource was touched (that is a 5.1 resource failure)", () => {
-    expect(
-      classifyDeployCloudAuthDrift({
-        provider: "azure",
-        resourcesTouched: true,
-        failedStepNames: ["Azure Login (OIDC)"]
-      })
-    ).toBe("");
-  });
-
-  it("returns '' when no failed step looks like a cloud auth step", () => {
-    expect(
-      classifyDeployCloudAuthDrift({
-        provider: "aws",
-        resourcesTouched: false,
-        failedStepNames: ["Run rad commands", undefined]
-      })
-    ).toBe("");
-  });
-
-  it("returns '' when there are no failed steps at all", () => {
-    expect(
-      classifyDeployCloudAuthDrift({
-        provider: "azure",
-        resourcesTouched: false,
-        failedStepNames: []
-      })
-    ).toBe("");
-  });
-
-  it("returns '' when a mutation step failed even though login is also listed", () => {
-    // A failed mutation step (e.g. registering credentials with Radius) means
-    // state was already being changed, so this is not clean pre-mutation drift.
-    expect(
-      classifyDeployCloudAuthDrift({
-        provider: "azure",
-        resourcesTouched: false,
-        failedStepNames: [
-          "Azure Login (OIDC)",
-          "Register cloud credentials with Radius"
-        ]
-      })
-    ).toBe("");
-  });
-
-  it("does not misread a mutation step that mentions credentials as a login failure", () => {
-    expect(
-      classifyDeployCloudAuthDrift({
-        provider: "azure",
-        resourcesTouched: false,
-        failedStepNames: ["Refresh external deployment target credentials"]
-      })
-    ).toBe("");
-  });
-
-  it("returns '' when the environment never verified (bypassed), even at the login step", () => {
-    expect(
-      classifyDeployCloudAuthDrift({
-        provider: "azure",
-        resourcesTouched: false,
-        failedStepNames: ["Azure Login (OIDC)"],
-        environmentPreviouslyVerified: false
-      })
-    ).toBe("");
-  });
-
-  it("classifies drift when the environment previously verified and login failed", () => {
-    const out = classifyDeployCloudAuthDrift({
-      provider: "aws",
-      resourcesTouched: false,
-      failedStepNames: ["Configure AWS Credentials (OIDC)"],
-      environmentPreviouslyVerified: true
-    });
-    expect(out).toContain("Cloud authentication or authorization failed");
-    // Prior success is proven, so the message may assert it.
-    expect(out).toContain("This environment verified earlier");
-  });
-});
-
-describe("extractErrorLines", () => {
-  it("returns trailing error-ish lines only", () => {
-    const log = [
-      "starting up",
-      "everything is fine",
-      "Error: something exploded",
-      "cleanup done",
-      "fatal: giving up"
-    ].join("\n");
-    const out = extractErrorLines(log, 8);
-    expect(out).toContain("Error: something exploded");
-    expect(out).toContain("fatal: giving up");
-    expect(out).not.toContain("everything is fine");
-  });
-
-  it("returns [] for empty input", () => {
-    expect(extractErrorLines("")).toEqual([]);
-    expect(extractErrorLines(undefined)).toEqual([]);
-  });
-});
 describe("explainRepoAccessForEnvSetup", () => {
   it("read failure with a known login → switch-account guidance", () => {
     const out = explainRepoAccessForEnvSetup({
