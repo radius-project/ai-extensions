@@ -51,7 +51,7 @@ This document specifies the AWS capability functionally. [User experience](#user
 
 None of the following is needed for Azure parity, so none is in scope.
 
-- Wiring an application to a backing service automatically, the AWS analogue of Azure workload-identity connections, would give each pod's service account an IAM role through IRSA. It is deferred on sequencing, not rejected.
+- Wiring an application to a backing service through a workload identity rather than a returned credential. Radius supported this in connections on `Applications.Core/containers`; the new types do not, on either cloud, so there is no Azure behavior to match. Bringing it back reaches into the container recipe and belongs in its own design covering Azure and AWS together.
 - Adding services beyond the Tier 1 catalog to the built-in AWS pack. Dependencies outside the catalog remain deployable through custom resource-type generation where AWS can provision them.
 - Compute outside EKS, such as ECS or Fargate, has no Radius execution model to target. Radius runs containers on Kubernetes and Azure Container Instances. EKS Auto Mode is out too.
 - Creating or reconfiguring infrastructure. The canvas discovers clusters and networks; it does not create EKS clusters, VPCs, or subnets, and does not change how an existing cluster is configured. Azure is the same — it does not create AKS clusters either.
@@ -340,11 +340,10 @@ Deleting an environment removes it from the role, then narrows what the role car
 
 ### Deliberate non-parity
 
-| Azure capability                       | Why AWS does not mirror it                                                                                                                |
-|----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
-| Resource group as a grouping scope     | AWS has no equivalent container. Region and VPC carry the equivalent meaning and are already surfaced.                                    |
-| Workload-identity connections          | Automatic wiring is deferred, not rejected. An application still authenticates with a credential its recipe returns, as it does on Azure. |
-| Enterprise app-registration governance | Immutable subjects and service-management references are Entra-specific. AWS governance is expressed by permissions boundaries instead.   |
+| Azure capability                       | Why AWS does not mirror it                                                                                                              |
+|----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| Resource group as a grouping scope     | AWS has no equivalent container. Region and VPC carry the equivalent meaning and are already surfaced.                                  |
+| Enterprise app-registration governance | Immutable subjects and service-management references are Entra-specific. AWS governance is expressed by permissions boundaries instead. |
 
 The reverse case — where AWS asks for something Azure does not — occurs once, and is equally deliberate.
 
