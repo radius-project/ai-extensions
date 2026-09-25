@@ -306,10 +306,6 @@ interface CredentialProvenanceRegistry {
     input: RecordCredentialProvenanceInput
   ): Promise<CredentialProvenanceRecord | null>;
   listForClient(clientId: string): Promise<CredentialProvenanceRecord[]>;
-  listForEnvironment(
-    repoId: number,
-    environment: string
-  ): Promise<CredentialProvenanceRecord[]>;
   removeCredential(clientId: string, credentialId: string): Promise<void>;
   clearEnvironment(repoId: number, environment: string): Promise<void>;
   withLock<T>(work: () => Promise<T>): Promise<T>;
@@ -371,19 +367,6 @@ function createRegistry(): CredentialProvenanceRegistry {
         const normalizedClientId = normalized(clientId);
         return entries
           .filter((entry) => normalized(entry.clientId) === normalizedClientId)
-          .map((entry) => ({ ...entry }));
-      });
-    },
-    async listForEnvironment(repoId, environment) {
-      return serialize(async () => {
-        if (store) {
-          entries = requireCredentialProvenanceRecords(await store.load());
-        }
-        return entries
-          .filter(
-            (entry) =>
-              entry.repoId === repoId && entry.environment === environment
-          )
           .map((entry) => ({ ...entry }));
       });
     },
@@ -451,13 +434,6 @@ export function listCredentialProvenanceForClient(
   clientId: string
 ): Promise<CredentialProvenanceRecord[]> {
   return registry.listForClient(clientId);
-}
-
-export function listCredentialProvenanceForEnvironment(
-  repoId: number,
-  environment: string
-): Promise<CredentialProvenanceRecord[]> {
-  return registry.listForEnvironment(repoId, environment);
 }
 
 export async function removeCredentialProvenance(

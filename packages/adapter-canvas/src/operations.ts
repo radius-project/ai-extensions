@@ -6305,10 +6305,6 @@ export async function configureOperationStore(
   operations = registry;
 }
 
-export async function persistOperations(): Promise<void> {
-  await operations.persist();
-}
-
 /**
  * Whether any setup operation is in flight.
  *
