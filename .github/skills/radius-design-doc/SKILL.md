@@ -1,6 +1,6 @@
 ---
 name: radius-design-doc
-description: 'Author a NEW design doc (design note / proposal) for a planned, non-trivial change to the ai-extensions repo — capturing why and how before implementation. Use when the user asks to write/create/draft a design doc, design note, design proposal, RFC, or spec for a feature or architectural change (e.g. control plane state storage, a new canvas action, plugin packaging). Not for documenting existing architecture after the fact, and not for how-to/contributing docs.'
+description: 'Author a NEW design doc (design note / proposal) for a planned, non-trivial change to the ai-extensions repo — capturing why and how before implementation. Use when the user asks to write/create/draft a design doc, design note, design proposal, or RFC for a feature or architectural change (e.g. control plane state storage, a new canvas action, plugin packaging). Not for documenting existing architecture after the fact, not for how-to/contributing docs, and not for a functional spec describing the user experience — use radius-functional-spec for that.'
 argument-hint: 'The design topic and a starting code reference (file, package, component, or issue)'
 user-invocable: true
 ---
@@ -21,6 +21,7 @@ Use this skill when the user wants to propose a non-trivial change, such as:
 
 Do **not** use this skill for:
 
+- **A functional spec** — a document describing what the developer experiences, screen by screen. Use [`radius-functional-spec`](../radius-functional-spec/SKILL.md) instead. That document has its own shorter template and carries none of the engineering sections below. Where a capability needs both, the functional spec is written first and is the input to this document.
 - Documenting how an existing subsystem already works after the fact — write an architecture overview instead.
 - How-to or contributing guides (setup, build, release steps).
 - Minor changes (docs, small bug fixes, behavior-preserving refactors) — those are handled with a normal issue and pull request.
