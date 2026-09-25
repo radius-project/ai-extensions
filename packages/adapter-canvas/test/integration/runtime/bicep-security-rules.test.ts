@@ -890,6 +890,50 @@ describe("requestFileReferences", () => {
     });
   });
 
+  // An answer that leaves the model out cannot describe this compile, and an
+  // empty one would inspect nothing and let a clean compile pass.
+  it("refuses an empty file list", async () => {
+    const app = server({ filePaths: [] });
+
+    await expect(
+      rules.requestFileReferences(process.execPath, app)
+    ).resolves.toEqual({
+      error: "Bicep did not list the model among the files the compile reads"
+    });
+  });
+
+  it("refuses a file list that leaves the model out", async () => {
+    const app = server({ filePaths: ["/elsewhere/other.bicep"] });
+    fs.writeFileSync(app, "");
+
+    await expect(
+      rules.requestFileReferences(process.execPath, app)
+    ).resolves.toEqual({
+      error: "Bicep did not list the model among the files the compile reads"
+    });
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "accepts the model listed under the path a symlink resolves to",
+    async () => {
+      const app = server({});
+      fs.writeFileSync(app, "");
+      const alias = path.join(temporaryDirectory(), "alias");
+      fs.symlinkSync(path.dirname(app), alias);
+      fs.writeFileSync(
+        path.join(path.dirname(app), "jsonrpc.json"),
+        JSON.stringify({ filePaths: [app] })
+      );
+
+      await expect(
+        rules.requestFileReferences(
+          process.execPath,
+          path.join(alias, "app.bicep")
+        )
+      ).resolves.toEqual({ filePaths: [app] });
+    }
+  );
+
   it("reports a Bicep executable that cannot be started", async () => {
     const app = server();
     const missing = path.join(path.dirname(app), "missing-bicep");
@@ -1168,15 +1212,22 @@ describe("inspectSecurityRules", () => {
     expect(files.reads).toEqual([stagedApp, stagedConfig]);
   });
 
-  it("skips a file that has disappeared since Bicep listed it", () => {
-    const files = fakeFiles({});
+  // Bicep lists a loadTextContent() target that does not exist, and a file can
+  // disappear after the compile read it; neither may pass unchecked.
+  it("reports a listed file that does not exist", () => {
+    const files = fakeFiles({ [stagedApp]: "" });
 
     expect(
       rules.inspectSecurityRules([stagedApp, stagedConfig], {
         stagingDir,
         readFile: files.readFile
       })
-    ).toEqual({ findings: [], unavailable: null });
+    ).toEqual({
+      findings: [
+        `${stagedConfig}: error compile-file-missing: Bicep reads this file for the compile, but it does not exist, so whether it disables or suppresses a security rule cannot be established. Add the file or remove the reference to it.`
+      ],
+      unavailable: null
+    });
   });
 
   it("reports a configuration that cannot be parsed", () => {

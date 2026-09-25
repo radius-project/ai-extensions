@@ -50,7 +50,7 @@
 // would currently ignore.
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 export const BICEP_CONFIG_FILE = "bicepconfig.json";
@@ -448,11 +448,47 @@ export function parseFileReferencesResponse(output) {
   }
 }
 
-// Asks the managed Bicep for the files compiling `app` reads. The server only
-// answers while its input is open, so the request is written, the response is
-// awaited, and only then is the input closed so the server exits. Resolves with
+// Whether `filePaths` names `file`. Bicep reports the path it was given, but a
+// path spelled through a symlink is compared by the file it resolves to.
+function listsFile(filePaths, file) {
+  const target = path.resolve(file);
+  const resolved = realPath(target);
+  return filePaths.some(
+    (listed) =>
+      path.resolve(listed) === target ||
+      (resolved !== null && realPath(listed) === resolved)
+  );
+}
+
+function realPath(file) {
+  try {
+    return realpathSync.native(file);
+  } catch {
+    return null;
+  }
+}
+
+// Asks the managed Bicep for the files compiling `app` reads, and refuses an
+// answer that leaves the model itself out: such a list cannot describe this
+// compile, and an empty one would inspect nothing. Resolves with
 // `{ filePaths }` or `{ error }`; it never rejects.
-export function requestFileReferences(
+export async function requestFileReferences(bicep, app, options) {
+  const references = await queryFileReferences(bicep, app, options);
+  if (
+    references.filePaths !== undefined &&
+    !listsFile(references.filePaths, app)
+  ) {
+    return {
+      error: "Bicep did not list the model among the files the compile reads"
+    };
+  }
+  return references;
+}
+
+// The server only answers while its input is open, so the request is written,
+// the response is awaited, and only then is the input closed so the server
+// exits.
+function queryFileReferences(
   bicep,
   app,
   { timeoutMs = FILE_REFERENCES_TIMEOUT_MS } = {}
@@ -567,8 +603,10 @@ function remedy(file, stagingDir, modelConfig) {
 // Every finding that keeps a security rule from running, among the files Bicep
 // reported for the compile, formatted for the checker's output. `unavailable`
 // is set, and the findings so far are incomplete, when a file that exists could
-// not be read. A file that has disappeared since Bicep listed it is skipped;
-// the compile that follows reports it.
+// not be read. A listed file that does not exist is a finding rather than
+// skipped: Bicep lists a missing loadTextContent() target, which the model can
+// repair, and a file that disappeared after the compile read it must not pass
+// unchecked.
 export function inspectSecurityRules(
   filePaths,
   { stagingDir = null, readFile = readFileIfPresent } = {}
@@ -583,7 +621,12 @@ export function inspectSecurityRules(
     } catch (error) {
       return { findings, unavailable: `${file}: ${error.message}` };
     }
-    if (bytes === null) continue;
+    if (bytes === null) {
+      findings.push(
+        `${file}: error compile-file-missing: Bicep reads this file for the compile, but it does not exist, so whether it disables or suppresses a security rule cannot be established. Add the file or remove the reference to it.`
+      );
+      continue;
+    }
     const text = decodeText(bytes);
     if (isBicepConfig(file)) {
       const parsed = parseBicepConfig(text);

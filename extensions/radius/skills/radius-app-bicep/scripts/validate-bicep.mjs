@@ -1325,23 +1325,23 @@ const bicep = path.join(
 
 // Whether every Bicep security rule runs for the files this compile reads. A
 // model that does not exist has nothing to inspect, and the compile reports it
-// exactly as it did before this check existed.
-async function inspectCompiledFiles(app, staged) {
+// exactly as it did before this check existed. Never rejects, so the compile
+// running alongside it is always awaited rather than left behind.
+async function inspectCompiledFiles(securityRules, app, staged) {
   if (!existsSync(app)) {
     return { findings: [], unavailable: null };
   }
-  // Loaded here rather than imported statically, so an installation missing
-  // the sibling module reaches the catch below main() and reports the check as
-  // unavailable (exit 2) instead of failing to load (exit 1).
-  const { inspectSecurityRules, requestFileReferences } =
-    await import("./bicep-security-rules.mjs");
-  const references = await requestFileReferences(bicep, app);
-  if (references.error !== undefined) {
-    return { findings: [], unavailable: references.error };
+  try {
+    const references = await securityRules.requestFileReferences(bicep, app);
+    if (references.error !== undefined) {
+      return { findings: [], unavailable: references.error };
+    }
+    return securityRules.inspectSecurityRules(references.filePaths, {
+      stagingDir: staged ? path.dirname(app) : null
+    });
+  } catch (error) {
+    return { findings: [], unavailable: error.message };
   }
-  return inspectSecurityRules(references.filePaths, {
-    stagingDir: staged ? path.dirname(app) : null
-  });
 }
 
 const COMPILE_TIMEOUT_MS = 120_000;
@@ -1418,13 +1418,18 @@ function compileModel(app) {
 // could not produce a reliable verdict. The budget wraps it rather than living
 // inside it.
 async function check(app, staged) {
+  // Loaded before anything is spawned rather than imported statically, so an
+  // installation missing the sibling module reaches the catch below main() and
+  // reports the check as unavailable (exit 2) instead of failing to load
+  // (exit 1), without leaving a compile running.
+  const securityRuleModule = await import("./bicep-security-rules.mjs");
   // A security rule that was turned off reports nothing, so a clean compile is
   // only evidence once the rules are known to have run. The inspection runs
   // alongside the compile, and its findings are reported first; a finding
   // still lets the compile's own diagnostics through, so one attempt reports
   // everything the model has to fix.
   const [securityRules, compiled] = await Promise.all([
-    inspectCompiledFiles(app, staged),
+    inspectCompiledFiles(securityRuleModule, app, staged),
     compileModel(app)
   ]);
   securityRules.findings.forEach(report);
