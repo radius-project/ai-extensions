@@ -40,3 +40,18 @@ export type {
   RunRadBicepPublishOptions
 } from "./rad.js";
 export { RadProcessError } from "./rad.js";
+export {
+  readWorkflowRun,
+  readWorkflowLog,
+  selectedWorkflowJson,
+  SelectedGhAuthorizationError,
+  isSelectedGhAuthorizationError,
+  isGitHubRateLimitError,
+  selectedCommandAuthorizationError
+} from "./workflow-reads.js";
+export type {
+  WorkflowExecution,
+  WorkflowRunner,
+  WorkflowReadOptions,
+  SelectedWorkflowExecutor
+} from "./workflow-reads.js";

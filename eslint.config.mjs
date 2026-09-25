@@ -79,6 +79,35 @@ export default [
     }
   },
   {
+    files: ["packages/adapter-shared/src/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: [
+                "@radius-project/adapter-canvas",
+                "@radius-project/adapter-canvas/**",
+                "**/adapter-canvas",
+                "**/adapter-canvas/**"
+              ],
+              message: "Shared must not depend on Canvas implementations."
+            }
+          ]
+        }
+      ],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "ImportExpression[source.value=/(?:^|\\/)adapter-canvas(?:\\/|$)/]",
+          message: "Shared must not dynamically import Canvas implementations."
+        }
+      ]
+    }
+  },
+  {
     files: ["packages/core/src/**/*.ts"],
     rules: {
       "no-restricted-imports": [
