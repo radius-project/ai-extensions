@@ -608,11 +608,16 @@ describe("generateDeleteWorkflow", () => {
     );
     expect(dispatcher).toContain('if [ -n "$AZURE_CLIENT_ID" ]');
     // The AKS connect step reads the resource group / cluster / subscription
-    // from env and references them with $VAR, never inline ${{ vars.* }}.
+    // from env and references them with $VAR, never inline ${{ vars.* }}. The
+    // resource group is the cluster's own, falling back to the application's
+    // for an environment that does not record it.
     expect(provider).toContain(
-      "AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}"
+      "AZURE_AKS_RESOURCE_GROUP: ${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}"
     );
-    expect(provider).toContain('--resource-group "$AZURE_RESOURCE_GROUP"');
+    expect(provider).toContain('--resource-group "$AZURE_AKS_RESOURCE_GROUP"');
+    expect(provider).not.toContain(
+      '--resource-group "${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}"'
+    );
     expect(provider).not.toContain(
       '--resource-group "${{ vars.AZURE_RESOURCE_GROUP }}"'
     );

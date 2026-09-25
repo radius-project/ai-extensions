@@ -20,6 +20,7 @@ import {
   fetchBicepFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
+  mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
   projectSafeApplicationGraph,
@@ -1399,6 +1400,7 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   buildDeployStatusMap,
   buildDeployMessageMap,
   deployStatusKeys,
+  mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   projectDeployedGraph: (modeled, statusByKey) =>
     projectDeployedGraph(modeled as any[], statusByKey),
@@ -3354,15 +3356,6 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
       else resolve((stdout || "").trim());
     });
   });
-}
-
-export function resolveGitHubEnvironmentCreateState(
-  result: Partial<CommandResult> | null | undefined
-): "created_candidate" | "reused" | null {
-  if (!result) return null;
-  if (result.code === 0 || result.code === "0") return "reused";
-  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
-  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
 }
 
 export interface CleanupGitHubContext {

@@ -16,7 +16,7 @@ import {
   resolveGraphSettings
 } from "./build.js";
 import type { GraphOptions } from "./build.js";
-import type { GraphResource } from "./model.js";
+import { parseGraphResources, type GraphResource } from "./model.js";
 
 function settings(options: GraphOptions = {}) {
   return resolveGraphSettings(options);
@@ -407,8 +407,11 @@ describe("modeled graph", () => {
       }
     ]);
     expect(built.dataById["db/output/0/a"].typeLabel).toBe("Display");
+    expect(built.dataById["db/output/0/a"].concreteType).toBe("T");
     expect(built.dataById["db/output/1/b"].typeLabel).toBe("T");
+    expect(built.dataById["db/output/1/b"].concreteType).toBe("T");
     expect(built.dataById["db/output/2/c"].typeLabel).toBe("c");
+    expect(built.dataById["db/output/2/c"].concreteType).toBe("");
     expect(built.dataById["db/output/0/a"].bgColor).toBe(
       "var(--rad-bg-subtle)"
     );
@@ -613,13 +616,125 @@ describe("diff graph", () => {
 });
 
 describe("planned and deploying graphs", () => {
-  it("keeps modeled topology and relabels with the resolved concrete type", () => {
-    const built = buildGraph(settings({ plannedMode: true }), [db]);
+  it("keeps modeled topology and relabels with the resolved friendly type", () => {
+    const built = buildGraph(settings({ plannedMode: true }), [
+      {
+        ...db,
+        outputResources: [
+          {
+            ...db.outputResources?.[0],
+            displayType: "Azure Database for MySQL"
+          }
+        ]
+      }
+    ]);
     expect(built.nodes.map((node) => node.id)).toEqual(["app/db"]);
-    expect(built.dataById["app/db"].typeLabel).toBe(
-      "Microsoft.DBforMySQL/flexibleServers"
+    expect(built.dataById["app/db"]).toMatchObject({
+      typeLabel: "Azure Database for MySQL",
+      concreteType: "Microsoft.DBforMySQL/flexibleServers",
+      resourceType: "Radius.Data/mySqlDatabases@2023-10-01-preview",
+      nodeName: "db"
+    });
+  });
+
+  it.each([
+    [
+      "Azure managed service",
+      "Microsoft.DBforPostgreSQL/flexibleServers",
+      "Azure Database for PostgreSQL"
+    ],
+    [
+      "Azure managed container platform",
+      "Microsoft.ContainerService/managedClusters",
+      "Azure Kubernetes Service"
+    ],
+    ["Kubernetes workload", "apps/Deployment", "Deployment (K8s)"],
+    ["AWS managed workload", "apps/Deployment", "Deployment (EKS)"],
+    ["Kubernetes object", "gateway.networking.k8s.io/HTTPRoute", "HTTPRoute"]
+  ])("shows the friendly label for a %s", (_case, type, displayType) => {
+    const built = buildGraph(settings({ plannedMode: true }), [
+      {
+        id: "resource",
+        name: "resource",
+        outputResources: [{ type, displayType }]
+      }
+    ]);
+
+    expect(built.dataById.resource.typeLabel).toBe(displayType);
+    expect(built.dataById.resource.concreteType).toBe(type);
+  });
+
+  it.each([undefined, "", "   "])(
+    "falls back to the concrete type for display type %j",
+    (displayType) => {
+      const built = buildGraph(settings({ plannedMode: true }), [
+        {
+          id: "resource",
+          name: "resource",
+          outputResources: [
+            {
+              type: "Microsoft.DBforMySQL/flexibleServers@2024-01-01",
+              displayType
+            }
+          ]
+        }
+      ]);
+
+      expect(built.dataById.resource.typeLabel).toBe(
+        "Microsoft.DBforMySQL/flexibleServers"
+      );
+      expect(built.dataById.resource.concreteType).toBe(
+        "Microsoft.DBforMySQL/flexibleServers@2024-01-01"
+      );
+    }
+  );
+
+  it("uses the same friendly labeling rule while deploying", () => {
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "postgres",
+        name: "postgres",
+        outputResources: [
+          {
+            type: "Microsoft.DBforPostgreSQL/flexibleServers",
+            displayType: "Azure Database for PostgreSQL"
+          }
+        ]
+      }
+    ]);
+
+    expect(built.dataById.postgres.typeLabel).toBe(
+      "Azure Database for PostgreSQL"
     );
-    expect(built.dataById["app/db"].nodeName).toBe("db");
+    expect(built.dataById.postgres.concreteType).toBe(
+      "Microsoft.DBforPostgreSQL/flexibleServers"
+    );
+  });
+
+  it("omits blank concrete type details for a display-only output", () => {
+    const built = buildGraph(settings({ plannedMode: true }), [
+      {
+        id: "secret",
+        name: "secret",
+        outputResources: [{ type: "   ", displayType: "Secret" }]
+      }
+    ]);
+
+    expect(built.dataById.secret.typeLabel).toBe("Secret");
+    expect(built.dataById.secret.concreteType).toBe("");
+
+    const malformed = buildGraph(
+      settings({ plannedMode: true }),
+      parseGraphResources([
+        {
+          id: "malformed",
+          name: "malformed",
+          outputResources: [{ type: 42, displayType: "Friendly resource" }]
+        }
+      ])
+    );
+    expect(malformed.dataById.malformed.typeLabel).toBe("Friendly resource");
+    expect(malformed.dataById.malformed.concreteType).toBe("");
   });
 
   it("prefers the primary workload over supporting recipe outputs, in any order", () => {
@@ -628,13 +743,18 @@ describe("planned and deploying graphs", () => {
         id: "cache",
         name: "cache",
         outputResources: [
-          { name: "s", type: "core/Secret" },
-          { name: "d", type: "apps/Deployment" },
-          { name: "svc", type: "core/Service" }
+          { name: "s", type: "core/Secret", displayType: "Secret" },
+          {
+            name: "d",
+            type: "apps/Deployment",
+            displayType: "Deployment (K8s)"
+          },
+          { name: "svc", type: "core/Service", displayType: "Service" }
         ]
       }
     ]);
-    expect(built.dataById["cache"].typeLabel).toBe("apps/Deployment");
+    expect(built.dataById["cache"].typeLabel).toBe("Deployment (K8s)");
+    expect(built.dataById["cache"].concreteType).toBe("apps/Deployment");
   });
 
   it("shows the MySQL root resource instead of its lock and child resources", () => {
@@ -647,7 +767,8 @@ describe("planned and deploying graphs", () => {
           { name: "lock", type: "Microsoft.Authorization/locks" },
           {
             name: "server",
-            type: "Microsoft.DBforMySQL/flexibleServers"
+            type: "Microsoft.DBforMySQL/flexibleServers",
+            displayType: "Azure Database for MySQL"
           },
           {
             name: "database",
@@ -660,7 +781,8 @@ describe("planned and deploying graphs", () => {
         ]
       }
     ]);
-    expect(built.dataById.mysql.typeLabel).toBe(
+    expect(built.dataById.mysql.typeLabel).toBe("Azure Database for MySQL");
+    expect(built.dataById.mysql.concreteType).toBe(
       "Microsoft.DBforMySQL/flexibleServers"
     );
   });
@@ -731,8 +853,14 @@ describe("planned and deploying graphs", () => {
   });
 
   it("falls back to the modeled type when no output resolves", () => {
-    const built = buildGraph(settings({ plannedMode: true }), [web]);
+    const built = buildGraph(settings({ plannedMode: true }), [
+      {
+        ...web,
+        outputResources: [{ displayType: "   " }]
+      }
+    ]);
     expect(built.dataById["app/web"].typeLabel).toBe("Compute/containers");
+    expect(built.dataById["app/web"].concreteType).toBe("");
   });
 
   it("draws planned nodes and every planned edge dashed", () => {

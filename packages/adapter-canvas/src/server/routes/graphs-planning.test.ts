@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import {
+  mergeDeployedGraphDisplayMetadata,
   mergeDeployedGraphMetadata,
   type DeployStatus
 } from "@radius-project/core";
@@ -359,6 +360,14 @@ function fakes(
         )})`
       );
       return mergeDeployedGraphMetadata(modeled, deployed);
+    },
+    mergeDeployedGraphDisplayMetadata: (modeled, displaySource) => {
+      calls.log.push(
+        `mergeDeployedGraphDisplayMetadata(${JSON.stringify(modeled)}|${JSON.stringify(
+          displaySource
+        )})`
+      );
+      return mergeDeployedGraphDisplayMetadata(modeled, displaySource);
     },
     projectDeployedGraph: (modeled, statusByKey) => {
       calls.log.push(
@@ -1998,14 +2007,27 @@ describe("graphs-planning read routes (SU-09)", () => {
           {
             ...DEPLOYING_RESOURCES[0],
             deployStatus: "failed",
-            deployMessage: "old attempt error"
+            deployMessage: "old attempt error",
+            outputResources: [
+              {
+                type: "apps/Deployment",
+                displayType: "Old deployment"
+              }
+            ]
           }
         ]
       },
       modeledResources: DEPLOYING_RESOURCES,
       reader: {
         graph: {
-          graph: null,
+          graph: {
+            resources: [
+              {
+                ...DEPLOYING_RESOURCES[0],
+                outputResources: [{ type: "apps/StatefulSet" }]
+              }
+            ]
+          },
           status: "ok",
           artifact: {
             id: 8,
@@ -2034,6 +2056,9 @@ describe("graphs-planning read routes (SU-09)", () => {
 
     expect(payload.resources[0].deployStatus).toBe("failed");
     expect(payload.resources[0].deployMessage).toBe("new attempt error");
+    expect(payload.resources[0].outputResources).toEqual([
+      { type: "apps/StatefulSet" }
+    ]);
     expect(calls.log).toContain("settleDeployStatuses(failure)");
     expect(calls.log).not.toContain("settleDeployStatuses(success)");
   });
@@ -2353,6 +2378,76 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(payload.resources[0].deployStatus).toBe("pending");
   });
 
+  it("carries a planned friendly type into final deployment metadata", async () => {
+    const calls: Calls = { log: [] };
+    const modeled = {
+      id: "mysql",
+      name: "mysql",
+      type: "Radius.Data/mySqlDatabases"
+    };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        graphTargetRepo: CONTEXT_REPO,
+        graphBranch: "main",
+        graphResources: [modeled],
+        plannedRepo: CONTEXT_REPO,
+        plannedBranch: "main",
+        plannedEnvironment: DEPLOY_ENV,
+        plannedProvider: "azure",
+        deployProvider: "azure",
+        plannedResources: [
+          {
+            ...modeled,
+            outputResources: [
+              {
+                id: "planned-server",
+                type: "Microsoft.DBforMySQL/flexibleServers@2024-01-01",
+                displayType: "Azure Database for MySQL"
+              }
+            ]
+          }
+        ]
+      },
+      reader: {
+        graph: {
+          graph: {
+            resources: [
+              {
+                ...modeled,
+                outputResources: [
+                  {
+                    id: "deployed-server",
+                    type: "Microsoft.DBforMySQL/flexibleServers@2025-01-01",
+                    portalUrl: "https://portal.azure.com/mysql"
+                  }
+                ]
+              }
+            ]
+          },
+          status: "ok"
+        }
+      }
+    });
+
+    const payload = payloadOf(
+      await run(
+        `/api/deployed-graph?environment=${DEPLOY_ENV}`,
+        handleDeployedGraph,
+        deps
+      )
+    );
+
+    expect(payload.resources[0].outputResources).toEqual([
+      {
+        id: "deployed-server",
+        type: "Microsoft.DBforMySQL/flexibleServers@2025-01-01",
+        displayType: "Azure Database for MySQL",
+        portalUrl: "https://portal.azure.com/mysql"
+      }
+    ]);
+  });
+
   it("does not borrow planned outputs after a failed deployment", async () => {
     const calls: Calls = { log: [] };
     const modeled = {
@@ -2383,12 +2478,35 @@ describe("graphs-planning read routes (SU-09)", () => {
             ]
           }
         ],
+        deployEnvName: DEPLOY_ENV,
+        deployingResources: [
+          {
+            ...modeled,
+            outputResources: [
+              {
+                id: "attempt-server",
+                type: "Microsoft.DBforMySQL/flexibleServers@2024-01-01",
+                displayType: "Azure Database for MySQL",
+                portalUrl: "https://portal.azure.com/#attempt-only"
+              }
+            ]
+          }
+        ],
         deployStatus: "failed",
         deployRunId: 7
       },
       reader: {
         graph: {
-          graph: { resources: [{ ...modeled, outputResources: [] }] },
+          graph: {
+            resources: [
+              {
+                ...modeled,
+                outputResources: [
+                  { id: "secret", type: "core/Secret", displayType: "Secret" }
+                ]
+              }
+            ]
+          },
           status: "ok"
         }
       }
@@ -2402,7 +2520,15 @@ describe("graphs-planning read routes (SU-09)", () => {
       )
     );
 
-    expect(payload.resources[0].outputResources).toEqual([]);
+    expect(payload.resources[0].outputResources).toEqual([
+      { id: "secret", type: "core/Secret", displayType: "Secret" },
+      {
+        type: "Microsoft.DBforMySQL/flexibleServers@2024-01-01",
+        displayType: "Azure Database for MySQL"
+      }
+    ]);
+    expect(JSON.stringify(payload.resources)).not.toContain("attempt-only");
+    expect(JSON.stringify(payload.resources)).not.toContain("missing");
     expect(payload.resources[0].deployStatus).toBe("failed");
   });
 
