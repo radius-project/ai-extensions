@@ -109,6 +109,8 @@ Run `pnpm test:visual:canonical` before opening a pull request that can affect C
 
 When a check fails, inspect `packages/adapter-canvas/test-results/visual/` for actual, expected, and diff images or open `packages/adapter-canvas/playwright-visual-report/index.html`. If the UX change is intentional, run `pnpm test:visual:canonical:update`, review every changed file under `packages/adapter-canvas/test/visual/__screenshots__/`, rerun `pnpm test:visual:canonical`, and commit the reviewed PNGs with the product change. Do not use update mode to accept an unexplained rendering difference.
 
+Pull requests run the same comparison as the **Visual comparisons** check whenever they change `packages/**`, the root package manifests or lockfile, the canonical runner, or its workflow. When screenshots no longer match, the check comments on the pull request with a link to the diff images. If the change is intended, add the `pr:update-visual-baselines` label instead of running Docker locally: the **Canvas Visual Baselines** workflow regenerates the baselines, commits the changed PNGs to the pull request branch, removes the label, and **Visual comparisons** runs again on the new commit. Review every regenerated image in **Files changed** before approving. The label cannot push to a branch in a fork, so fork pull requests use the local update command.
+
 The container supplies canonical Linux rasterization on every developer host; it does not prove native Canvas functionality on that host. The separate reliability workflow continues to qualify behavioral checks natively on Ubuntu, Windows, and macOS.
 
 ## Before you open a pull request

@@ -30,6 +30,7 @@ const MARKETPLACE_BLOB = "2".repeat(40);
 const EXTENSION_BLOB = "3".repeat(40);
 const MANIFEST_BLOB = "4".repeat(40);
 const README_BLOB = "5".repeat(40);
+const PARENT_TREE = "9".repeat(40);
 // File modes and symlinks are not reproducible on Windows.
 const WINDOWS = process.platform === "win32";
 
@@ -57,11 +58,12 @@ async function api({
   commitVerified = verified,
   parents = [],
   refs = [],
+  refTargets = {},
   broken,
   tagObject
 } = {}) {
   const calls = [];
-  const existing = new Set(refs);
+  const existing = new Set([...refs, ...Object.keys(refTargets)]);
   let blobs = 0;
 
   const server = createServer((request, response) => {
@@ -98,6 +100,7 @@ async function api({
       if (request.method === "GET" && path.startsWith("/git/commits/")) {
         return send(200, {
           sha: path.slice("/git/commits/".length),
+          tree: { sha: PARENT_TREE },
           verification: {
             verified: commitVerified,
             reason: commitVerified ? "valid" : "unsigned"
@@ -115,6 +118,9 @@ async function api({
         if (!existing.has(name)) return send(404, { message: "Not Found" });
         return send(200, {
           ref: name,
+          ...(refTargets[name] ?
+            { object: { type: "commit", sha: refTargets[name] } }
+          : {}),
           ...(tagObject ?
             {
               object: {
@@ -734,10 +740,226 @@ describe("scripts/verified-git.mjs", () => {
     });
   });
 
+  it("layers the paths over a parent commit's tree", async () => {
+    const root = repository();
+    const { url, calls } = await api({ parents: [{ sha: TARGET }] });
+
+    const result = await run(root, url, [
+      ...commitArgs(["catalog.json"]),
+      "--parent",
+      TARGET
+    ]);
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ commit: COMMIT, tree: TREE });
+    expect(calls.map((call) => call.route)).toEqual([
+      "POST /git/blobs",
+      `GET /git/commits/${TARGET}`,
+      "POST /git/trees",
+      "POST /git/commits"
+    ]);
+    expect(calls[2].body).toEqual({
+      base_tree: PARENT_TREE,
+      tree: [
+        {
+          path: "catalog.json",
+          mode: "100644",
+          type: "blob",
+          sha: expect.any(String)
+        }
+      ]
+    });
+    expect(calls[3].body).toEqual({
+      message: "chore(release): publish",
+      tree: TREE,
+      parents: [TARGET]
+    });
+  });
+
+  it.each([
+    [["--parent", "abc"], "--parent must be a full 40-character commit SHA"],
+    [["--parent"], "--parent is required"]
+  ])("rejects an unusable parent %j", async (parent, message) => {
+    const root = repository();
+    const { url, calls } = await api();
+
+    const result = await run(root, url, [...commitArgs(), ...parent]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([[[]], [[{ sha: COMMIT }]], [[{ sha: TARGET }, { sha: COMMIT }]]])(
+    "refuses a commit whose parents are %j",
+    async (parents) => {
+      const root = repository();
+      const { url } = await api({ parents });
+
+      const result = await run(root, url, [
+        ...commitArgs(),
+        "--parent",
+        TARGET
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`without ${TARGET} as its only parent`);
+      expect(result.stdout).toBe("");
+    }
+  );
+
+  it("refuses an unsigned commit on top of a parent", async () => {
+    const root = repository();
+    const { url } = await api({ verified: false, parents: [{ sha: TARGET }] });
+
+    const result = await run(root, url, [...commitArgs(), "--parent", TARGET]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("GitHub did not sign the commit");
+  });
+
+  it("fast-forwards a branch ref that still points at the expected head", async () => {
+    const root = repository();
+    const { url, calls } = await api({
+      refTargets: { "refs/heads/feature/ui": TARGET }
+    });
+
+    const result = await run(root, url, [
+      "ref",
+      "--name",
+      "refs/heads/feature/ui",
+      "--sha",
+      COMMIT,
+      "--fast-forward-from",
+      TARGET
+    ]);
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(COMMIT);
+    expect(calls.at(-1)).toMatchObject({
+      route: "PATCH /git/refs/heads/feature/ui",
+      body: { sha: COMMIT, force: false }
+    });
+  });
+
+  // A force-push back to an ancestor would still let a plain fast-forward
+  // through, and silently restore commits the author removed.
+  it.each([
+    ["an unrelated newer push", SOURCE],
+    ["a force-push back to an ancestor", TAG]
+  ])("refuses to move a ref that moved to %s", async (_, current) => {
+    const root = repository();
+    const { url, calls } = await api({
+      refTargets: { "refs/heads/feature/ui": current }
+    });
+
+    const result = await run(root, url, [
+      "ref",
+      "--name",
+      "refs/heads/feature/ui",
+      "--sha",
+      COMMIT,
+      "--fast-forward-from",
+      TARGET
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `refs/heads/feature/ui moved to ${current}; expected ${TARGET}`
+    );
+    expect(calls.map((call) => call.route)).not.toContain(
+      "PATCH /git/refs/heads/feature/ui"
+    );
+  });
+
+  it("surfaces GitHub refusing a non-fast-forward update", async () => {
+    const root = repository();
+    const { url } = await api({
+      refTargets: { "refs/heads/feature/ui": TARGET },
+      broken: {
+        route: "PATCH /git/refs/heads/feature/ui",
+        status: 422,
+        body: { message: "Update is not a fast forward" }
+      }
+    });
+
+    const result = await run(root, url, [
+      "ref",
+      "--name",
+      "refs/heads/feature/ui",
+      "--sha",
+      COMMIT,
+      "--fast-forward-from",
+      TARGET
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("failed with 422");
+    expect(result.stderr).toContain("Update is not a fast forward");
+  });
+
+  it("will not create a missing ref when asked to fast-forward", async () => {
+    const root = repository();
+    const { url, calls } = await api();
+
+    const result = await run(root, url, [
+      "ref",
+      "--name",
+      "refs/heads/feature/ui",
+      "--sha",
+      COMMIT,
+      "--fast-forward-from",
+      TARGET
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "refs/heads/feature/ui does not exist, so it cannot fast-forward"
+    );
+    expect(calls.map((call) => call.route)).not.toContain("POST /git/refs");
+  });
+
+  it.each([
+    [
+      ["--fast-forward-from", "abc"],
+      "--fast-forward-from must be a full 40-character commit SHA"
+    ],
+    [["--fast-forward-from"], "--fast-forward-from is required"],
+    [
+      ["--force", "--fast-forward-from", TARGET],
+      "--force and --fast-forward-from are exclusive"
+    ]
+  ])("rejects the fast-forward arguments %j", async (extra, message) => {
+    const root = repository();
+    const { url, calls } = await api({
+      refTargets: { "refs/heads/feature/ui": TARGET }
+    });
+
+    const result = await run(root, url, [
+      "ref",
+      "--name",
+      "refs/heads/feature/ui",
+      "--sha",
+      COMMIT,
+      ...extra
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+    expect(calls).toEqual([]);
+  });
+
   it.each([
     ["refs/notes/build"],
     ["releases/radius/edge"],
-    ["refs/heads/bad ref"]
+    ["refs/heads/bad ref"],
+    ["refs/heads/main#x"],
+    ["refs/heads/a/%2e%2e/main"],
+    ["refs/heads/a/../main"],
+    ["refs/heads/./main"],
+    ["refs/heads/a/.."]
   ])("rejects the unusable ref %s", async (name) => {
     const root = repository();
     const { url } = await api();

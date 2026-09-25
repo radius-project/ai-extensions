@@ -11,14 +11,20 @@
 //
 // Usage:
 //   node scripts/verified-git.mjs commit --message <message> --path <path>...
-//         Uploads the paths as a parentless ROOT commit, so an install branch
-//         built from it shares no history with main. Moves no ref, and prints
+//                                        [--parent <sha>]
+//         Without --parent, uploads the paths as a parentless ROOT commit, so
+//         an install branch built from it shares no history with main. With
+//         --parent, layers the paths over that commit's tree and makes it the
+//         only parent. Moves no ref, and prints
 //         {"commit":"<sha>","tree":"<sha>"} so a caller can compare the tree
 //         against an already published branch before deciding to publish.
 //   node scripts/verified-git.mjs tag --name <tag> --target <sha> [--force]
 //         Creates a lightweight tag ref after GitHub verifies its target commit.
 //   node scripts/verified-git.mjs ref --name refs/heads/<branch> --sha <sha>
-//                                     [--force]
+//                                     [--force | --fast-forward-from <sha>]
+//         --fast-forward-from moves an existing ref only while it still points
+//         at <sha>, and only when GitHub confirms the new commit descends from
+//         it, so neither a newer push nor a force-push back is overwritten.
 //   node scripts/verified-git.mjs verify-tag --name <tag> [--target <sha>]
 //         Fails unless the tag resolves to the expected GitHub-Verified commit.
 //   node scripts/verified-git.mjs verify-artifact --branch <branch>
@@ -37,7 +43,10 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
-const REF = /^refs\/(?:heads|tags)\/[^\s~^:?*[\\]+$/;
+// Refs are joined into REST URLs, so `#`, `%`, and dot segments are refused:
+// URL parsing would drop, decode, or normalize them into a different ref.
+const REF =
+  /^refs\/(?:heads|tags)\/(?!(?:.*\/)?\.{1,2}(?:\/|$))[^\s~^:?*[\\#%]+$/;
 const PUBLISHED_PATH =
   /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[^\s\\:*?"<>|]+(?<!\/)$/;
 const MARKETPLACE = ".github/plugin/marketplace.json";
@@ -207,9 +216,21 @@ async function readRef(name, absentOn404 = false) {
   );
 }
 
-async function writeRef(name, sha, force) {
+async function writeRef(name, sha, force, expected) {
   const existing = await readRef(name, true);
-  if (existing) {
+  if (expected !== undefined) {
+    if (!existing) fail(`${name} does not exist, so it cannot fast-forward`);
+    if (existing.object?.sha !== expected) {
+      fail(
+        `${name} moved to ${existing.object?.sha ?? "an unknown commit"}; expected ${expected}`
+      );
+    }
+    // GitHub's ref API has no compare-and-swap. force: false still rejects
+    // any push that lands after the check above, because the new commit's
+    // only parent is `expected`; only a force-push back to an ancestor of
+    // `expected` inside that window could be overwritten.
+    await api("PATCH", `/git/${name}`, { sha, force: false });
+  } else if (existing) {
     if (!force) fail(`${name} already exists; pass --force to move it`);
     await api("PATCH", `/git/${name}`, { sha, force: true });
   } else {
@@ -220,6 +241,8 @@ async function writeRef(name, sha, force) {
 
 async function commit(args) {
   const message = required(option(args, "--message"), "--message");
+  const parent = option(args, "--parent");
+  if (args.includes("--parent")) requireSha(parent, "--parent");
   const files = collect(repeated(args, "--path"));
   const tree = [];
   for (const file of files) {
@@ -235,19 +258,45 @@ async function commit(args) {
     });
   }
 
-  // No base_tree, so the tree holds exactly these files, and no parents, so the
-  // commit is a root commit.
-  const created = await api("POST", "/git/trees", { tree });
+  if (parent === undefined) {
+    // No base_tree, so the tree holds exactly these files, and no parents, so
+    // the commit is a root commit.
+    const created = await api("POST", "/git/trees", { tree });
+    const object = requireVerified(
+      await api("POST", "/git/commits", {
+        message,
+        tree: created.sha,
+        parents: []
+      }),
+      "commit"
+    );
+    if (object.parents?.length) {
+      fail(
+        `GitHub created ${object.sha} with parents; it is not a root commit`
+      );
+    }
+    console.log(JSON.stringify({ commit: object.sha, tree: created.sha }));
+    return;
+  }
+
+  // The parent is ordinary branch history, which need not be signed; only the
+  // commit created here must be.
+  const base = await api("GET", `/git/commits/${parent}`);
+  const created = await api("POST", "/git/trees", {
+    base_tree: requireSha(base.tree?.sha, "parent tree"),
+    tree
+  });
   const object = requireVerified(
     await api("POST", "/git/commits", {
       message,
       tree: created.sha,
-      parents: []
+      parents: [parent]
     }),
     "commit"
   );
-  if (object.parents?.length) {
-    fail(`GitHub created ${object.sha} with parents; it is not a root commit`);
+  const parents = (object.parents ?? []).map((entry) => entry.sha);
+  if (parents.length !== 1 || parents[0] !== parent) {
+    fail(`GitHub created ${object.sha} without ${parent} as its only parent`);
   }
   console.log(JSON.stringify({ commit: object.sha, tree: created.sha }));
 }
@@ -263,7 +312,15 @@ async function tag(args) {
 async function ref(args) {
   const name = required(option(args, "--name"), "--name");
   const sha = requireSha(option(args, "--sha"), "--sha");
-  console.log(await writeRef(name, sha, args.includes("--force")));
+  const force = args.includes("--force");
+  const expected =
+    args.includes("--fast-forward-from") ?
+      requireSha(option(args, "--fast-forward-from"), "--fast-forward-from")
+    : undefined;
+  if (force && expected !== undefined) {
+    fail("--force and --fast-forward-from are exclusive");
+  }
+  console.log(await writeRef(name, sha, force, expected));
 }
 
 async function verifyTagTarget(name, expected) {

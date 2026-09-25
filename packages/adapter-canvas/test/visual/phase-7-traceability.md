@@ -1,6 +1,6 @@
 # Phase 7 visual and reliability traceability
 
-Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.test.ts`, the recurring functional workflow in `.github/workflows/canvas-functional.yml`, and the scheduled extended resilience gate (P2-B) in `.github/workflows/canvas-reliability.yml`. All reuse the Phase 6 real Chromium harness and deterministic fake CLI boundary. No personal credential, live cloud, mutable repository, public content network, or inherited credential store is used.
+Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.test.ts`, the functional workflow in `.github/workflows/canvas-functional.yml` that runs on pull requests which change visual inputs and on a recurring schedule, and the scheduled extended resilience gate (P2-B) in `.github/workflows/canvas-reliability.yml`. All reuse the Phase 6 real Chromium harness and deterministic fake CLI boundary. No personal credential, live cloud, mutable repository, public content network, or inherited credential store is used.
 
 ## Visual baseline inventory
 
@@ -38,6 +38,8 @@ The canonical visual environment is `packages/adapter-canvas/test/visual/Dockerf
 3. If the change is unintended, fix the UI and rerun the check. Ordinary check mode cannot update a PNG.
 4. If the product change is intentional, run `pnpm test:visual:canonical:update`.
 5. Review every changed PNG under `packages/adapter-canvas/test/visual/__screenshots__/`, rerun `pnpm test:visual:canonical`, and commit the reviewed PNGs with the product change.
+
+On a same-repository pull request, adding the `pr:update-visual-baselines` label replaces steps 1 through 4: `.github/workflows/canvas-visual-baselines.yml` regenerates the baselines from the pull request merge commit with a read-only token and uploads the changed files. `.github/workflows/canvas-visual-baselines-commit.yml` then runs from the default branch, validates that every regenerated file is a bounded, plainly named PNG, commits the files to the branch as a signed bot commit that moves the branch only while it still points at the rendered head, and reports the result in the pull request's status comment. Pull request code never runs in the job that holds the commit credential. Step 5's review still applies.
 
 The functional workflow's manual **Regenerate and upload the canonical visual baselines** input remains available as a fallback and publishes the same directories in the `canvas-visual-functional` artifact. A reviewer must still accept every changed image. The native Ubuntu, Windows, and macOS reliability matrix remains responsible for OS-specific qualification; the canonical container deliberately proves one stable Linux rendering contract rather than native pixel parity.
 
