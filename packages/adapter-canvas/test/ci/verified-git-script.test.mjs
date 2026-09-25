@@ -903,7 +903,12 @@ describe("scripts/verified-git.mjs", () => {
   it.each([
     ["refs/notes/build"],
     ["releases/radius/edge"],
-    ["refs/heads/bad ref"]
+    ["refs/heads/bad ref"],
+    ["refs/heads/main#x"],
+    ["refs/heads/a/%2e%2e/main"],
+    ["refs/heads/a/../main"],
+    ["refs/heads/./main"],
+    ["refs/heads/a/.."]
   ])("rejects the unusable ref %s", async (name) => {
     const root = repository();
     const { url } = await api();

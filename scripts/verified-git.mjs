@@ -42,7 +42,10 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
-const REF = /^refs\/(?:heads|tags)\/[^\s~^:?*[\\]+$/;
+// Refs are joined into REST URLs, so `#`, `%`, and dot segments are refused:
+// URL parsing would drop, decode, or normalize them into a different ref.
+const REF =
+  /^refs\/(?:heads|tags)\/(?!(?:.*\/)?\.{1,2}(?:\/|$))[^\s~^:?*[\\#%]+$/;
 const PUBLISHED_PATH =
   /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[^\s\\:*?"<>|]+(?<!\/)$/;
 const MARKETPLACE = ".github/plugin/marketplace.json";
