@@ -6,8 +6,9 @@
 //         `true` when any of them can change what the visual suite renders.
 //   node scripts/canvas-visual-baselines.mjs apply <directory>
 //         Validates regenerated baselines downloaded from an untrusted job,
-//         copies every changed PNG into the committed baseline directory, and
-//         prints the repository-relative path of each file it changed.
+//         copies every PNG into this checkout's baseline directory, and prints
+//         the repository-relative path of each file it wrote. The caller
+//         commits those paths on top of the pull request head.
 //   node scripts/canvas-visual-baselines.mjs comment --pr <number>
 //         --state <state> --run-url <url> [--commit <sha>] [--file <path>]...
 //         Creates or updates the single status comment on a pull request.
@@ -15,7 +16,13 @@
 // `comment` requires GITHUB_TOKEN and GITHUB_REPOSITORY; GITHUB_API_URL is
 // optional and defaults to the public GitHub API.
 
-import { lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -67,25 +74,27 @@ export function affectsCanvasVisuals(paths) {
   );
 }
 
-function existingRegularFile(path, label) {
-  const stats = lstatSync(path, { throwIfNoEntry: false });
-  if (stats && !stats.isFile()) {
-    throw new Error(`${label} is not a regular file`);
-  }
-  return stats !== undefined;
-}
-
-/**
- * Copies regenerated baselines into the committed baseline directory. The
- * source comes from a job that ran pull request code, so every entry must be a
- * plainly named, bounded PNG; anything else rejects the whole update.
- */
-export function applyBaselineUpdates(source, { root = repoRoot } = {}) {
+function requireConfinedDirectory(root) {
   const target = resolve(root, SNAPSHOT_DIRECTORY);
   const targetStats = lstatSync(target, { throwIfNoEntry: false });
   if (!targetStats?.isDirectory()) {
     throw new Error(`${SNAPSHOT_DIRECTORY} is not a directory`);
   }
+  // lstat only sees the last segment; a symlinked ancestor would still send
+  // every write somewhere else, so the resolved path must be the literal one.
+  if (realpathSync(target) !== join(realpathSync(root), SNAPSHOT_DIRECTORY)) {
+    throw new Error(`${SNAPSHOT_DIRECTORY} resolves through a symlink`);
+  }
+  return target;
+}
+
+/**
+ * Copies regenerated baselines into the baseline directory of this checkout.
+ * The source comes from a job that ran pull request code, so every entry must
+ * be a plainly named, bounded PNG; anything else rejects the whole update.
+ */
+export function applyBaselineUpdates(source, { root = repoRoot } = {}) {
+  const target = requireConfinedDirectory(root);
 
   const entries = readdirSync(source, { withFileTypes: true });
   if (entries.length === 0) {
@@ -120,11 +129,9 @@ export function applyBaselineUpdates(source, { root = repoRoot } = {}) {
     }
 
     const destination = join(target, name);
-    if (
-      existingRegularFile(destination, `${SNAPSHOT_DIRECTORY}/${name}`) &&
-      readFileSync(destination).equals(content)
-    ) {
-      continue;
+    const existing = lstatSync(destination, { throwIfNoEntry: false });
+    if (existing && !existing.isFile()) {
+      throw new Error(`${SNAPSHOT_DIRECTORY}/${name} is not a regular file`);
     }
     updates.push({ name, content, destination });
   }

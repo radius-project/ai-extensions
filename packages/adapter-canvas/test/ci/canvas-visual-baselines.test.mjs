@@ -119,7 +119,9 @@ describe("affectsCanvasVisuals", () => {
 });
 
 describe("applyBaselineUpdates", () => {
-  it("copies changed and new baselines and reports them in order", () => {
+  // The checkout is the default branch, not the pull request head, so a file
+  // that matches it may still differ from the head and must be committed.
+  it("writes every regenerated baseline and reports them in order", () => {
     const { root, snapshots, source } = workspace({
       "vi-01-a-light.png": png("old"),
       "vi-02-b-light.png": png("same")
@@ -132,6 +134,7 @@ describe("applyBaselineUpdates", () => {
 
     expect(files).toEqual([
       `${SNAPSHOT_DIRECTORY}/vi-01-a-light.png`,
+      `${SNAPSHOT_DIRECTORY}/vi-02-b-light.png`,
       `${SNAPSHOT_DIRECTORY}/vi-03-c-dark.png`
     ]);
     expect(readFileSync(join(snapshots, "vi-01-a-light.png"))).toEqual(
@@ -142,12 +145,48 @@ describe("applyBaselineUpdates", () => {
     );
   });
 
-  it("reports nothing when every baseline is already current", () => {
-    const { root, source } = workspace({ "vi-01-a-light.png": png("same") });
-    writeFileSync(join(source, "vi-01-a-light.png"), png("same"));
+  it.skipIf(WINDOWS)(
+    "refuses a baseline directory reached through a symlinked ancestor",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "radius-visual-baselines-"));
+      roots.push(root);
+      const outside = mkdtempSync(join(tmpdir(), "radius-visual-outside-"));
+      roots.push(outside);
+      mkdirSync(join(outside, "__screenshots__"));
+      mkdirSync(join(root, "packages", "adapter-canvas", "test"), {
+        recursive: true
+      });
+      symlinkSync(
+        outside,
+        join(root, "packages", "adapter-canvas", "test", "visual")
+      );
+      const source = join(root, "artifact");
+      mkdirSync(source);
+      writeFileSync(join(source, "vi-01-a-light.png"), png("new"));
 
-    expect(applyBaselineUpdates(source, { root })).toEqual([]);
-  });
+      expect(() => applyBaselineUpdates(source, { root })).toThrow(
+        `${SNAPSHOT_DIRECTORY} resolves through a symlink`
+      );
+      expect(() =>
+        readFileSync(join(outside, "__screenshots__", "vi-01-a-light.png"))
+      ).toThrow();
+    }
+  );
+
+  it.skipIf(WINDOWS)(
+    "accepts a repository root reached through a symlink",
+    () => {
+      const { root, source } = workspace();
+      const alias = `${root}-alias`;
+      symlinkSync(root, alias);
+      roots.push(alias);
+      writeFileSync(join(source, "vi-01-a-light.png"), png("new"));
+
+      expect(applyBaselineUpdates(source, { root: alias })).toEqual([
+        `${SNAPSHOT_DIRECTORY}/vi-01-a-light.png`
+      ]);
+    }
+  );
 
   it.each([
     ["VI-01-upper.png"],
@@ -602,16 +641,6 @@ describe("runCli", () => {
     );
   });
 
-  it("prints nothing when apply changed nothing", async () => {
-    const { root, source } = workspace({ "vi-01-a-light.png": png("a") });
-    writeFileSync(join(source, "vi-01-a-light.png"), png("a"));
-    const printed = output();
-
-    await runCli(["apply", source], { root, write: printed.write });
-
-    expect(printed.text()).toBe("");
-  });
-
   it("requires exactly one apply directory", async () => {
     await expect(runCli(["apply"])).rejects.toThrow(
       "Usage: node scripts/canvas-visual-baselines.mjs apply <directory>"
@@ -721,18 +750,37 @@ describe("command line", () => {
 describe("workflow contract", () => {
   const read = (path) => readFileSync(join(repoRoot, path), "utf8");
 
-  it("uses the same label in both workflows and the script", () => {
+  const render = ".github/workflows/canvas-visual-baselines.yml";
+  const commit = ".github/workflows/canvas-visual-baselines-commit.yml";
+
+  it("uses the same label in every workflow and the script", () => {
     for (const path of [
       ".github/workflows/canvas-functional.yml",
-      ".github/workflows/canvas-visual-baselines.yml"
+      render,
+      commit
     ]) {
       expect(read(path), path).toContain(`LABEL: ${BASELINE_LABEL}`);
     }
-    expect(
-      read(".github/workflows/canvas-visual-baselines.yml").match(
-        /label\.name == '([^']+)'/g
-      )
-    ).toEqual(Array(3).fill(`label.name == '${BASELINE_LABEL}'`));
+    expect(read(render).match(/label\.name == '([^']+)'/g)).toEqual(
+      Array(2).fill(`label.name == '${BASELINE_LABEL}'`)
+    );
+  });
+
+  it("triggers the commit workflow from the render workflow and job", () => {
+    const renderName = read(render).match(/^name: (.+)$/m)?.[1];
+    const renderJob = read(render).match(
+      /^  render:\n(?:  .*\n)*?    name: (.+)$/m
+    )?.[1];
+
+    expect(read(commit)).toContain(
+      `  workflow_run:\n    workflows:\n      - ${renderName}\n`
+    );
+    expect(read(commit)).toContain(`RENDER_JOB: ${renderJob}\n`);
+  });
+
+  it("keeps secrets out of the workflow that runs pull request code", () => {
+    expect(read(render)).not.toMatch(/\$\{\{\s*secrets\./);
+    expect(read(commit)).not.toMatch(/^\s+(?:ref|repository):/m);
   });
 
   it("stages regenerated files from the directory apply writes to", () => {

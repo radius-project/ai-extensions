@@ -58,11 +58,12 @@ async function api({
   commitVerified = verified,
   parents = [],
   refs = [],
+  refTargets = {},
   broken,
   tagObject
 } = {}) {
   const calls = [];
-  const existing = new Set(refs);
+  const existing = new Set([...refs, ...Object.keys(refTargets)]);
   let blobs = 0;
 
   const server = createServer((request, response) => {
@@ -117,6 +118,9 @@ async function api({
         if (!existing.has(name)) return send(404, { message: "Not Found" });
         return send(200, {
           ref: name,
+          ...(refTargets[name] ?
+            { object: { type: "commit", sha: refTargets[name] } }
+          : {}),
           ...(tagObject ?
             {
               object: {
@@ -815,9 +819,11 @@ describe("scripts/verified-git.mjs", () => {
     expect(result.stderr).toContain("GitHub did not sign the commit");
   });
 
-  it("fast-forwards an existing branch ref without forcing it", async () => {
+  it("fast-forwards a branch ref that still points at the expected head", async () => {
     const root = repository();
-    const { url, calls } = await api({ refs: ["refs/heads/feature/ui"] });
+    const { url, calls } = await api({
+      refTargets: { "refs/heads/feature/ui": TARGET }
+    });
 
     const result = await run(root, url, [
       "ref",
@@ -825,9 +831,11 @@ describe("scripts/verified-git.mjs", () => {
       "refs/heads/feature/ui",
       "--sha",
       COMMIT,
-      "--fast-forward"
+      "--fast-forward-from",
+      TARGET
     ]);
 
+    expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
     expect(result.stdout).toBe(COMMIT);
     expect(calls.at(-1)).toMatchObject({
@@ -836,10 +844,40 @@ describe("scripts/verified-git.mjs", () => {
     });
   });
 
+  // A force-push back to an ancestor would still let a plain fast-forward
+  // through, and silently restore commits the author removed.
+  it.each([
+    ["an unrelated newer push", SOURCE],
+    ["a force-push back to an ancestor", TAG]
+  ])("refuses to move a ref that moved to %s", async (_, current) => {
+    const root = repository();
+    const { url, calls } = await api({
+      refTargets: { "refs/heads/feature/ui": current }
+    });
+
+    const result = await run(root, url, [
+      "ref",
+      "--name",
+      "refs/heads/feature/ui",
+      "--sha",
+      COMMIT,
+      "--fast-forward-from",
+      TARGET
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `refs/heads/feature/ui moved to ${current}; expected ${TARGET}`
+    );
+    expect(calls.map((call) => call.route)).not.toContain(
+      "PATCH /git/refs/heads/feature/ui"
+    );
+  });
+
   it("surfaces GitHub refusing a non-fast-forward update", async () => {
     const root = repository();
     const { url } = await api({
-      refs: ["refs/heads/feature/ui"],
+      refTargets: { "refs/heads/feature/ui": TARGET },
       broken: {
         route: "PATCH /git/refs/heads/feature/ui",
         status: 422,
@@ -853,7 +891,8 @@ describe("scripts/verified-git.mjs", () => {
       "refs/heads/feature/ui",
       "--sha",
       COMMIT,
-      "--fast-forward"
+      "--fast-forward-from",
+      TARGET
     ]);
 
     expect(result.status).toBe(1);
@@ -871,7 +910,8 @@ describe("scripts/verified-git.mjs", () => {
       "refs/heads/feature/ui",
       "--sha",
       COMMIT,
-      "--fast-forward"
+      "--fast-forward-from",
+      TARGET
     ]);
 
     expect(result.status).toBe(1);
@@ -881,9 +921,21 @@ describe("scripts/verified-git.mjs", () => {
     expect(calls.map((call) => call.route)).not.toContain("POST /git/refs");
   });
 
-  it("rejects --force together with --fast-forward", async () => {
+  it.each([
+    [
+      ["--fast-forward-from", "abc"],
+      "--fast-forward-from must be a full 40-character commit SHA"
+    ],
+    [["--fast-forward-from"], "--fast-forward-from is required"],
+    [
+      ["--force", "--fast-forward-from", TARGET],
+      "--force and --fast-forward-from are exclusive"
+    ]
+  ])("rejects the fast-forward arguments %j", async (extra, message) => {
     const root = repository();
-    const { url, calls } = await api({ refs: ["refs/heads/feature/ui"] });
+    const { url, calls } = await api({
+      refTargets: { "refs/heads/feature/ui": TARGET }
+    });
 
     const result = await run(root, url, [
       "ref",
@@ -891,12 +943,11 @@ describe("scripts/verified-git.mjs", () => {
       "refs/heads/feature/ui",
       "--sha",
       COMMIT,
-      "--force",
-      "--fast-forward"
+      ...extra
     ]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("--force and --fast-forward are exclusive");
+    expect(result.stderr).toContain(message);
     expect(calls).toEqual([]);
   });
 

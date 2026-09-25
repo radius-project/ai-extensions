@@ -21,9 +21,10 @@
 //   node scripts/verified-git.mjs tag --name <tag> --target <sha> [--force]
 //         Creates a lightweight tag ref after GitHub verifies its target commit.
 //   node scripts/verified-git.mjs ref --name refs/heads/<branch> --sha <sha>
-//                                     [--force | --fast-forward]
-//         --fast-forward moves an existing ref only when GitHub confirms the
-//         new commit descends from it, so a concurrent push is never lost.
+//                                     [--force | --fast-forward-from <sha>]
+//         --fast-forward-from moves an existing ref only while it still points
+//         at <sha>, and only when GitHub confirms the new commit descends from
+//         it, so neither a newer push nor a force-push back is overwritten.
 //   node scripts/verified-git.mjs verify-tag --name <tag> [--target <sha>]
 //         Fails unless the tag resolves to the expected GitHub-Verified commit.
 //   node scripts/verified-git.mjs verify-artifact --branch <branch>
@@ -215,10 +216,19 @@ async function readRef(name, absentOn404 = false) {
   );
 }
 
-async function writeRef(name, sha, force, fastForward = false) {
+async function writeRef(name, sha, force, expected) {
   const existing = await readRef(name, true);
-  if (fastForward) {
+  if (expected !== undefined) {
     if (!existing) fail(`${name} does not exist, so it cannot fast-forward`);
+    if (existing.object?.sha !== expected) {
+      fail(
+        `${name} moved to ${existing.object?.sha ?? "an unknown commit"}; expected ${expected}`
+      );
+    }
+    // GitHub's ref API has no compare-and-swap. force: false still rejects
+    // any push that lands after the check above, because the new commit's
+    // only parent is `expected`; only a force-push back to an ancestor of
+    // `expected` inside that window could be overwritten.
     await api("PATCH", `/git/${name}`, { sha, force: false });
   } else if (existing) {
     if (!force) fail(`${name} already exists; pass --force to move it`);
@@ -303,9 +313,14 @@ async function ref(args) {
   const name = required(option(args, "--name"), "--name");
   const sha = requireSha(option(args, "--sha"), "--sha");
   const force = args.includes("--force");
-  const fastForward = args.includes("--fast-forward");
-  if (force && fastForward) fail("--force and --fast-forward are exclusive");
-  console.log(await writeRef(name, sha, force, fastForward));
+  const expected =
+    args.includes("--fast-forward-from") ?
+      requireSha(option(args, "--fast-forward-from"), "--fast-forward-from")
+    : undefined;
+  if (force && expected !== undefined) {
+    fail("--force and --fast-forward-from are exclusive");
+  }
+  console.log(await writeRef(name, sha, force, expected));
 }
 
 async function verifyTagTarget(name, expected) {
