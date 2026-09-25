@@ -26,9 +26,12 @@
 //   those are the only levels that fail validation — "info" is reported as a
 //   SARIF note, which validate-bicep.mjs does not treat as a failure.
 // - A directive is recognized only as the first token on its line and outside
-//   a string or comment, and its codes end where a `//` or `/*` comment starts,
-//   even with no space before it. A multiline string ends at the last quote of
-//   a run of three or more, so `'''a''''` holds `a'`.
+//   a string or comment. Its keyword is matched as a prefix, so text may follow
+//   it with no space, and its codes are runs of letters, digits, `_`, and `-`
+//   separated by whitespace, ending at the first other character. So
+//   `#disable-next-linesecure-parameter-default@secure()` suppresses the rule
+//   and still compiles. A multiline string ends at the last quote of a run of
+//   three or more, so `'''a''''` holds `a'`.
 // - A `//` comment in the configuration ends at a carriage return as well as at
 //   a line feed.
 // - Sources are decoded by their byte-order mark, so a UTF-16 or UTF-32 file
@@ -67,7 +70,12 @@ export const SECURITY_RULES = Object.freeze([
 
 const ENFORCING_LEVELS = new Set(["warning", "error"]);
 const SUPPRESSION_DIRECTIVE =
-  /#(disable-next-line|disable-diagnostics)\b([^\r\n]*)/uy;
+  /#(disable-next-line|disable-diagnostics)([^\r\n]*)/uy;
+// Anything that is neither part of a diagnostic code nor whitespace ends a
+// directive's codes, exactly as in Bicep. The one difference is whitespace
+// other than a space or tab, which Bicep does not accept between codes but
+// this reads as a separator; that can only report more codes, never fewer.
+const DIRECTIVE_CODES_END = /[^A-Za-z0-9_\-\s]/u;
 const MULTILINE_QUOTE = "'''";
 const ABSENT_CODES = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
 const FILE_REFERENCES_REQUEST_ID = 1;
@@ -347,7 +355,9 @@ export function securitySuppressions(source) {
     const directive = lineStart ? SUPPRESSION_DIRECTIVE.exec(source) : null;
     lineStart = false;
     if (directive !== null) {
-      const codes = directive[2].split(/\/[/*]/u, 1)[0];
+      const rest = directive[2];
+      const end = rest.search(DIRECTIVE_CODES_END);
+      const codes = end === -1 ? rest : rest.slice(0, end);
       const rules = directiveRules(codes);
       if (rules.length > 0) {
         suppressions.push({
@@ -356,9 +366,9 @@ export function securitySuppressions(source) {
           rules
         });
       }
-      // A comment after the codes is lexed normally, so one that opens a block
-      // comment is followed to its end.
-      index += directive[0].length - directive[2].length + codes.length;
+      // Whatever ends the codes is lexed normally: a comment that opens there
+      // is followed to its end, and a decorator is code.
+      index += directive[0].length - rest.length + codes.length;
     } else if (source.startsWith(MULTILINE_QUOTE, index)) {
       index = skipMultilineString(source, index + MULTILINE_QUOTE.length);
     } else if (character === "'") {

@@ -437,6 +437,47 @@ describe("securitySuppressions", () => {
     }
   );
 
+  // Each form was checked against Bicep 0.42.1: the rule is suppressed and the
+  // file still compiles.
+  it.each([
+    [
+      "a decorator right after the code",
+      `#disable-next-line ${secureValueRule}@secure()`
+    ],
+    ["a code right after the keyword", `#disable-next-line${secureValueRule}`],
+    [
+      "a code right after the diagnostics keyword",
+      `#disable-diagnostics${secureValueRule}`
+    ],
+    ["a suffix on the keyword", `#disable-next-linex ${secureValueRule}`]
+  ])("reads a directive with %s the way Bicep does", (_name, source) => {
+    expect(rules.securitySuppressions(source)[0]?.rules).toEqual([
+      secureValueRule
+    ]);
+  });
+
+  it.each([["|"], ["("], ["'"], ["."], ["é"]])(
+    "ends the codes at %j and keeps the code before it",
+    (terminator) => {
+      expect(
+        rules.securitySuppressions(
+          `#disable-next-line ${secureValueRule}${terminator}secure-parameter-default`
+        )[0]?.rules
+      ).toEqual([secureValueRule]);
+    }
+  );
+
+  it("lexes the text after the codes as code", () => {
+    const multiline = "'''";
+    expect(
+      rules.securitySuppressions(
+        `#disable-next-line ${secureValueRule}${multiline}\n#disable-next-line secure-parameter-default\n${multiline}`
+      )
+    ).toEqual([
+      { line: 1, directive: "disable-next-line", rules: [secureValueRule] }
+    ]);
+  });
+
   it("ignores a rule named only in the directive's comment", () => {
     expect(
       rules.securitySuppressions(
@@ -494,8 +535,8 @@ describe("securitySuppressions", () => {
       `#DISABLE-NEXT-LINE ${secureValueRule}`
     ],
     [
-      "a directive name with a suffix",
-      `#disable-diagnosticsx ${secureValueRule}`
+      "a code that only starts with a security rule's name",
+      `#disable-next-line ${secureValueRule}2`
     ]
   ])("ignores %s", (_name, source) => {
     expect(rules.securitySuppressions(source)).toEqual([]);
