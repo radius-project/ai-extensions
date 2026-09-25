@@ -384,7 +384,8 @@ describe("P0-C built Radius extension artifact", () => {
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/references/source-code-references.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
-      "skills/radius-app-bicep/scripts/validate-bicep.mjs"
+      "skills/radius-app-bicep/scripts/validate-bicep.mjs",
+      "skills/radius-app-bicep/scripts/bicep-security-rules.mjs"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
@@ -1076,6 +1077,39 @@ describe("P0-C built Radius extension artifact", () => {
       "secure-parameter-default"
     ]) {
       expect(checkerScript).toContain(rule);
+    }
+  });
+
+  // The checker loads its security-rule inspection from a sibling script, so
+  // the packaged copy only works if that module ships beside it. With the
+  // module present, the checker asks the managed Bicep for the compile's files,
+  // finds none installed in the empty home, and reports that it could not
+  // establish whether the security rules run; a missing module would report
+  // the failed import instead.
+  it("packages a checker that loads its security-rule inspection", () => {
+    assertCurrentArtifact();
+    const workspace = mkdtempSync(join(tmpdir(), "radius-security-rules-"));
+    try {
+      writeFileSync(join(workspace, "app.bicep"), "");
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+          join(workspace, "app.bicep")
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, HOME: workspace, USERPROFILE: workspace }
+        }
+      );
+
+      expect(result.stderr).toContain(
+        "error checker-unavailable: whether the Bicep security rules run could not be established"
+      );
+      expect(result.status).toBe(2);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
     }
   });
 

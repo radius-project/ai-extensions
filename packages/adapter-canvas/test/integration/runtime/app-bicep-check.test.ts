@@ -301,6 +301,25 @@ test("removes nothing when no stand-in home was created", () => {
   assert.deepEqual(removed, []);
 });
 
+const fakeJsonRpcServer = path.join(
+  root,
+  "packages",
+  "adapter-canvas",
+  "test",
+  "support",
+  "fake-bicep-jsonrpc.mjs"
+);
+
+// The checker asks Bicep which files the compile reads before compiling, by
+// running `bicep jsonrpc --stdio`; the stand-in resolves `jsonrpc` from the
+// model's directory the same way it resolves the `build` driver.
+function installFakeJsonRpc(directory: string): void {
+  fs.writeFileSync(
+    path.join(directory, "jsonrpc"),
+    `import(${JSON.stringify(pathToFileURL(fakeJsonRpcServer).href)});\n`
+  );
+}
+
 function fakeBicep(
   directory: string,
   compilerOutput: string,
@@ -308,6 +327,7 @@ function fakeBicep(
   compiledOutput = "{}"
 ): NodeJS.ProcessEnv {
   const home = sharedHome.path();
+  installFakeJsonRpc(directory);
   const driver = path.join(directory, "build");
   fs.writeFileSync(
     driver,
@@ -434,7 +454,6 @@ function template(resources: object, parameters: object = {}): string {
 test("passes a warning-free Bicep compilation", () => {
   const directory = temporaryDirectory();
   const result = runChecker(directory, fakeBicep(directory, sarif([]), 0));
-
   assert.equal(result.status, 0);
   assert.equal(result.stderr, "");
 });
@@ -4422,4 +4441,344 @@ describe("resolved-type contract agreement", () => {
     assert.equal(await writerAccepts(staged), accepted);
     assert.equal(checkerAccepts(staged), accepted);
   });
+});
+
+// --- Security rules --------------------------------------------------------
+//
+// A Bicep security rule that has been turned off reports nothing, so the
+// checker refuses to read a quiet compile as a clean one until it knows the
+// rules ran. bicep-security-rules.test.ts covers how configurations,
+// directives, and Bicep's file list are read; these cases cover what the
+// checker does with the result.
+
+const secureValueRule = "use-secure-value-for-secure-inputs";
+
+function writeBicepConfig(directory: string, config: unknown): string {
+  const file = path.join(directory, "bicepconfig.json");
+  fs.writeFileSync(file, JSON.stringify(config, null, 2));
+  return file;
+}
+
+function controlFakeJsonRpc(directory: string, control: object): void {
+  fs.writeFileSync(
+    path.join(directory, "jsonrpc.json"),
+    JSON.stringify(control)
+  );
+}
+
+function disabledSecureValueRule(): object {
+  return {
+    experimentalFeaturesEnabled: { extensibility: true },
+    extensions: { radius: "br:biceptypes.azurecr.io/radius:0.50" },
+    analyzers: {
+      core: { rules: { [secureValueRule]: { level: "off" } } }
+    }
+  };
+}
+
+describe("security rules", () => {
+  it("fails a staged run whose configuration turns the secure-value rule off", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const config = writeBicepConfig(directory, disabledSecureValueRule());
+
+    const result = runChecker(directory, fakeBicep(directory, sarif([]), 0));
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      new RegExp(
+        `^${escapeRegExp(config)}: error security-rule-disabled: analyzers\\.core\\.rules\\.${secureValueRule}\\.level is "off", which turns the rule off\\.`,
+        "mu"
+      )
+    );
+    assert.match(result.stderr, /fix what it reports in the model itself/u);
+    assert.doesNotMatch(result.stderr, /staging directory/u);
+    const repair = readRepair(directory) as {
+      attempts: number;
+      fingerprint: string | null;
+    };
+    assert.equal(repair.attempts, 1);
+    assert.match(repair.fingerprint ?? "", /security-rule-disabled/u);
+  });
+
+  it("refuses the same configuration outside a modeling run", () => {
+    const directory = temporaryDirectory();
+    writeBicepConfig(directory, disabledSecureValueRule());
+
+    const result = runChecker(directory, fakeBicep(directory, sarif([]), 0));
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /security-rule-disabled/u);
+  });
+
+  it("reports a disabled rule together with the compiler's findings from one attempt", () => {
+    const directory = temporaryDirectory();
+    writeBicepConfig(directory, {
+      analyzers: { core: { enabled: false } }
+    });
+
+    const result = runChecker(directory, fakeBicep(directory, failure, 1));
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /analyzers\.core\.enabled is false/u);
+    assert.match(result.stderr, /BCP057/u);
+  });
+
+  it("fails a model that suppresses a security rule with a directive", () => {
+    const directory = temporaryDirectory();
+    const app = path.join(directory, "app.bicep");
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0),
+      `extension radius\n\n#disable-next-line ${secureValueRule}\n`
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      new RegExp(
+        `^${escapeRegExp(app)}:3: error security-rule-suppressed: #disable-next-line suppresses ${secureValueRule}\\.`,
+        "mu"
+      )
+    );
+  });
+
+  // Bicep names a module's own configuration and source among the files the
+  // compile reads, whatever the module file is called.
+  it("inspects every file Bicep reports for the compile", () => {
+    const directory = temporaryDirectory();
+    const modules = path.join(directory, "modules");
+    fs.mkdirSync(modules);
+    const module = path.join(modules, "db.txt");
+    const moduleConfig = writeBicepConfig(modules, {
+      analyzers: {
+        core: { rules: { "secure-parameter-default": { level: "info" } } }
+      }
+    });
+    fs.writeFileSync(
+      module,
+      "#disable-diagnostics outputs-should-not-contain-secrets\n"
+    );
+    const env = fakeBicep(directory, sarif([]), 0);
+    controlFakeJsonRpc(directory, {
+      filePaths: [path.join(directory, "app.bicep"), module, moduleConfig]
+    });
+
+    const result = runChecker(directory, env);
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      new RegExp(
+        `^${escapeRegExp(module)}:1: error security-rule-suppressed:`,
+        "mu"
+      )
+    );
+    assert.match(
+      result.stderr,
+      new RegExp(
+        `^${escapeRegExp(moduleConfig)}: error security-rule-disabled: analyzers\\.core\\.rules\\.secure-parameter-default\\.level is "info"`,
+        "mu"
+      )
+    );
+  });
+
+  it("keeps a configuration that sets unrelated rules and enforces security ones", () => {
+    const directory = temporaryDirectory();
+    writeBicepConfig(directory, {
+      analyzers: {
+        core: {
+          enabled: true,
+          rules: {
+            "no-unused-params": { level: "off" },
+            [secureValueRule]: { level: "error" }
+          }
+        }
+      }
+    });
+
+    const result = runChecker(directory, fakeBicep(directory, sarif([]), 0));
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("fails a configuration that cannot be parsed", () => {
+    const directory = temporaryDirectory();
+    fs.writeFileSync(path.join(directory, "bicepconfig.json"), "{,}");
+
+    const result = runChecker(directory, fakeBicep(directory, sarif([]), 0));
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /bicep-config-invalid/u);
+  });
+
+  // The stand-in server answers only once the compile has started, so a
+  // checker that waited for the answer before compiling would never finish.
+  it("lists the compile's files while the model compiles", () => {
+    const directory = temporaryDirectory();
+    const env = fakeBicep(directory, sarif([]), 0);
+    const driver = path.join(directory, "build");
+    fs.writeFileSync(
+      driver,
+      `require("node:fs").writeFileSync("compile-started", "");\n${fs.readFileSync(driver, "utf8")}`
+    );
+    controlFakeJsonRpc(directory, { awaitFile: "compile-started" });
+    const app = path.join(directory, "app.bicep");
+    fs.writeFileSync(app, "");
+
+    // Bounded here because a serial checker would otherwise wait out its own
+    // two-minute timeout before failing.
+    const result = spawnSync(process.execPath, [checker, app], {
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+      timeout: 10_000
+    });
+
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("is unavailable when the compile writes more output than the limit", () => {
+    const directory = temporaryDirectory();
+    const env = fakeBicep(directory, sarif([]), 0);
+    fs.writeFileSync(
+      path.join(directory, "build"),
+      'process.stdout.write("x".repeat(16 * 1024 * 1024 + 1));\n'
+    );
+
+    const result = runChecker(directory, env);
+
+    assert.equal(result.status, 2);
+    assert.match(
+      result.stderr,
+      /^Bicep wrote more than 16777216 bytes to stdout\.$/mu
+    );
+  });
+
+  // An installation that lost the sibling module must still follow the exit-2
+  // contract, so the agent aborts the run instead of trying to repair a model
+  // that was never checked.
+  it("is unavailable, without starting a compile, when its security-rule module is missing", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const isolated = path.join(directory, "validate-bicep.mjs");
+    fs.copyFileSync(checker, isolated);
+    const app = path.join(directory, "app.bicep");
+    fs.writeFileSync(app, "");
+    const env = fakeBicep(directory, sarif([]), 0);
+    const driver = path.join(directory, "build");
+    fs.writeFileSync(
+      driver,
+      `require("node:fs").writeFileSync("compile-started", "");\n${fs.readFileSync(driver, "utf8")}`
+    );
+
+    const result = spawnSync(process.execPath, [isolated, app], {
+      encoding: "utf8",
+      env: { ...process.env, ...env }
+    });
+
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /bicep-security-rules\.mjs/u);
+    assert.match(result.stderr, /ERR_MODULE_NOT_FOUND/u);
+    assert.equal(fs.existsSync(path.join(directory, "compile-started")), false);
+  });
+
+  it("is unavailable when Bicep lists no files for the compile", () => {
+    const directory = temporaryDirectory();
+    const env = fakeBicep(directory, sarif([]), 0);
+    controlFakeJsonRpc(directory, { filePaths: [] });
+
+    const result = runChecker(directory, env);
+
+    assert.equal(result.status, 2);
+    assert.match(
+      result.stderr,
+      /error checker-unavailable: whether the Bicep security rules run could not be established: Bicep did not list the model among the files the compile reads\./u
+    );
+  });
+
+  it("fails a model that reads a file which does not exist", () => {
+    const directory = temporaryDirectory();
+    const missing = path.join(directory, "snippet.txt");
+    const env = fakeBicep(directory, sarif([]), 0);
+    controlFakeJsonRpc(directory, {
+      filePaths: [path.join(directory, "app.bicep"), missing]
+    });
+
+    const result = runChecker(directory, env);
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      new RegExp(`^${escapeRegExp(missing)}: error compile-file-missing:`, "mu")
+    );
+  });
+
+  it("leaves a missing model for the compile to report", () => {
+    const directory = temporaryDirectory();
+    const env = fakeBicep(directory, failure, 1);
+    controlFakeJsonRpc(directory, { exitCode: 3, stderr: "must not be asked" });
+
+    const result = rerunChecker(directory, env);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /BCP057/u);
+    assert.doesNotMatch(result.stderr, /must not be asked/u);
+  });
+
+  it("is unavailable, and reports nothing from the compile, when Bicep cannot list the compile's files", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const env = fakeBicep(directory, failure, 1);
+    controlFakeJsonRpc(directory, {
+      exitCode: 3,
+      stderr: "restore failed"
+    });
+
+    const result = runChecker(directory, env);
+
+    assert.equal(result.status, 2);
+    assert.match(
+      result.stderr,
+      /error checker-unavailable: whether the Bicep security rules run could not be established: restore failed\. No model-policy verdict was produced\. Abort the staged run/u
+    );
+    assert.doesNotMatch(result.stderr, /BCP057/u);
+    assert.deepEqual(readRepair(directory), {
+      attempts: 1,
+      fingerprint: null
+    });
+  });
+
+  // A symlink that points at itself exists but cannot be read, on every
+  // platform that allows an unprivileged symlink and whatever the user's
+  // permissions are.
+  it.runIf(process.platform !== "win32")(
+    "is unavailable, and reports nothing from the compile, when the configuration cannot be read",
+    () => {
+      const directory = temporaryDirectory();
+      stagedRun(directory);
+      const config = path.join(directory, "bicepconfig.json");
+      fs.symlinkSync(config, config);
+
+      const result = runChecker(directory, fakeBicep(directory, failure, 1));
+
+      assert.equal(result.status, 2);
+      assert.match(
+        result.stderr,
+        new RegExp(
+          `error checker-unavailable: whether the Bicep security rules run could not be established: ${escapeRegExp(config)}: ELOOP`,
+          "u"
+        )
+      );
+      assert.doesNotMatch(result.stderr, /BCP057/u);
+      assert.deepEqual(readRepair(directory), {
+        attempts: 1,
+        fingerprint: null
+      });
+    }
+  );
 });
