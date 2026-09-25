@@ -42,7 +42,7 @@ This document specifies the AWS capability functionally. [User experience](#user
 2. **Accurate representation.** Planned and deployed graphs show real AWS resource types, and resource nodes link to the AWS console.
 3. **Complete lifecycle.** Environments and deployments can be deleted from the canvas, and cleanup removes what Radius created without disturbing what it did not.
 4. **Bicep recipes.** Every AWS recipe is Bicep, both those in the published pack and those modeling generates. The Azure pack is Bicep, so one language covers both clouds: a recipe stays reviewable by the same people, and the type on a graph node is the namespace the recipe declares on either cloud.
-5. **Parity with Azure.** The organizing principle behind the goals above. Every capability the canvas offers an Azure developer has an AWS equivalent, expressed in AWS-native concepts, or a recorded and justified reason it does not. The **Parity with Azure** table closing each step in [User experience](#user-experience) sets that step's capabilities against what an Azure developer gets today and what the AWS experience requires.
+5. **Parity with Azure.** The organizing principle behind the goals above. Every capability the canvas offers an Azure developer has an AWS equivalent, expressed in AWS-native concepts, or a recorded and justified reason it does not, collected in [Deliberate non-parity](#deliberate-non-parity). The **Parity with Azure** table closing each step in [User experience](#user-experience) sets that step's capabilities against what an Azure developer gets today and what the AWS experience requires.
 6. **No regression for Azure.** Azure behavior, copy, and workflows are unchanged.
 
 **Definition of done.** Automated AWS cloud end-to-end coverage proves both identity paths. With a new role, it creates an environment, verifies credentials, deploys and deletes the reference application, deletes the environment, and confirms that no IAM role, access entry, or provisioned resource remains. With a selected existing role, it completes the same journey, confirms that the role remains, and confirms that the only trust, permissions, and cluster access removed are those no remaining environment still needs. Catalog coverage deploys every shared Kubernetes type and every Tier 1 type to its AWS outcome, and generates and deploys a custom type for a service outside the catalog. A deployment is confirmed to resolve against the pack commit pinned in the repository manifest, not the newest published one.
@@ -89,8 +89,6 @@ A developer arrives with source code in a repository and no environment. What fo
 6. **Delete** — the deployment, then the environment, with cleanup stated before it happens.
 
 The AWS experience follows the canvas's existing information architecture. The top-level navigation remains **Applications**, **Environments**, and **Deployments**. Provider-specific behavior appears only where the underlying cloud concepts genuinely differ.
-
-A **Parity with Azure** table closes each step, stating what an Azure developer gets today and what the AWS experience requires; [Deliberate non-parity](#deliberate-non-parity) collects the cases where the two clouds should differ, with the reason.
 
 ### Step 1 · Model the application
 
