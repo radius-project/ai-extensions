@@ -56,7 +56,7 @@ None of the following is needed for Azure parity, so none is in scope.
 - Compute outside EKS, such as ECS or Fargate, has no Radius execution model to target. Radius runs containers on Kubernetes and Azure Container Instances. EKS Auto Mode is out too.
 - Creating or reconfiguring infrastructure. The canvas discovers clusters and networks; it does not create EKS clusters, VPCs, or subnets, and does not change how an existing cluster is configured. Azure is the same — it does not create AKS clusters either.
 - Editing a saved credential profile is out, since profiles are create-and-delete on Azure too. Region is the field most likely to justify changing that, and it changes for both clouds at once or not at all.
-- Long-lived AWS access keys as a credential option are out. They regress the Azure baseline, which stores no cloud secrets.
+- Long-lived AWS access keys as a *deploy* credential are out. Deployment authenticates over OIDC on both clouds, and a stored key in the repository would regress that. An application's own credential is a separate matter: Azure hands each app a key its recipe returned, and AWS does the same.
 
 ### User scenarios
 
@@ -154,7 +154,9 @@ The screen is one labeled field, **IAM role**, under the lead-in `The IAM role G
 
 By default Radius creates the role and proposes the name `radius-deploy-<owner>-<repo>`. The developer can rename it, or pick a role a platform team already owns. The picker lists roles the signed-in identity can inspect, says which repositories each already trusts, and pins the choice by ARN rather than by its editable name. Either way, the canvas shows every change before it makes one, and an existing role stays with its owner.
 
-**What the role can do.** It gets `PowerUserAccess` in the selected region and cluster-admin on the target cluster — broad, because a deploy provisions whatever the application declares and a custom resource type can name any AWS service. It cannot touch IAM, so it cannot widen its own permissions or grant access to anyone else. Both the grant and its limits are in the help text, where the choice is made.
+**What the role can do.** It gets `PowerUserAccess` in the selected region and cluster-admin on the target cluster — broad, because a deploy provisions whatever the application declares and a custom resource type can name any AWS service. Azure's identity is the same shape: Contributor on the resource group, able to create any Azure service and nothing in identity.
+
+The one place AWS needs more is handing an application its credential. On Azure that comes free with the resource — create a storage account, read its key, and Contributor already allows it. AWS has no equivalent, so a recipe that gives an application access to S3 or Bedrock has to create an IAM user and an access key for it. Without that the role could provision a service the application then cannot use, which is a worse outcome than Azure from the same permission level. So the role can create application credentials, but only narrow ones, and it still cannot make itself or anyone else an administrator. The help text discloses the grant and its limits where the choice is made, and would need to name this alongside them.
 
 **One role serves the whole repository.** A second environment joins the role the repository already uses in that account instead of proposing a new name, so a repository never acquires a second role by accident. The role carries the sum of what its environments need — every repository subject trusted to assume it, every region it may act in, every cluster it can reach — and an operator reading it in the console can see which environments depend on it and why.
 
@@ -338,11 +340,11 @@ Deleting an environment removes it from the role, then narrows what the role car
 
 ### Deliberate non-parity
 
-| Azure capability                       | Why AWS does not mirror it                                                                                                              |
-|----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
-| Resource group as a grouping scope     | AWS has no equivalent container. Region and VPC carry the equivalent meaning and are already surfaced.                                  |
-| Workload-identity connections          | Radius has no AWS equivalent, and an access-key pattern would contradict the passwordless principle.                                    |
-| Enterprise app-registration governance | Immutable subjects and service-management references are Entra-specific. AWS governance is expressed by permissions boundaries instead. |
+| Azure capability                       | Why AWS does not mirror it                                                                                                                |
+|----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| Resource group as a grouping scope     | AWS has no equivalent container. Region and VPC carry the equivalent meaning and are already surfaced.                                    |
+| Workload-identity connections          | Automatic wiring is deferred, not rejected. An application still authenticates with a credential its recipe returns, as it does on Azure. |
+| Enterprise app-registration governance | Immutable subjects and service-management references are Entra-specific. AWS governance is expressed by permissions boundaries instead.   |
 
 The reverse case — where AWS asks for something Azure does not — occurs once, and is equally deliberate.
 
