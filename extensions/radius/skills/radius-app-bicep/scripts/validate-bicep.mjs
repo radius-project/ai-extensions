@@ -17,7 +17,7 @@
 // workspace packages do not exist; app-bicep-check.test.ts asserts the copies
 // agree.
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   existsSync,
   readFileSync,
@@ -1343,15 +1343,89 @@ async function inspectCompiledFiles(app, staged) {
   });
 }
 
+const COMPILE_TIMEOUT_MS = 120_000;
+const COMPILE_OUTPUT_LIMIT = 16 * 1024 * 1024;
+
+// Compiles the model in a child process, resolving with the fields a
+// spawnSync() result carries: `error` when Bicep could not be started, ran
+// past the timeout, or wrote more output than the limit, and otherwise its
+// exit status, signal, and output. Asynchronous so the security-rule
+// inspection, which needs its own Bicep process, runs alongside it.
+function compileModel(app) {
+  return new Promise((resolve) => {
+    const output = { stdout: [], stderr: [] };
+    const sizes = { stdout: 0, stderr: 0 };
+    let error = null;
+    let settled = false;
+    let timer;
+    const finish = (status, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        error,
+        status,
+        signal,
+        stdout: Buffer.concat(output.stdout).toString("utf8"),
+        stderr: Buffer.concat(output.stderr).toString("utf8")
+      });
+    };
+    const child = spawn(
+      bicep,
+      ["build", app, "--diagnostics-format", "sarif", "--stdout"],
+      {
+        cwd: path.dirname(app),
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
+      }
+    );
+    const stop = (reason) => {
+      error ??= reason;
+      child.kill();
+    };
+    timer = setTimeout(() => {
+      stop(
+        new Error(
+          `Bicep did not finish compiling within ${COMPILE_TIMEOUT_MS} ms.`
+        )
+      );
+    }, COMPILE_TIMEOUT_MS);
+    for (const stream of ["stdout", "stderr"]) {
+      child[stream].on("data", (chunk) => {
+        sizes[stream] += chunk.length;
+        if (sizes[stream] > COMPILE_OUTPUT_LIMIT) {
+          stop(
+            new Error(
+              `Bicep wrote more than ${COMPILE_OUTPUT_LIMIT} bytes to ${stream}.`
+            )
+          );
+          return;
+        }
+        output[stream].push(chunk);
+      });
+    }
+    child.on("error", (reason) => {
+      error ??= reason;
+      // A process that never started emits no exit to wait for.
+      if (child.pid === undefined) finish(null, null);
+    });
+    child.on("close", finish);
+  });
+}
+
 // Compiles the model and distinguishes model diagnostics from a check that
 // could not produce a reliable verdict. The budget wraps it rather than living
 // inside it.
 async function check(app, staged) {
-  // Established before compiling, because a security rule that was turned off
-  // reports nothing, so a clean compile is only evidence once the rules are
-  // known to have run. A finding still lets the compile run, so one attempt
-  // reports everything the model has to fix.
-  const securityRules = await inspectCompiledFiles(app, staged);
+  // A security rule that was turned off reports nothing, so a clean compile is
+  // only evidence once the rules are known to have run. The inspection runs
+  // alongside the compile, and its findings are reported first; a finding
+  // still lets the compile's own diagnostics through, so one attempt reports
+  // everything the model has to fix.
+  const [securityRules, compiled] = await Promise.all([
+    inspectCompiledFiles(app, staged),
+    compileModel(app)
+  ]);
   securityRules.findings.forEach(report);
   if (securityRules.unavailable !== null) {
     report(
@@ -1364,18 +1438,6 @@ async function check(app, staged) {
   }
   const securityRuleDisabled = securityRules.findings.length > 0;
 
-  const compiled = spawnSync(
-    bicep,
-    ["build", app, "--diagnostics-format", "sarif", "--stdout"],
-    {
-      cwd: path.dirname(app),
-      encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 120_000,
-      windowsHide: true
-    }
-  );
   if (compiled.error) {
     report(compiled.error.message);
     return EXIT_CHECK_UNAVAILABLE;

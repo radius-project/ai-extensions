@@ -19,6 +19,7 @@
 //   linger     keep running after the input closes, until killed
 //   trailing   write this text once the input closes, after answering
 //   exitAtStart  exit with this status before reading any input
+//   awaitFile  answer only once this file exists in the directory
 //   close      exit as soon as the answer is written, without waiting for input
 //              to close
 //   hang       never answer, and stay alive until killed
@@ -58,6 +59,13 @@ function write(text) {
 }
 
 function respond(request) {
+  if (
+    control.awaitFile !== undefined &&
+    !fs.existsSync(path.join(process.cwd(), control.awaitFile))
+  ) {
+    setTimeout(() => respond(request), 20);
+    return;
+  }
   if (control.signal !== undefined) {
     process.kill(process.pid, control.signal);
     return;

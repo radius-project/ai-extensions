@@ -4615,6 +4615,50 @@ describe("security rules", () => {
     assert.match(result.stderr, /bicep-config-invalid/u);
   });
 
+  // The stand-in server answers only once the compile has started, so a
+  // checker that waited for the answer before compiling would never finish.
+  it("lists the compile's files while the model compiles", () => {
+    const directory = temporaryDirectory();
+    const env = fakeBicep(directory, sarif([]), 0);
+    const driver = path.join(directory, "build");
+    fs.writeFileSync(
+      driver,
+      `require("node:fs").writeFileSync("compile-started", "");\n${fs.readFileSync(driver, "utf8")}`
+    );
+    controlFakeJsonRpc(directory, { awaitFile: "compile-started" });
+    const app = path.join(directory, "app.bicep");
+    fs.writeFileSync(app, "");
+
+    // Bounded here because a serial checker would otherwise wait out its own
+    // two-minute timeout before failing.
+    const result = spawnSync(process.execPath, [checker, app], {
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+      timeout: 10_000
+    });
+
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("is unavailable when the compile writes more output than the limit", () => {
+    const directory = temporaryDirectory();
+    const env = fakeBicep(directory, sarif([]), 0);
+    fs.writeFileSync(
+      path.join(directory, "build"),
+      'process.stdout.write("x".repeat(16 * 1024 * 1024 + 1));\n'
+    );
+
+    const result = runChecker(directory, env);
+
+    assert.equal(result.status, 2);
+    assert.match(
+      result.stderr,
+      /^Bicep wrote more than 16777216 bytes to stdout\.$/mu
+    );
+  });
+
   it("leaves a missing model for the compile to report", () => {
     const directory = temporaryDirectory();
     const env = fakeBicep(directory, failure, 1);
@@ -4627,7 +4671,7 @@ describe("security rules", () => {
     assert.doesNotMatch(result.stderr, /must not be asked/u);
   });
 
-  it("is unavailable, without compiling, when Bicep cannot list the compile's files", () => {
+  it("is unavailable, and reports nothing from the compile, when Bicep cannot list the compile's files", () => {
     const directory = temporaryDirectory();
     stagedRun(directory);
     const env = fakeBicep(directory, failure, 1);
@@ -4654,7 +4698,7 @@ describe("security rules", () => {
   // platform that allows an unprivileged symlink and whatever the user's
   // permissions are.
   it.runIf(process.platform !== "win32")(
-    "is unavailable, without compiling, when the configuration cannot be read",
+    "is unavailable, and reports nothing from the compile, when the configuration cannot be read",
     () => {
       const directory = temporaryDirectory();
       stagedRun(directory);
