@@ -162,6 +162,59 @@ verify_attached_pack_names() {
     ((count > 0)) || fail "no attached recipe pack names found."
 }
 
+# Parameter names the provider workflows pass to a catalog-pinned recipe pack.
+# Scoped to the PACK_PARAMETERS array the pack deploy expands so that app-level
+# `--parameters` elsewhere in the same run block are not attributed to the pack.
+# A parameter the pack does not declare would otherwise only surface as a failed
+# `rad deploy` against a live environment.
+pack_parameters() {
+    local workflow
+    while IFS= read -r -d '' workflow; do
+        yq -r \
+            '.. | select(tag == "!!map") | .run? | select(tag == "!!str")' \
+            "${workflow}" |
+            awk '
+                match($0, /radius_contrib_recipe_pack_url [A-Za-z0-9._-]+ [A-Za-z0-9._\/-]+/) {
+                    split(substr($0, RSTART, RLENGTH), parts, " ")
+                    pack = parts[2]
+                    file = parts[3]
+                }
+                /PACK_PARAMETERS\+?=\(/ { in_array = 1 }
+                in_array && match($0, /--parameters "?[A-Za-z0-9_]+=/) {
+                    name = substr($0, RSTART, RLENGTH)
+                    sub(/^--parameters "?/, "", name)
+                    sub(/=$/, "", name)
+                    if (pack != "") { print pack, file, name }
+                }
+                # Closes both the multi-line array and a single-line
+                # `PACK_PARAMETERS+=(--parameters name=value)`. Anchored to the
+                # end of the line so a value containing `)` does not close it.
+                in_array && /\)[ \t]*$/ { in_array = 0 }
+            '
+    done < <(extension_yaml_files) | sort -u
+}
+
+# The parameters a pack declares, e.g. `param routesGatewayName string`.
+parse_pack_declared_parameters() {
+    sed -nE 's/^[[:space:]]*param[[:space:]]+([A-Za-z0-9_]+)[[:space:]].*/\1/p' "$1"
+}
+
+verify_pack_parameters() {
+    local pack file parameter pack_file declared count=0
+    while read -r pack file parameter; do
+        [[ -n "${pack}" ]] || continue
+        pack_file="$(recipe_pack_file "${pack}" "${file}")"
+        [[ -f "${pack_file}" ]] ||
+            fail "verified recipe pack file is unavailable: ${pack_file}"
+        declared="$(parse_pack_declared_parameters "${pack_file}")"
+        printf '%s\n' "${declared}" | grep -Fxq "${parameter}" ||
+            fail "recipe pack ${pack}/${file} does not declare parameter '${parameter}'; it declares: ${declared//$'\n'/, }"
+        echo "  Verified recipe pack ${pack}/${file} declares parameter '${parameter}'"
+        ((count += 1))
+    done < <(pack_parameters)
+    ((count > 0)) || fail "no recipe pack parameter consumers found."
+}
+
 parse_pack_kube_recipes() {
     awk -v q="'" '
         {
@@ -285,6 +338,7 @@ main() {
 
     verify_recipe_packs
     verify_attached_pack_names
+    verify_pack_parameters
     verify_kube_recipes
     verify_git_recipes
     echo "Contrib workflow consumers are valid."
