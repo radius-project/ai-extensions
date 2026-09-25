@@ -97,11 +97,6 @@ export interface SubTab {
   label: string;
 }
 
-export interface SelectOption {
-  value: string;
-  label: string;
-}
-
 export function subTabs(items: readonly SubTab[], active: string): string {
   const links = items
     .map((it) => {
@@ -115,58 +110,6 @@ export function subTabs(items: readonly SubTab[], active: string): string {
     })
     .join("");
   return `<nav class="rad-subtabs" id="graph-nav">${links}</nav>`;
-}
-
-// Page heading with the brand mark.
-export function heading(title: string, subtitleHtml = ""): string {
-  const sub = subtitleHtml ? `<p class="rad-lede">${subtitleHtml}</p>` : "";
-  return `<div class="rad-heading"><h1>${radiusMark(26)}<span>${escapeHtml(
-    title
-  )}</span></h1>${sub}</div>`;
-}
-
-// Labeled form field wrapper.
-export function field(label: string, controlHtml: string): string {
-  return `<div class="rad-field"><label>${escapeHtml(
-    label
-  )}</label>${controlHtml}</div>`;
-}
-
-// Native select. `options` = [{ value, label }] or a raw <option> string.
-export function select(
-  id: string,
-  options: readonly SelectOption[] | string,
-  attrs = ""
-): string {
-  const opts =
-    Array.isArray(options) ?
-      options
-        .map(
-          (o) =>
-            `<option value="${escapeHtml(o.value)}">${escapeHtml(
-              o.label
-            )}</option>`
-        )
-        .join("")
-    : String(options);
-  return `<select id="${id}" class="rad-select" ${attrs}>${opts}</select>`;
-}
-
-// Button. `variant`: 'primary' (green, default) | 'brand' | 'neutral'.
-export function button(
-  id: string,
-  label: string,
-  variant = "primary",
-  attrs = ""
-): string {
-  return `<button id="${id}" class="rad-btn rad-btn--${variant}" ${attrs}>${escapeHtml(
-    label
-  )}</button>`;
-}
-
-// Status banner. `kind`: 'info' | 'success' | 'error'.
-export function statusPill(id: string, kind: string, html: string): string {
-  return `<div id="${id}" class="rad-status rad-status--${kind}">${html}</div>`;
 }
 
 // Floating feedback widget (bottom-right). A dark round chat button that toggles
@@ -205,23 +148,6 @@ export function feedbackWidget(): string {
   });
 })();
 </script>`;
-}
-
-// A resource node card used in the app graph (icon + title + type label).
-export function nodeCard(
-  title: string,
-  typeLabel: string,
-  iconHtml?: string
-): string {
-  return (
-    `<div class="rad-node">` +
-    `<div class="rad-node__head"><span class="rad-node__icon">${
-      iconHtml || ""
-    }</span>` +
-    `<span class="rad-node__title">${escapeHtml(title)}</span></div>` +
-    `<div class="rad-node__type">${escapeHtml(typeLabel)}</div>` +
-    `</div>`
-  );
 }
 
 // --- Nav icons — the exact artwork from the Figma file (Applications page) -----
