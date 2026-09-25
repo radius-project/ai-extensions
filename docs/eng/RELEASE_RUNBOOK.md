@@ -60,6 +60,17 @@ gh api "repos/{owner}/{repo}/commits/$(git rev-parse "refs/tags/radius@<version>
   --jq .commit.verification
 ```
 
+## Update the Awesome Copilot listing
+
+After confirming that the stable release shipped, open a pull request in [`github/awesome-copilot`](https://github.com/github/awesome-copilot) to update each released plugin already listed there. Publishing here does not automatically update that marketplace. Use [github/awesome-copilot#3966](https://github.com/github/awesome-copilot/pull/3966), which updated Radius from `0.1.1` to `0.2.0`, as an example.
+
+1. **Resolve the published artifact commit.** Use the commit targeted by the release tag, not the source or release-PR merge commit. For Radius, run `git ls-remote origin "refs/tags/radius@<version>" "refs/tags/radius@<version>^{}"` from this repository; use the peeled `^{}` commit if the tag is annotated, otherwise the tag ref's SHA.
+2. **Update the existing entry in `plugins/external.json` in `github/awesome-copilot`.** Set `version` to `<version>`, `source.ref` to `radius@<version>`, and `source.sha` to the full 40-character artifact commit SHA. Keep `source.repo` as `radius-project/ai-extensions` and `source.path` as `plugins/radius`. Substitute the released plugin's name if updating another listing.
+3. **Regenerate and check the marketplace output.** Follow that repository's current [contributing guidance](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#updating-listed-external-plugins-via-pr) and run `npm start` in its checkout. Confirm that the matching entry in `.github/plugin/marketplace.json` has the same version, ref, and SHA, and include both files in the pull request.
+4. **Open the version-update pull request against `github/awesome-copilot`'s `main`.** Use a title such as `chore(plugin): update radius plugin to <version>`, link the published GitHub release in the description, and complete the upstream pull request checklist. Follow through on the external-plugin quality checks and review until the update merges.
+
+This updates an existing approved listing; adding a new external plugin follows Awesome Copilot's separate intake process. Do not point the stable listing at `main`, `radius@edge`, or an unpublished version.
+
 ## If something fails
 
 Re-run **the same failed run**. Do not push a new commit to force it, and do not create the tags or branches by hand — a human-made ref would be unsigned, and the workflow refuses to reuse an install branch GitHub has not verified. The publish is written to be resumable: it redoes only what did not finish, refuses to overwrite anything already published, and never moves the stable channel back to an older release. A fresh run cannot stand in for the original, because the signed build provenance is tied to the run that produced the artifact.
