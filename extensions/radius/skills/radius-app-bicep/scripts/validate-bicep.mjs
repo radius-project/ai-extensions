@@ -27,10 +27,6 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {
-  inspectSecurityRules,
-  requestFileReferences
-} from "./bicep-security-rules.mjs";
 
 const STAGING_RUN_RECORD = "run.json";
 // The resolved type contract show-radius-type.mjs stages for this run: a map of
@@ -1334,6 +1330,11 @@ async function inspectCompiledFiles(app, staged) {
   if (!existsSync(app)) {
     return { findings: [], unavailable: null };
   }
+  // Loaded here rather than imported statically, so an installation missing
+  // the sibling module reaches the catch below main() and reports the check as
+  // unavailable (exit 2) instead of failing to load (exit 1).
+  const { inspectSecurityRules, requestFileReferences } =
+    await import("./bicep-security-rules.mjs");
   const references = await requestFileReferences(bicep, app);
   if (references.error !== undefined) {
     return { findings: [], unavailable: references.error };

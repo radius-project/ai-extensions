@@ -351,7 +351,7 @@ export function securitySuppressions(source) {
       const rules = directiveRules(codes);
       if (rules.length > 0) {
         suppressions.push({
-          line: source.slice(0, index).split("\n").length,
+          line: source.slice(0, index).split(/\r\n|\r|\n/u).length,
           directive: directive[1],
           rules
         });

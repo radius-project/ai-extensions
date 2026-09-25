@@ -4659,6 +4659,27 @@ describe("security rules", () => {
     );
   });
 
+  // An installation that lost the sibling module must still follow the exit-2
+  // contract, so the agent aborts the run instead of trying to repair a model
+  // that was never checked.
+  it("is unavailable when its security-rule module is missing", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const isolated = path.join(directory, "validate-bicep.mjs");
+    fs.copyFileSync(checker, isolated);
+    const app = path.join(directory, "app.bicep");
+    fs.writeFileSync(app, "");
+
+    const result = spawnSync(process.execPath, [isolated, app], {
+      encoding: "utf8",
+      env: { ...process.env, ...fakeBicep(directory, sarif([]), 0) }
+    });
+
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /bicep-security-rules\.mjs/u);
+    assert.match(result.stderr, /ERR_MODULE_NOT_FOUND/u);
+  });
+
   it("leaves a missing model for the compile to report", () => {
     const directory = temporaryDirectory();
     const env = fakeBicep(directory, failure, 1);

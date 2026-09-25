@@ -1080,11 +1080,12 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
-  // The checker imports its security-rule inspection from a sibling script, so
-  // the packaged copy only works if that module ships beside it. A missing
-  // module would fail the import and exit 1 before printing anything; with the
+  // The checker loads its security-rule inspection from a sibling script, so
+  // the packaged copy only works if that module ships beside it. With the
   // module present, the checker asks the managed Bicep for the compile's files,
-  // finds none installed in the empty home, and fails closed with exit 2.
+  // finds none installed in the empty home, and reports that it could not
+  // establish whether the security rules run; a missing module would report
+  // the failed import instead.
   it("packages a checker that loads its security-rule inspection", () => {
     assertCurrentArtifact();
     const workspace = mkdtempSync(join(tmpdir(), "radius-security-rules-"));

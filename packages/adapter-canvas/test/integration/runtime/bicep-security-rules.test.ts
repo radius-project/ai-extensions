@@ -453,6 +453,22 @@ describe("securitySuppressions", () => {
     ).toEqual(["Use-Secure-Value-For-Secure-Inputs"]);
   });
 
+  it.each([
+    ["a bare carriage return", "\r"],
+    ["a line feed", "\n"],
+    ["a CRLF pair", "\r\n"]
+  ])("counts %s as one line break", (_name, lineBreak) => {
+    expect(
+      rules.securitySuppressions(
+        [
+          "param a string",
+          "param b string",
+          `#disable-next-line ${secureValueRule}`
+        ].join(lineBreak)
+      )[0]?.line
+    ).toBe(3);
+  });
+
   it("counts lines across CRLF line endings", () => {
     expect(
       rules.securitySuppressions(
