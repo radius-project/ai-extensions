@@ -47,8 +47,8 @@ runs:
         # Pin the Radius install script to a stable release and verify its checksum
         # before running it, rather than piping from main. The CLI channel stays
         # `edge` so the workflow still exercises the latest control-plane build.
-        RADIUS_INSTALL_REF: v0.60.2
-        RADIUS_INSTALL_SHA256: d12f6e1101dea7911c491de14a0f0aef57518aaf573d46e225b29d6f103c2e86
+        RADIUS_INSTALL_REF: v0.61.0
+        RADIUS_INSTALL_SHA256: bf2fdf0248b39ac2a0222326f8458824924872816737a08af3558bddd16c392b
       run: |
         curl -sSL "https://raw.githubusercontent.com/radius-project/radius/${RADIUS_INSTALL_REF}/deploy/install.sh" -o install-rad.sh
         echo "${RADIUS_INSTALL_SHA256}  install-rad.sh" | sha256sum -c -
