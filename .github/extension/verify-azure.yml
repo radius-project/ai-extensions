@@ -169,12 +169,20 @@ jobs:
           kubelogin-version: 'v0.2.19'
 
       - name: Verify AKS Access
+        env:
+          # Pass environment-controlled values through the environment rather
+          # than interpolating them into the shell source, so a crafted value
+          # cannot execute commands in this OIDC job.
+          #
+          # The resource group here is the one the cluster lives in, which is
+          # not AZURE_RESOURCE_GROUP: that one is where the application's
+          # resources are created, and the two are allowed to differ. Falls back
+          # to it for environments created before AZURE_AKS_RESOURCE_GROUP was
+          # recorded.
+          AZURE_AKS_RESOURCE_GROUP: ${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}
+          AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
         run: |
-          # The resource group the cluster lives in, which is not
-          # AZURE_RESOURCE_GROUP: that one is where the application's resources
-          # are created, and the two are allowed to differ. Falls back to it for
-          # environments created before AZURE_AKS_RESOURCE_GROUP was recorded.
-          az aks get-credentials --name "${{ vars.AZURE_AKS_CLUSTER_NAME }}" --resource-group "${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}" --overwrite-existing
+          az aks get-credentials --name "$AZURE_AKS_CLUSTER_NAME" --resource-group "$AZURE_AKS_RESOURCE_GROUP" --overwrite-existing
           kubelogin convert-kubeconfig -l azurecli
           kubectl cluster-info
           echo "✅ AKS cluster accessible"
@@ -186,8 +194,13 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
+        env:
+          # Same treatment as the vars.* values above. This one is a
+          # workflow_dispatch input rather than an environment variable, but it
+          # is user-controlled and reaches the shell the same way.
+          VERIFIED_ENVIRONMENT: ${{ inputs.environment || '{{ENV}}' }}
         run: |
           echo "## ✅ Credentials Verified" >> $GITHUB_STEP_SUMMARY
-          echo "Environment: ${{ inputs.environment || '{{ENV}}' }}" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: $VERIFIED_ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
           echo "Provider: azure" >> $GITHUB_STEP_SUMMARY
           echo "GHCR package push: ${GHCR_PUSH_CHECK:-unknown}" >> $GITHUB_STEP_SUMMARY

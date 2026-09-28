@@ -15,10 +15,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const SCRIPTS = ["plugins.mjs", "verified-git.mjs"].map((name) => [
-  name,
-  fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
-]);
+const SCRIPTS = ["plugins.mjs", "module-entry.mjs", "verified-git.mjs"].map(
+  (name) => [
+    name,
+    fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
+  ]
+);
 const TARGET = "a".repeat(40);
 const COMMIT = "b".repeat(40);
 const TREE = "c".repeat(40);

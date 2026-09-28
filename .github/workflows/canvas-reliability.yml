@@ -51,6 +51,27 @@ jobs:
       - name: Run extended reliability checks
         run: pnpm run test:reliability
 
+      - name: Install Chromium for native browser checks
+        if: runner.os != 'Linux'
+        run: pnpm exec playwright install chromium
+
+      - name: Run cross-platform Chromium checks
+        if: runner.os != 'Linux'
+        run: pnpm run test:chromium --grep "@cross-platform"
+
+      # A scheduled failure is only actionable with the trace and screenshot
+      # Playwright retains, and nobody is watching the run when it happens.
+      - name: Upload Chromium diagnostics and retry-only reports
+        if: always() && runner.os != 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canvas-reliability-playwright-${{ matrix.os }}
+          path: |
+            packages/adapter-canvas/test-results
+            packages/adapter-canvas/playwright-report
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Run native Windows process checks
         if: runner.os == 'Windows'
         run: pnpm run test:integration:windows-process

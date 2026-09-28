@@ -2,7 +2,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import path, { dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+
+import { isMainModule } from "./module-entry.mjs";
 
 export const CANONICAL_VISUAL_IMAGE =
   "radius-canvas-visual:playwright-1.63.0-node-24.19.0";
@@ -165,8 +167,7 @@ export function runCanonicalVisual(
   return run.status ?? 1;
 }
 
-const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   try {
     process.exitCode = runCanonicalVisual();
   } catch (error) {
