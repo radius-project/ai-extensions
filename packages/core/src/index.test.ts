@@ -13,6 +13,14 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "createDeployStatusReader",
+  "confirmArtifactIdentity",
+  "deployStatusArtifactPrefix",
+  "isLiveSlotArtifactName",
+  "parseDeployGraphArtifact",
+  "parseDeployProgressArtifact",
+  "sanitizeArtifactSegment",
+  "selectDeployStatusArtifacts",
   "observeWorkflowRun",
   "confirmedWorkflowConclusion",
   "collectWorkflowFailure",
@@ -63,6 +71,12 @@ const EXPECTED_FUNCTIONS = [
 ] as const;
 
 const EXPECTED_VALUES = [
+  "ARTIFACT_PAGE_SIZE",
+  "MAX_ARTIFACT_PAGES",
+  "DEPLOY_STATUS_FILES",
+  "DEPLOY_STATUS_ARTIFACT_PREFIX",
+  "DEPLOY_PROGRESS_SCHEMA_VERSION",
+  "MAX_ARTIFACT_CANDIDATES",
   "APP_ORIGIN_REPO_PATH",
   "APP_ORIGIN_ROOT_PATH",
   "RECIPE_PACK_REF",

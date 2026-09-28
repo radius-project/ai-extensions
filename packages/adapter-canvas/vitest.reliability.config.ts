@@ -4,6 +4,8 @@ export default defineConfig({
   test: {
     include: [
       "src/deploy-artifacts.test.ts",
+      "../core/src/deploy-artifact-evidence.test.ts",
+      "../adapter-shared/src/workflow-artifacts*.test.ts",
       "src/gh*.test.ts",
       "src/workspace.test.ts",
       "src/server/create-canvas-server.test.ts",

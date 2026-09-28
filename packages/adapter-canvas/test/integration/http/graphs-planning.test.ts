@@ -1,4 +1,7 @@
 import { createServer } from "node:http";
+import { existsSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deployStatusKeys,
@@ -166,6 +169,92 @@ function start(actualReader?: DeployedGraphStatusReader): Harness {
 }
 
 describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
+  it.each([
+    "valid",
+    "wrong-app",
+    "wrong-run",
+    "wrong-environment",
+    "malformed",
+    "auth"
+  ] as const)(
+    "projects only validated %s evidence through the real shared binding",
+    async (mode) => {
+      const directories: string[] = [];
+      const reader = createWorkflowArtifactReader(
+        {
+          repo: "octo/app",
+          runId: 42,
+          environment: "prod",
+          application: "billing"
+        },
+        async (args) => {
+          if (args[0] === "api")
+            return {
+              code: 0,
+              stderr: "",
+              stdout: JSON.stringify({
+                artifacts: [
+                  {
+                    id: 1,
+                    name: "radius-deploy-status-prod-billing",
+                    workflow_run: { id: 42 }
+                  }
+                ]
+              })
+            };
+          expect(args[1]).toBe("download");
+          directories.push(args[6]);
+          if (mode === "auth")
+            return { code: 1, stdout: "", stderr: "HTTP 403" };
+          writeFileSync(
+            path.join(args[6], DEPLOY_STATUS_FILES.progress),
+            JSON.stringify({
+              schemaVersion: mode === "malformed" ? 2 : 1,
+              application: mode === "wrong-app" ? "foreign" : "billing",
+              environment: mode === "wrong-environment" ? "dev" : "prod",
+              runId: mode === "wrong-run" ? 99 : 42,
+              sequence: 1,
+              resources: [
+                {
+                  name: "api",
+                  type: "Radius.Compute/containers",
+                  status: "failed"
+                }
+              ]
+            })
+          );
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      );
+      const harness = start(reader);
+      harness.state.contextRepo = "octo/app";
+      harness.state.deployRunId = 42;
+      harness.state.deployStatus = "in_progress";
+      harness.modeledResources.push({
+        name: "api",
+        type: "Radius.Compute/containers"
+      });
+      const entry = await container!.getOrCreate("artifact-panel");
+      const response = await fetch(
+        `${entry.baseUrl}/api/deployed-graph?application=billing&environment=prod`
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({
+        resources: expect.arrayContaining([
+          expect.objectContaining({
+            name: "api",
+            deployStatus: mode === "valid" ? "failed" : "pending"
+          })
+        ])
+      });
+      expect(directories).toHaveLength(1);
+      expect(directories.every((directory) => !existsSync(directory))).toBe(
+        true
+      );
+      expect(harness.state.deployStatus).toBe("in_progress");
+    }
+  );
   it.each([
     ["cancelled", "", undefined, "Deployment cancelled"],
     ["timed_out", "", undefined, "Deployment timed out"],
