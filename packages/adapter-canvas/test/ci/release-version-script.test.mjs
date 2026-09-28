@@ -45,7 +45,12 @@ function workspace() {
   mkdirSync(join(root, "scripts"));
   mkdirSync(join(root, ".changeset"));
   mkdirSync(join(root, ".github", "plugin"), { recursive: true });
-  for (const name of ["plugins.mjs", "version.mjs", "release-version.mjs"]) {
+  for (const name of [
+    "plugins.mjs",
+    "module-entry.mjs",
+    "version.mjs",
+    "release-version.mjs"
+  ]) {
     copyFileSync(join(repoRoot, "scripts", name), join(root, "scripts", name));
   }
   symlinkSync(

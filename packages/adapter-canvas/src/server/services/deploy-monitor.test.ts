@@ -9,6 +9,12 @@ import {
 } from "./deploy-monitor.js";
 import { createDeployDispatchService } from "./deploy-dispatch.js";
 import { createDeployOutcomeService } from "./deploy-outcome.js";
+import { observeWorkflowRun } from "@radius-project/core";
+import {
+  readWorkflowRun,
+  readWorkflowLog,
+  type WorkflowExecution
+} from "@radius-project/adapter-shared";
 import { createPlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import type { DeployOutcomeRequest } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
@@ -1235,7 +1241,7 @@ describe("deploy monitor settlement", () => {
 // sides come from different places: one is produced by the code, the other was
 // read off the arm this slice removed.
 describe("deploy pipeline parity with the legacy arm transcript", () => {
-  function composed(effects: string[]) {
+  function composed(effects: string[], conclusion = "success") {
     const record = (effect: string): void => {
       effects.push(effect);
     };
@@ -1371,22 +1377,61 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       now: () => 1_700_000_000_000
     });
 
+    const execution: WorkflowExecution = {
+      mode: "ambient",
+      run: async (args, options) => {
+        if (
+          args.join(" ") ===
+          "run view 77 --json status,conclusion,jobs --repo acme/widgets"
+        ) {
+          record("get-run-detail");
+          expect(options).toEqual({ timeout: 15000 });
+          return {
+            code: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              status: "completed",
+              conclusion,
+              jobs: [
+                {
+                  steps: [
+                    {
+                      name:
+                        conclusion === "success" ? "Run rad commands" : (
+                          "Azure Login (OIDC)"
+                        ),
+                      status: "completed",
+                      conclusion
+                    }
+                  ]
+                }
+              ]
+            })
+          };
+        }
+        if (
+          conclusion === "failure" &&
+          args.join(" ") === "run view 77 --log --repo acme/widgets"
+        ) {
+          record("read-run-log");
+          expect(options).toEqual({
+            timeout: 30000,
+            maxBuffer: 20 * 1024 * 1024
+          });
+          return { code: 0, stderr: "", stdout: "Error: login denied" };
+        }
+        throw new Error("Unexpected workflow command: " + args.join(" "));
+      }
+    };
     const outcome = createDeployOutcomeService({
       projectSafeGraphResources: (graph) =>
         Array.isArray(graph) ? (graph as CanvasGraphResource[]) : [],
-      settleDeployStatuses: (resources) => {
+      settleDeployStatuses: (resources, runConclusion, radiusError) => {
         record("settle-statuses");
-        resources.forEach((r) => {
-          r.deployStatus = "success";
-        });
+        settleDeployStatuses(resources, runConclusion, radiusError);
       },
-      fetchRunLog: () => {
-        throw new Error("a successful run has no failure log to read");
-      },
-      extractGitHubActionsStepLog: () => "",
-      explainOidcEnterpriseClaim: () => "",
-      extractRadDeployError: () => "",
-      classifyDeployCloudAuthDrift: () => "",
+      fetchRunLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+
       cloudAuthDriftKind: "cloud-auth-drift",
       sleep: () => Promise.resolve(),
       now: () => 1_700_000_060_000
@@ -1402,20 +1447,13 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         record("find-workflow-run");
         return Promise.resolve(77);
       },
-      getRunDetail: () => {
-        record("get-run-detail");
-        return Promise.resolve({
-          status: "completed",
-          conclusion: "success",
-          steps: [
-            {
-              name: "Run rad commands",
-              status: "completed",
-              conclusion: "success"
-            }
-          ]
-        });
-      },
+      getRunDetail: (repo, runId) =>
+        observeWorkflowRun(
+          { repo, runId },
+          {
+            readRun: (repo, runId) => readWorkflowRun(execution, repo, runId)
+          }
+        ),
       createStatusReader: () => {
         record("create-status-reader");
         return Promise.resolve({
@@ -1428,7 +1466,10 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
             return Promise.resolve({ graph: [{ id: "r1" }], status: "ok" });
           },
           controlPlaneLog: () => {
-            throw new Error("a successful run has no control-plane tail");
+            if (conclusion !== "failure")
+              throw new Error("a successful run has no control-plane tail");
+            record("read-control-plane");
+            return Promise.resolve("control-plane evidence");
           }
         });
       },
@@ -1511,6 +1552,61 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       "",
       "🎉 Deployment complete! Application deployed to Azure.",
       "Click on deployed resources to view them in the Azure Portal."
+    ]);
+  });
+
+  it("publishes real diagnostics, settled resources and drift kind before a failed status can initiate repair", async () => {
+    const effects: string[] = [];
+    const { request: input, state, logs } = request();
+    const service = composed(effects, "failure");
+    let status: CanvasState["deployStatus"];
+    Object.defineProperty(state, "deployStatus", {
+      configurable: true,
+      get: () => status,
+      set: (value: CanvasState["deployStatus"]) => {
+        if (value === "failed") {
+          expect(state.deployError).toContain("Error: login denied");
+          expect(state.deployError).toContain("control-plane evidence");
+          expect(state.deployError).toMatch(
+            /^Cloud authentication or authorization failed/
+          );
+          expect(state.deployError).not.toContain(
+            "This environment verified earlier"
+          );
+          expect(state.deployErrorKind).toBe("cloud-auth-drift");
+          expect(
+            input.resources.every(
+              (resource) => resource.deployStatus === "failed"
+            )
+          ).toBe(true);
+          effects.push("publish-failed");
+        }
+        status = value;
+      }
+    });
+    await service.run(input);
+    expect(state.deployStatus).toBe("failed");
+    expect(effects.slice(effects.indexOf("get-run-detail"))).toEqual([
+      "get-run-detail",
+      "read-graph",
+      "read-progress",
+      "read-run-log",
+      "read-control-plane",
+      "settle-statuses",
+      "publish-failed"
+    ]);
+    expect(
+      logs.slice(logs.indexOf("❌ Deployment failed. Conclusion: failure"))
+    ).toEqual([
+      "❌ Deployment failed. Conclusion: failure",
+      "",
+      "──────── failure details ────────",
+      "  Error: login denied",
+      "─────────────────────────────────",
+      "",
+      "──────── control-plane log ────────",
+      "  control-plane evidence",
+      "───────────────────────────────────"
     ]);
   });
 });

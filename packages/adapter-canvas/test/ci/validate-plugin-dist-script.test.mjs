@@ -13,7 +13,11 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
-const SCRIPTS = ["plugins.mjs", "validate-plugin-dist.mjs"].map((name) => [
+const SCRIPTS = [
+  "plugins.mjs",
+  "module-entry.mjs",
+  "validate-plugin-dist.mjs"
+].map((name) => [
   name,
   fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
 ]);

@@ -38,6 +38,14 @@ import type {
 } from "../../../src/deploy-artifacts.js";
 import type { DeployMonitorRequest } from "../../../src/server/services/deploy-monitor.js";
 import type { CanvasState } from "../../../src/shared.js";
+import { observeWorkflowRun } from "@radius-project/core";
+import {
+  readWorkflowRun,
+  readWorkflowLog,
+  type WorkflowExecution
+} from "@radius-project/adapter-shared";
+import { createDeployOutcomeService } from "../../../src/server/services/deploy-outcome.js";
+import { settleDeployStatuses } from "../../../src/deploy-artifacts.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -272,6 +280,128 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
+  it("exposes complete real workflow failure evidence to repair polling but keeps notifications passive", async () => {
+    const calls: string[] = [];
+    const harness = start({
+      triggerDeployRepairHandoff: (entry) => {
+        expect(entry?.state.deployError).toContain(
+          "Error: recipe quota exceeded"
+        );
+        expect(entry?.state.deployingResources?.[0].deployStatus).toBe(
+          "failed"
+        );
+        calls.push("repair");
+        return false;
+      },
+      triggerDeployFailureNotice: () => {
+        calls.push("notice");
+        return false;
+      }
+    });
+    const execution: WorkflowExecution = {
+      mode: "ambient",
+      run: async (args) => {
+        calls.push(args.join(" "));
+        if (
+          args.join(" ") ===
+          "run view 42 --json status,conclusion,jobs --repo org/app"
+        ) {
+          return {
+            code: 0,
+            stderr: "",
+            stdout:
+              '{"status":"completed","conclusion":"failure","jobs":[{"steps":[{"name":"Run rad commands","conclusion":"failure"}]}]}'
+          };
+        }
+        if (args.join(" ") === "run view 42 --log --repo org/app") {
+          return {
+            code: 0,
+            stderr: "",
+            stdout: "Error: recipe quota exceeded"
+          };
+        }
+        throw new Error("Unexpected workflow read");
+      }
+    };
+    const observed = await observeWorkflowRun(
+      { repo: "org/app", runId: 42 },
+      {
+        readRun: (repo, runId) => readWorkflowRun(execution, repo, runId)
+      }
+    );
+    if (!observed) throw new Error("Expected observed run");
+    harness.state.deployStatus = "in_progress";
+    harness.state.deployingResources = [
+      { name: "db", deployStatus: "pending" }
+    ];
+    const outcome = createDeployOutcomeService({
+      projectSafeGraphResources: () => [],
+      settleDeployStatuses,
+      fetchRunLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+      cloudAuthDriftKind: "cloud-auth-drift",
+      sleep: () => {
+        throw new Error("No graph retry expected");
+      },
+      now: () => 1700000060000
+    });
+    await outcome.settle({
+      entry: { state: harness.state },
+      repo: "org/app",
+      runId: 42,
+      provider: "azure",
+      resources: harness.state.deployingResources,
+      conclusion: observed.conclusion,
+      steps: observed.steps,
+      statusReader: {
+        graph: async () => {
+          calls.push("graph");
+          return { graph: [], status: "ok" };
+        },
+        controlPlaneLog: async () => {
+          calls.push("control-plane");
+          return null;
+        }
+      },
+      deployStepStartedAt: 0,
+      log: () => {},
+      setStatus: (resource, status) => {
+        resource.deployStatus = status;
+      },
+      pollDeployStatus: async (force) => {
+        expect(force).toBe(true);
+        calls.push("progress");
+      }
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const notification = await fetch(
+      `${entry.baseUrl}/api/deploy-notification`
+    );
+    expect(notification.status).toBe(200);
+    expect(calls).not.toContain("repair");
+    const status = await fetch(`${entry.baseUrl}/api/deploy-status`);
+    expect(await status.json()).toMatchObject({
+      status: "failed",
+      resources: [
+        expect.objectContaining({
+          name: "db",
+          deployStatus: "failed",
+          deployMessage: "Error: recipe quota exceeded"
+        })
+      ],
+      error: expect.stringContaining("Error: recipe quota exceeded")
+    });
+    expect(calls).toEqual([
+      "run view 42 --json status,conclusion,jobs --repo org/app",
+      "graph",
+      "progress",
+      "run view 42 --log --repo org/app",
+      "control-plane",
+      "repair",
+      "notice"
+    ]);
+    expect(harness.dispatches).toEqual([]);
+  });
+
   it("preserves terminal attempt status and passes the socket instance to status callbacks", async () => {
     const calls: Array<{
       callback: string;

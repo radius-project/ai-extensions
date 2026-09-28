@@ -244,9 +244,7 @@ import {
   fetchRunLog,
   extractErrorLines,
   extractGitHubActionsStepLog,
-  extractRadDeployError,
   explainOidcEnterpriseClaim,
-  classifyDeployCloudAuthDrift,
   explainNoSubscriptions,
   explainRepoAccessForEnvSetup,
   isGitHubRateLimitError,
@@ -1575,8 +1573,8 @@ const environmentsRoutes = createEnvironmentsRoutes({
       );
     }
   },
-  getRunDetail: (repo, runId, executor) => getRunDetail(repo, runId, executor),
-  fetchRunLog: (repo, runId, executor) => fetchRunLog(repo, runId, executor),
+  getRunDetail,
+  fetchRunLog,
   extractErrorLines: (logText, max) => extractErrorLines(logText, max),
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
@@ -3260,10 +3258,6 @@ const deployOutcomeService = createDeployOutcomeService({
     canvasGraphResources(projectSafeApplicationGraph(graph).resources),
   settleDeployStatuses,
   fetchRunLog,
-  extractGitHubActionsStepLog,
-  explainOidcEnterpriseClaim,
-  extractRadDeployError: (logText) => extractRadDeployError(logText),
-  classifyDeployCloudAuthDrift,
   cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -3356,15 +3350,6 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
       else resolve((stdout || "").trim());
     });
   });
-}
-
-export function resolveGitHubEnvironmentCreateState(
-  result: Partial<CommandResult> | null | undefined
-): "created_candidate" | "reused" | null {
-  if (!result) return null;
-  if (result.code === 0 || result.code === "0") return "reused";
-  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
-  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
 }
 
 export interface CleanupGitHubContext {

@@ -106,15 +106,24 @@ jobs:
 
       - name: Connect to AKS cluster
         if: ${{ vars.AZURE_AKS_CLUSTER_NAME != '' }}
+        env:
+          # Pass environment-controlled values through the environment rather
+          # than interpolating them into the shell source, so a crafted value
+          # cannot execute commands in this OIDC + write job.
+          #
+          # The resource group here is the one the cluster lives in, which is
+          # not AZURE_RESOURCE_GROUP: that one is where the application's
+          # resources are created, and the two are allowed to differ. Falls back
+          # to it for environments created before AZURE_AKS_RESOURCE_GROUP was
+          # recorded.
+          AZURE_AKS_RESOURCE_GROUP: ${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}
+          AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
-          # The resource group the cluster lives in, which is not
-          # AZURE_RESOURCE_GROUP: that one is where the application's resources
-          # are created, and the two are allowed to differ. Falls back to it for
-          # environments created before AZURE_AKS_RESOURCE_GROUP was recorded.
           az aks get-credentials \
-            --resource-group "${{ vars.AZURE_AKS_RESOURCE_GROUP || vars.AZURE_RESOURCE_GROUP }}" \
-            --name "${{ vars.AZURE_AKS_CLUSTER_NAME }}" \
-            --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}" \
+            --resource-group "$AZURE_AKS_RESOURCE_GROUP" \
+            --name "$AZURE_AKS_CLUSTER_NAME" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
             --file "$RADIUS_TARGET_KUBECONFIG"
 
       - name: Set up control plane
@@ -124,13 +133,18 @@ jobs:
         uses: radius-project/ai-extensions/.github/extension/actions/load-contrib-catalog@{{RADIUS_REF}}
 
       - name: Project cloud OIDC tokens into Radius pods
+        env:
+          # Read from the environment rather than interpolated into the shell
+          # source, so a crafted value cannot execute commands in this
+          # OIDC + write job.
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
         run: |
           # Mint GitHub OIDC tokens and mount them where Radius expects them.
           # GitHub Actions is already a trusted OIDC issuer for both AWS and Azure
           # (via the CloudFormation template / AAD federated credential), so no
           # custom issuer setup is needed.
 
-          if [ -n "${{ vars.AZURE_CLIENT_ID }}" ]; then
+          if [ -n "$AZURE_CLIENT_ID" ]; then
             echo "Projecting Azure OIDC token..."
             AZ_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
               "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r '.value')
@@ -153,7 +167,7 @@ jobs:
           # AZURE_FEDERATED_TOKEN_FILE is still required because armauth builds the
           # WorkloadIdentityCredential with an empty TokenFilePath and falls back to
           # this env var to locate the token.
-          if [ -n "${{ vars.AZURE_CLIENT_ID }}" ]; then
+          if [ -n "$AZURE_CLIENT_ID" ]; then
             AZ_PATCH='[
               {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"azure-oidc-token","secret":{"secretName":"azure-oidc-token"}}},
               {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"azure-oidc-token","mountPath":"/var/run/secrets/azure/tokens","readOnly":true}},
@@ -207,6 +221,12 @@ jobs:
           namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
 
       - name: Register cloud credentials with Radius
+        env:
+          # Read from the environment rather than interpolated into the shell
+          # source, so a crafted value cannot execute commands in this
+          # OIDC + write job.
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
         run: |
           # Register the cloud identity with Radius using its UCP credential model.
           # Radius stores only the identity selector (AWS role ARN / Azure client +
@@ -214,21 +234,36 @@ jobs:
           # OIDC token file projected into the pods in the earlier step. This keeps
           # the credential visible to `rad credential show`, rotatable, and usable
           # by both the Bicep and Terraform code paths.
-          if [ -n "${{ vars.AZURE_CLIENT_ID }}" ]; then
+          if [ -n "$AZURE_CLIENT_ID" ]; then
             echo "Registering Azure workload identity credential..."
             rad credential register azure wi \
-              --client-id "${{ vars.AZURE_CLIENT_ID }}" \
-              --tenant-id "${{ vars.AZURE_TENANT_ID }}"
+              --client-id "$AZURE_CLIENT_ID" \
+              --tenant-id "$AZURE_TENANT_ID"
           fi
           echo "✅ Cloud credentials registered with Radius."
 
       - name: Create Radius environment and deploy provider recipe pack
         id: provider-setup
+        env:
+          # Read from the environment rather than interpolated into the shell
+          # source, so a crafted value cannot execute commands in this
+          # OIDC + write job. The defaults stay in the GitHub expression, so
+          # each value resolves exactly as it did when it was interpolated.
+          #
+          # AZURE_RESOURCE_GROUP is the application's resource group, which is
+          # what the environment's Azure provider and the recipe pack want. The
+          # cluster's own group is a different value and is not used here.
+          KUBERNETES_NAMESPACE: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
+          RADIUS_BUILD_REGISTRY: ${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository) }}
+          RADIUS_ROUTES_GATEWAY_NAME: ${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}
+          RADIUS_ROUTES_GATEWAY_NAMESPACE: ${{ vars.RADIUS_ROUTES_GATEWAY_NAMESPACE || 'radius-system' }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
         run: |
           # load-contrib-catalog exports the catalog and generic accessors from
           # the same Radius ref as this generated workflow.
           source "$RADIUS_CONTRIB_CATALOG_HELPER"
-          NAMESPACE="${{ vars.KUBERNETES_NAMESPACE || 'default' }}"
+          NAMESPACE="$KUBERNETES_NAMESPACE"
 
           # Registry and credentials for the Radius.Compute/containerImages recipe.
           # The recipe builds images with the in-pod BuildKit and pushes them to
@@ -241,7 +276,7 @@ jobs:
           # containerImagesRegistrySecretName. $BUILD_REGISTRY is
           # ghcr.io/<owner>/<repo> so images land under the repository's package
           # namespace; it must be lowercase.
-          BUILD_REGISTRY=$(echo "${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository) }}" | tr '[:upper:]' '[:lower:]')
+          BUILD_REGISTRY=$(echo "$RADIUS_BUILD_REGISTRY" | tr '[:upper:]' '[:lower:]')
           REGISTRY_SECRET_NAME="radius-ghcr-registry-creds"
           PACK_NAME="azure-avm"
 
@@ -261,8 +296,8 @@ jobs:
             properties: {
               providers: {
                 azure: {
-                  subscriptionId: '${{ vars.AZURE_SUBSCRIPTION_ID }}'
-                  resourceGroupName: '${{ vars.AZURE_RESOURCE_GROUP }}'
+                  subscriptionId: '$AZURE_SUBSCRIPTION_ID'
+                  resourceGroupName: '$AZURE_RESOURCE_GROUP'
                 }
                 kubernetes: {
                   namespace: '$NAMESPACE'
@@ -353,8 +388,8 @@ jobs:
           # The default routes recipe always receives a concrete Gateway reference.
           # A separately-passed boolean tells the lifecycle action whether this is a
           # user-owned Gateway or the Radius-managed default.
-          ROUTES_GATEWAY_NAME="${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}"
-          ROUTES_GATEWAY_NAMESPACE="${{ vars.RADIUS_ROUTES_GATEWAY_NAMESPACE || 'radius-system' }}"
+          ROUTES_GATEWAY_NAME="$RADIUS_ROUTES_GATEWAY_NAME"
+          ROUTES_GATEWAY_NAMESPACE="$RADIUS_ROUTES_GATEWAY_NAMESPACE"
 
           echo "Recipe pack file:"
           cat "$RECIPE_PACK_BICEP"
@@ -378,8 +413,8 @@ jobs:
           # present so both immutable catalog revisions remain deployable.
           append_pack_parameter_if_declared environmentName "$ENVIRONMENT"
           append_pack_parameter_if_declared environmentNamespace "$NAMESPACE"
-          append_pack_parameter_if_declared azureSubscriptionId "${{ vars.AZURE_SUBSCRIPTION_ID }}"
-          append_pack_parameter_if_declared azureResourceGroup "${{ vars.AZURE_RESOURCE_GROUP }}"
+          append_pack_parameter_if_declared azureSubscriptionId "$AZURE_SUBSCRIPTION_ID"
+          append_pack_parameter_if_declared azureResourceGroup "$AZURE_RESOURCE_GROUP"
 
           rad deploy "$RECIPE_PACK_BICEP" \
             --environment "$ENVIRONMENT" \

@@ -37,6 +37,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule } from "./module-entry.mjs";
+
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const PLUGINS_DIR = "plugins";
@@ -210,7 +212,7 @@ function option(args, name) {
   return index === -1 ? undefined : args[index + 1];
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   const args = process.argv.slice(2);
 
   if (args.includes("--select")) {

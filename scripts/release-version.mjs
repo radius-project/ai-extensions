@@ -8,8 +8,9 @@
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+
+import { isMainModule } from "./module-entry.mjs";
 import { listPlugins, repoRoot, requirePlugin } from "./plugins.mjs";
 
 const require = createRequire(import.meta.url);
@@ -68,7 +69,7 @@ function run(command, args) {
   return result.status ?? 1;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   const args = process.argv.slice(2);
   const selectedName = option(args, "--plugin");
   const snapshot = option(args, "--snapshot");
