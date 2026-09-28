@@ -3358,15 +3358,6 @@ function ghOrThrow(args: string[], timeout = 12000): Promise<string> {
   });
 }
 
-export function resolveGitHubEnvironmentCreateState(
-  result: Partial<CommandResult> | null | undefined
-): "created_candidate" | "reused" | null {
-  if (!result) return null;
-  if (result.code === 0 || result.code === "0") return "reused";
-  const detail = `${result.stderr || ""}\n${result.stdout || ""}`;
-  return /HTTP 404|Not Found|404\b/i.test(detail) ? "created_candidate" : null;
-}
-
 export interface CleanupGitHubContext {
   rollbackCommand: WorkflowRollbackCommand;
   deleteEnvironment(args: string[]): Promise<void>;

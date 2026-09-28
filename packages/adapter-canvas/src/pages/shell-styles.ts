@@ -245,10 +245,10 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .rad-subtab--active { color: var(--rad-text); font-weight: 700; border-bottom-color: var(--rad-brand); }
 
   /* ─── Status banners ──────────────────────────────────────────────────── */
-  .status, .rad-status { padding: 12px 14px; border-radius: var(--rad-radius); margin: 12px 0; font-size: 13px; }
-  .status.info, .rad-status--info { background: var(--rad-info-bg); border: 1px solid var(--rad-info); color: var(--rad-text); }
-  .status.success, .rad-status--success { background: var(--rad-success-bg); border: 1px solid var(--rad-success); color: var(--rad-text); }
-  .status.error, .rad-status--error { background: var(--rad-danger-bg); border: 1px solid var(--rad-danger); color: var(--rad-text); }
+  .status { padding: 12px 14px; border-radius: var(--rad-radius); margin: 12px 0; font-size: 13px; }
+  .status.info { background: var(--rad-info-bg); border: 1px solid var(--rad-info); color: var(--rad-text); }
+  .status.success { background: var(--rad-success-bg); border: 1px solid var(--rad-success); color: var(--rad-text); }
+  .status.error { background: var(--rad-danger-bg); border: 1px solid var(--rad-danger); color: var(--rad-text); }
 
   /* ─── Graph build progress ────────────────────────────────────────────── */
   /* Shared by every graph page's progress panel. Lives here rather than in the
