@@ -4525,6 +4525,58 @@ describe("security rules", () => {
     assert.match(result.stderr, /BCP057/u);
   });
 
+  // An interpolated multiline string holding another multiline string with an
+  // apostrophe used to leave the scanner inside a string, so the real directive
+  // after it went unreported and the model passed. Bicep 0.42.1 compiles both
+  // documents below cleanly.
+  const startupScript = [
+    "param includeNotice bool = true",
+    "output startupScript string = $'''",
+    "#!/bin/sh",
+    "${includeNotice ? '''echo \"don't log credentials\"''' : ''}",
+    "'''"
+  ].join("\n");
+
+  it("fails a directive that follows an interpolated multiline string", () => {
+    const directory = temporaryDirectory();
+    const app = path.join(directory, "app.bicep");
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0),
+      [
+        startupScript,
+        "#disable-diagnostics secure-parameter-default outputs-should-not-contain-secrets",
+        "@secure()",
+        "param credential string = 'dummy-review-only'",
+        "output exposed string = credential",
+        ""
+      ].join("\n")
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      new RegExp(
+        `^${escapeRegExp(app)}:6: error security-rule-suppressed: #disable-diagnostics suppresses secure-parameter-default, outputs-should-not-contain-secrets\\.`,
+        "mu"
+      )
+    );
+  });
+
+  it("passes the interpolated multiline string on its own", () => {
+    const directory = temporaryDirectory();
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0),
+      `${startupScript}\n`
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
   it("fails a model that suppresses a security rule with a directive", () => {
     const directory = temporaryDirectory();
     const app = path.join(directory, "app.bicep");

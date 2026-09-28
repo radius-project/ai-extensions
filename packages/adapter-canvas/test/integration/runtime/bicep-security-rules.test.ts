@@ -30,7 +30,7 @@ interface SecurityRulesModule {
   requestFileReferences(
     bicep: string,
     app: string,
-    options?: { timeoutMs?: number }
+    options?: { timeoutMs?: number; killGraceMs?: number }
   ): Promise<FileReferences>;
   readFileIfPresent(file: string): Buffer | null;
   inspectSecurityRules(
@@ -102,6 +102,17 @@ function frame(message: unknown): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+// Whether a process with this id still exists. Signal 0 tests for the process
+// without signaling it, on Windows as elsewhere.
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe("security rule list", () => {
@@ -357,7 +368,13 @@ describe("configurationProblems", () => {
 
   // Bicep matches these keys case-sensitively today; matching them
   // case-insensitively keeps a more lenient compiler from reopening the gap.
-  it("matches section, rule, and level keys regardless of case", () => {
+  // Bicep 0.42.1 and 0.47 match these keys case-sensitively and ignore the
+  // other spellings, so the finding says so rather than claiming the setting
+  // takes effect.
+  const caseNote =
+    "; Bicep matches configuration keys case-sensitively, so this spelling has no effect today, but it is refused anyway because a compiler that matched keys case-insensitively would honor it";
+
+  it("names section, rule, and level keys as spelled and notes that Bicep ignores them", () => {
     expect(
       rules.configurationProblems({
         Analyzers: {
@@ -368,9 +385,69 @@ describe("configurationProblems", () => {
         }
       })
     ).toEqual([
-      "analyzers.core.enabled is false, which turns off the Bicep linter and every security rule with it",
-      'analyzers.core.rules.Use-Secure-Value-For-Secure-Inputs.Level is "off", which turns the rule off'
+      `Analyzers.Core.Enabled is false, which turns off the Bicep linter and every security rule with it${caseNote}`,
+      `Analyzers.Core.Rules.Use-Secure-Value-For-Secure-Inputs.Level is "off", which turns the rule off${caseNote}`
     ]);
+  });
+
+  it.each([
+    [
+      "a section key",
+      {
+        Analyzers: { core: { rules: { [secureValueRule]: { level: "off" } } } }
+      }
+    ],
+    [
+      "the rules key",
+      {
+        analyzers: { core: { Rules: { [secureValueRule]: { level: "off" } } } }
+      }
+    ],
+    [
+      "a rule name",
+      {
+        analyzers: {
+          core: {
+            rules: { "Use-Secure-Value-For-Secure-Inputs": { level: "off" } }
+          }
+        }
+      }
+    ],
+    [
+      "the level key",
+      {
+        analyzers: { core: { rules: { [secureValueRule]: { LEVEL: "off" } } } }
+      }
+    ]
+  ])("notes that Bicep ignores %s spelled in another case", (_name, config) => {
+    const [problem] = rules.configurationProblems(config);
+
+    expect(problem).toMatch(/turns the rule off/u);
+    expect(problem?.endsWith(caseNote)).toBe(true);
+  });
+
+  it.each([
+    [{ Analyzers: [] }, "Analyzers"],
+    [{ analyzers: { Core: "on" } }, "analyzers.Core"],
+    [{ analyzers: { core: { Rules: null } } }, "analyzers.core.Rules"],
+    [
+      { analyzers: { core: { rules: { "Secure-Parameter-Default": "off" } } } },
+      "analyzers.core.rules.Secure-Parameter-Default"
+    ]
+  ])(
+    "notes the case of a %j section that is not an object",
+    (config, setting) => {
+      const [problem] = rules.configurationProblems(config);
+
+      expect(problem?.startsWith(`${setting} is not an object`)).toBe(true);
+      expect(problem?.endsWith(caseNote)).toBe(true);
+    }
+  );
+
+  it("does not note the case of a level value, which Bicep reads in any case", () => {
+    expect(
+      rules.configurationProblems(ruleLevel(secureValueRule, "OFF"))[0]
+    ).not.toContain("case-sensitively");
   });
 
   it("follows the last duplicate key, as Bicep does", () => {
@@ -592,6 +669,70 @@ describe("securitySuppressions", () => {
 
   it("stops at the end of an unterminated string", () => {
     expect(rules.securitySuppressions("var s = 'open\\")).toEqual([]);
+  });
+
+  // Checked against Bicep 0.42.1: a string opened with dollar signs before its
+  // quotes interpolates, and its interpolations may hold other strings, so the
+  // lexer must resume the right kind of string when one closes.
+  const multiline = "'''";
+  it.each([
+    [
+      "an interpolated multiline string holding a multiline string with a quote",
+      `output o string = $${multiline}\n#!/bin/sh\n\${true ? ${multiline}echo "don't log"${multiline} : ''}\n${multiline}`
+    ],
+    [
+      "an interpolated multiline string holding a single-line string",
+      `var s = $${multiline}a \${'}'} b${multiline}`
+    ],
+    [
+      "an interpolated multiline string with several interpolations",
+      `var s = $${multiline}\${1}\n'\n\${'x'}${multiline}`
+    ],
+    [
+      "a multiline string that needs two dollar signs to interpolate",
+      `var s = $$${multiline}\${x}\n$$\${'x'}${multiline}`
+    ],
+    [
+      "a longer run of dollar signs than the string needs",
+      `var s = $${multiline}$$\${'x'}${multiline}`
+    ],
+    [
+      "dollar signs that open nothing",
+      `var s = $${multiline}$ $$ '${multiline}\nvar t = $x`
+    ],
+    [
+      "an interpolated multiline string closed by extra quotes",
+      `var s = $${multiline}\${1}''''`
+    ],
+    [
+      "an object inside an interpolation",
+      `var s = $${multiline}\${ {a: '}'}.a }${multiline}`
+    ]
+  ])("finds a directive on the line after %s", (_name, before) => {
+    expect(rules.securitySuppressions(`${before}\n${directive}\n`)).toEqual([
+      {
+        line: before.split("\n").length + 1,
+        directive: "disable-diagnostics",
+        rules: [secureValueRule]
+      }
+    ]);
+  });
+
+  it.each([
+    [
+      "an interpolated multiline string",
+      `var s = $${multiline}\${1}\n${directive}\n${multiline}`
+    ],
+    [
+      "a multiline string whose dollar signs do not open an interpolation",
+      `var s = $$${multiline}\${'\n${directive}\n${multiline}`
+    ],
+    [
+      "an unterminated interpolated multiline string",
+      `var s = $${multiline}\n${directive}`
+    ]
+  ])("ignores a directive inside %s", (_name, source) => {
+    expect(rules.securitySuppressions(source)).toEqual([]);
   });
 });
 
@@ -850,15 +991,47 @@ describe("requestFileReferences", () => {
     }
   );
 
-  it("stops a server that never answers", async () => {
-    const app = server({ hang: true });
+  // Resolving before the stopped server exits would leave it running with the
+  // model's directory as its working directory, which Windows then refuses to
+  // delete.
+  it("stops a server that never answers, and waits for it to exit", async () => {
+    const app = server({ hang: true, startedFile: "server.pid" });
+    const pidFile = path.join(path.dirname(app), "server.pid");
 
-    await expect(
-      rules.requestFileReferences(process.execPath, app, { timeoutMs: 500 })
-    ).resolves.toEqual({
+    const result = await rules.requestFileReferences(process.execPath, app, {
+      timeoutMs: 500
+    });
+
+    expect(result).toEqual({
       error: "Bicep did not list the files the compile reads within 500 ms"
     });
+    expect(isRunning(Number(fs.readFileSync(pidFile, "utf8")))).toBe(false);
   });
+
+  // Windows has no signal a process can ignore, so this only runs elsewhere.
+  it.runIf(process.platform !== "win32")(
+    "kills a server that ignores the request to stop",
+    async () => {
+      const app = server({
+        hang: true,
+        ignoreTerm: true,
+        startedFile: "server.pid"
+      });
+      const pidFile = path.join(path.dirname(app), "server.pid");
+
+      const result = await rules.requestFileReferences(process.execPath, app, {
+        timeoutMs: 500,
+        killGraceMs: 200
+      });
+
+      expect(result).toEqual({
+        error: "Bicep did not list the files the compile reads within 500 ms"
+      });
+      await expect
+        .poll(() => isRunning(Number(fs.readFileSync(pidFile, "utf8"))))
+        .toBe(false);
+    }
+  );
 
   it("keeps a complete answer from a server that does not exit", async () => {
     const app = server({ linger: true });
@@ -1149,6 +1322,38 @@ describe("inspectSecurityRules", () => {
     ).toEqual([
       `${stagedApp}:2: error security-rule-suppressed: #disable-next-line suppresses ${secureValueRule}. ${remedy}`,
       `${module}:1: error security-rule-suppressed: #disable-diagnostics suppresses secure-parameter-default. ${remedy}`
+    ]);
+  });
+
+  // Bicep 0.42.1 and 0.47 ignore a code spelled in another case, so the
+  // finding must not tell the agent the directive worked.
+  it("says that Bicep ignores a code spelled in another case", () => {
+    const files = fakeFiles({
+      [stagedApp]: "#disable-next-line Secure-Parameter-Default\n"
+    });
+
+    expect(
+      rules.inspectSecurityRules([stagedApp], {
+        stagingDir,
+        readFile: files.readFile
+      }).findings
+    ).toEqual([
+      `${stagedApp}:1: error security-rule-suppressed: #disable-next-line names Secure-Parameter-Default, which has no effect today because Bicep matches diagnostic codes case-sensitively, but is refused anyway because a compiler that matched codes case-insensitively would honor it. ${remedy}`
+    ]);
+  });
+
+  it("separates the codes Bicep honors from those it ignores", () => {
+    const files = fakeFiles({
+      [stagedApp]: `#disable-next-line ${secureValueRule} Secure-Parameter-Default\n`
+    });
+
+    expect(
+      rules.inspectSecurityRules([stagedApp], {
+        stagingDir,
+        readFile: files.readFile
+      }).findings
+    ).toEqual([
+      `${stagedApp}:1: error security-rule-suppressed: #disable-next-line suppresses ${secureValueRule}. It also names Secure-Parameter-Default, which has no effect today because Bicep matches diagnostic codes case-sensitively, but is refused anyway because a compiler that matched codes case-insensitively would honor it. ${remedy}`
     ]);
   });
 

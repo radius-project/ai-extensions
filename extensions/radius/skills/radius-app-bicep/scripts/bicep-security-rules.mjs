@@ -30,8 +30,10 @@
 //   it with no space, and its codes are runs of letters, digits, `_`, and `-`
 //   separated by whitespace, ending at the first other character. So
 //   `#disable-next-linesecure-parameter-default@secure()` suppresses the rule
-//   and still compiles. A multiline string ends at the last quote of a run of
-//   three or more, so `'''a''''` holds `a'`.
+//   and still compiles. A multiline string ends at the end of the first run of
+//   three or more quotes, so `'''a''''` holds `a'`, and one opened with dollar
+//   signs, as in `$'''`, interpolates where a run of at least that many dollar
+//   signs is followed by `{`.
 // - A `//` comment in the configuration ends at a carriage return as well as at
 //   a line feed.
 // - Sources are decoded by their byte-order mark, so a UTF-16 or UTF-32 file
@@ -80,6 +82,7 @@ const MULTILINE_QUOTE = "'''";
 const ABSENT_CODES = new Set(["ENOENT", "ENOTDIR", "EISDIR"]);
 const FILE_REFERENCES_REQUEST_ID = 1;
 const FILE_REFERENCES_TIMEOUT_MS = 120_000;
+const FILE_REFERENCES_KILL_GRACE_MS = 5_000;
 const HEADER_SEPARATOR = "\r\n\r\n";
 
 function isPlainObject(value) {
@@ -90,11 +93,9 @@ function isSecurityRule(name) {
   return SECURITY_RULES.includes(name.toLowerCase());
 }
 
-// Every value stored under `name`, ignoring case, in key order.
-function valuesNamed(object, name) {
-  return Object.entries(object)
-    .filter(([key]) => key.toLowerCase() === name)
-    .map(([, value]) => value);
+// Every entry stored under `name`, ignoring case, in key order.
+function entriesNamed(object, name) {
+  return Object.entries(object).filter(([key]) => key.toLowerCase() === name);
 }
 
 function decodeUtf32(bytes, littleEndian) {
@@ -203,22 +204,28 @@ function levelProblem(level) {
   return `is ${JSON.stringify(level)}, which is not a level known to enforce the rule`;
 }
 
-function ruleProblems(rules) {
+const CONFIG_CASE_NOTE =
+  "; Bicep matches configuration keys case-sensitively, so this spelling has no effect today, but it is refused anyway because a compiler that matched keys case-insensitively would honor it";
+
+function ruleProblems(rules, prefix, exactPrefix) {
   const problems = [];
   for (const [name, rule] of Object.entries(rules)) {
     if (!isSecurityRule(name)) continue;
-    const setting = `analyzers.core.rules.${name}`;
+    const setting = `${prefix}.${name}`;
+    const exactRule = exactPrefix && SECURITY_RULES.includes(name);
     if (!isPlainObject(rule)) {
       problems.push(
-        `${setting} is not an object, so whether ${name} runs cannot be established`
+        `${setting} is not an object, so whether ${name} runs cannot be established${exactRule ? "" : CONFIG_CASE_NOTE}`
       );
       continue;
     }
-    for (const [key, level] of Object.entries(rule)) {
-      if (key.toLowerCase() !== "level") continue;
+    for (const [key, level] of entriesNamed(rule, "level")) {
       const problem = levelProblem(level);
       if (problem !== null) {
-        problems.push(`${setting}.${key} ${problem}`);
+        const exact = exactRule && key === "level";
+        problems.push(
+          `${setting}.${key} ${problem}${exact ? "" : CONFIG_CASE_NOTE}`
+        );
       }
     }
   }
@@ -228,6 +235,8 @@ function ruleProblems(rules) {
 // Each setting in a parsed configuration that keeps a security rule from
 // running, or makes it impossible to tell whether it runs. An absent section is
 // Bicep's default, and every security rule is enabled at "warning" by default.
+// Each setting is named as it is spelled, and one that only matches when case
+// is ignored says that Bicep does not honor it today.
 export function configurationProblems(config) {
   if (!isPlainObject(config)) {
     return [
@@ -235,35 +244,37 @@ export function configurationProblems(config) {
     ];
   }
   const problems = [];
-  for (const analyzers of valuesNamed(config, "analyzers")) {
+  const notObject = (setting, exact) =>
+    `${setting} is not an object, so whether the security rules run cannot be established${exact ? "" : CONFIG_CASE_NOTE}`;
+  for (const [analyzersKey, analyzers] of entriesNamed(config, "analyzers")) {
+    const analyzersExact = analyzersKey === "analyzers";
     if (!isPlainObject(analyzers)) {
-      problems.push(
-        "analyzers is not an object, so whether the security rules run cannot be established"
-      );
+      problems.push(notObject(analyzersKey, analyzersExact));
       continue;
     }
-    for (const core of valuesNamed(analyzers, "core")) {
+    for (const [coreKey, core] of entriesNamed(analyzers, "core")) {
+      const corePath = `${analyzersKey}.${coreKey}`;
+      const coreExact = analyzersExact && coreKey === "core";
       if (!isPlainObject(core)) {
-        problems.push(
-          "analyzers.core is not an object, so whether the security rules run cannot be established"
-        );
+        problems.push(notObject(corePath, coreExact));
         continue;
       }
-      for (const enabled of valuesNamed(core, "enabled")) {
+      for (const [enabledKey, enabled] of entriesNamed(core, "enabled")) {
         if (enabled !== true) {
+          const exact = coreExact && enabledKey === "enabled";
           problems.push(
-            `analyzers.core.enabled is ${JSON.stringify(enabled)}, which ${enabled === false ? "turns off the Bicep linter and every security rule with it" : "is not true, so whether the linter runs cannot be established"}`
+            `${corePath}.${enabledKey} is ${JSON.stringify(enabled)}, which ${enabled === false ? "turns off the Bicep linter and every security rule with it" : "is not true, so whether the linter runs cannot be established"}${exact ? "" : CONFIG_CASE_NOTE}`
           );
         }
       }
-      for (const rules of valuesNamed(core, "rules")) {
+      for (const [rulesKey, rules] of entriesNamed(core, "rules")) {
+        const rulesPath = `${corePath}.${rulesKey}`;
+        const rulesExact = coreExact && rulesKey === "rules";
         if (!isPlainObject(rules)) {
-          problems.push(
-            "analyzers.core.rules is not an object, so whether the security rules run cannot be established"
-          );
+          problems.push(notObject(rulesPath, rulesExact));
           continue;
         }
-        problems.push(...ruleProblems(rules));
+        problems.push(...ruleProblems(rules, rulesPath, rulesExact));
       }
     }
   }
@@ -272,6 +283,13 @@ export function configurationProblems(config) {
 
 function isLineBreak(character) {
   return character === "\n" || character === "\r";
+}
+
+// The length of the run of `character` starting at `index`.
+function runLength(source, index, character) {
+  let end = index;
+  while (source[end] === character) end += 1;
+  return end - index;
 }
 
 // Where a single-line string's body stops: after its closing quote, at the
@@ -296,15 +314,32 @@ function scanStringBody(source, start) {
   return { index: source.length, interpolation: false };
 }
 
-// The index just past a multiline string whose body starts at `start`. It
-// closes at the end of the first run of three or more quotes, and the extra
-// quotes belong to the string.
-function skipMultilineString(source, start) {
-  const close = source.indexOf(MULTILINE_QUOTE, start);
-  if (close === -1) return source.length;
-  let end = close + MULTILINE_QUOTE.length;
-  while (source[end] === "'") end += 1;
-  return end;
+// Where a multiline string's body stops: after the run of three or more quotes
+// that closes it, whose extra quotes belong to the string, or at the start of
+// an interpolation. A string opened with `dollars` dollar signs before its
+// quotes, as in `$'''`, interpolates where a run of at least that many dollar
+// signs is followed by `{`; one opened without any never does.
+function scanMultilineBody(source, start, dollars) {
+  let index = start;
+  while (index < source.length) {
+    const character = source[index];
+    if (character === "$") {
+      const run = runLength(source, index, "$");
+      index += run;
+      if (dollars > 0 && run >= dollars && source[index] === "{") {
+        return { index: index + 1, interpolation: true };
+      }
+    } else if (character === "'") {
+      const run = runLength(source, index, "'");
+      index += run;
+      if (run >= MULTILINE_QUOTE.length) {
+        return { index, interpolation: false };
+      }
+    } else {
+      index += 1;
+    }
+  }
+  return { index: source.length, interpolation: false };
 }
 
 function directiveRules(codes) {
@@ -320,13 +355,19 @@ function directiveRules(codes) {
 // comment is not one. An interpolation is walked as code.
 export function securitySuppressions(source) {
   const suppressions = [];
-  // Brace depth inside each open interpolation, innermost last.
+  // Each open interpolation, innermost last: the string it resumes when it
+  // closes, and the depth of object braces opened inside it.
   const interpolations = [];
   let index = 0;
   let lineStart = true;
-  const enterString = (start) => {
-    const body = scanStringBody(source, start);
-    if (body.interpolation) interpolations.push(0);
+  const enterString = (start, multiline, dollars) => {
+    const body =
+      multiline ?
+        scanMultilineBody(source, start, dollars)
+      : scanStringBody(source, start);
+    if (body.interpolation) {
+      interpolations.push({ multiline, dollars, depth: 0 });
+    }
     index = body.index;
   };
   while (index < source.length) {
@@ -354,6 +395,8 @@ export function securitySuppressions(source) {
     SUPPRESSION_DIRECTIVE.lastIndex = index;
     const directive = lineStart ? SUPPRESSION_DIRECTIVE.exec(source) : null;
     lineStart = false;
+    const dollars = character === "$" ? runLength(source, index, "$") : 0;
+    const open = interpolations.at(-1);
     if (directive !== null) {
       const rest = directive[2];
       const end = rest.search(DIRECTIVE_CODES_END);
@@ -369,23 +412,23 @@ export function securitySuppressions(source) {
       // Whatever ends the codes is lexed normally: a comment that opens there
       // is followed to its end, and a decorator is code.
       index += directive[0].length - rest.length + codes.length;
-    } else if (source.startsWith(MULTILINE_QUOTE, index)) {
-      index = skipMultilineString(source, index + MULTILINE_QUOTE.length);
+    } else if (source.startsWith(MULTILINE_QUOTE, index + dollars)) {
+      enterString(index + dollars + MULTILINE_QUOTE.length, true, dollars);
     } else if (character === "'") {
-      enterString(index + 1);
-    } else if (interpolations.length > 0 && character === "{") {
-      interpolations[interpolations.length - 1] += 1;
+      enterString(index + 1, false, 0);
+    } else if (open !== undefined && character === "{") {
+      open.depth += 1;
       index += 1;
-    } else if (interpolations.length > 0 && character === "}") {
-      const depth = interpolations.pop();
-      if (depth > 0) {
-        interpolations.push(depth - 1);
+    } else if (open !== undefined && character === "}") {
+      if (open.depth > 0) {
+        open.depth -= 1;
         index += 1;
       } else {
-        enterString(index + 1);
+        interpolations.pop();
+        enterString(index + 1, open.multiline, open.dollars);
       }
     } else {
-      index += 1;
+      index += Math.max(dollars, 1);
     }
   }
   return suppressions;
@@ -488,36 +531,61 @@ export async function requestFileReferences(bicep, app, options) {
 // The server only answers while its input is open, so the request is written,
 // the response is awaited, and only then is the input closed so the server
 // exits.
+//
+// Every outcome waits for the process to exit, so nothing is left running with
+// the model's directory as its working directory. A server that is still
+// running at the timeout is asked to stop, and one that ignores that is killed
+// outright after a grace period.
 function queryFileReferences(
   bicep,
   app,
-  { timeoutMs = FILE_REFERENCES_TIMEOUT_MS } = {}
+  {
+    timeoutMs = FILE_REFERENCES_TIMEOUT_MS,
+    killGraceMs = FILE_REFERENCES_KILL_GRACE_MS
+  } = {}
 ) {
   return new Promise((resolve) => {
     const chunks = [];
     let stderr = "";
     let response = null;
+    let timedOut = false;
     let settled = false;
     let timer;
+    let graceTimer;
     const finish = (value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(graceTimer);
       resolve(value);
     };
+    // A server that answered but did not exit still gave a complete answer.
+    const outcome = (code, signal) =>
+      response ??
+      (timedOut ?
+        {
+          error: `Bicep did not list the files the compile reads within ${timeoutMs} ms`
+        }
+      : {
+          error:
+            stderr.trim() ||
+            `Bicep exited with status ${code === null ? "null" : code}${signal ? ` after receiving signal ${signal}` : ""} without listing the files the compile reads`
+        });
     const child = spawn(bicep, ["jsonrpc", "--stdio"], {
       cwd: path.dirname(app),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
     });
-    // A server that answered but did not exit still gave a complete answer.
     timer = setTimeout(() => {
+      timedOut = true;
       child.kill();
-      finish(
-        response ?? {
-          error: `Bicep did not list the files the compile reads within ${timeoutMs} ms`
+      graceTimer = setTimeout(() => {
+        child.kill("SIGKILL");
+        for (const stream of [child.stdin, child.stdout, child.stderr]) {
+          stream.destroy();
         }
-      );
+        finish(outcome(null, null));
+      }, killGraceMs);
     }, timeoutMs);
     child.on("error", (error) => finish({ error: error.message }));
     // A server that exits before reading the request closes the pipe; the
@@ -532,15 +600,7 @@ function queryFileReferences(
       response = parseFileReferencesResponse(Buffer.concat(chunks));
       if (response !== null) child.stdin.end();
     });
-    child.on("close", (code, signal) => {
-      finish(
-        response ?? {
-          error:
-            stderr.trim() ||
-            `Bicep exited with status ${code === null ? "null" : code}${signal ? ` after receiving signal ${signal}` : ""} without listing the files the compile reads`
-        }
-      );
-    });
+    child.on("close", (code, signal) => finish(outcome(code, signal)));
     child.stdin.write(fileReferencesRequest(app));
   });
 }
@@ -564,6 +624,25 @@ function isInside(directory, file) {
     relative.split(path.sep)[0] !== ".." &&
     !path.isAbsolute(relative)
   );
+}
+
+// What a directive does to the security rules it names. A code spelled in a
+// different case is refused like the rest, but Bicep matches codes
+// case-sensitively, so saying it suppresses the rule would tell the agent a
+// directive worked when it did not.
+function suppressionSummary(directive, rules) {
+  const exact = rules.filter((rule) => SECURITY_RULES.includes(rule));
+  const inexact = rules.filter((rule) => !SECURITY_RULES.includes(rule));
+  const sentences = [];
+  if (exact.length > 0) {
+    sentences.push(`#${directive} suppresses ${exact.join(", ")}.`);
+  }
+  if (inexact.length > 0) {
+    sentences.push(
+      `${exact.length > 0 ? "It also names" : `#${directive} names`} ${inexact.join(", ")}, which has no effect today because Bicep matches diagnostic codes case-sensitively, but is refused anyway because a compiler that matched codes case-insensitively would honor it.`
+    );
+  }
+  return sentences.join(" ");
 }
 
 function isBicepConfig(file) {
@@ -645,7 +724,7 @@ export function inspectSecurityRules(
     }
     for (const { line, directive, rules } of securitySuppressions(text)) {
       findings.push(
-        `${file}:${line}: error security-rule-suppressed: #${directive} suppresses ${rules.join(", ")}. ${remedy(file, stagingDir, modelConfig)}`
+        `${file}:${line}: error security-rule-suppressed: ${suppressionSummary(directive, rules)} ${remedy(file, stagingDir, modelConfig)}`
       );
     }
   }

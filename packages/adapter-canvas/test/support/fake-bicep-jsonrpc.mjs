@@ -23,6 +23,8 @@
 //   close      exit as soon as the answer is written, without waiting for input
 //              to close
 //   hang       never answer, and stay alive until killed
+//   ignoreTerm ignore a request to stop (SIGTERM), so only SIGKILL ends it
+//   startedFile  write this file in the directory once the server has started
 
 import fs from "node:fs";
 import path from "node:path";
@@ -96,6 +98,14 @@ function respond(request) {
         }
       };
   write(notification + frame(answer));
+}
+
+if (control.ignoreTerm) process.on("SIGTERM", () => {});
+if (control.startedFile !== undefined) {
+  fs.writeFileSync(
+    path.join(process.cwd(), control.startedFile),
+    String(process.pid)
+  );
 }
 
 if (control.exitAtStart !== undefined) {
