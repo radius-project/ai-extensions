@@ -411,6 +411,8 @@ function workflowExecution(executor?: SelectedGhExecutor): WorkflowExecution {
         mode: "ambient",
         run: (args, options) =>
           new Promise((resolve) => {
+            // Resolve CLI callback failures as nonzero results rather than rejecting,
+            // preserving ambient readers' null/status-fallback behavior.
             cliExec("gh", args, options, (error, stdout, stderr) => {
               resolve({ code: error ? 1 : 0, stdout, stderr });
             });
