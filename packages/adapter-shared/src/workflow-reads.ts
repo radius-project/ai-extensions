@@ -11,6 +11,7 @@ export interface WorkflowReadOptions {
   maxBuffer?: number;
 }
 
+/** The runner enforces the supplied timeout and output-buffer limit. */
 export type WorkflowRunner = (
   args: string[],
   options: WorkflowReadOptions
@@ -23,7 +24,11 @@ export interface SelectedWorkflowExecutor {
 }
 
 export type WorkflowExecution =
+  // Ambient runners resolve ordinary command failures (including timeouts) with
+  // a nonzero code. Unexpected rejections propagate unchanged to the caller.
   | { mode: "ambient"; run: WorkflowRunner }
+  // Selected readers classify rejected authorization evidence through
+  // executor.errorMessage; unexpected workflow-read rejections propagate.
   | { mode: "selected"; executor: SelectedWorkflowExecutor };
 
 export class SelectedGhAuthorizationError extends Error {
@@ -175,7 +180,7 @@ export async function selectedCommandAuthorizationError(
     : null;
 }
 
-type SelectedWorkflowJsonRead =
+export type SelectedWorkflowJsonRead =
   | { state: "value"; value: unknown }
   | { state: "missing" }
   | { state: "fallback" };

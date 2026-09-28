@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { observeWorkflowRun } from "@radius-project/core";
+import type {
+  WorkflowCommandResult,
+  SelectedWorkflowJsonRead
+} from "./index.js";
 import {
   readWorkflowRun,
   readWorkflowLog,
@@ -78,9 +82,12 @@ describe("workflow execution failure boundaries", () => {
       const executor = successfulSelectedGhExecutor({
         run: async () => ({ code: 1, stdout: "", stderr })
       });
-      expect(
-        await selectedWorkflowJson(executor, "org/app", ["run", "view", "41"])
-      ).toEqual({ state: "fallback" });
+      const result: SelectedWorkflowJsonRead = await selectedWorkflowJson(
+        executor,
+        "org/app",
+        ["run", "view", "41"]
+      );
+      expect(result).toEqual({ state: "fallback" });
     }
     const executor = successfulSelectedGhExecutor({
       run: async () => ({ code: 1, stdout: "", stderr: "HTTP 404" })
@@ -101,7 +108,7 @@ describe("workflow execution failure boundaries", () => {
     repo
   ];
   const logArgs = ["run", "view", "41", "--log", "--repo", repo];
-  type Result = { code: number; stdout: string; stderr: string };
+  type Result = WorkflowCommandResult;
   const failed = (stderr: string, stdout = ""): Result => ({
     code: 1,
     stderr,

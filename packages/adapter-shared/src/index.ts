@@ -50,8 +50,10 @@ export {
   selectedCommandAuthorizationError
 } from "./workflow-reads.js";
 export type {
+  WorkflowCommandResult,
   WorkflowExecution,
   WorkflowRunner,
   WorkflowReadOptions,
-  SelectedWorkflowExecutor
+  SelectedWorkflowExecutor,
+  SelectedWorkflowJsonRead
 } from "./workflow-reads.js";

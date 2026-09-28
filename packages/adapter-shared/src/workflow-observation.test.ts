@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   collectWorkflowFailure,
-  observeWorkflowRun
+  observeWorkflowRun,
+  type WorkflowJob
 } from "@radius-project/core";
 import {
   readWorkflowRun,
@@ -15,6 +16,9 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
     "observes %s with only explicitly targeted reads",
     async (conclusion) => {
       const transcript: unknown[] = [];
+      const job: WorkflowJob = {
+        steps: [{ name: "Run rad commands", conclusion }]
+      };
       const run: WorkflowRunner = async (args, options) => {
         transcript.push([args, options]);
         if (
@@ -26,7 +30,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
             stdout: JSON.stringify({
               status: "completed",
               conclusion,
-              jobs: [{ steps: [{ name: "Run rad commands", conclusion }] }]
+              jobs: [job]
             }),
             stderr: ""
           };

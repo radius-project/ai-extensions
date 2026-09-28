@@ -44,7 +44,7 @@ export async function collectWorkflowFailure(
     "https://github.com/" + target.repo + "/actions/runs/" + target.runId;
   const narration: string[] = [];
   let message = lead;
-  let radiusError = "";
+  let radiusError: string;
   try {
     if (failedSteps.length) {
       message +=
@@ -93,11 +93,16 @@ export async function collectWorkflowFailure(
     message += "\n\nView the full run: " + url;
     radiusError = detail;
   } catch {
-    message =
-      lead +
-      " The failure details could not be read; see the full run: " +
-      url +
-      ".";
+    return {
+      message:
+        lead +
+        " The failure details could not be read; see the full run: " +
+        url +
+        ".",
+      radiusError: "",
+      authDriftMessage,
+      narration: []
+    };
   }
   return { message, radiusError, authDriftMessage, narration };
 }

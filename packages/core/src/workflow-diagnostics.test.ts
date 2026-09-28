@@ -433,6 +433,7 @@ describe("extractErrorLines", () => {
       );
       expect(result.authDriftMessage).toContain("Cloud authentication");
       expect(result.radiusError).toBe("");
+      expect(result.narration).toEqual([]);
     });
     it("keeps the normal failure when the best-effort control-plane read throws", async () => {
       const result = await collectWorkflowFailure(
@@ -452,6 +453,12 @@ describe("extractErrorLines", () => {
         "Deployment failed.\n\nError: recipe failed\n\nView the full run: https://github.com/org/app/actions/runs/41"
       );
       expect(result.radiusError).toBe("Error: recipe failed");
+      expect(result.narration).toEqual([
+        "",
+        "──────── failure details ────────",
+        "  Error: recipe failed",
+        "─────────────────────────────────"
+      ]);
     });
     it("keeps the 40-line tail and narration order", async () => {
       const lines = Array.from({ length: 41 }, (_, index) => `line-${index}`);
