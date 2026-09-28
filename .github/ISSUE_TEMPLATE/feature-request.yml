@@ -41,10 +41,7 @@ body:
       description: |
         The observable outcomes that must be true for this request to be done.
         Write each one as a checkable item.
-      placeholder: |
-        - [ ] Modeling an app with two databases produces two database resources in app.bicep
-        - [ ] The application graph shows both databases connected to the container
-        - [ ] The generated app.bicep deploys without manual edits
+      placeholder: "- [ ] Modeling an app with two databases produces two database resources in app.bicep"
     validations:
       required: true
   - type: textarea
