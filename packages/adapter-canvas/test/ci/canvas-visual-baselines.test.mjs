@@ -1,14 +1,16 @@
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -102,7 +104,10 @@ describe("affectsCanvasVisuals", () => {
     [".node-version"],
     [".dockerignore"],
     ["scripts/canvas-visual.mjs"],
-    [".github/workflows/canvas-functional.yml"]
+    [".github/workflows/canvas-functional.yml"],
+    ["tsconfig.json"],
+    ["extensions/radius/package.json"],
+    ["extensions/radius/skills/radius-app-bicep/SKILL.md"]
   ])("runs the suite when %s changes", (path) => {
     expect(affectsCanvasVisuals(["README.md", path])).toBe(true);
   });
@@ -111,10 +116,36 @@ describe("affectsCanvasVisuals", () => {
     [[]],
     [["README.md", "docs/design/plan.md"]],
     [["extensions/radius/skills/radius-deploy/SKILL.md"]],
+    [["tsconfig.test.json", "extensions/radius/README.md"]],
     [[".github/workflows/build.yml", "scripts/canvas-visual-baselines.mjs"]],
     [["plugins/radius/package.json", "apackages/core/src/index.ts"]]
   ])("skips the suite for %j", (paths) => {
     expect(affectsCanvasVisuals(paths)).toBe(false);
+  });
+  // A package that extends a config outside packages/ compiles differently
+  // when that config changes, so the detector must see it.
+  it("covers every tsconfig a package extends", () => {
+    const extended = readdirSync(join(repoRoot, "packages"), {
+      withFileTypes: true
+    })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(repoRoot, "packages", entry.name, "tsconfig.json"))
+      .filter((path) => existsSync(path))
+      .flatMap((path) => {
+        const parent = JSON.parse(readFileSync(path, "utf8")).extends;
+        return parent ?
+            [
+              relative(repoRoot, resolve(dirname(path), parent))
+                .split(sep)
+                .join("/")
+            ]
+          : [];
+      });
+
+    expect(extended).toContain("tsconfig.json");
+    for (const path of extended) {
+      expect(affectsCanvasVisuals([path]), path).toBe(true);
+    }
   });
 });
 

@@ -44,17 +44,24 @@ const PAGE_SIZE = 100;
 export const MAX_BASELINE_FILES = 200;
 export const MAX_BASELINE_BYTES = 5 * 1024 * 1024;
 
-// Anything the canonical container copies in can change a rendered pixel.
-const VISUAL_INPUT_PREFIXES = ["packages/"];
+// Everything the canonical run installs, compiles, or reads at runtime. The
+// server reads the generator version and skill base from extensions/radius
+// when it runs from source, and packages extend the root tsconfig.json.
+const VISUAL_INPUT_PREFIXES = [
+  "packages/",
+  "extensions/radius/skills/radius-app-bicep/"
+];
 const VISUAL_INPUT_FILES = new Set([
   ".dockerignore",
   ".github/workflows/canvas-functional.yml",
   ".node-version",
   ".npmrc",
+  "extensions/radius/package.json",
   "package.json",
   "pnpm-lock.yaml",
   "pnpm-workspace.yaml",
-  "scripts/canvas-visual.mjs"
+  "scripts/canvas-visual.mjs",
+  "tsconfig.json"
 ]);
 
 export const COMMENT_STATES = [
