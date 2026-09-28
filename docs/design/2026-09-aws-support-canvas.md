@@ -380,46 +380,19 @@ However a step fails, three rules hold.
 ## Open questions
 
 - **Q1 · Should the canvas surface an environment that has drifted?** An environment deleted outside the canvas, or whose AWS objects are removed by hand, leaves the environments list and the role disagreeing. Deleting a sibling environment stays safe, because the role is read rather than remembered. Whether the developer should be told, and where, is undecided. *Product, with the canvas UX owner.*
-- **Q2 · How far does the deploy role go in handing an application its credential?** An application on AWS needs a credential its recipe returns, and creating one requires permissions the deploy role is otherwise denied. How wide that exception is, and whether the help text discloses it at the point of consent, is undecided. *Product, with security review.* See [Appendix · Deploy role permissions](#deploy-role-permissions).
+- **Q2 · How far does the deploy role go in handing an application its credential?** An application on AWS needs a credential its recipe returns, and creating one requires permissions the deploy role is otherwise denied. How wide that exception is, and whether the help text discloses it at the point of consent, is undecided. *Product, with security review.*
 
 ## Appendix
-
-Material an engineer needs and a product reader does not. It is parked here rather than deleted, and moves to the design doc when one is written.
-
-### Deploy role permissions
-
-The role receives `PowerUserAccess` restricted to the selected region, plus cluster-admin on the target cluster. Azure's equivalent is Contributor on the resource group. The two are the same shape — create any service, touch nothing in identity.
-
-They diverge on handing an application its own credential. On Azure that comes free: create a storage account, read its key, and Contributor already allows it. AWS has no equivalent, so a recipe giving an application access to S3 or Bedrock has to create an IAM user and an access key — which `PowerUserAccess` denies, since it excludes `iam:*`. Without an exception the role provisions services the application cannot then use, which is worse than Azure at the same permission level.
-
-The exception therefore has to be narrow enough that the role still cannot make anyone an administrator. A scoped path plus a required permissions boundary is the shape to investigate. This is Q2.
-
-### Where the region restriction does not hold
-
-The help text promises a role limited to the selected region. Two cases are wider.
-
-- IAM, STS, Organizations describe calls, Route 53, CloudFront, and Support sit outside the restriction. Most are global, and restricting `sts:AssumeRoleWithWebIdentity` would stop the role being assumed at all.
-- A second environment in a second region widens the shared role to allow both, so what the developer agreed to as one region becomes two. The role is specified to accumulate regions this way; see the first row of [Needs engineering investigation](#needs-engineering-investigation).
-
-### The two identity objects
-
-Two AWS objects carry the deploy identity, and only one belongs to the repository. The **IAM role** is created per repository and trusts that repository's workflows. The **identity provider** is account-level — one per account, shared by every repository, and named as the principal in the role's trust policy. A role cannot be created before it exists.
-
-Environment creation creates the provider when the account has none rather than stopping to hand over a command. The provider only tells AWS that GitHub's token issuer exists and grants nothing until a trust policy names both it and the repository. It is never deleted, because a later repository's role may come to depend on it, and environment deletion reports it as retained for that reason.
-
-### Verification
-
-Automated AWS end-to-end coverage proves both identity paths. With a new role: create an environment, verify credentials, deploy and delete the reference application, delete the environment, and confirm no role, access entry, or provisioned resource remains. With a selected existing role: the same journey, confirming the role remains and that the only trust, permissions, and cluster access removed are those no remaining environment needs. Catalog coverage deploys every shared Kubernetes type and every Tier 1 type to its AWS outcome, and generates and deploys a custom type for a service outside the catalog. A deployment is confirmed to resolve against the pack commit pinned in the repository manifest, not the newest published one.
 
 ### Needs engineering investigation
 
 Each of these affects behavior this document specifies, and none is settled.
 
-| Area                     | Question                                                                                                                                                                                                                                                  | Affects                                |
-|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------|
-| Region restriction       | The role is specified to accumulate regions, but the policy is written for one region and replaced rather than merged — so adding a second environment in a second region would narrow the boundary and break the first. Needs a policy that accumulates. | Step 3 · Deploy identity               |
-| Application credentials  | Which IAM actions the deploy role needs to mint a scoped application credential, and how a permissions boundary keeps that from being an escalation path.                                                                                                 | Q2, Appendix · Deploy role permissions |
-| Recipe language coverage | Bicep on AWS reaches only what Cloud Control supports. An access key has no Cloud Control type, so a recipe returning one cannot be expressed in Bicep as the pack requires.                                                                              | Overview, Step 5                       |
-| Concurrent setup         | Two environments created at once in one account must both finish without displacing each other on the shared role or the identity provider.                                                                                                               | Step 3 · Create Environment            |
-| Console link mapping     | Which AWS resource types map to which console list, and what a node shows for a type with no mapping.                                                                                                                                                     | Step 4, Step 5                         |
-| Drift detection          | Whether the environments list can detect a role that no longer matches what Radius recorded, and at what cost.                                                                                                                                            | Q1                                     |
+| Area                     | Question                                                                                                                                                                                                                                                  | Affects                     |
+|--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------|
+| Region restriction       | The role is specified to accumulate regions, but the policy is written for one region and replaced rather than merged — so adding a second environment in a second region would narrow the boundary and break the first. Needs a policy that accumulates. | Step 3 · Deploy identity    |
+| Application credentials  | Which IAM actions the deploy role needs to mint a scoped application credential, and how a permissions boundary keeps that from being an escalation path.                                                                                                 | Q2                          |
+| Recipe language coverage | Bicep on AWS reaches only what Cloud Control supports. An access key has no Cloud Control type, so a recipe returning one cannot be expressed in Bicep as the pack requires.                                                                              | Overview, Step 5            |
+| Concurrent setup         | Two environments created at once in one account must both finish without displacing each other on the shared role or the identity provider.                                                                                                               | Step 3 · Create Environment |
+| Console link mapping     | Which AWS resource types map to which console list, and what a node shows for a type with no mapping.                                                                                                                                                     | Step 4, Step 5              |
+| Drift detection          | Whether the environments list can detect a role that no longer matches what Radius recorded, and at what cost.                                                                                                                                            | Q1                          |
