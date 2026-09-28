@@ -397,7 +397,9 @@ export function resolveExistingRadBinary(
   managedPath: string = MANAGED_RAD_PATH
 ): string | null {
   const fromEnv = process.env.RADIUS_RAD_BINARY;
-  if (fromEnv && isExecutableFile(fromEnv)) return fromEnv;
+  if (fromEnv && isExecutableFile(fromEnv)) {
+    return path.isAbsolute(fromEnv) ? fromEnv : fs.realpathSync.native(fromEnv);
+  }
 
   if (isExecutableFile(managedPath)) return managedPath;
 
@@ -406,12 +408,14 @@ export function resolveExistingRadBinary(
 
 function isSelectedExecutableRadOverride(radPath: string): boolean {
   const override = process.env.RADIUS_RAD_BINARY;
-  if (!override || path.resolve(override) !== path.resolve(radPath)) {
-    return false;
-  }
+  if (!override) return false;
   try {
     const stat = fs.statSync(override);
-    return stat.isFile() && (IS_WIN || (stat.mode & 0o111) !== 0);
+    return (
+      stat.isFile() &&
+      (IS_WIN || (stat.mode & 0o111) !== 0) &&
+      fs.realpathSync.native(override) === fs.realpathSync.native(radPath)
+    );
   } catch {
     return false;
   }

@@ -424,7 +424,12 @@ async function queryManagedRadiusIdentity({
 } = {}) {
   const binaries = managedBinaries(home);
   const usesExecutableOverride = isExecutable(env.RADIUS_RAD_BINARY);
-  const rad = usesExecutableOverride ? env.RADIUS_RAD_BINARY : binaries.rad;
+  const rad =
+    usesExecutableOverride ?
+      path.isAbsolute(env.RADIUS_RAD_BINARY) ?
+        env.RADIUS_RAD_BINARY
+      : fs.realpathSync.native(env.RADIUS_RAD_BINARY)
+    : binaries.rad;
   if (!isExecutable(rad)) {
     throw new Error(`Extension-managed Radius binary not found at "${rad}".`);
   }

@@ -2002,6 +2002,43 @@ describe("command boundary", () => {
     );
   });
 
+  it("queries the same absolute override when the configured binary is relative", async () => {
+    const root = temporaryDirectory();
+    const cacheRoot = temporaryDirectory();
+    seedCache(cacheRoot);
+    const binary = path.join(root, "rad.exe");
+    fs.writeFileSync(binary, "");
+    if (process.platform !== "win32") fs.chmodSync(binary, 0o755);
+    const previousDirectory = process.cwd();
+    const runRadImpl = vi.fn(async (selected: string) => {
+      if (selected !== fs.realpathSync.native(binary)) {
+        throw new Error(`Selected a different Radius executable: ${selected}`);
+      }
+      return { stdout: JSON.stringify(managedVersion), stderr: "" };
+    });
+    try {
+      process.chdir(root);
+      const result = await resolver.resolveRadiusTypes(
+        ["Radius.Data/postgreSqlDatabases"],
+        {
+          env: { ...process.env, RADIUS_RAD_BINARY: path.join(".", "rad.exe") },
+          home: root,
+          cacheRoot,
+          runRadImpl,
+          fetchImpl: fixtureFetch([])
+        }
+      );
+      expect(result.extension).toBe(identity.extension);
+      expect(runRadImpl).toHaveBeenCalledWith(
+        fs.realpathSync.native(binary),
+        ["version", "--cli", "--output", "json"],
+        expect.any(Object)
+      );
+    } finally {
+      process.chdir(previousDirectory);
+    }
+  });
+
   it("routes nonfatal resolver warnings through command stderr", async () => {
     let stdout = "";
     let stderr = "";

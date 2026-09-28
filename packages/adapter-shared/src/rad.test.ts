@@ -436,6 +436,29 @@ describe("resolveRadiusExtensionRef", () => {
     }
   });
 
+  it("rejects edge from a different binary while an executable RADIUS_RAD_BINARY override is set", async () => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "rad-edge-different-")
+    );
+    const selected = path.join(directory, RAD);
+    const previousBinary = process.env.RADIUS_RAD_BINARY;
+    try {
+      fs.writeFileSync(selected, "");
+      if (process.platform !== "win32") fs.chmodSync(selected, 0o755);
+      process.env.RADIUS_RAD_BINARY = process.execPath;
+      await expect(
+        resolveRadiusExtensionRef({
+          radPath: selected,
+          readVersion: async () => "edge"
+        })
+      ).rejects.toThrow(/edge.*RADIUS_RAD_BINARY/iu);
+    } finally {
+      if (previousBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+      else process.env.RADIUS_RAD_BINARY = previousBinary;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a pull-request release with a useful diagnostic", async () => {
     const log = vi.fn();
     await expect(
@@ -605,6 +628,23 @@ describe("resolveExistingRadBinary", () => {
     fs.writeFileSync(bin, "");
     process.env.RADIUS_RAD_BINARY = bin;
     expect(resolveExistingRadBinary(managed)).toBe(bin);
+  });
+
+  it("resolves a relative override before a graph changes its working directory", () => {
+    const previousDirectory = process.cwd();
+    const relative = path.join("custom-bin", RAD);
+    const bin = path.join(tmp, relative);
+    fs.mkdirSync(path.dirname(bin), { recursive: true });
+    fs.writeFileSync(bin, "");
+    try {
+      process.chdir(tmp);
+      process.env.RADIUS_RAD_BINARY = relative;
+      expect(resolveExistingRadBinary(managed)).toBe(
+        fs.realpathSync.native(bin)
+      );
+    } finally {
+      process.chdir(previousDirectory);
+    }
   });
 
   it("ignores a missing RADIUS_RAD_BINARY and falls through to the managed path", () => {
