@@ -90,7 +90,7 @@ The sections below identify current tests and contracts for each row. HTTP parsi
 
 ### Stage 1B evidence interpretation
 
-**Owner and scope:** Nell Shamrell-Harrington. This candidate corrects evidence interpretation above the complete Stage 1A implementation. Publication is held under the two-open-layer limit and candidate-head Linux CI is pending. It does not complete Stage 1, extract artifact transport, add retries, or change account policy, attempt selection, repair eligibility, status vocabulary, workflow formats, or producer schemas.
+**Owner and scope:** Nell Shamrell-Harrington. This candidate corrects evidence interpretation above the complete Stage 1A implementation. The user authorized publication as a third open layer; fresh candidate-head CI is required independently of its parents. It does not complete Stage 1, extract artifact transport, add retries, or change account policy, attempt selection, repair eligibility, status vocabulary, workflow formats, or producer schemas.
 
 | Existing evidence                                                                            | Before 1B                                                                  | 1B interpretation                                                                                                                                          |
 |----------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
