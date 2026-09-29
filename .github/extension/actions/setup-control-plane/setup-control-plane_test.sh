@@ -8,7 +8,8 @@
 #   1. The CLI step runs install.sh with the pinned RADIUS_INSTALL_REF, never edge.
 #   2. The CLI step fails when the installed CLI is not the pinned release.
 #   3. The control-plane step accepts a control plane on the CLI's release
-#      (including a newer patch) and fails for edge or any other release.
+#      (including a newer patch) and fails for edge, prereleases, or any other
+#      release.
 
 set -euo pipefail
 
@@ -148,7 +149,8 @@ for control_plane in "${PINNED_RELEASE}" "${MINOR}.999"; do
         fail "control-plane step rejected ${control_plane}: $(cat "${TEST_ROOT}/step.log")"
 done
 
-for control_plane in edge "Not installed" "" "${MINOR}" "${MINOR}0.0" "9${PINNED_RELEASE}" "999.0.0"; do
+for control_plane in edge "Not installed" "" "${MINOR}" "${MINOR}." "${MINOR}0.0" "9${PINNED_RELEASE}" "999.0.0" \
+    "${MINOR}.edge" "${MINOR}.1-rc.1" "${MINOR}.1-rc1" "${PINNED_RELEASE}.1" "v${PINNED_RELEASE}"; do
     if run_step "${TEST_ROOT}/install-control-plane.sh" "${PINNED_RELEASE}" "${control_plane}"; then
         fail "control-plane step accepted '${control_plane}' for CLI ${PINNED_RELEASE}"
     fi

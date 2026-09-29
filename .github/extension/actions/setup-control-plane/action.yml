@@ -113,15 +113,13 @@ runs:
         # A stable CLI installs the newest patch of its own minor release (chart
         # `~X.Y.Z`, images tagged `X.Y`), so a Radius patch release can put the
         # control plane one patch ahead of the pinned CLI. Accept any patch of
-        # the CLI's release; reject edge or any other release.
+        # the CLI's release; reject edge, prereleases, and any other release.
         rad version
         VERSIONS="$(rad version -o json)"
         CLI_RELEASE="$(jq -r .cli.release <<<"$VERSIONS")"
         CONTROL_PLANE_VERSION="$(jq -r .controlPlane.version <<<"$VERSIONS")"
-        case "$CONTROL_PLANE_VERSION" in
-          "${CLI_RELEASE%.*}".*) ;;
-          *)
-            echo "::error::Installed Radius control plane $CONTROL_PLANE_VERSION, expected release ${CLI_RELEASE%.*}.x to match the CLI ($CLI_RELEASE)."
-            exit 1
-            ;;
-        esac
+        if [[ ! "$CONTROL_PLANE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+          [ "${CONTROL_PLANE_VERSION%.*}" != "${CLI_RELEASE%.*}" ]; then
+          echo "::error::Installed Radius control plane $CONTROL_PLANE_VERSION, expected a stable ${CLI_RELEASE%.*}.x release to match the CLI ($CLI_RELEASE)."
+          exit 1
+        fi
