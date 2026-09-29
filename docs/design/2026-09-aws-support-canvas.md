@@ -101,7 +101,7 @@ Generation is automatic rather than a path the developer chooses, and the type c
 **Parity with Azure**
 
 | Capability                              | Azure today                                                                           | What AWS requires                                                                                            |
-|-----------------------------------------|---------------------------------------------------------------------------------------|
+|-----------------------------------------|---------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
 | Dependency outside the built-in catalog | Generates a custom type, with an Azure Verified Module where one matches              | The same, with a recipe declaring the AWS resource types directly, there being no verified-module equivalent |
 | Service the cloud cannot provision      | RabbitMQ alone resolves to a Kubernetes recipe, as a catalog entry rather than a rule | Any such service runs on the cluster, by rule rather than a per-service catalog entry                        |
 
@@ -122,7 +122,7 @@ Saving unlocks once both the cloud session and GitHub Packages access are verifi
 **Parity with Azure**
 
 | Capability                 | Azure today                 | What AWS requires                                                        |
-|----------------------------|-----------------------------|
+|----------------------------|-----------------------------|--------------------------------------------------------------------------|
 | What the profile scopes to | Tenant and subscription     | Account and region                                                       |
 | Signing in from the canvas | Azure CLI login remediation | `Sign in to AWS CLI`, which runs `aws sso login`                         |
 | Wrong account detected     | Rejects a tenant mismatch   | Reported on the form before the developer proceeds, naming both accounts |
@@ -180,11 +180,11 @@ Progress runs through the same three stages Azure reports.
 
 **Parity with Azure**
 
-| Capability                              | Azure today                                                                     | What AWS requires                                                                                                                        |
-|-----------------------------------------|---------------------------------------------------------------------------------|
-| What the wizard discovers for you       | Resource groups, AKS clusters, namespaces                                       | EKS clusters, namespaces, VPCs, subnets                                                                                                  |
-| What is created or changed in the cloud | App registration when needed, federated credential, and scoped role assignments | GitHub identity provider when the account has none, IAM role when needed, repository trust, regional permissions, and EKS cluster access |
-| How many identities a repository gets   | One per repository, spanning every subscription in the tenant                   | One per repository **per account**; an IAM role cannot span accounts, so an account per environment means a role per environment         |
+| Capability                              | Azure today                                                                     | What AWS requires                                                                                                                                     |
+|-----------------------------------------|---------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| What the wizard discovers for you       | Resource groups, AKS clusters, namespaces                                       | EKS clusters, namespaces, VPCs, subnets                                                                                                               |
+| What is created or changed in the cloud | App registration when needed, federated credential, and scoped role assignments | GitHub identity provider when the account has none, IAM role when needed, repository trust, regional permissions, and EKS cluster access              |
+| How many identities a repository gets   | One per repository, spanning every subscription in the tenant                   | One per repository **per account**; an IAM role cannot span accounts, so an account per environment means a role per environment                      |
 | Adding an environment                   | Adds a federated credential to the same app, and cannot disturb the others      | Adds the environment's own permission policy and cluster access to the same shared role, and merges its subject into the role's single trust document |
 
 ### Step 4 · Review the application graph
@@ -222,7 +222,7 @@ Failures caused by identity or cluster access name their specific cause rather t
 Watching a run, the deployments list, and the delete controls are provider-neutral and unchanged.
 
 | Capability                | Azure today                                              | What AWS requires                                      |
-|---------------------------|----------------------------------------------------------|
+|---------------------------|----------------------------------------------------------|--------------------------------------------------------|
 | The closing message       | `🎉 Deployment complete! Application deployed to Azure.` | `🎉 Deployment complete! Application deployed to AWS.` |
 | When identity has drifted | Names the federated credential or role assignment        | Names the trust policy or permissions                  |
 
@@ -258,7 +258,7 @@ The role is narrowed to what the environments still on it need. It is deleted on
 **Parity with Azure**
 
 | Capability                          | Azure today                                    | What AWS requires                                                                                                               |
-|-------------------------------------|------------------------------------------------|
+|-------------------------------------|------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
 | What happens to the deploy identity | Deletes the environment's federated credential | Removes what this environment added; deletes a Radius-created role only when unused, and never deletes a selected existing role |
 | What you are told afterwards        | Names the federated credential removed         | Names what was removed and what was kept                                                                                        |
 
@@ -294,10 +294,10 @@ Several of these are not the developer's to fix. Where a permission they do not 
 
 ### Needs engineering investigation
 
-| Area                    | Question                                                                                                                                                                                                                                                                          |
-|-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| AWS recipe coverage     | Whether the Radius AWS Bicep provider reaches every one of the ten backing services, and what a dependency does when its service is out of reach.                                                                                                                                 |
-| Application credentials | Whether every recipe can return an access key as a secret, or whether workload identity is needed for an application to reach its AWS resource.                                                                                                                                   |
-| Deploy role breadth     | Azure scopes the deploy identity's role assignments to a resource group. The `PowerUserAccess` policy in AWS, bounded by region, is account-wide within that region, so whether the role can be narrowed — by tag, by permissions boundary, or by a scoped policy — is unsettled. |
-| Concurrent setup        | Two environments created at once in one account both merge a subject into the role's single trust document, which is the one object that cannot be made additive.                                                                                                                 |
-| Console link mapping    | Azure appends a resource ID to one portal template and lands on that resource's overview, so no per-type table exists. AWS console URLs differ by service, so every type needs its own mapping to a console list and region, and that table has to be written and kept current.   |
+| Area                    | Question                                                                                                                                                                                                                                                                        |
+|-------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| AWS recipe coverage     | Whether the Radius AWS Bicep provider reaches every one of the ten backing services, and what a dependency does when its service is out of reach.                                                                                                                               |
+| Application credentials | Whether every recipe can return an access key as a secret, or whether workload identity is needed for an application to reach its AWS resource.                                                                                                                                 |
+| Deploy role breadth     | Azure scopes the deploy identity's role assignments to a resource group. The `PowerUserAccess` policy in AWS, bounded by region, is account-wide within that region. Whether the role can be narrowed by tag, by permissions boundary, or by a scoped policy.                   |
+| Concurrent setup        | Two environments created at once in one account both merge a subject into the role's single trust document, which is the one object that cannot be made additive.                                                                                                               |
+| Console link mapping    | Azure appends a resource ID to one portal template and lands on that resource's overview, so no per-type table exists. AWS console URLs differ by service, so every type needs its own mapping to a console list and region, and that table has to be written and kept current. |
