@@ -897,6 +897,28 @@ describe("P0-C built Radius extension artifact", () => {
       /username:\s*'myadmin'\s*\/\/ authored broker administrator/u
     );
     expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
+    // Every consumer must authenticate as the broker's username, so the
+    // example binds consumers to the resource rather than to a second copy.
+    expect(rabbitmqExample).toMatch(
+      /ORDER_QUEUE_USERNAME:\s*\{\s*value:\s*rabbitmq\.properties\.username\b/u
+    );
+    expect(rabbitmqExample?.match(/'myadmin'/gu)).toHaveLength(1);
+    expect(rabbitmqExample).toMatch(
+      /ORDER_QUEUE_PASSWORD:\s*\{\s*valueFrom:\s*\{\s*secretKeyRef:\s*\{\s*secretName:\s*rabbitmqCredentials\.name\s+key:\s*'password'/u
+    );
+    expect(secretsGuidance).toContain("## Provisioned service usernames");
+    expect(secretsGuidance).toContain(
+      "Two copies that happen to match today are not a binding"
+    );
+    expect(structureGuidance).toContain(
+      "Never also copy into a Secret a username that a resource takes as a plain literal"
+    );
+    expect(structureGuidance).not.toContain(
+      "Author it as a `@secure() param` here even though the same administrator name is a plain literal"
+    );
+    expect(skillGuidance).toContain(
+      "Every provisioned service username is set explicitly on its resource"
+    );
     expect(secretsGuidance).toContain(
       "Writing `password: rabbitmqPassword` here deploys a broken application"
     );
@@ -1012,7 +1034,7 @@ describe("P0-C built Radius extension artifact", () => {
     expect(rabbitmqExample).toMatch(
       /data:\s*\{\s*password:\s*\{\s*value:\s*rabbitmqPassword\s*\}/u
     );
-    expect(rabbitmqExample).not.toContain("PASSWORD:");
+    expect(rabbitmqExample).not.toMatch(/^\s*PASSWORD:/mu);
 
     const rabbitmqConsumer = bicepBlocks.find(
       (block) =>
