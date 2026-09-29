@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Reject deployment artifacts whose workflow-run or application identity conflicts with the deployment being monitored.
+**Fixed:** Reject conflicting deployment-artifact identities and retire stale evidence even when another application's graph is malformed. Keep graph reads responsive to malformed artifacts without missing a later valid graph.

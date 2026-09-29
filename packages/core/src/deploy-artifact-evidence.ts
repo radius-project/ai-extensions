@@ -1,4 +1,5 @@
 import type { DeployStatus } from "./graph/index.js";
+import { validJsonSyntax } from "./json-syntax.js";
 
 // Files the producer packs into the deploy-status artifact.
 export const DEPLOY_STATUS_FILES = {
@@ -325,54 +326,205 @@ export function parseDeployProgressArtifact(
  */
 export function parseDeployGraphArtifact(text?: string | null): unknown | null {
   if (!text) return null;
-  let arrayGraph: unknown[] | null = null;
-  for (let start = 0; start < text.length; start++) {
-    const first = text[start];
-    if (first !== "{" && first !== "[") continue;
-    const expectedClosers: string[] = [];
+  const scan = (
+    recoverQuotedOpeners: boolean,
+    recoverAcrossLines = false
+  ): unknown | null => {
+    type Frame = {
+      start: number;
+      closer: string;
+      children: Frame[];
+      end: number;
+      earlyGraph: unknown | null;
+      invalid: boolean;
+    };
+    const frames: Frame[] = [];
+    let arrayGraph: unknown[] | null = null;
+    let parseBudget = text.length * 3;
+    let invalidDocuments = 0;
+    const findGraph = (document: unknown): unknown | null => {
+      const pending: unknown[] = [document];
+      while (pending.length > 0) {
+        const value = pending.pop();
+        if (isRecord(value) && isGraphResourceArray(value.resources))
+          return value;
+        if (isGraphResourceArray(value) && arrayGraph === null)
+          arrayGraph = value;
+        if (Array.isArray(value)) {
+          for (let index = value.length - 1; index >= 0; index--)
+            pending.push(value[index]);
+        } else if (isRecord(value)) {
+          const entries = Object.values(value);
+          for (let index = entries.length - 1; index >= 0; index--)
+            pending.push(entries[index]);
+        }
+      }
+      return null;
+    };
+    const inspect = (root: Frame): unknown | null => {
+      const pending = [root];
+      while (pending.length > 0) {
+        const frame = pending.pop()!;
+        const size = frame.end - frame.start;
+        // Reserve enough parsing work for a later complete document even when
+        // a malformed outer fragment contains many nested candidates.
+        const reserved =
+          frames.length ?
+            text.length - frames[0]!.start
+          : text.length - frame.end;
+        if (
+          !frame.invalid &&
+          size <= parseBudget - reserved &&
+          (invalidDocuments < 64 ||
+            validJsonSyntax(text, frame.start, frame.end))
+        ) {
+          parseBudget -= size;
+          try {
+            const parsed: unknown = JSON.parse(
+              text.slice(frame.start, frame.end)
+            );
+            const graph = findGraph(parsed);
+            if (graph) return graph;
+            continue;
+          } catch {
+            // A balanced fragment in the preamble is not necessarily valid JSON.
+            invalidDocuments++;
+          }
+        }
+        if (frame.earlyGraph) return frame.earlyGraph;
+        for (let index = frame.children.length - 1; index >= 0; index--)
+          pending.push(frame.children[index]);
+      }
+      return null;
+    };
     let inString = false;
     let escaped = false;
-    let end = -1;
-    for (let index = start; index < text.length; index++) {
+    let recoveredQuote = false;
+    let resyncedLine = false;
+    const inspectUnclosed = (): unknown | null => {
+      for (const frame of frames) {
+        if (frame.earlyGraph) return frame.earlyGraph;
+        for (const child of frame.children) {
+          const graph = inspect(child);
+          if (graph) return graph;
+        }
+      }
+      return null;
+    };
+    for (let index = 0; index < text.length; index++) {
       const character = text[index];
       if (inString) {
-        if (escaped) {
-          escaped = false;
-        } else if (character === "\\") {
-          escaped = true;
-        } else if (character === '"') {
+        if (
+          recoverQuotedOpeners &&
+          !recoveredQuote &&
+          !escaped &&
+          (character === "{" || character === "[")
+        ) {
+          frames.length = 0;
           inString = false;
+          recoveredQuote = true;
+        } else {
+          if (character === "\n" || character === "\r") {
+            // An unescaped newline cannot occur in JSON strings; recover from
+            // unterminated preamble text before looking for the next document.
+            const graph = inspectUnclosed();
+            if (graph) return graph;
+            frames.length = 0;
+            inString = false;
+            escaped = false;
+            recoveredQuote = false;
+          } else if (escaped) {
+            escaped = false;
+          } else if (character === "\\") {
+            escaped = true;
+          } else if (character === '"') {
+            inString = false;
+          }
+          continue;
         }
-        continue;
       }
       if (character === '"') {
         inString = true;
-      } else if (character === "{") {
-        expectedClosers.push("}");
-      } else if (character === "[") {
-        expectedClosers.push("]");
-      } else if (character === "}" || character === "]") {
-        if (expectedClosers.pop() !== character) break;
-        if (expectedClosers.length === 0) {
-          end = index + 1;
-          break;
+      } else if (character === "{" || character === "[") {
+        if (frames.length === 256) {
+          const graph = inspectUnclosed();
+          if (graph) return graph;
+          // Retain the newest openers so a document following an unclosed
+          // preamble can still close as a whole.
+          frames.splice(0, 128);
         }
+        frames.push({
+          start: index,
+          closer: character === "{" ? "}" : "]",
+          children: [],
+          end: -1,
+          earlyGraph: null,
+          invalid: false
+        });
+      } else if (character === "}" || character === "]") {
+        const frame = frames.pop();
+        if (!frame || frame.closer !== character) {
+          if (frame) frames.push(frame);
+          const graph = inspectUnclosed();
+          if (graph) return graph;
+          frames.length = 0;
+          continue;
+        }
+        frame.end = index + 1;
+        const parent = frames.at(-1);
+        if (parent) {
+          parent.invalid ||= frame.invalid;
+          if (!parent.earlyGraph) {
+            parent.children.push(frame);
+            if (parent.children.length === 1024) {
+              for (const child of parent.children) {
+                parent.earlyGraph = inspect(child);
+                if (parent.earlyGraph) break;
+              }
+              parent.children.length = 0;
+            }
+          }
+        } else {
+          const graph = inspect(frame);
+          if (graph) return graph;
+        }
+      } else if (
+        recoverAcrossLines &&
+        !resyncedLine &&
+        recoveredQuote &&
+        (character === "\n" || character === "\r")
+      ) {
+        // The earlier scan already inspected candidates before this line.
+        frames.length = 0;
+        recoveredQuote = false;
+        resyncedLine = true;
+      } else if (recoverQuotedOpeners && recoveredQuote && character === "\\") {
+        const graph = inspectUnclosed();
+        if (graph) return graph;
+        frames.length = 0;
+        inString = true;
+        escaped = true;
+        recoveredQuote = false;
+      } else if (
+        frames.length > 0 &&
+        !/[\s\d+\-.,:eEtrufalsn]/.test(character)
+      ) {
+        frames.at(-1)!.invalid = true;
       }
     }
-    if (end < 0) continue;
-    try {
-      const parsed: unknown = JSON.parse(text.slice(start, end));
-      if (isRecord(parsed) && isGraphResourceArray(parsed.resources)) {
-        return parsed;
-      }
-      if (isGraphResourceArray(parsed) && arrayGraph === null) {
-        arrayGraph = parsed;
-      }
-    } catch {
-      // A balanced fragment in the preamble is not necessarily valid JSON.
-    }
-  }
-  return arrayGraph;
+    const graph = inspectUnclosed();
+    if (graph) return graph;
+    return arrayGraph;
+  };
+  const first = scan(false);
+  if (first && !Array.isArray(first)) return first;
+  const recovered = scan(true);
+  if (recovered && !Array.isArray(recovered)) return recovered;
+  if (!/[\r\n]/.test(text)) return first ?? recovered;
+  const acrossLines = scan(true, true);
+  return acrossLines && !Array.isArray(acrossLines) ?
+      acrossLines
+    : (first ?? recovered ?? acrossLines);
 }
 
 function isGraphResourceArray(value: unknown): value is unknown[] {
@@ -562,7 +714,6 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         }
         const graphText = files[DEPLOY_STATUS_FILES.graph];
         const graph = parseDeployGraphArtifact(graphText);
-        if (graphText && graph === null) sawMalformed = true;
         result = {
           status: "ok",
           progress,

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { Worker } from "node:worker_threads";
 import {
   confirmArtifactIdentity,
   createDeployStatusReader,
@@ -30,6 +31,52 @@ function deferred<T>() {
       complete(value);
     }
   };
+}
+
+async function parseGraphInWorker(text: string): Promise<unknown | null> {
+  const moduleUrl = new URL("./deploy-artifact-evidence.ts", import.meta.url)
+    .href;
+  const worker = new Worker(
+    `const { registerHooks } = require("node:module");
+     registerHooks({
+       resolve(specifier, context, nextResolve) {
+         return nextResolve(specifier === "./json-syntax.js" ? "./json-syntax.ts" : specifier, context);
+       }
+     });
+     const { parentPort, workerData } = require("node:worker_threads");
+     import(workerData.moduleUrl).then(({ parseDeployGraphArtifact }) => {
+       parentPort.postMessage(parseDeployGraphArtifact(workerData.text));
+     }, (error) => parentPort.postMessage({ error: String(error) }));`,
+    { eval: true, workerData: { moduleUrl, text } }
+  );
+  try {
+    return await new Promise<unknown | null>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Graph parse exceeded bounded deadline")),
+        4000
+      );
+      worker.once("message", (result: unknown) => {
+        clearTimeout(timeout);
+        if (result && typeof result === "object" && "error" in result) {
+          reject(new Error(String(result.error)));
+          return;
+        }
+        resolve(result);
+      });
+      worker.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      worker.once("exit", (code) => {
+        if (code !== 0) {
+          clearTimeout(timeout);
+          reject(new Error(`Graph parser worker exited with code ${code}`));
+        }
+      });
+    });
+  } finally {
+    await worker.terminate();
+  }
 }
 
 describe("artifact evidence validation boundaries", () => {
@@ -447,6 +494,19 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.sequence).toBe(1);
     expect(parsed?.resources).toHaveLength(1);
     expect(parsed?.resourcesDiscarded).toBeUndefined();
+    expect(
+      parseDeployProgressArtifact(
+        progressPayload({
+          resources: [
+            {
+              name: "frontend",
+              type: "Radius.Compute/containers",
+              message: "Deployed"
+            }
+          ]
+        })
+      )?.resources[0]?.message
+    ).toBe("Deployed");
   });
 
   it.each([
@@ -536,6 +596,251 @@ describe("parseDeployProgressArtifact", () => {
       ).toBeNull();
       expect(parseDeployGraphArtifact('["starting build"]')).toBeNull();
     });
+
+    it("recovers a later graph after unbalanced quotes and delimiters", () => {
+      const nested = { event: { graph } };
+      expect(
+        parseDeployGraphArtifact(`{"unfinished\n${JSON.stringify(graph)}`)
+      ).toEqual(graph);
+      expect(
+        parseDeployGraphArtifact(`{"unfinished ${JSON.stringify(graph)}`)
+      ).toEqual(graph);
+      expect(
+        parseDeployGraphArtifact(`[]\n{"unfinished ${JSON.stringify(graph)}`)
+      ).toEqual(graph);
+      const graphWithBracket = {
+        resources: [
+          { id: "web", name: "web[0]", type: "container", connections: [] }
+        ]
+      };
+      expect(
+        parseDeployGraphArtifact(
+          `note: "unterminated ${JSON.stringify(graphWithBracket)}`
+        )
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(
+          `error: "{\\"k\\":\\"v\\"} ${JSON.stringify(graphWithBracket)}`
+        )
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(`"{a\\"} ${JSON.stringify(graphWithBracket)}`)
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(`"{${JSON.stringify(graphWithBracket)}\\`)
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(
+          `x "[ ${JSON.stringify(graphWithBracket)} \\ more`
+        )
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(`"{\n"${JSON.stringify(graphWithBracket)}`)
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(`"{\n"{${JSON.stringify(graphWithBracket)}\n`)
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(`"[]\\"${JSON.stringify(graphWithBracket)}`)
+      ).toEqual(graphWithBracket);
+      const decoratedGraph = {
+        resources: [
+          {
+            id: "web",
+            name: "web[0] {x}",
+            type: "container",
+            connections: []
+          }
+        ]
+      };
+      expect(
+        parseDeployGraphArtifact(`"[]${JSON.stringify(decoratedGraph)}`)
+      ).toEqual(decoratedGraph);
+      expect(
+        parseDeployGraphArtifact(
+          `"[]${JSON.stringify(decoratedGraph, null, 2)}`
+        )
+      ).toEqual(decoratedGraph);
+      expect(
+        parseDeployGraphArtifact(
+          `"{}${JSON.stringify(decoratedGraph, null, 2)}`
+        )
+      ).toEqual(decoratedGraph);
+      expect(
+        parseDeployGraphArtifact(
+          `"{\n"${JSON.stringify(decoratedGraph, null, 2)}`
+        )
+      ).toEqual(decoratedGraph);
+      expect(
+        parseDeployGraphArtifact(`"{x\n"${JSON.stringify(decoratedGraph)}`)
+      ).toEqual(decoratedGraph);
+      expect(
+        parseDeployGraphArtifact(`{\\\n${JSON.stringify(nested)}`)
+      ).toEqual(graph);
+      expect(
+        parseDeployGraphArtifact(
+          `${JSON.stringify(nested)}\n${JSON.stringify(graph)}`
+        )
+      ).toEqual(graph);
+      expect(
+        parseDeployGraphArtifact('[{"id":"prior"}]\n' + JSON.stringify(graph))
+      ).toEqual(graph);
+      expect(parseDeployGraphArtifact("[]\n" + JSON.stringify(graph))).toEqual(
+        graph
+      );
+      expect(parseDeployGraphArtifact(`{${JSON.stringify(graph)}`)).toEqual(
+        graph
+      );
+      expect(parseDeployGraphArtifact(`{[]${JSON.stringify(graph)}`)).toEqual(
+        graph
+      );
+      expect(parseDeployGraphArtifact(`[${JSON.stringify(graph)}]`)).toEqual(
+        graph
+      );
+      expect(parseDeployGraphArtifact(`{${JSON.stringify(graph)}]`)).toEqual(
+        graph
+      );
+      expect(
+        parseDeployGraphArtifact(`{${JSON.stringify(graph)}"unfinished\n`)
+      ).toEqual(graph);
+      expect(
+        parseDeployGraphArtifact(
+          `{${"bad".repeat(100)}${JSON.stringify(graph)}}`
+        )
+      ).toEqual(graph);
+      expect(parseDeployGraphArtifact(`]${JSON.stringify(graph)}`)).toEqual(
+        graph
+      );
+      expect(
+        parseDeployGraphArtifact(
+          "{{{{" + "bad".repeat(500) + "}}}}" + JSON.stringify(graph)
+        )
+      ).toEqual(graph);
+      expect(
+        parseDeployGraphArtifact(`${"[".repeat(257)}${JSON.stringify(graph)}`)
+      ).toEqual(graph);
+      expect(
+        parseDeployGraphArtifact(
+          `${"[".repeat(254)}${JSON.stringify(graphWithBracket)}`
+        )
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(
+          `${"[".repeat(255)}\n${JSON.stringify(graphWithBracket)}`
+        )
+      ).toEqual(graphWithBracket);
+      expect(
+        parseDeployGraphArtifact(`{${JSON.stringify(graph)}${"[".repeat(257)}`)
+      ).toEqual(graph);
+    });
+
+    it("bounds nested candidates while retaining the earliest completed graph", () => {
+      const first = { resources: [{ name: "first" }] };
+      const second = { resources: [{ name: "second" }] };
+      const manyFragments = "[]".repeat(1023);
+      expect(
+        parseDeployGraphArtifact(
+          `{${manyFragments}${JSON.stringify(first)}${JSON.stringify(second)}}`
+        )
+      ).toEqual(first);
+      expect(
+        parseDeployGraphArtifact(
+          `{${manyFragments}${JSON.stringify(first)}${JSON.stringify(second)}`
+        )
+      ).toEqual(first);
+    });
+
+    it("retains a large graph after a malformed nested preamble", () => {
+      const largeGraph = {
+        resources: Array.from({ length: 1024 }, (_, index) => ({
+          id: `r${index}`,
+          name: `resource${index}`,
+          type: "container"
+        }))
+      };
+      const document = JSON.stringify(largeGraph);
+      const preamble =
+        "[".repeat(200) +
+        "x".repeat(Math.floor(document.length / 2)) +
+        "]".repeat(200);
+      expect(parseDeployGraphArtifact(`${preamble}\n${document}`)).toEqual(
+        largeGraph
+      );
+    });
+
+    it("recovers after many balanced but invalid JSON fragments", () => {
+      const preamble = "[null,]".repeat(65);
+      const fragments = [
+        "[]",
+        "{}",
+        "[ true, false, null ]",
+        '  {"a": [0, -12, 3.14, 2E+3], "b": "escaped\\u00aF"} ',
+        '["quote\\\"slash\\\\tab\\t"]',
+        "[,]",
+        "[null,]",
+        "[null true]",
+        '{"a":}',
+        '{"a":1,}',
+        "{true}",
+        '{"a" 1}',
+        '{"a":1 "b":2}',
+        '{"a":01}',
+        '{"a":1.}',
+        '{"a":1e+}',
+        '{"a":-}',
+        '{"a":"\\q"}',
+        '{"a":"\\uZ000"}',
+        '{"a":"a\nb"}'
+      ];
+      for (const fragment of fragments) {
+        expect(
+          parseDeployGraphArtifact(
+            `${preamble}\n${fragment}\n${JSON.stringify(graph)}`
+          )
+        ).toEqual(graph);
+      }
+    });
+
+    it.each([
+      ["unmatched openers", () => "{".repeat(8 * 1024 * 1024), null],
+      [
+        "unmatched openers before a later graph",
+        () => `${"{".repeat(8 * 1024 * 1024)}\n${JSON.stringify(graph)}`,
+        graph
+      ],
+      [
+        "balanced deep invalid nesting before a later graph",
+        () =>
+          `${"[".repeat(4 * 1024 * 1024)}${"]".repeat(4 * 1024 * 1024)}\n${JSON.stringify(graph)}`,
+        graph
+      ],
+      [
+        "many small fragments before a later graph",
+        () => `{broken${"[]".repeat(100_000)}${JSON.stringify(graph)}`,
+        graph
+      ],
+      [
+        "invalid-character fragments",
+        () => `[${"[x],".repeat(2 * 1024 * 1024)}`,
+        null
+      ],
+      [
+        "invalid-grammar fragments",
+        () => `[${"[null,],".repeat(1024 * 1024)}`,
+        null
+      ],
+      [
+        "invalid fragments before a later graph",
+        () => `[${"[x],".repeat(100_000)}${JSON.stringify(graph)}`,
+        graph
+      ]
+    ] as const)(
+      "bounds %s within a worker deadline",
+      async (_label, input, expected) => {
+        expect(await parseGraphInWorker(input())).toEqual(expected);
+      },
+      5000
+    );
   });
 
   it("rejects an unknown schemaVersion rather than guessing", () => {
@@ -1002,6 +1307,41 @@ describe("createDeployStatusReader", () => {
     expect((await reader.graph()).artifact).toBeNull();
     expect(await reader.progress()).toBeNull();
     expect(await reader.controlPlaneLog()).toBeNull();
+  });
+
+  it("retires cached evidence when only a different application's malformed graph remains", async () => {
+    let clock = 0;
+    let listing = [artifact("radius-deploy-status-dev-todolist")];
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      now: () => clock,
+      listArtifacts: async () => listing,
+      downloadArtifact: async (_repo, candidate) => ({
+        [DEPLOY_STATUS_FILES.progress]: progressPayload({
+          application: candidate.id === 2 ? "other" : "todolist"
+        }),
+        [DEPLOY_STATUS_FILES.graph]:
+          candidate.id === 2 ?
+            "{broken"
+          : '{"resources":[{"name":"frontend"}]}',
+        [DEPLOY_STATUS_FILES.controlPlane]: "recipe log"
+      })
+    });
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+    expect(reader.sequence).toBe(1);
+    clock = 10000;
+    listing = [artifact("radius-deploy-status-dev-other", { id: 2 })];
+    expect(await reader.status()).toBe("missing");
+    expect(await reader.progress()).toBeNull();
+    expect(await reader.graph()).toEqual({
+      status: "missing",
+      graph: null,
+      artifact: null
+    });
+    expect(await reader.controlPlaneLog()).toBeNull();
+    expect(reader.sequence).toBe(-1);
   });
 
   it("accepts a redeploy after the previous artifact was deleted", async () => {
