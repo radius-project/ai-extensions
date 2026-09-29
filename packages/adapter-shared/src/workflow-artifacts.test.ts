@@ -648,9 +648,13 @@ describe("artifact cleanup and compatibility", () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
-    it.each([41, null])(
-      "retains only unretired accepted evidence after refusing a newer flight (run %s)",
-      async (runId) => {
+    it.each([
+      { runId: 41, foreignMalformed: false },
+      { runId: null, foreignMalformed: false },
+      { runId: null, foreignMalformed: true }
+    ])(
+      "retains only unretired accepted evidence after refusing a newer flight (run $runId, foreign malformed $foreignMalformed)",
+      async ({ runId, foreignMalformed }) => {
         vi.useFakeTimers();
         const session = createWorkflowReadSession();
         const owner = session.observe(120000);
@@ -669,7 +673,15 @@ describe("artifact cleanup and compatibility", () => {
                   {
                     artifacts:
                       calls === 5 ?
-                        []
+                        foreignMalformed ?
+                          [
+                            {
+                              ...artifact,
+                              id: 99,
+                              name: "radius-deploy-status-dev-other"
+                            }
+                          ]
+                        : []
                       : [
                           {
                             ...artifact,
@@ -690,17 +702,22 @@ describe("artifact cleanup and compatibility", () => {
           async (_repo: string, candidate: { id: number }) => ({
             [DEPLOY_STATUS_FILES.progress]: JSON.stringify({
               ...progress,
+              application: candidate.id === 99 ? "other" : "app",
               sequence: candidate.id - 11
             }),
-            [DEPLOY_STATUS_FILES.graph]: JSON.stringify({
-              resources: [{ name: `api-${candidate.id}` }]
-            }),
+            [DEPLOY_STATUS_FILES.graph]:
+              candidate.id === 99 ?
+                "{broken"
+              : JSON.stringify({
+                  resources: [{ name: `api-${candidate.id}` }]
+                }),
             [DEPLOY_STATUS_FILES.controlPlane]: `diagnostic-${candidate.id}`
           })
         );
         const reader = createDeployStatusReader({
           repo: "org/app",
           runId,
+          application: "app",
           ttlMs: 100,
           listArtifacts: reads.listWorkflowArtifacts,
           downloadArtifact: download
@@ -749,6 +766,7 @@ describe("artifact cleanup and compatibility", () => {
           expect(await reader.read(session.observe(30000))).toMatchObject({
             status: "missing"
           });
+          expect(reader.sequence).toBe(-1);
           await vi.advanceTimersByTimeAsync(101);
           expect(await reader.graph(joiner)).toMatchObject({
             status: "error",
@@ -758,7 +776,7 @@ describe("artifact cleanup and compatibility", () => {
           expect(await reader.progress(joiner)).toBeNull();
           expect(await reader.controlPlaneLog(joiner)).toBeNull();
           expect(run).toHaveBeenCalledTimes(6);
-          expect(download).toHaveBeenCalledTimes(2);
+          expect(download).toHaveBeenCalledTimes(foreignMalformed ? 3 : 2);
           await vi.advanceTimersByTimeAsync(101);
           const replacement = reader.read(session.observe(30000));
           const secondRefusal = reader.read(joiner);
@@ -779,7 +797,7 @@ describe("artifact cleanup and compatibility", () => {
           expect(await reader.progress(joiner)).toBeNull();
           expect(await reader.controlPlaneLog(joiner)).toBeNull();
           expect(run).toHaveBeenCalledTimes(8);
-          expect(download).toHaveBeenCalledTimes(3);
+          expect(download).toHaveBeenCalledTimes(foreignMalformed ? 4 : 3);
         }
         expect(vi.getTimerCount()).toBe(0);
       }

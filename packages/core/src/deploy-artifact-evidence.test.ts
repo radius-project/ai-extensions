@@ -37,11 +37,24 @@ async function parseGraphInWorker(text: string): Promise<unknown | null> {
   const moduleUrl = new URL("./deploy-artifact-evidence.ts", import.meta.url)
     .href;
   const worker = new Worker(
-    `const { parentPort, workerData } = require("node:worker_threads");
+    `const { registerHooks } = require("node:module");
+     registerHooks({
+       resolve(specifier, context, nextResolve) {
+         const sources = {
+           "./workflow-read-policy.js": "./workflow-read-policy.ts"
+         };
+         return nextResolve(sources[specifier] ?? specifier, context);
+       }
+     });
+     const { parentPort, workerData } = require("node:worker_threads");
      import(workerData.moduleUrl).then(({ parseDeployGraphArtifact }) => {
        parentPort.postMessage(parseDeployGraphArtifact(workerData.text));
      }, (error) => parentPort.postMessage({ error: String(error) }));`,
-    { eval: true, workerData: { moduleUrl, text } }
+    {
+      eval: true,
+      execArgv: [...process.execArgv, "--experimental-transform-types"],
+      workerData: { moduleUrl, text }
+    }
   );
   try {
     return await new Promise<unknown | null>((resolve, reject) => {
