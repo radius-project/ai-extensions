@@ -288,7 +288,7 @@ resource mysqlDb 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
     application: app.id
     database: 'todos'      // derived from source (e.g. MYSQL_DATABASE)
     version: '8.0'         // derived from source (e.g. image tag mysql:8.0)
-    username: 'myadmin'    // administrator you author for the provisioned DB
+    username: 'myadmin'    // default administrator (see Provisioned service usernames in secrets-handling.md)
     password: password     // from a @secure() param
   }
 }

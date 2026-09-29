@@ -891,10 +891,10 @@ describe("P0-C built Radius extension artifact", () => {
     expect(rabbitmqExample).not.toMatch(
       /^\s*password:\s*rabbitmqPassword\s*$/mu
     );
-    // `username` is the administrator the broker is provisioned with, not a
-    // value copied from the application's existing deployment.
+    // `username` is the default the broker is provisioned with, not a value
+    // copied from the application's existing deployment.
     expect(rabbitmqExample).toMatch(
-      /username:\s*'myadmin'\s*\/\/ authored broker administrator/u
+      /username:\s*'myadmin'\s*\/\/ default broker username \(see Provisioned service usernames\)/u
     );
     expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
     // Every consumer must authenticate as the broker's username, so the
@@ -919,6 +919,30 @@ describe("P0-C built Radius extension artifact", () => {
     expect(skillGuidance).toContain(
       "Every provisioned service username is set explicitly on its resource"
     );
+    // Only a login the application fixes overrides the default; deployment
+    // configuration the model replaces does not.
+    expect(secretsGuidance).toContain(
+      "Use `myadmin` unless the application fixes a specific login"
+    );
+    expect(secretsGuidance).toContain(
+      "Compose `environment` entries, `.env` files, Helm values, Kubernetes manifests, and a fallback default in code"
+    );
+    expect(secretsGuidance).toMatch(
+      /The application fixes it\.\*\*[^\n]*stop and report the conflict\. Do not rename it\./u
+    );
+    const azureGuidance = readGuidance(
+      "references/azure-provider-value-rules.md"
+    );
+    expect(skillGuidance).toContain(
+      "(references/secrets-handling.md#provisioned-service-usernames)"
+    );
+    expect(azureGuidance).toContain(
+      "(secrets-handling.md#provisioned-service-usernames)"
+    );
+    for (const guidance of [skillGuidance, azureGuidance]) {
+      expect(guidance).not.toMatch(/does not require a (?:specific )?login/u);
+    }
+    expect(skillGuidance).not.toContain("It is not derived from the source");
     expect(secretsGuidance).toContain(
       "Writing `password: rabbitmqPassword` here deploys a broken application"
     );

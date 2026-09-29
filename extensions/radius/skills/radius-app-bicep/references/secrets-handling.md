@@ -45,7 +45,7 @@ resource mysql 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
   properties: {
     environment: environment
     application: app.id
-    username: 'myadmin'
+    username: 'myadmin'   // default administrator (see Provisioned service usernames)
     password: password
   }
 }
@@ -114,7 +114,7 @@ resource rabbitmq 'Radius.Messaging/rabbitMQ@2025-08-01-preview' = {
     environment: environment
     application: app.id
     queue: 'orders'          // derived from source (e.g. ORDER_QUEUE_NAME)
-    username: 'myadmin'      // authored broker administrator; consumers authenticate as this same value
+    username: 'myadmin'      // default broker username (see Provisioned service usernames); consumers read it from this resource
     password: rabbitmqCredentials.id
   }
 }
@@ -225,6 +225,15 @@ The compiler enforces this for predefined and generated custom types alike: Bice
 ## Provisioned service usernames
 
 A data store or broker that Radius provisions is created with the username you give it, such as `username` on `Radius.Data/mySqlDatabases` or `Radius.Messaging/rabbitMQ`. Every consumer must then authenticate as that exact value. The username is not a secret, but getting it wrong fails the same way a wrong password does: the model compiles and deploys, and the application is refused at login.
+
+### Choosing the value
+
+Use `myadmin` unless the application fixes a specific login. Decide by tracing the username from the call that authenticates back to where its value comes from:
+
+1. **The application fixes it.** Use that exact value when Radius cannot change it on the selected runtime path: a literal in the connection code with no configuration override, a checked-in configuration file the application reads that no environment or deployment setting overrides, a username embedded in a connection URI that is itself fixed in one of those places, or a username the user or the selected deployment profile explicitly requires. If the [Azure provider value rules](azure-provider-value-rules.md) for the selected Recipe reject it, stop and report the conflict. Do not rename it.
+2. **Otherwise, use `myadmin`.** A username set only in deployment configuration that the Radius model replaces is not a requirement. That includes Compose `environment` entries, `.env` files, Helm values, Kubernetes manifests, and a fallback default in code such as `process.env.QUEUE_USER || 'guest'`. Those configured the application's previous deployment; the service Radius provisions uses the username in the model, and consumers receive that same value. `myadmin` fits the Azure PostgreSQL, MySQL, and SQL username rules and avoids `guest`, which RabbitMQ restricts to loopback connections.
+
+`myadmin` in the examples in this skill is this default, not a value read from any application. When the schema takes the username from an authored Secret, the value is a deploy-time `@secure()` input with no default, so the deployer supplies it and this order does not apply. Do not add a username to a type whose schema defines none.
 
 ### One username, one source
 
