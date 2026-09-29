@@ -1540,6 +1540,248 @@ describe("runRadAppGraph artifact completion", () => {
   }, 10000);
 });
 
+describe("buildGraphViaRad compiled-graph cache", () => {
+  const MODEL =
+    "resource app 'Radius.Core/applications@2023-10-01-preview' = {\n  name: 'app'\n}\n";
+  const DIFF_HASH = `sha256:${"a".repeat(64)}`;
+  const graphWith = (name: string) =>
+    JSON.stringify({
+      resources: [
+        {
+          id: `/planes/radius/local/resourcegroups/default/providers/Radius.Core/applications/${name}`,
+          name,
+          type: "Radius.Core/applications",
+          diffHash: DIFF_HASH
+        }
+      ]
+    });
+
+  let root: string;
+  let ws: string;
+  let cacheDir: string;
+  let countFile: string;
+  let bicepBackup: Buffer | null;
+  let bicepMode: number | null;
+  const saved: Record<string, string | undefined> = {};
+  const ENV_KEYS = [
+    "NODE_OPTIONS",
+    "RADIUS_RAD_BINARY",
+    "FAKE_RAD_GRAPH",
+    "FAKE_RAD_COUNT",
+    "FAKE_RAD_FAIL"
+  ];
+
+  const compiles = () =>
+    fs.existsSync(countFile) ? fs.readFileSync(countFile, "utf8").length : 0;
+  const names = (resources: unknown[]) =>
+    resources.map((r) => (r as { name: string }).name);
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-graph-cache-"));
+    ws = path.join(root, "ws");
+    cacheDir = path.join(root, "cache");
+    countFile = path.join(root, "compiles");
+    fs.mkdirSync(ws);
+    // Pinning the extension keeps the compile independent of the fake rad's
+    // reported version.
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({
+        extensions: { radius: `${RADIUS_EXTENSION_REGISTRY}:0.60` }
+      })
+    );
+    // The fake rad is node itself; this preload answers `rad version` and
+    // `rad app graph` and exits before node looks for a script to run.
+    const preload = path.join(root, "fake-rad.cjs");
+    fs.writeFileSync(
+      preload,
+      [
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        'const script = path.basename(process.argv[1] || "");',
+        'if (script === "version") {',
+        '  process.stdout.write(JSON.stringify({ release: "v0.60.0", version: "v0.60.0" }));',
+        "  process.exit(0);",
+        "}",
+        'if (script === "app" && process.argv[2] === "graph") {',
+        '  fs.appendFileSync(process.env.FAKE_RAD_COUNT, "x");',
+        '  if (process.env.FAKE_RAD_FAIL) { process.stderr.write("BCP000: failed"); process.exit(1); }',
+        '  fs.writeFileSync("app-graph.json", process.env.FAKE_RAD_GRAPH);',
+        "  process.exit(0);",
+        "}",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    for (const key of ENV_KEYS) saved[key] = process.env[key];
+    const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+    process.env.NODE_OPTIONS =
+      saved.NODE_OPTIONS ?
+        `${saved.NODE_OPTIONS} ${preloadOption}`
+      : preloadOption;
+    process.env.RADIUS_RAD_BINARY = process.execPath;
+    process.env.FAKE_RAD_COUNT = countFile;
+    process.env.FAKE_RAD_GRAPH = graphWith("first");
+    delete process.env.FAKE_RAD_FAIL;
+    if (fs.existsSync(MANAGED_BICEP_PATH)) {
+      bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
+      bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
+    } else {
+      bicepBackup = null;
+      bicepMode = null;
+      fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
+      if (process.platform !== "win32") {
+        fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+      }
+    }
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+    if (bicepBackup === null) {
+      fs.rmSync(MANAGED_BICEP_PATH, { force: true });
+    } else if (!fs.readFileSync(MANAGED_BICEP_PATH).equals(bicepBackup)) {
+      fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
+      if (bicepMode !== null && process.platform !== "win32") {
+        fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
+      }
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const build = (
+    content = MODEL,
+    options: Parameters<typeof buildGraphViaRad>[2] = {}
+  ) =>
+    buildGraphViaRad(content, ".radius/app.bicep", {
+      radArtifactsDir: ws,
+      graphCacheDir: cacheDir,
+      ...options
+    });
+
+  it("compiles once and answers the same definition from the cache", async () => {
+    const messages: string[] = [];
+    expect(names(await build())).toEqual(["first"]);
+    expect(compiles()).toBe(1);
+    expect(fs.readdirSync(cacheDir)).toHaveLength(1);
+
+    process.env.FAKE_RAD_GRAPH = graphWith("second");
+    const graphJson = path.join(root, "out", "app-graph.json");
+    expect(
+      names(
+        await build(MODEL.replaceAll("\n", "\r\n"), {
+          log: (m) => messages.push(m),
+          saveGraphJsonTo: graphJson
+        })
+      )
+    ).toEqual(["first"]);
+    expect(compiles()).toBe(1);
+    expect(messages).toContain(
+      "Reusing the cached application graph for this model definition."
+    );
+    // The debug artifact is still written when the graph comes from the cache.
+    expect(
+      (
+        JSON.parse(fs.readFileSync(graphJson, "utf8")) as {
+          resources: { name: string }[];
+        }
+      ).resources.map((r) => r.name)
+    ).toEqual(["first"]);
+  }, 20000);
+
+  it("recompiles when the model or the compile configuration changes", async () => {
+    await build();
+    process.env.FAKE_RAD_GRAPH = graphWith("edited");
+    expect(names(await build(`${MODEL}\n// edited`))).toEqual(["edited"]);
+    expect(compiles()).toBe(2);
+
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({
+        extensions: { radius: `${RADIUS_EXTENSION_REGISTRY}:0.61` }
+      })
+    );
+    process.env.FAKE_RAD_GRAPH = graphWith("reconfigured");
+    expect(names(await build())).toEqual(["reconfigured"]);
+    expect(compiles()).toBe(3);
+  }, 20000);
+
+  it("recompiles after the managed Bicep CLI is replaced", async () => {
+    await build();
+    fs.writeFileSync(MANAGED_BICEP_PATH, "bicep upgraded to a new release");
+    process.env.FAKE_RAD_GRAPH = graphWith("upgraded");
+
+    expect(names(await build())).toEqual(["upgraded"]);
+    expect(compiles()).toBe(2);
+  }, 20000);
+
+  it("never caches a failed compile", async () => {
+    process.env.FAKE_RAD_FAIL = "1";
+    await expect(build()).rejects.toThrow(/rad app graph failed/u);
+    expect(fs.existsSync(cacheDir)).toBe(false);
+
+    delete process.env.FAKE_RAD_FAIL;
+    expect(names(await build())).toEqual(["first"]);
+    expect(compiles()).toBe(2);
+  }, 20000);
+
+  it("compiles every time when the cache is disabled", async () => {
+    await build(MODEL, { graphCacheDir: null });
+    await build(MODEL, { graphCacheDir: null });
+
+    expect(compiles()).toBe(2);
+    expect(fs.existsSync(cacheDir)).toBe(false);
+  }, 20000);
+
+  it("compiles without the cache when the compile inputs cannot be fingerprinted", async () => {
+    const readdir = fs.readdirSync.bind(fs);
+    const spy = vi.spyOn(fs, "readdirSync").mockImplementation(((
+      target: fs.PathLike,
+      ...rest: unknown[]
+    ) => {
+      if (path.basename(String(target)).startsWith("rad-bicep-")) {
+        throw new Error("EBUSY: locked by a scanner");
+      }
+      return (readdir as (...args: unknown[]) => unknown)(target, ...rest);
+    }) as typeof fs.readdirSync);
+    const messages: string[] = [];
+    try {
+      expect(
+        names(await build(MODEL, { log: (m) => messages.push(m) }))
+      ).toEqual(["first"]);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(compiles()).toBe(1);
+    expect(fs.existsSync(cacheDir)).toBe(false);
+    expect(messages).toContain(
+      "Warning: could not fingerprint the graph compile inputs; compiling without the cache: EBUSY: locked by a scanner"
+    );
+  }, 20000);
+
+  it("safety-projects a cached entry again before using it", async () => {
+    await build();
+    const [entryName] = fs.readdirSync(cacheDir);
+    const entryPath = path.join(cacheDir, entryName);
+    const entry = JSON.parse(fs.readFileSync(entryPath, "utf8")) as {
+      graph: { resources: Record<string, unknown>[] };
+    };
+    entry.graph.resources[0].properties = { password: "fixture-secret" };
+    fs.writeFileSync(entryPath, JSON.stringify(entry));
+    const graphJson = path.join(root, "app-graph.json");
+
+    await build(MODEL, { saveGraphJsonTo: graphJson });
+
+    expect(compiles()).toBe(1);
+    expect(fs.readFileSync(graphJson, "utf8")).not.toContain("fixture-secret");
+  }, 20000);
+});
+
 describe("writeBicepCompileConfig", () => {
   let dir: string;
   let ws: string;

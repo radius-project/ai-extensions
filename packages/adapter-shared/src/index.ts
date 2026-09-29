@@ -23,6 +23,11 @@ export {
   runRadBicepPublish,
   buildGraphViaRad
 } from "./rad.js";
+export {
+  GRAPH_CACHE_DIR_ENV,
+  graphCacheDir,
+  pruneGraphCache
+} from "./graph-cache.js";
 export type {
   Logger,
   ProcessResult,

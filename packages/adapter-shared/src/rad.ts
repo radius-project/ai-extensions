@@ -53,6 +53,12 @@ import {
   radiusCliIdentity,
   radiusExtensionRefForRelease
 } from "./rad-release.js";
+import {
+  graphCacheDir,
+  graphCacheKey,
+  readCachedGraph,
+  writeCachedGraph
+} from "./graph-cache.js";
 
 export { killChildTree, RadProcessError, spawnRad };
 export type { ProcessResult, SpawnRadOptions };
@@ -168,6 +174,11 @@ export interface BuildGraphViaRadOptions {
   saveGraphJsonTo?: string;
   radArtifactsDir?: string;
   cleanupRadArtifactsDir?: boolean;
+  /**
+   * Directory of the machine-local compiled-graph cache, or null to bypass it.
+   * Defaults to {@link graphCacheDir}.
+   */
+  graphCacheDir?: string | null;
 }
 
 /** Options for {@link runRadBicepPublishExtension}. */
@@ -1202,16 +1213,7 @@ export async function runRadAppGraph(
     exitCloseGraceMs = 2000
   }: RunRadAppGraphOptions = {}
 ): Promise<unknown> {
-  if (saveGraphJsonTo && path.isAbsolute(saveGraphJsonTo)) {
-    try {
-      fs.rmSync(saveGraphJsonTo, { force: true });
-    } catch (error) {
-      throw new Error(
-        "Cannot safely replace the existing application graph artifact.",
-        { cause: error }
-      );
-    }
-  }
+  removeGraphJson(saveGraphJsonTo);
   const radPath = providedRadPath || (await resolveRadForGraph({ log }));
   await ensureManagedBicep(radPath, { log, timeout });
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
@@ -1360,14 +1362,7 @@ export async function runRadAppGraph(
       throw new Error("rad app graph produced invalid graph JSON.");
     }
     const appGraph = projectSafeApplicationGraph(parsed);
-    if (saveGraphJsonTo) {
-      if (path.isAbsolute(saveGraphJsonTo))
-        saveGraphJson(saveGraphJsonTo, JSON.stringify(appGraph, null, 2), log);
-      else
-        log(
-          `Warning: saveGraphJsonTo must be an absolute path; ignoring: ${saveGraphJsonTo}`
-        );
-    }
+    persistGraphJson(saveGraphJsonTo, appGraph, log);
     return appGraph;
   } catch (err) {
     throw new Error(`rad app graph failed: ${radErrorDetail(err)}`, {
@@ -1401,6 +1396,60 @@ export function saveGraphJson(
     log(
       `Warning: could not save app-graph.json to ${destPath}: ${errorMessage(err)}`
     );
+  }
+}
+
+// Removes the previous workspace artifact before a build replaces it, so a
+// failed build can never leave a graph from an older model behind.
+function removeGraphJson(saveGraphJsonTo: string): void {
+  if (!saveGraphJsonTo || !path.isAbsolute(saveGraphJsonTo)) return;
+  try {
+    fs.rmSync(saveGraphJsonTo, { force: true });
+  } catch (error) {
+    throw new Error(
+      "Cannot safely replace the existing application graph artifact.",
+      { cause: error }
+    );
+  }
+}
+
+function persistGraphJson(
+  saveGraphJsonTo: string,
+  appGraph: unknown,
+  log: Logger
+): void {
+  if (!saveGraphJsonTo) return;
+  if (!path.isAbsolute(saveGraphJsonTo)) {
+    log(
+      `Warning: saveGraphJsonTo must be an absolute path; ignoring: ${saveGraphJsonTo}`
+    );
+    return;
+  }
+  saveGraphJson(saveGraphJsonTo, JSON.stringify(appGraph, null, 2), log);
+}
+
+// The cache key for a populated compile directory, or "" when the cache is
+// disabled or the inputs cannot be read. An unreadable input only costs the
+// cache; the compile that follows reports any real problem.
+function compileCacheKey(
+  cacheDir: string | null,
+  compileDir: string,
+  radPath: string,
+  log: Logger
+): string {
+  if (!cacheDir) return "";
+  try {
+    return graphCacheKey({
+      compileDir,
+      radPath,
+      bicepPath: MANAGED_BICEP_PATH,
+      flags: MODELED_APP_GRAPH_FLAGS
+    });
+  } catch (err) {
+    log(
+      `Warning: could not fingerprint the graph compile inputs; compiling without the cache: ${errorMessage(err)}`
+    );
+    return "";
   }
 }
 
@@ -1621,7 +1670,8 @@ export async function buildGraphViaRad(
     log = noop,
     saveGraphJsonTo = "",
     radArtifactsDir = "",
-    cleanupRadArtifactsDir = false
+    cleanupRadArtifactsDir = false,
+    graphCacheDir: graphCacheDirectory
   }: BuildGraphViaRadOptions = {}
 ): Promise<unknown[]> {
   if (!content) return [];
@@ -1645,12 +1695,30 @@ export async function buildGraphViaRad(
       radiusExtensionRef
     );
     fs.writeFileSync(bicepFile, content);
+    const cacheDir =
+      graphCacheDirectory === undefined ? graphCacheDir() : graphCacheDirectory;
+    const cacheKey = compileCacheKey(cacheDir, dir, radPath, log);
+    const cached = cacheKey ? readCachedGraph(cacheDir, cacheKey, log) : null;
+    if (cached) {
+      log("Reusing the cached application graph for this model definition.");
+      // Projected again so a hand-edited cache entry cannot carry fields the
+      // compile path would have stripped.
+      const appGraph = projectSafeApplicationGraph(cached);
+      removeGraphJson(saveGraphJsonTo);
+      persistGraphJson(saveGraphJsonTo, appGraph, log);
+      return filterGraphVisualizationResources(
+        applicationGraphToResources(appGraph, definitionFile, content)
+      );
+    }
     try {
       const appGraph = await runRadAppGraph(bicepFile, {
         log,
         saveGraphJsonTo,
         radPath
       });
+      if (cacheKey && isPlainObject(appGraph)) {
+        writeCachedGraph(cacheDir, cacheKey, appGraph, log);
+      }
       return filterGraphVisualizationResources(
         applicationGraphToResources(appGraph, definitionFile, content)
       );

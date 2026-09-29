@@ -527,6 +527,7 @@ describe("planHarnessProcess in fake mode", () => {
     expect(plan.env.RADIUS_FAKE_CLI_SCENARIO).toBe("/tmp/root/scenario.json");
     expect(plan.env.RADIUS_FAKE_CLI_LOG).toBe("/tmp/root/cli.log");
     expect(plan.env.RADIUS_RAD_SKIP_VERSION_CHECK).toBe("1");
+    expect(plan.env.RADIUS_GRAPH_CACHE_DIR).toBe("off");
   });
 
   it("uses the placeholder token even when a real one is exported", () => {
@@ -568,7 +569,8 @@ describe("planHarnessProcess in cloud mode", () => {
       "RADIUS_FAKE_CLI_SCENARIO",
       "RADIUS_FAKE_CLI_LOG",
       "RADIUS_RAD_BINARY",
-      "RADIUS_RAD_SKIP_VERSION_CHECK"
+      "RADIUS_RAD_SKIP_VERSION_CHECK",
+      "RADIUS_GRAPH_CACHE_DIR"
     ]) {
       expect(Object.hasOwn(plan.env, key)).toBe(false);
       expect(plan.unsetEnv).toContain(key);
