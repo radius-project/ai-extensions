@@ -402,8 +402,10 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           throw new Error("No graph payload");
         },
         settleDeployStatuses,
-        fetchRunLog: (repo, runId, request) =>
-          readWorkflowLog(execution, repo, runId, request),
+        fetchRunLog: (repo, runId, request) => {
+          expect(request).toBe(observation);
+          return readWorkflowLog(execution, repo, runId, request);
+        },
         cloudAuthDriftKind: "cloud-auth-drift",
         sleep: () => {
           throw new Error(
@@ -418,6 +420,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         runId: 42,
         provider: "azure",
         resources: harness.state.deployingResources,
+        status: detail.status,
         conclusion: detail.conclusion,
         steps: detail.steps,
         jobs: detail.jobs,

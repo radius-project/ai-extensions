@@ -822,12 +822,25 @@ describe("deploy outcome on failure", () => {
     expect(state.deployErrorKind).toBeUndefined();
   });
 
-  it.each(["in_progress", undefined])(
+  it.each([
+    undefined,
+    "",
+    "unknown",
+    "future_status",
+    "running",
+    "in_progress",
+    "queued",
+    "waiting"
+  ])(
     "refuses terminal settlement for observed status %j before reading or mutating state",
     async (status) => {
       const { request, state, logs, polls, statusCalls } = outcomeRequest({
         status,
         conclusion: "failure",
+        observation: {
+          context: createWorkflowReadSession().observe(15000),
+          identity: "selected:unconfirmed"
+        },
         resources: [{ name: "db", deployStatus: "pending" }],
         statusReader: {
           graph: () => {

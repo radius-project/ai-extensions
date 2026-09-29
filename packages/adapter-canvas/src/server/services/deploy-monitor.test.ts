@@ -159,7 +159,17 @@ describe("bounded monitor observation lifetime", () => {
     const resources: CanvasGraphResource[] = [
       { name: "api", deployStatus: "pending" }
     ];
-    const f = request({ entry: { state: {}, observation: scope }, resources });
+    const f = request({
+      entry: { state: {}, observation: scope },
+      resources,
+      isCurrent: () => true
+    });
+    const detail: DeployRunDetail = {
+      status: "completed",
+      conclusion: "failure",
+      steps: [{ name: "Run rad commands", status: "in_progress" }],
+      jobs: [{ name: "deploy" }]
+    };
     let runGets = 0;
     let artifactGets = 0;
     const response = (status: number) => ({
@@ -199,11 +209,7 @@ describe("bounded monitor observation lifetime", () => {
             response(++runGets === 3 ? 200 : 503)
           );
           time += 12500;
-          return {
-            status: "completed",
-            conclusion: "failure",
-            steps: [{ name: "Run rad commands", status: "in_progress" }]
-          };
+          return detail;
         },
         createStatusReader: async () => ({
           ...reader(),
@@ -216,7 +222,12 @@ describe("bounded monitor observation lifetime", () => {
         }),
         now: () => 1700000000000 + time,
         outcome: {
-          settle: async ({ observation }) => {
+          settle: async (call) => {
+            const { observation } = call;
+            expect(call.status).toBe(detail.status);
+            expect(call.steps).toBe(detail.steps);
+            expect(call.jobs).toBe(detail.jobs);
+            expect(call.isCurrent).toBe(f.request.isCurrent);
             if (!observation) throw new Error("Terminal observation was lost");
             expect(observation.context.deadline).toBe(2855000);
             expect(observation.context.remaining()).toBe(2341000);
