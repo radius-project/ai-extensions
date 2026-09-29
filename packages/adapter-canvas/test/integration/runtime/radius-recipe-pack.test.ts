@@ -32,6 +32,20 @@ const azureRecipePackPin = `  - name: azure
     ref: ${resourceTypesContribCommit}
     tag: "recipe-pack/azure/v0.1.0"`;
 
+const legacyAzurePin = {
+  repository: "radius-project/resource-types-contrib",
+  commit: resourceTypesContribCommit,
+  name: "azure",
+  path: "recipe-packs/azure/aks-recipepack.bicep"
+};
+const azureAksCommit = "a".repeat(40);
+const azureAksPin = {
+  repository: "radius-project/resource-types-contrib",
+  commit: azureAksCommit,
+  name: "azure-aks",
+  path: "recipe-packs/azure-aks/azure-aks.bicep"
+};
+
 function replaceAzureRecipePackPin(
   replacement: (pin: string) => string
 ): string {
@@ -40,10 +54,7 @@ function replaceAzureRecipePackPin(
 
 describe("parseAzureRecipePackPin", () => {
   it("returns the exact immutable Azure Recipe-pack source", () => {
-    expect(parseAzureRecipePackPin(defaults)).toEqual({
-      repository: "radius-project/resource-types-contrib",
-      commit: resourceTypesContribCommit
-    });
+    expect(parseAzureRecipePackPin(defaults)).toEqual(legacyAzurePin);
     expect(
       [...defaults.matchAll(/^    ref: ([0-9a-f]{40})$/gmu)].map(
         (match) => match[1]
@@ -61,10 +72,7 @@ describe("parseAzureRecipePackPin", () => {
           .map((line) => `  ${line}`)
           .join("\r\n")
       )
-    ).toEqual({
-      repository: "radius-project/resource-types-contrib",
-      commit: resourceTypesContribCommit
-    });
+    ).toEqual(legacyAzurePin);
   });
 
   it("accepts an indentationless Recipe-pack sequence", () => {
@@ -74,10 +82,27 @@ describe("parseAzureRecipePackPin", () => {
   repo: github.com/radius-project/resource-types-contrib
   ref: ${resourceTypesContribCommit}
 defaultRegistration: []`)
-    ).toEqual({
-      repository: "radius-project/resource-types-contrib",
-      commit: resourceTypesContribCommit
-    });
+    ).toEqual(legacyAzurePin);
+  });
+
+  it("prefers the azure-aks entry used by newer Radius releases", () => {
+    expect(
+      parseAzureRecipePackPin(`recipePacks:
+  - name: azure-aks
+    repo: github.com/radius-project/resource-types-contrib
+    ref: ${azureAksCommit}
+defaultRegistration: []`)
+    ).toEqual(azureAksPin);
+    expect(
+      parseAzureRecipePackPin(`recipePacks:
+  - name: azure
+    repo: github.com/radius-project/resource-types-contrib
+    ref: ${resourceTypesContribCommit}
+  - name: azure-aks
+    repo: github.com/radius-project/resource-types-contrib
+    ref: ${azureAksCommit}
+defaultRegistration: []`)
+    ).toEqual(azureAksPin);
   });
 
   it.each([

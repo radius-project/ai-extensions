@@ -28,7 +28,7 @@ function fakeGitHub(cfg: FakeConfig = {}): GitHub {
 const AZURE_PACK = `
 extension radius
 resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
-  name: 'azure-avm'
+  name: 'azure-aks'
   properties: {
     recipes: {
       'Radius.Data/mySqlDatabases': {
@@ -102,7 +102,7 @@ describe("fetchRecipePack", () => {
 
   it("reads the kubernetes default pack for aws and kubernetes providers", async () => {
     const KUBE_PACK = `
-resource defaultRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
+resource kubernetesRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default'
   properties: {
     recipes: {
@@ -114,7 +114,7 @@ resource defaultRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   }
 }
 `;
-    // Both providers resolve to recipe-packs/kubernetes/default-recipepack.bicep.
+    // Both providers resolve to recipe-packs/kubernetes/default.bicep.
     expect(recipePackContentPath("aws")).toBe(
       recipePackContentPath("kubernetes")
     );

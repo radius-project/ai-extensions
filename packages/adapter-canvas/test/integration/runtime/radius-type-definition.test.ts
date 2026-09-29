@@ -73,6 +73,7 @@ const fixturePostgreSqlRecipeDefinition = fs
 const resourceTypesContribCommit = "d35ca390587661117a45a37bc2916f7aebf11428";
 const defaultsPath = "deploy/manifest/defaults.yaml";
 const recipePackPath = "recipe-packs/azure/aks-recipepack.bicep";
+const azureAksRecipePackPath = "recipe-packs/azure-aks/azure-aks.bicep";
 const defaultsCachePath = "managed-recipes/defaults.json";
 const recipePackCachePath = `managed-recipes/azure/${resourceTypesContribCommit}/aks-recipepack.json`;
 
@@ -164,7 +165,10 @@ function fixtureFetch(
         headers: { "content-type": "text/plain" }
       });
     }
-    if (url.endsWith(`/${resourceTypesContribCommit}/${recipePackPath}`)) {
+    if (
+      url.endsWith(`/${resourceTypesContribCommit}/${recipePackPath}`) ||
+      url.endsWith(`/${resourceTypesContribCommit}/${azureAksRecipePackPath}`)
+    ) {
       return new Response(recipePack, {
         status: 200,
         headers: { "content-type": "text/plain" }
@@ -768,6 +772,49 @@ describe("network and cache behavior", () => {
       path: recipePackPath,
       definition: fixturePostgreSqlRecipeDefinition
     });
+  });
+
+  it("resolves the azure-aks Recipe pack entry from newer Radius releases", async () => {
+    const cacheRoot = temporaryDirectory();
+    const calls: string[] = [];
+    const defaults = fixtureDefaults.replace(
+      "  - name: azure\n",
+      "  - name: azure-aks\n"
+    );
+    expect(defaults).not.toBe(fixtureDefaults);
+
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Data/postgreSqlDatabases"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot,
+        fetchImpl: fixtureFetch(calls, { defaults })
+      }
+    );
+
+    expect(calls).toContain(
+      `https://raw.githubusercontent.com/radius-project/resource-types-contrib/${resourceTypesContribCommit}/${azureAksRecipePackPath}`
+    );
+    expect(calls).not.toContain(
+      `https://raw.githubusercontent.com/radius-project/resource-types-contrib/${resourceTypesContribCommit}/${recipePackPath}`
+    );
+    expect(contract.resources[0].recipe).toEqual({
+      status: "available",
+      provenance: "managed-release-default",
+      recipePack: "azure-aks",
+      repository: "radius-project/resource-types-contrib",
+      commit: resourceTypesContribCommit,
+      path: azureAksRecipePackPath,
+      definition: fixturePostgreSqlRecipeDefinition
+    });
+    expect(
+      fs.existsSync(
+        cacheFile(
+          cacheRoot,
+          `managed-recipes/azure-aks/${resourceTypesContribCommit}/azure-aks.json`
+        )
+      )
+    ).toBe(true);
   });
 
   it("replaces a malformed managed Recipe defaults cache entry", async () => {

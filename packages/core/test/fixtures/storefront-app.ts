@@ -137,8 +137,8 @@ export function appGraphPayload(options: { withCache: boolean }) {
 // The Azure (AKS) recipe pack, in the committed pack's shape.
 export const AZURE_RECIPE_PACK = `extension radius
 
-resource azureRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
-  name: 'azure-avm'
+resource azureAksRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'azure-aks'
   properties: {
     recipes: {
       'Radius.Compute/containers': {
