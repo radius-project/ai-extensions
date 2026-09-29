@@ -3,6 +3,13 @@ const RESOURCE_TYPES_CONTRIB_REPOSITORY =
 const COMMIT = /^[0-9a-f]{40}$/iu;
 const PREDEFINED_RESOURCE_TYPE =
   /^Radius(?:\.[A-Za-z][A-Za-z0-9]*)+\/[A-Za-z][A-Za-z0-9]*$/u;
+// Radius releases before the azure-aks rename (resource-types-contrib#292)
+// publish the AKS pack as `azure`. Prefer the new entry and fall back so the
+// skill works against both older and newer Radius releases.
+const AZURE_RECIPE_PACKS = [
+  { name: "azure-aks", path: "recipe-packs/azure-aks/azure-aks.bicep" },
+  { name: "azure", path: "recipe-packs/azure/aks-recipepack.bicep" }
+];
 
 export function parseAzureRecipePackPin(source) {
   if (typeof source !== "string") {
@@ -56,12 +63,18 @@ export function parseAzureRecipePackPin(source) {
   }
   if (current !== undefined) entries.push(current);
 
-  const azureEntries = entries.filter((entry) => entry.name === "azure");
+  const pack = AZURE_RECIPE_PACKS.find((candidate) =>
+    entries.some((entry) => entry.name === candidate.name)
+  );
+  if (pack === undefined) {
+    throw new Error(
+      "Radius release defaults do not contain an Azure Recipe pack."
+    );
+  }
+  const azureEntries = entries.filter((entry) => entry.name === pack.name);
   if (azureEntries.length !== 1) {
     throw new Error(
-      azureEntries.length === 0 ?
-        "Radius release defaults do not contain an Azure Recipe pack."
-      : "Radius release defaults contain multiple Azure Recipe packs."
+      "Radius release defaults contain multiple Azure Recipe packs."
     );
   }
   const azure = azureEntries[0];
@@ -76,7 +89,9 @@ export function parseAzureRecipePackPin(source) {
   }
   return {
     repository: RESOURCE_TYPES_CONTRIB_REPOSITORY,
-    commit: azure.commit.toLowerCase()
+    commit: azure.commit.toLowerCase(),
+    name: pack.name,
+    path: pack.path
   };
 }
 

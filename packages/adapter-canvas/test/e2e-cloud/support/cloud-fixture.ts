@@ -1191,17 +1191,14 @@ export async function createCloudFixture(
         }
       };
 
+      const applicationFailureStart = failures.length;
       for (const target of applicationCleanupTargets.values())
         await attempt(
           `Radius application ${target.application} in ${environmentName}`,
           () => deleteApplicationResources(target.application)
         );
-      if (failures.length > 0)
-        throw new Error(
-          `Could not reclaim the deployed Radius application for ${repository}; preserving its identity, ` +
-            "GitHub Environment, state package, and repository workflows for recovery:\n" +
-            failures.map((failure) => `  - ${failure}`).join("\n")
-        );
+      const applicationDeletionFailed =
+        failures.length > applicationFailureStart;
 
       for (const target of applicationCleanupTargets.values())
         await attempt(
@@ -1276,6 +1273,16 @@ export async function createCloudFixture(
                 lastSeen.join(", ")
             });
           }
+        );
+
+      if (applicationDeletionFailed)
+        throw new Error(
+          `Could not reclaim the deployed Radius application for ${repository}; preserving its identity, ` +
+            "GitHub Environment, state package, and repository workflows for recovery:\n" +
+            failures.map((failure) => `  - ${failure}`).join("\n") +
+            (reclaimed.length > 0 ?
+              `\nReclaimed before failing: ${reclaimed.join(", ")}`
+            : "")
         );
 
       // Delete service principals explicitly before applications. Application

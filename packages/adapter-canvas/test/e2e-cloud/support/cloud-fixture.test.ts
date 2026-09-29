@@ -3656,12 +3656,22 @@ describe("createCloudFixture", () => {
           respond: {
             stdout: '{"status":"completed","conclusion":"failure"}'
           }
+        },
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "all"],
+          respond: {}
         }
       ]);
       fixture.registerApplicationCleanupTarget("demo", "default-demo");
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /preserving its identity, GitHub Environment, state package, and repository workflows for recovery/
+        /preserving its identity, GitHub Environment, state package, and repository workflows for recovery:.*Reclaimed before failing: Kubernetes workloads for demo in default-demo/s
       );
 
       const gh = fake.commands.commandLines("gh");
@@ -3674,7 +3684,73 @@ describe("createCloudFixture", () => {
       expect(fake.commands.commandLines("az")).not.toContain(
         `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id,appId:appId} -o json`
       );
-      expect(fake.commands.commandLines("kubectl")).toEqual([]);
+      expect(fake.commands.commandLines("kubectl")).toEqual([
+        `--kubeconfig ${WORKSPACE}/kubeconfig delete all --namespace default-demo ` +
+          "--selector radapp.io/application=demo --ignore-not-found=true --wait=true"
+      ]);
+    });
+
+    it("reports Radius and Kubernetes cleanup failures before preserving recovery inputs", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "gh",
+            match: ["run", "view"],
+            respond: {
+              stdout: '{"status":"completed","conclusion":"failure"}'
+            }
+          },
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          failing("kubectl", ["delete", "all"], "namespace unavailable"),
+          {
+            tool: "kubectl",
+            match: ["get", RADIUS_RENDERED_RESOURCES],
+            respond: {
+              stdout: JSON.stringify({
+                items: [
+                  {
+                    kind: "HorizontalPodAutoscaler",
+                    metadata: { name: "sleeper" }
+                  }
+                ]
+              })
+            }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      const error = await fixture.reclaimLeakedProductArtifacts().then(
+        () => undefined,
+        (reason: unknown) => reason
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) {
+        throw new Error("Expected reclamation to fail");
+      }
+      expect(error.message).toContain(
+        `Radius application demo in ${ENVIRONMENT}`
+      );
+      expect(error.message).toContain(
+        "Kubernetes workloads for demo in default-demo"
+      );
+      expect(error.message).toContain("namespace unavailable");
+      expect(error.message).toContain("HorizontalPodAutoscaler/sleeper");
+      expect(error.message).toContain(
+        "preserving its identity, GitHub Environment, state package, and repository workflows for recovery"
+      );
+      expect(
+        fake.commands
+          .commandLines("gh")
+          .some((line) => line.includes(ENVIRONMENT_PATH))
+      ).toBe(false);
     });
 
     it("closes an open pull request even when its branch is already gone", async () => {

@@ -109,10 +109,10 @@ For example `mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.
 
 Do NOT guess the module's parameter or output names, and do NOT guess the version to pin. Verify both against the module's real interface, in this order.
 
-**First, look for an existing recipe pack that already uses the same module.** The Azure packs live in `recipe-packs/azure/` in `radius-project/resource-types-contrib`. Fetch the pack as raw text and scan it for the module path — **search by module path, not by type name**. This needs no local clone and no platform-specific shell utilities:
+**First, look for an existing recipe pack that already uses the same module.** The Azure AKS pack lives in `recipe-packs/azure-aks/` in `radius-project/resource-types-contrib`. Fetch the pack as raw text and scan it for the module path — **search by module path, not by type name**. This needs no local clone and no platform-specific shell utilities:
 
 ```text
-gh api repos/radius-project/resource-types-contrib/contents/recipe-packs/azure/aks-recipepack.bicep \
+gh api repos/radius-project/resource-types-contrib/contents/recipe-packs/azure-aks/azure-aks.bicep \
   -H "Accept: application/vnd.github.raw"
 ```
 
@@ -181,7 +181,7 @@ target: br:ghcr.io/<owner>/<repo>/<recipe>:<tag>
 
 ### 5. Author the recipe pack: `<staging-dir>/custom-recipe-pack.bicep`
 
-The recipe pack registers the recipe for the custom type. It is a `Radius.Core/recipePacks` resource whose `recipes` map is keyed by the full type name. Model it on `recipe-packs/azure/aks-recipepack.bicep` in `resource-types-contrib`:
+The recipe pack registers the recipe for the custom type. It is a `Radius.Core/recipePacks` resource whose `recipes` map is keyed by the full type name. Model it on `recipe-packs/azure-aks/azure-aks.bicep` in `resource-types-contrib`:
 
 ```bicep
 extension radius
