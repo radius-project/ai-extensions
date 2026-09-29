@@ -17,8 +17,14 @@
 // workspace packages do not exist; app-bicep-check.test.ts asserts the copies
 // agree.
 
-import { spawnSync } from "node:child_process";
-import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -1317,22 +1323,127 @@ const bicep = path.join(
   executable
 );
 
+// Whether every Bicep security rule runs for the files this compile reads. A
+// model that does not exist has nothing to inspect, and the compile reports it
+// exactly as it did before this check existed. Never rejects, so the compile
+// running alongside it is always awaited rather than left behind.
+async function inspectCompiledFiles(securityRules, app, staged) {
+  if (!existsSync(app)) {
+    return { findings: [], unavailable: null };
+  }
+  try {
+    const references = await securityRules.requestFileReferences(bicep, app);
+    if (references.error !== undefined) {
+      return { findings: [], unavailable: references.error };
+    }
+    return securityRules.inspectSecurityRules(references.filePaths, {
+      stagingDir: staged ? path.dirname(app) : null
+    });
+  } catch (error) {
+    return { findings: [], unavailable: error.message };
+  }
+}
+
+const COMPILE_TIMEOUT_MS = 120_000;
+const COMPILE_OUTPUT_LIMIT = 16 * 1024 * 1024;
+
+// Compiles the model in a child process, resolving with the fields a
+// spawnSync() result carries: `error` when Bicep could not be started, ran
+// past the timeout, or wrote more output than the limit, and otherwise its
+// exit status, signal, and output. Asynchronous so the security-rule
+// inspection, which needs its own Bicep process, runs alongside it.
+function compileModel(app) {
+  return new Promise((resolve) => {
+    const output = { stdout: [], stderr: [] };
+    const sizes = { stdout: 0, stderr: 0 };
+    let error = null;
+    let settled = false;
+    let timer;
+    const finish = (status, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        error,
+        status,
+        signal,
+        stdout: Buffer.concat(output.stdout).toString("utf8"),
+        stderr: Buffer.concat(output.stderr).toString("utf8")
+      });
+    };
+    const child = spawn(
+      bicep,
+      ["build", app, "--diagnostics-format", "sarif", "--stdout"],
+      {
+        cwd: path.dirname(app),
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true
+      }
+    );
+    const stop = (reason) => {
+      error ??= reason;
+      child.kill();
+    };
+    timer = setTimeout(() => {
+      stop(
+        new Error(
+          `Bicep did not finish compiling within ${COMPILE_TIMEOUT_MS} ms.`
+        )
+      );
+    }, COMPILE_TIMEOUT_MS);
+    for (const stream of ["stdout", "stderr"]) {
+      child[stream].on("data", (chunk) => {
+        sizes[stream] += chunk.length;
+        if (sizes[stream] > COMPILE_OUTPUT_LIMIT) {
+          stop(
+            new Error(
+              `Bicep wrote more than ${COMPILE_OUTPUT_LIMIT} bytes to ${stream}.`
+            )
+          );
+          return;
+        }
+        output[stream].push(chunk);
+      });
+    }
+    child.on("error", (reason) => {
+      error ??= reason;
+      // A process that never started emits no exit to wait for.
+      if (child.pid === undefined) finish(null, null);
+    });
+    child.on("close", finish);
+  });
+}
+
 // Compiles the model and distinguishes model diagnostics from a check that
 // could not produce a reliable verdict. The budget wraps it rather than living
 // inside it.
-function check(app, staged) {
-  const compiled = spawnSync(
-    bicep,
-    ["build", app, "--diagnostics-format", "sarif", "--stdout"],
-    {
-      cwd: path.dirname(app),
-      encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 120_000,
-      windowsHide: true
-    }
-  );
+async function check(app, staged) {
+  // Loaded before anything is spawned rather than imported statically, so an
+  // installation missing the sibling module reaches the catch below main() and
+  // reports the check as unavailable (exit 2) instead of failing to load
+  // (exit 1), without leaving a compile running.
+  const securityRuleModule = await import("./bicep-security-rules.mjs");
+  // A security rule that was turned off reports nothing, so a clean compile is
+  // only evidence once the rules are known to have run. The inspection runs
+  // alongside the compile, and its findings are reported first; a finding
+  // still lets the compile's own diagnostics through, so one attempt reports
+  // everything the model has to fix.
+  const [securityRules, compiled] = await Promise.all([
+    inspectCompiledFiles(securityRuleModule, app, staged),
+    compileModel(app)
+  ]);
+  securityRules.findings.forEach(report);
+  if (securityRules.unavailable !== null) {
+    report(
+      `${app}: error checker-unavailable: whether the Bicep security rules run could not be established: ${securityRules.unavailable}. ` +
+        "No model-policy verdict was produced. Abort the staged run: do not retry validation, do not modify the current model, " +
+        "do not start another modeling run, do not write the origin record, and do not publish the run. " +
+        "Report this exact failure to the user and say that no application definition was written."
+    );
+    return EXIT_CHECK_UNAVAILABLE;
+  }
+  const securityRuleDisabled = securityRules.findings.length > 0;
+
   if (compiled.error) {
     report(compiled.error.message);
     return EXIT_CHECK_UNAVAILABLE;
@@ -1403,7 +1514,8 @@ function check(app, staged) {
     resolvedTypes
   );
   return (
-      compilerFailed ||
+      securityRuleDisabled ||
+        compilerFailed ||
         invalidBuildSource ||
         invalidSourceReference ||
         invalidConnectionSource ||
@@ -1415,11 +1527,11 @@ function check(app, staged) {
     : EXIT_SUCCESS;
 }
 
-function main() {
+async function main() {
   const app = path.resolve(process.argv[2] || ".radius/app.bicep");
   const run = readRunRecord(app);
   if (run === null) {
-    return check(app, false);
+    return await check(app, false);
   }
 
   // Fail closed: a staged run whose record cannot be parsed or read has no
@@ -1445,7 +1557,7 @@ function main() {
     return EXIT_CHECK_UNAVAILABLE;
   }
 
-  const status = check(app, true);
+  const status = await check(app, true);
   // An unavailable check produced no new model verdict, so keep the last model
   // failure for comparison with the next completed validation. Success clears
   // it because there is no longer a failed model to compare.
@@ -1487,7 +1599,7 @@ function main() {
 }
 
 try {
-  process.exitCode = main();
+  process.exitCode = await main();
 } catch (error) {
   console.error(error);
   process.exitCode = EXIT_CHECK_UNAVAILABLE;

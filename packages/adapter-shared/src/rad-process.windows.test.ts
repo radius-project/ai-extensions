@@ -1,9 +1,10 @@
-import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { RadProcessError, spawnRad } from "./rad-process.mjs";
+import { resolveExistingRadBinary, resolveRadiusExtensionRef } from "./rad.js";
 
 const describeWindows = process.platform === "win32" ? describe : describe.skip;
 const childHarnessPath = fileURLToPath(
@@ -47,6 +48,40 @@ describeWindows("spawnRad Windows process integration", () => {
       stdout: JSON.stringify(["two words", 'say "hello"']),
       stderr: "fixture stderr"
     });
+  });
+
+  it("uses a relative developer override from a different graph working directory", async () => {
+    const graphDirectory = join(directory, "graph workspace");
+    await mkdir(graphDirectory);
+    const previousDirectory = process.cwd();
+    const previousOverride = process.env.RADIUS_RAD_BINARY;
+    try {
+      process.chdir(directory);
+      process.env.RADIUS_RAD_BINARY = "rad.exe";
+      const selected = resolveExistingRadBinary(
+        join(directory, "missing-managed.exe")
+      );
+      expect(selected).toBe(join(process.cwd(), "rad.exe"));
+      await expect(
+        resolveRadiusExtensionRef({
+          radPath: selected ?? "",
+          readVersion: async () => "edge"
+        })
+      ).resolves.toBe("br:biceptypes.azurecr.io/radius:latest");
+      await expect(
+        spawnRad(selected ?? "", [childHarnessPath, "success", "two words"], {
+          cwd: graphDirectory,
+          timeout: 5_000
+        })
+      ).resolves.toEqual({
+        stdout: JSON.stringify(["two words"]),
+        stderr: "fixture stderr"
+      });
+    } finally {
+      process.chdir(previousDirectory);
+      if (previousOverride === undefined) delete process.env.RADIUS_RAD_BINARY;
+      else process.env.RADIUS_RAD_BINARY = previousOverride;
+    }
   });
 
   it("propagates a non-zero exit with both captured streams", async () => {
