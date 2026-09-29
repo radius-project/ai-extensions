@@ -1,7 +1,6 @@
-// Scheduled workflows whose failures the Radius on-call triages label their
-// failure issue `test-failure`, which is how on-call finds them. An unlabeled
-// alert still opens an issue, so a missing label fails silently: the issue
-// exists but no one is looking for it.
+// These scheduled workflows label their failure issue `test-failure` so the
+// failures can be found by label. An unlabeled alert still opens an issue, so a
+// missing label fails silently.
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +11,7 @@ const WORKFLOWS_DIRECTORY = path.resolve(
   "../../../../.github/workflows"
 );
 
-const ON_CALL_WORKFLOWS = [
+const LABELED_WORKFLOWS = [
   "canvas-functional.yml",
   "canvas-reliability.yml"
 ] as const;
@@ -25,7 +24,7 @@ async function issueCreateCommands(file: string): Promise<readonly string[]> {
   return [...raw.matchAll(ISSUE_CREATE)].map((match) => match[0]);
 }
 
-describe.each(ON_CALL_WORKFLOWS)("%s scheduled failure alert", (file) => {
+describe.each(LABELED_WORKFLOWS)("%s scheduled failure alert", (file) => {
   it("opens an issue when a scheduled run fails", async () => {
     expect(await issueCreateCommands(file)).not.toHaveLength(0);
   });
