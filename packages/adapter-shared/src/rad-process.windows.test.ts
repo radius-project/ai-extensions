@@ -1,4 +1,3 @@
-import { realpathSync } from "node:fs";
 import { copyFile, mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,7 +61,7 @@ describeWindows("spawnRad Windows process integration", () => {
       const selected = resolveExistingRadBinary(
         join(directory, "missing-managed.exe")
       );
-      expect(selected).toBe(realpathSync.native(radPath));
+      expect(selected).toBe(join(process.cwd(), "rad.exe"));
       await expect(
         resolveRadiusExtensionRef({
           radPath: selected ?? "",

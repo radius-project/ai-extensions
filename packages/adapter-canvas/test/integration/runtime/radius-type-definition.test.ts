@@ -2010,14 +2010,17 @@ describe("command boundary", () => {
     fs.writeFileSync(binary, "");
     if (process.platform !== "win32") fs.chmodSync(binary, 0o755);
     const previousDirectory = process.cwd();
-    const runRadImpl = vi.fn(async (selected: string) => {
-      if (selected !== fs.realpathSync.native(binary)) {
-        throw new Error(`Selected a different Radius executable: ${selected}`);
-      }
-      return { stdout: JSON.stringify(managedVersion), stderr: "" };
-    });
     try {
       process.chdir(root);
+      const expected = path.join(process.cwd(), "rad.exe");
+      const runRadImpl = vi.fn(async (selected: string) => {
+        if (selected !== expected) {
+          throw new Error(
+            `Selected a different Radius executable: ${selected}`
+          );
+        }
+        return { stdout: JSON.stringify(managedVersion), stderr: "" };
+      });
       const result = await resolver.resolveRadiusTypes(
         ["Radius.Data/postgreSqlDatabases"],
         {
@@ -2030,7 +2033,7 @@ describe("command boundary", () => {
       );
       expect(result.extension).toBe(identity.extension);
       expect(runRadImpl).toHaveBeenCalledWith(
-        fs.realpathSync.native(binary),
+        expected,
         ["version", "--cli", "--output", "json"],
         expect.any(Object)
       );

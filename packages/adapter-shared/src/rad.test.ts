@@ -640,12 +640,34 @@ describe("resolveExistingRadBinary", () => {
       process.chdir(tmp);
       process.env.RADIUS_RAD_BINARY = relative;
       expect(resolveExistingRadBinary(managed)).toBe(
-        fs.realpathSync.native(bin)
+        path.join(process.cwd(), relative)
       );
     } finally {
       process.chdir(previousDirectory);
     }
   });
+
+  const itPosix = process.platform === "win32" ? it.skip : it;
+  itPosix(
+    "keeps a relative symlink override as configured instead of its target",
+    () => {
+      const previousDirectory = process.cwd();
+      const relative = path.join("custom-bin", RAD);
+      const target = path.join(tmp, "custom-bin", "rad-v0.61.0");
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, "");
+      fs.symlinkSync(path.basename(target), path.join(tmp, relative));
+      try {
+        process.chdir(tmp);
+        process.env.RADIUS_RAD_BINARY = relative;
+        expect(resolveExistingRadBinary(managed)).toBe(
+          path.join(process.cwd(), relative)
+        );
+      } finally {
+        process.chdir(previousDirectory);
+      }
+    }
+  );
 
   it("ignores a missing RADIUS_RAD_BINARY and falls through to the managed path", () => {
     fs.mkdirSync(path.dirname(managed), { recursive: true });

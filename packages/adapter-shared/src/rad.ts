@@ -397,9 +397,7 @@ export function resolveExistingRadBinary(
   managedPath: string = MANAGED_RAD_PATH
 ): string | null {
   const fromEnv = process.env.RADIUS_RAD_BINARY;
-  if (fromEnv && isExecutableFile(fromEnv)) {
-    return path.isAbsolute(fromEnv) ? fromEnv : fs.realpathSync.native(fromEnv);
-  }
+  if (fromEnv && isExecutableFile(fromEnv)) return path.resolve(fromEnv);
 
   if (isExecutableFile(managedPath)) return managedPath;
 
