@@ -1,6 +1,6 @@
 # Azure provider value rules
 
-Use these rules for a predefined type when its `show-radius-type.mjs` result has an available managed-default Azure Recipe: `recipe.status` is `available`, `recipe.provenance` is `managed-release-default`, and `recipe.recipePack` is `azure`. In that case, `recipe.definition` is the exact matching Recipe, and `recipe.repository`, `recipe.commit`, and `recipe.path` identify its pinned source.
+Use these rules for a predefined type when its `show-radius-type.mjs` result has an available managed-default Azure Recipe: `recipe.status` is `available`, `recipe.provenance` is `managed-release-default`, and `recipe.recipePack` is `azure-aks` (or `azure` on Radius releases before the `azure-aks` rename). In that case, `recipe.definition` is the exact matching Recipe, and `recipe.repository`, `recipe.commit`, and `recipe.path` identify its pinned source.
 
 Check these values before writing `app.bicep`. Write each one as a string literal or a parameter with a literal default. If the application requires a value that the Recipe cannot deploy, stop and report the conflict. Do not silently rename a required database, container, topic, or model.
 

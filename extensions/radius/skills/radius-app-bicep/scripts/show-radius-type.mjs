@@ -60,7 +60,6 @@ const GENERATED_ROOT =
   "https://raw.githubusercontent.com/radius-project/radius";
 const GENERATED_PATH = "hack/bicep-types-radius/generated";
 const RADIUS_DEFAULTS_PATH = "deploy/manifest/defaults.yaml";
-const AZURE_RECIPE_PACK_PATH = "recipe-packs/azure/aks-recipepack.bicep";
 const MANAGED_RECIPES_CACHE_PATH = "managed-recipes";
 // This exact SHA pattern is the safety boundary around the only recursive
 // removal below ~/.radius. Never broaden it to accept arbitrary directory names.
@@ -786,16 +785,17 @@ async function loadManagedAzureRecipePack(releaseCommit, options) {
     options
   );
   const { text: source } = await loadCachedText(
-    `${MANAGED_RECIPES_CACHE_PATH}/azure/${pin.commit}/aks-recipepack.json`,
+    `${MANAGED_RECIPES_CACHE_PATH}/${pin.name}/${pin.commit}/${path.posix.basename(pin.path, ".bicep")}.json`,
     releaseCommit,
-    `https://raw.githubusercontent.com/${pin.repository}/${pin.commit}/${AZURE_RECIPE_PACK_PATH}`,
+    `https://raw.githubusercontent.com/${pin.repository}/${pin.commit}/${pin.path}`,
     validateAzureRecipePack,
     options
   );
   return {
+    name: pin.name,
     repository: pin.repository,
     commit: pin.commit,
-    path: AZURE_RECIPE_PACK_PATH,
+    path: pin.path,
     source
   };
 }
@@ -901,7 +901,7 @@ export async function resolveRadiusTypes(selectors, options = {}) {
                 {
                   status: "notFound",
                   provenance: "managed-release-default",
-                  recipePack: "azure",
+                  recipePack: pack.name,
                   repository: pack.repository,
                   commit: pack.commit,
                   path: pack.path,
@@ -910,7 +910,7 @@ export async function resolveRadiusTypes(selectors, options = {}) {
               : {
                   status: "available",
                   provenance: "managed-release-default",
-                  recipePack: "azure",
+                  recipePack: pack.name,
                   repository: pack.repository,
                   commit: pack.commit,
                   path: pack.path,
@@ -921,7 +921,7 @@ export async function resolveRadiusTypes(selectors, options = {}) {
             resource.recipe = {
               status: "unavailable",
               provenance: "managed-release-default",
-              recipePack: "azure",
+              recipePack: pack.name,
               repository: pack.repository,
               commit: pack.commit,
               path: pack.path,
