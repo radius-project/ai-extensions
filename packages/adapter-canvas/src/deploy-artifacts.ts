@@ -55,7 +55,10 @@ export function createDeployStatusReader(
   options: WorkflowArtifactReaderOptions
 ) {
   return createWorkflowArtifactReader(
-    { allowApplicationFallback: true, ...options },
+    {
+      ...options,
+      allowApplicationFallback: options.allowApplicationFallback ?? true
+    },
     run
   );
 }

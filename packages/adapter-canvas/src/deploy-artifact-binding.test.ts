@@ -26,7 +26,7 @@ describe("Canvas artifact execution binding", () => {
     {
       label: "explicit undefined",
       options: { allowApplicationFallback: undefined },
-      status: "missing"
+      status: "ok"
     }
   ] as const)(
     "preserves repo-wide guessed-name policy with $label fallback",
