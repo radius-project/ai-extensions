@@ -7,6 +7,11 @@
 // code.
 
 export {
+  createWorkflowArtifactReads,
+  createWorkflowArtifactReader
+} from "./workflow-artifacts.js";
+export type { WorkflowArtifactReaderOptions } from "./workflow-artifacts.js";
+export {
   RADIUS_EXTENSION_REGISTRY,
   RADIUS_BICEP_EXPERIMENTAL_FEATURES,
   radiusExtensionRefForVersion,

@@ -1971,10 +1971,9 @@ export function addGraphProgress(
 // artifact repo-wide, which is what a fresh canvas session with no run in flight
 // needs.
 //
-// The application name only breaks ties between artifacts in the same
-// environment; it is never a lookup key and never a hard filter. That is why the
-// ordinary `resolveRepoAppName` is good enough here even though it falls back to
-// the repository's short name: a wrong guess cannot hide a real artifact.
+// Repo-wide discovery permits a guessed application name as a tie-breaker.
+// An active run instead requires matching application and execution evidence;
+// another application's progress must not paint this deployment's graph.
 async function deployStatusReaderFromState(
   state: CanvasState,
   repo: string,

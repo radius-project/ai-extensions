@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -273,6 +275,53 @@ describeWindows("cliExec Windows process integration", () => {
 
     expect(result.code).not.toBe(0);
   });
+
+  it.each(["ok", "auth"])(
+    "runs the shared artifact binding across real Windows argv and temp paths: %s",
+    async (mode) => {
+      const script = join(directory, `artifact reader ${mode}.cjs`);
+      await writeFile(
+        script,
+        `
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (args[0] === "api") {
+  process.stdout.write(JSON.stringify({ artifacts: [{
+    id: 1, name: "radius-deploy-status-dev-app", workflow_run: { id: 41 }
+  }] }));
+} else if (args[0] === "run" && args[1] === "download") {
+  if (${JSON.stringify(mode)} === "auth") {
+    process.stderr.write("HTTP 403");
+    process.exitCode = 1;
+  } else {
+    fs.writeFileSync(path.join(args[6], "deploy-progress.json"), JSON.stringify({
+      schemaVersion: 1, application: "app", environment: "dev",
+      runId: 41, sequence: 1, resources: []
+    }));
+  }
+} else throw new Error("Unexpected fixture command");
+`,
+        "utf8"
+      );
+      const downloads: string[] = [];
+      const reader = createWorkflowArtifactReader(
+        {
+          repo: "org/app",
+          runId: 41,
+          application: "app",
+          environment: "dev"
+        },
+        async (args) => {
+          if (args[1] === "download") downloads.push(args[6]);
+          return runCli(process.execPath, [script, ...args]);
+        }
+      );
+      expect(await reader.status()).toBe(mode);
+      expect(downloads).toHaveLength(1);
+      expect(downloads.every((file) => !existsSync(file))).toBe(true);
+    }
+  );
 
   function runCli(
     command: string,

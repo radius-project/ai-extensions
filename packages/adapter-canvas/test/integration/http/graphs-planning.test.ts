@@ -1,4 +1,7 @@
 import { createServer } from "node:http";
+import { existsSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   deployStatusKeys,
@@ -175,27 +178,38 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     "graph-budget-exhausted",
     "auth"
   ] as const)(
-    "projects only validated %s evidence through the Canvas core reader",
+    "projects only validated %s evidence through the real shared binding",
     async (mode) => {
-      const reader = createDeployStatusReader({
-        repo: "octo/app",
-        runId: 42,
-        environment: "prod",
-        application: "billing",
-        listArtifacts: async () => [
-          {
-            id: 1,
-            name: "radius-deploy-status-prod-billing",
-            workflow_run: { id: 42 }
-          }
-        ],
-        downloadArtifact: async () => {
+      const directories: string[] = [];
+      const reader = createWorkflowArtifactReader(
+        {
+          repo: "octo/app",
+          runId: 42,
+          environment: "prod",
+          application: "billing"
+        },
+        async (args) => {
+          if (args[0] === "api")
+            return {
+              code: 0,
+              stderr: "",
+              stdout: JSON.stringify({
+                artifacts: [
+                  {
+                    id: 1,
+                    name: "radius-deploy-status-prod-billing",
+                    workflow_run: { id: 42 }
+                  }
+                ]
+              })
+            };
+          expect(args[1]).toBe("download");
+          directories.push(args[6]);
           if (mode === "auth")
-            throw Object.assign(new Error("HTTP 403"), {
-              code: "GH_ARTIFACT_AUTH"
-            });
-          return {
-            [DEPLOY_STATUS_FILES.progress]: JSON.stringify({
+            return { code: 1, stdout: "", stderr: "HTTP 403" };
+          writeFileSync(
+            path.join(args[6], DEPLOY_STATUS_FILES.progress),
+            JSON.stringify({
               schemaVersion: mode === "malformed" ? 2 : 1,
               application: mode === "wrong-app" ? "foreign" : "billing",
               environment: mode === "wrong-environment" ? "dev" : "prod",
@@ -208,17 +222,17 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
                   status: "failed"
                 }
               ]
-            }),
-            ...(mode === "graph-budget-exhausted" ?
-              {
-                [DEPLOY_STATUS_FILES.graph]:
-                  "{".repeat(8 * 1024 * 1024) +
-                  JSON.stringify({ resources: [{ name: "foreign" }] })
-              }
-            : {})
-          };
+            })
+          );
+          if (mode === "graph-budget-exhausted")
+            writeFileSync(
+              path.join(args[6], DEPLOY_STATUS_FILES.graph),
+              "[10:32:01]".repeat(64) +
+                JSON.stringify({ resources: [{ name: "foreign" }] })
+            );
+          return { code: 0, stdout: "", stderr: "" };
         }
-      });
+      );
       const harness = start(reader);
       harness.state.contextRepo = "octo/app";
       harness.state.deployRunId = 42;
@@ -249,6 +263,10 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
         expect(await reader.graph()).toMatchObject({ graph: null });
         expect((await reader.progress())?.resources).toHaveLength(1);
       }
+      expect(directories).toHaveLength(1);
+      expect(directories.every((directory) => !existsSync(directory))).toBe(
+        true
+      );
       expect(harness.state.deployStatus).toBe("in_progress");
     }
   );
