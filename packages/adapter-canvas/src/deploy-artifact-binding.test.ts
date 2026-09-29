@@ -16,6 +16,54 @@ vi.mock("./gh.js", () => ({ cliExec: vi.fn() }));
 afterEach(() => vi.resetAllMocks());
 
 describe("Canvas artifact execution binding", () => {
+  it.each([
+    { label: "omitted", options: {}, status: "ok" },
+    {
+      label: "explicit false",
+      options: { allowApplicationFallback: false },
+      status: "missing"
+    },
+    {
+      label: "explicit undefined",
+      options: { allowApplicationFallback: undefined },
+      status: "missing"
+    }
+  ] as const)(
+    "preserves repo-wide guessed-name policy with $label fallback",
+    async ({ options, status }) => {
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        environment: "dev",
+        application: "guessed-from-repo",
+        ...options,
+        listArtifacts: async () => [
+          {
+            id: 1,
+            name: "radius-deploy-status-dev-actual",
+            workflow_run: { id: 41 }
+          }
+        ],
+        downloadArtifact: async () => ({
+          [DEPLOY_STATUS_FILES.progress]: JSON.stringify({
+            schemaVersion: 1,
+            application: "actual",
+            environment: "dev",
+            runId: 41,
+            sequence: 1,
+            resources: []
+          })
+        })
+      });
+
+      expect(await reader.read()).toMatchObject({
+        status,
+        progress:
+          status === "ok" ? { application: "actual", environment: "dev" } : null
+      });
+      expect(cliExec).not.toHaveBeenCalled();
+    }
+  );
+
   it("retains force-delete conflict proof through the real generic artifact binding", async () => {
     let directory = "";
     vi.mocked(cliExec).mockImplementation((_file, args, _options, callback) => {
