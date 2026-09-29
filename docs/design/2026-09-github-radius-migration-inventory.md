@@ -92,7 +92,7 @@ The sections below identify current tests and contracts for each row. HTTP parsi
 
 ### Stage 1B evidence interpretation
 
-**Owner and scope:** Nell Shamrell-Harrington. Draft [#907](https://github.com/radius-project/ai-extensions/pull/907) corrects evidence interpretation above the merged Stage 1A implementation in `main`; each candidate head requires independent CI. It does not complete Stage 1, extract artifact transport, add retries, or change account policy, attempt selection, repair eligibility, status vocabulary, workflow formats, or producer schemas.
+**Owner and scope:** Nell Shamrell-Harrington. [#907](https://github.com/radius-project/ai-extensions/pull/907) is under review above the merged Stage 1A implementation in `main`; each candidate head requires independent CI. It does not complete Stage 1, extract artifact transport, add retries, or change account policy, attempt selection, repair eligibility, status vocabulary, workflow formats, or producer schemas.
 
 | Existing evidence                                                                            | Before 1B                                                                  | 1B interpretation                                                                                                                                          |
 |----------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
