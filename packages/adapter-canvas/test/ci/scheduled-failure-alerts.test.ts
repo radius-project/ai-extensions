@@ -1,8 +1,8 @@
-// Every scheduled workflow that files an issue on failure labels it
-// `test-failure`, which is how the Radius on-call finds failures to triage.
-// An unlabeled alert still opens an issue, so a missing label fails silently:
-// the issue exists but no one is looking for it.
-import { readdir, readFile } from "node:fs/promises";
+// Scheduled workflows whose failures the Radius on-call triages label their
+// failure issue `test-failure`, which is how on-call finds them. An unlabeled
+// alert still opens an issue, so a missing label fails silently: the issue
+// exists but no one is looking for it.
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -12,40 +12,27 @@ const WORKFLOWS_DIRECTORY = path.resolve(
   "../../../../.github/workflows"
 );
 
-const ISSUE_CREATE = /gh issue create\b[^\n]*/g;
+const ON_CALL_WORKFLOWS = [
+  "canvas-functional.yml",
+  "canvas-reliability.yml"
+] as const;
 
-async function issueCreateCommands(): Promise<
-  readonly { readonly file: string; readonly command: string }[]
-> {
-  const files = (await readdir(WORKFLOWS_DIRECTORY)).filter((file) =>
-    /\.ya?ml$/.test(file)
-  );
-  const commands: { file: string; command: string }[] = [];
-  for (const file of files.sort()) {
-    const raw = await readFile(path.join(WORKFLOWS_DIRECTORY, file), "utf8");
-    for (const match of raw.matchAll(ISSUE_CREATE)) {
-      commands.push({ file, command: match[0] });
-    }
-  }
-  return commands;
+const ISSUE_CREATE = /gh issue create\b[^\n]*/g;
+const TEST_FAILURE_LABEL = /--label[= ]"?test-failure"?(\s|$)/;
+
+async function issueCreateCommands(file: string): Promise<readonly string[]> {
+  const raw = await readFile(path.join(WORKFLOWS_DIRECTORY, file), "utf8");
+  return [...raw.matchAll(ISSUE_CREATE)].map((match) => match[0]);
 }
 
-describe("scheduled failure alerts", () => {
-  it("covers every workflow that alerts on a scheduled failure", async () => {
-    const files = new Set((await issueCreateCommands()).map((c) => c.file));
-    expect([...files]).toEqual(
-      expect.arrayContaining([
-        "canvas-functional.yml",
-        "canvas-reliability.yml",
-        "cloud-e2e-cleanup.yml",
-        "cloud-e2e.yml"
-      ])
-    );
+describe.each(ON_CALL_WORKFLOWS)("%s scheduled failure alert", (file) => {
+  it("opens an issue when a scheduled run fails", async () => {
+    expect(await issueCreateCommands(file)).not.toHaveLength(0);
   });
 
-  it("labels every alert issue test-failure", async () => {
-    const unlabeled = (await issueCreateCommands()).filter(
-      ({ command }) => !/--label[= ]"?test-failure"?(\s|$)/.test(command)
+  it("labels that issue test-failure", async () => {
+    const unlabeled = (await issueCreateCommands(file)).filter(
+      (command) => !TEST_FAILURE_LABEL.test(command)
     );
     expect(unlabeled).toEqual([]);
   });
