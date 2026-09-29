@@ -629,6 +629,15 @@ describe("extractErrorLines", () => {
         expected: "Error: { unattributed }"
       },
       {
+        names: ["Run rad commands", "Persist Radius state (rad shutdown)"],
+        logs: [
+          "deploy\tUNKNOWN STEP\t2026-01-01T00:00:01Z Error: { deployment quota }",
+          "deploy\tUNKNOWN STEP\t2026-01-01T00:00:02Z Error: { teardown failed }",
+          "deploy\tUNKNOWN STEP\t2026-01-01T00:00:03Z TraceId: fixture-trace"
+        ],
+        expected: "Error: { teardown failed }\nTraceId: fixture-trace"
+      },
+      {
         names: ["Run rad commands"],
         logs: ["Error: { unprefixed }"],
         expected: "Error: { unprefixed }"
@@ -664,11 +673,19 @@ describe("extractErrorLines", () => {
           {
             status: "completed",
             conclusion: "failure",
-            steps: names.map((name) => ({ name, conclusion: "failure" })),
+            steps: names.map((name) => ({
+              name,
+              status: "completed",
+              conclusion: "failure"
+            })),
             jobs: [
               {
                 name: "deploy",
-                steps: names.map((name) => ({ name, conclusion: "failure" }))
+                steps: names.map((name) => ({
+                  name,
+                  status: "completed",
+                  conclusion: "failure"
+                }))
               }
             ]
           },
@@ -679,7 +696,15 @@ describe("extractErrorLines", () => {
           }
         );
         expect(result.radiusError).toBe(expected);
-        for (const name of names) expect(result.message).toContain(name);
+        expect(result.message).toBe(
+          `Deployment failed (failure). Failed step: ${names.join(", ")}.\n\n${expected}\n\nView the full run: https://github.com/org/app/actions/runs/41`
+        );
+        expect(result.narration).toEqual([
+          "",
+          "──────── failure details ────────",
+          ...expected.split("\n").map((line) => "  " + line),
+          "─────────────────────────────────"
+        ]);
       }
     );
     it("keeps the 40-line tail and narration order", async () => {

@@ -5,7 +5,10 @@ import { createRequestHandler } from "../../../src/server/create-request-handler
 import { createDeploymentsRoutes } from "../../../src/server/routes/deployments.js";
 import { isValidRepoSlug } from "../../../src/azure-oidc.js";
 import { createDeploymentAbandonmentService } from "../../../src/server/services/deployment-abandonment.js";
-import { createDeployRequestService } from "../../../src/server/services/deploy-request.js";
+import {
+  createDeployRequestService,
+  type DeployRequestDependencies
+} from "../../../src/server/services/deploy-request.js";
 import { createDeployDispatchService } from "../../../src/server/services/deploy-dispatch.js";
 import { resolveEnvironmentDeployment } from "../../../src/server/services/deployment-resolver.js";
 import { probeDeleteConflict } from "../../../src/server/services/delete-conflict.js";
@@ -22,7 +25,9 @@ import {
   releaseDeploymentMutation,
   reserveDeploymentMutation,
   setDeployRepairHandoff,
+  setDeployFailureNotice,
   triggerDeployRepairHandoff,
+  triggerDeployFailureNotice,
   resolveDeploymentEnvironment,
   resolveDeployRepairLoop
 } from "../../../src/server.js";
@@ -48,6 +53,8 @@ import {
 } from "@radius-project/adapter-shared";
 import { createDeployOutcomeService } from "../../../src/server/services/deploy-outcome.js";
 import { settleDeployStatuses } from "../../../src/deploy-artifacts.js";
+import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monitor.js";
+import { createDeferred } from "../../support/browser/fakes.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -282,107 +289,59 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
-  it("publishes an unreadable completed outcome as run-unconfirmed and refuses repair through the real guard", async () => {
-    let repairs = 0;
-    setDeployRepairHandoff(() => {
-      repairs++;
-    });
-    try {
-      const harness = start({ triggerDeployRepairHandoff });
-      harness.state.deployStatus = "in_progress";
-      let reads = 0;
-      const execution: WorkflowExecution = {
-        mode: "ambient",
-        run: async (args) => {
-          expect(args).toEqual([
-            "run",
-            "view",
-            "42",
-            "--json",
-            "status,conclusion,jobs",
-            "--repo",
-            "org/app"
-          ]);
-          reads++;
-          return {
-            code: 0,
-            stderr: "",
-            stdout: '{"status":"completed","conclusion":null}'
-          };
-        }
-      };
-      await createDeployMonitorService({
-        plannedGraph: { recover: async () => null },
-        dispatch: {
-          prepareAndDispatch: async () => ({
-            dispatched: true,
-            workflowFile: "run-rad-commands.yml",
-            dispatchedAt: 1,
-            environment: "dev",
-            baselineRunId: null
-          })
-        },
-        outcome: {
-          settle: () => {
-            throw new Error("Unconfirmed outcome must not settle");
-          }
-        },
-        deployRadCommandsStep: "Run rad commands",
-        unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
-        findWorkflowRun: async () => 42,
-        getRunDetail: (repo, runId) =>
-          observeWorkflowRun(
-            { repo, runId },
+  it.each([
+    { conclusion: "future_conclusion", reads: 1, sleeps: 0 },
+    { conclusion: null, reads: 240, sleeps: 240 }
+  ])(
+    "publishes completed+$conclusion as run-unconfirmed and refuses repair through the real guard",
+    async ({ conclusion, reads, sleeps }) => {
+      let repairs = 0;
+      setDeployRepairHandoff(() => {
+        repairs++;
+      });
+      try {
+        const harness = start({ triggerDeployRepairHandoff });
+        harness.state.deployStatus = "in_progress";
+        harness.state.deployingResources = [
+          { name: "db", deployStatus: "pending" }
+        ];
+        const observed = createUnconfirmedMonitor(conclusion);
+        await observed.monitor.run({
+          entry: { state: harness.state },
+          repo: "org/app",
+          branch: "feature",
+          provider: "azure",
+          requestedEnvironment: "dev",
+          resources: harness.state.deployingResources,
+          log: () => {}
+        });
+        const entry = await container!.getOrCreate("panel-a");
+        const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+        expect(await response.json()).toMatchObject({
+          status: "failed",
+          errorKind: "run-unconfirmed",
+          error:
+            "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed. View the full run: https://github.com/org/app/actions/runs/42",
+          deployRunUrl: "https://github.com/org/app/actions/runs/42",
+          resources: [
             {
-              readRun: (targetRepo, targetRun) =>
-                readWorkflowRun(execution, targetRepo, targetRun)
+              name: "db",
+              deployStatus: "failed",
+              deployMessage:
+                "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed."
             }
-          ),
-        createStatusReader: async () => ({
-          graph: () => {
-            throw new Error("No terminal artifact read");
-          },
-          progress: () => {
-            throw new Error("No resource progress read");
-          },
-          controlPlaneLog: () => {
-            throw new Error("No confirmed failure diagnostics");
-          }
-        }),
-        buildDeployStatusMap: () => new Map(),
-        buildDeployMessageMap: () => new Map(),
-        applyDeployMessages: () => {},
-        applyDeployStatusToResources: () => [],
-        settleDeployStatuses,
-        generatePortalUrl: () => "",
-        optionalString: () => "",
-        errorMessage: String,
-        sleep: async () => {},
-        now: () => 1700000000000
-      }).run({
-        entry: { state: harness.state },
-        repo: "org/app",
-        branch: "feature",
-        provider: "azure",
-        requestedEnvironment: "dev",
-        resources: [],
-        log: () => {}
-      });
-      const entry = await container!.getOrCreate("panel-a");
-      const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
-      expect(await response.json()).toMatchObject({
-        status: "failed",
-        errorKind: "run-unconfirmed",
-        error: expect.stringContaining("It may still be running"),
-        deployRunUrl: "https://github.com/org/app/actions/runs/42"
-      });
-      expect(reads).toBe(240);
-      expect(repairs).toBe(0);
-      expect(harness.dispatches).toEqual([]);
-    } finally {
-      setDeployRepairHandoff(null);
+          ]
+        });
+        expect(observed.reads).toHaveLength(reads);
+        expect(observed.sleeps).toEqual(Array<number>(sleeps).fill(5000));
+        expect(observed.dispatches).toBe(1);
+        expect(repairs).toBe(0);
+        expect(harness.dispatches).toEqual([]);
+      } finally {
+        setDeployRepairHandoff(null);
+      }
     }
-  });
+  );
 
   it.each(["primary", "unavailable"] as const)(
     "exposes real %s failure evidence to repair polling but keeps notifications passive",
@@ -1365,7 +1324,17 @@ interface DeployHarness {
   failPersistedLookup(failure: boolean): void;
 }
 
-function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
+function startDeploy(
+  monitorOverride?: DeployMonitorService,
+  callbacks: Partial<
+    Pick<
+      DeployRequestDependencies,
+      | "triggerDeployRepairHandoff"
+      | "triggerDeployFailureNotice"
+      | "releaseDeploymentMutation"
+    >
+  > = {}
+): DeployHarness {
   const monitorCalls: DeployMonitorRequest[] = [];
   const branchLookups: string[][] = [];
   const handoffs: string[] = [];
@@ -1383,7 +1352,8 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
       localDeploymentBlocksMutation(state),
     reserveDeploymentMutation: (state, reservation) =>
       reserveDeploymentMutation(state, reservation),
-    releaseDeploymentMutation,
+    releaseDeploymentMutation:
+      callbacks.releaseDeploymentMutation ?? releaseDeploymentMutation,
     deploymentStatusBlocksMutation,
     resolveEnvDeployment: () =>
       persistedFails ?
@@ -1399,11 +1369,14 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
           !!value && typeof value === "object"
       ),
     beginDeployAttempt,
-    triggerDeployRepairHandoff: (_entry, instanceId) => {
-      handoffs.push(instanceId);
-      return true;
-    },
-    triggerDeployFailureNotice: () => false,
+    triggerDeployRepairHandoff:
+      callbacks.triggerDeployRepairHandoff ??
+      ((_entry, instanceId) => {
+        handoffs.push(instanceId);
+        return true;
+      }),
+    triggerDeployFailureNotice:
+      callbacks.triggerDeployFailureNotice ?? (() => false),
     monitor: monitorOverride ?? {
       run: (request) => {
         monitorCalls.push(request);
@@ -1424,8 +1397,10 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
     createDeploymentsRoutes({
       isValidRepoSlug,
       readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
-      triggerDeployRepairHandoff: () => false,
-      triggerDeployFailureNotice: () => false,
+      triggerDeployRepairHandoff:
+        callbacks.triggerDeployRepairHandoff ?? (() => false),
+      triggerDeployFailureNotice:
+        callbacks.triggerDeployFailureNotice ?? (() => false),
       deployHandoffStatus: () => ({
         state: "idle",
         attempts: 0,
@@ -1546,6 +1521,143 @@ function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
 }
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
+  it.each([
+    { conclusion: "future_conclusion", reads: 1, sleeps: 0 },
+    { conclusion: null, reads: 240, sleeps: 240 }
+  ])(
+    "cleans up completed+$conclusion once, only after dispatch, and never repairs it",
+    async ({ conclusion, reads, sleeps }) => {
+      const dispatchDone = createDeferred<void>();
+      const noticeDone = createDeferred<string>();
+      let dispatches = 0;
+      let releases = 0;
+      let repairs = 0;
+      const notices: string[] = [];
+      setDeployRepairHandoff(() => {
+        repairs++;
+      });
+      setDeployFailureNotice(({ error }) => {
+        notices.push(error);
+        return noticeDone.promise;
+      });
+      const observed = createUnconfirmedMonitor(conclusion, {
+        prepareAndDispatch: async () => {
+          dispatches++;
+          await dispatchDone.promise;
+          return {
+            dispatched: true,
+            workflowFile: "run-rad-commands.yml",
+            dispatchedAt: 1,
+            environment: "production",
+            baselineRunId: null
+          };
+        }
+      });
+      try {
+        const harness = startDeploy(observed.monitor, {
+          triggerDeployRepairHandoff,
+          triggerDeployFailureNotice,
+          releaseDeploymentMutation: (state, reservation) => {
+            expect(state.deployStatus).toBe("failed");
+            expect(state.deployErrorKind).toBe("run-unconfirmed");
+            expect(state.deployError).toContain(
+              "its outcome could not be confirmed"
+            );
+            expect(state.deployingResources?.[0]).toMatchObject({
+              deployStatus: "failed",
+              deployMessage:
+                "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed."
+            });
+            expect(reservation.attemptId).toBe(state.deployAttempt?.id);
+            releases++;
+            releaseDeploymentMutation(state, reservation);
+          }
+        });
+        const entry = await container!.getOrCreate("panel-a");
+        const state = harness.stateOf("panel-a");
+        state.plannedResources = [{ id: "r1", name: "db" }];
+        const response = await post(entry.baseUrl, "/api/deploy", deployBody());
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ ok: true });
+        expect(dispatches).toBe(1);
+        expect(activeDeploymentMutation(state)?.attemptId).toBe(
+          state.deployAttempt?.id
+        );
+        expect(releases).toBe(0);
+        expect(observed.reads).toEqual([]);
+        expect(notices).toEqual([]);
+        const duplicate = await post(
+          entry.baseUrl,
+          "/api/deploy",
+          deployBody()
+        );
+        expect(duplicate.status).toBe(409);
+        await duplicate.text();
+        expect(dispatches).toBe(1);
+        expect(releases).toBe(0);
+
+        dispatchDone.resolve();
+        await expect.poll(() => releases).toBe(1);
+        expect(activeDeploymentMutation(state)).toBeUndefined();
+        expect(observed.reads).toHaveLength(reads);
+        expect(
+          observed.reads.every(
+            (args) =>
+              JSON.stringify(args) ===
+              JSON.stringify([
+                "run",
+                "view",
+                "42",
+                "--json",
+                "status,conclusion,jobs",
+                "--repo",
+                "acme/widgets"
+              ])
+          )
+        ).toBe(true);
+        expect(observed.sleeps).toEqual(Array<number>(sleeps).fill(5000));
+        expect(notices).toEqual([state.deployError]);
+        expect(state.deployNoticeState).toBe("pending");
+        expect(state.deployNoticeAttempts).toBe(1);
+        expect(state.deployRepairAttempts).toBe(0);
+        expect(repairs).toBe(0);
+        for (let poll = 0; poll < 2; poll++) {
+          const status = await fetch(`${entry.baseUrl}/api/deploy-status`);
+          expect(await status.json()).toMatchObject({
+            status: "failed",
+            errorKind: "run-unconfirmed",
+            repairing: false
+          });
+        }
+        expect(notices).toHaveLength(1);
+        expect(repairs).toBe(0);
+        expect(dispatches).toBe(1);
+        expect(releases).toBe(1);
+        expect(observed.reads).toHaveLength(reads);
+
+        beginDeployAttempt(state, {
+          repo: "acme/widgets",
+          branch: "feat",
+          environment: "production",
+          provider: "azure",
+          appFile: ".radius/app.bicep",
+          repairLoop: false
+        });
+        const replacement = structuredClone(state);
+        noticeDone.resolve("notice-id");
+        await noticeDone.promise;
+        expect(state).toEqual(replacement);
+        expect(state.deployNoticeState).toBe("idle");
+        expect(releases).toBe(1);
+      } finally {
+        dispatchDone.resolve();
+        noticeDone.resolve("notice-id");
+        setDeployRepairHandoff(null);
+        setDeployFailureNotice(null);
+      }
+    }
+  );
+
   // Each refusal below gets its own harness. Sharing one test made the
   // case-mismatch half reachable only if the missing-subject half got that
   // far, so a regression in either path reported a single failure that said

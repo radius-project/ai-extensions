@@ -20,7 +20,7 @@ import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 // here has to become canvas state — nothing above it is still listening. The
 // three failure shapes are preserved exactly: a confirmed workflow failure, a
 // branch that was never pushed, and a run whose outcome was never confirmed
-// (no run found, monitoring timed out, monitor crashed), which is the only one
+// (no run found, unreadable outcome, monitoring timed out, monitor crashed), which is the only one
 // an automatic repair may never act on.
 
 export interface DeployMonitorInstanceEntry {
@@ -85,8 +85,7 @@ export interface DeployMonitorDependencies {
     resources: CanvasGraphResource[],
     statuses: Map<string, DeployResourceStatus>
   ): DeployStatusChange[];
-  // Used only on the monitoring-timeout path: the terminal settle belongs to
-  // the outcome service, but a run this loop stops watching never reaches it.
+  // Unconfirmed exits never reach the outcome service's terminal settlement.
   settleDeployStatuses(
     resources: CanvasGraphResource[],
     conclusion: string | null | undefined,
@@ -355,12 +354,53 @@ export function createDeployMonitorService(
       };
 
       const DEPLOY_STEP = dependencies.deployRadCommandsStep;
+      let completionObserved = false;
+      const stopUnconfirmed = (completed: boolean): void => {
+        const explanation =
+          "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed.";
+        log(
+          completed ?
+            "⚠ " + explanation
+          : "⚠ Timed out waiting for the deploy workflow to complete."
+        );
+        // Stop unfinished spinners without claiming a workflow failure.
+        // Producer-terminal resources retain their own status and message.
+        dependencies.settleDeployStatuses(
+          resources,
+          completed ? null : "monitor_timed_out",
+          completed ? explanation : undefined
+        );
+        for (const resource of resources) {
+          if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+        }
+        entry.state.deployError =
+          (completed ?
+            explanation + " View the full run: "
+          : "Timed out waiting for the deploy workflow to complete. It may still be running — view it at ") +
+          "https://github.com/" +
+          repo +
+          "/actions/runs/" +
+          dRunId;
+        entry.state.deployErrorKind = dependencies.unconfirmedRunKind;
+        entry.state.deployStatus = "failed";
+      };
 
       for (let p = 0; p < RUN_POLL_ATTEMPTS; p++) {
         const detail = await dependencies.getRunDetail(repo, dRunId);
         if (!detail) {
           await dependencies.sleep(POLL_INTERVAL_MS);
           continue;
+        }
+        if (detail.status === "completed") {
+          completionObserved = true;
+          if (
+            typeof detail.conclusion === "string" &&
+            detail.conclusion.trim() !== "" &&
+            !confirmedWorkflowConclusion(detail)
+          ) {
+            stopUnconfirmed(true);
+            return;
+          }
         }
 
         // Stream step lifecycle: announce when a step STARTS (in_progress) and
@@ -465,27 +505,7 @@ export function createDeployMonitorService(
         }
         await dependencies.sleep(POLL_INTERVAL_MS);
       }
-      log("⚠ Timed out waiting for the deploy workflow to complete.");
-      // Monitoring stopped watching, so nothing else will ever move these
-      // nodes: the terminal settle lives in the outcome service, which this
-      // path never reaches. Leaving them gray or yellow would show a deployment
-      // that looks perpetually in flight, so settle them here with a warning
-      // that monitoring stopped, not the workflow itself. Resources the
-      // producer already reported terminal keep their own status and message.
-      dependencies.settleDeployStatuses(resources, "monitor_timed_out");
-      for (const resource of resources) {
-        if (resource.deployStatus) setStatus(resource, resource.deployStatus);
-      }
-      entry.state.deployError =
-        "Timed out waiting for the deploy workflow to complete. It may still be running — view it at https://github.com/" +
-        repo +
-        "/actions/runs/" +
-        dRunId;
-      // Monitoring gave up; the run itself may still be going. Mark it so an
-      // attempt-bound repair redeploy is refused rather than racing a second
-      // workflow against the same target.
-      entry.state.deployErrorKind = dependencies.unconfirmedRunKind;
-      entry.state.deployStatus = "failed";
+      stopUnconfirmed(completionObserved);
     }
   };
 }
