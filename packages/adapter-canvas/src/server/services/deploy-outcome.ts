@@ -1,9 +1,15 @@
 import {
   collectWorkflowFailure,
   confirmedWorkflowConclusion,
+  WorkflowReadInterruptedError,
+  type WorkflowReadContext,
   type WorkflowRunDetail,
   type WorkflowStep
 } from "@radius-project/core";
+import {
+  WorkflowArtifactReadError,
+  type WorkflowReadRequest
+} from "@radius-project/adapter-shared";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 
@@ -25,13 +31,14 @@ export type DeployRunStep = WorkflowStep;
 export interface DeployGraphRead {
   graph: unknown | null;
   status: string;
+  error?: unknown;
 }
 
 // The run-scoped artifact reader. Only the two reads the terminal stage makes
 // are declared; the progress read belongs to the polling loop.
 export interface DeployOutcomeStatusReader {
-  graph(): Promise<DeployGraphRead>;
-  controlPlaneLog(): Promise<string | null>;
+  graph(context?: WorkflowReadContext): Promise<DeployGraphRead>;
+  controlPlaneLog(context?: WorkflowReadContext): Promise<string | null>;
 }
 
 export interface DeployOutcomeDependencies {
@@ -41,7 +48,11 @@ export interface DeployOutcomeDependencies {
     conclusion: string | null | undefined,
     radiusError?: string
   ): void;
-  fetchRunLog(repo: string, runId: number | string): Promise<string | null>;
+  fetchRunLog(
+    repo: string,
+    runId: number | string,
+    request?: WorkflowReadRequest
+  ): Promise<string | null>;
   // The deployErrorKind stamped on an auth-drift failure so the repair guard
   // leaves it for the user to re-verify rather than auto-redeploying it.
   cloudAuthDriftKind: CanvasState["deployErrorKind"];
@@ -69,6 +80,8 @@ export interface DeployOutcomeRequest {
     status: "pending" | "in_progress" | "success" | "failed"
   ): void;
   pollDeployStatus(force: boolean): Promise<void>;
+  observation?: WorkflowReadRequest;
+  isCurrent?(): boolean;
 }
 
 export interface DeployOutcomeService {
@@ -108,20 +121,40 @@ export function createDeployOutcomeService(
   // the upload has normally landed. Retry a few times anyway to absorb
   // upload-finalization lag, since this read is the whole terminal graph.
   const readDeployedGraph = async (
-    statusReader: DeployOutcomeStatusReader
-  ): Promise<{ deployed: unknown; graphStatus: string | null }> => {
+    statusReader: DeployOutcomeStatusReader,
+    context?: WorkflowReadContext
+  ): Promise<{
+    deployed: unknown;
+    graphStatus: string | null;
+    note?: string;
+  }> => {
     let deployed: unknown = null;
     let graphStatus: string | null = null;
     for (let g = 0; g < 3; g++) {
       let gr: DeployGraphRead;
       try {
-        gr = await statusReader.graph();
+        gr = await statusReader.graph(context);
       } catch {
         return { deployed: null, graphStatus: "unavailable" };
       }
       graphStatus = gr.status;
+      if (gr.status === "error") {
+        const decision =
+          gr.error instanceof WorkflowArtifactReadError ?
+            gr.error.decision
+          : undefined;
+        return {
+          deployed: null,
+          graphStatus: "unavailable",
+          ...(decision && decision.state !== "ready" ?
+            {
+              note: `Artifact evidence ${decision.state}: ${decision.reason}.`
+            }
+          : {})
+        };
+      }
       // Permission failures will not resolve by retrying.
-      if (gr.status === "auth") break;
+      if (gr.status === "auth" || gr.status === "malformed") break;
       if (gr.graph) {
         try {
           deployed = dependencies.projectSafeGraphResources(gr.graph);
@@ -130,15 +163,47 @@ export function createDeployOutcomeService(
           // Treat an unsafe producer artifact as malformed without retaining or
           // repeating any of its data in shared state or user-facing diagnostics.
           graphStatus = "malformed";
+          break;
         }
       }
-      if (g < 2) await dependencies.sleep(5000);
+      if (g < 2) {
+        if (context) {
+          if (context.remaining() <= 5000) break;
+          try {
+            await context.wait(
+              context.clock.sleep(5000, {
+                stopped: () => context.check().state === "stopped",
+                onStop: context.onStop
+              })
+            );
+          } catch (error) {
+            if (
+              !(error instanceof WorkflowReadInterruptedError) ||
+              error.reason !== "elapsed"
+            )
+              throw error;
+            return {
+              deployed: null,
+              graphStatus: "unavailable",
+              note: "Artifact evidence exhausted: elapsed."
+            };
+          }
+        } else await dependencies.sleep(5000);
+      }
     }
     return { deployed, graphStatus };
   };
 
   return {
     async settle(request) {
+      const assertCurrent = () => {
+        if (
+          request.isCurrent?.() === false ||
+          request.observation?.context.check().state === "stopped"
+        )
+          throw new WorkflowReadInterruptedError("cancelled");
+      };
+      assertCurrent();
       const {
         entry,
         repo,
@@ -157,10 +222,15 @@ export function createDeployOutcomeService(
       }
 
       log("🗺  Retrieving deploy status and application graph…");
-      const { deployed, graphStatus } = await readDeployedGraph(statusReader);
+      const { deployed, graphStatus, note } = await readDeployedGraph(
+        statusReader,
+        request.observation?.context
+      );
+      assertCurrent();
       // Final status sweep, forced past the poll interval so the last published
       // state is always folded in.
       await pollDeployStatus(true);
+      assertCurrent();
 
       // Record stop time + duration.
       const finishedAt = dependencies.now();
@@ -219,6 +289,7 @@ export function createDeployOutcomeService(
           "  ⚠ Deployed graph not available (the deploy may not have published one)."
         );
       }
+      if (note) log("  " + note);
 
       if (conclusion === "success") {
         entry.state.deployStatus = "complete";
@@ -249,12 +320,15 @@ export function createDeployOutcomeService(
         },
         { provider, resourcesTouched: deployStepStartedAt > 0 },
         {
-          readLog: dependencies.fetchRunLog,
-          readControlPlaneLog: () => statusReader.controlPlaneLog()
+          readLog: (targetRepo, runId) =>
+            dependencies.fetchRunLog(targetRepo, runId, request.observation),
+          readControlPlaneLog: () =>
+            statusReader.controlPlaneLog(request.observation?.context)
         }
       );
+      assertCurrent();
       failure.narration.forEach(log);
-      entry.state.deployError = failure.message;
+      entry.state.deployError = failure.message + (note ? "\n\n" + note : "");
       const { radiusError, authDriftMessage } = failure;
       // Settle the graph now that the exact Radius error is known, so every red
       // node carries it — or "Deployment cancelled" / "Deployment timed out"

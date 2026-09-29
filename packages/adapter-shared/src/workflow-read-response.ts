@@ -1,6 +1,8 @@
 import type {
   WorkflowReadTiming,
-  WorkflowResponseMetadata
+  WorkflowResponseMetadata,
+  WorkflowReadContext,
+  WorkflowReadDecision
 } from "@radius-project/core";
 import type {
   WorkflowCommandResult,
@@ -9,6 +11,7 @@ import type {
 } from "./workflow-reads.js";
 
 export interface WorkflowApiResponse {
+  decision?: WorkflowReadDecision;
   metadata: WorkflowResponseMetadata;
   value: unknown;
   nextLink: string | null;
@@ -18,6 +21,49 @@ export interface WorkflowApiResponse {
   commandAuthorizationStatus: 401 | 403 | null;
   commandMissing: boolean;
   diagnostic: string;
+}
+
+export async function readWorkflowApiWithPolicy(
+  run: WorkflowRunner,
+  endpoint: string,
+  options: WorkflowReadOptions,
+  context: WorkflowReadContext,
+  key: string,
+  phaseDeadline: number,
+  observe: (response: WorkflowApiResponse) => void = () => {}
+): Promise<WorkflowApiResponse> {
+  const result = await context.read(key, phaseDeadline, async () => {
+    const response = await readWorkflowApi(
+      run,
+      endpoint,
+      options,
+      context.clock.wall
+    );
+    observe(response);
+    return response;
+  });
+  if (result.response) return { ...result.response, decision: result.decision };
+  return {
+    ok: false,
+    metadata: {
+      source: "unavailable",
+      reason: result.decision.state === "stopped" ? "cancelled" : "deferred"
+    },
+    value: null,
+    nextLink: null,
+    failure: "response",
+    commandAuthorizationFailure: false,
+    commandAuthorizationStatus: null,
+    commandMissing: false,
+    diagnostic:
+      (
+        result.decision.state !== "ready" &&
+        result.decision.reason === "capacity"
+      ) ?
+        "Automatic workflow reads are deferred because this observation already retains 32 protected retry restrictions."
+      : `Workflow read ${result.decision.state}${result.decision.state === "ready" ? "" : `: ${result.decision.reason}`}.`,
+    decision: result.decision
+  };
 }
 
 const absent: WorkflowReadTiming = { state: "absent" };

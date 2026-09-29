@@ -126,7 +126,7 @@ describe("deploy outcome on success", () => {
     "secondary rate limit",
     "Resource protected by organization SAML enforcement"
   ])(
-    "retains the artifact 403 projection without activating graph retries: %s",
+    "distinguishes rate deferral from auth without activating graph retries: %s",
     async (message) => {
       let reads = 0;
       const reader = createWorkflowArtifactReader(
@@ -151,12 +151,21 @@ describe("deploy outcome on success", () => {
       await service.settle(request);
       expect(reads).toBe(1);
       expect(state.deployStatus).toBe("complete");
-      expect(logs.join("\n")).toContain("access denied");
+      expect(logs.join("\n")).toContain(
+        message === "secondary rate limit" ?
+          "deferred: missing-deadline"
+        : "access denied"
+      );
       const evidence = await reader.read();
-      expect(evidence.status).toBe("auth");
+      expect(evidence.status).toBe(
+        message === "secondary rate limit" ? "error" : "auth"
+      );
       expect(evidence.error).toBeInstanceOf(WorkflowArtifactReadError);
       expect(evidence.error).toMatchObject({
-        code: "GH_ARTIFACT_AUTH",
+        code:
+          message === "secondary rate limit" ?
+            "GH_ARTIFACT_TRANSPORT"
+          : "GH_ARTIFACT_AUTH",
         evidence: [
           {
             response: {

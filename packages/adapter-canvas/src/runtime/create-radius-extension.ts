@@ -306,23 +306,13 @@ export function createRadiusExtension(
 
       try {
         const closes: Array<Promise<void>> = [];
-        for (const [id, entry] of deps.servers) {
+        for (const id of [...deps.servers.keys()]) {
           try {
             deps.operations.markEnvironmentInstanceShuttingDown(id);
-            entry.server.closeAllConnections?.();
-            closes.push(
-              new Promise<void>((resolve) => {
-                try {
-                  entry.server.close(() => resolve());
-                } catch {
-                  resolve();
-                }
-              })
-            );
+            closes.push(deps.stopServer(id, true));
           } catch {
             /* ignore */
           }
-          deps.servers.delete(id);
         }
         await withTimeout(Promise.all(closes), CLEANUP_TIMEOUT_MS);
 

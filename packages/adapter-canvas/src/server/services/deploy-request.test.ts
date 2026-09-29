@@ -141,6 +141,11 @@ function entryWith(state: CanvasState = {}) {
   return { state };
 }
 
+function entryReader(state: CanvasState = {}) {
+  const entry = entryWith(state);
+  return () => entry;
+}
+
 describe("deploy request service construction", () => {
   it.each([
     "readInstanceEntry",
@@ -233,7 +238,7 @@ describe("deploy request admission", () => {
     const state: CanvasState = { deployStatus: "failed" };
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith(state),
+        readInstanceEntry: entryReader(state),
         resolveDeployRepairLoop: () => ({
           repairLoop: false,
           attemptId: "",
@@ -263,7 +268,7 @@ describe("deploy request admission", () => {
 
   it("reads the attempt id off the parsed body, so a JSON null fails as it always did", async () => {
     const service = createDeployRequestService(
-      dependencies({ readInstanceEntry: () => entryWith({}) })
+      dependencies({ readInstanceEntry: entryReader() })
     );
 
     const result = await service.deploy({ instanceId: "a", body: "null" });
@@ -294,7 +299,7 @@ describe("deploy request admission", () => {
       const state: CanvasState = { ...seed };
       const { monitor, control } = controllableMonitor();
       const service = createDeployRequestService(
-        dependencies({ readInstanceEntry: () => entryWith(state), monitor })
+        dependencies({ readInstanceEntry: entryReader(state), monitor })
       );
 
       const result = await service.deploy({
@@ -318,7 +323,7 @@ describe("deploy request admission", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith(state),
+        readInstanceEntry: entryReader(state),
         // The real resolver's precedence, reproduced here as the port contract.
         resolveDeploymentEnvironment: (current, requested) =>
           (typeof requested === "string" && requested) ||
@@ -345,7 +350,7 @@ describe("deploy request admission", () => {
   ])("answers 400 when the request names %s", async (_name, overrides) => {
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         reserveDeploymentMutation: () => {
           throw new Error("nothing may be reserved for an invalid request");
         }
@@ -368,7 +373,7 @@ describe("deploy request admission", () => {
     };
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith(state),
+        readInstanceEntry: entryReader(state),
         localDeploymentBlocksMutation: () => true,
         reserveDeploymentMutation: () => {
           throw new Error("a blocked request must not reserve");
@@ -394,7 +399,7 @@ describe("deploy request admission", () => {
     };
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         activeDeploymentMutation: () => lease
       })
     );
@@ -421,7 +426,7 @@ describe("deploy request admission", () => {
     };
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith(state),
+        readInstanceEntry: entryReader(state),
         localDeploymentBlocksMutation: () => true
       })
     );
@@ -438,7 +443,7 @@ describe("deploy request admission", () => {
   it("falls back to the request itself when nothing else identifies the block", async () => {
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         localDeploymentBlocksMutation: () => true
       })
     );
@@ -455,7 +460,7 @@ describe("deploy request admission", () => {
   it("refuses when the reservation is lost to a concurrent request", async () => {
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         reserveDeploymentMutation: () => null,
         resolveEnvDeployment: () => {
           throw new Error("a lost reservation must not reach GitHub");
@@ -473,7 +478,7 @@ describe("deploy request admission", () => {
     const released: DeploymentReservation[] = [];
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         resolveEnvDeployment: () => Promise.reject(new Error("gh down")),
         releaseDeploymentMutation: (_state, reservation) => {
           released.push(reservation);
@@ -503,7 +508,7 @@ describe("deploy request admission", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         resolveEnvDeployment: (repo, environment, application) => {
           lookups.push([repo, environment, application]);
           return Promise.resolve(null);
@@ -544,7 +549,7 @@ describe("deploy request admission", () => {
       let released = 0;
       const service = createDeployRequestService(
         dependencies({
-          readInstanceEntry: () => entryWith({}),
+          readInstanceEntry: entryReader(),
           resolveEnvDeployment: () => Promise.resolve({ status }),
           deploymentStatusBlocksMutation: () => true,
           releaseDeploymentMutation: () => {
@@ -565,7 +570,7 @@ describe("deploy request admission", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         resolveEnvDeployment: () => Promise.resolve({ status: "deployed" }),
         deploymentStatusBlocksMutation: () => false,
         monitor
@@ -584,7 +589,7 @@ describe("deploy request branch resolution", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         runCommand: () => {
           throw new Error("an explicit branch must not be looked up");
         },
@@ -606,7 +611,7 @@ describe("deploy request branch resolution", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         runCommand: (command, args) => {
           calls.push([command, args]);
           return Promise.resolve(stdout);
@@ -639,7 +644,7 @@ describe("deploy request branch resolution", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         runCommand: () => Promise.reject(new Error("gh missing")),
         monitor
       })
@@ -656,7 +661,7 @@ describe("deploy request branch resolution", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         runCommand: () => {
           order.push("branch-lookup");
           return Promise.resolve("main");
@@ -700,7 +705,7 @@ describe("deploy request attempt setup", () => {
     };
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
-      dependencies({ readInstanceEntry: () => entryWith(state), monitor })
+      dependencies({ readInstanceEntry: entryReader(state), monitor })
     );
 
     await service.deploy({ instanceId: "a", body: body() });
@@ -740,7 +745,7 @@ describe("deploy request attempt setup", () => {
     const state: CanvasState = { plannedResources: planned };
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
-      dependencies({ readInstanceEntry: () => entryWith(state), monitor })
+      dependencies({ readInstanceEntry: entryReader(state), monitor })
     );
 
     await service.deploy({ instanceId: "a", body: body() });
@@ -757,7 +762,7 @@ describe("deploy request attempt setup", () => {
     Object.assign(state, { plannedResources: { nope: true } });
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
-      dependencies({ readInstanceEntry: () => entryWith(state), monitor })
+      dependencies({ readInstanceEntry: entryReader(state), monitor })
     );
 
     await service.deploy({ instanceId: "a", body: body() });
@@ -771,7 +776,7 @@ describe("deploy request attempt setup", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         beginDeployAttempt: (state, input) => {
           attempts.push(input);
           state.deployAttempt = { id: "attempt-new", targetRepo: input.repo };
@@ -808,7 +813,7 @@ describe("deploy request attempt setup", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         reserveDeploymentMutation: (_state, reservation) => {
           const lease = { ...reservation, expiresAt: 1 };
           reservations.push(lease);
@@ -828,7 +833,7 @@ describe("deploy request attempt setup", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         resolveDeployRepairLoop: () => ({
           repairLoop: true,
           attemptId: "attempt-A",
@@ -859,7 +864,7 @@ describe("deploy request background monitor ownership", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         releaseDeploymentMutation: (_state, reservation) => {
           released.push(reservation.repo);
         },
@@ -892,7 +897,7 @@ describe("deploy request background monitor ownership", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith({}),
+        readInstanceEntry: entryReader(),
         releaseDeploymentMutation: () => {},
         triggerDeployRepairHandoff: () => false,
         triggerDeployFailureNotice: (_entry, instanceId) => {
@@ -917,7 +922,7 @@ describe("deploy request background monitor ownership", () => {
     let log: ((message: string) => void) | undefined;
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith(state),
+        readInstanceEntry: entryReader(state),
         releaseDeploymentMutation: () => {},
         monitor: {
           run: (request) => {
@@ -941,7 +946,7 @@ describe("deploy request background monitor ownership", () => {
     let log: ((message: string) => void) | undefined;
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith(state),
+        readInstanceEntry: entryReader(state),
         monitor: {
           run: (request) => {
             log = request.log;
@@ -976,7 +981,7 @@ describe("deploy request background monitor ownership", () => {
       const { monitor, control } = controllableMonitor();
       const service = createDeployRequestService(
         dependencies({
-          readInstanceEntry: () => entryWith(state),
+          readInstanceEntry: entryReader(state),
           releaseDeploymentMutation: () => {},
           monitor
         })
@@ -1001,7 +1006,7 @@ describe("deploy request background monitor ownership", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith(state),
+        readInstanceEntry: entryReader(state),
         releaseDeploymentMutation: () => {},
         monitor
       })
@@ -1022,7 +1027,7 @@ describe("deploy request background monitor ownership", () => {
     const { monitor, control } = controllableMonitor();
     const service = createDeployRequestService(
       dependencies({
-        readInstanceEntry: () => entryWith(state),
+        readInstanceEntry: entryReader(state),
         releaseDeploymentMutation: () => {
           released += 1;
         },

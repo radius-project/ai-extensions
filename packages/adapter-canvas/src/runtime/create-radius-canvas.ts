@@ -430,10 +430,13 @@ export function createRadiusCanvas(
               return;
             if (deps.servers.get(ctx.instanceId) !== entry) return;
             deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
-            deps.servers.delete(ctx.instanceId);
             closeGenerations.delete(ctx.instanceId);
             canvasInstances.release(ctx.instanceId);
-            entry.server.close();
+            void deps
+              .stopServer(ctx.instanceId)
+              .catch((error: unknown) =>
+                deps.logError(`Could not stop Radius canvas: ${String(error)}`)
+              );
           };
           const stopListening = deps.operations.onEnvironmentTasksSettled(
             ctx.instanceId,
@@ -449,12 +452,9 @@ export function createRadiusCanvas(
           return;
         }
         deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
-        deps.servers.delete(ctx.instanceId);
         closeGenerations.delete(ctx.instanceId);
         canvasInstances.release(ctx.instanceId);
-        await new Promise<void>((resolve) =>
-          entry.server.close(() => resolve())
-        );
+        await deps.stopServer(ctx.instanceId);
       }
     }
   };

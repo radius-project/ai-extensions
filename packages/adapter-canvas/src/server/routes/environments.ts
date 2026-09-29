@@ -1225,17 +1225,35 @@ export async function handleVerifyStatus(
       };
     }
 
+    const observation = entry?.observation?.observe(selectedExecutor, 45000);
+    let readNotice: string | null = null;
+    if (observation)
+      observation.onDecision = (decision) => {
+        if (decision.state !== "ready" && decision.reason !== "ineligible")
+          readNotice = `Workflow evidence ${decision.state}: ${decision.reason}.`;
+      };
     const detail =
       selectedExecutor ?
-        await dependencies.getRunDetail(repo, runId, selectedExecutor)
-      : await dependencies.getRunDetail(repo, runId);
+        await dependencies.getRunDetail(
+          repo,
+          runId,
+          selectedExecutor,
+          observation
+        )
+      : await dependencies.getRunDetail(repo, runId, undefined, observation);
+    if (entry?.observation?.stopped) return;
     if (!isCurrentVerificationRequest()) {
       respondWithCurrentVerification();
       return;
     }
     const runUrl = "https://github.com/" + repo + "/actions/runs/" + runId;
     if (!detail) {
-      respond({ state: "pending", runId, runUrl });
+      respond({
+        state: "pending",
+        runId,
+        runUrl,
+        ...(readNotice ? { activity: readNotice } : {})
+      });
       return;
     }
 
@@ -1252,7 +1270,7 @@ export async function handleVerifyStatus(
         state: "in_progress",
         runId,
         runUrl,
-        activity: active ? active.name : null
+        activity: active ? active.name : readNotice
       });
       return;
     }
@@ -1288,10 +1306,17 @@ export async function handleVerifyStatus(
       ".";
     if (failed.length)
       errMsg += " Failed step: " + failed.map((s) => s.name).join(", ") + ".";
+    if (readNotice) errMsg += "\n" + readNotice;
     const log =
       selectedExecutor ?
-        await dependencies.fetchRunLog(repo, runId, selectedExecutor)
-      : await dependencies.fetchRunLog(repo, runId);
+        await dependencies.fetchRunLog(
+          repo,
+          runId,
+          selectedExecutor,
+          observation
+        )
+      : await dependencies.fetchRunLog(repo, runId, undefined, observation);
+    if (entry?.observation?.stopped) return;
     if (!isCurrentVerificationRequest()) {
       respondWithCurrentVerification();
       return;

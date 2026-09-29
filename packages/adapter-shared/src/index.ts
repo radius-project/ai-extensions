@@ -65,4 +65,8 @@ export type {
   SelectedWorkflowExecutor,
   SelectedWorkflowJsonRead
 } from "./workflow-reads.js";
-export type { WorkflowRunResponse } from "./workflow-reads.js";
+export type {
+  WorkflowRunResponse,
+  WorkflowReadRequest
+} from "./workflow-reads.js";
+export { createWorkflowReadSession } from "./workflow-read-budget.js";

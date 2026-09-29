@@ -7,6 +7,12 @@ import {
   GraphModelingFailure
 } from "../../graph-modeling-failure.js";
 import type { DeployStatus } from "@radius-project/core";
+import {
+  WORKFLOW_READ_LIMITS,
+  WorkflowReadInterruptedError,
+  type WorkflowReadContext
+} from "@radius-project/core";
+import type { WorkflowObservationScope } from "../services/workflow-observation-scope.js";
 import type {
   DeployProgress,
   WorkflowArtifact
@@ -43,13 +49,13 @@ import {
 // member these routes do not call. The inventory uses `read` so status and
 // progress come from one snapshot, without graph/progress's last-good fallback.
 export interface DeployedGraphStatusReader {
-  read(): Promise<DeletionInventorySnapshot>;
-  graph(): Promise<{
+  read(context?: WorkflowReadContext): Promise<DeletionInventorySnapshot>;
+  graph(context?: WorkflowReadContext): Promise<{
     graph: unknown | null;
     status: string;
     artifact?: WorkflowArtifact | null;
   }>;
-  progress(): Promise<DeployProgress | null>;
+  progress(context?: WorkflowReadContext): Promise<DeployProgress | null>;
 }
 
 export interface DeployedGraphReaderOptions {
@@ -69,6 +75,7 @@ export interface DeployedGraphReaderOptions {
 // no `/api/progress` reader could ever serve.
 export interface DeployedGraphInstanceEntry {
   state?: CanvasState;
+  observation?: WorkflowObservationScope;
 }
 
 // Ten narrow function seams for two routes. Nothing is moved: the cached reader
@@ -86,7 +93,8 @@ export interface GraphsPlanningReadsDependencies {
   // single-flight de-dup and monotonic sequence guard live in the reader
   // instance, so building a fresh one per request would make all three inert.
   createDeployStatusReader(
-    options: DeployedGraphReaderOptions
+    options: DeployedGraphReaderOptions,
+    instanceId: string
   ): DeployedGraphStatusReader;
   loadModeledGraph(
     instanceId: string,
@@ -397,22 +405,37 @@ export async function handleDeployedGraph(
   // application for a repo-wide fallback rather than mislabeling its status.
   let resolvedApp: string | null = requestedApp || null;
   const messageByKey = new Map<string, string>();
+  const observation = entry?.observation?.observe(
+    undefined,
+    deploying ?
+      WORKFLOW_READ_LIMITS.artifactRunMs
+    : WORKFLOW_READ_LIMITS.artifactRepositoryMs
+  );
+  const assertCurrent = () => {
+    if (entry?.observation?.stopped)
+      throw new WorkflowReadInterruptedError("cancelled");
+  };
   try {
-    const reader = dependencies.createDeployStatusReader({
-      repo,
-      environment: requestedEnv,
-      application: requestedApp,
-      // While a deploy is in flight, scope to its run so a previous
-      // deployment's newest-repo-wide artifact can't overwrite the live
-      // topology/status. The in-flight run hasn't uploaded yet, so this read is
-      // empty and the seeded live statuses stand. `??` rather than `||`: a run
-      // id of 0 is a real id and must not fall through to null.
-      runId: deploying ? (state.deployRunId ?? null) : null
-    });
-    const result = await reader.graph();
+    const reader = dependencies.createDeployStatusReader(
+      {
+        repo,
+        environment: requestedEnv,
+        application: requestedApp,
+        // While a deploy is in flight, scope to its run so a previous
+        // deployment's newest-repo-wide artifact can't overwrite the live
+        // topology/status. The in-flight run hasn't uploaded yet, so this read is
+        // empty and the seeded live statuses stand. `??` rather than `||`: a run
+        // id of 0 is a real id and must not fall through to null.
+        runId: deploying ? (state.deployRunId ?? null) : null
+      },
+      context.instanceId
+    );
+    const result = await reader.graph(observation?.context);
+    assertCurrent();
     publishedGraph = result.graph;
     readOk = result.status === "ok" || result.status === "stale";
-    progress = await reader.progress();
+    progress = await reader.progress(observation?.context);
+    assertCurrent();
     artifactRunId =
       progress?.runId ?? result.artifact?.workflow_run?.id ?? null;
     const artifactRunMismatchesSession =
@@ -465,7 +488,8 @@ export async function handleDeployedGraph(
       )) {
         if (!messageByKey.has(key)) messageByKey.set(key, message);
       }
-      const snapshot = await reader.read();
+      const snapshot = await reader.read(observation?.context);
+      assertCurrent();
       // A concurrent deploy must not turn an earlier snapshot into a delete
       // inventory. Unlike graph display, selectors cannot fall back to session
       // identity, and unverified reads cannot reuse last-good resources.
@@ -485,6 +509,7 @@ export async function handleDeployedGraph(
       }
     }
   } catch (e) {
+    assertCurrent();
     // A status read failure must not blank the tab: fall through to the seeded
     // statuses and the modeled topology. The message is appended to the same
     // array `/api/progress` serves, which is the one piece of cross-route state
