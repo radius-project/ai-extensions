@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createWorkflowReadSession } from "./workflow-read-budget.js";
 import { observeWorkflowRun } from "@radius-project/core";
 import type {
   WorkflowCommandResult,
@@ -6,6 +7,7 @@ import type {
 } from "./index.js";
 import {
   readWorkflowRun,
+  readWorkflowRunWithMetadata,
   readWorkflowLog,
   readWorkflowLogWithMetadata,
   selectedWorkflowJson,
@@ -51,6 +53,39 @@ function fetchRunLog(
   return readWorkflowLog({ mode: "selected", executor }, repo, runId);
 }
 describe("selected-account workflow reads", () => {
+  it("retains deferred run evidence across polls without another GET", async () => {
+    const session = createWorkflowReadSession();
+    const run = vi.fn(async () => ({
+      code: 1,
+      stdout: 'HTTP/2 429\nRetry-After: 60\n\n{"message":"rate limit"}',
+      stderr: ""
+    }));
+    const onDecision = vi.fn();
+    await readWorkflowRunWithMetadata({ mode: "ambient", run }, "org/app", 41, {
+      context: session.observe(15000),
+      identity: "ambient",
+      onDecision
+    });
+    const result = await readWorkflowRunWithMetadata(
+      { mode: "ambient", run },
+      "org/app",
+      41,
+      {
+        context: session.observe(15000),
+        identity: "ambient",
+        onDecision
+      }
+    );
+    expect(result.value).toBeNull();
+    expect(result.evidence).toContainEqual({
+      phase: "run",
+      response: { source: "unavailable", reason: "deferred" }
+    });
+    expect(onDecision).toHaveBeenLastCalledWith(
+      expect.objectContaining({ state: "deferred", reason: "not-before" })
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+  });
   it.each([
     ["gh: Forbidden (HTTP 403)", 403],
     [

@@ -15,6 +15,7 @@ import * as core from "./index.js";
 const EXPECTED_FUNCTIONS = [
   "createWorkflowReadContext",
   "createWorkflowReadCooldowns",
+  "isSecondaryWorkflowRateLimitMessage",
   "WorkflowReadInterruptedError",
   "createDeployStatusReader",
   "confirmArtifactIdentity",

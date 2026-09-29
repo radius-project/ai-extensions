@@ -496,23 +496,29 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     now = () => Date.now()
   } = options;
 
-  let cache: { at: number; result: ReadResult } | null = null;
+  let cache: { at: number; result: ReadResult; usage: object } | null = null;
   interface ReadLedger {
     downloads: Map<number, Promise<ArtifactFiles | null>>;
     failure?: ReadResult;
-    context?: WorkflowReadContext;
+    accepted?: { result: ReadResult; retirement: number };
+    receipts: WeakMap<object, { count: number; admitted: boolean }>;
   }
-  let inflight: {
+  interface Flight {
     promise: Promise<ReadResult>;
     ledger: ReadLedger;
+    usage: { extraGets: number };
     subscribers: number;
+    stopped(): boolean;
     stop(): void;
-  } | null = null;
-  const ledgers = new WeakMap<WorkflowReadContext, ReadLedger>();
+  }
+  let inflight: Flight | null = null;
+  const ledgers = new WeakMap<object, ReadLedger>();
   let hasAccepted = false;
   let acceptedRunId: number | null = null;
   let acceptedSequence = -1;
   let lastGood: ReadResult | null = null;
+  let lastGoodUsage: object | undefined;
+  let retirement = 0;
   const inspectedArtifacts = new Map<number, ReadResult>();
   // A run-scoped read follows one in-flight deployment through its rotating
   // live slots; a repo-wide read looks for the newest terminal artifact and is
@@ -537,11 +543,11 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   }
 
   async function fetchOnce(
-    context?: WorkflowReadContext,
-    ledger?: ReadLedger
+    context: WorkflowReadContext | undefined,
+    ledger: ReadLedger
   ): Promise<ReadResult> {
     ensureCurrent(context);
-    if (ledger?.failure) return ledger.failure;
+    if (ledger.failure) return ledger.failure;
     if (!repo) return empty("missing");
     let artifacts: WorkflowArtifact[];
     try {
@@ -612,13 +618,13 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       if (!result) {
         let files: ArtifactFiles | null;
         try {
-          let work = ledger?.downloads.get(artifact.id);
+          let work = ledger.downloads.get(artifact.id);
           if (!work) {
             work =
               context ?
                 downloadArtifact(repo, artifact, context)
               : downloadArtifact(repo, artifact);
-            ledger?.downloads.set(artifact.id, work);
+            ledger.downloads.set(artifact.id, work);
           }
           files = await work;
           ensureCurrent(context);
@@ -714,12 +720,30 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   }
 
   // read - fetch (cached, single-flight) and enforce monotonic sequencing.
+  function accept(ledger: ReadLedger, result: ReadResult): ReadResult {
+    if (result.status === "ok" || result.status === "stale")
+      ledger.accepted = { result, retirement };
+    else if (result.status === "missing" && !isRunScoped)
+      delete ledger.accepted;
+    return result;
+  }
+
   async function read(
     suppliedContext?: WorkflowReadContext
   ): Promise<ReadResult> {
     const context = suppliedContext ?? options.createReadContext?.();
     ensureCurrent(context);
-    if (cache && now() - cache.at < ttlMs) return cache.result;
+    const ledger: ReadLedger = (context &&
+      ledgers.get(context.observation)) || {
+      downloads: new Map(),
+      receipts: new WeakMap()
+    };
+    if (context) ledgers.set(context.observation, ledger);
+    if (cache && now() - cache.at < ttlMs)
+      return ledger.receipts.get(cache.usage)?.admitted === false ?
+          empty("error", new WorkflowReadInterruptedError("attempts"))
+        : accept(ledger, cache.result);
+    if (inflight?.stopped()) inflight = null;
     if (!inflight) {
       let stopped = options.stopped?.() === true;
       const listeners = new Set<() => void>();
@@ -729,16 +753,14 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         listeners.clear();
       };
       const detach = options.onStop?.(stop);
-      const ledger: ReadLedger =
-        context ?
-          (ledgers.get(context) ?? { downloads: new Map(), context })
-        : { downloads: new Map() };
-      const flightContext = ledger.context
+      const usage = { extraGets: 0 };
+      const flightContext = context
         ?.limit(
           isRunScoped ?
             WORKFLOW_READ_LIMITS.artifactRunMs
           : WORKFLOW_READ_LIMITS.artifactRepositoryMs
         )
+        .withRetryMeter(usage)
         .withCancellation({
           stopped: () => stopped,
           onStop: (listener) => {
@@ -788,6 +810,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
             acceptedRunId = incomingRun;
             acceptedSequence = result.progress.sequence;
             lastGood = result;
+            lastGoodUsage = usage;
           }
         } else if (result.status === "missing" && !isRunScoped) {
           // GitHub answered and this deployment has no artifact. Retire what was
@@ -802,8 +825,10 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
           acceptedRunId = null;
           acceptedSequence = -1;
           lastGood = null;
+          lastGoodUsage = undefined;
+          retirement++;
         }
-        cache = { at: now(), result };
+        cache = { at: now(), result, usage };
         return result;
       };
       const pending = work();
@@ -814,17 +839,66 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         detach?.();
         if (inflight?.promise === promise) inflight = null;
       });
-      inflight = { promise, ledger, subscribers: 0, stop };
+      inflight = {
+        promise,
+        ledger,
+        usage,
+        subscribers: 0,
+        stopped: () => stopped,
+        stop
+      };
     }
     const flight = inflight;
     flight.subscribers++;
-    if (context) ledgers.set(context, flight.ledger);
+    const receive = (): boolean => {
+      if (!context || ledger === flight.ledger) return true;
+      const prior = ledger.receipts.get(flight.usage);
+      const admitted = context.chargeRetries(
+        flight.usage.extraGets - (prior?.count ?? 0)
+      );
+      const receipt = {
+        count: flight.usage.extraGets,
+        admitted: admitted && (prior?.admitted ?? true)
+      };
+      ledger.receipts.set(flight.usage, receipt);
+      for (const [id, work] of flight.ledger.downloads) {
+        if (!ledger.downloads.has(id)) ledger.downloads.set(id, work);
+      }
+      return receipt.admitted;
+    };
     try {
-      return await (context ? context.wait(flight.promise) : flight.promise);
+      if (!receive())
+        return empty("error", new WorkflowReadInterruptedError("attempts"));
+      const result = await (context ?
+        context.wait(flight.promise)
+      : flight.promise);
+      if (!receive())
+        return empty("error", new WorkflowReadInterruptedError("attempts"));
+      if (
+        result.status === "error" ||
+        result.status === "auth" ||
+        result.status === "malformed"
+      )
+        ledger.failure = result;
+      return accept(ledger, result);
     } finally {
+      receive();
       flight.subscribers--;
       if (!flight.subscribers) flight.stop();
     }
+  }
+
+  function acceptedFallback(context?: WorkflowReadContext): ReadResult | null {
+    if (
+      context &&
+      lastGoodUsage &&
+      ledgers.get(context.observation)?.receipts.get(lastGoodUsage)
+        ?.admitted === false
+    ) {
+      const accepted = ledgers.get(context.observation)?.accepted;
+      return accepted?.retirement === retirement ? accepted.result : null;
+    }
+    return lastGood;
   }
 
   return {
@@ -839,7 +913,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       context?: WorkflowReadContext
     ): Promise<DeployProgress | null> {
       const result = await read(context);
-      return result.progress || lastGood?.progress || null;
+      return result.progress || acceptedFallback(context)?.progress || null;
     },
     /**
      * controlPlaneLog - the deploy-controlplane.log text from the latest
@@ -851,7 +925,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       context?: WorkflowReadContext
     ): Promise<string | null> {
       const result = await read(context);
-      const files = result.files ?? lastGood?.files ?? null;
+      const files = result.files ?? acceptedFallback(context)?.files ?? null;
       const text = files?.[DEPLOY_STATUS_FILES.controlPlane];
       return typeof text === "string" && text.trim() ? text : null;
     },
@@ -867,11 +941,12 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       error?: unknown;
     }> {
       const result = await read(context);
-      const graph = result.graph ?? lastGood?.graph ?? null;
+      const fallback = acceptedFallback(context);
+      const graph = result.graph ?? fallback?.graph ?? null;
       return {
         graph,
         status: result.status,
-        artifact: result.artifact || lastGood?.artifact || null,
+        artifact: result.artifact || fallback?.artifact || null,
         ...(result.error ? { error: result.error } : {})
       };
     }

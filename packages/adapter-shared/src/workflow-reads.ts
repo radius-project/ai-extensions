@@ -432,7 +432,7 @@ export async function readWorkflowRunWithMetadata(
         (result) => evidence.push({ phase, response: result.metadata })
       );
       decision = response.decision;
-      if (decision) request?.onDecision?.(decision);
+      request?.onDecision?.(response.decision);
       if (
         response.metadata.source === "unavailable" &&
         response.metadata.reason === "deferred"

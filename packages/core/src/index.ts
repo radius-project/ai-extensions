@@ -13,6 +13,7 @@
 export {
   createWorkflowReadContext,
   createWorkflowReadCooldowns,
+  isSecondaryWorkflowRateLimitMessage,
   WorkflowReadInterruptedError,
   WORKFLOW_READ_LIMITS
 } from "./workflow-read-policy.js";

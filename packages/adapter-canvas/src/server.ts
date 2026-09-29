@@ -32,8 +32,13 @@ import {
   remediationView,
   stateRegistryForEnvironment
 } from "@radius-project/core";
+import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
 import type { Remediation, RemediationView } from "@radius-project/core";
-import { buildGraphViaRad } from "@radius-project/adapter-shared";
+import {
+  buildGraphViaRad,
+  createWorkflowReadSession,
+  type WorkflowReadRequest
+} from "@radius-project/adapter-shared";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
@@ -998,12 +1003,24 @@ const deploymentsRoutes = createDeploymentsRoutes({
   get abandonment() {
     return deploymentAbandonmentService;
   },
-  probeDeleteConflict: (request) =>
-    probeDeleteConflict(request, {
+  probeDeleteConflict: (request, instanceId) => {
+    const scope = canvasServer.instances.get(instanceId)?.observation;
+    if (!scope)
+      throw new Error("Workflow observation instance is unavailable.");
+    let observation: WorkflowReadRequest | undefined;
+    const read = () =>
+      (observation ??= scope.observe(
+        undefined,
+        WORKFLOW_READ_LIMITS.deleteConflictMs
+      ));
+    return probeDeleteConflict(request, {
       resolveEnvDeployment,
-      listArtifacts: listWorkflowArtifacts,
-      downloadArtifact: downloadWorkflowArtifact
-    })
+      listArtifacts: (repo, runId) =>
+        listWorkflowArtifacts(repo, runId, undefined, read().context),
+      downloadArtifact: (repo, artifact) =>
+        downloadWorkflowArtifact(repo, artifact, read().context)
+    });
+  }
 });
 
 // Composition root for the `azure-discovery` routes. Four seams:
@@ -3088,9 +3105,13 @@ async function deleteRadiusEnvironmentViaWorkflow(
     };
   }
   const deadline = Date.now() + 30 * 60 * 1000;
+  const reads = createWorkflowReadSession();
   let delayMs = 5000;
   while (Date.now() < deadline) {
-    const detail = await getRunDetail(repo, runId);
+    const detail = await getRunDetail(repo, runId, undefined, {
+      identity: "ambient",
+      context: reads.observe(WORKFLOW_READ_LIMITS.runMs)
+    });
     if (detail && detail.status === "completed") {
       const classified = classifyCompletedDeleteEnvRun(
         detail.conclusion,

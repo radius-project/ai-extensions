@@ -2833,8 +2833,8 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBeLessThanOrEqual(4);
   });
 
-  for (const jobsUnavailable of [false, true]) {
-    test(`retries verification through the selected account and returned run URL (jobs unavailable: ${jobsUnavailable}) @safety`, async ({
+  for (const jobsRead of ["available", "rate-limited", "recovers"] as const) {
+    test(`retries verification through the selected account and returned run URL (jobs: ${jobsRead}) @safety`, async ({
       page,
       canvas
     }) => {
@@ -2937,12 +2937,34 @@ test.describe("Radius Canvas in Chromium", () => {
           ],
           env: { GH_TOKEN: "fixture-repo-token" },
           stdout:
-            jobsUnavailable ?
+            jobsRead === "rate-limited" ?
               'HTTP/2.0 429 Too Many Requests\nRetry-After: 120\r\n\r\n{"message":"secondary rate limit"}'
+            : jobsRead === "recovers" ? "HTTP/2 503\n\n{}"
             : 'HTTP/2 200\n\n{"jobs":[],"total_count":0}',
-          exitCode: jobsUnavailable ? 1 : 0
+          exitCode: jobsRead === "available" ? 0 : 1
         }
       );
+      if (jobsRead === "recovers") {
+        const jobsCommand = scenario.commands.at(-1);
+        if (!jobsCommand) throw new Error("Missing jobs fixture");
+        const recovered = {
+          commands: scenario.commands.map((command) =>
+            command === jobsCommand ?
+              {
+                ...command,
+                stdout: 'HTTP/2 200\n\n{"jobs":[],"total_count":0}',
+                exitCode: 0
+              }
+            : command
+          )
+        };
+        jobsCommand.writeFiles = [
+          {
+            path: canvas.scenarioPath,
+            content: JSON.stringify(recovered)
+          }
+        ];
+      }
       await canvas.setScenario(scenario);
       await gotoCanvas(page, canvas, "environment");
 
@@ -3014,7 +3036,7 @@ test.describe("Radius Canvas in Chromium", () => {
             call.args[1] ===
               `repos/${REPOSITORY}/actions/runs/41/jobs?per_page=100&page=1`
         )
-      ).toHaveLength(1);
+      ).toHaveLength(jobsRead === "recovers" ? 2 : 1);
       await page.locator("#env-progress-details > summary").click();
       await expect(
         page.getByRole("button", { name: "Download diagnostic snapshot" })

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WorkflowReadInterruptedError } from "@radius-project/core";
 import {
   createDeployOutcomeService,
   type DeployOutcomeDependencies,
@@ -9,12 +10,15 @@ import {
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import {
   createWorkflowArtifactReader,
+  createWorkflowReadSession,
   WorkflowArtifactReadError
 } from "@radius-project/adapter-shared";
 import {
   MAX_DEPLOY_MESSAGE_LENGTH,
   settleDeployStatuses
 } from "../../deploy-artifacts.js";
+
+afterEach(() => vi.useRealTimers());
 
 function dependencies(
   overrides: Partial<DeployOutcomeDependencies> = {}
@@ -93,6 +97,158 @@ function outcomeRequest(overrides: Partial<DeployOutcomeRequest> = {}): {
   };
   return { request, logs, state, statusCalls, polls };
 }
+
+describe("bounded terminal graph finalization", () => {
+  it("fences settlement after the final status sweep replaces the observation", async () => {
+    let current = true;
+    const f = outcomeRequest({
+      isCurrent: () => current,
+      statusReader: statusReader([{ status: "ok", graph: [{ name: "api" }] }]),
+      pollDeployStatus: async () => {
+        current = false;
+      }
+    });
+    await expect(
+      createDeployOutcomeService(dependencies()).settle(f.request)
+    ).rejects.toMatchObject({ reason: "cancelled" });
+    expect(f.state.deployStatus).toBeUndefined();
+    expect(f.state.deployedGraph).toBeUndefined();
+  });
+  it("waits once for producer finalization inside the shared observation", async () => {
+    vi.useFakeTimers();
+    const observation = {
+      context: createWorkflowReadSession().observe(15000),
+      identity: "ambient"
+    };
+    const graph = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "missing", graph: null })
+      .mockResolvedValueOnce({ status: "ok", graph: [{ name: "api" }] });
+    const f = outcomeRequest({
+      observation,
+      statusReader: { graph, controlPlaneLog: async () => null }
+    });
+    const settling = createDeployOutcomeService(
+      dependencies({
+        sleep: () => {
+          throw new Error("Unowned wait");
+        }
+      })
+    ).settle(f.request);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(graph).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settling;
+    expect(graph).toHaveBeenCalledTimes(2);
+    expect(f.state.deployStatus).toBe("complete");
+    expect(f.state.deployedGraph).toEqual([{ name: "api" }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not start a finalization wait equal to the remaining budget", async () => {
+    const observation = {
+      context: createWorkflowReadSession().observe(5000),
+      identity: "ambient"
+    };
+    const graph = vi.fn(async () => ({ status: "missing", graph: null }));
+    const f = outcomeRequest({
+      observation,
+      statusReader: { graph, controlPlaneLog: async () => null }
+    });
+    await createDeployOutcomeService(
+      dependencies({
+        sleep: () => {
+          throw new Error("Unowned wait");
+        }
+      })
+    ).settle(f.request);
+    expect(graph).toHaveBeenCalledTimes(1);
+    expect(f.state.deployStatus).toBe("complete");
+  });
+
+  it("retains the confirmed outcome when a delayed timer consumes the graph budget", async () => {
+    vi.useFakeTimers();
+    const observation = {
+      context: createWorkflowReadSession().observe(10000),
+      identity: "ambient"
+    };
+    const graph = vi.fn(async () => ({ status: "missing", graph: null }));
+    const f = outcomeRequest({
+      observation,
+      statusReader: { graph, controlPlaneLog: async () => null }
+    });
+    const settling = createDeployOutcomeService(dependencies()).settle(
+      f.request
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(10000);
+    await settling;
+    expect(graph).toHaveBeenCalledTimes(1);
+    expect(f.state.deployStatus).toBe("complete");
+    expect(f.logs.join("\n")).toContain(
+      "Artifact evidence exhausted: elapsed."
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops a finalization wait without publishing or starting another graph read", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const observation = {
+      context: createWorkflowReadSession().observe(15000, controller.signal),
+      identity: "ambient"
+    };
+    const graph = vi.fn(async () => ({ status: "missing", graph: null }));
+    const f = outcomeRequest({
+      observation,
+      statusReader: { graph, controlPlaneLog: async () => null }
+    });
+    const settling = createDeployOutcomeService(dependencies())
+      .settle(f.request)
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    expect(await settling).toMatchObject({ reason: "cancelled" });
+    expect(graph).toHaveBeenCalledTimes(1);
+    expect(f.state.deployStatus).toBeUndefined();
+    expect(f.polls).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("propagates graph cancellation rather than publishing an unavailable outcome", async () => {
+    const f = outcomeRequest({
+      statusReader: {
+        graph: async () => {
+          throw new WorkflowReadInterruptedError("cancelled");
+        },
+        controlPlaneLog: async () => null
+      }
+    });
+    await expect(
+      createDeployOutcomeService(dependencies()).settle(f.request)
+    ).rejects.toMatchObject({ reason: "cancelled" });
+    expect(f.state.deployStatus).toBeUndefined();
+  });
+
+  it("preserves a failed workflow and the refused-flight attempts diagnostic", async () => {
+    const f = outcomeRequest({
+      conclusion: "failure",
+      statusReader: {
+        graph: async () => ({
+          status: "error",
+          graph: null,
+          error: new WorkflowReadInterruptedError("attempts")
+        }),
+        controlPlaneLog: async () => null
+      }
+    });
+    await createDeployOutcomeService(dependencies()).settle(f.request);
+    expect(f.state.deployStatus).toBe("failed");
+    expect(f.logs.join("\n")).toContain(
+      "Artifact evidence exhausted: attempts."
+    );
+  });
+});
 
 describe("deploy outcome construction", () => {
   it.each([

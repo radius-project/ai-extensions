@@ -9,6 +9,29 @@ import {
 afterEach(() => vi.useRealTimers());
 
 describe("one logical workflow read budget", () => {
+  it("cleans up a sleep cancelled synchronously while its listener is registered", async () => {
+    vi.useFakeTimers();
+    const { clock } = createWorkflowReadSession().observe(100);
+    const detach = vi.fn();
+    await clock.sleep(50, {
+      stopped: () => true,
+      onStop: (listener) => {
+        listener();
+        return detach;
+      }
+    });
+    expect(detach).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("supports ordinary and already-cancelled injected sleep callers without leaking timers", async () => {
+    vi.useFakeTimers();
+    const { clock } = createWorkflowReadSession().observe(100);
+    const ordinary = clock.sleep(10);
+    await vi.advanceTimersByTimeAsync(10);
+    await ordinary;
+    await clock.sleep(10, { stopped: () => true });
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("preserves the smaller nested page/output and command/time limits", async () => {
     vi.useFakeTimers();
     const supplied: unknown[] = [];

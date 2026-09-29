@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createWorkflowReadContext,
   createWorkflowReadCooldowns,
+  isSecondaryWorkflowRateLimitMessage,
   WORKFLOW_READ_LIMITS,
   type WorkflowReadClock
 } from "./workflow-read-policy.js";
@@ -60,6 +61,133 @@ function fixture(timeout = 15000, jitter = 0) {
 }
 
 describe("bounded workflow read policy", () => {
+  it("retains one active cooldown slot for concurrent base reads of the same target", async () => {
+    const f = fixture();
+    const run = vi.fn(async () => response(200));
+    const results = await Promise.all([
+      f.context.read("run", 15000, run),
+      f.create().read("run", 15000, run)
+    ]);
+    expect(results.map((result) => result.decision)).toEqual([
+      { state: "ready" },
+      { state: "ready" }
+    ]);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(f.cooldowns.check("run")).toEqual({ state: "ready" });
+  });
+
+  it("supports primary 403 timing without a secondary classifier", async () => {
+    const f = fixture();
+    let calls = 0;
+    const result = await f.context.read("run", 15000, async () =>
+      ++calls === 1 ?
+        response(403, {
+          classification: "rate-limit",
+          retryAfter: { state: "delay", milliseconds: 1000 }
+        })
+      : response(200)
+    );
+    expect(result.decision).toEqual({ state: "ready" });
+    expect(f.waits).toEqual([1000]);
+    expect(calls).toBe(2);
+  });
+  it.each([
+    ["You have exceeded a SECONDARY RATE LIMIT. Wait 5 seconds.", true],
+    ["API rate limit exceeded", false],
+    ["", false]
+  ] as const)(
+    "recognizes secondary classification without extracting message timing: %s",
+    (message, expected) => {
+      expect(isSecondaryWorkflowRateLimitMessage(message)).toBe(expected);
+    }
+  );
+
+  it("requires a secondary deadline independently of an exhausted primary quota", async () => {
+    const f = fixture();
+    const read = vi.fn(async () =>
+      response(403, {
+        classification: "rate-limit",
+        rateLimitRemaining: 0,
+        serverDate: { state: "deadline", epochMilliseconds: 100000 },
+        rateLimitReset: { state: "deadline", epochMilliseconds: 101000 }
+      })
+    );
+    expect(
+      (await f.context.read("run", 15000, read, () => true)).decision
+    ).toEqual({ state: "deferred", reason: "missing-deadline" });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(f.waits).toEqual([]);
+  });
+  it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid retry receipt %s without spending credits",
+    (count) => {
+      const f = fixture();
+      expect(() => f.context.chargeRetries(count)).toThrow(
+        "nonnegative integer"
+      );
+      expect(f.context.chargeRetries(2)).toBe(true);
+    }
+  );
+
+  it("shares observation identity and retry meters across derived phases without charging receipts twice", async () => {
+    const f = fixture();
+    const first = { extraGets: 0 };
+    const second = { extraGets: 0 };
+    const derived = f.context
+      .withRetryMeter(first)
+      .limit(10000)
+      .withCancellation({ stopped: () => false })
+      .withRetryMeter(second);
+    expect(derived.observation).toBe(f.context.observation);
+    expect(f.create().observation).not.toBe(f.context.observation);
+    expect(derived.chargeRetries(0)).toBe(true);
+    let calls = 0;
+    expect(
+      (
+        await derived.read("run", 10000, async () =>
+          response(++calls === 1 ? 503 : 200)
+        )
+      ).decision
+    ).toEqual({ state: "ready" });
+    expect(first.extraGets).toBe(1);
+    expect(second.extraGets).toBe(1);
+    expect(f.context.chargeRetries(1)).toBe(true);
+    expect(f.context.chargeRetries(1)).toBe(false);
+    expect(f.context.chargeRetries(0)).toBe(true);
+    expect(first.extraGets).toBe(1);
+    const exhausted = await derived.read("jobs", 10000, async () => {
+      calls++;
+      return response(503);
+    });
+    expect(exhausted.decision).toEqual({
+      state: "exhausted",
+      reason: "attempts"
+    });
+    expect(calls).toBe(3);
+  });
+  it("does not dispatch when synchronous admission reaches the exact deadline", async () => {
+    const f = fixture();
+    let ticks = 0;
+    f.clock.monotonic = () => (++ticks === 1 ? 14999 : 15000);
+    const read = vi.fn(async () => response(200));
+    expect(await f.context.read("run", 15000, read)).toEqual({
+      response: null,
+      decision: { state: "exhausted", reason: "elapsed" }
+    });
+    expect(read).not.toHaveBeenCalled();
+  });
+  it("supports clock ports without cancellation callbacks and preserves synchronous sleep failures", async () => {
+    const f = fixture();
+    f.clock.sleep = () => new Promise<void>(() => {});
+    await expect(f.context.wait(Promise.resolve("ready"))).resolves.toBe(
+      "ready"
+    );
+    const error = new Error("clock unavailable");
+    f.clock.sleep = () => {
+      throw error;
+    };
+    await expect(f.context.wait(Promise.resolve("ready"))).rejects.toBe(error);
+  });
   it.each([0, 200, 1200])(
     "never requests early for Retry-After %sms",
     async (milliseconds) => {

@@ -106,7 +106,10 @@ describe("instance workflow observation ownership", () => {
     expect(
       scope.reader({ ...options, identity: scope.observe(second).identity })
     ).not.toBe(reader);
-    expect(factory).toHaveBeenCalledTimes(4);
+    const repository = scope.reader({ repo: target.repo });
+    expect(repository).not.toBe(reader);
+    expect(scope.reader({ repo: target.repo })).toBe(repository);
+    expect(factory).toHaveBeenCalledTimes(5);
     scope.stop();
     scope.stop();
     expect(scope.stopped).toBe(true);

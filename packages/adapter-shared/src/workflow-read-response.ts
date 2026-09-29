@@ -4,6 +4,7 @@ import type {
   WorkflowReadContext,
   WorkflowReadDecision
 } from "@radius-project/core";
+import { isSecondaryWorkflowRateLimitMessage } from "@radius-project/core";
 import type {
   WorkflowCommandResult,
   WorkflowReadOptions,
@@ -31,23 +32,31 @@ export async function readWorkflowApiWithPolicy(
   key: string,
   phaseDeadline: number,
   observe: (response: WorkflowApiResponse) => void = () => {}
-): Promise<WorkflowApiResponse> {
-  const result = await context.read(key, phaseDeadline, async () => {
-    const response = await readWorkflowApi(
-      run,
-      endpoint,
-      options,
-      context.clock.wall
-    );
-    observe(response);
-    return response;
-  });
+): Promise<WorkflowApiResponse & { decision: WorkflowReadDecision }> {
+  const result = await context.read(
+    key,
+    phaseDeadline,
+    async () => {
+      const response = await readWorkflowApi(
+        run,
+        endpoint,
+        options,
+        context.clock.wall
+      );
+      observe(response);
+      return response;
+    },
+    (response) => isSecondaryWorkflowRateLimitMessage(message(response.value))
+  );
   if (result.response) return { ...result.response, decision: result.decision };
   return {
     ok: false,
     metadata: {
       source: "unavailable",
-      reason: result.decision.state === "stopped" ? "cancelled" : "deferred"
+      reason:
+        result.decision.state === "stopped" ? "cancelled"
+        : result.decision.reason === "elapsed" ? "timeout"
+        : "deferred"
     },
     value: null,
     nextLink: null,
@@ -56,12 +65,9 @@ export async function readWorkflowApiWithPolicy(
     commandAuthorizationStatus: null,
     commandMissing: false,
     diagnostic:
-      (
-        result.decision.state !== "ready" &&
-        result.decision.reason === "capacity"
-      ) ?
+      result.decision.reason === "capacity" ?
         "Automatic workflow reads are deferred because this observation already retains 32 protected retry restrictions."
-      : `Workflow read ${result.decision.state}${result.decision.state === "ready" ? "" : `: ${result.decision.reason}`}.`,
+      : `Workflow read ${result.decision.state}: ${result.decision.reason}.`,
     decision: result.decision
   };
 }
@@ -200,9 +206,8 @@ export function parseWorkflowApiResponse(
       (rateLimitRemaining === 0 ||
         retryAfter.state === "delay" ||
         retryAfter.state === "deadline" ||
-        /secondary rate limit|(?:API|primary) rate limit (?:exceeded|reached)/i.test(
-          detail
-        )));
+        isSecondaryWorkflowRateLimitMessage(message(value)) ||
+        /(?:API|primary) rate limit (?:exceeded|reached)/i.test(detail)));
   return {
     metadata: {
       source: "gh-api-include",

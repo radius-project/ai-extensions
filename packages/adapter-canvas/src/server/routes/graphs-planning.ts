@@ -509,7 +509,11 @@ export async function handleDeployedGraph(
       }
     }
   } catch (e) {
-    assertCurrent();
+    if (entry?.observation?.stopped) {
+      response.writeHead(503);
+      response.end(JSON.stringify({ error: "Workflow observation stopped." }));
+      return;
+    }
     // A status read failure must not blank the tab: fall through to the seeded
     // statuses and the modeled topology. The message is appended to the same
     // array `/api/progress` serves, which is the one piece of cross-route state

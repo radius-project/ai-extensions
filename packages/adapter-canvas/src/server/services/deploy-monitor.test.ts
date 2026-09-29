@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDeployMonitorService,
   type DeployMonitorDependencies,
@@ -9,7 +9,8 @@ import {
 } from "./deploy-monitor.js";
 import { createDeployDispatchService } from "./deploy-dispatch.js";
 import { createDeployOutcomeService } from "./deploy-outcome.js";
-import { observeWorkflowRun } from "@radius-project/core";
+import { observeWorkflowRun, WORKFLOW_READ_LIMITS } from "@radius-project/core";
+import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
 import {
   readWorkflowRun,
   readWorkflowLog,
@@ -136,6 +137,179 @@ function settleRecorder() {
     }
   };
 }
+
+afterEach(() => vi.useRealTimers());
+
+describe("bounded monitor observation lifetime", () => {
+  it("retains elapsed run/progress work and retry credits when promoting to terminal evidence", async () => {
+    let time = 0;
+    const scope = createWorkflowObservationScope(
+      () => {
+        throw new Error("Reader supplied by monitor port");
+      },
+      {
+        monotonic: () => time,
+        wall: () => 1700000000000 + time,
+        jitter: () => 0,
+        sleep: async (milliseconds) => {
+          time += milliseconds;
+        }
+      }
+    );
+    const resources: CanvasGraphResource[] = [
+      { name: "api", deployStatus: "pending" }
+    ];
+    const f = request({ entry: { state: {}, observation: scope }, resources });
+    let runGets = 0;
+    let artifactGets = 0;
+    const response = (status: number) => ({
+      ok: status === 200,
+      metadata: {
+        source: "gh-api-include" as const,
+        status,
+        classification: "other" as const,
+        receivedAtEpochMilliseconds: 1700000000000 + time,
+        retryAfter: { state: "absent" as const },
+        rateLimitReset: { state: "absent" as const },
+        serverDate: { state: "absent" as const },
+        rateLimitRemaining: null
+      }
+    });
+    await createDeployMonitorService(
+      dependencies({
+        getRunDetail: async (_repo, _run, observation) => {
+          if (!observation) throw new Error("Missing production observation");
+          observation.onDecision?.({ state: "ready" });
+          observation.onDecision?.({
+            state: "exhausted",
+            reason: "ineligible"
+          });
+          observation.onDecision?.({
+            state: "deferred",
+            reason: "missing-deadline"
+          });
+          observation.onDecision?.({
+            state: "deferred",
+            reason: "missing-deadline"
+          });
+          expect(observation.context.deadline).toBe(
+            WORKFLOW_READ_LIMITS.observationMs
+          );
+          await observation.context.read("run", 15000, async () =>
+            response(++runGets === 3 ? 200 : 503)
+          );
+          time += 12500;
+          return {
+            status: "completed",
+            conclusion: "failure",
+            steps: [{ name: "Run rad commands", status: "in_progress" }]
+          };
+        },
+        createStatusReader: async () => ({
+          ...reader(),
+          progress: async (context) => {
+            expect(context?.deadline).toBe(WORKFLOW_READ_LIMITS.monitorMs);
+            expect(context?.remaining()).toBe(561000);
+            time += 500000;
+            return null;
+          }
+        }),
+        now: () => 1700000000000 + time,
+        outcome: {
+          settle: async ({ observation }) => {
+            if (!observation) throw new Error("Terminal observation was lost");
+            expect(observation.context.deadline).toBe(2855000);
+            expect(observation.context.remaining()).toBe(2341000);
+            const result = await observation.context.read(
+              "artifacts",
+              observation.context.deadline,
+              async () => (++artifactGets, response(503))
+            );
+            expect(result.decision).toEqual({
+              state: "exhausted",
+              reason: "attempts"
+            });
+          }
+        }
+      })
+    ).run(f.request);
+    expect(runGets).toBe(3);
+    expect(artifactGets).toBe(1);
+    expect(time).toBe(514000);
+    expect(f.logs.filter((line) => line.includes("Workflow evidence"))).toEqual(
+      ["    Workflow evidence deferred: missing-deadline."]
+    );
+    scope.stop();
+  });
+
+  it("stops the five-second polling wait without remotely cancelling a workflow", async () => {
+    vi.useFakeTimers();
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("No artifact read");
+    });
+    const find = vi.fn(async () => null);
+    const f = request({
+      entry: { state: {}, observation: scope },
+      resources: [{ name: "api" }]
+    });
+    const pending = createDeployMonitorService(
+      dependencies({ findWorkflowRun: find })
+    )
+      .run(f.request)
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(find).toHaveBeenCalledTimes(1);
+    scope.stop();
+    expect(await pending).toMatchObject({ reason: "cancelled" });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(f.request.entry.state.deployStatus).toBeUndefined();
+  });
+
+  it("does not finish observation ownership early while dispatch is still pending", async () => {
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("No artifact read");
+    });
+    let dispatch: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      dispatch = resolve;
+    });
+    const find = vi.fn(async () => 42);
+    const f = request({
+      entry: { state: {}, observation: scope },
+      resources: [{ name: "api" }]
+    });
+    let settled = false;
+    const pending = createDeployMonitorService(
+      dependencies({
+        dispatch: {
+          prepareAndDispatch: async () => {
+            await started;
+            return {
+              dispatched: true,
+              workflowFile: "run.yml",
+              dispatchedAt: 1,
+              baselineRunId: null,
+              environment: "dev"
+            };
+          }
+        },
+        findWorkflowRun: find
+      })
+    )
+      .run(f.request)
+      .catch((error: unknown) => {
+        settled = true;
+        return error;
+      });
+    scope.stop();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    if (!dispatch) throw new Error("Dispatch was not initialized");
+    dispatch();
+    expect(await pending).toMatchObject({ reason: "cancelled" });
+    expect(find).not.toHaveBeenCalled();
+  });
+});
 
 describe("workflow evidence uncertainty", () => {
   it.each([null, undefined, "", "   "])(

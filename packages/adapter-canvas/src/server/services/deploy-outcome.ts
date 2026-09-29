@@ -120,6 +120,22 @@ export function createDeployOutcomeService(
   // `rad deploy` and before teardown, so by the time the run reports completed
   // the upload has normally landed. Retry a few times anyway to absorb
   // upload-finalization lag, since this read is the whole terminal graph.
+  const unavailableGraph = (error: unknown) => {
+    const decision =
+      (
+        error instanceof WorkflowArtifactReadError ||
+        error instanceof WorkflowReadInterruptedError
+      ) ?
+        error.decision
+      : undefined;
+    return {
+      deployed: null,
+      graphStatus: "unavailable",
+      ...(decision && decision.state !== "ready" ?
+        { note: `Artifact evidence ${decision.state}: ${decision.reason}.` }
+      : {})
+    };
+  };
   const readDeployedGraph = async (
     statusReader: DeployOutcomeStatusReader,
     context?: WorkflowReadContext
@@ -134,24 +150,17 @@ export function createDeployOutcomeService(
       let gr: DeployGraphRead;
       try {
         gr = await statusReader.graph(context);
-      } catch {
-        return { deployed: null, graphStatus: "unavailable" };
+      } catch (error) {
+        if (
+          error instanceof WorkflowReadInterruptedError &&
+          error.reason === "cancelled"
+        )
+          throw error;
+        return unavailableGraph(error);
       }
       graphStatus = gr.status;
       if (gr.status === "error") {
-        const decision =
-          gr.error instanceof WorkflowArtifactReadError ?
-            gr.error.decision
-          : undefined;
-        return {
-          deployed: null,
-          graphStatus: "unavailable",
-          ...(decision && decision.state !== "ready" ?
-            {
-              note: `Artifact evidence ${decision.state}: ${decision.reason}.`
-            }
-          : {})
-        };
+        return unavailableGraph(gr.error);
       }
       // Permission failures will not resolve by retrying.
       if (gr.status === "auth" || gr.status === "malformed") break;
@@ -182,11 +191,7 @@ export function createDeployOutcomeService(
               error.reason !== "elapsed"
             )
               throw error;
-            return {
-              deployed: null,
-              graphStatus: "unavailable",
-              note: "Artifact evidence exhausted: elapsed."
-            };
+            return unavailableGraph(error);
           }
         } else await dependencies.sleep(5000);
       }

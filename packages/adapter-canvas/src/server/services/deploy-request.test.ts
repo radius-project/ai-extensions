@@ -6,6 +6,7 @@ import {
 } from "./deploy-request.js";
 import type { DeployMonitorRequest } from "./deploy-monitor.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
 
 // Every seam throws unless a test opts into it, so a path that reaches for a
 // dependency it should not need fails loudly instead of getting a benign
@@ -858,6 +859,53 @@ describe("deploy request attempt setup", () => {
 });
 
 describe("deploy request background monitor ownership", () => {
+  it.each(["removed", "replaced", "attempt", "stopped"] as const)(
+    "fences a %s observer but releases its original reservation after actual settlement",
+    async (mode) => {
+      const { monitor, control } = controllableMonitor();
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("No reader expected");
+      });
+      const original = { state: {} as CanvasState, observation: scope };
+      let live: typeof original | undefined = original;
+      let releases = 0;
+      let handoffs = 0;
+      let notices = 0;
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: () => live,
+          monitor,
+          releaseDeploymentMutation: (state) => {
+            expect(state).toBe(original.state);
+            releases++;
+          },
+          triggerDeployRepairHandoff: () => {
+            handoffs++;
+            return true;
+          },
+          triggerDeployFailureNotice: () => {
+            notices++;
+            return true;
+          }
+        })
+      );
+      await service.deploy({ instanceId: "a", body: body() });
+      if (mode === "removed") live = undefined;
+      else if (mode === "replaced") live = { ...original };
+      else if (mode === "attempt")
+        original.state.deployAttempt = { id: "new-attempt" };
+      else scope.stop();
+      control.calls[0].log("late observation");
+      expect(original.state.deployLogs).toEqual([]);
+      expect(releases).toBe(0);
+      await control.settle(new Error("late observation rejection"));
+      expect(original.state.deployStatus).toBe("in_progress");
+      expect(releases).toBe(1);
+      expect(handoffs).toBe(0);
+      expect(notices).toBe(0);
+      scope.stop();
+    }
+  );
   it("answers before the monitor settles and releases the reservation only afterwards", async () => {
     const released: string[] = [];
     const handoffs: string[] = [];

@@ -72,14 +72,15 @@ export function createWorkflowReadBudget(
     if (remainingBytes <= 0) throw new WorkflowReadLimitError("output-limit");
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let rejectStopped: (error: Error) => void = () => {};
+    // Promise executors run synchronously, before any stop listener is attached.
+    let rejectStopped!: (error: Error) => void;
+    const stopped = new Promise<never>((_, reject) => {
+      rejectStopped = reject;
+    });
     const stop = () => {
       rejectStopped(new WorkflowReadLimitError("cancelled"));
       controller.abort();
     };
-    const stopped = new Promise<never>((_, reject) => {
-      rejectStopped = reject;
-    });
     const detach = context?.onStop?.(stop);
     options.signal?.addEventListener("abort", stop, { once: true });
     try {

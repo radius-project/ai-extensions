@@ -7,6 +7,7 @@ import type {
   EnvironmentVerifyRun
 } from "./environments-types.js";
 import { classifyVerifyFailure } from "./verify-failure-classification.js";
+import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
 
 // The `environments` family, minus `POST /api/create-environment`, which is
 // large enough to live in its own `create-environment*.ts` seams. The five
@@ -546,15 +547,33 @@ export async function handleBypassVerification(
     //    falling through to the outer client-error handler. Only a terminal run
     //    that genuinely *failed* (not cancelled, timed out or skipped) and whose
     //    classification is a bypassable category is allowed through.
+    const entry = dependencies.readInstanceEntry(context.instanceId);
+    const observation = entry?.observation?.observe(
+      selectedExecutor,
+      WORKFLOW_READ_LIMITS.verificationMs
+    );
     let detail: Awaited<ReturnType<typeof dependencies.getRunDetail>>;
     try {
-      detail = await dependencies.getRunDetail(repo, runId, selectedExecutor);
+      detail = await dependencies.getRunDetail(
+        repo,
+        runId,
+        selectedExecutor,
+        observation
+      );
     } catch (e) {
+      if (entry?.observation?.stopped) {
+        json(503, { error: "Workflow observation stopped." });
+        return;
+      }
       json(502, {
         error:
           "Could not read the verification run to confirm the bypass: " +
           dependencies.errorMessage(e)
       });
+      return;
+    }
+    if (entry?.observation?.stopped) {
+      json(503, { error: "Workflow observation stopped." });
       return;
     }
     if (!detail) {
@@ -592,13 +611,26 @@ export async function handleBypassVerification(
     let log: string;
     try {
       log =
-        (await dependencies.fetchRunLog(repo, runId, selectedExecutor)) || "";
+        (await dependencies.fetchRunLog(
+          repo,
+          runId,
+          selectedExecutor,
+          observation
+        )) || "";
     } catch (e) {
+      if (entry?.observation?.stopped) {
+        json(503, { error: "Workflow observation stopped." });
+        return;
+      }
       json(502, {
         error:
           "Could not read the verification run log to confirm the bypass: " +
           dependencies.errorMessage(e)
       });
+      return;
+    }
+    if (entry?.observation?.stopped) {
+      json(503, { error: "Workflow observation stopped." });
       return;
     }
     const azureLoginLog = dependencies.extractGitHubActionsStepLog(
@@ -1062,8 +1094,8 @@ export async function handleListEnvironments(
 // Polls the credential-verification workflow run for a repo/operation and maps
 // its outcome to a UI state. When an operation id is supplied it must match the
 // tracked operation's repo/environment and carry a complete dispatch identity,
-// or the poll is rejected as expired. Every response is 200 with
-// `Cache-Control: no-store`; the state field carries the verdict.
+// or the poll is rejected as expired. Responses use `Cache-Control: no-store`;
+// the state field carries the verdict, except physical stop returns 503.
 export function isAzureRbacVerificationFailure(
   failedSteps: readonly { name?: string }[],
   log: string,
@@ -1086,10 +1118,10 @@ export async function handleVerifyStatus(
   const { response, url } = context;
   const repo = url.searchParams.get("repo") || "";
   const operationId = url.searchParams.get("operationId") || "";
-  const respond = (payload: unknown): void => {
+  const respond = (payload: unknown, status = 200): void => {
     response.setHeader("Content-Type", "application/json");
     response.setHeader("Cache-Control", "no-store");
-    response.writeHead(200);
+    response.writeHead(status);
     response.end(JSON.stringify(payload));
   };
   if (!repo) {
@@ -1107,6 +1139,7 @@ export async function handleVerifyStatus(
         retryCommandId: string;
       }
     | undefined;
+  let entry: ReturnType<EnvironmentsDependencies["readInstanceEntry"]>;
   const isCurrentVerificationRequest = (): boolean => {
     if (!verificationRequest || !operationId) return true;
     const current: any = dependencies.getOperation(operationId);
@@ -1132,7 +1165,7 @@ export async function handleVerifyStatus(
   };
 
   try {
-    const entry = dependencies.readInstanceEntry(context.instanceId);
+    entry = dependencies.readInstanceEntry(context.instanceId);
     const verifyOp: any =
       operationId ? dependencies.getOperation(operationId) : null;
     if (
@@ -1225,7 +1258,10 @@ export async function handleVerifyStatus(
       };
     }
 
-    const observation = entry?.observation?.observe(selectedExecutor, 45000);
+    const observation = entry?.observation?.observe(
+      selectedExecutor,
+      WORKFLOW_READ_LIMITS.verificationMs
+    );
     let readNotice: string | null = null;
     if (observation)
       observation.onDecision = (decision) => {
@@ -1241,7 +1277,13 @@ export async function handleVerifyStatus(
           observation
         )
       : await dependencies.getRunDetail(repo, runId, undefined, observation);
-    if (entry?.observation?.stopped) return;
+    if (entry?.observation?.stopped) {
+      respond(
+        { state: "pending", error: "Workflow observation stopped." },
+        503
+      );
+      return;
+    }
     if (!isCurrentVerificationRequest()) {
       respondWithCurrentVerification();
       return;
@@ -1316,7 +1358,13 @@ export async function handleVerifyStatus(
           observation
         )
       : await dependencies.fetchRunLog(repo, runId, undefined, observation);
-    if (entry?.observation?.stopped) return;
+    if (entry?.observation?.stopped) {
+      respond(
+        { state: "pending", error: "Workflow observation stopped." },
+        503
+      );
+      return;
+    }
     if (!isCurrentVerificationRequest()) {
       respondWithCurrentVerification();
       return;
@@ -1393,6 +1441,13 @@ export async function handleVerifyStatus(
       ...(classification.detail ? { detail: classification.detail } : {})
     });
   } catch (e) {
+    if (entry?.observation?.stopped) {
+      respond(
+        { state: "pending", error: "Workflow observation stopped." },
+        503
+      );
+      return;
+    }
     if (!isCurrentVerificationRequest()) {
       respondWithCurrentVerification();
       return;
