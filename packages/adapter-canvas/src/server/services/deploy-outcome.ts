@@ -55,6 +55,7 @@ export interface DeployOutcomeRequest {
   runId: number | string;
   provider: string;
   resources: CanvasGraphResource[];
+  status: WorkflowRunDetail["status"];
   conclusion: string | null | undefined;
   steps: readonly DeployRunStep[];
   jobs?: WorkflowRunDetail["jobs"];
@@ -151,7 +152,7 @@ export function createDeployOutcomeService(
         pollDeployStatus
       } = request;
 
-      if (!confirmedWorkflowConclusion({ status: "completed", conclusion })) {
+      if (!confirmedWorkflowConclusion(request)) {
         throw new Error("The workflow outcome could not be confirmed.");
       }
 
@@ -240,7 +241,12 @@ export function createDeployOutcomeService(
       // may immediately start a repair handoff using this error and graph.
       const failure = await collectWorkflowFailure(
         { repo, runId: request.runId },
-        { conclusion, steps: [...request.steps], jobs: request.jobs },
+        {
+          status: request.status,
+          conclusion,
+          steps: [...request.steps],
+          jobs: request.jobs
+        },
         { provider, resourcesTouched: deployStepStartedAt > 0 },
         {
           readLog: dependencies.fetchRunLog,

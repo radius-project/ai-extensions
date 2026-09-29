@@ -74,6 +74,7 @@ function outcomeRequest(overrides: Partial<DeployOutcomeRequest> = {}): {
     runId: 42,
     provider: "azure",
     resources: [],
+    status: "completed",
     conclusion: "success",
     steps: [],
     statusReader: statusReader(missingReads()),
@@ -600,6 +601,45 @@ describe("deploy outcome on failure", () => {
     expect(state.deployStatus).toBe("failed");
     expect(state.deployErrorKind).toBeUndefined();
   });
+
+  it.each(["in_progress", undefined])(
+    "refuses terminal settlement for observed status %j before reading or mutating state",
+    async (status) => {
+      const { request, state, logs, polls, statusCalls } = outcomeRequest({
+        status,
+        conclusion: "failure",
+        resources: [{ name: "db", deployStatus: "pending" }],
+        statusReader: {
+          graph: () => {
+            throw new Error("Unconfirmed workflow must not read the graph");
+          },
+          controlPlaneLog: () => {
+            throw new Error("Unconfirmed workflow must not read diagnostics");
+          }
+        }
+      });
+      const diagnosticReads: string[] = [];
+      const service = createDeployOutcomeService(
+        dependencies({
+          fetchRunLog: async () => {
+            diagnosticReads.push("workflow");
+            return "Error: unconfirmed";
+          }
+        })
+      );
+      await expect(service.settle(request)).rejects.toThrow(
+        "The workflow outcome could not be confirmed."
+      );
+      expect(state).toEqual({});
+      expect(request.resources).toEqual([
+        { name: "db", deployStatus: "pending" }
+      ]);
+      expect(logs).toEqual([]);
+      expect(polls).toEqual([]);
+      expect(statusCalls).toEqual([]);
+      expect(diagnosticReads).toEqual([]);
+    }
+  );
 
   it.each([null, undefined, "", "future_conclusion"])(
     "refuses to settle an unconfirmed conclusion %j",

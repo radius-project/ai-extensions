@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { WorkflowRunDetail } from "./workflow-observation.js";
 import {
   collectWorkflowFailure,
   extractRadDeployError
@@ -326,7 +327,50 @@ describe("extractErrorLines", () => {
 
   describe("terminal collection of an already-observed run", () => {
     const target = Object.freeze({ repo: "org/app", runId: 41 });
+    it.each([
+      "in_progress",
+      "waiting",
+      "queued",
+      "future_status",
+      "",
+      undefined
+    ])(
+      "does not collect failure evidence when the observed status is %j",
+      async (status) => {
+        const observed: WorkflowRunDetail = {
+          status,
+          conclusion: "failure",
+          jobs: [],
+          steps: [{ name: "Azure Login (OIDC)", conclusion: "failure" }]
+        };
+        const reads: string[] = [];
+        const result = await collectWorkflowFailure(
+          target,
+          observed,
+          { provider: "azure", resourcesTouched: false },
+          {
+            readLog: async () => {
+              reads.push("workflow");
+              return "Error: incomplete run";
+            },
+            readControlPlaneLog: async () => {
+              reads.push("control-plane");
+              return "incomplete control-plane evidence";
+            }
+          }
+        );
+        expect(reads).toEqual([]);
+        expect(result).toEqual({
+          message:
+            "Workflow outcome is unconfirmed. View the full run: https://github.com/org/app/actions/runs/41",
+          radiusError: "",
+          authDriftMessage: "",
+          narration: []
+        });
+      }
+    );
     const run = Object.freeze({
+      status: "completed",
       conclusion: "failure",
       steps: Object.freeze([
         Object.freeze({ name: "Azure Login (OIDC)", conclusion: "failure" }),
@@ -446,7 +490,7 @@ describe("extractErrorLines", () => {
     it("keeps the normal failure when the best-effort control-plane read throws", async () => {
       const result = await collectWorkflowFailure(
         target,
-        { conclusion: "failure", steps: [] },
+        { status: "completed", conclusion: "failure", steps: [] },
         {
           resourcesTouched: false
         },
@@ -471,6 +515,7 @@ describe("extractErrorLines", () => {
     });
     it("does not retain prior details or narration when a later collection loses both reads", async () => {
       const observed = {
+        status: "completed",
         conclusion: "failure",
         steps: [{ name: "Run rad commands", conclusion: "failure" }]
       };
@@ -519,6 +564,7 @@ describe("extractErrorLines", () => {
         const result = await collectWorkflowFailure(
           target,
           {
+            status: "completed",
             conclusion,
             steps: [{ name: "Azure Login (OIDC)", conclusion: "failure" }]
           },
@@ -545,6 +591,7 @@ describe("extractErrorLines", () => {
       const result = await collectWorkflowFailure(
         target,
         {
+          status: "completed",
           conclusion: "failure",
           steps: [{ name: "Run rad commands", conclusion: "failure" }]
         },
@@ -615,6 +662,7 @@ describe("extractErrorLines", () => {
         const result = await collectWorkflowFailure(
           target,
           {
+            status: "completed",
             conclusion: "failure",
             steps: names.map((name) => ({ name, conclusion: "failure" })),
             jobs: [
@@ -638,7 +686,7 @@ describe("extractErrorLines", () => {
       const lines = Array.from({ length: 41 }, (_, index) => `line-${index}`);
       const result = await collectWorkflowFailure(
         target,
-        { conclusion: "timed_out", steps: [] },
+        { status: "completed", conclusion: "timed_out", steps: [] },
         {
           resourcesTouched: false
         },
@@ -701,6 +749,7 @@ describe("extractErrorLines", () => {
         const result = await collectWorkflowFailure(
           target,
           {
+            status: "completed",
             conclusion: "failure",
             steps: [{ name: "Run rad commands", conclusion: "failure" }],
             jobs

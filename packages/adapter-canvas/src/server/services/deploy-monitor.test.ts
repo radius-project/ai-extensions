@@ -1064,6 +1064,7 @@ describe("deploy monitor settlement", () => {
       repo: "acme/widgets",
       runId: 77,
       provider: "azure",
+      status: "completed",
       conclusion: "failure",
       statusReader
     });

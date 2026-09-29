@@ -451,6 +451,7 @@ export function createDeployMonitorService(
             runId: dRunId,
             provider,
             resources,
+            status: detail.status,
             conclusion: detail.conclusion,
             steps: detail.steps,
             jobs: detail.jobs,

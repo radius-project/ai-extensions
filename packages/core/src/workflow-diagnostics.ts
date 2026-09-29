@@ -18,7 +18,7 @@ export interface WorkflowFailure {
 
 export async function collectWorkflowFailure(
   target: WorkflowTarget,
-  run: Pick<WorkflowRunDetail, "conclusion" | "steps"> &
+  run: Pick<WorkflowRunDetail, "status" | "conclusion" | "steps"> &
     Partial<Pick<WorkflowRunDetail, "jobs">>,
   context: Pick<
     DeployCloudAuthDriftInput,
@@ -29,7 +29,7 @@ export async function collectWorkflowFailure(
   const { conclusion, steps } = run;
   const url =
     "https://github.com/" + target.repo + "/actions/runs/" + target.runId;
-  if (!confirmedWorkflowConclusion({ status: "completed", conclusion })) {
+  if (!confirmedWorkflowConclusion(run)) {
     return {
       message: "Workflow outcome is unconfirmed. View the full run: " + url,
       radiusError: "",

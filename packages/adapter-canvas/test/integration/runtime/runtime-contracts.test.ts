@@ -47,6 +47,7 @@ describe("P0-A Radius runtime registration contract", () => {
     const failure = await collectWorkflowFailure(
       { repo: "org/app", runId: 41 },
       {
+        status: "completed",
         conclusion: "failure",
         steps: [{ name: "Run rad commands", conclusion: "failure" }]
       },

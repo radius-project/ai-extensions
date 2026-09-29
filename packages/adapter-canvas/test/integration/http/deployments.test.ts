@@ -460,6 +460,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         runId: 42,
         provider: "azure",
         resources: harness.state.deployingResources,
+        status: observed.status,
         conclusion: observed.conclusion,
         steps: observed.steps,
         jobs: observed.jobs,
