@@ -40,13 +40,26 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
         mode: "ambient",
         run: async (args) => {
           calls.push(args.join(" "));
-          if (fallback && calls.length === 1)
-            return { code: 1, stderr: "Jobs unavailable", stdout: "" };
-          if (args[3] === "--json")
+          if (
+            args[0] === "api" &&
+            args[1].endsWith("/jobs?per_page=100&page=1")
+          ) {
+            if (fallback)
+              return { code: 1, stderr: "Jobs unavailable", stdout: "" };
             return {
               code: 0,
               stderr: "",
-              stdout: JSON.stringify({ status, conclusion: "failure" })
+              stdout:
+                "HTTP/2 200\n\n" + JSON.stringify({ jobs: [], total_count: 0 })
+            };
+          }
+          if (args[0] === "api")
+            return {
+              code: 0,
+              stderr: "",
+              stdout:
+                "HTTP/2 200\n\n" +
+                JSON.stringify({ status, conclusion: "failure" })
             };
           if (args[3] === "--log")
             return { code: 0, stderr: "", stdout: "Error: observed failure" };
@@ -71,10 +84,8 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
         }
       );
       expect(calls).toEqual([
-        "run view 41 --json status,conclusion,jobs --repo org/app",
-        ...(fallback ?
-          ["run view 41 --json status,conclusion --repo org/app"]
-        : []),
+        "api repos/org/app/actions/runs/41 --include --method GET",
+        "api repos/org/app/actions/runs/41/jobs?per_page=100&page=1 --include --method GET",
         ...(status === "completed" ?
           ["run view 41 --log --repo org/app", "control-plane"]
         : [])
