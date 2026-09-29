@@ -3377,6 +3377,11 @@ describe("createCloudFixture", () => {
           .commandLines("gh-package")
           .some((line) => line.includes("packages/container"))
       ).toBe(true);
+      expect(
+        fake.commands
+          .commandLines("gh")
+          .some((line) => line.includes(`PATCH ${DEFAULT_REF_PATH}`))
+      ).toBe(false);
     });
 
     it("reports targeted workload cleanup failure and continues reclaiming other artifacts", async () => {
@@ -3849,9 +3854,45 @@ describe("createCloudFixture", () => {
       const error = await captureError(fixture.reclaimLeakedProductArtifacts());
 
       expect(error.message).toContain(
-        "reported the app registration was already absent"
+        "reported the object id was already absent and the client-id retry did not remove it"
       );
       expect(error.message).toContain("still listed after 2000ms");
+    });
+
+    it("retries application deletion by client id when object-id deletion reports not found", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          },
+          times: 1
+        },
+        {
+          tool: "az",
+          match: ["ad", "app", "delete", "--id", "obj-1"],
+          respond: {
+            code: 1,
+            stderr:
+              "ERROR: Resource 'Application_obj-1' does not exist or one of its queried reference-property objects are not present."
+          }
+        },
+        {
+          tool: "az",
+          match: ["ad", "app", "delete", "--id", "app-1"],
+          respond: {}
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
+      );
+      expect(fake.commands.commandLines("az")).toContain(
+        "ad app delete --id app-1 --output none"
+      );
     });
 
     it("fails when a service principal outlives the application it belonged to", async () => {
@@ -4108,6 +4149,30 @@ describe("createCloudFixture", () => {
       );
     });
 
+    it("rejects a delete 404 when the GHCR state package is still readable", async () => {
+      const packageBody = JSON.stringify({
+        visibility: "internal",
+        repository: { full_name: REPOSITORY }
+      });
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", "--method", "DELETE", PACKAGE_PATH],
+          respond: NOT_FOUND
+        },
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: { stdout: packageBody },
+          times: 2
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /returned HTTP 404, but the package is still readable.*does not have effective delete access/s
+      );
+    });
+
     it("records an unreadable GHCR state package probe and continues cleanup", async () => {
       const { fixture, fake } = await createHarness([
         failing("gh-package", ["api", PACKAGE_PATH], "HTTP 502"),
@@ -4148,7 +4213,7 @@ describe("createCloudFixture", () => {
     });
 
     it("records a failing pull-request close and continues cleanup", async () => {
-      const { fixture } = await createHarness([
+      const { fixture, fake } = await createHarness([
         {
           tool: "gh",
           match: ["api", PULLS_PATH],
@@ -4176,8 +4241,13 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /pull request #9: .*HTTP 403.*Reclaimed before failing: main reset/s
+        /pull request #9: .*HTTP 403/s
       );
+      expect(
+        fake.commands
+          .commandLines("gh")
+          .some((line) => line.includes(`PATCH ${DEFAULT_REF_PATH}`))
+      ).toBe(false);
     });
 
     it("records a failing default branch read", async () => {

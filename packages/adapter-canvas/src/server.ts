@@ -244,9 +244,7 @@ import {
   fetchRunLog,
   extractErrorLines,
   extractGitHubActionsStepLog,
-  extractRadDeployError,
   explainOidcEnterpriseClaim,
-  classifyDeployCloudAuthDrift,
   explainNoSubscriptions,
   explainRepoAccessForEnvSetup,
   isGitHubRateLimitError,
@@ -1575,8 +1573,8 @@ const environmentsRoutes = createEnvironmentsRoutes({
       );
     }
   },
-  getRunDetail: (repo, runId, executor) => getRunDetail(repo, runId, executor),
-  fetchRunLog: (repo, runId, executor) => fetchRunLog(repo, runId, executor),
+  getRunDetail,
+  fetchRunLog,
   extractErrorLines: (logText, max) => extractErrorLines(logText, max),
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
@@ -3260,10 +3258,6 @@ const deployOutcomeService = createDeployOutcomeService({
     canvasGraphResources(projectSafeApplicationGraph(graph).resources),
   settleDeployStatuses,
   fetchRunLog,
-  extractGitHubActionsStepLog,
-  explainOidcEnterpriseClaim,
-  extractRadDeployError: (logText) => extractRadDeployError(logText),
-  classifyDeployCloudAuthDrift,
   cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),

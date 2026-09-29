@@ -3504,7 +3504,7 @@ test.describe("Radius Canvas in Chromium", () => {
       .toMatchObject({ environment: "fixture-environment" });
   });
 
-  test("reads the full deletion inventory without hidden entries before confirming in Chromium @safety", async ({
+  test("reads the full deletion inventory without hidden entries before confirming in Chromium @safety @cross-platform", async ({
     page,
     canvas
   }) => {

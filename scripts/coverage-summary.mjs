@@ -1,6 +1,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+
+import { isMainModule } from "./module-entry.mjs";
 
 const METRICS = ["statements", "branches", "functions", "lines"];
 
@@ -133,7 +134,6 @@ function run(argv = process.argv.slice(2), env = process.env) {
   }
 }
 
-const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   run();
 }

@@ -13,6 +13,13 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "observeWorkflowRun",
+  "collectWorkflowFailure",
+  "extractErrorLines",
+  "extractGitHubActionsStepLog",
+  "explainOidcEnterpriseClaim",
+  "classifyDeployCloudAuthDrift",
+  "extractRadDeployError",
   "applicationGraphToResources",
   "computeGraphDiff",
   "deployStatusKeys",

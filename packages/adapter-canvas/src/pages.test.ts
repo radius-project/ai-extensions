@@ -124,6 +124,11 @@ describe("remaining pages smoke-render without removed tokens", () => {
     );
   });
 
+  it("keeps the bounded deletion inventory visible across browser font metrics", () => {
+    const html = deployingPage({ deployRepo: "octo/app" });
+    expect(html).toContain("max-height:min(22rem, 40vh)");
+  });
+
   it("references no --rad-* token that pageShell does not define", () => {
     // A var(--rad-foo, <fallback>) whose token is never defined silently
     // paints its light-only fallback in every theme (e.g. the --rad-muted

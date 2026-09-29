@@ -35,6 +35,16 @@ body:
     validations:
       required: true
   - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: |
+        The observable outcomes that must be true for this request to be done.
+        Write each one as a checkable item.
+      placeholder: "- [ ] Modeling an app with two databases produces two database resources in app.bicep"
+    validations:
+      required: true
+  - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered

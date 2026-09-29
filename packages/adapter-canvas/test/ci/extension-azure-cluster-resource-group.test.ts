@@ -27,6 +27,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const EXTENSION_DIRECTORY = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -72,61 +73,104 @@ const clusterWorkflows = workflows.filter(([, source]) =>
   source.includes(CLUSTER_COMMAND)
 );
 
+interface WorkflowStep {
+  readonly name?: string;
+  readonly run?: unknown;
+  readonly env?: Record<string, unknown>;
+}
+
+interface WorkflowJob {
+  readonly env?: Record<string, unknown>;
+  readonly steps?: readonly WorkflowStep[];
+}
+
+interface Workflow {
+  readonly env?: Record<string, unknown>;
+  readonly jobs?: Record<string, WorkflowJob>;
+}
+
 /**
- * The lines that actually pass `--resource-group`, with comments dropped.
+ * A `run:` script paired with the environment its own step can see.
  *
- * A YAML comment mentioning a variable is documentation, not an argument, and
- * these steps carry comments naming both variables precisely because the
- * distinction is easy to get wrong.
+ * Scope is what makes the resolution below mean anything. A binding declared on
+ * some other step is not in this step's environment, so reading the file as one
+ * flat namespace would accept a workflow whose cluster lookup is bound to
+ * nothing — the shell would expand an unset name to the empty string and `az`
+ * would be called with no resource group at all.
+ *
+ * Workflow, job and step `env:` are merged in that order, matching how GitHub
+ * Actions layers them.
  */
-function resourceGroupArguments(source: string): string[] {
-  return source
-    .split(/\r?\n/)
-    .filter((line) => !line.trimStart().startsWith("#"))
-    .filter((line) => line.includes("--resource-group"));
+interface ScopedScript {
+  readonly step: string;
+  readonly script: string;
+  readonly environment: Record<string, string>;
 }
 
-/** The value an `env:` entry binds, for the steps that avoid interpolation. */
-function environmentBinding(source: string, name: string): string | null {
-  const match = source
-    .split(/\r?\n/)
-    .filter((line) => !line.trimStart().startsWith("#"))
-    .find((line) => line.trimStart().startsWith(`${name}:`));
-  return match ? match.slice(match.indexOf(":") + 1).trim() : null;
+function stringEntries(
+  source: Record<string, unknown> | undefined
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source ?? {})) {
+    if (typeof value === "string") out[key] = value;
+  }
+  return out;
+}
+
+function scopedScripts(source: string): ScopedScript[] {
+  const parsed = parse(source) as Workflow | null;
+  const workflowEnv = stringEntries(parsed?.env);
+  const found: ScopedScript[] = [];
+  for (const job of Object.values(parsed?.jobs ?? {})) {
+    const jobEnv = stringEntries(job?.env);
+    for (const step of job?.steps ?? []) {
+      if (typeof step?.run !== "string") continue;
+      found.push({
+        step: step.name ?? "(unnamed)",
+        script: step.run,
+        environment: {
+          ...workflowEnv,
+          ...jobEnv,
+          ...stringEntries(step.env)
+        }
+      });
+    }
+  }
+  return found;
 }
 
 /**
- * The expression a `--resource-group` argument ultimately resolves to.
+ * The expression a reference ultimately resolves to.
  *
- * Two shapes are legitimate. The argument either carries the expression
- * directly, or it reads a shell variable that an `env:` entry bound to the
- * expression — which is how `delete-environment-azure.yml` keeps
- * environment-controlled values out of its shell source.
+ * Two shapes are legitimate. The text either carries the expression directly,
+ * or it reads a shell variable that an `env:` entry bound to the expression —
+ * which is how these workflows keep environment-controlled values out of their
+ * shell source.
  *
  * Following the indirection is what makes this answer the question being
- * asked. Reading the argument line alone would see `"$AZURE_AKS_RESOURCE_GROUP"`
- * and stop, without ever learning which group that name was bound to.
- *
- * Resolution deliberately starts from the argument rather than from the file,
- * so an `env:` binding belonging to some other step is not mistaken for part of
- * the cluster lookup. Hardening an unrelated step the same way is a change this
- * test has no business failing.
+ * asked. Reading the text alone would see `"$AZURE_AKS_RESOURCE_GROUP"` and
+ * stop, without ever learning which group that name was bound to.
  *
  * `null` means the shape was not recognised, which the callers treat as a
- * failure rather than a pass: an argument this cannot read is one it cannot
+ * failure rather than a pass: a reference this cannot read is one it cannot
  * vouch for.
  */
-function resolvedResourceGroup(
-  source: string,
-  argument: string
+function resolveReference(
+  environment: Record<string, string>,
+  text: string
 ): string | null {
-  const interpolated = /--resource-group\s+"(\$\{\{.*?\}\})"/.exec(argument);
+  const interpolated = /(\$\{\{.*?\}\})/.exec(text);
   if (interpolated) return interpolated[1];
-  const shellVariable = /--resource-group\s+"\$([A-Za-z_][A-Za-z0-9_]*)"/.exec(
-    argument
-  );
-  if (shellVariable) return environmentBinding(source, shellVariable[1]);
+  const shellVariable = /\$([A-Za-z_][A-Za-z0-9_]*)/.exec(text);
+  if (shellVariable) return environment[shellVariable[1]] ?? null;
   return null;
+}
+
+/** Every `--resource-group` argument in a script, resolved against its step. */
+function resolvedResourceGroups(script: ScopedScript): (string | null)[] {
+  return [...script.script.matchAll(/--resource-group\s+"([^"]+)"/g)].map(
+    (match) => resolveReference(script.environment, match[1])
+  );
 }
 
 describe("the generated Azure workflows' AKS cluster lookup", () => {
@@ -144,12 +188,10 @@ describe("the generated Azure workflows' AKS cluster lookup", () => {
   it.each(clusterWorkflows)(
     "%s looks the cluster up in the cluster's own resource group",
     (_name, source) => {
-      const args = resourceGroupArguments(source);
-      expect(args.length).toBeGreaterThan(0);
-      for (const argument of args) {
-        expect(resolvedResourceGroup(source, argument)).toBe(
-          CLUSTER_RESOURCE_GROUP
-        );
+      const resolved = scopedScripts(source).flatMap(resolvedResourceGroups);
+      expect(resolved.length).toBeGreaterThan(0);
+      for (const group of resolved) {
+        expect(group).toBe(CLUSTER_RESOURCE_GROUP);
       }
     }
   );
@@ -161,18 +203,65 @@ describe("the generated Azure workflows' AKS cluster lookup", () => {
   it.each(clusterWorkflows)(
     "%s never resolves the cluster from the application's resource group alone",
     (_name, source) => {
-      for (const argument of resourceGroupArguments(source)) {
-        expect(resolvedResourceGroup(source, argument)).not.toBe(
-          APPLICATION_RESOURCE_GROUP
-        );
+      for (const group of scopedScripts(source).flatMap(
+        resolvedResourceGroups
+      )) {
+        expect(group).not.toBe(APPLICATION_RESOURCE_GROUP);
       }
     }
   );
+
+  // A binding on another step is not in this step's environment, so a lookup
+  // that reads an unbound name must fail rather than resolve through the file.
+  // The shell would expand it to the empty string and call `az` with no
+  // resource group at all.
+  it("refuses a lookup whose binding belongs to another step", () => {
+    const source = [
+      "jobs:",
+      "  deploy:",
+      "    steps:",
+      "      - name: Unrelated",
+      "        env:",
+      `          AZURE_AKS_RESOURCE_GROUP: ${CLUSTER_RESOURCE_GROUP}`,
+      "        run: echo unrelated",
+      "      - name: Connect to AKS cluster",
+      "        run: |",
+      '          az aks get-credentials --resource-group "$AZURE_AKS_RESOURCE_GROUP"'
+    ].join("\n");
+
+    expect(scopedScripts(source).flatMap(resolvedResourceGroups)).toEqual([
+      null
+    ]);
+  });
+
+  // Job-level `env:` is in scope for every step in the job, so a binding
+  // declared there resolves rather than failing.
+  it("resolves a lookup through a job-level binding", () => {
+    const source = [
+      "jobs:",
+      "  deploy:",
+      "    env:",
+      `      AZURE_AKS_RESOURCE_GROUP: ${CLUSTER_RESOURCE_GROUP}`,
+      "    steps:",
+      "      - name: Connect to AKS cluster",
+      "        run: |",
+      '          az aks get-credentials --resource-group "$AZURE_AKS_RESOURCE_GROUP"'
+    ].join("\n");
+
+    expect(scopedScripts(source).flatMap(resolvedResourceGroups)).toEqual([
+      CLUSTER_RESOURCE_GROUP
+    ]);
+  });
 });
 
 describe("the generated Azure workflows' application resource group", () => {
   // The opposite substitution, which would move where an application's
   // resources are created rather than break a lookup.
+  //
+  // Resolved rather than matched literally, so the assertion keeps holding
+  // once a value reaches the shell through an `env:` binding instead of being
+  // interpolated. What matters is which group the value ends up being, not the
+  // shape it travels in.
   it.each([
     ["the environment's Azure provider", "resourceGroupName:"],
     [
@@ -180,14 +269,20 @@ describe("the generated Azure workflows' application resource group", () => {
       "append_pack_parameter_if_declared azureResourceGroup"
     ]
   ])("keeps %s on the application's resource group", (_label, marker) => {
-    const uses = workflows
-      .flatMap(([, source]) => source.split(/\r?\n/))
-      .filter((line) => line.includes(marker));
+    const uses = workflows.flatMap(([, source]) =>
+      scopedScripts(source).flatMap((script) =>
+        script.script
+          .split(/\r?\n/)
+          .filter((line) => line.includes(marker))
+          .map((line) => [script.environment, line] as const)
+      )
+    );
 
     expect(uses.length).toBeGreaterThan(0);
-    for (const line of uses) {
-      expect(line).toContain("vars.AZURE_RESOURCE_GROUP");
-      expect(line).not.toContain("AZURE_AKS_RESOURCE_GROUP");
+    for (const [environment, line] of uses) {
+      expect(resolveReference(environment, line)).toBe(
+        APPLICATION_RESOURCE_GROUP
+      );
     }
   });
 });

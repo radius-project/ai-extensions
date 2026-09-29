@@ -1,6 +1,6 @@
 # GitHub Radius library: staged implementation plan
 
-- **Status**: Stage 0 inventory and characterization implemented; Extraction stages have not started.
+- **Status**: Stage 0 merged in [#877](https://github.com/radius-project/ai-extensions/pull/877); Stage 1A implements behavior-preserving workflow observation. Stages 1B-1D and later stages remain pending.
 - **Design**: [GitHub Radius: Extracting a Reusable Library from Canvas](./2026-09-github-radius.md), approved and merged in [#845](https://github.com/radius-project/ai-extensions/pull/845).
 - **Planning baseline**: `c1c9e938963bbca923984138c82173ec3f0d8b08`, inspected on September 23, 2026. Recheck the current code and concurrent work before starting each slice.
 - **Implementation basis**: The approved design and current production code only.
@@ -89,7 +89,13 @@ Do not mistake existing dependency injection for the completed extraction. Link 
 
 **Outcome:** The first complete call works through both Canvas and a small caller with no Canvas server.
 
-**Prerequisite (not yet satisfied):** Before production extraction begins, merge a separate documentation-only PR correcting the obsolete `plugins/radius/dist/extension.mjs` references in the [code-quality policy](../../.github/skills/radius-code-quality/SKILL.md), [test architecture](./2026-08-radius-canvas-test-architecture.md), and [test plan](./2026-08-radius-canvas-test-plan.md) to match the current build/manifest layout recorded in stage 7. Preserve all behavioral, single-bundle, SDK-externalization, and test requirements. Record the cleanup PR link here and confirm it has merged before marking this prerequisite satisfied; adding this gate does not complete the cleanup.
+**Prerequisites:** Stage 0 [#877](https://github.com/radius-project/ai-extensions/pull/877) and the artifact-path guidance correction [#879](https://github.com/radius-project/ai-extensions/pull/879) are merged.
+
+**Sequencing:** Review may overlap between a layer and its immediate parent, with at most two open implementation layers. Each layer has its own worktree and PR; dependent layers land only after their parents. This limit does not impose dependencies on unrelated contributors. Stage 1A alone does not complete Stage 1.
+
+**Stage 1A delivery:** Nell Shamrell-Harrington owns two dependent layers: [#889](https://github.com/radius-project/ai-extensions/pull/889) provides core/shared observation, diagnostics, reads and boundary enforcement while leaving Canvas unchanged; [#890](https://github.com/radius-project/ai-extensions/pull/890) adopts those implementations in Canvas and removes duplicate policies. Tests stay with their implementation owners. Core owns known-run normalization and terminal failure collection; shared owns argv/JSON/fallback and ambient/selected read semantics. Canvas retains dispatch, discovery, polling, artifacts/cache, graph projection, narration, attempt state and repair. Verification uses the shared readers but retains its own failure-message assembly. See the [Stage 1A ownership record](./2026-09-github-radius-migration-inventory.md#stage-1a-workflow-observation) for compatibility exports, limitations and test boundaries; the PRs record provenance and per-layer CI evidence. Evidence corrections, artifact extraction and retries remain separate 1B, 1C and 1D changes.
+
+**Compatibility:** Preserve the diagnostic-column contract introduced by [#858](https://github.com/radius-project/ai-extensions/pull/858) without changing authoring scripts or unrelated graph-display behavior.
 
 Start with observing an explicitly identified workflow execution and interpreting the available evidence. Trace `deploy.ts` monitoring/log parsing and `deploy-diagnostics.ts` alongside the deploy monitor/outcome services. Extract only the relevant decisions, not entire files: the services currently mutate `CanvasState` and graph presentation. Keep state projection and refresh scheduling in Canvas.
 

@@ -1400,7 +1400,7 @@ export async function createCloudFixture(
           continue;
         }
         await attempt(`app registration ${app.appId}`, async () => {
-          const deletion = await commands.runAz([
+          const objectIdDeletion = await commands.runAz([
             "ad",
             "app",
             "delete",
@@ -1409,9 +1409,22 @@ export async function createCloudFixture(
             "--output",
             "none"
           ]);
-          const notFound = isAzureResourceNotFound(deletion);
-          if (!notFound)
-            expectSuccess(deletion, `az ad app delete ${app.objectId}`);
+          const objectIdNotFound = isAzureResourceNotFound(objectIdDeletion);
+          if (!objectIdNotFound)
+            expectSuccess(objectIdDeletion, `az ad app delete ${app.objectId}`);
+          if (objectIdNotFound) {
+            const appIdDeletion = await commands.runAz([
+              "ad",
+              "app",
+              "delete",
+              "--id",
+              app.appId,
+              "--output",
+              "none"
+            ]);
+            if (!isAzureResourceNotFound(appIdDeletion))
+              expectSuccess(appIdDeletion, `az ad app delete ${app.appId}`);
+          }
           // Neither a zero exit nor a not-found is proof the object is gone.
           // A run reported this step reclaimed while the app registration was
           // still live and absent from Entra's deleted items, which wedged the
@@ -1435,7 +1448,7 @@ export async function createCloudFixture(
             },
             timeoutMessage: () =>
               `az ad app delete ${app.objectId} ` +
-              `${notFound ? "reported the app registration was already absent" : "succeeded"}, ` +
+              `${objectIdNotFound ? `reported the object id was already absent and the client-id retry did not remove it` : "succeeded"}, ` +
               `but app registration ${survivors.join(", ")} was still listed after ${assertionTimeoutMs}ms.`
           });
         });
@@ -1577,13 +1590,20 @@ export async function createCloudFixture(
               "DELETE",
               packageRecord.apiPath
             ]);
-            // The package is read before it is deleted, so a 404 here means it
-            // disappeared in between rather than that reclamation failed. The
-            // read path already treats absence as "nothing to reclaim"; a
-            // delete that reports the same absence has reached the same end
-            // state and must not fail the run.
-            if (!isGitHubApiNotFound(deletion))
-              expectSuccess(deletion, `gh api DELETE ${packageRecord.apiPath}`);
+            if (isGitHubApiNotFound(deletion)) {
+              const remaining = await readStatePackage(
+                commands,
+                repository,
+                statePackage
+              );
+              if (remaining)
+                throw new Error(
+                  `gh api DELETE ${packageRecord.apiPath} returned HTTP 404, but the package is still readable. ` +
+                    "The package credential does not have effective delete access."
+                );
+              return;
+            }
+            expectSuccess(deletion, `gh api DELETE ${packageRecord.apiPath}`);
           });
         }
       }
@@ -1637,30 +1657,39 @@ export async function createCloudFixture(
           );
         });
 
-      const head = await readDefaultBranchSha(
-        commands,
-        repository,
-        defaultBranch
-      ).catch((error: unknown) => {
-        failures.push(`read ${defaultBranch} head: ${describeError(error)}`);
-        return null;
-      });
-      if (head !== null && !sameSha(head, baselineSha))
-        await attempt(`${defaultBranch} reset to ${baselineSha}`, async () => {
-          expectSuccess(
-            await commands.runGh([
-              "api",
-              "--method",
-              "PATCH",
-              `repos/${repository}/git/refs/heads/${defaultBranch}`,
-              "-f",
-              `sha=${baselineSha}`,
-              "-F",
-              "force=true"
-            ]),
-            `gh api PATCH refs/heads/${defaultBranch}`
-          );
+      // The generated workflows are recovery inputs for every retained
+      // environment. Resetting the branch after an earlier cleanup failure
+      // removes the only workflow scheduled cleanup can dispatch, permanently
+      // deadlocking the fixture behind its own fail-closed preservation.
+      if (failures.length === 0) {
+        const head = await readDefaultBranchSha(
+          commands,
+          repository,
+          defaultBranch
+        ).catch((error: unknown) => {
+          failures.push(`read ${defaultBranch} head: ${describeError(error)}`);
+          return null;
         });
+        if (head !== null && !sameSha(head, baselineSha))
+          await attempt(
+            `${defaultBranch} reset to ${baselineSha}`,
+            async () => {
+              expectSuccess(
+                await commands.runGh([
+                  "api",
+                  "--method",
+                  "PATCH",
+                  `repos/${repository}/git/refs/heads/${defaultBranch}`,
+                  "-f",
+                  `sha=${baselineSha}`,
+                  "-F",
+                  "force=true"
+                ]),
+                `gh api PATCH refs/heads/${defaultBranch}`
+              );
+            }
+          );
+      }
 
       if (failures.length > 0)
         throw new Error(
