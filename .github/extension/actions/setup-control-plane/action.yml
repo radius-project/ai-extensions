@@ -44,17 +44,24 @@ runs:
     - name: Install Radius CLI
       shell: bash
       env:
-        # Pin the Radius install script to a stable release and verify its checksum
-        # before running it, rather than piping from main. The CLI channel stays
-        # `edge` so the workflow still exercises the latest control-plane build.
+        # Install the CLI from a pinned stable Radius release. The control plane
+        # comes from the same release, because `rad install kubernetes` installs
+        # the chart for the CLI's release. Fetch install.sh from that release and
+        # verify its checksum before running it, rather than piping from main.
+        # update-radius-installer.yml keeps this pin on the latest stable release.
         RADIUS_INSTALL_REF: v0.61.0
         RADIUS_INSTALL_SHA256: bf2fdf0248b39ac2a0222326f8458824924872816737a08af3558bddd16c392b
       run: |
         curl -sSL "https://raw.githubusercontent.com/radius-project/radius/${RADIUS_INSTALL_REF}/deploy/install.sh" -o install-rad.sh
         echo "${RADIUS_INSTALL_SHA256}  install-rad.sh" | sha256sum -c -
-        /bin/bash install-rad.sh edge
+        /bin/bash install-rad.sh --version "$RADIUS_INSTALL_REF"
         rm -f install-rad.sh
         rad version
+        CLI_VERSION="$(rad version --cli -o json | jq -r .version)"
+        if [ "$CLI_VERSION" != "$RADIUS_INSTALL_REF" ]; then
+          echo "::error::Installed Radius CLI $CLI_VERSION, expected $RADIUS_INSTALL_REF."
+          exit 1
+        fi
 
     - name: Install Terraform
       uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -102,3 +109,19 @@ runs:
           --set dynamicrp.buildkit.enabled=true \
           "${TARGET_FLAGS[@]}"
         kubectl wait --for=condition=Available deployment --all -n radius-system --timeout=300s
+
+        # A stable CLI installs the newest patch of its own minor release (chart
+        # `~X.Y.Z`, images tagged `X.Y`), so a Radius patch release can put the
+        # control plane one patch ahead of the pinned CLI. Accept any patch of
+        # the CLI's release; reject edge or any other release.
+        rad version
+        VERSIONS="$(rad version -o json)"
+        CLI_RELEASE="$(jq -r .cli.release <<<"$VERSIONS")"
+        CONTROL_PLANE_VERSION="$(jq -r .controlPlane.version <<<"$VERSIONS")"
+        case "$CONTROL_PLANE_VERSION" in
+          "${CLI_RELEASE%.*}".*) ;;
+          *)
+            echo "::error::Installed Radius control plane $CONTROL_PLANE_VERSION, expected release ${CLI_RELEASE%.*}.x to match the CLI ($CLI_RELEASE)."
+            exit 1
+            ;;
+        esac
