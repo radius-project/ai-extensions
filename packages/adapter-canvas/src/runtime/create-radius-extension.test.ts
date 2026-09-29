@@ -283,6 +283,43 @@ describe("RU-19: onPreToolUse hook", () => {
     });
     expect(result).toBeUndefined();
   });
+
+  it("never intercepts pull request creation, even in a modeled worktree", async () => {
+    const fake = createFakeDependencies({ radiusEnabled: true });
+    const session = createFakeSession();
+    fake.sessionHolder.set(session);
+    const ext = createRadiusExtension(fake.deps);
+    await ext.hooks.onSessionStart({ workingDirectory: "/worktrees/widgets" });
+
+    const result = await ext.hooks.onPreToolUse({
+      toolName: "create_pull_request",
+      toolArgs: { title: "Fix CLI flag", body: "Summary" },
+      workingDirectory: "/worktrees/widgets"
+    });
+
+    expect(result).toBeUndefined();
+    expect(fake.deps.github.getDefaultBranch).not.toHaveBeenCalled();
+    expect(session.rpc.canvas.open).not.toHaveBeenCalled();
+  });
+
+  it("ignores failures of non-Radius tools", async () => {
+    const { ext } = setup();
+
+    await expect(
+      ext.hooks.onPostToolUseFailure({
+        toolName: "open_canvas",
+        toolArgs: { canvasId: "browser" },
+        error: "host unavailable"
+      })
+    ).resolves.toBeUndefined();
+    await expect(
+      ext.hooks.onPostToolUseFailure({
+        toolName: "radius_generate_pr_diff_markdown",
+        toolArgs: null,
+        error: "rad unavailable"
+      })
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe("RU-19: onSessionStart hook", () => {
@@ -296,9 +333,6 @@ describe("RU-19: onSessionStart hook", () => {
 
     expect(result?.additionalContext).toContain("radius-panel");
     expect(result?.additionalContext).toContain("radius_generate_app");
-    expect(result?.additionalContext).toContain(
-      "radius_generate_pr_diff_markdown"
-    );
     expect(
       fake.deps.workspace.hasRadiusApplicationModel
     ).toHaveBeenCalledExactlyOnceWith("/worktrees/radius-app");
@@ -327,7 +361,23 @@ describe("RU-19: onSessionStart hook", () => {
     await expect(
       ext.hooks.onSessionStart({ workingDirectory: undefined })
     ).resolves.toBeUndefined();
+    await expect(
+      ext.hooks.onSessionStart({ workingDirectory: "   " })
+    ).resolves.toBeUndefined();
     expect(deps.workspace.hasRadiusApplicationModel).not.toHaveBeenCalled();
+  });
+
+  it("trims the working directory before checking for a model", async () => {
+    const fake = createFakeDependencies({ radiusEnabled: true });
+    const ext = createRadiusExtension(fake.deps);
+
+    await ext.hooks.onSessionStart({
+      workingDirectory: "  /worktrees/radius-app  "
+    });
+
+    expect(
+      fake.deps.workspace.hasRadiusApplicationModel
+    ).toHaveBeenCalledExactlyOnceWith("/worktrees/radius-app");
   });
 
   it("does not block session startup when model detection fails", async () => {

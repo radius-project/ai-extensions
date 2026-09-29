@@ -29,7 +29,6 @@ import {
   deployRepairHandoffMessage,
   deployFailureNoticeMessage
 } from "./hooks.js";
-import { createPullRequestGraphDiffGuard } from "./pr-graph-diff-guard.js";
 import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
 import { createRadiusCanvasInstanceRegistry } from "./canvas-instance-registry.js";
 import { errorMessage } from "./util.js";
@@ -64,18 +63,12 @@ export interface RadiusExtension {
         }
       | undefined
     >;
-    onPostToolUse: (input: {
-      toolName?: unknown;
-      toolArgs?: unknown;
-      toolResult?: unknown;
-      workingDirectory?: unknown;
-    }) => Promise<{ additionalContext: string } | undefined>;
     onPostToolUseFailure: (input: {
       toolName?: unknown;
       toolArgs?: unknown;
       error?: unknown;
       workingDirectory?: unknown;
-    }) => Promise<{ additionalContext: string } | undefined>;
+    }) => Promise<undefined>;
     onSessionStart: (input: {
       workingDirectory?: unknown;
     }) => Promise<{ additionalContext: string } | undefined>;
@@ -97,12 +90,6 @@ export function createRadiusExtension(
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
   const canvasInstances = createRadiusCanvasInstanceRegistry();
-
-  const selectedCanvasInstanceId = (): string =>
-    canvasInstances.current() ?? RADIUS_CANVAS_INSTANCE_ID;
-
-  const reserveCanvasInstance = (): string =>
-    canvasInstances.claim(selectedCanvasInstanceId());
 
   // Staleness signals already handed to the agent, so a refresh that does not
   // clear the drift cannot re-prompt on every later render. Scoped to this
@@ -152,33 +139,6 @@ export function createRadiusExtension(
       )
   });
 
-  const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
-    hasRadiusApplicationModel: (workspacePath) =>
-      deps.workspace.hasRadiusApplicationModel(workspacePath),
-    canonicalWorkspacePath: (workspacePath) =>
-      deps.workspace.canonicalWorkspacePath(workspacePath),
-    workspaceContext: async () => {
-      const state = await workspaceState();
-      return {
-        repo: state.contextRepo || "",
-        branch: state.contextBranch || ""
-      };
-    },
-    getDefaultBranch: (repo) => deps.github.getDefaultBranch(repo),
-    openGraphDiff: async ({ repo, baseBranch, headBranch }) => {
-      const instanceId = reserveCanvasInstance();
-      try {
-        return await deps.session.get().rpc.canvas.open({
-          canvasId: "radius",
-          instanceId,
-          input: { page: "graph-diff", repo, baseBranch, headBranch }
-        });
-      } catch (error) {
-        if (!deps.servers.has(instanceId)) canvasInstances.release(instanceId);
-        throw error;
-      }
-    }
-  });
   let pendingStartupDiagnostic = "";
 
   function logStartupDiagnostic(message: string): boolean {
@@ -517,8 +477,6 @@ export function createRadiusExtension(
               Reflect.get(input.toolArgs, "instanceId")
             : undefined;
           if (canvasId === "radius") {
-            const guarded = await pullRequestGraphDiffGuard.onPreToolUse(input);
-            if (guarded) return guarded;
             const requestedInstanceId =
               typeof instanceId === "string" && instanceId ?
                 instanceId
@@ -536,9 +494,8 @@ export function createRadiusExtension(
             };
           }
         }
-        return await pullRequestGraphDiffGuard.onPreToolUse(input);
+        return undefined;
       },
-      onPostToolUse: (input) => pullRequestGraphDiffGuard.onPostToolUse(input),
       onPostToolUseFailure: async (input) => {
         const canvasId =
           input.toolArgs !== null && typeof input.toolArgs === "object" ?
@@ -559,16 +516,20 @@ export function createRadiusExtension(
         ) {
           canvasInstances.release(failedInstanceId);
         }
-        return await pullRequestGraphDiffGuard.onPostToolUseFailure(input);
+        return undefined;
       },
       onSessionStart: async (input) => {
+        const workspacePath =
+          typeof input.workingDirectory === "string" ?
+            input.workingDirectory.trim()
+          : "";
+        if (!workspacePath) return undefined;
         let modeled = false;
         try {
-          modeled = await pullRequestGraphDiffGuard.observeSessionStart(
-            input.workingDirectory
-          );
+          modeled =
+            await deps.workspace.hasRadiusApplicationModel(workspacePath);
         } catch (error) {
-          pendingStartupDiagnostic = `Radius could not inspect the worktree for an application model during session startup: ${errorMessage(error)}. Radius remains inactive for now and will retry when a later tool call provides the worktree.`;
+          pendingStartupDiagnostic = `Radius could not inspect the worktree for an application model during session startup: ${errorMessage(error)}. Radius session guidance was not loaded for this session.`;
           if (logStartupDiagnostic(pendingStartupDiagnostic)) {
             pendingStartupDiagnostic = "";
           }
