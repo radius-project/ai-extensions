@@ -267,24 +267,21 @@ describe("the generated Azure workflows' application resource group", () => {
   // the pack-only artifact reads the group from the environment it deploys
   // into, so that marker was removed with the parameter rather than left
   // behind to match nothing.
-  it.each([["the environment's Azure provider", "resourceGroupName:"]])(
-    "keeps %s on the application's resource group",
-    (_label, marker) => {
-      const uses = workflows.flatMap(([, source]) =>
-        scopedScripts(source).flatMap((script) =>
-          script.script
-            .split(/\r?\n/)
-            .filter((line) => line.includes(marker))
-            .map((line) => [script.environment, line] as const)
-        )
-      );
+  it("keeps the environment's Azure provider on the application's resource group", () => {
+    const uses = workflows.flatMap(([, source]) =>
+      scopedScripts(source).flatMap((script) =>
+        script.script
+          .split(/\r?\n/)
+          .filter((line) => line.includes("resourceGroupName:"))
+          .map((line) => [script.environment, line] as const)
+      )
+    );
 
-      expect(uses.length).toBeGreaterThan(0);
-      for (const [environment, line] of uses) {
-        expect(resolveReference(environment, line)).toBe(
-          APPLICATION_RESOURCE_GROUP
-        );
-      }
+    expect(uses.length).toBeGreaterThan(0);
+    for (const [environment, line] of uses) {
+      expect(resolveReference(environment, line)).toBe(
+        APPLICATION_RESOURCE_GROUP
+      );
     }
-  );
+  });
 });

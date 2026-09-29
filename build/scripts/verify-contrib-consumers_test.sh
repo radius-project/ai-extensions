@@ -139,6 +139,8 @@ else
 param ${PACK_DECLARED_PARAMETER:-routesGatewayName} string
 param ${PACK_APPENDED_PARAMETER:-appendedParam} string
 param ${PACK_INLINE_PARAMETER:-inlineParam} string
+param defaultedParam string = 'unpassed'
+${PACK_EXTRA_PARAMETER_LINE:-}
 resource pack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: '${PACK_DECLARED_NAME:-sample}'
   properties: {
@@ -264,6 +266,52 @@ if PATH="${TEST_ROOT}/bin:${PATH}" \
     EXTENSION_DIR="${TEST_ROOT}/extension" \
     bash "${VERIFIER}" >/dev/null 2>&1; then
     fail "verifier ignored a parameter appended by a single-line PACK_PARAMETERS+=()"
+fi
+
+# The reverse direction. A pack parameter with no default has to be supplied, so
+# a catalog bump that adds one has to fail here; `rad deploy` would otherwise be
+# the first thing to notice, against a live environment.
+#
+# The run above is the companion assertion: the fixture pack always declares
+# `defaultedParam`, which no workflow passes, and it has to keep passing. A
+# check that flagged every unpassed parameter would break every pack carrying an
+# optional one.
+: >"${CURL_LOG}"
+: >"${DOCKER_LOG}"
+if PATH="${TEST_ROOT}/bin:${PATH}" \
+    PACK_EXTRA_PARAMETER_LINE='param unpassedRequired string' \
+    CATALOG_REF="${REF}" \
+    CATALOG_HELPER="${HELPER_PATH}" \
+    EXTENSION_DIR="${TEST_ROOT}/extension" \
+    bash "${VERIFIER}" >/dev/null 2>&1; then
+    fail "verifier accepted a pack requiring a parameter no workflow passes"
+fi
+
+# A `--parameters` inside the array whose name cannot be read has to be reported
+# rather than skipped: silently ignoring it is indistinguishable from verifying
+# it, and `--parameters "${name}=${value}"` is precisely the shape the removed
+# compatibility shim used. Derived from the fixture so the two cannot drift.
+mkdir -p "${TEST_ROOT}/extension-unparsable"
+awk '
+    { print }
+    /PACK_PARAMETERS=\(/ && !inserted {
+        print "            --parameters \"${legacyName}=${legacyValue}\""
+        inserted = 1
+    }
+' "${TEST_ROOT}/extension/workflow.yml" \
+    >"${TEST_ROOT}/extension-unparsable/workflow.yml"
+# shellcheck disable=SC2016 # The unexpanded `${...}` is what is being planted.
+grep -Fq '${legacyName}' "${TEST_ROOT}/extension-unparsable/workflow.yml" ||
+    fail "could not plant an unreadable parameter in the fixture workflow"
+
+: >"${CURL_LOG}"
+: >"${DOCKER_LOG}"
+if PATH="${TEST_ROOT}/bin:${PATH}" \
+    CATALOG_REF="${REF}" \
+    CATALOG_HELPER="${HELPER_PATH}" \
+    EXTENSION_DIR="${TEST_ROOT}/extension-unparsable" \
+    bash "${VERIFIER}" >/dev/null 2>&1; then
+    fail "verifier skipped a --parameters whose name it could not read"
 fi
 
 echo "contrib consumer verifier tests passed"

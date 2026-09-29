@@ -395,9 +395,10 @@ jobs:
           cat "$RECIPE_PACK_BICEP"
           echo ""
           echo "Deploying provider recipe pack..."
-          # Every parameter here is owned by the pack-only recipe pack artifact.
-          # build/scripts/verify-contrib-consumers.sh fails when the catalog is
-          # pinned to a pack that does not declare one of them.
+          # Every parameter here is owned by the pack-only recipe pack
+          # artifact. Radius verifies that the pack its catalog pins declares
+          # each of them, so one the pack drops is caught before this workflow
+          # ships rather than here.
           PACK_PARAMETERS=(
             --parameters routesGatewayName="$ROUTES_GATEWAY_NAME"
             --parameters routesGatewayNamespace="$ROUTES_GATEWAY_NAMESPACE"
