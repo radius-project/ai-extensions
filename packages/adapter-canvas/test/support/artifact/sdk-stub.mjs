@@ -9,6 +9,7 @@ const REQUIRED_SKILL_FILES = [
   "SKILL.md",
   "scripts/promote-app-model.mjs",
   "scripts/validate-bicep.mjs",
+  "scripts/bicep-security-rules.mjs",
   "scripts/write-app-origin.mjs",
   "references/source-code-references.md"
 ];

@@ -24,6 +24,7 @@ const CANONICAL_MODULE_DIR = path.join(
 const REQUIRED_FILES = [
   "SKILL.md",
   path.join("scripts", "validate-bicep.mjs"),
+  path.join("scripts", "bicep-security-rules.mjs"),
   path.join("references", "source-code-references.md")
 ];
 const INSTRUCTION =
