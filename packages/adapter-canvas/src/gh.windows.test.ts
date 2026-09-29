@@ -1,7 +1,10 @@
 import { execFile } from "node:child_process";
 import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
+import {
+  createWorkflowArtifactReader,
+  readWorkflowRunWithMetadata
+} from "@radius-project/adapter-shared";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -95,6 +98,59 @@ describeWindows("cliExec Windows process integration", () => {
     });
   });
 
+  it("reports actual maxBuffer truncation without losing the known workflow outcome", async () => {
+    let commands = 0;
+    let truncation:
+      | {
+          code: string | number | null | undefined;
+          actual: number;
+          allowed: number | undefined;
+        }
+      | undefined;
+    const result = await readWorkflowRunWithMetadata(
+      {
+        mode: "ambient",
+        run: async (args, options) => {
+          commands++;
+          if (!args[1].includes("/jobs"))
+            return {
+              code: 0,
+              stderr: "",
+              stdout:
+                'HTTP/2.0 200 OK\n\r\n{"status":"completed","conclusion":"failure"}'
+            };
+          return new Promise((resolve) => {
+            cliExec(
+              process.execPath,
+              [
+                "-e",
+                'process.stdout.write("HTTP/2.0 200 OK\\n\\r\\n{\\"jobs\\":[" + " ".repeat(10 * 1024 * 1024));'
+              ],
+              { ...options, env: environment },
+              (error, stdout, stderr) => {
+                truncation = {
+                  code: error?.code,
+                  actual: Buffer.byteLength(stdout),
+                  allowed: options.maxBuffer
+                };
+                resolve({ code: 1, stdout, stderr });
+              }
+            );
+          });
+        }
+      },
+      "org/app",
+      41
+    );
+    expect(result).toMatchObject({
+      completeness: "status-only",
+      reason: "output-limit",
+      value: { data: { conclusion: "failure" }, includeJobs: false }
+    });
+    expect(commands).toBe(2);
+    expect(truncation?.code).toBe("ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+    expect(truncation?.actual).toBe(truncation?.allowed);
+  });
   it("round-trips the production App Registration tag PATCH arguments", async () => {
     const args = buildAppTagPatchArgs({
       appId: "11111111-2222-3333-4444-555555555555",
@@ -287,7 +343,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
 if (args[0] === "api") {
-  process.stdout.write(JSON.stringify({ artifacts: [{
+  process.stdout.write("HTTP/2 200\\n\\n" + JSON.stringify({ artifacts: [{
     id: 1, name: "radius-deploy-status-dev-app", workflow_run: { id: 41 }
   }] }));
 } else if (args[0] === "run" && args[1] === "download") {

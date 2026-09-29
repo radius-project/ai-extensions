@@ -1,4 +1,4 @@
-import { cliExec } from "./gh.js";
+import { cliExec, redactGhCredentials } from "./gh.js";
 import { deployStatusKeys, lookupDeployStatus } from "@radius-project/core";
 import type {
   DeployStatus,
@@ -45,7 +45,7 @@ const run: WorkflowRunner = (args, options) =>
       resolve({
         code: error ? (error.code ?? 1) : 0,
         stdout,
-        stderr: stderr || error?.message || ""
+        stderr: redactGhCredentials(stderr || error?.message || "")
       });
     });
   });

@@ -73,6 +73,67 @@ function downloadRunner(populate: (directory: string) => void | Promise<void>) {
 
 describe("workflow artifact Node binding", () => {
   it.each([
+    [{ artifacts: [null] }, "GitHub returned invalid artifact metadata."],
+    [
+      { artifacts: [{ ...artifact, workflow_run: { id: -1 } }] },
+      "GitHub returned an invalid artifact execution identity."
+    ],
+    [{ artifacts: null }, "GitHub returned an invalid artifact listing."]
+  ])("retains actionable schema diagnostics for %j", async (value, message) => {
+    const reads = createWorkflowArtifactReads(async () => ({
+      code: 0,
+      stderr: "",
+      stdout: `HTTP/2.0 200 OK\n\r\n${JSON.stringify(value)}`
+    }));
+    await expect(
+      reads.listWorkflowArtifactsWithMetadata("org/app", 41)
+    ).rejects.toMatchObject({
+      message,
+      code: "GH_ARTIFACT_MALFORMED",
+      evidence: [{ response: { status: 200 } }]
+    });
+  });
+  it("retains raw listing status/timing independently of its legacy 403 auth projection", async () => {
+    const reads = createWorkflowArtifactReads(async () => ({
+      code: 1,
+      stdout:
+        'HTTP/2 403\nRetry-After: 12\r\n\r\n{"message":"secondary rate limit"}',
+      stderr: ""
+    }));
+    await expect(
+      reads.listWorkflowArtifactsWithMetadata("org/app", 41)
+    ).rejects.toMatchObject({
+      code: "GH_ARTIFACT_AUTH",
+      evidence: [
+        {
+          phase: "artifacts",
+          response: {
+            source: "gh-api-include",
+            status: 403,
+            classification: "rate-limit",
+            retryAfter: { state: "delay", milliseconds: 12000 }
+          }
+        }
+      ]
+    });
+  });
+
+  it("returns safe explicit failure metadata for framed non-auth transport failures", async () => {
+    const reads = createWorkflowArtifactReads(async () => ({
+      code: 1,
+      stdout: 'HTTP/2 503\n\n{"message":"fixture-private"}',
+      stderr: ""
+    }));
+    const error = await reads
+      .listWorkflowArtifacts("org/app")
+      .catch((error: unknown) => error);
+    expect(error).toMatchObject({
+      code: "GH_ARTIFACT_TRANSPORT",
+      evidence: [{ response: { status: 503 } }]
+    });
+    expect(JSON.stringify(error)).not.toContain("fixture-private");
+  });
+  it.each([
     { label: "empty", artifacts: [] },
     {
       label: "exact page limit",
@@ -106,7 +167,7 @@ describe("workflow artifact Node binding", () => {
     async ({ artifacts }) => {
       const run = vi.fn<WorkflowRunner>(async () => ({
         code: 0,
-        stdout: JSON.stringify({ artifacts }),
+        stdout: "HTTP/2 200\n\n" + JSON.stringify({ artifacts }),
         stderr: ""
       }));
       const reads = createWorkflowArtifactReads(run);
@@ -114,7 +175,13 @@ describe("workflow artifact Node binding", () => {
         artifacts.length
       );
       expect(run).toHaveBeenCalledExactlyOnceWith(
-        ["api", "/repos/org/app/actions/runs/41/artifacts?per_page=100"],
+        [
+          "api",
+          "/repos/org/app/actions/runs/41/artifacts?per_page=100",
+          "--include",
+          "--method",
+          "GET"
+        ],
         { timeout: 20000 }
       );
     }
@@ -154,7 +221,7 @@ describe("workflow artifact Node binding", () => {
         { repo: "org/app" },
         async () => ({
           code: 0,
-          stdout,
+          stdout: `HTTP/2 200\n\n${stdout}`,
           stderr: ""
         })
       );
@@ -210,18 +277,20 @@ describe("workflow artifact Node binding", () => {
       .mockResolvedValueOnce({
         code: 0,
         stderr: "",
-        stdout: JSON.stringify({
-          artifacts: Array.from({ length: ARTIFACT_PAGE_SIZE }, (_, id) => ({
-            ...artifact,
-            id: id + 1,
-            expired: true
-          }))
-        })
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            artifacts: Array.from({ length: ARTIFACT_PAGE_SIZE }, (_, id) => ({
+              ...artifact,
+              id: id + 1,
+              expired: true
+            }))
+          })
       })
       .mockResolvedValueOnce({
         code: 0,
         stderr: "",
-        stdout: '{"artifacts":[]}'
+        stdout: 'HTTP/2 200\n\n{"artifacts":[]}'
       });
     expect(
       await createWorkflowArtifactReads(run).listWorkflowArtifacts("org/app")
@@ -358,6 +427,34 @@ describe("workflow artifact Node binding", () => {
 });
 
 describe("artifact cleanup and compatibility", () => {
+  it("reports a failed opaque download with no stderr without masking cleanup", async () => {
+    let directory = "";
+    const reads = createWorkflowArtifactReads(async (args) => {
+      directory = args[6];
+      return { code: 7, stdout: "", stderr: "" };
+    });
+    await expect(
+      reads.downloadWorkflowArtifact("org/app", artifact)
+    ).rejects.toThrow("GitHub artifact command failed (7).");
+    expect(existsSync(directory)).toBe(false);
+  });
+  it("marks download metadata unavailable rather than parsing producer diagnostics", async () => {
+    const fixture = downloadRunner((directory) => {
+      writeFileSync(
+        path.join(directory, DEPLOY_STATUS_FILES.controlPlane),
+        "HTTP 429\nRetry-After: 1"
+      );
+    });
+    expect(
+      await createWorkflowArtifactReads(
+        fixture.run
+      ).downloadWorkflowArtifactWithMetadata("org/app", artifact)
+    ).toEqual({
+      value: { [DEPLOY_STATUS_FILES.controlPlane]: "HTTP 429\nRetry-After: 1" },
+      metadata: { source: "unavailable", reason: "opaque-command" }
+    });
+    expect(existsSync(fixture.directory())).toBe(false);
+  });
   it.each(["ok", "auth", "transport"] as const)(
     "reports cleanup failure without replacing the %s read outcome",
     async (mode) => {
@@ -429,12 +526,35 @@ describe("direct workflow observer using production artifact binding", () => {
     async (mode) => {
       const directories: string[] = [];
       const run: WorkflowRunner = async (args) => {
-        if (args[0] === "api")
+        if (args[0] === "api" && args[1].includes("artifacts"))
           return {
             code: 0,
             stderr: "",
-            stdout: JSON.stringify({ artifacts: [artifact] })
+            stdout: "HTTP/2 200\n\n" + JSON.stringify({ artifacts: [artifact] })
           };
+        if (args[0] === "api") {
+          return {
+            code: 0,
+            stderr: "",
+            stdout:
+              "HTTP/2 200\n\n" +
+              JSON.stringify(
+                args[1].includes("/jobs") ?
+                  {
+                    total_count: 1,
+                    jobs: [
+                      {
+                        name: "deploy",
+                        steps: [
+                          { name: "Run rad commands", conclusion: "failure" }
+                        ]
+                      }
+                    ]
+                  }
+                : { status: "completed", conclusion: "failure" }
+              )
+          };
+        }
         if (args[1] === "download") {
           directories.push(args[6]);
           if (mode === "auth")
@@ -460,18 +580,7 @@ describe("direct workflow observer using production artifact binding", () => {
           code: 0,
           stderr: "",
           stdout:
-            args[3] === "--log" ?
-              "deploy\tRun rad commands\t2026-01-01 Error: { primary quota }"
-            : JSON.stringify({
-                status: "completed",
-                conclusion: "failure",
-                jobs: [
-                  {
-                    name: "deploy",
-                    steps: [{ name: "Run rad commands", conclusion: "failure" }]
-                  }
-                ]
-              })
+            "deploy\tRun rad commands\t2026-01-01 Error: { primary quota }"
         };
       };
       const target = { repo: "org/app", runId: 41 };

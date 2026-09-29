@@ -11,9 +11,15 @@ import {
 } from "./deploy-artifacts.js";
 import { probeDeleteConflict } from "./server/services/delete-conflict.js";
 
-vi.mock("./gh.js", () => ({ cliExec: vi.fn() }));
+vi.mock("./gh.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./gh.js")>()),
+  cliExec: vi.fn()
+}));
 
-afterEach(() => vi.resetAllMocks());
+afterEach(() => {
+  vi.resetAllMocks();
+  vi.unstubAllEnvs();
+});
 
 describe("Canvas artifact execution binding", () => {
   it.each([
@@ -64,22 +70,41 @@ describe("Canvas artifact execution binding", () => {
     }
   );
 
+  it("retains useful artifact errors while redacting the host's opaque credential", async () => {
+    vi.stubEnv("GH_TOKEN", "fixture-private-credential");
+    vi.mocked(cliExec).mockImplementation(
+      (_file, _args, _options, callback) => {
+        callback(
+          new Error("denied"),
+          "HTTP/2.0 403 Forbidden\n\r\n{}",
+          "SAML enforcement: grant your OAuth token access (fixture-private-credential)"
+        );
+        return new ChildProcess();
+      }
+    );
+    await expect(listWorkflowArtifacts("org/app", 41)).rejects.toMatchObject({
+      message: "SAML enforcement: grant your OAuth token access ([REDACTED])",
+      code: "GH_ARTIFACT_AUTH",
+      evidence: [{ response: { status: 403, classification: "authorization" } }]
+    });
+  });
   it("retains force-delete conflict proof through the real generic artifact binding", async () => {
     let directory = "";
     vi.mocked(cliExec).mockImplementation((_file, args, _options, callback) => {
       if (args[0] === "api") {
         callback(
           null,
-          JSON.stringify({
-            artifacts: [
-              {
-                id: 1,
-                name: "rad-delete-result",
-                workflow_run: { id: 41 },
-                created_at: null
-              }
-            ]
-          }),
+          "HTTP/2 200\n\n" +
+            JSON.stringify({
+              artifacts: [
+                {
+                  id: 1,
+                  name: "rad-delete-result",
+                  workflow_run: { id: 41 },
+                  created_at: null
+                }
+              ]
+            }),
           ""
         );
       } else {
@@ -135,20 +160,24 @@ describe("Canvas artifact execution binding", () => {
       if (args[0] === "api") {
         expect(args).toEqual([
           "api",
-          "/repos/org/app/actions/runs/41/artifacts?per_page=100"
+          "/repos/org/app/actions/runs/41/artifacts?per_page=100",
+          "--include",
+          "--method",
+          "GET"
         ]);
         expect(options).toEqual({ timeout: 20000 });
         callback(
           null,
-          JSON.stringify({
-            artifacts: [
-              {
-                id: 1,
-                name: "radius-deploy-status-dev-app",
-                workflow_run: { id: 41 }
-              }
-            ]
-          }),
+          "HTTP/2 200\n\n" +
+            JSON.stringify({
+              artifacts: [
+                {
+                  id: 1,
+                  name: "radius-deploy-status-dev-app",
+                  workflow_run: { id: 41 }
+                }
+              ]
+            }),
           ""
         );
       } else {

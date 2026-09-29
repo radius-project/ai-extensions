@@ -8,6 +8,10 @@ import {
 } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import {
+  createWorkflowArtifactReader,
+  WorkflowArtifactReadError
+} from "@radius-project/adapter-shared";
+import {
   MAX_DEPLOY_MESSAGE_LENGTH,
   settleDeployStatuses
 } from "../../deploy-artifacts.js";
@@ -118,6 +122,57 @@ describe("deploy outcome construction", () => {
 });
 
 describe("deploy outcome on success", () => {
+  it.each([
+    "secondary rate limit",
+    "Resource protected by organization SAML enforcement"
+  ])(
+    "retains the artifact 403 projection without activating graph retries: %s",
+    async (message) => {
+      let reads = 0;
+      const reader = createWorkflowArtifactReader(
+        { repo: "acme/widgets", runId: 42 },
+        async () => {
+          reads++;
+          return {
+            code: 1,
+            stderr: "",
+            stdout: `HTTP/2 403\n\n${JSON.stringify({ message })}`
+          };
+        }
+      );
+      const { request, state, logs } = outcomeRequest({ statusReader: reader });
+      const service = createDeployOutcomeService(
+        dependencies({
+          sleep: () => {
+            throw new Error("403 must not activate graph retries");
+          }
+        })
+      );
+      await service.settle(request);
+      expect(reads).toBe(1);
+      expect(state.deployStatus).toBe("complete");
+      expect(logs.join("\n")).toContain("access denied");
+      const evidence = await reader.read();
+      expect(evidence.status).toBe("auth");
+      expect(evidence.error).toBeInstanceOf(WorkflowArtifactReadError);
+      expect(evidence.error).toMatchObject({
+        code: "GH_ARTIFACT_AUTH",
+        evidence: [
+          {
+            response: {
+              source: "gh-api-include",
+              status: 403,
+              classification:
+                message === "secondary rate limit" ? "rate-limit" : (
+                  "authorization"
+                ),
+              retryAfter: { state: "absent" }
+            }
+          }
+        ]
+      });
+    }
+  );
   it("saves the published graph, settles the resources, and reports the provider", async () => {
     const resource: CanvasGraphResource = {
       id: "r1",

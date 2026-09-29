@@ -48,6 +48,18 @@ export default defineConfig({
           functions: 100,
           lines: 100
         },
+        "packages/adapter-shared/src/workflow-read-response.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-shared/src/workflow-read-budget.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
         "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs":
           {
             statements: 100,

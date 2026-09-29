@@ -8,7 +8,8 @@
 
 export {
   createWorkflowArtifactReads,
-  createWorkflowArtifactReader
+  createWorkflowArtifactReader,
+  WorkflowArtifactReadError
 } from "./workflow-artifacts.js";
 export type { WorkflowArtifactReaderOptions } from "./workflow-artifacts.js";
 export {
@@ -47,7 +48,9 @@ export type {
 export { RadProcessError } from "./rad.js";
 export {
   readWorkflowRun,
+  readWorkflowRunWithMetadata,
   readWorkflowLog,
+  readWorkflowLogWithMetadata,
   selectedWorkflowJson,
   SelectedGhAuthorizationError,
   isSelectedGhAuthorizationError,
@@ -62,3 +65,4 @@ export type {
   SelectedWorkflowExecutor,
   SelectedWorkflowJsonRead
 } from "./workflow-reads.js";
+export type { WorkflowRunResponse } from "./workflow-reads.js";

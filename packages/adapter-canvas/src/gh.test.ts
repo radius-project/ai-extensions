@@ -1694,6 +1694,74 @@ describe("selected GitHub executor", { concurrent: false }, () => {
     ]);
   });
 
+  it("prepares the real selected executor before starting Canvas's shared run/jobs allowance", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser"
+    });
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+    const { getRunDetail } = await import("./deploy.js");
+    childProcess.execFile.mockClear();
+    childProcess.execFile.mockImplementation(
+      (_file, args, options, callback) => {
+        expect(options.env.GH_TOKEN).toBe("selected-injected-token");
+        expect(options.env.GITHUB_TOKEN).toBeUndefined();
+        expect(options.env.GH_HOST).toBeUndefined();
+        let stdout: string;
+        let delay: number;
+        if (args[1] === "user") {
+          stdout = "tokuser";
+          delay = 6000;
+        } else if (args[1] === "repos/org/app/actions/runs/41") {
+          stdout =
+            'HTTP/2.0 200 OK\n\r\n{"status":"completed","conclusion":"success"}';
+          delay = 8000;
+          expect(options.timeout).toBe(15000);
+        } else if (
+          args[1] === "repos/org/app/actions/runs/41/jobs?per_page=100&page=1"
+        ) {
+          stdout = 'HTTP/2.0 200 OK\n\r\n{"jobs":[],"total_count":0}';
+          delay = 4000;
+          expect(options.timeout).toBe(7000);
+        } else throw new Error(`Unscripted selected read: ${args.join(" ")}`);
+        setTimeout(() => callback(null, stdout, ""), delay);
+        return { stdin: { end() {} } };
+      }
+    );
+    vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
+    try {
+      const detail = getRunDetail("org/app", 41, executor);
+      await vi.advanceTimersByTimeAsync(18000);
+      expect(await detail).toMatchObject({
+        status: "completed",
+        conclusion: "success",
+        steps: []
+      });
+      await executor.verifyIdentity();
+      expect(childProcess.execFile.mock.calls.map(([, args]) => args)).toEqual([
+        ["api", "user", "--jq", ".login"],
+        [
+          "api",
+          "repos/org/app/actions/runs/41",
+          "--include",
+          "--method",
+          "GET"
+        ],
+        [
+          "api",
+          "repos/org/app/actions/runs/41/jobs?per_page=100&page=1",
+          "--include",
+          "--method",
+          "GET"
+        ]
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves timeout state from selected-account commands", async () => {
     const gh = await loadGh("linux", {
       token: "selected-injected-token",

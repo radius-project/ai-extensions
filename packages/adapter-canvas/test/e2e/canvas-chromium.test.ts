@@ -2833,157 +2833,195 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBeLessThanOrEqual(4);
   });
 
-  test("retries verification through the selected account and returned run URL @safety", async ({
-    page,
-    canvas
-  }) => {
-    const operationId = await canvas.seedRestartedVerificationFailure();
-    const exactCreatedAt = new Date().toISOString();
-    const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
-    const scenario = defaultFakeCliScenario();
-    scenario.commands.push(
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "list",
-          "--workflow=radius-verify-credentials.yml",
-          "--limit",
-          "1",
-          "--json",
-          "databaseId",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: '[{"databaseId":40}]'
-      },
-      {
-        tool: "gh",
-        args: [
-          "workflow",
-          "run",
-          "radius-verify-credentials.yml",
-          "-f",
-          "environment=fixture-environment",
-          "-f",
-          `radius_operation=${operationId}`,
-          "--repo",
-          REPOSITORY,
-          "--ref",
-          WORKTREE_BRANCH
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
-      },
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "list",
-          "--workflow=radius-verify-credentials.yml",
-          "--limit",
-          "10",
-          "--json",
-          "databaseId,createdAt,displayTitle,event,headBranch",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: JSON.stringify([
+  for (const jobsUnavailable of [false, true]) {
+    test(`retries verification through the selected account and returned run URL (jobs unavailable: ${jobsUnavailable}) @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const operationId = await canvas.seedRestartedVerificationFailure();
+      const exactCreatedAt = new Date().toISOString();
+      const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
+      const scenario = defaultFakeCliScenario();
+      scenario.commands.push(
+        {
+          tool: "gh",
+          args: [
+            "run",
+            "list",
+            "--workflow=radius-verify-credentials.yml",
+            "--limit",
+            "1",
+            "--json",
+            "databaseId",
+            "--repo",
+            REPOSITORY
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: '[{"databaseId":40}]'
+        },
+        {
+          tool: "gh",
+          args: [
+            "workflow",
+            "run",
+            "radius-verify-credentials.yml",
+            "-f",
+            "environment=fixture-environment",
+            "-f",
+            `radius_operation=${operationId}`,
+            "--repo",
+            REPOSITORY,
+            "--ref",
+            WORKTREE_BRANCH
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
+        },
+        {
+          tool: "gh",
+          args: [
+            "run",
+            "list",
+            "--workflow=radius-verify-credentials.yml",
+            "--limit",
+            "10",
+            "--json",
+            "databaseId,createdAt,displayTitle,event,headBranch",
+            "--repo",
+            REPOSITORY
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: JSON.stringify([
+            {
+              databaseId: 42,
+              createdAt: decoyCreatedAt,
+              displayTitle:
+                "Radius verify fixture-environment [another-operation]",
+              event: "workflow_dispatch",
+              headBranch: WORKTREE_BRANCH
+            },
+            {
+              databaseId: 41,
+              createdAt: exactCreatedAt,
+              displayTitle: `Radius verify fixture-environment [${operationId}]`,
+              event: "workflow_dispatch",
+              headBranch: WORKTREE_BRANCH
+            }
+          ])
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `repos/${REPOSITORY}/actions/runs/41`,
+            "--include",
+            "--method",
+            "GET"
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout:
+            "HTTP/2 200\n\n" +
+            JSON.stringify({
+              status: "completed",
+              conclusion: "success"
+            })
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `repos/${REPOSITORY}/actions/runs/41/jobs?per_page=100&page=1`,
+            "--include",
+            "--method",
+            "GET"
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout:
+            jobsUnavailable ?
+              'HTTP/2.0 429 Too Many Requests\nRetry-After: 120\r\n\r\n{"message":"secondary rate limit"}'
+            : 'HTTP/2 200\n\n{"jobs":[],"total_count":0}',
+          exitCode: jobsUnavailable ? 1 : 0
+        }
+      );
+      await canvas.setScenario(scenario);
+      await gotoCanvas(page, canvas, "environment");
+
+      const retry = page.locator("#env-progress-command-retry-verification");
+      await expect(retry).toBeVisible();
+      await expect(retry).toHaveText("Retry verification");
+      await retry.click();
+
+      await expect
+        .poll(async () =>
+          (await canvas.cliCalls()).some(
+            (call) =>
+              call.tool === "gh" &&
+              call.args[0] === "workflow" &&
+              call.args.includes(`radius_operation=${operationId}`)
+          )
+        )
+        .toBe(true);
+      await expect
+        .poll(
+          async () => (await canvas.operationRecord(operationId))["state"],
           {
-            databaseId: 42,
-            createdAt: decoyCreatedAt,
-            displayTitle:
-              "Radius verify fixture-environment [another-operation]",
-            event: "workflow_dispatch",
-            headBranch: WORKTREE_BRANCH
-          },
-          {
-            databaseId: 41,
-            createdAt: exactCreatedAt,
-            displayTitle: `Radius verify fixture-environment [${operationId}]`,
-            event: "workflow_dispatch",
-            headBranch: WORKTREE_BRANCH
+            timeout: 15_000
           }
-        ])
-      },
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "view",
-          "41",
-          "--json",
-          "status,conclusion,jobs",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: JSON.stringify({
-          status: "completed",
-          conclusion: "success",
-          jobs: []
-        })
-      }
-    );
-    await canvas.setScenario(scenario);
-    await gotoCanvas(page, canvas, "environment");
+        )
+        .toBe("succeeded");
 
-    const retry = page.locator("#env-progress-command-retry-verification");
-    await expect(retry).toBeVisible();
-    await expect(retry).toHaveText("Retry verification");
-    await retry.click();
-
-    await expect
-      .poll(async () =>
-        (await canvas.cliCalls()).some(
+      const record = await canvas.operationRecord(operationId);
+      expect(record["verification"]).toMatchObject({
+        baselineRunId: 40,
+        runId: "41",
+        runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
+        operationMarker: operationId
+      });
+      expect(record["providerRecovery"]).toMatchObject({
+        mutations: [
+          expect.objectContaining({
+            kind: "github_workflow.dispatch_retry",
+            status: "confirmed",
+            providerIdempotencyKey: operationId
+          })
+        ]
+      });
+      expect(
+        (await canvas.cliCalls()).filter(
           (call) =>
             call.tool === "gh" &&
-            call.args[0] === "workflow" &&
-            call.args.includes(`radius_operation=${operationId}`)
+            call.args[0] === "run" &&
+            call.args.includes(
+              "databaseId,createdAt,displayTitle,event,headBranch"
+            )
         )
-      )
-      .toBe(true);
-    await expect
-      .poll(async () => (await canvas.operationRecord(operationId))["state"], {
-        timeout: 15_000
-      })
-      .toBe("succeeded");
-
-    const record = await canvas.operationRecord(operationId);
-    expect(record["verification"]).toMatchObject({
-      baselineRunId: 40,
-      runId: "41",
-      runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
-      operationMarker: operationId
+      ).toEqual([]);
+      await expect(page.locator("body")).toContainText("Environment created");
+      const calls = await canvas.cliCalls();
+      expect(
+        calls.filter(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "api" &&
+            call.args[1] === `repos/${REPOSITORY}/actions/runs/41`
+        )
+      ).toHaveLength(1);
+      expect(
+        calls.filter(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "api" &&
+            call.args[1] ===
+              `repos/${REPOSITORY}/actions/runs/41/jobs?per_page=100&page=1`
+        )
+      ).toHaveLength(1);
+      await page.locator("#env-progress-details > summary").click();
+      await expect(
+        page.getByRole("button", { name: "Download diagnostic snapshot" })
+      ).toBeHidden();
+      await expectNoWcagViolations(page);
     });
-    expect(record["providerRecovery"]).toMatchObject({
-      mutations: [
-        expect.objectContaining({
-          kind: "github_workflow.dispatch_retry",
-          status: "confirmed",
-          providerIdempotencyKey: operationId
-        })
-      ]
-    });
-    expect(
-      (await canvas.cliCalls()).filter(
-        (call) =>
-          call.tool === "gh" &&
-          call.args[0] === "run" &&
-          call.args.includes(
-            "databaseId,createdAt,displayTitle,event,headBranch"
-          )
-      )
-    ).toEqual([]);
-    await expect(page.locator("body")).toContainText("Environment created");
-    await page.locator("#env-progress-details > summary").click();
-    await expect(
-      page.getByRole("button", { name: "Download diagnostic snapshot" })
-    ).toBeHidden();
-    await expectNoWcagViolations(page);
-  });
+  }
 
   test("pauses an interrupted setup before offering exact-run cancellation and deletion by keyboard @safety", async ({
     page,
@@ -3779,12 +3817,16 @@ test.describe("Radius Canvas in Chromium", () => {
               tool: "gh",
               args: [
                 "api",
-                `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
+                `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`,
+                "--include",
+                "--method",
+                "GET"
               ],
               stdout:
-                evidence === "malformed" ?
+                `HTTP/2 ${evidence === "auth" ? 403 : 200}\n\n` +
+                (evidence === "malformed" ?
                   '{"message":"not a listing"}'
-                : JSON.stringify({ artifacts: [] }),
+                : JSON.stringify({ artifacts: [] })),
               exitCode: evidence === "auth" ? 1 : 0,
               stderr: evidence === "auth" ? "HTTP 403 Forbidden" : ""
             }

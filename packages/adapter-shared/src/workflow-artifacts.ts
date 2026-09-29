@@ -22,9 +22,23 @@ import type {
   DeployStatusReaderOptions,
   DownloadArtifact,
   ListArtifacts,
-  WorkflowArtifact
+  WorkflowArtifact,
+  WorkflowReadEvidence,
+  WorkflowResponseMetadata
 } from "@radius-project/core";
 import type { WorkflowRunner } from "./workflow-reads.js";
+import { readWorkflowApi } from "./workflow-read-response.js";
+
+export class WorkflowArtifactReadError extends Error {
+  constructor(
+    readonly code:
+      "GH_ARTIFACT_AUTH" | "GH_ARTIFACT_MALFORMED" | "GH_ARTIFACT_TRANSPORT",
+    readonly evidence: readonly WorkflowReadEvidence[],
+    message: string
+  ) {
+    super(message);
+  }
+}
 
 export const MAX_ARTIFACT_FILE_BYTES = 8 * 1024 * 1024;
 
@@ -44,13 +58,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function artifactPage(value: unknown): WorkflowArtifact[] {
+function artifactPage(
+  value: unknown,
+  evidence: readonly WorkflowReadEvidence[]
+): WorkflowArtifact[] {
   if (
     !isRecord(value) ||
     !Array.isArray(value.artifacts) ||
     value.artifacts.length > ARTIFACT_PAGE_SIZE
   ) {
-    throw malformed("GitHub returned an invalid artifact listing.");
+    throw new WorkflowArtifactReadError(
+      "GH_ARTIFACT_MALFORMED",
+      evidence,
+      "GitHub returned an invalid artifact listing."
+    );
   }
   return value.artifacts.map((artifact: unknown) => {
     if (
@@ -64,7 +85,11 @@ function artifactPage(value: unknown): WorkflowArtifact[] {
         typeof artifact.expired !== "boolean") ||
       (artifact.created_at != null && typeof artifact.created_at !== "string")
     ) {
-      throw malformed("GitHub returned invalid artifact metadata.");
+      throw new WorkflowArtifactReadError(
+        "GH_ARTIFACT_MALFORMED",
+        evidence,
+        "GitHub returned invalid artifact metadata."
+      );
     }
     const run = artifact.workflow_run;
     if (
@@ -75,7 +100,9 @@ function artifactPage(value: unknown): WorkflowArtifact[] {
             !Number.isSafeInteger(run.id) ||
             run.id <= 0)))
     ) {
-      throw malformed(
+      throw new WorkflowArtifactReadError(
+        "GH_ARTIFACT_MALFORMED",
+        evidence,
         "GitHub returned an invalid artifact execution identity."
       );
     }
@@ -149,26 +176,42 @@ export function createWorkflowArtifactReads(run: WorkflowRunner) {
     return result.stdout;
   }
 
-  const listWorkflowArtifacts: ListArtifacts = async (
-    repo,
-    runId,
-    namePrefix
+  const listWorkflowArtifactsWithMetadata = async (
+    repo: string,
+    runId?: number | string | null,
+    namePrefix?: string
   ) => {
     const found: WorkflowArtifact[] = [];
+    const evidence: WorkflowReadEvidence[] = [];
     const prefix = namePrefix || DEPLOY_STATUS_ARTIFACT_PREFIX;
     for (let page = 1; page <= (runId ? 1 : MAX_ARTIFACT_PAGES); page++) {
       const endpoint =
         runId ?
           `/repos/${repo}/actions/runs/${runId}/artifacts?per_page=${ARTIFACT_PAGE_SIZE}`
         : `/repos/${repo}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=${page}`;
-      const text = await command(["api", endpoint], 20000);
-      let data: unknown;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw malformed("GitHub returned malformed artifact listing JSON.");
+      const response = await readWorkflowApi(run, endpoint, { timeout: 20000 });
+      evidence.push({ phase: "artifacts", response: response.metadata });
+      if (!response.ok) {
+        const status =
+          response.metadata.source === "gh-api-include" ?
+            response.metadata.status
+          : null;
+        throw new WorkflowArtifactReadError(
+          (
+            status === 401 ||
+              status === 403 ||
+              response.commandAuthorizationFailure
+          ) ?
+            "GH_ARTIFACT_AUTH"
+          : response.failure === "json" ? "GH_ARTIFACT_MALFORMED"
+          : "GH_ARTIFACT_TRANSPORT",
+          evidence,
+          response.failure === "json" ?
+            "GitHub returned malformed artifact listing JSON."
+          : response.diagnostic || "GitHub artifact listing could not be read."
+        );
       }
-      const batch = artifactPage(data);
+      const batch = artifactPage(response.value, evidence);
       found.push(...batch);
       if (
         batch.some(
@@ -181,8 +224,10 @@ export function createWorkflowArtifactReads(run: WorkflowRunner) {
       )
         break;
     }
-    return found;
+    return { value: found, evidence };
   };
+  const listWorkflowArtifacts: ListArtifacts = async (...args) =>
+    (await listWorkflowArtifactsWithMetadata(...args)).value;
 
   const downloadWorkflowArtifact: DownloadArtifact = async (repo, artifact) => {
     const runId = artifact.workflow_run?.id;
@@ -218,7 +263,24 @@ export function createWorkflowArtifactReads(run: WorkflowRunner) {
       }
     }
   };
-  return { listWorkflowArtifacts, downloadWorkflowArtifact };
+  async function downloadWorkflowArtifactWithMetadata(
+    repo: string,
+    artifact: WorkflowArtifact
+  ): Promise<{
+    value: ArtifactFiles | null;
+    metadata: WorkflowResponseMetadata;
+  }> {
+    return {
+      value: await downloadWorkflowArtifact(repo, artifact),
+      metadata: { source: "unavailable", reason: "opaque-command" }
+    };
+  }
+  return {
+    listWorkflowArtifacts,
+    listWorkflowArtifactsWithMetadata,
+    downloadWorkflowArtifact,
+    downloadWorkflowArtifactWithMetadata
+  };
 }
 
 export function createWorkflowArtifactReader(

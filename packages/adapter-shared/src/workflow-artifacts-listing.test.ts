@@ -27,7 +27,7 @@ function noise(count: number, offset = 0) {
 function requestedPaths(): string[] {
   return run.mock.calls.map((call) => {
     const args = call[0];
-    return args[args.length - 1];
+    return args[1];
   });
 }
 
@@ -37,7 +37,7 @@ function serve(bodies: string[]) {
   run.mockImplementation(async () => {
     const body = bodies[Math.min(call, bodies.length - 1)];
     call++;
-    return { code: 0, stdout: body, stderr: "" };
+    return { code: 0, stdout: `HTTP/2 200\n\n${body}`, stderr: "" };
   });
 }
 

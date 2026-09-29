@@ -147,6 +147,11 @@ export type {
   DeleteWorkflowFiles
 } from "./workflows/index.js";
 export type { GitHub } from "./ports/index.js";
+export type {
+  WorkflowReadTiming,
+  WorkflowResponseMetadata,
+  WorkflowReadEvidence
+} from "./workflow-read-metadata.js";
 export {
   observeWorkflowRun,
   confirmedWorkflowConclusion

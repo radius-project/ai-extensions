@@ -193,15 +193,17 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
             return {
               code: 0,
               stderr: "",
-              stdout: JSON.stringify({
-                artifacts: [
-                  {
-                    id: 1,
-                    name: "radius-deploy-status-prod-billing",
-                    workflow_run: { id: 42 }
-                  }
-                ]
-              })
+              stdout:
+                "HTTP/2 200\n\n" +
+                JSON.stringify({
+                  artifacts: [
+                    {
+                      id: 1,
+                      name: "radius-deploy-status-prod-billing",
+                      workflow_run: { id: 42 }
+                    }
+                  ]
+                })
             };
           expect(args[1]).toBe("download");
           directories.push(args[6]);

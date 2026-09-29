@@ -149,25 +149,34 @@ describe("verify-status HTTP contract — failure classification", () => {
       login: "octocat",
       run: async (args, options) => {
         calls.push(args);
-        if (
-          args.join(" ") ===
-          "run view 91 --json status,conclusion,jobs --repo octo/app"
-        ) {
-          expect(options).toEqual({ timeout: 15000 });
+        if (args[0] === "api") {
+          expect(options?.timeout).toBeGreaterThan(0);
+          expect(options?.timeout).toBeLessThanOrEqual(15000);
           return {
             code: 0,
             stderr: "",
-            stdout: JSON.stringify({
-              status: "completed",
-              conclusion: "failure",
-              jobs: [
-                {
-                  steps: [
-                    { name: "Check AKS cluster access", conclusion: "failure" }
-                  ]
-                }
-              ]
-            })
+            stdout:
+              "HTTP/2 200\n\n" +
+              JSON.stringify(
+                args[1].includes("/jobs") ?
+                  {
+                    total_count: 1,
+                    jobs: [
+                      {
+                        steps: [
+                          {
+                            name: "Check AKS cluster access",
+                            conclusion: "failure"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                : {
+                    status: "completed",
+                    conclusion: "failure"
+                  }
+              )
           };
         }
         if (args.join(" ") === "run view 91 --log --repo octo/app") {
@@ -240,7 +249,7 @@ describe("verify-status HTTP contract — failure classification", () => {
       "Microsoft.ContainerService/managedClusters/read"
     ]);
     expect(finished).toBe("failed_partial");
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     expect(SelectedGhAuthorizationError).toBe(SharedAuthorizationError);
     expect(
       isSelectedGhAuthorizationError(
