@@ -20,12 +20,12 @@ Three principles shape it.
 
 ## Terms and definitions
 
-| Term            | Definition                                                                                                                                                                                |
-|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Term | Definition |
+| --- | --- |
 | Deploy identity | The identity GitHub Actions assumes when deploying. On Azure an Entra app registration, which spans every subscription in its tenant; on AWS an IAM role, which cannot leave its account. |
-| Recipe pack     | The mapping from each Radius resource type to the recipe that provisions it. It decides whether a dependency becomes an AWS managed service or a workload on the cluster.                 |
-| Target cluster  | The cluster the developer's applications run on.                                                                                                                                          |
-| Tier 1 catalog  | The ranked set of backing services the built-in recipe pack covers on both clouds.                                                                                                        |
+| Recipe pack | The mapping from each Radius resource type to the recipe that provisions it. It decides whether a dependency becomes an AWS managed service or a workload on the cluster. |
+| Target cluster | The cluster the developer's applications run on. |
+| Tier 1 catalog | The ranked set of backing services the built-in recipe pack covers on both clouds. |
 
 ## Objectives
 
@@ -62,12 +62,12 @@ None of the following is needed for Azure parity, so none is in scope.
 
 Error handling covers what the developer is told when one of these is missing.
 
-| Dependency                                          | Why it is needed                                                                                                                                               |
-|-----------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| AWS CLI 2.15.3 or later, with a live session        | Discovery, verification, and identity setup all run through it                                                                                                 |
-| A target EKS cluster the canvas may grant access to | Required to set up an environment on that cluster                                                                                                              |
-| A GitHub identity provider in the AWS account       | Required for passwordless role assumption; one serves every repository in the account, so Radius creates it only if the account has none, and never removes it |
-| A published AWS recipe pack                         | Provides the Tier 1 and Kubernetes catalog. The deploy workflow applies it, so only deployment depends on it and environment creation is unaffected            |
+| Dependency | Why it is needed |
+| --- | --- |
+| AWS CLI 2.15.3 or later, with a live session | Discovery, verification, and identity setup all run through it |
+| A target EKS cluster the canvas may grant access to | Required to set up an environment on that cluster |
+| A GitHub identity provider in the AWS account | Required for passwordless role assumption; one serves every repository in the account, so Radius creates it only if the account has none, and never removes it |
+| A published AWS recipe pack | Provides the Tier 1 and Kubernetes catalog. The deploy workflow applies it, so only deployment depends on it and environment creation is unaffected |
 
 ## User experience
 
@@ -88,22 +88,22 @@ The developer starts with a repository and no environment. The canvas reads it a
 
 Nothing here is AWS-specific. A dependency resolves to a **Radius resource type**, such as `Radius.Data/mySqlDatabases` rather than Amazon RDS. The environment decides later which cloud service sits behind that type. Everything generated lands in the repository beside the application definition and is reviewed in the same pull request.
 
-| Dependency found in the application                       | What the developer gets                                                      |
-|-----------------------------------------------------------|------------------------------------------------------------------------------|
-| Core primitive: container, gateway, route, volume, secret | Standard core Radius type deployed to K8s                                    |
-| Tier 1 backing service                                    | Standard Radius type, resolved at deploy to the cloud service in the catalog |
-| A service AWS can provision                               | Generated custom type whose recipe provisions the managed AWS service        |
-| A service AWS cannot provision, but the cluster can run   | Generated custom type whose recipe runs the service on the cluster           |
-| Anything else                                             | Named during modeling, with nothing generated for it                         |
+| Dependency found in the application | What the developer gets |
+| --- | --- |
+| Core primitive: container, gateway, route, volume, secret | Standard core Radius type deployed to K8s |
+| Tier 1 backing service | Standard Radius type, resolved at deploy to the cloud service in the catalog |
+| A service AWS can provision | Generated custom type whose recipe provisions the managed AWS service |
+| A service AWS cannot provision, but the cluster can run | Generated custom type whose recipe runs the service on the cluster |
+| Anything else | Named during modeling, with nothing generated for it |
 
 Generation is automatic rather than a path the developer chooses, and the type carries only the properties the application uses.
 
 **Parity with Azure**
 
-| Capability                              | Azure today                                                                           | What AWS requires                                                                                            |
-|-----------------------------------------|---------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
-| Dependency outside the built-in catalog | Generates a custom type, with an Azure Verified Module where one matches              | The same, with a recipe declaring the AWS resource types directly, there being no verified-module equivalent |
-| Service the cloud cannot provision      | RabbitMQ alone resolves to a Kubernetes recipe, as a catalog entry rather than a rule | Any such service runs on the cluster, by rule rather than a per-service catalog entry                        |
+| Capability | Azure today | What AWS requires |
+| --- | --- | --- |
+| Dependency outside the built-in catalog | Generates a custom type, with an Azure Verified Module where one matches | The same, with a recipe declaring the AWS resource types directly, there being no verified-module equivalent |
+| Service the cloud cannot provision | RabbitMQ alone resolves to a Kubernetes recipe, as a catalog entry rather than a rule | Any such service runs on the cluster, by rule rather than a per-service catalog entry |
 
 ### Step 2 · Connect an AWS account
 
@@ -121,11 +121,11 @@ Saving unlocks once both the cloud session and GitHub Packages access are verifi
 
 **Parity with Azure**
 
-| Capability                 | Azure today                 | What AWS requires                                                        |
-|----------------------------|-----------------------------|--------------------------------------------------------------------------|
-| What the profile scopes to | Tenant and subscription     | Account and region                                                       |
-| Signing in from the canvas | Azure CLI login remediation | `Sign in to AWS CLI`, which runs `aws sso login`                         |
-| Wrong account detected     | Rejects a tenant mismatch   | Reported on the form before the developer proceeds, naming both accounts |
+| Capability | Azure today | What AWS requires |
+| --- | --- | --- |
+| What the profile scopes to | Tenant and subscription | Account and region |
+| Signing in from the canvas | Azure CLI login remediation | `Sign in to AWS CLI`, which runs `aws sso login` |
+| Wrong account detected | Rejects a tenant mismatch | Reported on the form before the developer proceeds, naming both accounts |
 
 ### Step 3 · Create an environment
 
@@ -146,7 +146,7 @@ Section 4 reports what discovery found and offers a refresh. The selectors popul
 
 VPC and Subnets have no Azure counterpart, because AWS managed data and messaging services are VPC-bound where the Azure equivalents take no network input.
 
-- **Both arrive filled in from the cluster**, which is the selection that works for workloads reaching a managed service. Another VPC can be chosen, and the form states that reaching it needs network routing the canvas does not create.
+- **VPC and Subnets are filled in from the cluster**, which is the selection that works for workloads reaching a managed service. Another VPC can be chosen, and  reaching it needs network routing the canvas does not create.
 - **A selection must span at least two availability zones.** The list states each subnet's zone, and the form rejects a selection resolving to a single zone.
 - **Each subnet is labelled public or private**, derived from whether its route table reaches an internet gateway, so a database does not land in a public subnet unnoticed.
 - **Subnets are limited to the selected VPC.**
@@ -162,7 +162,7 @@ Progress runs through the same three stages Azure reports.
   - The account's GitHub identity provider is checked, and created if the account has none.
   - The subject the role will trust is stated, as `Deploy identity will trust <subject>`.
   - The role is created, or an existing one reused.
-  - A deploy permission policy named for the environment is attached, carrying that environment's region, so it cannot replace the policy of an environment already using this role.
+  - A deploy permission policy named for the environment is attached, carrying that environment's region.
   - The cluster is checked, and the role granted access to it.
 - **`Configure environment`** records the environment on GitHub and commits the deploy workflow.
 - **`Verify credentials`** exercises the trust once, so the developer sees GitHub assume the role before a deploy depends on it.
@@ -180,12 +180,12 @@ Progress runs through the same three stages Azure reports.
 
 **Parity with Azure**
 
-| Capability                              | Azure today                                                                     | What AWS requires                                                                                                                                     |
-|-----------------------------------------|---------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
-| What the wizard discovers for you       | Resource groups, AKS clusters, namespaces                                       | EKS clusters, namespaces, VPCs, subnets                                                                                                               |
-| What is created or changed in the cloud | App registration when needed, federated credential, and scoped role assignments | GitHub identity provider when the account has none, IAM role when needed, repository trust, regional permissions, and EKS cluster access              |
-| How many identities a repository gets   | One per repository, spanning every subscription in the tenant                   | One per repository **per account**; an IAM role cannot span accounts, so an account per environment means a role per environment                      |
-| Adding an environment                   | Adds a federated credential to the same app, and cannot disturb the others      | Adds the environment's own permission policy and cluster access to the same shared role, and merges its subject into the role's single trust document |
+| Capability | Azure today | What AWS requires |
+| --- | --- | --- |
+| What the wizard discovers for you | Resource groups, AKS clusters, namespaces | EKS clusters, namespaces, VPCs, subnets |
+| What is created or changed in the cloud | App registration when needed, federated credential, and scoped role assignments | GitHub identity provider when the account has none, IAM role when needed, repository trust, regional permissions, and EKS cluster access |
+| How many identities a repository gets | One per repository, spanning every subscription in the tenant | One per repository **per account**; an IAM role cannot span accounts, so an account per environment means a role per environment |
+| Adding an environment | Adds a federated credential to the same app, and cannot disturb the others | Adds the environment's own permission policy and cluster access to the same shared role, and merges its subject into the role's single trust document |
 
 ### Step 4 · Review the application graph
 
@@ -221,10 +221,10 @@ Failures caused by identity or cluster access name their specific cause rather t
 
 Watching a run, the deployments list, and the delete controls are provider-neutral and unchanged.
 
-| Capability                | Azure today                                              | What AWS requires                                      |
-|---------------------------|----------------------------------------------------------|--------------------------------------------------------|
-| The closing message       | `🎉 Deployment complete! Application deployed to Azure.` | `🎉 Deployment complete! Application deployed to AWS.` |
-| When identity has drifted | Names the federated credential or role assignment        | Names the trust policy or permissions                  |
+| Capability | Azure today | What AWS requires |
+| --- | --- | --- |
+| The closing message | `🎉 Deployment complete! Application deployed to Azure.` | `🎉 Deployment complete! Application deployed to AWS.` |
+| When identity has drifted | Names the federated credential or role assignment | Names the trust policy or permissions |
 
 #### What each dependency deploys to
 
@@ -232,18 +232,18 @@ The recipe pack decides which AWS service stands behind each Radius type.
 
 Ten backing services are in the first release, ranked by how often developers need them, from the ranked catalog proposed in [radius-project/radius#13122](https://github.com/radius-project/radius/pull/13122). They are where the pack starts, not the limit of what an application can use.
 
-| Rank | Developer dependency | Radius resource type              | Azure outcome                | AWS outcome           |
-|------|----------------------|-----------------------------------|------------------------------|-----------------------|
-| 1    | PostgreSQL           | `Radius.Data/postgreSqlDatabases` | PostgreSQL Flexible Server   | Amazon RDS PostgreSQL |
-| 2    | Redis                | `Radius.Data/redisCaches`         | Azure Managed Redis          | Amazon ElastiCache    |
-| 3    | Object storage       | `Radius.Storage/objectStorage`    | Storage Account              | Amazon S3             |
-| 4    | LLM inference API    | `Radius.AI/models`                | Azure OpenAI                 | Amazon Bedrock        |
-| 5    | MongoDB              | `Radius.Data/mongoDatabases`      | Cosmos DB, Mongo API         | Amazon DocumentDB     |
-| 6    | MySQL                | `Radius.Data/mySqlDatabases`      | MySQL Flexible Server        | Amazon RDS MySQL      |
-| 7    | Kafka                | `Radius.Messaging/kafka`          | Event Hubs, Kafka-compatible | Amazon MSK            |
-| 8    | Search               | `Radius.AI/search`                | Azure AI Search              | Amazon OpenSearch     |
-| 9    | RabbitMQ             | `Radius.Messaging/rabbitMQ`       | Kubernetes recipe            | Amazon MQ             |
-| 10   | SQL Server           | `Radius.Data/sqlServerDatabases`  | Azure SQL Database           | Amazon RDS SQL Server |
+| Rank | Developer dependency | Radius resource type | Azure outcome | AWS outcome |
+| --- | --- | --- | --- | --- |
+| 1 | PostgreSQL | `Radius.Data/postgreSqlDatabases` | PostgreSQL Flexible Server | Amazon RDS PostgreSQL |
+| 2 | Redis | `Radius.Data/redisCaches` | Azure Managed Redis | Amazon ElastiCache |
+| 3 | Object storage | `Radius.Storage/objectStorage` | Storage Account | Amazon S3 |
+| 4 | LLM inference API | `Radius.AI/models` | Azure OpenAI | Amazon Bedrock |
+| 5 | MongoDB | `Radius.Data/mongoDatabases` | Cosmos DB, Mongo API | Amazon DocumentDB |
+| 6 | MySQL | `Radius.Data/mySqlDatabases` | MySQL Flexible Server | Amazon RDS MySQL |
+| 7 | Kafka | `Radius.Messaging/kafka` | Event Hubs, Kafka-compatible | Amazon MSK |
+| 8 | Search | `Radius.AI/search` | Azure AI Search | Amazon OpenSearch |
+| 9 | RabbitMQ | `Radius.Messaging/rabbitMQ` | Kubernetes recipe | Amazon MQ |
+| 10 | SQL Server | `Radius.Data/sqlServerDatabases` | Azure SQL Database | Amazon RDS SQL Server |
 
 The core primitives are `Radius.Compute/containers`, `gateways`, `routes`, `persistentVolumes`, and `Radius.Security/secrets`. These resolve through the same Kubernetes recipes on both clouds, so an application using only these types moves between AKS and EKS unchanged, subject to what each cluster provides: a route needs an ingress controller, and a volume needs a storage class.
 
@@ -257,10 +257,10 @@ The role is narrowed to what the environments still on it need. It is deleted on
 
 **Parity with Azure**
 
-| Capability                          | Azure today                                    | What AWS requires                                                                                                               |
-|-------------------------------------|------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
+| Capability | Azure today | What AWS requires |
+| --- | --- | --- |
 | What happens to the deploy identity | Deletes the environment's federated credential | Removes what this environment added; deletes a Radius-created role only when unused, and never deletes a selected existing role |
-| What you are told afterwards        | Names the federated credential removed         | Names what was removed and what was kept                                                                                        |
+| What you are told afterwards | Names the federated credential removed | Names what was removed and what was kept |
 
 ## Error handling
 
@@ -272,32 +272,32 @@ These rules hold wherever a step fails.
 
 Several of these are not the developer's to fix. Where a permission they do not hold is required, the message names the command and is written to be handed to whoever does. The conditions below follow the order of the journey.
 
-| Condition                                                                                 | What the developer is told                                                                                                                                                                                                                         |
-|-------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| A dependency neither AWS nor the cluster can provide                                      | Named during modeling, with nothing generated for it, and reported as permanent rather than offered a retry                                                                                                                                        |
-| No AWS CLI session                                                                        | Named, with the commands to sign in, alongside a `Sign in to AWS CLI` remediation that runs `aws sso login` for them                                                                                                                               |
-| Account ID or region is not a valid value                                                 | Named at the field, before verification runs                                                                                                                                                                                                       |
-| A credential profile is deleted while environments use it                                 | Deletion names those environments and does not proceed; deleting a profile never touches anything in AWS. Azure needs the same guard, and deletes an in-use profile today                                                                          |
-| AWS CLI too old, or cannot be run                                                         | The installed version, the version required, and why — granting cluster access needs EKS access entries — with the upgrade link. Where the CLI cannot be run at all, its own output is shown                                                       |
-| The account has no GitHub identity provider, and the signed-in identity cannot create one | Names the account and hands over the `aws iam create-open-id-connect-provider` command for an IAM administrator to run                                                                                                                             |
-| The cluster grants access through `aws-auth`                                              | Setup stops at the cluster check, naming the cluster's authentication mode, explaining that Radius grants access through an access entry which that mode does not support, and giving the `aws eks update-cluster-config` command that enables one |
-| A role of the expected name is not Radius-managed                                         | Names the matching role, says that no change was made, and offers the two valid paths: select that role explicitly, or choose a different name                                                                                                     |
-| Role creation denied by IAM                                                               | Said plainly, with a choice to return and select an existing role, or hand the denied action to an IAM administrator                                                                                                                               |
-| A selected role cannot be updated                                                         | Names the trust, permission, or cluster-access change that was denied, and leaves the role as it was before setup began                                                                                                                            |
-| Discovery is denied, or returns nothing                                                   | Each list says whether it is empty because the account holds none or because the signed-in identity cannot read them; the namespace accepts a typed value meanwhile                                                                                |
-| The GitHub environment or workflow cannot be written                                      | Named as the stage that failed, separately from anything created in AWS                                                                                                                                                                            |
-| A recipe fails part way through                                                           | Names the resource and leaves what was provisioned visible in the graph                                                                                                                                                                            |
-| Cleanup partly fails                                                                      | What was removed and what remains are listed separately, with the remainder offered for retry                                                                                                                                                      |
-| The role is already gone at delete                                                        | Reported as already absent, and deletion continues                                                                                                                                                                                                 |
+| Condition | What the developer is told |
+| --- | --- |
+| A dependency neither AWS nor the cluster can provide | Named during modeling, with nothing generated for it, and reported as permanent rather than offered a retry |
+| No AWS CLI session | Named, with the commands to sign in, alongside a `Sign in to AWS CLI` remediation that runs `aws sso login` for them |
+| Account ID or region is not a valid value | Named at the field, before verification runs |
+| A credential profile is deleted while environments use it | Deletion names those environments and does not proceed; deleting a profile never touches anything in AWS. Azure needs the same guard, and deletes an in-use profile today |
+| AWS CLI too old, or cannot be run | The installed version, the version required, and why — granting cluster access needs EKS access entries — with the upgrade link. Where the CLI cannot be run at all, its own output is shown |
+| The account has no GitHub identity provider, and the signed-in identity cannot create one | Names the account and hands over the `aws iam create-open-id-connect-provider` command for an IAM administrator to run |
+| The cluster grants access through `aws-auth` | Setup stops at the cluster check, naming the cluster's authentication mode, explaining that Radius grants access through an access entry which that mode does not support, and giving the `aws eks update-cluster-config` command that enables one |
+| A role of the expected name is not Radius-managed | Names the matching role, says that no change was made, and offers the two valid paths: select that role explicitly, or choose a different name |
+| Role creation denied by IAM | Said plainly, with a choice to return and select an existing role, or hand the denied action to an IAM administrator |
+| A selected role cannot be updated | Names the trust, permission, or cluster-access change that was denied, and leaves the role as it was before setup began |
+| Discovery is denied, or returns nothing | Each list says whether it is empty because the account holds none or because the signed-in identity cannot read them; the namespace accepts a typed value meanwhile |
+| The GitHub environment or workflow cannot be written | Named as the stage that failed, separately from anything created in AWS |
+| A recipe fails part way through | Names the resource and leaves what was provisioned visible in the graph |
+| Cleanup partly fails | What was removed and what remains are listed separately, with the remainder offered for retry |
+| The role is already gone at delete | Reported as already absent, and deletion continues |
 
 ## Appendix
 
 ### Needs engineering investigation
 
-| Area                    | Question                                                                                                                                                                                                                                                                        |
-|-------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| AWS recipe coverage     | Whether the Radius AWS Bicep provider reaches every one of the ten backing services, and what a dependency does when its service is out of reach.                                                                                                                               |
-| Application credentials | Whether every recipe can return an access key as a secret, or whether workload identity is needed for an application to reach its AWS resource.                                                                                                                                 |
-| Deploy role breadth     | Azure scopes the deploy identity's role assignments to a resource group. The `PowerUserAccess` policy in AWS, bounded by region, is account-wide within that region. Whether the role can be narrowed by tag, by permissions boundary, or by a scoped policy.                   |
-| Concurrent setup        | Two environments created at once in one account both merge a subject into the role's single trust document, which is the one object that cannot be made additive.                                                                                                               |
-| Console link mapping    | Azure appends a resource ID to one portal template and lands on that resource's overview, so no per-type table exists. AWS console URLs differ by service, so every type needs its own mapping to a console list and region, and that table has to be written and kept current. |
+| Area | Question |
+| --- | --- |
+| AWS recipe coverage | Whether the Radius AWS Bicep provider can enable modeling of all the ten backing services |
+| Application credentials | Whether every recipe can return an access key as a secret, or whether workload identity is needed for an application to reach its AWS resource. |
+| Deploy role breadth | Azure scopes the deploy identity's role assignments to a resource group. The `PowerUserAccess` policy in AWS, bounded by region, is account-wide within that region. Whether the role can be narrowed by tag, by permissions boundary, or by a scoped policy. |
+| Concurrent setup | Two environments created at once in one account both merge a subject into the role's single trust document, which is the one object that cannot be made additive. |
+| Console link mapping | Azure appends a resource ID to one portal template and lands on that resource's overview, so no per-type table exists. AWS console URLs differ by service, so every type needs its own mapping to a console list and region, and that table has to be written and kept current. |
