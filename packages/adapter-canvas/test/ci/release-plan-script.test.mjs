@@ -11,10 +11,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const SCRIPTS = ["plugins.mjs", "release-plan.mjs"].map((name) => [
-  name,
-  fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
-]);
+const SCRIPTS = ["plugins.mjs", "module-entry.mjs", "release-plan.mjs"].map(
+  (name) => [
+    name,
+    fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
+  ]
+);
 const temporaryRepositories = [];
 
 function git(root, ...args) {

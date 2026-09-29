@@ -1,6 +1,6 @@
 # Phase 7 visual and reliability traceability
 
-Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.test.ts`, the recurring functional workflow in `.github/workflows/canvas-functional.yml`, and the scheduled extended resilience gate (P2-B) in `.github/workflows/canvas-reliability.yml`. All reuse the Phase 6 real Chromium harness and deterministic fake CLI boundary. No personal credential, live cloud, mutable repository, public content network, or inherited credential store is used.
+Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.test.ts`, the functional workflow in `.github/workflows/canvas-functional.yml` that runs on pull requests which change visual inputs and on a recurring schedule, and the scheduled extended resilience gate (P2-B) in `.github/workflows/canvas-reliability.yml`. All reuse the Phase 6 real Chromium harness and deterministic fake CLI boundary. No personal credential, live cloud, mutable repository, public content network, or inherited credential store is used.
 
 ## Visual baseline inventory
 
@@ -39,6 +39,8 @@ The canonical visual environment is `packages/adapter-canvas/test/visual/Dockerf
 4. If the product change is intentional, run `pnpm test:visual:canonical:update`.
 5. Review every changed PNG under `packages/adapter-canvas/test/visual/__screenshots__/`, rerun `pnpm test:visual:canonical`, and commit the reviewed PNGs with the product change.
 
+On a same-repository pull request, adding the `pr:update-visual-baselines` label replaces steps 1 through 4: `.github/workflows/canvas-visual-baselines.yml` regenerates the baselines from the pull request merge commit with a read-only token and uploads the changed files. `.github/workflows/canvas-visual-baselines-commit.yml` then runs from the default branch, validates that every regenerated file is a bounded, plainly named PNG, commits the files to the branch as a signed bot commit that moves the branch only while it still points at the rendered head, and reports the result in the pull request's status comment. Pull request code never runs in the job that holds the commit credential. Step 5's review still applies.
+
 The functional workflow's manual **Regenerate and upload the canonical visual baselines** input remains available as a fallback and publishes the same directories in the `canvas-visual-functional` artifact. A reviewer must still accept every changed image. The native Ubuntu, Windows, and macOS reliability matrix remains responsible for OS-specific qualification; the canonical container deliberately proves one stable Linux rendering contract rather than native pixel parity.
 
 ### Worktree branch preservation
@@ -47,7 +49,7 @@ The graph and planned views must never fall back to `main`. Every VI-01 and VI-0
 
 ## Extended reliability inventory
 
-`pnpm run test:reliability` runs on Ubuntu, Windows, and macOS every eight hours and on manual dispatch. A dedicated Vitest configuration selects the existing focused test areas with directory globs, so moving or adding a test inside an owning area cannot silently remove it from the scheduled run. Running these suites natively on three hosts is what the schedule adds; it does not convert a unit test with a mocked boundary into a native end-to-end check, and the dispositions below say so.
+`pnpm run test:reliability` runs on Ubuntu, Windows, and macOS every eight hours and on manual dispatch. A dedicated Vitest configuration selects the existing focused test areas with directory globs, so moving or adding a test inside an owning area cannot silently remove it from the scheduled run. The Windows and macOS jobs also run Chromium scenarios tagged `@cross-platform` when the result depends on native browser layout or platform path handling that Ubuntu cannot represent. These checks remain behavioral and do not compare platform-specific rasterization. Running suites natively on three hosts does not convert a unit test with a mocked boundary into a native end-to-end check, and the dispositions below say so.
 
 | Phase 7 category                       | Owning checks                                                                                                                                                                                            | Disposition |
 |----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------|

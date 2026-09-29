@@ -3,6 +3,10 @@
 name: Canvas Functional Tests
 
 on:
+  # Every pull request reports "Visual comparisons" so the check can be made
+  # required. The job is skipped, which satisfies a required check, when the
+  # pull request changes nothing the visual suite renders.
+  pull_request:
   # GitHub can disable scheduled workflows after 60 days without repository
   # activity. A manual dispatch or repository update re-enables the schedule.
   schedule:
@@ -23,12 +27,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect visual inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      visual: ${{ steps.detect.outputs.visual }}
+    steps:
+      # The pull request merge commit's first parent is the base branch tip, so
+      # a depth of two is enough to list exactly what the pull request changes.
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Node.js
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - name: Detect changes that can affect rendering
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "visual=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          visual="$(git diff --name-only HEAD^1 HEAD | node scripts/canvas-visual-baselines.mjs affects)"
+          echo "visual=$visual" >> "$GITHUB_OUTPUT"
+
   visual:
     name: Visual comparisons
+    needs:
+      - changes
+    # Detection fails closed: anything but an explicit "false" runs the suite.
+    if: ${{ !cancelled() && needs.changes.outputs.visual != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      mismatch: ${{ steps.explain.outputs.mismatch }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,8 +93,35 @@ jobs:
           cache: pnpm
 
       - name: Run canonical visual stability comparisons
+        id: check
         if: ${{ !inputs.update_snapshots }}
         run: pnpm run test:visual:canonical
+
+      # A missing or mismatched baseline leaves an `-actual.png`; any other
+      # failure, such as a build error, does not.
+      - name: Explain how to update baselines
+        id: explain
+        if: ${{ failure() && steps.check.outcome == 'failure' && github.event_name == 'pull_request' }}
+        env:
+          LABEL: pr:update-visual-baselines
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$(find packages/adapter-canvas/test-results/visual -name '*-actual.png' -print -quit 2>/dev/null)" ]]; then
+            echo "mismatch=true" >> "$GITHUB_OUTPUT"
+            message="Screenshots no longer match their committed baselines. If the UI change is intended, add the $LABEL label to regenerate and commit them (pull requests from forks: run pnpm test:visual:canonical:update locally and push the reviewed PNGs). Otherwise fix the UI."
+          else
+            echo "mismatch=false" >> "$GITHUB_OUTPUT"
+            message="Visual comparisons failed without a screenshot mismatch, so an outdated baseline is not the cause. Check the job log."
+          fi
+          echo "::error title=Canvas visual baselines::$message"
+          {
+            echo "### Canvas visual comparisons failed"
+            echo
+            echo "$message"
+            echo
+            echo "Actual, expected, and diff images are in the \`canvas-visual-functional\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Regenerate canonical visual baselines
         if: ${{ inputs.update_snapshots }}
@@ -63,6 +138,55 @@ jobs:
             packages/adapter-canvas/test/visual/__screenshots__
           if-no-files-found: warn
           retention-days: 14
+
+  # Fork and Dependabot pull requests receive a read-only token, so they rely on
+  # the check annotation and job summary instead of a comment.
+  report-pull-request:
+    name: Pull request visual status
+    if: >-
+      ${{ always() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]' &&
+      (needs.visual.result == 'success' || needs.visual.result == 'failure') }}
+    needs:
+      - visual
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - name: Update pull request status comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MISMATCH: ${{ needs.visual.outputs.mismatch }}
+          PR: ${{ github.event.pull_request.number }}
+          RESULT: ${{ needs.visual.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RESULT" == "success" ]]; then
+            state=passed
+          elif [[ "$MISMATCH" == "true" ]]; then
+            state=mismatch
+          else
+            state=failed
+          fi
+          node scripts/canvas-visual-baselines.mjs comment \
+            --pr "$PR" \
+            --state "$state" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   notify-scheduled-result:
     name: Scheduled functional alert

@@ -564,7 +564,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
      the remainder line without scrolling; a viewport-relative cap keeps the
      confirmation control reachable on short windows. Overlay scrollbars are
      invisible until interaction, so anything hidden here has no affordance. */
-  .rad-ddlg__resources { list-style:none; margin:0; padding:0; max-height:min(19rem, 40vh); overflow-y:auto; border:1px solid var(--rad-stroke); border-radius:6px; }
+  .rad-ddlg__resources { list-style:none; margin:0; padding:0; max-height:min(22rem, 40vh); overflow-y:auto; border:1px solid var(--rad-stroke); border-radius:6px; }
   /* Platforms that draw classic scrollbars honour this and gain a visible
      track when the viewport cap does force scrolling. */
   .rad-ddlg__resources::-webkit-scrollbar { width:10px; }

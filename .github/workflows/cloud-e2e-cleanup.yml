@@ -350,6 +350,7 @@ jobs:
       # so it inherits the App's whole installation grant - granting the App
       # Packages write here would hand package-write to the journey token too.
       - name: Purge stale GHCR deployment state
+        id: stale-ghcr-state-cleanup
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -411,12 +412,36 @@ jobs:
               failures+=("refuse GHCR package $package_name with visibility ${visibility:-unknown}")
               continue
             fi
-            if [[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]; then
+            if [[ -n "$linked_repository" && "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]; then
               failures+=("refuse GHCR package $package_name linked to ${linked_repository:-no repository}")
               continue
             fi
-            if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"; then
+            delete_stderr="$package.stderr"
+            if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path" 2>"$delete_stderr" &&
+              ! grep -q "HTTP 404" "$delete_stderr"; then
               failures+=("delete GHCR package $package_name for $environment")
+              continue
+            fi
+            absent=0
+            verification_failed=0
+            for _ in {1..6}; do
+              if GH_TOKEN="$GH_PACKAGES_TOKEN" gh api "$package_path" >/dev/null 2>"$package.stderr"; then
+                sleep 2
+                continue
+              fi
+              if grep -q "HTTP 404" "$package.stderr"; then
+                absent=1
+                break
+              fi
+              failures+=("verify deletion of GHCR package $package_name for $environment")
+              verification_failed=1
+              break
+            done
+            if (( absent == 0 && verification_failed == 0 )); then
+              failures+=("GHCR package $package_name for $environment is still readable after deletion")
+              continue
+            fi
+            if (( verification_failed == 1 )); then
               continue
             fi
             deleted=$((deleted + 1))
@@ -445,6 +470,7 @@ jobs:
       # succeeding, because that delete failing is one of the ways state is
       # orphaned in the first place.
       - name: Purge orphaned GHCR deployment state
+        id: ghcr-state-cleanup
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
         env:
           GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
@@ -497,12 +523,36 @@ jobs:
               failures+=("refuse GHCR package $package_name with visibility ${visibility:-unknown}")
               continue
             fi
-            if [[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]; then
+            if [[ -n "$linked_repository" && "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]; then
               failures+=("refuse GHCR package $package_name linked to ${linked_repository:-no repository}")
               continue
             fi
-            if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path"; then
+            delete_stderr="$package.stderr"
+            if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path" 2>"$delete_stderr" &&
+              ! grep -q "HTTP 404" "$delete_stderr"; then
               failures+=("delete orphaned GHCR package $package_name")
+              continue
+            fi
+            absent=0
+            verification_failed=0
+            for _ in {1..6}; do
+              if GH_TOKEN="$GH_PACKAGES_TOKEN" gh api "$package_path" >/dev/null 2>"$package.stderr"; then
+                sleep 2
+                continue
+              fi
+              if grep -q "HTTP 404" "$package.stderr"; then
+                absent=1
+                break
+              fi
+              failures+=("verify deletion of orphaned GHCR package $package_name")
+              verification_failed=1
+              break
+            done
+            if (( absent == 0 && verification_failed == 0 )); then
+              failures+=("orphaned GHCR package $package_name is still readable after deletion")
+              continue
+            fi
+            if (( verification_failed == 1 )); then
               continue
             fi
             deleted=$((deleted + 1))
@@ -533,6 +583,7 @@ jobs:
       # This is not gated on the Radius application delete succeeding, because
       # that failing is precisely what strands a workload here.
       - name: Reclaim leaked Radius workloads from the shared cluster
+        id: cluster-workload-cleanup
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
         env:
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
@@ -610,6 +661,7 @@ jobs:
       # The cluster itself is refused, and the selector refuses the whole group
       # if the configured cluster is not in it.
       - name: Reclaim Azure resources left in the shared resource group
+        id: shared-resource-cleanup
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
         env:
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
@@ -666,7 +718,8 @@ jobs:
       # go first because deleting an application can leave an orphaned principal
       # that still fails the next clean-slate probe.
       - name: Purge leaked Entra service principals and applications
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        id: entra-identity-cleanup
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success'))
         env:
           APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
@@ -826,8 +879,41 @@ jobs:
               continue
             fi
             echo "Deleting leaked application $APPLICATION_NAME ($id), created before $cutoff."
-            if ! az ad app delete --id "$id"; then
-              failures+=("delete application $id")
+            delete_error="$RUNNER_TEMP/delete-application-$id.stderr"
+            if ! az ad app delete --id "$id" 2>"$delete_error"; then
+              if ! grep -Eqi "does not exist|Request_ResourceNotFound|Directory_ObjectNotFound" "$delete_error"; then
+                failures+=("delete application $id (appId $app_id)")
+                continue
+              fi
+              if ! az ad app delete --id "$app_id" 2>"$delete_error" &&
+                ! grep -Eqi "does not exist|Request_ResourceNotFound|Directory_ObjectNotFound" "$delete_error"; then
+                failures+=("delete application $id (appId $app_id)")
+                continue
+              fi
+            fi
+            absent=0
+            verification_failed=0
+            for _ in {1..12}; do
+              if ! remaining="$(
+                az ad app list \
+                  --filter "displayName eq '$APPLICATION_NAME'" \
+                  --query "[?id == '$id'] | length(@)" \
+                  -o tsv
+              )"; then
+                failures+=("verify deletion of application $id (appId $app_id)")
+                verification_failed=1
+                break
+              fi
+              if [[ "$remaining" == "0" ]]; then
+                absent=1
+                break
+              fi
+              sleep 5
+            done
+            if (( absent == 0 )); then
+              if (( verification_failed == 0 )); then
+                failures+=("application $id (appId $app_id) remained listed after deletion")
+              fi
               continue
             fi
             applications_purged=$((applications_purged + 1))
@@ -850,7 +936,7 @@ jobs:
       # whose environment has already gone.
       - name: Purge stale GitHub deployment records
         id: deployment-records-cleanup
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success'))
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
@@ -915,7 +1001,8 @@ jobs:
       # name nothing will match again. Leaving the environment in place instead
       # lets the next sweep retry both.
       - name: Purge stale GitHub Environments
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success' && steps.deployment-records-cleanup.outcome == 'success'
+        id: environment-cleanup
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success')) && steps.deployment-records-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
@@ -967,7 +1054,8 @@ jobs:
       # a side effect. Branch age comes from the referenced commit, not from a
       # missing field on the refs API.
       - name: Purge stale workflow fallback pull requests and branches
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        id: fallback-ref-cleanup
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success'))
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
@@ -1083,9 +1171,10 @@ jobs:
       # Cleanup may use an abandoned lease only after its recorded Actions owner
       # is provably complete. A local or malformed owner is unverifiable and is
       # deliberately left intact. When no lease exists, cleanup acquires its own
-      # before touching the mutable default branch.
+      # before touching the mutable default branch. Recovery workflows remain
+      # in place unless every preceding sweep completed successfully.
       - name: Reset the fixture default branch under the shared lease
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success' && steps.entra-identity-cleanup.outcome == 'success' && steps.deployment-records-cleanup.outcome == 'success' && steps.environment-cleanup.outcome == 'success' && steps.stale-ghcr-state-cleanup.outcome == 'success' && steps.ghcr-state-cleanup.outcome == 'success' && steps.fallback-ref-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOURCE_GH_TOKEN: ${{ github.token }}

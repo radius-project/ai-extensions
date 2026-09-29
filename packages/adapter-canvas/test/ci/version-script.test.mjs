@@ -12,10 +12,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const SCRIPTS = ["version.mjs", "plugins.mjs"].map((name) => [
-  name,
-  fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
-]);
+const SCRIPTS = ["version.mjs", "plugins.mjs", "module-entry.mjs"].map(
+  (name) => [
+    name,
+    fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
+  ]
+);
 
 const MANIFEST = ".github/plugin/marketplace.json";
 const PLUGIN_MANIFEST = "plugins/radius/plugin.json";
