@@ -354,16 +354,17 @@ function browserEntrySource(spec: BrowserEntrySpec): string {
   }
   return `import * as react from "react";
 import { createRoot } from "react-dom/client";
-import ReactFlow, {
+import {
   Background,
   Controls,
   Handle,
   Position,
+  ReactFlow,
   useEdgesState,
   useNodesState
-} from "reactflow";
+} from "@xyflow/react";
 import dagre from "dagre";
-import "reactflow/dist/style.css";
+import "@xyflow/react/dist/style.css";
 ${installer}
 install(globalThis, {
   react,

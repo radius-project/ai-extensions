@@ -9,17 +9,19 @@
 
 import * as React from "react";
 import * as ReactDOM from "react-dom/client";
-import * as ReactFlow from "reactflow";
+import * as ReactFlow from "@xyflow/react";
 import dagre from "dagre";
-import "reactflow/dist/style.css";
+import "@xyflow/react/dist/style.css";
 import type { GraphVendor } from "../../../src/browser/graph/vendor.js";
-import type { ClockPort } from "../../../src/browser/ports.js";
 
 export function realGraphVendor(): GraphVendor {
   return {
     react: React as unknown as GraphVendor["react"],
     reactDom: ReactDOM as unknown as GraphVendor["reactDom"],
-    reactFlow: ReactFlow as unknown as GraphVendor["reactFlow"],
+    reactFlow: {
+      ...ReactFlow,
+      default: ReactFlow.ReactFlow
+    } as unknown as GraphVendor["reactFlow"],
     dagre: dagre as unknown as GraphVendor["dagre"]
   };
 }
@@ -36,18 +38,5 @@ export function createGraphHost(): { host: HTMLElement; dispose(): void } {
     dispose() {
       host.remove();
     }
-  };
-}
-
-// The browser's own timers: React Flow and the graph app both schedule work, so
-// a fake clock would suppress the rendering this layer exists to observe.
-export function realClock(): ClockPort {
-  return {
-    setTimeout: (handler, timeoutMs) => window.setTimeout(handler, timeoutMs),
-    clearTimeout: (handle) => window.clearTimeout(handle),
-    setInterval: (handler, intervalMs) =>
-      window.setInterval(handler, intervalMs),
-    clearInterval: (handle) => window.clearInterval(handle),
-    now: () => Date.now()
   };
 }

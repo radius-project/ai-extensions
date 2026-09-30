@@ -2,7 +2,6 @@
 
 - **Author**: Ryan Waite (@ryanwaite)
 - **Date**: 2026-08
-- **Status**: In review
 
 ## Overview
 
@@ -37,7 +36,7 @@ This note builds on [Progress UX for credential and environment creation](./2026
 
 ## Objectives
 
-> **Issue Reference:** [#306: Environment Creation Hardening: Add cancellation, resume, and retry controls](https://github.com/radius-project/ai-extensions/issues/306). Native stack 517 ordered the merged implementation as [PR #508](https://github.com/radius-project/ai-extensions/pull/508), [PR #511](https://github.com/radius-project/ai-extensions/pull/511), [PR #515](https://github.com/radius-project/ai-extensions/pull/515), and [PR #516](https://github.com/radius-project/ai-extensions/pull/516). Follow-on work is in [PR #544](https://github.com/radius-project/ai-extensions/pull/544) for integration boundaries, [PR #580](https://github.com/radius-project/ai-extensions/pull/580) for diagnostics and readiness evidence, [PR #599](https://github.com/radius-project/ai-extensions/pull/599) for restart decisions and workflow cancellation, and [PR #600](https://github.com/radius-project/ai-extensions/pull/600) for verification dispatch identity. These follow-on pull requests are still in review.
+> **Issue Reference:** [#306: Environment Creation Hardening: Add cancellation, resume, and retry controls](https://github.com/radius-project/ai-extensions/issues/306). Native stack 517 ordered the merged implementation as [PR #508](https://github.com/radius-project/ai-extensions/pull/508), [PR #511](https://github.com/radius-project/ai-extensions/pull/511), [PR #515](https://github.com/radius-project/ai-extensions/pull/515), and [PR #516](https://github.com/radius-project/ai-extensions/pull/516). Follow-on work is in [PR #544](https://github.com/radius-project/ai-extensions/pull/544) for integration boundaries, [PR #580](https://github.com/radius-project/ai-extensions/pull/580) for diagnostics and readiness evidence, [PR #599](https://github.com/radius-project/ai-extensions/pull/599) for restart decisions and workflow cancellation, and [PR #600](https://github.com/radius-project/ai-extensions/pull/600) for verification dispatch identity. These follow-on pull requests are merged.
 
 ### Goals
 
@@ -659,7 +658,7 @@ Every external system sits behind a controlled port or fake. Pull-request tests 
 
 ### Validation gates
 
-The merged control stack ran frozen install, typecheck, lint, formatting, Markdown lint, full Vitest coverage, build, runtime integration, HTTP integration, artifact integration, browser component tests, and Canvas Chromium. Each follow-on pull request carries its own evidence while in review. PR #544 reports the complete repository gates. PR #580 reports focused diagnostic and Chromium coverage but keeps live and human readiness gates blocked or not run. PR #599 reports the complete repository gates for restart recovery. PR #600 reports 850 focused tests, 141 dispatch-focused tests, and the build and artifact gates; its local full-coverage and Chromium notes distinguish pre-existing environment failures from the new dispatch behavior. No draft evidence is treated as production approval.
+The merged control stack ran frozen install, typecheck, lint, formatting, Markdown lint, full Vitest coverage, build, runtime integration, HTTP integration, artifact integration, browser component tests, and Canvas Chromium. Each follow-on pull request carried its own evidence. PR #544 reports the complete repository gates. PR #580 reports focused diagnostic and Chromium coverage but keeps live and human readiness gates blocked or not run. PR #599 reports the complete repository gates for restart recovery. PR #600 reports 850 focused tests, 141 dispatch-focused tests, and the build and artifact gates; its local full-coverage and Chromium notes distinguish pre-existing environment failures from the new dispatch behavior. No draft evidence is treated as production approval.
 
 ## Security
 
@@ -749,7 +748,7 @@ The merged control stack ran frozen install, typecheck, lint, formatting, Markdo
 - **Repository rename or deletion:** the operation persists the repository slug it started with and does not adopt a renamed repository automatically. Reads and mutations continue against the saved slug. If GitHub does not resolve it under the selected account, Radius treats the resource as unreadable or unresolved and provides manual guidance rather than interpreting a bare 404 as absence.
 - **Bounded command history:** the operation keeps the latest 20 command records. Attempt outcomes and artifact or provider journals retain the safety facts needed for recovery, but the operation is not an unbounded audit log.
 - **GitHub CLI prerequisite timing:** the target 2.87 check happens when the selected executor is created, not when the extension starts. Read-only Canvas use can begin on an older client, but selected-account environment execution fails before its GitHub mutations.
-- **Follow-on integration:** PRs #544, #580, #599, and #600 are still in review and do not yet share one merged head. This design records their intended combined contract; any rebase that changes schema, routes, exact-run handling, or diagnostic vocabulary must update this note before approval.
+- **Follow-on integration:** PRs #544, #580, #599, and #600 are merged. This design records their combined contract; a later change to schema, routes, exact-run handling, or diagnostic vocabulary must update this note.
 
 ## Monitoring and logging
 
@@ -772,16 +771,16 @@ The core work was split into native stack 517 so each safety layer could be revi
 
 The original [PR #358](https://github.com/radius-project/ai-extensions/pull/358) is closed and superseded. Issue #306 is closed. Issue #506 is a separate required follow-up for unavailable durable storage.
 
-### Follow-on work in review
+### Follow-on work
 
-| Pull request                                                     | State at this review              | Design effect                                                                                                                                                                           |
-|------------------------------------------------------------------|-----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| [#544](https://github.com/radius-project/ai-extensions/pull/544) | Merged                            | Advances the operation schema to version 6, journals GitHub environment variable predecessors, validates Azure/GitHub/GHCR/generated-workflow boundaries, and bounds transient retries. |
-| [#580](https://github.com/radius-project/ai-extensions/pull/580) | Draft, rebased on merged controls | Adds the local allowlisted diagnostic download, reviewed contextual profile, support guidance, and readiness evidence without claiming production approval.                             |
-| [#599](https://github.com/radius-project/ai-extensions/pull/599) | Merged                            | Pauses restored setup for an explicit Continue or Stop decision, monitors the exact saved run, and gates cleanup on exact-run inactivity or cancellation.                               |
-| [#600](https://github.com/radius-project/ai-extensions/pull/600) | Merged                            | Raises the GitHub CLI prerequisite to 2.87, captures the returned run ID and URL, centralizes initial and retry dispatch, and narrows redispatch to proved registration failures.       |
+| Pull request                                                     | State  | Design effect                                                                                                                                                                           |
+|------------------------------------------------------------------|--------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [#544](https://github.com/radius-project/ai-extensions/pull/544) | Merged | Advances the operation schema to version 6, journals GitHub environment variable predecessors, validates Azure/GitHub/GHCR/generated-workflow boundaries, and bounds transient retries. |
+| [#580](https://github.com/radius-project/ai-extensions/pull/580) | Merged | Adds the local allowlisted diagnostic download, reviewed contextual profile, support guidance, and readiness evidence without claiming production approval.                             |
+| [#599](https://github.com/radius-project/ai-extensions/pull/599) | Merged | Pauses restored setup for an explicit Continue or Stop decision, monitors the exact saved run, and gates cleanup on exact-run inactivity or cancellation.                               |
+| [#600](https://github.com/radius-project/ai-extensions/pull/600) | Merged | Raises the GitHub CLI prerequisite to 2.87, captures the returned run ID and URL, centralizes initial and retry dispatch, and narrows redispatch to proved registration failures.       |
 
-PR #580 is rebased onto the merged contract. It retains schema-version-6 environment variable outcomes, includes #599's `cancel_workflow` command and saved workflow state in its diagnostic allowlist, preserves #600's exact run identity, and keeps #544's boundary validation, variable rollback, and journal hooks.
+PR #580 builds on the merged contract. It retains schema-version-6 environment variable outcomes, includes #599's `cancel_workflow` command and saved workflow state in its diagnostic allowlist, preserves #600's exact run identity, and keeps #544's boundary validation, variable rollback, and journal hooks.
 
 ### Other recent related pull requests reviewed
 
@@ -852,4 +851,4 @@ Rejected when the blob chain breaks. Another actor may have edited the file betw
 
 ## Design review notes
 
-Draft for review. Native stack 517 supersedes the closed PR #358, and PRs #508, #511, #515, and #516 are merged. This revision also records the in-review contracts from PRs #544, #580, #599, and #600; those branches must converge before their combined behavior can be treated as shipped. The design accepts the narrow concurrent GitHub environment creator race and records the session-scoped admission limit. Issue #506 remains a difficult unresolved safety gap because the disabled operation store can acknowledge writes that will not survive restart.
+Native stack 517 supersedes the closed PR #358, and PRs #508, #511, #515, #516, #544, #580, #599, and #600 are merged. This revision also records the contracts from PRs #544, #580, #599, and #600. The design accepts the narrow concurrent GitHub environment creator race and records the session-scoped admission limit. Issue #506 remains a difficult unresolved safety gap because the disabled operation store can acknowledge writes that will not survive restart.

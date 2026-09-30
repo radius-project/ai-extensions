@@ -50,5 +50,6 @@ Do **not** use this skill for:
 - Every template section is present; non-applicable sections say `N/A` with a reason — none are silently dropped.
 - The **Detailed design** presents options with advantages/disadvantages and a reasoned **Proposed option**.
 - Every path, symbol, command, and link resolves to something real in the repo — no hallucinated references.
+- The doc has no `Draft`, `In review`, or `Approved` status and does not describe the review state of other pull requests or issues, per the [Status](../../../docs/design/README.md#status) rules.
 - Any Mermaid diagram renders (valid fenced ```mermaid``` block) and reflects the actual components.
 - Markdown follows the repo's lint rules: dash (`-`) bullets, fenced code blocks, and ordered lists starting at `1.`.

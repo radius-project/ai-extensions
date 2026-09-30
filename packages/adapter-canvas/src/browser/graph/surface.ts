@@ -315,7 +315,6 @@ export function createGraphSurface(
 
     const mounted = mountGraph({
       vendor,
-      clock: context.clock,
       host,
       settings,
       deps: { openExternal, openLocalSource, toggleDetails },

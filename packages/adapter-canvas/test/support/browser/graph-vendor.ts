@@ -15,12 +15,13 @@
 // Test-support only: production modules never import this.
 
 import { Component, createElement, isValidElement } from "react";
-import ReactFlowComponent, {
+import {
   Background,
   Controls,
   Handle,
-  Position
-} from "reactflow";
+  Position,
+  ReactFlow as ReactFlowComponent
+} from "@xyflow/react";
 import dagre from "dagre";
 import type { ReactElement } from "react";
 import type {
@@ -354,19 +355,25 @@ export function createRecordingGraphVendor(): RecordingGraphVendorHarness {
 
 // A real instance only exists once React Flow has mounted in a browser, so the
 // viewport port stays recorded here and is exercised for real in Chromium.
+// `failure` selects how a refused fit surfaces: the rejected promise React Flow
+// v12 returns, or a synchronous throw from a port that is not async. Every
+// attempt is recorded, including refused ones.
 export interface FakeFlowInstance extends ReactFlowInstance {
   readonly fits: ReadonlyArray<Record<string, unknown>>;
-  failing: boolean;
+  failure: "none" | "throw" | "reject";
 }
 
 export function createFakeFlowInstance(): FakeFlowInstance {
   const fits: Array<Record<string, unknown>> = [];
   const instance: FakeFlowInstance = {
     fits,
-    failing: false,
+    failure: "none",
     fitView(options) {
-      if (instance.failing) throw new Error("viewport not ready");
       fits.push(options);
+      if (instance.failure === "throw") throw new Error("viewport not ready");
+      return instance.failure === "reject" ?
+          Promise.reject(new Error("viewport not ready"))
+        : Promise.resolve(true);
     }
   };
   return instance;
