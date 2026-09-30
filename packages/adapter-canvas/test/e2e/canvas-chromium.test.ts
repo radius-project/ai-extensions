@@ -18,7 +18,8 @@ import {
   type CanvasHarness,
   type FakeCliCommand
 } from "./support/canvas-harness.js";
-import type { Locator, Page } from "@playwright/test";
+import type { Locator, Page, TestInfo } from "@playwright/test";
+import { collectWorkflowFailure } from "@radius-project/core";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
@@ -60,6 +61,23 @@ const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
 const DIFF_BASE_BRANCH = "main";
+
+async function captureDeployEvidence(
+  page: Page,
+  testInfo: TestInfo,
+  name: string
+): Promise<void> {
+  const screenshotPath = testInfo.outputPath(name + ".png");
+  await page.screenshot({
+    path: screenshotPath,
+    fullPage: true,
+    animations: "disabled"
+  });
+  await testInfo.attach(name, {
+    path: screenshotPath,
+    contentType: "image/png"
+  });
+}
 
 async function stubPageStateGraphRequests(page: Page): Promise<void> {
   await page.route("**/api/discover-branches", async (route) => {
@@ -3702,7 +3720,7 @@ test.describe("Radius Canvas in Chromium", () => {
     test(`shows retained ${completed ? "unconfirmed completion" : "timeout"} details through the real graph route in Chromium @safety`, async ({
       page,
       canvas
-    }) => {
+    }, testInfo) => {
       await page.clock.install();
       const resources: CanvasGraphResource[] = [
         {
@@ -3747,7 +3765,7 @@ test.describe("Radius Canvas in Chromium", () => {
         deployingResources: resources,
         deployStatus: "failed",
         deployErrorKind: "run-unconfirmed",
-        deployRunId: 7,
+        deployRunId: completed ? monitorState.deployRunId : 7,
         deployEnvName: "fixture-environment",
         deployAppName: "radius-app"
       });
@@ -3808,6 +3826,14 @@ test.describe("Radius Canvas in Chromium", () => {
         .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
         .analyze();
       expect(detailsAccessibility.violations).toEqual([]);
+      if (completed) {
+        await expect(page.locator("#node-popup")).toBeVisible();
+        await captureDeployEvidence(
+          page,
+          testInfo,
+          "unconfirmed-completion-resource-details"
+        );
+      }
       const requestsAfterSettlement = graphRequests;
       await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS * 2);
       expect(graphRequests).toBe(requestsAfterSettlement);
@@ -4119,11 +4145,18 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#deploy-progress-modal")).toBeAttached();
   });
 
-  for (const unconfirmed of [false, true]) {
-    test(`preserves ${unconfirmed ? "unconfirmed completion" : "primary failure with unavailable diagnostics"} and keyboard dismissal @safety`, async ({
+  for (const evidence of [
+    "primary failure with unavailable diagnostics",
+    "unconfirmed completion",
+    "primary failure with unavailable workflow log"
+  ]) {
+    test(`preserves ${evidence} and keyboard dismissal @safety`, async ({
       page,
       canvas
-    }) => {
+    }, testInfo) => {
+      const unconfirmed = evidence === "unconfirmed completion";
+      const workflowLogUnavailable =
+        evidence === "primary failure with unavailable workflow log";
       const monitorState: CanvasState = {};
       if (unconfirmed) {
         await createUnconfirmedMonitor("future_conclusion").monitor.run({
@@ -4136,11 +4169,29 @@ test.describe("Radius Canvas in Chromium", () => {
           log: () => {}
         });
       }
-      const error =
+      let error =
         unconfirmed ?
           monitorState.deployError
         : "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
           "Error: recipe quota <img src=x>\n\nThe control-plane log could not be read.";
+      if (workflowLogUnavailable) {
+        const failure = await collectWorkflowFailure(
+          { repo: REPOSITORY, runId: 77 },
+          {
+            status: "completed",
+            conclusion: "failure",
+            steps: [{ name: "Run rad commands", conclusion: "failure" }]
+          },
+          { provider: "azure", resourcesTouched: true },
+          {
+            readLog: async () => {
+              throw new Error("fixture-private-log-read-error");
+            },
+            readControlPlaneLog: async () => null
+          }
+        );
+        error = failure.message;
+      }
       if (typeof error !== "string")
         throw new Error("Missing monitor diagnostic");
       await page.route("**/api/deploy-status**", async (route) => {
@@ -4152,7 +4203,10 @@ test.describe("Radius Canvas in Chromium", () => {
             active: false,
             error,
             errorKind: unconfirmed ? monitorState.deployErrorKind : null,
-            deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+            deployRunUrl:
+              unconfirmed ?
+                monitorState.deployRunUrl
+              : `https://github.com/${REPOSITORY}/actions/runs/77`,
             repairing: false,
             handoff: { pending: false, state: "idle" },
             attempt: { targetRepo: "", environment: "" }
@@ -4172,6 +4226,7 @@ test.describe("Radius Canvas in Chromium", () => {
         0
       );
       await expect(page.locator("#deploy-fail-repair-note")).toBeHidden();
+      await expect(page.locator("#deploy-progress-modal")).toBeVisible();
       if (unconfirmed) {
         await expect(page.locator("#deploy-progress-subtitle")).toContainText(
           DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
@@ -4180,7 +4235,30 @@ test.describe("Radius Canvas in Chromium", () => {
           page.locator("#deploy-progress-subtitle")
         ).not.toContainText("may still be running");
       }
+      if (workflowLogUnavailable) {
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "Deployment failed (failure). Failed step: Run rad commands."
+        );
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "The workflow log could not be read."
+        );
+        await expect(
+          page.locator("#deploy-progress-subtitle")
+        ).not.toContainText("fixture-private-log-read-error");
+        await expect(
+          page.locator("#deploy-progress-subtitle")
+        ).not.toContainText("The control-plane log could not be read.");
+      }
       await expectNoWcagViolations(page);
+      if (unconfirmed || workflowLogUnavailable) {
+        await captureDeployEvidence(
+          page,
+          testInfo,
+          unconfirmed ?
+            "unconfirmed-completion-dialog"
+          : "workflow-log-unavailable-dialog"
+        );
+      }
       const back = page.locator("#deploy-fail-back");
       await back.focus();
       await expect(back).toBeFocused();
