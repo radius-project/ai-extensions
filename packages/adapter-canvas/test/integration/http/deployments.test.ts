@@ -1607,13 +1607,11 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
             (args) =>
               JSON.stringify(args) ===
               JSON.stringify([
-                "run",
-                "view",
-                "42",
-                "--json",
-                "status,conclusion,jobs",
-                "--repo",
-                "acme/widgets"
+                "api",
+                "repos/acme/widgets/actions/runs/42",
+                "--include",
+                "--method",
+                "GET"
               ])
           )
         ).toBe(true);
