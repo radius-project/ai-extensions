@@ -18,13 +18,13 @@ Environment creation is usually one step in a larger task: _plan the app → cre
 
 Today, environment creation is tied to the page that started it. The page sends `/api/azure-auto-setup`, waits for that request to finish, then sends `/api/create-environment` and waits again. A full-screen modal prevents the user from navigating elsewhere during those requests. Separately, every canvas page calls the local `/api/ping` endpoint every five seconds. Each request updates `lastWebviewActivityAt`; every two minutes, the extension checks that timestamp and calls `session.metadata.snapshot()` when the page was recently active. That host RPC call resets the host's idle timer and keeps the extension process alive.
 
-The design changes two parts of that arrangement, and draft PR #244 prototypes both. It replaces the blocking modal with an inline panel and records setup as an `OperationRecord` that the page polls through `/api/operations`. It also changes the host keepalive condition from “the canvas was recently active or a deploy is running” to “the canvas was recently active, a deploy is running, or `setupInFlight()` reports a live setup operation.” Setup itself still runs inside the same two browser requests. The prototype therefore makes the process lifetime aware of setup and lets another page rediscover its progress, but it does not yet detach the cloud work from the browser request that started it.
+The design changes two parts of that arrangement, and PR #244 prototypes both. It replaces the blocking modal with an inline panel and records setup as an `OperationRecord` that the page polls through `/api/operations`. It also changes the host keepalive condition from “the canvas was recently active or a deploy is running” to “the canvas was recently active, a deploy is running, or `setupInFlight()` reports a live setup operation.” Setup itself still runs inside the same two browser requests. The prototype therefore makes the process lifetime aware of setup and lets another page rediscover its progress, but it does not yet detach the cloud work from the browser request that started it.
 
 The background-start API makes the final ownership change. The server accepts one request, registers and persists the operation, returns `202 Accepted` with an operation ID and status URL, and schedules setup after the response has ended. The user can close the canvas entirely, which stops `/api/ping` and removes recent page activity from the keepalive decision. While the server task is executing, `setupInFlight()` keeps the host channel active. An operation paused in `input_required` retains the repository lock and persisted prompt but does not hold the extension process alive indefinitely.
 
 A terminal operation also retains the repository lock while it has proven-owned artifacts that its first **Rollback** or **Retry rollback** can still remove. A new Create Environment request receives `409 previous-cleanup-required` with the earlier operation ID, and the browser renders that operation's existing rollback controls and manual guidance instead of creating another operation. Reused resources and ambiguous or non-deletable candidates do not hold this lock. The lock and persisted operation store are scoped to one hydrated Copilot App session; separate Copilot sessions do not coordinate cleanup authority, and cross-session locking is outside this design.
 
-Prototype status in draft PR #244: the operation record, inline panel, status chip, completion entry, and pull-request outcome are working there. Detached background execution, cooperative stop, live updates for every individual cloud action, and Copilot diagnosis are still future work. [Findings from draft PR #244](#findings-from-draft-pr-244) records what building and testing the prototype changed.
+Prototype status in PR #244: the operation record, inline panel, status chip, completion entry, and pull-request outcome are working there. Detached background execution, cooperative stop, live updates for every individual cloud action, and Copilot diagnosis are still future work. [Findings from PR #244](#findings-from-pr-244) records what building and testing the prototype changed.
 
 ## Terms and definitions
 
@@ -45,7 +45,7 @@ Prototype status in draft PR #244: the operation record, inline panel, status ch
 
 ## Objectives
 
-> **Issue Reference:** [#274](https://github.com/radius-project/ai-extensions/issues/274) tracks the owner/provenance and commit-point behavior described here. The broader progress UX started from demo feedback and is tracked by this draft PR.
+> **Issue Reference:** [#274](https://github.com/radius-project/ai-extensions/issues/274) tracks the owner/provenance and commit-point behavior described here. The broader progress UX started from demo feedback and was tracked in PR #244.
 
 ### Goals
 
@@ -98,19 +98,19 @@ The developer lacks permission to grant AKS RBAC Cluster Admin. Today, Radius pl
 
 #### User story 4 — The workflows land on a pull request
 
-The developer lacks push access to the repository's `main` branch, so Radius commits the workflows to a setup branch and tries to open a pull request. Today, this path contains a live bug. The design treats the pull-request branch handoff as the commit point, stops before starting the verification poll, preserves the completed setup steps, and shows the pull request as the next action. Prototype status in draft PR #244: the server returns `pullRequestUrl`, deliberately skips credential verification because the new workflow is not yet available from the default branch, and no longer lets the presence or absence of a PR URL determine the final state. If Radius committed the setup branch but could not open the pull request automatically, the operation still reaches `action_required` and the panel tells the developer which branch to merge into the default branch. Merging installs the workflows; it does not automatically start credential verification or deployment. The developer returns to Radius to retry verification, then starts deployment after verification succeeds. Later verification failures keep the committed workflows and GHCR package instead of rewinding the setup.
+The developer lacks push access to the repository's `main` branch, so Radius commits the workflows to a setup branch and tries to open a pull request. Today, this path contains a live bug. The design treats the pull-request branch handoff as the commit point, stops before starting the verification poll, preserves the completed setup steps, and shows the pull request as the next action. Prototype status in PR #244: the server returns `pullRequestUrl`, deliberately skips credential verification because the new workflow is not yet available from the default branch, and no longer lets the presence or absence of a PR URL determine the final state. If Radius committed the setup branch but could not open the pull request automatically, the operation still reaches `action_required` and the panel tells the developer which branch to merge into the default branch. Merging installs the workflows; it does not automatically start credential verification or deployment. The developer returns to Radius to retry verification, then starts deployment after verification succeeds. Later verification failures keep the committed workflows and GHCR package instead of rewinding the setup.
 
 #### User story 5 — The user leaves the environment page
 
 The developer opened the canvas to plan an application, discovered they needed an environment, and started setup. They then open another canvas page. The status chip must continue showing that setup is active and link back to the environment panel. When setup finishes, the terminal panel must offer **View planned graph** for the same repository and branch.
 
-If the user closes the canvas but keeps the Copilot session open, the prototype in draft PR #244 also attempts to write a completion entry to the session timeline. Detached setup that continues after the browser request ends remains future work; the prototype does not yet support closing the page during an interactive setup prompt.
+If the user closes the canvas but keeps the Copilot session open, the prototype in PR #244 also attempts to write a completion entry to the session timeline. Detached setup that continues after the browser request ends remains future work; the prototype does not yet support closing the page during an interactive setup prompt.
 
 ## User experience
 
 The panel keeps the existing form and changes what appears after the user clicks **Create Environment**.
 
-The design replaces `env-creating-modal` with an inline panel on the environments page. Prototype status in draft PR #244: the panel already shows a named stage, elapsed time, a collapsible step list, and distinct glyphs for pending, running, successful, warning, skipped, and failed work.
+The design replaces `env-creating-modal` with an inline panel on the environments page. Prototype status in PR #244: the panel already shows a named stage, elapsed time, a collapsible step list, and distinct glyphs for pending, running, successful, warning, skipped, and failed work.
 
 **Sample input:** the user completes the existing Create Environment form on the environment page and clicks **Create Environment**. The form fields are unchanged by this design — profile, environment name, target repository, branch, resource group, AKS cluster, and namespace (the environment page renderer under `packages/adapter-canvas/src/pages/`). The only interaction change is what happens next.
 
@@ -259,7 +259,7 @@ The panel and Copilot read the same operation record independently. Copilot diag
 
 ### Architecture diagram
 
-The first diagram shows the current prototype in draft PR #244. The browser still drives the existing two-request setup sequence. The operation registry records what those requests are doing and gives the panel, status chip, and completion announcement one source of truth.
+The first diagram shows the current prototype in PR #244. The browser still drives the existing two-request setup sequence. The operation registry records what those requests are doing and gives the panel, status chip, and completion announcement one source of truth.
 
 ```mermaid
 flowchart LR
@@ -301,7 +301,7 @@ flowchart LR
   PANEL -->|after setup finishes| NEXT
 ```
 
-In the prototype in draft PR #244, the operation registry observes work that still belongs to the browser requests. The proposed background API moves ownership of that work to the server:
+In the prototype in PR #244, the operation registry observes work that still belongs to the browser requests. The proposed background API moves ownership of that work to the server:
 
 ```mermaid
 sequenceDiagram
@@ -329,14 +329,14 @@ sequenceDiagram
 
 The six layers build on one operation record. Each layer adds a user-visible capability without replacing the layers below it.
 
-| Layer | What it adds                    | What the user can newly do                                                    | Depends on | Prototype status in draft PR #244 |
-|-------|---------------------------------|-------------------------------------------------------------------------------|------------|-----------------------------------|
-| **1** | The operation record            | Nothing directly — it gives the existing two-request flow one shared identity | —          | **Built**                         |
-| **2** | An inline, non-blocking panel   | Read what is happening; leave the page and come back to it                    | 1          | **Built**                         |
-| **3** | A status chip in the page shell | See a running operation from any page and return to its environment panel     | 1          | **Built**                         |
-| **4** | A session-timeline announcement | Learn it finished after leaving the canvas entirely                           | 1          | **Best-effort built**             |
-| **5** | Live per-step narration         | Watch individual steps resolve instead of coarse stages                       | 1, 2       | Designed, not built               |
-| **6** | Agent diagnosis of a failure    | Ask why it failed and get a proposed fix                                      | 1          | Designed, not built               |
+| Layer | What it adds                    | What the user can newly do                                                    | Depends on | Prototype status in PR #244 |
+|-------|---------------------------------|-------------------------------------------------------------------------------|------------|-----------------------------|
+| **1** | The operation record            | Nothing directly — it gives the existing two-request flow one shared identity | —          | **Built**                   |
+| **2** | An inline, non-blocking panel   | Read what is happening; leave the page and come back to it                    | 1          | **Built**                   |
+| **3** | A status chip in the page shell | See a running operation from any page and return to its environment panel     | 1          | **Built**                   |
+| **4** | A session-timeline announcement | Learn it finished after leaving the canvas entirely                           | 1          | **Best-effort built**       |
+| **5** | Live per-step narration         | Watch individual steps resolve instead of coarse stages                       | 1, 2       | Designed, not built         |
+| **6** | Agent diagnosis of a failure    | Ask why it failed and get a proposed fix                                      | 1          | Designed, not built         |
 
 #### Layer 1: the operation becomes a thing
 
@@ -453,7 +453,7 @@ Later, Radius can add a second surface around the same operation record. Chat ca
 - Every diagnosis cites evidence, states uncertainty, uses placeholders for unverified values, and never proposes a destructive or privilege-expanding command without verified scope.
 - Proposed commands must cite verified record fields. When the server already knows the exact command, chat reuses that deterministic output instead of regenerating it.
 - Canvas and chat input synchronization is future work. The extension needs safe resume plumbing before a chat answer can unblock a waiting operation.
-- Draft PR #244 does not implement this long-term flow. It prototypes the panel, chip, timeline entry, and pull-request-path terminal state, but not kickoff narration, chat-based input handling, or success close-out.
+- PR #244 does not implement this long-term flow. It prototypes the panel, chip, timeline entry, and pull-request-path terminal state, but not kickoff narration, chat-based input handling, or success close-out.
 
 #### Release boundaries
 
@@ -545,7 +545,7 @@ Today, the extension keeps itself alive only when the canvas was recently active
 
 Today, environment setup stays protected indirectly because the modal keeps the page open and the page calls `/api/ping` every five seconds. Those pings refresh `lastWebviewActivityAt`, so the two-minute timer continues sending `session.metadata.snapshot()` while setup runs. The reap window is longer than it first appears: after canvas traffic stops, the active-window check can remain true for three minutes, the next keepalive decision can take up to two more minutes, and the host then waits roughly ten minutes of RPC silence. The earliest reap after all page activity stops is therefore about **3 + 2 + 10 ≈ 15 minutes**, not three.
 
-**Prototype status in draft PR #244:** `operations.anyRunning()` reports whether a non-stale setup record is live, and `setupInFlight()` exposes that answer to the extension entry point. The keepalive timer now sends `session.metadata.snapshot()` when recent page activity, a deploy, **or setup** is present. The process no longer relies solely on the page's health checks to prove that setup is active.
+**Prototype status in PR #244:** `operations.anyRunning()` reports whether a non-stale setup record is live, and `setupInFlight()` exposes that answer to the extension entry point. The keepalive timer now sends `session.metadata.snapshot()` when recent page activity, a deploy, **or setup** is present. The process no longer relies solely on the page's health checks to prove that setup is active.
 
 **The prototype does not yet move setup into the background.** The browser still waits for `/api/azure-auto-setup` and `/api/create-environment`, and interactive questions such as App Registration selection still depend on that page. The operation record gives the UI a durable in-process view of the work, but it does not own or schedule the work.
 
@@ -557,13 +557,13 @@ Today, `/api/verify-status` accepts an `environment` query parameter but reads s
 
 The collision is reachable because the agent's `create_environment` tool can call `/api/create-environment` while the user is creating an environment in the page.
 
-The prototype in draft PR #244 gives each setup an operation ID and permits one running setup per repository. The first setup request returns the ID, and the second request must present it along with the same repository, environment, provider, and expected stage. An unrelated caller receives `409 Conflict` instead of adopting or overwriting the running operation. Records remain in memory, so an extension restart still loses them.
+The prototype in PR #244 gives each setup an operation ID and permits one running setup per repository. The first setup request returns the ID, and the second request must present it along with the same repository, environment, provider, and expected stage. An unrelated caller receives `409 Conflict` instead of adopting or overwriting the running operation. Records remain in memory, so an extension restart still loses them.
 
 The implemented durable registry keeps that admission rule within one hydrated Copilot App Session. A live operation owns execution admission, while a terminal operation retains cleanup admission only when its ledger still gives that same operation a safe first rollback or retry-rollback target. A different Create Environment request then receives `409 previous-cleanup-required` with the blocking operation ID, and the browser reopens that record instead of registering another operation. Reused resources and ambiguous candidates never retain admission because the earlier operation cannot delete them. Blocking terminal records are exempt from age and count pruning until cleanup records every removable target as deleted or not found; normal retention applies again after that durable resolution. This does not coordinate separate Copilot App Sessions or introduce a cross-session repository lock.
 
 #### Record the target and acting identity before permission checks
 
-Today, the repository-admin check can fail before the server records the requested repository, environment, cloud target, and acting GitHub account. The response then contains little more than a 403 message. The prototype in draft PR #244 records those safe fields first, so the operation can explain which account lacked permission for which repository and environment.
+Today, the repository-admin check can fail before the server records the requested repository, environment, cloud target, and acting GitHub account. The response then contains little more than a 403 message. The prototype in PR #244 records those safe fields first, so the operation can explain which account lacked permission for which repository and environment.
 
 ### Stop and cancellation
 
@@ -797,7 +797,7 @@ Rules:
 10. **`finish` fires the completion hook once.** A failed timeline call never changes the setup outcome.
 11. **Legacy step markers have defined meanings.** `✅`, `⚠️`, `❌`, `⏭️`, `👉`, and a trailing ellipsis map existing `steps.push` messages into structured states. A source-reading test rejects unmarked non-observation steps.
 
-### Prototype details in draft PR #244
+### Prototype details in PR #244
 
 #### Core package
 
@@ -995,23 +995,23 @@ Setup creates identities and grants roles. Its data can appear in the panel, ses
 
 ## Development plan
 
-| Release unit     | Included work                                                                                                               | Prototype status in draft PR #244 |
-|------------------|-----------------------------------------------------------------------------------------------------------------------------|-----------------------------------|
-| **Record**       | Operation IDs, in-memory registry, stale-record policy, context capture, explicit outcomes, read routes                     | Built                             |
-| **Panel**        | Inline progress panel, retained failure context, pull-request `action_required`, verification activity                      | Built                             |
-| **Return**       | Cross-page status chip, branch-aware planned-graph link, best-effort timeline entry                                         | Built                             |
-| **Background**   | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence                                   | Built                             |
-| **Control**      | Cooperative stop, partial-state summary, in-panel input questions                                                           | Built                             |
-| **Diagnosis**    | User-initiated **Ask Copilot** explanation for unfamiliar failures with fenced evidence and propose-only constraints        | Not built                         |
-| **Conversation** | Optional kickoff orientation, sparse phase-boundary narration, input escalation, PR handoff, and optional success close-out | Not built                         |
+| Release unit     | Included work                                                                                                               | Prototype status in PR #244 |
+|------------------|-----------------------------------------------------------------------------------------------------------------------------|-----------------------------|
+| **Record**       | Operation IDs, in-memory registry, stale-record policy, context capture, explicit outcomes, read routes                     | Built                       |
+| **Panel**        | Inline progress panel, retained failure context, pull-request `action_required`, verification activity                      | Built                       |
+| **Return**       | Cross-page status chip, branch-aware planned-graph link, best-effort timeline entry                                         | Built                       |
+| **Background**   | `POST /api/operations`, server-owned execution, operation-keyed verification, persistence                                   | Built                       |
+| **Control**      | Cooperative stop, partial-state summary, in-panel input questions                                                           | Built                       |
+| **Diagnosis**    | User-initiated **Ask Copilot** explanation for unfamiliar failures with fenced evidence and propose-only constraints        | Not built                   |
+| **Conversation** | Optional kickoff orientation, sparse phase-boundary narration, input escalation, PR handoff, and optional success close-out | Not built                   |
 
 The minimum coherent release is **Record + Panel + Return**. Shipping the panel without the pull-request fix or status chip would replace one confusing experience with another.
 
 **Diagnosis** can follow as a separate failure-only addition. The broader conversation layer stays future work until the extension can resume a waiting operation safely from chat and define a notification policy for kickoff and close-out messages.
 
-## Findings from draft PR #244
+## Findings from PR #244
 
-Building the prototype in draft PR #244 exposed several cases where a correct backend outcome produced the wrong user message. The fixes below belong there, not in this design-only PR.
+Building the prototype in PR #244 exposed several cases where a correct backend outcome produced the wrong user message. The fixes below belong there, not in this design-only PR.
 
 | Finding                                              | Failure before the fix                                                                                                   | Fix                                                                                                                                             |
 |------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -1034,7 +1034,7 @@ Building the prototype in draft PR #244 exposed several cases where a correct ba
 
 ### Reuse the existing step messages
 
-The two setup routes contain 57 `steps.push(...)` calls. The prototype branch in draft PR #244 wraps each array's `push` method and passes the same message to `addLegacyStep`. This keeps the HTTP response and operation record synchronized with one write.
+The two setup routes contain 57 `steps.push(...)` calls. The prototype branch in PR #244 wraps each array's `push` method and passes the same message to `addLegacyStep`. This keeps the HTTP response and operation record synchronized with one write.
 
 `addLegacyStep` maps the existing message convention to structured state:
 

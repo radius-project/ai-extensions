@@ -25,10 +25,7 @@ import {
   isRenderedElement,
   refOf
 } from "../../../test/support/browser/graph-vendor.js";
-import {
-  createFakeClock,
-  createFakeElement
-} from "../../../test/support/browser/fakes.js";
+import { createFakeElement } from "../../../test/support/browser/fakes.js";
 import type { GraphNodeData, GraphOptions } from "./build.js";
 import type { UpdaterBinding } from "./view.js";
 import type { DomElement } from "../ports.js";
@@ -527,19 +524,28 @@ describe("node card", () => {
 describe("flow application", () => {
   function renderApp() {
     const vendor = createGraphVendor();
-    const clock = createFakeClock();
     const updater: UpdaterBinding = { fn: null };
     const built = buildGraph(resolveGraphSettings(), [
       { id: "a", name: "a", connections: [{ id: "b" }] },
       { id: "b", name: "b" }
     ]);
-    const app = createGraphApp(vendor, clock, { rad: "RadNode" }, updater);
+    const app = createGraphApp(vendor, { rad: "RadNode" }, updater);
     const tree = app({ initialNodes: built.nodes, initialEdges: built.edges });
-    return { vendor, clock, updater, built, tree };
+    return { vendor, updater, built, tree };
+  }
+
+  // The recorded app never re-renders, so this stands in for React committing
+  // the pushed nodes and running the app's passive effects.
+  function commit(vendor: ReturnType<typeof createGraphVendor>): void {
+    for (const entry of vendor.react.effects) entry.effect();
   }
 
   it("configures React Flow the way the shipped graph does", () => {
-    const { tree, vendor } = renderApp();
+    const { tree, vendor, built } = renderApp();
+    expect(vendor.react.layoutEffects).toHaveLength(1);
+    // The refit runs after React Flow has taken the committed nodes.
+    expect(vendor.react.effects).toHaveLength(1);
+    expect(vendor.react.effects[0].deps).toEqual([built.nodes]);
     const root = tree as RenderedElement;
     expect(root.type).toBe(vendor.reactFlow.default);
     expect(root.props.nodeTypes).toEqual({ rad: "RadNode" });
@@ -565,9 +571,13 @@ describe("flow application", () => {
       )
     ).toBe(false);
     expect(findAllByType(tree, vendor.reactFlow.Background)).toHaveLength(1);
-    expect(props(findAllByType(tree, vendor.reactFlow.Background)[0]).gap).toBe(
-      16
+    const background = props(
+      findAllByType(tree, vendor.reactFlow.Background)[0]
     );
+    expect(background.gap).toBe(16);
+    expect(background.size).toBe(1);
+    // v12 adds half the gap to the offset; -7.5 lands the dot where v11 put it.
+    expect(background.offset).toBe(-7.5);
     expect(
       props(findAllByType(tree, vendor.reactFlow.Controls)[0]).showInteractive
     ).toBe(false);
@@ -584,49 +594,43 @@ describe("flow application", () => {
     }
   });
 
-  it("fits the viewport shortly after mounting", () => {
-    const { tree, clock } = renderApp();
+  it("lets React Flow fit the viewport on mount without a refit of its own", () => {
+    const { tree, vendor } = renderApp();
     const instance = createFakeFlowInstance();
     callHandler(tree as RenderedElement, "onInit", {});
     const onInit = props(tree as RenderedElement).onInit as (
       value: unknown
     ) => void;
     onInit(instance);
+    vendor.react.runEffects();
     expect(instance.fits).toEqual([]);
-    clock.tick(30);
-    expect(instance.fits).toEqual([{ padding: 0.18 }]);
   });
 
   it("pushes a status-only update into React state without changing the viewport", () => {
-    const { tree, clock, vendor, updater, built } = renderApp();
+    const { tree, vendor, updater, built } = renderApp();
     const instance = createFakeFlowInstance();
     (props(tree as RenderedElement).onInit as (value: unknown) => void)(
       instance
     );
     vendor.react.runEffects();
-    clock.tick(30);
 
     expect(updater.fn).toBeTypeOf("function");
     // The same resources restated, which is what a status poll delivers.
     updater.fn?.(built.nodes, built.edges);
+    commit(vendor);
     expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
     expect(vendor.reactFlow.edgeUpdates).toHaveLength(1);
-    // A status-only update must not schedule any deferred work. Without this
-    // the assertion below would still pass if a re-fit timer were
-    // reintroduced, because the fake clock would never flush it.
-    expect(clock.timeouts).toBe(0);
-    expect(instance.fits).toEqual([{ padding: 0.18 }]);
+    expect(instance.fits).toEqual([]);
   });
 
-  it("re-fits when the update changes which nodes exist", () => {
-    const { tree, clock, vendor, updater } = renderApp();
+  it("re-fits once the update that changes which nodes exist commits", () => {
+    const { tree, vendor, updater } = renderApp();
     const instance = createFakeFlowInstance();
     (props(tree as RenderedElement).onInit as (value: unknown) => void)(
       instance
     );
     vendor.react.runEffects();
-    clock.tick(30);
-    expect(instance.fits).toEqual([{ padding: 0.18 }]);
+    expect(instance.fits).toEqual([]);
 
     // Switching application or environment reuses the controller, so an
     // entirely different resource set arrives through the same update path.
@@ -636,66 +640,92 @@ describe("flow application", () => {
     ]);
     updater.fn?.(next.nodes, next.edges);
     expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
-    clock.tick(40);
-    expect(instance.fits).toEqual([{ padding: 0.18 }, { padding: 0.18 }]);
+    // Asked before React Flow holds the new nodes, the fit could frame the old
+    // graph, so it waits for the commit rather than firing from the updater.
+    expect(instance.fits).toEqual([]);
+    commit(vendor);
+    expect(instance.fits).toEqual([{ padding: 0.18 }]);
+    // A later render without a new node set must not fit again.
+    commit(vendor);
+    expect(instance.fits).toHaveLength(1);
   });
 
   it("re-fits only once when a changed node set is then restated", () => {
-    const { tree, clock, vendor, updater } = renderApp();
+    const { tree, vendor, updater } = renderApp();
     const instance = createFakeFlowInstance();
     (props(tree as RenderedElement).onInit as (value: unknown) => void)(
       instance
     );
     vendor.react.runEffects();
-    clock.tick(30);
 
     const next = buildGraph(resolveGraphSettings(), [{ id: "c", name: "c" }]);
     updater.fn?.(next.nodes, next.edges);
-    clock.tick(40);
-    expect(instance.fits).toHaveLength(2);
+    commit(vendor);
+    expect(instance.fits).toHaveLength(1);
 
     // Polling continues against the newly selected graph. Those refreshes are
     // status-only again, so they must not keep stealing the viewport.
     updater.fn?.(next.nodes, next.edges);
-    expect(clock.timeouts).toBe(0);
-    clock.tick(40);
-    expect(instance.fits).toHaveLength(2);
+    commit(vendor);
+    expect(instance.fits).toHaveLength(1);
     expect(vendor.reactFlow.nodeUpdates).toHaveLength(2);
   });
 
   it("reorders without re-fitting when the same nodes come back shuffled", () => {
-    const { tree, clock, vendor, updater, built } = renderApp();
+    const { tree, vendor, updater, built } = renderApp();
     const instance = createFakeFlowInstance();
     (props(tree as RenderedElement).onInit as (value: unknown) => void)(
       instance
     );
     vendor.react.runEffects();
-    clock.tick(30);
 
     updater.fn?.([...built.nodes].reverse(), built.edges);
-    expect(clock.timeouts).toBe(0);
-    expect(instance.fits).toEqual([{ padding: 0.18 }]);
+    commit(vendor);
+    expect(instance.fits).toEqual([]);
     expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
   });
 
   it("skips the re-fit when the flow has not reported an instance", () => {
-    const { clock, vendor, updater } = renderApp();
+    const { vendor, updater } = renderApp();
     vendor.react.runEffects();
 
     const next = buildGraph(resolveGraphSettings(), [{ id: "c", name: "c" }]);
     expect(() => updater.fn?.(next.nodes, next.edges)).not.toThrow();
-    expect(clock.timeouts).toBe(0);
+    expect(() => commit(vendor)).not.toThrow();
+    expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
   });
 
-  it("survives a viewport that refuses to fit", () => {
-    const { tree, clock } = renderApp();
-    const instance = createFakeFlowInstance();
-    instance.failing = true;
-    (props(tree as RenderedElement).onInit as (value: unknown) => void)(
-      instance
-    );
-    expect(() => clock.tick(30)).not.toThrow();
-  });
+  it.each(["throw", "reject"] as const)(
+    "survives a viewport that refuses to fit by %s",
+    async (failure) => {
+      const { tree, vendor, updater } = renderApp();
+      const instance = createFakeFlowInstance();
+      instance.failure = failure;
+      (props(tree as RenderedElement).onInit as (value: unknown) => void)(
+        instance
+      );
+      vendor.react.runEffects();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const next = buildGraph(resolveGraphSettings(), [
+          { id: "c", name: "c" }
+        ]);
+        updater.fn?.(next.nodes, next.edges);
+        expect(() => commit(vendor)).not.toThrow();
+        // Let a rejected fit settle so an unobserved rejection would surface.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(unhandled).toEqual([]);
+        expect(instance.fits).toHaveLength(1);
+        expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+    }
+  );
 
   it("unbinds the updater when the application is torn down", () => {
     const { vendor, updater } = renderApp();
@@ -732,12 +762,10 @@ describe("error boundary", () => {
 describe("mountGraph", () => {
   function mount(options: { failUnmount?: boolean } = {}) {
     const vendor = createGraphVendor();
-    const clock = createFakeClock();
     const host = createFakeElement("host");
     const built = buildGraph(resolveGraphSettings(), [{ id: "a", name: "a" }]);
     const mounted = mountGraph({
       vendor,
-      clock,
       host,
       settings: resolveGraphSettings(),
       deps: {
@@ -750,7 +778,7 @@ describe("mountGraph", () => {
       edges: built.edges
     });
     if (options.failUnmount) vendor.reactDom.roots[0].failUnmount = true;
-    return { vendor, clock, host, built, mounted };
+    return { vendor, host, built, mounted };
   }
 
   it("creates one root on the host and renders the boundary around the app", () => {

@@ -65,7 +65,9 @@ describe("pageShell", () => {
     );
     expect(html).not.toContain("localStorage");
     expect(markupWithoutBrowserBundles(html)).not.toContain("matchMedia");
-    expect(html).not.toContain("prefers-color-scheme");
+    expect(markupWithoutBrowserBundles(html)).not.toContain(
+      "prefers-color-scheme"
+    );
     expect(html).not.toContain(
       "--rad-bg-subtle: var(--background-color-segmented"
     );

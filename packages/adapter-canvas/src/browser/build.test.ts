@@ -330,7 +330,12 @@ describe("in-memory browser compiler", () => {
     const graphInputs = first.graph.inputs.map((input) =>
       input.replaceAll("\\", "/")
     );
-    for (const packageName of ["react", "react-dom", "reactflow", "dagre"]) {
+    for (const packageName of [
+      "react",
+      "react-dom",
+      "@xyflow/react",
+      "dagre"
+    ]) {
       expect(
         graphInputs.some((input) =>
           input.includes(`/node_modules/${packageName}/`)
@@ -338,6 +343,9 @@ describe("in-memory browser compiler", () => {
         packageName
       ).toBe(true);
     }
+    expect(
+      graphInputs.some((input) => input.includes("/node_modules/reactflow/"))
+    ).toBe(false);
   });
 
   // Also proves the compiler stays loadable by bare Node type stripping: it

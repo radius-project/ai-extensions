@@ -2,7 +2,6 @@
 
 - **Author**: Nicole James (@nicolejms)
 - **Date**: 2026-08
-- **Status**: Draft
 
 ## Overview
 
