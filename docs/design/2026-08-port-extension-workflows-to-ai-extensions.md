@@ -2,7 +2,6 @@
 
 - **Author**: Shruthi Kumar (@sk593)
 - **Date**: 2026-08
-- **Status**: In review
 
 ## Overview
 

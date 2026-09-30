@@ -2,7 +2,6 @@
 
 - **Author**: Nicole James (@nicolejms)
 - **Date**: 2026-08
-- **Status**: Draft
 - **Tracking issue**: [#334](https://github.com/radius-project/ai-extensions/issues/334)
 - **Design PR**: [#282](https://github.com/radius-project/ai-extensions/pull/282)
 
