@@ -288,7 +288,7 @@ resource mysqlDb 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
     application: app.id
     database: 'todos'      // derived from source (e.g. MYSQL_DATABASE)
     version: '8.0'         // derived from source (e.g. image tag mysql:8.0)
-    username: 'myadmin'    // default administrator (see Provisioned service usernames in secrets-handling.md)
+    username: 'myadmin'    // default username (see Provisioned service usernames in secrets-handling.md)
     password: password     // from a @secure() param
   }
 }
@@ -343,7 +343,7 @@ Rules:
 - Every `value` in an authored Secret's `data` is a sensitive schema node, so each one comes from a `@secure() param` — including a value that is not itself a credential, such as an administrator or registry username. Never hardcode any of them. The node is sensitive because of where the value is stored, not because of what it identifies
 - `data` is an object map, NOT an array
 - Keys in `data` must match their exact consumer or schema contract; do not impose universal casing
-- Author a username in a Secret only when the consuming schema reads the username from that Secret instead of from a resource property. The Secret is then the username's one source: its value comes from a `@secure() param` like every `data.<key>.value`, consumers read it through `secretKeyRef` with the same key, and nothing else authors it. Never also copy into a Secret a username that a resource takes as a plain literal (`mySqlDatabases.username`, `rabbitMQ.username`): the Secret's `@secure() param` would be a second, independent input that nothing keeps equal to the literal. Decide literal versus `@secure() param` from the position, not the word, and follow [Provisioned service usernames](secrets-handling.md#provisioned-service-usernames)
+- Put a username in a Secret only when the consuming schema reads it from that Secret. Never copy a username that a resource takes as a literal (`mySqlDatabases.username`, `rabbitMQ.username`) into a Secret: its `@secure() param` would be a separate input that could differ. See [One username, one source](secrets-handling.md#one-username-one-source)
 - A developer-supplied credential consumed through connection projection belongs in an authored `Radius.Security/secrets`; connect the workload to `<secret>.id` so Radius injects a secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` variable
 - For Recipe-generated credentials, connect only to `<producer>.id`. Use `valueFrom.secretKeyRef` with `<producer>.properties.secrets.name` and the declared Recipe `result.secrets` key only when an explicit custom Kubernetes environment variable name is required
 - Never use `<producer>.properties.secrets.name` as a connection source or author a secret to wrap a Recipe output

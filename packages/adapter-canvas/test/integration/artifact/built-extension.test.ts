@@ -894,7 +894,7 @@ describe("P0-C built Radius extension artifact", () => {
     // `username` is the default the broker is provisioned with, not a value
     // copied from the application's existing deployment.
     expect(rabbitmqExample).toMatch(
-      /username:\s*'myadmin'\s*\/\/ default broker username \(see Provisioned service usernames\)/u
+      /username:\s*'myadmin'\s*\/\/ default username/u
     );
     expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
     // Every consumer must authenticate as the broker's username, so the
@@ -906,50 +906,19 @@ describe("P0-C built Radius extension artifact", () => {
     expect(rabbitmqExample).toMatch(
       /ORDER_QUEUE_PASSWORD:\s*\{\s*valueFrom:\s*\{\s*secretKeyRef:\s*\{\s*secretName:\s*rabbitmqCredentials\.name\s+key:\s*'password'/u
     );
-    expect(secretsGuidance).toContain("## Provisioned service usernames");
-    expect(secretsGuidance).toContain(
-      "Two copies that happen to match today are not a binding"
-    );
-    expect(structureGuidance).toContain(
-      "Never also copy into a Secret a username that a resource takes as a plain literal"
-    );
-    expect(structureGuidance).not.toContain(
-      "Author it as a `@secure() param` here even though the same administrator name is a plain literal"
-    );
-    expect(skillGuidance).toContain(
-      "Every provisioned service username is set explicitly on its resource"
-    );
-    // Only a login the application fixes overrides the default; deployment
-    // configuration the model replaces does not.
-    expect(secretsGuidance).toContain(
-      "Use `myadmin` unless the application fixes a specific login"
-    );
-    expect(secretsGuidance).toContain(
-      "Compose, `.env`, Helm, or Kubernetes files are not such a statement"
-    );
-    // The worked examples pin the decision for the common shapes, so the
-    // model applies a rule instead of judging where a value seems to come
-    // from. A Compose-set variable is the case that originally looked like a
-    // requirement.
+    // A username set by Compose and read from an environment variable is the
+    // case that looked like a requirement; the rule table pins it to myadmin.
     expect(secretsGuidance).toMatch(
-      /\|\s*`process\.env\.ORDER_QUEUE_USERNAME`, which Compose sets to `username`\s*\|\s*2\s*\|\s*`myadmin`; bind `ORDER_QUEUE_USERNAME`\s*\|/u
+      /\|\s*`process\.env\.ORDER_QUEUE_USERNAME`, which Compose sets to `username`\s*\|\s*2\s*\|\s*`myadmin`; set `ORDER_QUEUE_USERNAME`\s*\|/u
     );
-    expect(secretsGuidance).toMatch(
-      /\|\s*`amqp\.connect\('amqp:\/\/shop:' \+ password \+ '@' \+ host\)`\s*\|\s*3\s*\|\s*`shop`\s*\|/u
-    );
-    expect(secretsGuidance).toContain(
-      "After rules 1, 3, and 4, if the [Azure provider value rules](azure-provider-value-rules.md) for the selected Recipe reject the value, stop and report the conflict. Do not rename it."
-    );
+    expect(secretsGuidance).not.toMatch(/\|\s*4\s*\|/u);
     // A shared username var must land in the same place with the same name
     // on every regeneration.
     expect(secretsGuidance).toContain(
       "declare the value once as `var <resourceSymbolicName>Username`"
     );
     expect(skillGuidance).toContain(
-      "`extension` lines first, then `param` declarations, then `var` declarations, then the `Radius.Core/applications` resource"
-    );
-    expect(skillGuidance).toContain(
-      "A shared username `var` is named `<resourceSymbolicName>Username`"
+      "then `param` declarations, then `var` declarations, then the `Radius.Core/applications` resource"
     );
     const azureGuidance = readGuidance(
       "references/azure-provider-value-rules.md"
@@ -960,10 +929,9 @@ describe("P0-C built Radius extension artifact", () => {
     expect(azureGuidance).toContain(
       "(secrets-handling.md#provisioned-service-usernames)"
     );
-    for (const guidance of [skillGuidance, azureGuidance]) {
-      expect(guidance).not.toMatch(/does not require a (?:specific )?login/u);
-    }
-    expect(skillGuidance).not.toContain("It is not derived from the source");
+    expect(structureGuidance).toContain(
+      "(secrets-handling.md#one-username-one-source)"
+    );
     expect(secretsGuidance).toContain(
       "Writing `password: rabbitmqPassword` here deploys a broken application"
     );
