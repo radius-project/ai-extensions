@@ -4,6 +4,9 @@ import type {
 } from "./workflow-observation.js";
 import { confirmedWorkflowConclusion } from "./workflow-observation.js";
 
+// Must match the step in .github/extension/actions/run-rad-commands/action.yml.
+export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
+
 export interface WorkflowFailureReads {
   readLog(repo: string, runId: number | string): Promise<string | null>;
   readControlPlaneLog(): Promise<string | null>;
@@ -69,8 +72,10 @@ export async function collectWorkflowFailure(
   );
   if (claimHelp)
     message = claimHelp + "\n\n\u2014 raw error \u2014\n" + message;
-  const deploySteps = steps.filter((step) => step.name === "Run rad commands");
-  const deployLog = extractGitHubActionsStepLog(log, "Run rad commands");
+  const deploySteps = steps.filter(
+    (step) => step.name === DEPLOY_RAD_COMMANDS_STEP
+  );
+  const deployLog = extractGitHubActionsStepLog(log, DEPLOY_RAD_COMMANDS_STEP);
   const logJobs = new Set(
     deployLog.split("\n").map((line) => line.split("\t")[0])
   );
@@ -85,7 +90,8 @@ export async function collectWorkflowFailure(
       matchingJobs?.length === 1 &&
       matchingJobs[0].steps?.some(
         (step) =>
-          step.name === "Run rad commands" && step.conclusion === "failure"
+          step.name === DEPLOY_RAD_COMMANDS_STEP &&
+          step.conclusion === "failure"
       )
     ) ?
       extractRadDeployError(deployLog)

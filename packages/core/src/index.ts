@@ -134,6 +134,7 @@ export type {
   WorkflowObservationReads
 } from "./workflow-observation.js";
 export {
+  DEPLOY_RAD_COMMANDS_STEP,
   extractErrorLines,
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,

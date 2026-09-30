@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEPLOY_RAD_COMMANDS_STEP } from "./index.js";
 import type { WorkflowRunDetail } from "./workflow-observation.js";
 import {
   collectWorkflowFailure,
@@ -18,6 +19,10 @@ const MS_ERROR =
   "'https://token.actions.githubusercontent.com/' for applications or managed " +
   "identities registered in this tenant must contain the enterprise claim with " +
   "value 'microsoft', 'github' or 'microsoftopensource' but actual value is ''.";
+
+it("exports the deployment step name used by workflow evidence consumers", () => {
+  expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
+});
 
 describe("explainOidcEnterpriseClaim", () => {
   it("explains the Microsoft-tenant rejection, parsing accepted + empty actual value", () => {
