@@ -29,4 +29,4 @@ Before generating an AI model resource, verify the exact Recipe, model, version,
 
 When the source does not set an optional property, use the exact default from the resolved schema and check that value against the selected Recipe.
 
-Administrator usernames are required and have no schema default. Use `myadmin` unless the application fixes a specific login. A username set only in Compose, `.env`, Helm, or Kubernetes manifests does not fix it; see [Provisioned service usernames](secrets-handling.md#provisioned-service-usernames).
+Administrator usernames are required and have no schema default. Use `myadmin` unless the application fixes a specific login. Decide with the trace in [Provisioned service usernames](secrets-handling.md#provisioned-service-usernames).

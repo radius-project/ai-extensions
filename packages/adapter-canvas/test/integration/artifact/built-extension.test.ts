@@ -925,10 +925,31 @@ describe("P0-C built Radius extension artifact", () => {
       "Use `myadmin` unless the application fixes a specific login"
     );
     expect(secretsGuidance).toContain(
-      "Compose `environment` entries, `.env` files, Helm values, Kubernetes manifests, and a fallback default in code"
+      "Compose, `.env`, Helm, or Kubernetes files are not such a statement"
+    );
+    // The worked examples pin the decision for the common shapes, so the
+    // model applies a rule instead of judging where a value seems to come
+    // from. A Compose-set variable is the case that originally looked like a
+    // requirement.
+    expect(secretsGuidance).toMatch(
+      /\|\s*`process\.env\.ORDER_QUEUE_USERNAME`, which Compose sets to `username`\s*\|\s*2\s*\|\s*`myadmin`; bind `ORDER_QUEUE_USERNAME`\s*\|/u
     );
     expect(secretsGuidance).toMatch(
-      /The application fixes it\.\*\*[^\n]*stop and report the conflict\. Do not rename it\./u
+      /\|\s*`amqp\.connect\('amqp:\/\/shop:' \+ password \+ '@' \+ host\)`\s*\|\s*3\s*\|\s*`shop`\s*\|/u
+    );
+    expect(secretsGuidance).toContain(
+      "After rules 1, 3, and 4, if the [Azure provider value rules](azure-provider-value-rules.md) for the selected Recipe reject the value, stop and report the conflict. Do not rename it."
+    );
+    // A shared username var must land in the same place with the same name
+    // on every regeneration.
+    expect(secretsGuidance).toContain(
+      "declare the value once as `var <resourceSymbolicName>Username`"
+    );
+    expect(skillGuidance).toContain(
+      "`extension` lines first, then `param` declarations, then `var` declarations, then the `Radius.Core/applications` resource"
+    );
+    expect(skillGuidance).toContain(
+      "A shared username `var` is named `<resourceSymbolicName>Username`"
     );
     const azureGuidance = readGuidance(
       "references/azure-provider-value-rules.md"

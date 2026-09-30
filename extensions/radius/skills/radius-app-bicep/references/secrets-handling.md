@@ -228,19 +228,32 @@ A data store or broker that Radius provisions is created with the username you g
 
 ### Choosing the value
 
-Use `myadmin` unless the application fixes a specific login. Decide by tracing the username from the call that authenticates back to where its value comes from:
+Use `myadmin` unless the application fixes a specific login. Do not weigh where a value "seems" to come from. Start at the argument the client's authentication call receives for the username, or the user part of the URI it receives, and follow it back through the checked-in source. Apply the first rule that matches:
 
-1. **The application fixes it.** Use that exact value when Radius cannot change it on the selected runtime path: a literal in the connection code with no configuration override, a checked-in configuration file the application reads that no environment or deployment setting overrides, a username embedded in a connection URI that is itself fixed in one of those places, or a username the user or the selected deployment profile explicitly requires. If the [Azure provider value rules](azure-provider-value-rules.md) for the selected Recipe reject it, stop and report the conflict. Do not rename it.
-2. **Otherwise, use `myadmin`.** A username set only in deployment configuration that the Radius model replaces is not a requirement. That includes Compose `environment` entries, `.env` files, Helm values, Kubernetes manifests, and a fallback default in code such as `process.env.QUEUE_USER || 'guest'`. Those configured the application's previous deployment; the service Radius provisions uses the username in the model, and consumers receive that same value. `myadmin` fits the Azure PostgreSQL, MySQL, and SQL username rules and avoids `guest`, which RabbitMQ restricts to loopback connections.
+1. **The user or the task names a username.** Use it. Values in the selected profile's Compose, `.env`, Helm, or Kubernetes files are not such a statement; they fall under rule 2.
+2. **The path reads something a container can set.** That is an environment variable (including a read with a fallback such as `process.env.QUEUE_USER || 'guest'`), a command-line argument, or a key in a framework configuration system that environment variables override in the setup the application uses, such as ASP.NET Core `IConfiguration` (`RabbitMQ__UserName`) or Spring Boot properties (`SPRING_RABBITMQ_USERNAME`). Use `myadmin`, and bind that variable or key on every consumer. Whatever Compose, `.env`, Helm, or manifests set it to only configured the previous deployment.
+3. **The path ends at a literal with nothing a container can set along the way.** That is a string in the connection code, or a value in a checked-in configuration file read without an environment override. Use that exact value.
+4. **The path cannot be followed to rule 2 or rule 3**, for example because the read happens inside a prebuilt library. Use the value the selected profile's configuration sets, because the application authenticates with it whether or not it is fixed. When the profile sets none, use `myadmin`.
 
-`myadmin` in the examples in this skill is this default, not a value read from any application. When the schema takes the username from an authored Secret, the value is a deploy-time `@secure()` input with no default, so the deployer supplies it and this order does not apply. Do not add a username to a type whose schema defines none.
+After rules 1, 3, and 4, if the [Azure provider value rules](azure-provider-value-rules.md) for the selected Recipe reject the value, stop and report the conflict. Do not rename it. `myadmin` fits the Azure PostgreSQL, MySQL, and SQL username rules and avoids `guest`, which RabbitMQ restricts to loopback connections.
+
+| What the authentication call receives                                                                     | Rule | Username                               |
+|-----------------------------------------------------------------------------------------------------------|------|----------------------------------------|
+| `process.env.ORDER_QUEUE_USERNAME`, which Compose sets to `username`                                      | 2    | `myadmin`; bind `ORDER_QUEUE_USERNAME` |
+| `process.env.QUEUE_USER \|\| 'guest'`                                                                     | 2    | `myadmin`; bind `QUEUE_USER`           |
+| `builder.Configuration["RabbitMQ:UserName"]` from the default builder; `appsettings.json` sets `shop`     | 2    | `myadmin`; bind `RabbitMQ__UserName`   |
+| `amqp.connect('amqp://shop:' + password + '@' + host)`                                                    | 3    | `shop`                                 |
+| `config['queue']['user']` from a checked-in `config.ini` read by `configparser`, with no environment read | 3    | the value in `config.ini`              |
+| Read inside a prebuilt library; Compose sets `QUEUE_USER=orders`                                          | 4    | `orders`                               |
+
+Record the rule and the file and line the trace ended at in the requirement ledger, so a regeneration reaches the same answer. `myadmin` in the examples in this skill is this default, not a value read from any application. When the schema takes the username from an authored Secret, the value is a deploy-time `@secure()` input with no default, so the deployer supplies it and this order does not apply. Do not add a username to a type whose schema defines none.
 
 ### One username, one source
 
 Write the username once and give every consumer that same value. Two copies that happen to match today are not a binding: nothing checks that they stay equal.
 
 - When the schema documents the username as readable by consumers, as `Radius.Messaging/rabbitMQ` does ("exposed as a read-only connection value"), bind each consumer's native setting to `<resource>.properties.username`, as `ORDER_QUEUE_USERNAME` does in the [RabbitMQ example](#the-same-property-name-the-opposite-form). When the application reads the generated connection variable (`CONNECTION_<CONNECTION>_USERNAME`) instead, the connection supplies it.
-- Otherwise, declare the value once as a `var`, assign that `var` to the resource's `username`, and bind every consumer to the same `var`.
+- Otherwise, declare the value once as `var <resourceSymbolicName>Username` (for example `var mysqlDbUsername = 'myadmin'`), assign that `var` to the resource's `username`, and bind every consumer to the same `var`. Place it with the other `var` declarations in the order [Deterministic output](../SKILL.md#deterministic-output) sets.
 - Always set `username` on the resource when a consumer reads it. Do not rely on a schema default such as RabbitMQ's `radius`: the consumer's binding must name a value the model states.
 - Give a consumer the username through a plain `env.value`. Do not also copy it into an authored Secret for the consumer. A Secret's `data.<key>.value` must come from a `@secure()` parameter, which is a second, independent input, and a `@secure()` parameter cannot be assigned to the resource's non-sensitive `username`. When the application can read the username only from a Secret, report that the model cannot keep the two values equal and stop.
 - When the schema takes the username from an authored Secret instead of a resource property, that Secret is the one source. Consumers read it through `secretKeyRef` with the same data key, and the model does not also author the username as a literal anywhere else.
