@@ -52,7 +52,10 @@ import {
   type WorkflowExecution
 } from "@radius-project/adapter-shared";
 import { createDeployOutcomeService } from "../../../src/server/services/deploy-outcome.js";
-import { settleDeployStatuses } from "../../../src/deploy-artifacts.js";
+import {
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
+  settleDeployStatuses
+} from "../../../src/deploy-artifacts.js";
 import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monitor.js";
 import { createDeferred } from "../../support/browser/fakes.js";
 
@@ -321,14 +324,14 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           status: "failed",
           errorKind: "run-unconfirmed",
           error:
-            "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed. View the full run: https://github.com/org/app/actions/runs/42",
+            DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE +
+            " View the full run: https://github.com/org/app/actions/runs/42",
           deployRunUrl: "https://github.com/org/app/actions/runs/42",
           resources: [
             {
               name: "db",
               deployStatus: "failed",
-              deployMessage:
-                "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed."
+              deployMessage: DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
             }
           ]
         });
@@ -1565,8 +1568,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
             );
             expect(state.deployingResources?.[0]).toMatchObject({
               deployStatus: "failed",
-              deployMessage:
-                "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed."
+              deployMessage: DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
             });
             expect(reservation.attemptId).toBe(state.deployAttempt?.id);
             releases++;

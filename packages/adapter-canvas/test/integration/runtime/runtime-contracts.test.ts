@@ -20,6 +20,7 @@ import {
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monitor.js";
 import { deployFailureNoticePrompt } from "../../../src/runtime/hooks.js";
+import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../../src/deploy-artifacts.js";
 
 const ACTION_NAMES = ["get_graph_resources", "update_source_refs"];
 
@@ -83,7 +84,7 @@ describe("P0-A Radius runtime registration contract", () => {
         errorKind: "run-unconfirmed",
         deployRunUrl: "https://github.com/org/app/actions/runs/42",
         diagnostic: expect.stringContaining(
-          "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed."
+          DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
         )
       });
       expect(summary.diagnostic).toMatch(

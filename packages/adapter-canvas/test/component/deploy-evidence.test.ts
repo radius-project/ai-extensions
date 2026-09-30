@@ -9,6 +9,7 @@ import {
   DEPLOYMENTS_PATH
 } from "../../src/browser/repositories.js";
 import { createRealScope, jsonResponse } from "./support/real-scope.js";
+import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../src/deploy-messages.js";
 
 const disposals: Array<() => void> = [];
 afterEach(() => {
@@ -27,7 +28,8 @@ it.each([
   {
     name: "completed but unconfirmed outcome",
     error:
-      "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed. View the full run: https://github.com/org/app/actions/runs/42",
+      DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE +
+      " View the full run: https://github.com/org/app/actions/runs/42",
     errorKind: "run-unconfirmed"
   }
 ])(

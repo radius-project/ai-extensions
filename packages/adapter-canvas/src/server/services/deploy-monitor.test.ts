@@ -19,6 +19,7 @@ import { createPlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import type { DeployOutcomeRequest } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import {
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE as explanation,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
 } from "../../deploy-artifacts.js";
@@ -137,8 +138,6 @@ function settleRecorder() {
 }
 
 describe("workflow evidence uncertainty", () => {
-  const explanation =
-    "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed.";
   it.each([null, undefined, "", "   "])(
     "keeps completed+%j unconfirmed for the existing bound",
     async (conclusion) => {

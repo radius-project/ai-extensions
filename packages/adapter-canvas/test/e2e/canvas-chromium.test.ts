@@ -29,6 +29,7 @@ import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
 import {
   ARTIFACT_PAGE_SIZE,
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
 } from "../../src/deploy-artifacts.js";
@@ -3791,7 +3792,7 @@ test.describe("Radius Canvas in Chromium", () => {
       await page.keyboard.press("Enter");
       await expect(page.locator("#node-popup")).toContainText(
         completed ?
-          "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed."
+          DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
         : DEPLOY_MONITOR_TIMED_OUT_MESSAGE
       );
       if (completed) {
@@ -4173,7 +4174,7 @@ test.describe("Radius Canvas in Chromium", () => {
       await expect(page.locator("#deploy-fail-repair-note")).toBeHidden();
       if (unconfirmed) {
         await expect(page.locator("#deploy-progress-subtitle")).toContainText(
-          "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed."
+          DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
         );
         await expect(
           page.locator("#deploy-progress-subtitle")

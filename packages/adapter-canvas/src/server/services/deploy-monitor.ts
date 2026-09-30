@@ -1,4 +1,5 @@
 import type { DeployProgress } from "../../deploy-artifacts.js";
+import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../deploy-artifacts.js";
 import {
   confirmedWorkflowConclusion,
   type WorkflowRunDetail
@@ -356,11 +357,9 @@ export function createDeployMonitorService(
       const DEPLOY_STEP = dependencies.deployRadCommandsStep;
       let completionObserved = false;
       const stopUnconfirmed = (completed: boolean): void => {
-        const explanation =
-          "GitHub reported that the deploy workflow completed, but its outcome could not be confirmed.";
         log(
           completed ?
-            "⚠ " + explanation
+            "⚠ " + DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
           : "⚠ Timed out waiting for the deploy workflow to complete."
         );
         // Stop unfinished spinners without claiming a workflow failure.
@@ -368,14 +367,14 @@ export function createDeployMonitorService(
         dependencies.settleDeployStatuses(
           resources,
           completed ? null : "monitor_timed_out",
-          completed ? explanation : undefined
+          completed ? DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE : undefined
         );
         for (const resource of resources) {
           if (resource.deployStatus) setStatus(resource, resource.deployStatus);
         }
         entry.state.deployError =
           (completed ?
-            explanation + " View the full run: "
+            DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE + " View the full run: "
           : "Timed out waiting for the deploy workflow to complete. It may still be running — view it at ") +
           "https://github.com/" +
           repo +
