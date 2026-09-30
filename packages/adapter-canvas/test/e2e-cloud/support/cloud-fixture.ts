@@ -1231,7 +1231,7 @@ export async function createCloudFixture(
                 "--kubeconfig",
                 kubeconfig,
                 "delete",
-                "all",
+                RADIUS_WORKLOAD_RESOURCES,
                 "--namespace",
                 target.namespace,
                 "--selector",
@@ -1241,7 +1241,7 @@ export async function createCloudFixture(
               ],
               assertionTimeoutMs
             );
-            if (result.code === 0 || isMissingNamespace(result)) return;
+            if (isMissingNamespace(result)) return;
             // `kubectl delete --wait=true` prints its "deleted" lines and then
             // blocks until every object is finalized, so a delete that removed
             // everything can still be killed by this step's own budget.
@@ -1251,10 +1251,13 @@ export async function createCloudFixture(
             // terminating objects; poll for their absence the same way the
             // delete assertion does and report the delete only if something
             // outlives the deadline.
-            const failure = new CloudCommandError(
-              `kubectl delete all -n ${target.namespace}`,
-              result
-            );
+            const failure =
+              result.code === 0 ?
+                undefined
+              : new CloudCommandError(
+                  `kubectl delete ${RADIUS_WORKLOAD_RESOURCES} -n ${target.namespace}`,
+                  result
+                );
             let lastSeen: readonly string[] = [];
             await pollForValue({
               ports,
@@ -1281,7 +1284,7 @@ export async function createCloudFixture(
                   )
                     throw listFailure;
                   throw new Error(
-                    `${failure.message}\n  The follow-up listing also failed: ${describeError(listFailure)}`,
+                    `${failure ? `${failure.message}\n  The follow-up listing also failed` : "The follow-up listing failed"}: ${describeError(listFailure)}`,
                     { cause: listFailure }
                   );
                 }
@@ -1290,7 +1293,7 @@ export async function createCloudFixture(
                 return survivors.length === 0 ? true : undefined;
               },
               timeoutMessage: () =>
-                `${failure.message}\n  Still present after ${assertionTimeoutMs}ms: ` +
+                `${failure ? `${failure.message}\n  ` : ""}Still present after ${assertionTimeoutMs}ms: ` +
                 lastSeen.join(", ")
             });
           }
