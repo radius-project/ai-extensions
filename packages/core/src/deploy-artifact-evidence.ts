@@ -1,5 +1,4 @@
 import type { DeployStatus } from "./graph/index.js";
-import { validJsonSyntax } from "./json-syntax.js";
 
 // Files the producer packs into the deploy-status artifact.
 export const DEPLOY_STATUS_FILES = {
@@ -40,6 +39,10 @@ export const MAX_ARTIFACT_CANDIDATES = 9;
 // keeps a repo with no such artifact from walking its entire history.
 export const ARTIFACT_PAGE_SIZE = 100;
 export const MAX_ARTIFACT_PAGES = 5;
+
+// Share these budgets across all candidate starts, not per suffix scan.
+const GRAPH_SCAN_BUDGET_MULTIPLIER = 2;
+const MAX_FAILED_GRAPH_PARSE_ATTEMPTS = 64;
 
 export interface DeployProgressResource {
   id?: string;
@@ -321,210 +324,90 @@ export function parseDeployProgressArtifact(
 /**
  * Rad may write build progress to stdout before emitting the graph JSON. The
  * deploy workflow redirects that combined stream into deploy-graph.json, so
- * locate the first complete JSON document rather than rejecting valid graph
- * metadata because of the human-readable preamble.
+ * locate a complete graph document within a bounded amount of work. Malformed
+ * output may exhaust that budget before a later graph can be recovered.
  */
 export function parseDeployGraphArtifact(text?: string | null): unknown | null {
   if (!text) return null;
-  const scan = (
-    recoverQuotedOpeners: boolean,
-    recoverAcrossLines = false
-  ): unknown | null => {
-    type Frame = {
-      start: number;
-      closer: string;
-      children: Frame[];
-      end: number;
-      earlyGraph: unknown | null;
-      invalid: boolean;
-    };
-    const frames: Frame[] = [];
-    let arrayGraph: unknown[] | null = null;
-    let parseBudget = text.length * 3;
-    let invalidDocuments = 0;
-    const findGraph = (document: unknown): unknown | null => {
-      const pending: unknown[] = [document];
-      while (pending.length > 0) {
-        const value = pending.pop();
-        if (isRecord(value) && isGraphResourceArray(value.resources))
-          return value;
-        if (isGraphResourceArray(value) && arrayGraph === null)
-          arrayGraph = value;
-        if (Array.isArray(value)) {
-          for (let index = value.length - 1; index >= 0; index--)
-            pending.push(value[index]);
-        } else if (isRecord(value)) {
-          const entries = Object.values(value);
-          for (let index = entries.length - 1; index >= 0; index--)
-            pending.push(entries[index]);
-        }
-      }
-      return null;
-    };
-    const inspect = (root: Frame): unknown | null => {
-      const pending = [root];
-      while (pending.length > 0) {
-        const frame = pending.pop()!;
-        const size = frame.end - frame.start;
-        // Reserve enough parsing work for a later complete document even when
-        // a malformed outer fragment contains many nested candidates.
-        const reserved =
-          frames.length ?
-            text.length - frames[0]!.start
-          : text.length - frame.end;
-        if (
-          !frame.invalid &&
-          size <= parseBudget - reserved &&
-          (invalidDocuments < 64 ||
-            validJsonSyntax(text, frame.start, frame.end))
-        ) {
-          parseBudget -= size;
-          try {
-            const parsed: unknown = JSON.parse(
-              text.slice(frame.start, frame.end)
-            );
-            const graph = findGraph(parsed);
-            if (graph) return graph;
-            continue;
-          } catch {
-            // A balanced fragment in the preamble is not necessarily valid JSON.
-            invalidDocuments++;
-          }
-        }
-        if (frame.earlyGraph) return frame.earlyGraph;
-        for (let index = frame.children.length - 1; index >= 0; index--)
-          pending.push(frame.children[index]);
-      }
-      return null;
-    };
+  let arrayGraph: unknown[] | null = null;
+  let remainingScan = text.length * GRAPH_SCAN_BUDGET_MULTIPLIER;
+  let failedParseAttempts = 0;
+  const findGraph = (document: unknown): unknown | null => {
+    const pending: unknown[] = [document];
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (isRecord(value) && isGraphResourceArray(value.resources))
+        return value;
+      if (isGraphResourceArray(value) && arrayGraph === null)
+        arrayGraph = value;
+      const children =
+        Array.isArray(value) ? value
+        : isRecord(value) ? Object.values(value)
+        : [];
+      for (let index = children.length - 1; index >= 0; index--)
+        pending.push(children[index]);
+    }
+    return null;
+  };
+  for (let start = 0; start < text.length; start++) {
+    if (remainingScan === 0) return arrayGraph;
+    const first = text[start];
+    if (first !== "{" && first !== "[") {
+      remainingScan--;
+      continue;
+    }
+    const expectedClosers: string[] = [];
     let inString = false;
     let escaped = false;
-    let recoveredQuote = false;
-    let resyncedLine = false;
-    const inspectUnclosed = (): unknown | null => {
-      for (const frame of frames) {
-        if (frame.earlyGraph) return frame.earlyGraph;
-        for (const child of frame.children) {
-          const graph = inspect(child);
-          if (graph) return graph;
-        }
-      }
-      return null;
-    };
-    for (let index = 0; index < text.length; index++) {
+    let invalidCharacter = false;
+    let end = -1;
+    for (let index = start; index < text.length; index++) {
+      if (remainingScan === 0) return arrayGraph;
+      remainingScan--;
       const character = text[index];
       if (inString) {
-        if (
-          recoverQuotedOpeners &&
-          !recoveredQuote &&
-          !escaped &&
-          (character === "{" || character === "[")
-        ) {
-          frames.length = 0;
+        if (escaped) {
+          escaped = false;
+        } else if (character === "\\") {
+          escaped = true;
+        } else if (character === '"') {
           inString = false;
-          recoveredQuote = true;
-        } else {
-          if (character === "\n" || character === "\r") {
-            // An unescaped newline cannot occur in JSON strings; recover from
-            // unterminated preamble text before looking for the next document.
-            const graph = inspectUnclosed();
-            if (graph) return graph;
-            frames.length = 0;
-            inString = false;
-            escaped = false;
-            recoveredQuote = false;
-          } else if (escaped) {
-            escaped = false;
-          } else if (character === "\\") {
-            escaped = true;
-          } else if (character === '"') {
-            inString = false;
-          }
-          continue;
         }
+        continue;
       }
       if (character === '"') {
         inString = true;
-      } else if (character === "{" || character === "[") {
-        if (frames.length === 256) {
-          const graph = inspectUnclosed();
-          if (graph) return graph;
-          // Retain the newest openers so a document following an unclosed
-          // preamble can still close as a whole.
-          frames.splice(0, 128);
-        }
-        frames.push({
-          start: index,
-          closer: character === "{" ? "}" : "]",
-          children: [],
-          end: -1,
-          earlyGraph: null,
-          invalid: false
-        });
+      } else if (character === "{") {
+        expectedClosers.push("}");
+      } else if (character === "[") {
+        expectedClosers.push("]");
       } else if (character === "}" || character === "]") {
-        const frame = frames.pop();
-        if (!frame || frame.closer !== character) {
-          if (frame) frames.push(frame);
-          const graph = inspectUnclosed();
-          if (graph) return graph;
-          frames.length = 0;
-          continue;
+        if (expectedClosers.pop() !== character) break;
+        if (expectedClosers.length === 0) {
+          end = index + 1;
+          break;
         }
-        frame.end = index + 1;
-        const parent = frames.at(-1);
-        if (parent) {
-          parent.invalid ||= frame.invalid;
-          if (!parent.earlyGraph) {
-            parent.children.push(frame);
-            if (parent.children.length === 1024) {
-              for (const child of parent.children) {
-                parent.earlyGraph = inspect(child);
-                if (parent.earlyGraph) break;
-              }
-              parent.children.length = 0;
-            }
-          }
-        } else {
-          const graph = inspect(frame);
-          if (graph) return graph;
-        }
-      } else if (
-        recoverAcrossLines &&
-        !resyncedLine &&
-        recoveredQuote &&
-        (character === "\n" || character === "\r")
-      ) {
-        // The earlier scan already inspected candidates before this line.
-        frames.length = 0;
-        recoveredQuote = false;
-        resyncedLine = true;
-      } else if (recoverQuotedOpeners && recoveredQuote && character === "\\") {
-        const graph = inspectUnclosed();
-        if (graph) return graph;
-        frames.length = 0;
-        inString = true;
-        escaped = true;
-        recoveredQuote = false;
-      } else if (
-        frames.length > 0 &&
-        !/[\s\d+\-.,:eEtrufalsn]/.test(character)
-      ) {
-        frames.at(-1)!.invalid = true;
+      } else if (!/[\s\d+\-.,:eEtrufalsn]/.test(character)) {
+        // Skip non-JSON characters in tags such as [INFO], not JSON-like tags.
+        invalidCharacter = true;
       }
     }
-    const graph = inspectUnclosed();
+    if (end < 0 || invalidCharacter) continue;
+    let parsed: unknown;
+    try {
+      // Decoding and walking this document cost at most its already charged
+      // scan length. Do not scan its nested candidates again after decoding.
+      parsed = JSON.parse(text.slice(start, end));
+    } catch {
+      if (++failedParseAttempts === MAX_FAILED_GRAPH_PARSE_ATTEMPTS)
+        return arrayGraph;
+      continue;
+    }
+    const graph = findGraph(parsed);
     if (graph) return graph;
-    return arrayGraph;
-  };
-  const first = scan(false);
-  if (first && !Array.isArray(first)) return first;
-  const recovered = scan(true);
-  if (recovered && !Array.isArray(recovered)) return recovered;
-  if (!/[\r\n]/.test(text)) return first ?? recovered;
-  const acrossLines = scan(true, true);
-  return acrossLines && !Array.isArray(acrossLines) ?
-      acrossLines
-    : (first ?? recovered ?? acrossLines);
+    start = end - 1;
+  }
+  return arrayGraph;
 }
 
 function isGraphResourceArray(value: unknown): value is unknown[] {
@@ -832,9 +715,10 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         lastGood = null;
       }
       cache = { at: now(), result };
-      inflight = null;
       return result;
-    })();
+    })().finally(() => {
+      inflight = null;
+    });
     return inflight;
   }
 

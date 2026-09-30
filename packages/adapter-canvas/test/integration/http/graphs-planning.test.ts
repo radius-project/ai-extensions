@@ -172,6 +172,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     "wrong-run",
     "wrong-environment",
     "malformed",
+    "graph-budget-exhausted",
     "auth"
   ] as const)(
     "projects only validated %s evidence through the Canvas core reader",
@@ -207,7 +208,14 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
                   status: "failed"
                 }
               ]
-            })
+            }),
+            ...(mode === "graph-budget-exhausted" ?
+              {
+                [DEPLOY_STATUS_FILES.graph]:
+                  "{".repeat(8 * 1024 * 1024) +
+                  JSON.stringify({ resources: [{ name: "foreign" }] })
+              }
+            : {})
           };
         }
       });
@@ -229,10 +237,18 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
         resources: expect.arrayContaining([
           expect.objectContaining({
             name: "api",
-            deployStatus: mode === "valid" ? "failed" : "pending"
+            deployStatus:
+              mode === "valid" || mode === "graph-budget-exhausted" ?
+                "failed"
+              : "pending"
           })
         ])
       });
+      if (mode === "graph-budget-exhausted") {
+        expect(body).toHaveProperty("resources.length", 1);
+        expect(await reader.graph()).toMatchObject({ graph: null });
+        expect((await reader.progress())?.resources).toHaveLength(1);
+      }
       expect(harness.state.deployStatus).toBe("in_progress");
     }
   );
