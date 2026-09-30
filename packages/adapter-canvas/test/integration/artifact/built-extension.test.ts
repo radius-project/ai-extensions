@@ -523,15 +523,17 @@ describe("P0-C built Radius extension artifact", () => {
     for (const marker of [
       "===== react@19.3.0 =====",
       "===== react-dom@19.3.0 =====",
-      "===== reactflow@11.11.4 =====",
+      "===== @xyflow/react@12.11.6 =====",
+      "===== @xyflow/system@0.0.82 =====",
       "===== dagre@0.8.5 =====",
-      "===== @reactflow/core@11.11.4 =====",
       "===== graphlib@2.1.8 =====",
       "===== lodash@4.18.1 =====",
       "===== yaml@2.9.1 ====="
     ]) {
       expect(notices).toContain(marker);
     }
+    expect(notices).not.toContain("===== reactflow@");
+    expect(notices).not.toContain("===== @reactflow/");
   });
 
   it("packages the managed-secret modeling contract in executable examples and platform rules", () => {

@@ -162,6 +162,115 @@ verify_attached_pack_names() {
     ((count > 0)) || fail "no attached recipe pack names found."
 }
 
+# Parameter names the provider workflows pass to a catalog-pinned recipe pack.
+# Scoped to the PACK_PARAMETERS array the pack deploy expands so that app-level
+# `--parameters` elsewhere in the same run block are not attributed to the pack.
+# A parameter the pack does not declare would otherwise only surface as a failed
+# `rad deploy` against a live environment.
+#
+# Emits `pack file kind name`. `kind` is `param` for a parameter whose name was
+# read, and `unparsable` for a `--parameters` the name could not be read from —
+# reported rather than dropped, because a silent skip is indistinguishable from
+# a parameter that is genuinely verified.
+pack_parameters() {
+    local workflow
+    while IFS= read -r -d '' workflow; do
+        yq -r \
+            '.. | select(tag == "!!map") | .run? | select(tag == "!!str")' \
+            "${workflow}" |
+            awk '
+                match($0, /radius_contrib_recipe_pack_url [A-Za-z0-9._-]+ [A-Za-z0-9._\/-]+/) {
+                    split(substr($0, RSTART, RLENGTH), parts, " ")
+                    pack = parts[2]
+                    file = parts[3]
+                }
+                /PACK_PARAMETERS\+?=\(/ { in_array = 1 }
+                in_array && /--parameters/ {
+                    if (pack != "") {
+                        if (match($0, /--parameters "?[A-Za-z0-9_]+=/)) {
+                            name = substr($0, RSTART, RLENGTH)
+                            sub(/^--parameters "?/, "", name)
+                            sub(/=$/, "", name)
+                            print pack, file, "param", name
+                        }
+                        else {
+                            text = $0
+                            sub(/^[ \t]+/, "", text)
+                            print pack, file, "unparsable", text
+                        }
+                    }
+                }
+                # Closes both the multi-line array and a single-line
+                # `PACK_PARAMETERS+=(--parameters name=value)`. Anchored to the
+                # end of the line so a value containing `)` does not close it.
+                in_array && /\)[ \t]*$/ { in_array = 0 }
+            '
+    done < <(extension_yaml_files) | sort -u
+}
+
+# The catalog-pinned recipe packs the provider workflows deploy, whether or not
+# they pass the pack any parameters.
+pack_files() {
+    printf '%s\n' "${RUN_BLOCKS}" |
+        sed -nE 's/.*radius_contrib_recipe_pack_url ([A-Za-z0-9._-]+) ([A-Za-z0-9._\/-]+).*/\1 \2/p' |
+        sort -u
+}
+
+# The parameters a pack declares, e.g. `param routesGatewayName string`.
+parse_pack_declared_parameters() {
+    sed -nE 's/^[[:space:]]*param[[:space:]]+([A-Za-z0-9_]+)[[:space:]].*/\1/p' "$1"
+}
+
+# The subset a caller must supply: a `param` declaration carrying no `=`, and so
+# no default to fall back on. A pack that adds one of these is the case a
+# workflow cannot absorb silently, because `rad deploy` refuses it outright.
+parse_pack_required_parameters() {
+    sed -nE 's/^[[:space:]]*param[[:space:]]+([A-Za-z0-9_]+)[[:space:]]+[^=]*$/\1/p' "$1"
+}
+
+verify_pack_parameters() {
+    local records pack file kind name pack_file declared passed required
+    local count=0
+    records="$(pack_parameters)"
+
+    # Every parameter a workflow passes must be one the pack declares.
+    while read -r pack file kind name; do
+        [[ -n "${pack}" ]] || continue
+        [[ "${kind}" != unparsable ]] ||
+            fail "recipe pack ${pack}/${file} is passed a parameter this check cannot read, so it cannot be verified: ${name}"
+        pack_file="$(recipe_pack_file "${pack}" "${file}")"
+        [[ -f "${pack_file}" ]] ||
+            fail "verified recipe pack file is unavailable: ${pack_file}"
+        declared="$(parse_pack_declared_parameters "${pack_file}")"
+        printf '%s\n' "${declared}" | grep -Fxq "${name}" ||
+            fail "recipe pack ${pack}/${file} does not declare parameter '${name}'; it declares: ${declared//$'\n'/, }"
+        echo "  Verified recipe pack ${pack}/${file} declares parameter '${name}'"
+        ((count += 1))
+    done <<<"${records}"
+    ((count > 0)) || fail "no recipe pack parameter consumers found."
+
+    # And the reverse: a pack parameter with no default has to come from
+    # somewhere, so a catalog bump that adds one fails here rather than at the
+    # `rad deploy` it would otherwise reach.
+    while read -r pack file; do
+        [[ -n "${pack}" ]] || continue
+        pack_file="$(recipe_pack_file "${pack}" "${file}")"
+        [[ -f "${pack_file}" ]] ||
+            fail "verified recipe pack file is unavailable: ${pack_file}"
+        passed="$(
+            printf '%s\n' "${records}" |
+                awk -v p="${pack}" -v f="${file}" \
+                    '$1 == p && $2 == f && $3 == "param" { print $4 }'
+        )"
+        while read -r required; do
+            [[ -n "${required}" ]] || continue
+            printf '%s\n' "${passed}" | grep -Fxq "${required}" ||
+                fail "recipe pack ${pack}/${file} declares parameter '${required}' with no default, but no workflow passes it"
+            echo "  Verified recipe pack ${pack}/${file} is passed required parameter '${required}'"
+        done < <(parse_pack_required_parameters "${pack_file}")
+    done < <(pack_files)
+}
+
 parse_pack_kube_recipes() {
     awk -v q="'" '
         {
@@ -285,6 +394,7 @@ main() {
 
     verify_recipe_packs
     verify_attached_pack_names
+    verify_pack_parameters
     verify_kube_recipes
     verify_git_recipes
     echo "Contrib workflow consumers are valid."

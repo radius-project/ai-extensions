@@ -5,10 +5,9 @@
 // `az aks get-credentials --resource-group` names the group the cluster itself
 // lives in. That is `AZURE_AKS_RESOURCE_GROUP`. It is not
 // `AZURE_RESOURCE_GROUP`, which is where the application's own resources are
-// created: the same variable is passed to the environment's
-// `providers.azure.resourceGroupName` and to the recipe pack's
-// `azureResourceGroup` parameter, and Radius does not require an application to
-// deploy into the group its cluster happens to sit in.
+// created: that variable is passed to the environment's
+// `providers.azure.resourceGroupName`, and Radius does not require an
+// application to deploy into the group its cluster happens to sit in.
 //
 // The two are equal for every environment the wizard creates today, so a
 // workflow that confuses them still works and no run would report this. These
@@ -262,18 +261,18 @@ describe("the generated Azure workflows' application resource group", () => {
   // once a value reaches the shell through an `env:` binding instead of being
   // interpolated. What matters is which group the value ends up being, not the
   // shape it travels in.
-  it.each([
-    ["the environment's Azure provider", "resourceGroupName:"],
-    [
-      "the recipe pack's parameter",
-      "append_pack_parameter_if_declared azureResourceGroup"
-    ]
-  ])("keeps %s on the application's resource group", (_label, marker) => {
+  //
+  // The environment's provider is the only place the value is conveyed. The
+  // recipe pack used to take it as an `azureResourceGroup` parameter too, but
+  // the pack-only artifact reads the group from the environment it deploys
+  // into, so that marker was removed with the parameter rather than left
+  // behind to match nothing.
+  it("keeps the environment's Azure provider on the application's resource group", () => {
     const uses = workflows.flatMap(([, source]) =>
       scopedScripts(source).flatMap((script) =>
         script.script
           .split(/\r?\n/)
-          .filter((line) => line.includes(marker))
+          .filter((line) => line.includes("resourceGroupName:"))
           .map((line) => [script.environment, line] as const)
       )
     );

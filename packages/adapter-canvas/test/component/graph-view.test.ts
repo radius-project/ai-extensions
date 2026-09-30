@@ -18,11 +18,7 @@ import {
 } from "../../src/browser/graph/build.js";
 import { layoutGraph } from "../../src/browser/graph/layout.js";
 import { mountGraph } from "../../src/browser/graph/view.js";
-import {
-  createGraphHost,
-  realClock,
-  realGraphVendor
-} from "./support/real-vendor.js";
+import { createGraphHost, realGraphVendor } from "./support/real-vendor.js";
 import { SHELL_STYLE_CSS } from "../../src/pages/shell-styles.js";
 import type { GraphNodeData } from "../../src/browser/graph/build.js";
 import type { GraphResource } from "../../src/browser/graph/model.js";
@@ -91,7 +87,6 @@ function mount(
   };
   const graph = mountGraph({
     vendor,
-    clock: realClock(),
     host,
     settings,
     nodes: built.nodes,
@@ -530,6 +525,31 @@ describe("graph view in a real browser", () => {
     expect(reached).toContain("app/db:Show details");
   });
 
+  it("accepts an update as soon as the first render commits, before passive effects run", async () => {
+    const { graph, host } = mount();
+    // createRoot().render() only schedules the first render.
+    expect(host.childElementCount).toBe(0);
+
+    const settings = resolveGraphSettings({ localSource: true });
+    const next = buildGraph(settings, RESOURCES);
+    layoutGraph(realGraphVendor().dagre, next.nodes, next.edges);
+    // A MutationObserver callback is a microtask queued by the commit, so it
+    // runs after React's layout effects but before the task that flushes
+    // passive effects. Binding the updater in useEffect would miss this window
+    // and drop the controller's first push.
+    const accepted = await new Promise<boolean>((resolve) => {
+      const observer = new MutationObserver(() => {
+        if (!host.querySelector(".react-flow")) return;
+        observer.disconnect();
+        resolve(graph.update(next.nodes, next.edges));
+      });
+      observer.observe(host, { childList: true, subtree: true });
+    });
+
+    expect(accepted).toBe(true);
+    expect(await card("web")).toBeTruthy();
+  });
+
   it("re-renders through the real root when the controller pushes new data", async () => {
     const { graph } = mount();
     await card("web");
@@ -562,6 +582,9 @@ describe("graph view in a real browser", () => {
 
     const fittedTransform = await waitForStableTransform(viewport);
     await userEvent.click(zoomOut);
+    await waitFor(() =>
+      expect(viewport.style.transform).not.toBe(fittedTransform)
+    );
     const zoomedTransform = await waitForStableTransform(viewport);
     // Guard against a vacuous assertion: the control must really move the
     // viewport, otherwise "unchanged after refresh" would prove nothing.
@@ -599,6 +622,9 @@ describe("graph view in a real browser", () => {
 
     const fittedTransform = await waitForStableTransform(viewport);
     await userEvent.click(zoomOut);
+    await waitFor(() =>
+      expect(viewport.style.transform).not.toBe(fittedTransform)
+    );
     const zoomedTransform = await waitForStableTransform(viewport);
     expect(zoomedTransform).not.toBe(fittedTransform);
 
@@ -616,8 +642,20 @@ describe("graph view in a real browser", () => {
     layoutGraph(realGraphVendor().dagre, next.nodes, next.edges);
     expect(graph.update(next.nodes, next.edges)).toBe(true);
 
-    await card("api");
-    expect(await waitForStableTransform(viewport)).not.toBe(zoomedTransform);
+    // The refit runs straight after the update, so once React Flow has
+    // measured the new cards it must frame them, not the old layout.
+    const frame = host.getBoundingClientRect();
+    const cards = [await card("api"), await card("cache")];
+    await waitFor(() => {
+      for (const element of cards) {
+        const bounds = element.getBoundingClientRect();
+        expect(bounds.left).toBeGreaterThanOrEqual(frame.left);
+        expect(bounds.top).toBeGreaterThanOrEqual(frame.top);
+        expect(bounds.right).toBeLessThanOrEqual(frame.right);
+        expect(bounds.bottom).toBeLessThanOrEqual(frame.bottom);
+      }
+    });
+    expect(viewport.style.transform).not.toBe(zoomedTransform);
   });
 
   it("detaches the real root on unmount and stops answering updates", async () => {
