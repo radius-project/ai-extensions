@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
@@ -18,6 +18,7 @@ import {
   SelectedGhAuthorizationError
 } from "../../../src/deploy.js";
 import { SelectedGhAuthorizationError as SharedAuthorizationError } from "@radius-project/adapter-shared";
+import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
 
 // HTTP-integration coverage for the verify-status route's failure-classification
 // contract (issue #99). The classifier itself is proven at the unit level; this
@@ -135,6 +136,120 @@ async function startVerifyStatusServer(
 }
 
 describe("verify-status HTTP contract — failure classification", () => {
+  it("publishes and persists the confirmed failure when bounded log output is unavailable", async () => {
+    const operation = {
+      repo: REPO,
+      environment: "dev",
+      state: "verifying",
+      context: { githubLogin: "octocat" },
+      currentStage: "verify",
+      verification: { dispatchedAt: 1, runId: "91" }
+    };
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("Unexpected artifact read");
+    });
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      run: async (args, options) => {
+        calls.push(args);
+        if (args[0] === "api") {
+          return {
+            code: 0,
+            stderr: "",
+            stdout:
+              "HTTP/2 200\n\n" +
+              JSON.stringify(
+                args[1].includes("/jobs") ?
+                  {
+                    total_count: 1,
+                    jobs: [
+                      {
+                        steps: [
+                          { name: "Azure Login (OIDC)", conclusion: "failure" }
+                        ]
+                      }
+                    ]
+                  }
+                : { status: "completed", conclusion: "failure" }
+              )
+          };
+        }
+        expect(args).toEqual(["run", "view", "91", "--log", "--repo", REPO]);
+        expect(options?.timeout).toBeGreaterThan(0);
+        expect(options?.timeout).toBeLessThanOrEqual(30000);
+        expect(options?.maxBuffer).toBe(20 * 1024 * 1024);
+        expect(options?.signal).toBeInstanceOf(AbortSignal);
+        return {
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+          stdout: "",
+          stderr: ""
+        };
+      }
+    });
+    const finish = vi.fn((_operation: unknown, state: string) => {
+      operation.state = state;
+    });
+    const persistOperations = vi.fn(async () => {
+      expect(operation.state).toBe("failed_partial");
+    });
+    try {
+      const baseUrl = await startVerifyStatusServer({
+        readInstanceEntry: () => ({ observation: scope }),
+        getOperation: () => operation,
+        hasCompleteVerificationIdentity: () => true,
+        getSelectedGitHubExecutor: () => executor,
+        isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+        getRunDetail,
+        fetchRunLog,
+        extractErrorLines,
+        extractGitHubActionsStepLog,
+        explainOidcEnterpriseClaim,
+        explainNoSubscriptions,
+        finish,
+        persistBestEffort: async ({ persist }) => {
+          await persist();
+          return true;
+        },
+        persistOperations,
+        reportOperationDiagnostic: () => {}
+      });
+      const response = await fetch(
+        `${baseUrl}/api/verify-status?repo=${REPO}&environment=dev&operationId=op-1`
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain(
+        "application/json"
+      );
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const body = await response.json();
+      expect(body).toMatchObject({
+        state: "failed",
+        runId: "91",
+        runUrl: `https://github.com/${REPO}/actions/runs/91`,
+        category: "generic",
+        error: expect.stringContaining(
+          "The verification log could not be read: the output limit was exceeded."
+        )
+      });
+      expect(finish).toHaveBeenCalledExactlyOnceWith(
+        operation,
+        "failed_partial",
+        expect.objectContaining({
+          failure: expect.objectContaining({
+            code: "verify-run-failed",
+            evidence: expect.stringContaining(
+              "Failed step: Azure Login (OIDC)."
+            )
+          })
+        })
+      );
+      expect(persistOperations).toHaveBeenCalledOnce();
+      expect(calls).toHaveLength(3);
+    } finally {
+      scope.stop();
+    }
+  });
+
   it("serializes the classified permissions failure over the wire", async () => {
     const operation = {
       repo: REPO,
