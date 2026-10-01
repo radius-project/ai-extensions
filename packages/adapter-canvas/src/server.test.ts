@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { remediationView } from "@radius-project/core";
+import {
+  remediationView,
+  DEPLOY_RAD_COMMANDS_STEP as CORE_DEPLOY_RAD_COMMANDS_STEP
+} from "@radius-project/core";
 import {
   activeDeploymentMutation,
   addGraphProgress,
@@ -117,6 +120,7 @@ describe("DEPLOY_RAD_COMMANDS_STEP", () => {
     // nowhere in radius-project/ai-extensions, so that entire code path never ran on
     // a real deploy. Pin the value so the same silent break cannot recur.
     expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
+    expect(DEPLOY_RAD_COMMANDS_STEP).toBe(CORE_DEPLOY_RAD_COMMANDS_STEP);
   });
 
   describe("resetListingCaches", () => {

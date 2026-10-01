@@ -1,8 +1,40 @@
 import { describe, expect, it } from "vitest";
 import {
   observeWorkflowRun,
+  confirmedWorkflowConclusion,
   type WorkflowRunRead
 } from "./workflow-observation.js";
+
+describe("confirmed workflow conclusion", () => {
+  it.each([
+    "success",
+    "failure",
+    "cancelled",
+    "timed_out",
+    "action_required",
+    "neutral",
+    "skipped",
+    "stale",
+    "startup_failure"
+  ])("accepts GitHub's completed %s conclusion", (conclusion) => {
+    expect(
+      confirmedWorkflowConclusion({ status: "completed", conclusion })
+    ).toBe(conclusion);
+  });
+
+  it.each([
+    { status: "completed", conclusion: null },
+    { status: "completed", conclusion: undefined },
+    { status: "completed", conclusion: "" },
+    { status: "completed", conclusion: "future_conclusion" },
+    { status: "waiting", conclusion: null },
+    { status: "in_progress", conclusion: "success" },
+    { status: "queued", conclusion: "failure" },
+    { status: undefined, conclusion: "failure" }
+  ])("does not invent an outcome from %j", (run) => {
+    expect(confirmedWorkflowConclusion(run)).toBeNull();
+  });
+});
 
 describe("one-shot workflow observation", () => {
   it("normalizes once without mutating the raw run or selecting another execution", async () => {

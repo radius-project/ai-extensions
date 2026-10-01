@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   collectWorkflowFailure,
+  confirmedWorkflowConclusion,
   observeWorkflowRun,
   type WorkflowJob
 } from "@radius-project/core";
@@ -12,6 +13,167 @@ import {
 } from "./workflow-reads.js";
 
 describe("non-Canvas workflow caller with real core and shared reads", () => {
+  it.each([
+    { name: "in-progress", status: "in_progress", fallback: false },
+    { name: "missing status", status: undefined, fallback: false },
+    {
+      name: "completed status-only fallback",
+      status: "completed",
+      fallback: true
+    }
+  ])(
+    "requires observed completion before collecting $name diagnostics",
+    async ({ status, fallback }) => {
+      const calls: string[] = [];
+      const execution: WorkflowExecution = {
+        mode: "ambient",
+        run: async (args) => {
+          calls.push(args.join(" "));
+          if (fallback && calls.length === 1)
+            return { code: 1, stderr: "Jobs unavailable", stdout: "" };
+          if (args[3] === "--json")
+            return {
+              code: 0,
+              stderr: "",
+              stdout: JSON.stringify({ status, conclusion: "failure" })
+            };
+          if (args[3] === "--log")
+            return { code: 0, stderr: "", stdout: "Error: observed failure" };
+          throw new Error("Unexpected command");
+        }
+      };
+      const target = { repo: "org/app", runId: 41 };
+      const observed = await observeWorkflowRun(target, {
+        readRun: (repo, runId) => readWorkflowRun(execution, repo, runId)
+      });
+      if (!observed) throw new Error("Expected observation");
+      const result = await collectWorkflowFailure(
+        target,
+        observed,
+        { resourcesTouched: false },
+        {
+          readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+          readControlPlaneLog: async () => {
+            calls.push("control-plane");
+            return null;
+          }
+        }
+      );
+      expect(calls).toEqual([
+        "run view 41 --json status,conclusion,jobs --repo org/app",
+        ...(fallback ?
+          ["run view 41 --json status,conclusion --repo org/app"]
+        : []),
+        ...(status === "completed" ?
+          ["run view 41 --log --repo org/app", "control-plane"]
+        : [])
+      ]);
+      expect(result).toEqual(
+        status === "completed" ?
+          {
+            message:
+              "Deployment failed (failure).\n\nError: observed failure\n\nView the full run: https://github.com/org/app/actions/runs/41",
+            radiusError: "Error: observed failure",
+            authDriftMessage: "",
+            narration: [
+              "",
+              "──────── failure details ────────",
+              "  Error: observed failure",
+              "─────────────────────────────────"
+            ]
+          }
+        : {
+            message:
+              "Workflow outcome is unconfirmed. View the full run: https://github.com/org/app/actions/runs/41",
+            radiusError: "",
+            authDriftMessage: "",
+            narration: []
+          }
+      );
+    }
+  );
+
+  it.each(["throw", "null", "primary"] as const)(
+    "retains observed primary failure across %s diagnostics and secondary artifact failure",
+    async (mode) => {
+      const calls: string[] = [];
+      const execution: WorkflowExecution = {
+        mode: "ambient",
+        run: async (args) => {
+          calls.push(args.join(" "));
+          if (args[3] === "--json")
+            return {
+              code: 0,
+              stderr: "",
+              stdout: JSON.stringify({
+                status: "completed",
+                conclusion: "failure",
+                jobs: [
+                  {
+                    name: "deploy",
+                    steps: [
+                      { name: "Run rad commands", conclusion: "failure" },
+                      {
+                        name: "Persist Radius state (rad shutdown)",
+                        conclusion: "failure"
+                      }
+                    ]
+                  }
+                ]
+              })
+            };
+          if (args[3] !== "--log") throw new Error("unexpected command");
+          if (mode === "throw")
+            throw new Error("fixture-private-command-detail");
+          return {
+            code: mode === "null" ? 1 : 0,
+            stderr: "",
+            stdout: [
+              "deploy\tRun rad commands\t2026-01-01 Error: { primary quota }",
+              "deploy\tPersist Radius state (rad shutdown)\t2026-01-01 Error: { shutdown secondary }"
+            ].join("\n")
+          };
+        }
+      };
+      const target = { repo: "org/app", runId: 41 };
+      const observed = await observeWorkflowRun(target, {
+        readRun: (repo, runId) => readWorkflowRun(execution, repo, runId)
+      });
+      if (!observed) throw new Error("expected observed run");
+      expect(confirmedWorkflowConclusion(observed)).toBe("failure");
+      const result = await collectWorkflowFailure(
+        target,
+        observed,
+        { resourcesTouched: true },
+        {
+          readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+          readControlPlaneLog: () => {
+            calls.push("control-plane");
+            throw new Error("fixture-private-artifact-detail");
+          }
+        }
+      );
+      expect(result.message).toContain(
+        "Failed step: Run rad commands, Persist Radius state (rad shutdown)."
+      );
+      expect(result.message).toContain(
+        "The control-plane log could not be read."
+      );
+      expect(
+        result.message.includes("The workflow log could not be read.")
+      ).toBe(mode === "throw");
+      expect(result.radiusError).toBe(
+        mode === "primary" ? "Error: { primary quota }" : ""
+      );
+      expect(JSON.stringify(result)).not.toContain("fixture-private");
+      expect(calls).toEqual([
+        "run view 41 --json status,conclusion,jobs --repo org/app",
+        "run view 41 --log --repo org/app",
+        "control-plane"
+      ]);
+    }
+  );
+
   it.each(["success", "failure"])(
     "observes %s with only explicitly targeted reads",
     async (conclusion) => {
