@@ -8,7 +8,12 @@ export type WorkflowResponseMetadata =
   | {
       source: "unavailable";
       reason:
-        "opaque-command" | "invalid-response" | "timeout" | "output-limit";
+        | "opaque-command"
+        | "invalid-response"
+        | "timeout"
+        | "output-limit"
+        | "cancelled"
+        | "deferred";
     }
   | {
       source: "gh-api-include";
