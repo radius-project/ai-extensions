@@ -8,6 +8,7 @@ import type {
 } from "./environments-types.js";
 import { classifyVerifyFailure } from "./verify-failure-classification.js";
 import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
+import { isWorkflowReadLimitError } from "@radius-project/adapter-shared";
 
 // The `environments` family, minus `POST /api/create-environment`, which is
 // large enough to live in its own `create-environment*.ts` seams. The five
@@ -1349,15 +1350,26 @@ export async function handleVerifyStatus(
     if (failed.length)
       errMsg += " Failed step: " + failed.map((s) => s.name).join(", ") + ".";
     if (readNotice) errMsg += "\n" + readNotice;
-    const log =
-      selectedExecutor ?
-        await dependencies.fetchRunLog(
-          repo,
-          runId,
-          selectedExecutor,
-          observation
-        )
-      : await dependencies.fetchRunLog(repo, runId, undefined, observation);
+    let log: string | null = null;
+    try {
+      log =
+        selectedExecutor ?
+          await dependencies.fetchRunLog(
+            repo,
+            runId,
+            selectedExecutor,
+            observation
+          )
+        : await dependencies.fetchRunLog(repo, runId, undefined, observation);
+    } catch (error) {
+      if (!isWorkflowReadLimitError(error) || error.reason === "cancelled")
+        throw error;
+      errMsg +=
+        "\nThe verification log could not be read: " +
+        (error.reason === "timeout" ?
+          "the read timed out."
+        : "the output limit was exceeded.");
+    }
     if (entry?.observation?.stopped) {
       respond(
         { state: "pending", error: "Workflow observation stopped." },

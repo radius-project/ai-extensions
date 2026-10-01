@@ -4394,92 +4394,121 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.waitForURL(/\/\?page=environment$/);
   });
 
-  test("offers the verify-bypass recovery and sends the mutation nonce when Create environment anyway is clicked @safety", async ({
-    page,
-    canvas
-  }) => {
-    // Exceptions 4.4/4.5: a verification that fails on a recoverable category
-    // (missing permissions / unreachable endpoint) offers a "Create environment
-    // anyway" bypass. This drives the real restart-recovery path — the tracker
-    // observes a live operation, the server then loses that record, and the
-    // verify-status endpoint reports a bypassable failure — and asserts the
-    // compiled button renders in #env-progress-verify-bypass and POSTs with the
-    // browser mutation nonce the real page was served. Unit tests cover the
-    // render in jsdom; only Chromium proves the built script's real fetch
-    // actually carries the nonce header.
-    const operation = {
-      operationId: "op-bypass-e2e",
-      kind: "create",
-      environment: "fixture-environment",
-      provider: "azure",
-      state: "verifying",
-      currentStage: "verify",
-      startedAt: new Date().toISOString(),
-      verification: { dispatchedAt: Date.now(), runId: "555" }
-    };
-    let opCalls = 0;
-    // The tracker must observe the operation at least once (so it commits to
-    // this environment) before the record disappears; only then does it fall
-    // back to the verify-status endpoint that surfaces the bypass. Serving the
-    // operation for the first two reads (resume + first poll) and nothing after
-    // reproduces that sequence deterministically.
-    await page.route(/\/api\/operations\?repo=/, async (route) => {
-      opCalls += 1;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(opCalls <= 2 ? { operation } : { operation: null })
+  for (const category of ["permissions", "generic"] as const) {
+    test(`handles ${category} verification failure without granting unsupported bypass @safety`, async ({
+      page,
+      canvas
+    }) => {
+      // Only definitive permission evidence may offer bypass. This drives the
+      // real restart-recovery path — the tracker
+      // observes a live operation, the server then loses that record, and the
+      // verify-status endpoint reports a failure. For a bypassable failure the
+      // compiled button renders in #env-progress-verify-bypass and POSTs with the
+      // browser mutation nonce the real page was served. Unit tests cover the
+      // render in jsdom; only Chromium proves the built script's real fetch
+      // actually carries the nonce header.
+      const operation = {
+        operationId: "op-bypass-e2e",
+        kind: "create",
+        environment: "fixture-environment",
+        provider: "azure",
+        state: "verifying",
+        currentStage: "verify",
+        startedAt: new Date().toISOString(),
+        verification: { dispatchedAt: Date.now(), runId: "555" }
+      };
+      let opCalls = 0;
+      // The tracker must observe the operation at least once (so it commits to
+      // this environment) before the record disappears; only then does it fall
+      // back to the verify-status endpoint that surfaces the bypass. Serving the
+      // operation for the first two reads (resume + first poll) and nothing after
+      // reproduces that sequence deterministically.
+      await page.route(/\/api\/operations\?repo=/, async (route) => {
+        opCalls += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(
+            opCalls <= 2 ? { operation } : { operation: null }
+          )
+        });
+      });
+      const unavailableLog =
+        "Credential verification failed (failure). Failed step: Azure Login (OIDC).\nThe verification log could not be read: the read timed out.";
+      await page.route("**/api/verify-status**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            state: "failed",
+            terminal: false,
+            category,
+            ...(category === "permissions" ?
+              { missingPermissions: ["Contributor"] }
+            : { error: unavailableLog }),
+            runId: "555",
+            runUrl: `https://github.com/${REPOSITORY}/actions/runs/555`
+          })
+        });
+      });
+      let bypassNonce: string | null = null;
+      let bypassBody: unknown = null;
+      await page.route("**/api/bypass-verification**", async (route) => {
+        const request = route.request();
+        bypassNonce = request.headers()["x-radius-mutation-nonce"] ?? null;
+        bypassBody = request.postDataJSON();
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ success: true, category: "permissions" })
+        });
+      });
+
+      await page.clock.install();
+      await gotoCanvas(page, canvas, "environment");
+
+      const bypassButton = page.locator("#env-progress-verify-bypass-button");
+      if (category === "generic") {
+        await expect(page.locator("#env-progress-panel")).toHaveClass(
+          /env-progress--failed/
+        );
+        await expect(page.locator("#env-progress-activity")).toContainText(
+          unavailableLog
+        );
+        await expect(page.locator("#env-progress-activity")).toContainText(
+          `https://github.com/${REPOSITORY}/actions/runs/555`
+        );
+        await expect(bypassButton).toBeHidden();
+        await expect(page.locator("#env-progress-panel")).not.toHaveClass(
+          /env-progress--active/
+        );
+        const elapsed = page.locator("#env-progress-elapsed");
+        const settledElapsed = (await elapsed.textContent()) ?? "";
+        await page.clock.fastForward(60000);
+        await expect(elapsed).toHaveText(settledElapsed);
+        await expectNoWcagViolations(page);
+        return;
+      }
+      await expect(bypassButton).toBeVisible();
+      await expect(bypassButton).toHaveText("Create environment anyway");
+
+      await bypassButton.click();
+
+      await expect(page.locator("#env-success-banner")).toBeVisible();
+      await expect(page.locator("#env-success-banner-text")).toContainText(
+        "fixture-environment"
+      );
+      // The security contract: the built button's POST carries the nonce the real
+      // server injected into the page, not an empty string.
+      expect(bypassNonce).toBeTruthy();
+      expect(bypassBody).toMatchObject({
+        repo: REPOSITORY,
+        environment: "fixture-environment",
+        operationId: "op-bypass-e2e",
+        runId: "555"
       });
     });
-    await page.route("**/api/verify-status**", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "failed",
-          terminal: false,
-          category: "permissions",
-          missingPermissions: ["Contributor"],
-          runId: "555",
-          runUrl: `https://github.com/${REPOSITORY}/actions/runs/555`
-        })
-      });
-    });
-    let bypassNonce: string | null = null;
-    let bypassBody: unknown = null;
-    await page.route("**/api/bypass-verification**", async (route) => {
-      const request = route.request();
-      bypassNonce = request.headers()["x-radius-mutation-nonce"] ?? null;
-      bypassBody = request.postDataJSON();
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ success: true, category: "permissions" })
-      });
-    });
-
-    await gotoCanvas(page, canvas, "environment");
-
-    const bypassButton = page.locator("#env-progress-verify-bypass-button");
-    await expect(bypassButton).toBeVisible();
-    await expect(bypassButton).toHaveText("Create environment anyway");
-
-    await bypassButton.click();
-
-    await expect(page.locator("#env-success-banner")).toBeVisible();
-    await expect(page.locator("#env-success-banner-text")).toContainText(
-      "fixture-environment"
-    );
-    // The security contract: the built button's POST carries the nonce the real
-    // server injected into the page, not an empty string.
-    expect(bypassNonce).toBeTruthy();
-    expect(bypassBody).toMatchObject({
-      repo: REPOSITORY,
-      environment: "fixture-environment",
-      operationId: "op-bypass-e2e",
-      runId: "555"
-    });
-  });
+  }
 
   test("does not re-announce an unchanged deploy while it keeps polling", async ({
     page,

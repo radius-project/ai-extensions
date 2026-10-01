@@ -69,4 +69,7 @@ export type {
   WorkflowRunResponse,
   WorkflowReadRequest
 } from "./workflow-reads.js";
-export { createWorkflowReadSession } from "./workflow-read-budget.js";
+export {
+  createWorkflowReadSession,
+  isWorkflowReadLimitError
+} from "./workflow-read-budget.js";

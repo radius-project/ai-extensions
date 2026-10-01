@@ -36,6 +36,10 @@ import {
   isTerminalState as isSetupTerminalState
 } from "../../operations.js";
 import {
+  extractErrorLines,
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  explainNoSubscriptions,
   isSelectedGhAuthorizationError,
   SelectedGhAuthorizationError
 } from "../../deploy.js";
@@ -44,7 +48,8 @@ import { createWorkflowObservationScope } from "../services/workflow-observation
 import { observeWorkflowRun } from "@radius-project/core";
 import {
   readWorkflowRun,
-  readWorkflowLog
+  readWorkflowLog,
+  type WorkflowCommandResult
 } from "@radius-project/adapter-shared";
 
 interface Recording {
@@ -2267,6 +2272,225 @@ describe("environments — verify-status", () => {
     steps: [],
     ...over
   });
+
+  describe.each(["ambient", "selected"] as const)("%s bounded logs", (mode) => {
+    it.each(["output-limit", "expired", "in-flight"] as const)(
+      "retains the confirmed failure when the log is %s",
+      async (limit) => {
+        vi.useFakeTimers();
+        const scope = createWorkflowObservationScope(() => {
+          throw new Error("Unexpected artifact reader");
+        });
+        const operation = {
+          repo: "o/r",
+          environment: "dev",
+          context: { githubLogin: "octocat" },
+          currentStage: "verify",
+          verification: { dispatchedAt: 1, runId: 55 }
+        };
+        let complete: (result: WorkflowCommandResult) => void = () => {};
+        const pending = new Promise<WorkflowCommandResult>((resolve) => {
+          complete = resolve;
+        });
+        const run = vi.fn(async () =>
+          limit === "in-flight" ? pending : (
+            {
+              code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+              stdout: "",
+              stderr: ""
+            }
+          )
+        );
+        const executor = successfulSelectedGhExecutor({ run });
+        const finish = vi.fn();
+        const persistOperations = vi.fn(async () => {});
+        const { recording, ctx } = context(
+          "GET",
+          "/api/verify-status?repo=o/r" +
+            (mode === "selected" ? "&operationId=op1" : "")
+        );
+        try {
+          const handling = handleVerifyStatus(
+            ctx,
+            deps({
+              readInstanceEntry: () => ({
+                state: { verifyRunId: 55 },
+                observation: scope
+              }),
+              getOperation: () => operation,
+              getSelectedGitHubExecutor: () => executor,
+              hasCompleteVerificationIdentity: () => true,
+              getRunDetail: async (_repo, _id, _executor, request) => {
+                request?.onDecision?.({
+                  state: "deferred",
+                  reason: "missing-deadline"
+                });
+                if (limit === "expired") vi.advanceTimersByTime(45000);
+                return detail({
+                  conclusion: "failure",
+                  steps: [{ name: "Azure Login (OIDC)", conclusion: "failure" }]
+                });
+              },
+              fetchRunLog: (repo, runId, selected, request) => {
+                expect(selected).toBe(
+                  mode === "selected" ? executor : undefined
+                );
+                if (!request) throw new Error("Missing observation");
+                return readWorkflowLog(
+                  mode === "selected" ? { mode, executor } : { mode, run },
+                  repo,
+                  runId,
+                  request
+                );
+              },
+              extractErrorLines,
+              extractGitHubActionsStepLog,
+              explainOidcEnterpriseClaim,
+              explainNoSubscriptions,
+              finish,
+              persistBestEffort,
+              persistOperations,
+              reportOperationDiagnostic: () => {}
+            })
+          );
+          if (limit === "in-flight") await vi.advanceTimersByTimeAsync(30000);
+          await handling;
+          const payload = JSON.parse(recording.body);
+          expect(recording.status).toBe(200);
+          expect(payload).toMatchObject({
+            state: "failed",
+            runId: 55,
+            runUrl: "https://github.com/o/r/actions/runs/55",
+            category: "generic"
+          });
+          expect(payload.error).toContain(
+            "Credential verification failed (failure)."
+          );
+          expect(payload.error).toContain("Failed step: Azure Login (OIDC).");
+          expect(payload.error).toContain(
+            "Workflow evidence deferred: missing-deadline."
+          );
+          expect(payload.error).toContain(
+            limit === "output-limit" ?
+              "The verification log could not be read: the output limit was exceeded."
+            : "The verification log could not be read: the read timed out."
+          );
+          expect(run).toHaveBeenCalledTimes(limit === "expired" ? 0 : 1);
+          if (mode === "selected") {
+            expect(finish).toHaveBeenCalledExactlyOnceWith(
+              operation,
+              "failed_partial",
+              expect.objectContaining({
+                failure: expect.objectContaining({
+                  code: "verify-run-failed",
+                  evidence: payload.error
+                })
+              })
+            );
+            expect(persistOperations).toHaveBeenCalledOnce();
+          } else {
+            expect(finish).not.toHaveBeenCalled();
+            expect(persistOperations).not.toHaveBeenCalled();
+          }
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          complete({ code: 0, stdout: "", stderr: "" });
+          scope.stop();
+          vi.useRealTimers();
+        }
+      }
+    );
+  });
+
+  it.each(["cancelled", "superseded", "authorization", "unexpected"] as const)(
+    "preserves %s handling when a failed run's log rejects",
+    async (failure) => {
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("Unexpected artifact reader");
+      });
+      const operation = {
+        repo: "o/r",
+        environment: "dev",
+        context: { githubLogin: "octocat" },
+        currentStage: "verify",
+        verification: { dispatchedAt: 1, runId: 55 }
+      };
+      const executor = successfulSelectedGhExecutor({
+        run: async () => {
+          if (failure === "cancelled") scope.stop();
+          if (failure === "superseded") operation.verification.runId = 77;
+          if (failure === "authorization")
+            throw new SelectedGhAuthorizationError("octocat", 403, "denied");
+          if (failure === "unexpected")
+            throw new Error("Unexpected log failure");
+          return {
+            code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+            stdout: "",
+            stderr: ""
+          };
+        }
+      });
+      const finish = vi.fn();
+      const persistOperations = vi.fn(async () => {});
+      const { recording, ctx } = context(
+        "GET",
+        "/api/verify-status?repo=o/r&operationId=op1"
+      );
+      try {
+        await handleVerifyStatus(
+          ctx,
+          deps({
+            readInstanceEntry: () => ({ observation: scope }),
+            getOperation: () => operation,
+            getSelectedGitHubExecutor: () => executor,
+            hasCompleteVerificationIdentity: () => true,
+            getRunDetail: async () => detail({ conclusion: "failure" }),
+            fetchRunLog: (repo, runId, _executor, request) =>
+              readWorkflowLog(
+                { mode: "selected", executor },
+                repo,
+                runId,
+                request
+              ),
+            isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+            addLegacyStep: vi.fn(),
+            finish,
+            persistBestEffort,
+            persistOperations,
+            reportOperationDiagnostic: () => {}
+          })
+        );
+        const payload = JSON.parse(recording.body);
+        if (failure === "authorization") {
+          expect(payload).toMatchObject({
+            state: "failed",
+            terminal: true,
+            code: "verification-retry-github-account-unavailable"
+          });
+          expect(finish).toHaveBeenCalledExactlyOnceWith(
+            operation,
+            "failed_partial",
+            expect.objectContaining({
+              failure: expect.objectContaining({ code: payload.code })
+            })
+          );
+          expect(persistOperations).toHaveBeenCalledOnce();
+        } else {
+          expect(payload).toEqual(
+            failure === "cancelled" ?
+              { state: "pending", error: "Workflow observation stopped." }
+            : failure === "superseded" ? { state: "pending", runId: 77 }
+            : { state: "unknown", error: "Unexpected log failure" }
+          );
+          expect(finish).not.toHaveBeenCalled();
+          expect(persistOperations).not.toHaveBeenCalled();
+        }
+        expect(recording.status).toBe(failure === "cancelled" ? 503 : 200);
+      } finally {
+        scope.stop();
+      }
+    }
+  );
 
   it.each(["pending", "failure", "stopped-log"] as const)(
     "retains scoped uncertainty for %s verification without changing its primary verdict",
