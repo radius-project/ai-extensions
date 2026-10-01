@@ -644,8 +644,8 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("--selector radapp.io/environment");
     expect(script).toContain("selectLeakedClusterWorkloads");
     expect(script).toContain('kubectl delete "${kind,,}/$name"');
-    expect(script).toContain(
-      'kubectl delete namespace "$RADIUS_ENVIRONMENT_NAMESPACE"'
+    expect(script).toMatch(
+      /kubectl delete namespace "\$RADIUS_ENVIRONMENT_NAMESPACE" \\\s+--ignore-not-found=true \\\s+--wait=true \\\s+--timeout=5m/
     );
   });
 
