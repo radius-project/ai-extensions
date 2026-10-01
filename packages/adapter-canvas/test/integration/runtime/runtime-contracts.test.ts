@@ -506,6 +506,49 @@ describe("P0-A Radius runtime registration contract", () => {
 });
 
 describe("P0-A Radius SDK routing and lifecycle", () => {
+  it("disposes the SDK session after a physical stop rejects without skipping another instance", async () => {
+    vi.useFakeTimers();
+    const harness = await createRuntimeSdkHarness();
+    const close = vi.fn();
+    harness.session.close = close;
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("No artifact read expected");
+    });
+    try {
+      await harness.host.open("failed-stop", { page: "deployed" });
+      const entry = harness.servers.get("failed-stop");
+      if (!entry) throw new Error("Missing opened instance");
+      entry.observation = scope;
+      const sibling = createFakeServerEntry("sibling", "deployed");
+      harness.servers.set("sibling", sibling);
+      const stop = harness.deps.stopServer;
+      vi.mocked(stop).mockImplementationOnce(async (id, force) => {
+        scope.stop();
+        harness.servers.delete(id);
+        if (force) entry.server.closeAllConnections?.();
+        throw new Error("controlled physical stop failure");
+      });
+
+      const stopping = harness.extension.shutdown("test");
+      expect(harness.extension.shutdown("test")).toBe(stopping);
+      await stopping;
+
+      expect(scope.stopped).toBe(true);
+      expect(harness.deps.logError).toHaveBeenCalledExactlyOnceWith(
+        "Could not stop Radius canvas failed-stop: controlled physical stop failure"
+      );
+      expect(stop).toHaveBeenCalledWith("sibling", true);
+      expect(sibling.server.close).toHaveBeenCalledTimes(1);
+      expect(harness.servers.size).toBe(0);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      scope.stop();
+      await harness.extension.shutdown("test");
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["close", "shutdown"] as const)(
     "routes %s through instance observation cancellation and fences late command results",
     async (action) => {
