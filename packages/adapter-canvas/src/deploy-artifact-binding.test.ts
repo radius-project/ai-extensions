@@ -165,7 +165,13 @@ describe("Canvas artifact execution binding", () => {
           "--method",
           "GET"
         ]);
-        expect(options).toEqual({ timeout: 20000 });
+        expect(options).toEqual({
+          timeout: expect.any(Number),
+          maxBuffer: 10 * 1024 * 1024,
+          signal: expect.any(AbortSignal)
+        });
+        expect(options.timeout).toBeGreaterThan(0);
+        expect(options.timeout).toBeLessThanOrEqual(20000);
         callback(
           null,
           "HTTP/2 200\n\n" +
@@ -190,7 +196,12 @@ describe("Canvas artifact execution binding", () => {
           "--dir"
         ]);
         expect(args.slice(7)).toEqual(["--repo", "org/app"]);
-        expect(options).toEqual({ timeout: 60000 });
+        expect(options).toEqual({
+          timeout: expect.any(Number),
+          signal: expect.any(AbortSignal)
+        });
+        expect(options.timeout).toBeGreaterThan(0);
+        expect(options.timeout).toBeLessThanOrEqual(60000);
         directory = args[6];
         writeFileSync(
           path.join(directory, DEPLOY_STATUS_FILES.progress),
