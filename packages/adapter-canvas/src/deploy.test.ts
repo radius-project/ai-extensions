@@ -24,6 +24,7 @@ describe("ambient workflow callback binding", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   const detailArgs = [
@@ -77,6 +78,7 @@ describe("ambient workflow callback binding", () => {
   });
 
   it("preserves the known run when jobs fail without rereading the run", async () => {
+    vi.useFakeTimers();
     vi.mocked(gh.cliExec)
       .mockImplementationOnce((_cmd, _args, _opts, cb) => {
         queueMicrotask(() =>
@@ -88,21 +90,28 @@ describe("ambient workflow callback binding", () => {
         );
         return new ChildProcess();
       })
-      .mockImplementationOnce((_cmd, _args, _opts, cb) => {
+      .mockImplementation((_cmd, args, _opts, cb) => {
+        expect(args).toEqual(jobsArgs);
         queueMicrotask(() =>
           cb(new Error("jobs unavailable"), "HTTP/2 503\n\n{}", "")
         );
         return new ChildProcess();
       });
 
-    await expect(getRunDetail("contoso/store", "41")).resolves.toEqual({
+    const assertion = expect(
+      getRunDetail("contoso/store", "41")
+    ).resolves.toEqual({
       status: "in_progress",
       conclusion: "",
       jobs: [],
       steps: []
     });
+    await vi.runAllTimersAsync();
+    await assertion;
     expect(vi.mocked(gh.cliExec).mock.calls.map((call) => call[1])).toEqual([
       detailArgs,
+      jobsArgs,
+      jobsArgs,
       jobsArgs
     ]);
   });

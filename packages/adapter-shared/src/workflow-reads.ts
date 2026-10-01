@@ -1,11 +1,17 @@
 import type {
   WorkflowReadEvidence,
   WorkflowResponseMetadata,
-  WorkflowRunRead
+  WorkflowRunRead,
+  WorkflowReadContext,
+  WorkflowReadDecision
 } from "@radius-project/core";
-import { readWorkflowApi } from "./workflow-read-response.js";
+import {
+  readWorkflowApi,
+  readWorkflowApiWithPolicy
+} from "./workflow-read-response.js";
 import {
   createWorkflowReadBudget,
+  createWorkflowReadSession,
   isWorkflowReadLimitError
 } from "./workflow-read-budget.js";
 
@@ -258,8 +264,20 @@ export interface WorkflowRunResponse {
   value: WorkflowRunRead | null;
   completeness: "complete" | "status-only" | "unavailable";
   reason?:
-    "read-failed" | "invalid-data" | "pagination" | "timeout" | "output-limit";
+    | "read-failed"
+    | "invalid-data"
+    | "pagination"
+    | "timeout"
+    | "output-limit"
+    | "cancelled";
   evidence: WorkflowReadEvidence[];
+  decision?: WorkflowReadDecision;
+}
+
+export interface WorkflowReadRequest {
+  context: WorkflowReadContext;
+  identity: string;
+  onDecision?(decision: WorkflowReadDecision): void;
 }
 
 function nextJobsPage(
@@ -307,7 +325,8 @@ function nextJobsPage(
 export async function readWorkflowRunWithMetadata(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<WorkflowRunResponse> {
   if (
     !/^[\w-]+\/[\w.-]+$/.test(repo) ||
@@ -319,13 +338,15 @@ export async function readWorkflowRunWithMetadata(
   }
   const evidence: WorkflowReadEvidence[] = [];
   let value: WorkflowRunRead | null = null;
+  let decision: WorkflowReadDecision | undefined;
   const incomplete = (
     reason: NonNullable<WorkflowRunResponse["reason"]>
   ): WorkflowRunResponse => ({
     value,
     completeness: value ? "status-only" : "unavailable",
     reason,
-    evidence
+    evidence,
+    ...(decision ? { decision } : {})
   });
   const run =
     execution.mode === "ambient" ? execution.run : execution.executor.run;
@@ -386,12 +407,37 @@ export async function readWorkflowRunWithMetadata(
   };
   try {
     if (execution.mode === "selected") await execution.prepare?.();
-    const bounded = createWorkflowReadBudget(run);
+    const context =
+      request?.context ?? createWorkflowReadSession().observe(15000);
+    const phaseDeadline = context.clock.monotonic() + 15000;
+    const bounded = createWorkflowReadBudget(
+      run,
+      15000,
+      10 * 1024 * 1024,
+      context
+    );
     const read = async (endpoint: string, phase: "run" | "jobs") => {
-      const response = await readWorkflowApi(bounded, endpoint, {
-        timeout: 15000
-      });
-      evidence.push({ phase, response: response.metadata });
+      const response = await readWorkflowApiWithPolicy(
+        bounded,
+        endpoint,
+        { timeout: 15000 },
+        context,
+        JSON.stringify([
+          request?.identity ?? execution.mode,
+          repo,
+          String(runId),
+          phase
+        ]),
+        phaseDeadline,
+        (result) => evidence.push({ phase, response: result.metadata })
+      );
+      decision = response.decision;
+      request?.onDecision?.(response.decision);
+      if (
+        response.metadata.source === "unavailable" &&
+        response.metadata.reason === "deferred"
+      )
+        evidence.push({ phase, response: response.metadata });
       if (execution.mode === "selected") {
         const metadata = response.metadata;
         if (
@@ -519,20 +565,29 @@ export async function readWorkflowRunWithMetadata(
 export async function readWorkflowRun(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<WorkflowRunRead | null> {
-  return (await readWorkflowRunWithMetadata(execution, repo, runId)).value;
+  return (await readWorkflowRunWithMetadata(execution, repo, runId, request))
+    .value;
 }
 
 async function readWorkflowLogValue(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<string | null> {
+  const raw =
+    execution.mode === "selected" ? execution.executor.run : execution.run;
+  const run =
+    request ?
+      createWorkflowReadBudget(raw, 30000, 20 * 1024 * 1024, request.context)
+    : raw;
   if (execution.mode === "selected") {
     const executor = execution.executor;
     try {
-      const result = await executor.run(
+      const result = await run(
         ["run", "view", String(runId), "--log", "--repo", repo],
         {
           timeout: 30000,
@@ -576,7 +631,7 @@ async function readWorkflowLogValue(
       throw error;
     }
   }
-  const result = await execution.run(
+  const result = await run(
     ["run", "view", String(runId), "--log", "--repo", repo],
     { timeout: 30000, maxBuffer: 1024 * 1024 * 20 }
   );
@@ -586,10 +641,11 @@ async function readWorkflowLogValue(
 export async function readWorkflowLogWithMetadata(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<{ value: string | null; metadata: WorkflowResponseMetadata }> {
   return {
-    value: await readWorkflowLogValue(execution, repo, runId),
+    value: await readWorkflowLogValue(execution, repo, runId, request),
     metadata: { source: "unavailable", reason: "opaque-command" }
   };
 }
@@ -597,7 +653,9 @@ export async function readWorkflowLogWithMetadata(
 export async function readWorkflowLog(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<string | null> {
-  return (await readWorkflowLogWithMetadata(execution, repo, runId)).value;
+  return (await readWorkflowLogWithMetadata(execution, repo, runId, request))
+    .value;
 }

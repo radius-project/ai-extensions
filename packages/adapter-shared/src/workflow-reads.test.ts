@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createWorkflowReadSession } from "./workflow-read-budget.js";
 import { observeWorkflowRun } from "@radius-project/core";
 import type {
   WorkflowCommandResult,
@@ -6,6 +7,7 @@ import type {
 } from "./index.js";
 import {
   readWorkflowRun,
+  readWorkflowRunWithMetadata,
   readWorkflowLog,
   readWorkflowLogWithMetadata,
   selectedWorkflowJson,
@@ -51,6 +53,70 @@ function fetchRunLog(
   return readWorkflowLog({ mode: "selected", executor }, repo, runId);
 }
 describe("selected-account workflow reads", () => {
+  it("bounds a requested diagnostic log read without retrying log content", async () => {
+    vi.useFakeTimers();
+    try {
+      const log = "HTTP 429\nRetry-After: 1";
+      const run = vi.fn(async () => ({
+        code: 0,
+        stdout: log,
+        stderr: ""
+      }));
+      const executor = successfulSelectedGhExecutor({ run });
+      const request = {
+        context: createWorkflowReadSession().observe(1000),
+        identity: "alice"
+      };
+
+      await expect(
+        readWorkflowLog({ mode: "selected", executor }, "org/app", 41, request)
+      ).resolves.toBe(log);
+      expect(run).toHaveBeenCalledExactlyOnceWith(
+        ["run", "view", "41", "--log", "--repo", "org/app"],
+        {
+          timeout: 1000,
+          maxBuffer: 20 * 1024 * 1024,
+          signal: expect.any(AbortSignal)
+        }
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("retains deferred run evidence across polls without another GET", async () => {
+    const session = createWorkflowReadSession();
+    const run = vi.fn(async () => ({
+      code: 1,
+      stdout: 'HTTP/2 429\nRetry-After: 60\n\n{"message":"rate limit"}',
+      stderr: ""
+    }));
+    const onDecision = vi.fn();
+    await readWorkflowRunWithMetadata({ mode: "ambient", run }, "org/app", 41, {
+      context: session.observe(15000),
+      identity: "ambient",
+      onDecision
+    });
+    const result = await readWorkflowRunWithMetadata(
+      { mode: "ambient", run },
+      "org/app",
+      41,
+      {
+        context: session.observe(15000),
+        identity: "ambient",
+        onDecision
+      }
+    );
+    expect(result.value).toBeNull();
+    expect(result.evidence).toContainEqual({
+      phase: "run",
+      response: { source: "unavailable", reason: "deferred" }
+    });
+    expect(onDecision).toHaveBeenLastCalledWith(
+      expect.objectContaining({ state: "deferred", reason: "not-before" })
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+  });
   it.each([
     ["gh: Forbidden (HTTP 403)", 403],
     [
