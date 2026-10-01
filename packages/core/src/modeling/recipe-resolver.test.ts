@@ -181,7 +181,7 @@ describe("resolveRecipeOutputs", () => {
     expect(resolved[0].outputResources[0].type).toBe("core/Service");
   });
 
-  it("normalizes legacy Applications.* types before matching", async () => {
+  it("annotates a Kubernetes Deployment output with the AKS cluster service name", async () => {
     const gh = fakeGitHub();
     const recipes = [
       {
@@ -199,9 +199,7 @@ describe("resolveRecipeOutputs", () => {
         ]
       }
     ];
-    const appResources = [
-      { name: "api", type: "Applications.Core/containers" }
-    ];
+    const appResources = [{ name: "api", type: "Radius.Compute/containers" }];
     const resolved = await resolveRecipeOutputs(
       gh,
       appResources,
@@ -212,7 +210,7 @@ describe("resolveRecipeOutputs", () => {
     expect(resolved[0].outputResources[0].displayType).toBe("Deployment (AKS)");
   });
 
-  it("normalizes Applications.Datastores/sqlDatabases to Radius.Data/sqlServerDatabases", async () => {
+  it("resolves Radius.Data/sqlServerDatabases to its Azure concrete resource", async () => {
     const gh = fakeGitHub();
     const recipes = [
       {
@@ -231,7 +229,7 @@ describe("resolveRecipeOutputs", () => {
       }
     ];
     const appResources = [
-      { name: "db", type: "Applications.Datastores/sqlDatabases" }
+      { name: "db", type: "Radius.Data/sqlServerDatabases" }
     ];
     const resolved = await resolveRecipeOutputs(
       gh,
@@ -243,7 +241,7 @@ describe("resolveRecipeOutputs", () => {
     expect(resolved[0].outputResources[0].type).toBe("Microsoft.Sql/servers");
   });
 
-  it("normalizes Applications.Messaging/rabbitMQQueues to Radius.Messaging/rabbitMQ", async () => {
+  it("resolves Radius.Messaging/rabbitMQ to its Azure concrete resource", async () => {
     const gh = fakeGitHub();
     const recipes = [
       {
@@ -261,9 +259,7 @@ describe("resolveRecipeOutputs", () => {
         ]
       }
     ];
-    const appResources = [
-      { name: "queue", type: "Applications.Messaging/rabbitMQQueues" }
-    ];
+    const appResources = [{ name: "queue", type: "Radius.Messaging/rabbitMQ" }];
     const resolved = await resolveRecipeOutputs(
       gh,
       appResources,
@@ -285,14 +281,45 @@ describe("resolveRecipeOutputs", () => {
     expect(resolved[0].outputResources).toEqual([]);
   });
 
-  it("falls back to the raw type when a pack keys a legacy Applications.* type", async () => {
-    // The pack still lists the pre-rename type, so normalization finds nothing
-    // and the raw lookup has to resolve it.
+  it("annotates a Kubernetes Deployment output with the EKS cluster service name", async () => {
     const gh = fakeGitHub();
     const recipes = [
       {
         name: "containers",
-        resourceType: "Applications.Core/containers",
+        resourceType: "Radius.Compute/containers",
+        templateKind: "bicep",
+        templatePath: "ghcr.io/radius-project/kube-recipes/containers:latest",
+        concreteResources: [
+          {
+            name: "deployment",
+            type: "apps/Deployment",
+            provider: "kubernetes",
+            displayType: "Deployment"
+          }
+        ]
+      }
+    ];
+
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      [{ name: "api", type: "Radius.Compute/containers" }],
+      recipes,
+      "aws"
+    );
+
+    expect(resolved[0].recipe?.name).toBe("containers");
+    expect(resolved[0].outputResources[0].displayType).toBe("Deployment (EKS)");
+  });
+
+  it("produces no outputs for a retired Applications.* resource type", async () => {
+    // Only Radius.* types are supported. A pre-rename type is not translated to
+    // its Radius equivalent, so it resolves to nothing rather than silently
+    // borrowing the Radius recipe.
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "containers",
+        resourceType: "Radius.Compute/containers",
         templateKind: "bicep",
         templatePath: "ghcr.io/radius-project/kube-recipes/containers:latest",
         concreteResources: [
@@ -313,8 +340,40 @@ describe("resolveRecipeOutputs", () => {
       "aws"
     );
 
-    expect(resolved[0].recipe?.name).toBe("containers");
-    expect(resolved[0].outputResources[0].displayType).toBe("Deployment (EKS)");
+    expect(resolved[0].recipe).toBeNull();
+    expect(resolved[0].outputResources).toEqual([]);
+  });
+
+  it("refuses a retired Applications.* type even when a pack still keys it", async () => {
+    const gh = fakeGitHub();
+    const recipes = [
+      {
+        name: "containers",
+        resourceType: "Applications.Core/containers",
+        templateKind: "bicep",
+        templatePath: "ghcr.io/radius-project/kube-recipes/containers:latest",
+        concreteResources: [
+          {
+            name: "deployment",
+            type: "apps/Deployment",
+            provider: "kubernetes",
+            displayType: "Deployment"
+          }
+        ]
+      }
+    ];
+
+    const resolved = await resolveRecipeOutputs(
+      gh,
+      [
+        { name: "api", type: "Applications.Core/containers@2023-10-01-preview" }
+      ],
+      recipes,
+      "aws"
+    );
+
+    expect(resolved[0].recipe).toBeNull();
+    expect(resolved[0].outputResources).toEqual([]);
   });
 
   it("leaves a Deployment display type alone when it already names a cluster service", async () => {

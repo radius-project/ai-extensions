@@ -1,7 +1,10 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
 import { clearGraphProgress, createGraphProgress } from "../graph/progress.js";
-import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
+import {
+  githubRepositoryUrl,
+  parseGraphResources
+} from "@radius-project/graph-react/presentation";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import {
   isRecord,
@@ -18,8 +21,10 @@ import {
   populateBranches
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
-import type { GraphOptions } from "../graph/build.js";
-import type { GraphResource } from "../graph/model.js";
+import type {
+  GraphOptions,
+  GraphResource
+} from "@radius-project/graph-react/presentation";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";

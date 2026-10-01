@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Headlamp Compatibility
+
+# Loads the published library candidates into the actual Headlamp web host and
+# drives them with Headlamp's own plugin loader in real Chromium.
+#
+# This is a real-host qualification layer, so it is scheduled and on demand and
+# never gates a pull request. Every pull-request gate stays offline and free of
+# external registries and images, and this run needs both: it pulls the pinned
+# official Headlamp image and builds the plugin with the published Headlamp
+# plugin tooling. See docs/design/2026-08-radius-canvas-test-plan.md.
+#
+# The offline contracts that protect the same behavior on every pull request are
+# the packaging and boundary checks in
+# packages/adapter-canvas/test/ci/library-artifacts.test.mjs, the harness
+# contracts in packages/adapter-canvas/test/ci/headlamp-contracts.test.mjs, the
+# scoped vendor stylesheet drift check, and the host-peer styling regression in
+# packages/graph-react/src/styling.browser.test.ts.
+
+on:
+  # GitHub can disable scheduled workflows after 60 days without repository
+  # activity. A manual dispatch or repository update re-enables the schedule.
+  schedule:
+    # Three real-host qualification runs per day, offset from the visual and
+    # reliability sweeps so the Docker-based workflows do not contend.
+    - cron: "37 */8 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  headlamp:
+    name: Real Headlamp web compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Provision pinned repository and Chromium dependencies
+        run: |
+          docker build \
+            --tag radius-canvas-visual:playwright-1.62.1-node-24.19.0 \
+            --file packages/adapter-canvas/test/visual/Dockerfile .
+
+      - name: Provision official Headlamp and pinned published plugin tooling
+        run: |
+          docker build \
+            --tag radius-headlamp-qualification:0.45.0 \
+            --file scripts/fixtures/headlamp/Dockerfile scripts/fixtures/headlamp
+
+      - name: Qualify candidate packages in the actual offline Headlamp host
+        run: node scripts/test-headlamp.mjs --output .artifacts/headlamp-ci
+
+      - name: Upload Headlamp version receipts, negative controls and browser traces
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: headlamp-compatibility
+          path: .artifacts/headlamp-ci
+          if-no-files-found: error
+          retention-days: 14
+
+  notify-scheduled-result:
+    name: Scheduled compatibility alert
+    if: ${{ always() && github.event_name == 'schedule' }}
+    needs:
+      - headlamp
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Report or clear scheduled failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: headlamp=${{ needs.headlamp.result }}
+          SCHEDULE_FAILED: ${{ needs.headlamp.result != 'success' }}
+        shell: bash
+        run: |
+          title="Headlamp Compatibility scheduled failure"
+          issue_number="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "\"$title\" in:title" \
+            --json number \
+            --jq '.[0].number // empty')"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          if [[ "$SCHEDULE_FAILED" == "true" ]]; then
+            body="The recurring real Headlamp compatibility workflow failed: $RESULT. Run: $run_url"
+            if [[ -n "$issue_number" ]]; then
+              gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            fi
+          elif [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "The scheduled Headlamp compatibility workflow recovered. Run: $run_url"
+          fi

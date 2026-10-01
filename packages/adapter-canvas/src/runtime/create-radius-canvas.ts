@@ -34,6 +34,12 @@ import {
 
 const MAX_DEFERRED_ENVIRONMENT_CLOSE_MS = 46 * 60 * 1000;
 
+// The Radius application resource owns the model, not a service's source, so it
+// never counts as missing a code reference. Matched as a whole type segment with
+// an optional API version so only `<namespace>/applications` is excluded and a
+// workload type is never swept up by a loose substring.
+const APPLICATION_RESOURCE_TYPE = /\/applications(@|$)/i;
+
 interface CanvasContext {
   extensionId: string;
   canvasId: string;
@@ -99,7 +105,7 @@ export function createRadiusCanvas(
             result.resources.filter(
               (r) =>
                 !r.codeReference &&
-                !r.type?.toLowerCase().includes("applications")
+                !APPLICATION_RESOURCE_TYPE.test(r.type || "")
             )
           : result.resources;
         return {

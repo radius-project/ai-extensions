@@ -6,8 +6,9 @@
 .radius-credentials.json
 **/.radius-credentials.json
 .pnpm-store
+.artifacts
 coverage
-node_modules
+**/node_modules
 packages/*/coverage
 packages/*/node_modules
 packages/*/playwright-report

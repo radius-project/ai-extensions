@@ -30,7 +30,7 @@ export type FetchImplementation = (
   init?: {
     method?: string;
     headers?: Record<string, string>;
-    body?: Buffer;
+    body?: Buffer<ArrayBuffer>;
     redirect?: "error" | "follow";
     signal?: AbortSignal;
   }
@@ -68,7 +68,7 @@ interface BlobOptions {
   registryOrigin: string;
   repositoryPath: string;
   bearerToken: string;
-  bytes: Buffer;
+  bytes: Buffer<ArrayBuffer>;
   digest: string;
 }
 
@@ -212,7 +212,7 @@ interface RequestContext {
 interface RequestOptions {
   method?: string;
   headers?: Record<string, string>;
-  body?: Buffer;
+  body?: Buffer<ArrayBuffer>;
   redirect?: "error" | "follow";
 }
 
@@ -514,7 +514,7 @@ async function registryFetch(
   options: {
     method?: string;
     headers?: Record<string, string>;
-    body?: Buffer;
+    body?: Buffer<ArrayBuffer>;
   } = {}
 ): Promise<HttpResponse> {
   return request(requests, `${registryOrigin}${path}`, {

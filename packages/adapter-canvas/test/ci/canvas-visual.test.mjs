@@ -174,7 +174,7 @@ describe("canonical Canvas visual runner", () => {
     expect(dockerfile).not.toMatch(/playwright:v[^ \n]+-(?:amd64|arm64)@/);
   });
 
-  it("excludes ignored local credentials from the Docker build context", () => {
+  it("excludes local credentials, build outputs and nested dependencies from Docker", () => {
     const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
     const dockerignore = readFileSync(`${repoRoot}/.dockerignore`, "utf8");
     const ignoredPaths = new Set(dockerignore.split(/\r?\n/));
@@ -186,6 +186,8 @@ describe("canonical Canvas visual runner", () => {
       "**/.env.*",
       ".radius-credentials.json",
       "**/.radius-credentials.json",
+      ".artifacts",
+      "**/node_modules",
       "packages/adapter-canvas/test/e2e/.tmp"
     ]) {
       expect(ignoredPaths.has(ignoredPath), ignoredPath).toBe(true);

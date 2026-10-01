@@ -27,6 +27,16 @@ export default defineConfig({
       "test/integration/runtime/bicep-security-rules.test.ts"
     ],
     environment: "node",
-    testTimeout: 15_000
+    testTimeout: 15_000,
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "canvas-reliability"
+        }
+      },
+      "../graph-react/vitest.config.ts",
+      "../graph-react/vitest.component.config.ts"
+    ]
   }
 });

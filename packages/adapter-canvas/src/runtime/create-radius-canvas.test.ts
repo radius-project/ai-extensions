@@ -104,7 +104,7 @@ describe("RU-05: get_graph_resources", () => {
     });
   });
 
-  it("defaults to missingOnly=true, excluding resources with a codeReference or an applications-family type", async () => {
+  it("defaults to missingOnly=true, excluding resources with a codeReference or the application resource type", async () => {
     const { canvas, deps } = setup();
     await seedGraph(deps, [
       { id: "1", name: "db", type: "Radius.Data/redis" },
@@ -117,13 +117,24 @@ describe("RU-05: get_graph_resources", () => {
       {
         id: "3",
         name: "app",
-        type: "Applications.Core/containers"
+        type: "Radius.Core/applications@2025-08-01-preview"
       }
     ]);
     const result = await findAction(canvas, "get_graph_resources").handler(
       ctx("radius-panel")
     );
     expect(result.ready).toBe(true);
+    expect(result.resources.map((r: { id: string }) => r.id)).toEqual(["1"]);
+  });
+
+  it("keeps a container whose type merely contains the application namespace", async () => {
+    const { canvas, deps } = setup();
+    await seedGraph(deps, [
+      { id: "1", name: "api", type: "Radius.Compute/containers" }
+    ]);
+    const result = await findAction(canvas, "get_graph_resources").handler(
+      ctx("radius-panel")
+    );
     expect(result.resources.map((r: { id: string }) => r.id)).toEqual(["1"]);
   });
 

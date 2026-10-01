@@ -7,9 +7,11 @@ import { publishBrowserGlobals } from "../globals.js";
 import { isRecord } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { resolvePageRegistry, runBrowserEntry } from "../registry.js";
-import type { GraphOptions } from "../graph/build.js";
-import type { GraphResource } from "../graph/model.js";
-import type { GraphVendor } from "../graph/vendor.js";
+import type {
+  GraphOptions,
+  GraphResource
+} from "@radius-project/graph-react/presentation";
+import type { GraphMount } from "../graph/surface.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { BrowserContext } from "../ports.js";
 
@@ -57,7 +59,7 @@ function asOptions(value: unknown): GraphOptions {
 
 export function installGraphEntry(
   scope: unknown,
-  vendor: GraphVendor | null
+  vendor: GraphMount | null
 ): BrowserTeardown {
   return runBrowserEntry(
     scope,
@@ -69,7 +71,7 @@ export function installGraphEntry(
 function initializeGraphEntry(
   context: BrowserContext,
   scope: unknown,
-  vendor: GraphVendor | null
+  vendor: GraphMount | null
 ): BrowserTeardown {
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;

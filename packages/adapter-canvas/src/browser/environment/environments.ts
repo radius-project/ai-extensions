@@ -1,4 +1,4 @@
-import { escapeBrowserHtml } from "../html.js";
+import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
 import { requireSuccessfulJsonResponse } from "../http.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readRecord, readString } from "../json.js";

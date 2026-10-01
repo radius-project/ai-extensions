@@ -509,14 +509,13 @@ export async function workspaceFileExists(
 const WORKSPACE_BICEP_PATHS = [".radius/app.bicep", "app.bicep"];
 
 // A root app.bicep is a common Azure convention, so its filename alone cannot
-// activate Radius. Accept the current extension declaration or either supported
-// Radius application resource type used by legacy models.
+// activate Radius. Accept the current extension declaration or the Radius
+// application resource type. Retired `Applications.Core` types are not Radius
+// models and never activate the canvas.
 function isLegacyRadiusAppModel(content: string): boolean {
   return (
     /^\s*extension\s+radius\b/im.test(content) ||
-    /^\s*resource\s+\w+\s+['"](?:Radius|Applications)\.Core\/applications@/im.test(
-      content
-    )
+    /^\s*resource\s+\w+\s+['"]Radius\.Core\/applications@/im.test(content)
   );
 }
 

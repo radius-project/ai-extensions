@@ -882,7 +882,7 @@ describe("delete flow", () => {
             application: "app",
             environment: "dev",
             resources: [
-              { name: "web", type: "Applications.Core/containers" },
+              { name: "web", type: "Radius.Compute/containers" },
               { name: "cache", type: "Radius.Data/redis" }
             ]
           }
@@ -893,7 +893,7 @@ describe("delete flow", () => {
       await flushPromises();
 
       expect(renderedResources(page.deleteBody)).toEqual([
-        "webApplications.Core/containers",
+        "webRadius.Compute/containers",
         "cacheRadius.Data/redis"
       ]);
     });
@@ -922,7 +922,7 @@ describe("delete flow", () => {
           deletionInventory: {
             application: "other",
             environment: "dev",
-            resources: [{ name: "web", type: "Applications.Core/containers" }]
+            resources: [{ name: "web", type: "Radius.Compute/containers" }]
           }
         })
       );
@@ -951,7 +951,7 @@ describe("delete flow", () => {
           deletionInventory: {
             application: "app",
             environment: "dev",
-            resources: [{ name: "web", type: "Applications.Core/containers" }]
+            resources: [{ name: "web", type: "Radius.Compute/containers" }]
           }
         })
       );
@@ -968,7 +968,7 @@ describe("delete flow", () => {
       await flushPromises();
 
       expect(renderedResources(page.deleteBody)).toEqual([
-        "webApplications.Core/containers"
+        "webRadius.Compute/containers"
       ]);
     });
 

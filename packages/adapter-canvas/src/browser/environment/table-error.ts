@@ -1,4 +1,4 @@
-import { escapeBrowserHtml } from "../html.js";
+import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
 import { ServerResponseError } from "../http.js";
 
 export function tableErrorRowMarkup(

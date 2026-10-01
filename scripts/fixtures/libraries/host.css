@@ -1,0 +1,104 @@
+.host-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 840px);
+  gap: 24px;
+}
+
+.host-frame {
+  height: 360px;
+}
+
+.packed-custom {
+  --host-surface: rgb(233, 244, 255);
+  --host-ink: rgb(20, 42, 66);
+  color: var(--host-ink);
+  background: rgb(220, 230, 240);
+  font-family: monospace;
+  font-size: 18px;
+  line-height: 24px;
+}
+
+.packed-custom [data-radius-part="node"] {
+  color: var(--host-ink);
+  background: var(--host-surface);
+  border: 3px dashed rgb(30, 90, 150);
+  border-radius: 3px;
+  padding: 12px;
+  font-family: inherit;
+}
+
+.packed-custom [data-radius-part="node-title"] {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.packed-custom [data-radius-part="node-type"] {
+  font-size: 18px;
+  line-height: 24px;
+  white-space: normal;
+}
+
+.packed-custom [data-radius-part="source"],
+.packed-custom [data-radius-part="details-link"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgb(124, 45, 18);
+  font-family: inherit;
+  font-size: 17px;
+}
+
+.packed-custom [data-radius-part="details"] {
+  color: var(--host-ink);
+  background: var(--host-surface);
+  border: 4px dotted rgb(30, 90, 150);
+  border-radius: 2px;
+  padding: 10px;
+  font-family: monospace;
+  font-size: 17px;
+}
+
+.packed-custom [data-radius-part="details-row"] {
+  padding: 4px;
+}
+
+.packed-custom [data-radius-part="legend"] {
+  display: flex;
+  gap: 8px;
+  color: rgb(76, 29, 149);
+  background: rgb(237, 233, 254);
+  font-family: monospace;
+  font-size: 19px;
+}
+
+.packed-custom [data-radius-part="details-toggle"] {
+  font-family: inherit;
+  color: rgb(20, 42, 66);
+  background: rgb(255, 255, 255);
+  border: 1px solid rgb(30, 90, 150);
+}
+
+.packed-custom .react-flow__controls {
+  border-radius: 1px;
+  box-shadow: none;
+}
+
+.packed-custom .react-flow__controls-button {
+  color: rgb(250, 245, 255);
+  background: rgb(91, 33, 182);
+  border-color: rgb(76, 29, 149);
+}
+
+.packed-custom .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.packed-custom .radius-graph__edge .react-flow__edge-path {
+  stroke: rgb(13, 148, 136);
+  stroke-width: 4px;
+  stroke-dasharray: 7px 3px;
+}
+
+.packed-custom .react-flow {
+  --xy-background-pattern-color: rgb(30, 90, 150);
+}
