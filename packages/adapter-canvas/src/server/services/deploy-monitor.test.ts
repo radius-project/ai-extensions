@@ -19,6 +19,7 @@ import {
 import { createPlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import type { DeployOutcomeRequest } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import { createDeferred } from "../../../test/support/browser/fakes.js";
 import {
   DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE as explanation,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
@@ -141,6 +142,79 @@ function settleRecorder() {
 afterEach(() => vi.useRealTimers());
 
 describe("bounded monitor observation lifetime", () => {
+  it.each([
+    { fence: "superseded", conclusion: "future_conclusion" },
+    { fence: "superseded", conclusion: "success" },
+    { fence: "stopped", conclusion: "future_conclusion" },
+    { fence: "stopped", conclusion: "success" }
+  ])(
+    "rejects late completed+$conclusion detail when $fence before publishing",
+    async ({ fence, conclusion }) => {
+      const scope =
+        fence === "stopped" ?
+          createWorkflowObservationScope(() => {
+            throw new Error("No artifact read");
+          })
+        : undefined;
+      const detail = createDeferred<DeployRunDetail>();
+      const started = createDeferred<void>();
+      let current = true;
+      const state: CanvasState = { deployStatus: "deploying" };
+      const resources: CanvasGraphResource[] = [
+        {
+          name: "api",
+          deployStatus: "pending",
+          outputResources: [{ name: "container", deployStatus: "pending" }]
+        }
+      ];
+      const f = request({
+        entry: { state, observation: scope },
+        resources,
+        isCurrent: () => current
+      });
+      const progress = vi.fn(async () => null);
+      const settle = vi.fn(async () => {});
+      const settleResources = vi.fn(settleDeployStatuses);
+      const pending = createDeployMonitorService(
+        dependencies({
+          getRunDetail: () => {
+            started.resolve();
+            return detail.promise;
+          },
+          createStatusReader: async () => ({ ...reader(), progress }),
+          outcome: { settle },
+          settleDeployStatuses: settleResources
+        })
+      )
+        .run(f.request)
+        .catch((error: unknown) => error);
+
+      await started.promise;
+      const stateBefore = structuredClone(state);
+      const resourcesBefore = structuredClone(resources);
+      const logsBefore = [...f.logs];
+      if (scope) scope.stop();
+      else current = false;
+      detail.resolve({
+        status: "completed",
+        conclusion,
+        steps: [{ name: "Run rad commands", status: "in_progress" }]
+      });
+
+      try {
+        expect(await pending).toMatchObject({ reason: "cancelled" });
+        expect(state).toEqual(stateBefore);
+        expect(resources).toEqual(resourcesBefore);
+        expect(f.logs).toEqual(logsBefore);
+        expect(progress).not.toHaveBeenCalled();
+        expect(settle).not.toHaveBeenCalled();
+        expect(settleResources).not.toHaveBeenCalled();
+      } finally {
+        scope?.stop();
+      }
+    }
+  );
+
   it("retains elapsed run/progress work and retry credits when promoting to terminal evidence", async () => {
     let time = 0;
     const scope = createWorkflowObservationScope(
