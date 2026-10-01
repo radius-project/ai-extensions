@@ -2992,7 +2992,7 @@ describe("deployed graph delete dialog resources", () => {
 
   it("uses reported inventory rather than modeled graph nodes", async () => {
     const resources = [
-      { id: "app/web", name: "web", type: "Applications.Core/containers" },
+      { id: "app/web", name: "web", type: "Radius.Compute/containers" },
       { id: "app/cache", name: "cache", type: "Radius.Data/redis" }
     ];
     const { opens } = await openDelete(() =>

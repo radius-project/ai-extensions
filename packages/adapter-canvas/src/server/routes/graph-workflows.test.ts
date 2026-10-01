@@ -1163,7 +1163,7 @@ describe("graph planning workflows", () => {
     });
 
     it("repairs a rad-level model failure without a BCP code", async () => {
-      const diagnostic = 'resource type "Applications.Db/redis" not recognized';
+      const diagnostic = 'resource type "Radius.Db/redis" not recognized';
       const harness = start({
         selections: { main: selectionOf() },
         staged: { main: { dir: "/tmp/staged", remote: false } },

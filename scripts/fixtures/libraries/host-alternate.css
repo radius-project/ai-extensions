@@ -1,0 +1,38 @@
+.packed-custom {
+  --host-surface: rgb(255, 247, 214);
+  --host-ink: rgb(78, 42, 12);
+  background: rgb(250, 237, 211);
+}
+
+.packed-custom [data-radius-part="node"] {
+  border-radius: 11px;
+  border-color: rgb(150, 85, 30);
+}
+
+.packed-custom [data-radius-part="node-type"] {
+  font-size: 20px;
+}
+
+.packed-custom [data-radius-part="details"] {
+  border-radius: 9px;
+}
+
+.packed-custom [data-radius-part="source"],
+.packed-custom [data-radius-part="details-link"] {
+  color: rgb(21, 94, 117);
+}
+
+.packed-custom [data-radius-part="legend"] {
+  color: rgb(78, 42, 12);
+  background: rgb(255, 237, 213);
+}
+
+.packed-custom .react-flow__controls-button {
+  color: rgb(255, 247, 214);
+  background: rgb(120, 53, 15);
+}
+
+.packed-custom .radius-graph__edge .react-flow__edge-path {
+  stroke: rgb(180, 83, 9);
+  stroke-width: 5px;
+}

@@ -98,13 +98,10 @@ describe("graph modeling failure classification", () => {
   });
 
   it.each([
-    [
-      "unknown resource type",
-      'resource type "Applications.Db/redis" not recognized'
-    ],
+    ["unknown resource type", 'resource type "Radius.Db/redis" not recognized'],
     [
       "unsupported API version",
-      "API version '2020-01-01' for type 'Applications.Core/containers' is not supported."
+      "API version '2020-01-01' for type 'Radius.Compute/containers' is not supported."
     ],
     ["unknown property", 'property "port" is not allowed by this schema'],
     ["invalid reference", 'referenced resource "redis" does not exist'],

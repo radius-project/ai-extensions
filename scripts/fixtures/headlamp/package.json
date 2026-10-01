@@ -1,0 +1,20 @@
+{
+  "name": "radius-headlamp-consumer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "headlamp-plugin build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@types/react": "18.3.28",
+    "@types/react-dom": "18.3.7",
+    "@xyflow/react": "12.11.6",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@kinvolk/headlamp-plugin": "0.14.0"
+  }
+}

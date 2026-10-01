@@ -73,7 +73,7 @@ Live uploads carry `deploy-progress.json` with state `in_progress`. The fixed-na
       "name": "frontend",
       "type": "Radius.Compute/containers",
       "outputResourceIds": [
-        "/planes/radius/local/resourcegroups/dev/providers/Applications.Core/containers/frontend/providers/apps/Deployment/frontend"
+        "/planes/radius/local/resourcegroups/dev/providers/Radius.Compute/containers/frontend/providers/apps/Deployment/frontend"
       ],
       "provisioningState": "Succeeded",
       "status": "success",

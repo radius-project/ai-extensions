@@ -109,6 +109,8 @@ Create a separate Changeset for each independently releasable plugin, even when 
 
 Do not combine independently releasable plugins in one Changeset. A scoped release temporarily ignores unselected plugins, and Changesets rejects a Changeset that contains both ignored and non-ignored packages. Separate files allow each plugin's pending note to remain queued until that plugin is released.
 
+The npm libraries form one more release unit. `scripts/libraries.mjs` discovers them as workspace packages whose `publishConfig.access` is `public`, and `scripts/release-version.mjs --libraries` versions them together while ignoring every plugin; a plugin release ignores every library. Never put a library and a plugin in the same Changeset. When a library change also changes a plugin's shipped behavior, write one Changeset for the libraries and a separate Changeset for each affected plugin. A library that is still `private` is not published, so name only the plugins that ship its behavior until publishing begins.
+
 Use multi-package frontmatter only when the current Changesets configuration and release tooling explicitly require those packages to version together and a scoped release cannot split them. Do not assume that shared implementation implies shared versioning.
 
 ### 7. Draft or create the Changeset

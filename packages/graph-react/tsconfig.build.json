@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "types": ["react", "react-dom"],
+    "paths": {
+      "@radius-project/core/graph": ["../core/dist/graph/index.d.ts"],
+      "@radius-project/core/domain": ["../core/dist/domain/index.d.ts"]
+    },
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "noEmit": false
+  },
+  "files": [
+    "src/index.ts",
+    "src/brand.ts"
+  ],
+  "include": []
+}

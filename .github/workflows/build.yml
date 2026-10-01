@@ -182,7 +182,7 @@ jobs:
           retention-days: 14
 
   node-tests:
-    name: Node tests and coverage
+    name: Tests, browser coverage and library candidates
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -205,7 +205,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run Node tests with coverage
+      - name: Install Chromium for canonical graph coverage and packed candidates
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run Node and canonical graph browser tests with coverage
         id: coverage
         run: pnpm run coverage
 
@@ -227,9 +230,13 @@ jobs:
       - name: Check progress demo bundle
         run: pnpm --filter @radius-project/adapter-canvas run demo:check
 
+      - name: Verify offline npm library candidates with React 18 and 19
+        run: pnpm run test:integration:libraries
+
   build-gate:
     name: Shared release gate
-    needs: [static-checks, windows-process-integration, canvas-chromium, node-tests]
+    needs:
+      [static-checks, windows-process-integration, canvas-chromium, node-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: read

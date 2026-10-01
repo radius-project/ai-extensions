@@ -203,7 +203,7 @@ describe("assertBaselineConformance", () => {
               definitionFile,
               radArtifactsDir: options.radArtifactsDir
             });
-            return Promise.resolve([{ type: "Applications.Core/containers" }]);
+            return Promise.resolve([{ type: "Radius.Compute/containers" }]);
           }
         })
       ).resolves.toEqual({

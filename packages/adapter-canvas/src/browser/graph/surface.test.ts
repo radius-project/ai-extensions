@@ -1,12 +1,4 @@
-// BU-04, BU-05, BU-06, BU-11: the graph renderer surface.
-//
-// This is the API the graph pages call, so these cover the whole lifecycle: a
-// missing vendor bundle, a render failure, the empty graph, the populated
-// render and its legend, updating in place while a deployment runs, replacing a
-// render on the same container, destroying it, and the loading and error
-// states.
-
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   asGraphController,
   createGraphSurface,
@@ -15,36 +7,25 @@ import {
   GRAPH_RENDER_ERROR,
   OPEN_SOURCE_PATH
 } from "./surface.js";
-import { PANEL_ID } from "./details.js";
 import {
   createFakeBrowser,
   createFakeElement,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
-import {
-  childComponent,
-  createGraphVendor,
-  createRecordingGraphVendor,
-  findByClass
-} from "../../../test/support/browser/graph-vendor.js";
-import type { FakeElement } from "../../../test/support/browser/fakes.js";
-import type { RecordingGraphVendorHarness } from "../../../test/support/browser/graph-vendor.js";
-import type { GraphResource } from "./model.js";
-import type { DomElement } from "../ports.js";
+import { createRecordingMount } from "../../../test/support/browser/graph-mount.js";
 
-const RESOURCES: GraphResource[] = [
-  {
-    id: "app/web",
-    name: "web",
-    type: "Radius.Compute/containers",
-    connections: [{ id: "app/db" }]
-  },
-  { id: "app/db", name: "db", type: "Radius.Data/mySqlDatabases" }
-];
+function setup() {
+  const browser = createFakeBrowser();
+  const container = createFakeElement("graph-container");
+  browser.document.add(container);
+  const renderer = createRecordingMount();
+  const surface = createGraphSurface(browser.context, () => renderer.mount);
+  return { browser, container, renderer, surface };
+}
 
-describe("graph controller guard", () => {
-  it("wraps only complete controller values", () => {
+describe("Canvas graph mounting boundary", () => {
+  it("recognizes only complete controllers", () => {
     expect(asGraphController(null)).toBeNull();
     expect(asGraphController({ update() {} })).toBeNull();
     expect(asGraphController({ destroy() {} })).toBeNull();
@@ -55,104 +36,129 @@ describe("graph controller guard", () => {
         destroyed++;
       }
     };
-    const wrapped = asGraphController({
+    const controller = asGraphController({
       update: () => next,
       destroy: () => {
         destroyed++;
       }
     });
-    expect(wrapped?.update([])?.update([])).toBeNull();
-    wrapped?.destroy();
+    expect(controller?.update([])?.update([])).toBeNull();
+    controller?.destroy();
     expect(destroyed).toBe(1);
   });
-});
-
-interface Parent {
-  element: FakeElement;
-  inserted: Array<[DomElement, DomElement]>;
-  legends: DomElement[];
-}
-
-function setup(options: { vendor?: RecordingGraphVendorHarness | null } = {}) {
-  const browser = createFakeBrowser();
-  const container = createFakeElement("graph-container");
-  browser.document.add(container);
-  const legends: DomElement[] = [];
-  const inserted: Array<[DomElement, DomElement]> = [];
-  const parent = {
-    querySelectorAll: () => legends,
-    replaceChild: () => null,
-    insertBefore: (node: DomElement, before: DomElement) => {
-      inserted.push([node, before]);
-      legends.push(node);
-      return node;
+  it.each([
+    [{}, "modeled"],
+    [{ plannedMode: true }, "planned"],
+    [{ deployMode: true }, "deployed-projection"],
+    [{ diffMode: true }, "diff"]
+  ] as const)(
+    "mounts mode %# through the shared component, updates and tears down once",
+    (options, kind) => {
+      const { surface, renderer } = setup();
+      const resources = [{ id: "web", name: "web" }];
+      const controller = surface.render("graph-container", resources, options);
+      expect(renderer.roots[0].props.graph).toEqual({ kind, resources });
+      expect(renderer.roots[0].props.options).toBe(options);
+      expect(controller?.update(null)).toBe(controller);
+      expect(renderer.roots[0].updates).toEqual([]);
+      controller?.update([]);
+      expect(renderer.roots[0].updates[0].graph.resources).toEqual([]);
+      controller?.destroy();
+      controller?.destroy();
+      controller?.update(resources);
+      expect(renderer.roots[0].unmounts).toBe(1);
+      expect(renderer.roots[0].host).toMatchObject({ removed: true });
+      expect(renderer.roots[0].updates).toHaveLength(1);
     }
-  };
-  Object.assign(container, { parentNode: parent });
-  const vendor =
-    options.vendor === undefined ?
-      createRecordingGraphVendor()
-    : options.vendor;
-  const surface = createGraphSurface(browser.context, () => vendor);
-  return {
-    browser,
-    container,
-    surface,
-    vendor,
-    parent: { element: container, inserted, legends } satisfies Parent
-  };
-}
-
-describe("missing container", () => {
-  it("does nothing when the page has no such container", () => {
-    const harness = setup();
-    expect(harness.surface.render("absent", RESOURCES)).toBeNull();
-    expect(() => harness.surface.setLoading("absent")).not.toThrow();
-    expect(() => harness.surface.setError("absent", "x")).not.toThrow();
+  );
+  it.each([
+    { state: "empty", resources: [] },
+    { state: "populated", resources: [{ id: "web", name: "web" }] }
+  ])(
+    "isolates replacement and simultaneous roots from stale $state controllers",
+    ({ resources }) => {
+      const { surface, renderer, browser } = setup();
+      browser.document.add(createFakeElement("other"));
+      const first = surface.render("graph-container", resources);
+      surface.render("graph-container", []);
+      surface.render("other", null);
+      expect(renderer.roots[2].props.graph.resources).toEqual([]);
+      first?.destroy();
+      expect(first?.update([{ id: "stale" }])).toBe(first);
+      expect(renderer.roots.map((root) => root.unmounts)).toEqual([1, 0, 0]);
+      expect(renderer.roots.flatMap((root) => root.updates)).toEqual([]);
+      surface.destroyAll();
+      surface.destroyAll();
+      expect(renderer.roots.map((root) => root.unmounts)).toEqual([1, 1, 1]);
+    }
+  );
+  it("leaves absent page containers alone", () => {
+    const { surface, renderer } = setup();
+    expect(surface.render("absent", [])).toBeNull();
+    surface.setLoading("absent");
+    surface.setError("absent", "error");
+    expect(renderer.roots).toEqual([]);
   });
-});
-
-describe("vendor bundle", () => {
-  it("offers a reload instead of throwing when the libraries did not load", () => {
-    const harness = setup({ vendor: null });
-    expect(harness.surface.render("graph-container", RESOURCES)).toBeNull();
-    expect(harness.container.appended).toHaveLength(2);
-    const [error, retry] = harness.container.appended as FakeElement[];
-    expect(error.className).toBe("status error");
-    expect(error.textContent).toBe(GRAPH_LIBRARY_ERROR);
-    expect(retry.textContent).toBe("Reload graph");
-    expect(retry.getAttribute("type")).toBe("button");
-    retry.dispatch("click");
-    expect(harness.browser.nav.reloads).toBe(1);
-  });
-});
-
-describe("render failure", () => {
-  it("recovers with a reload action and reports the failure", () => {
-    const harness = setup();
-    harness.vendor!.reactDom.createRoot = () => {
-      throw new Error("React exploded");
-    };
-
-    expect(harness.surface.render("graph-container", RESOURCES)).toBeNull();
-
-    const error = (harness.container.appended as FakeElement[]).find(
-      (element) => element.className === "status error"
+  it("unmounts before showing loading or escaped error state", () => {
+    const { surface, renderer, container } = setup();
+    surface.render("graph-container", []);
+    surface.setLoading("graph-container");
+    expect(container.innerHTML).toBe(GRAPH_LOADING_HTML);
+    expect(container.innerHTML).toContain('id="progress-steps"');
+    expect(renderer.roots[0].unmounts).toBe(1);
+    surface.render("graph-container", []);
+    surface.setError("graph-container", "<script>bad</script>");
+    expect(container.querySelector(".error")?.textContent).toBe(
+      "<script>bad</script>"
     );
-    expect(error?.textContent).toBe(GRAPH_RENDER_ERROR);
-    expect(harness.browser.logger.errors).toEqual([
-      {
-        message: "Rendering the application graph failed.",
-        detail: expect.any(Error)
-      }
-    ]);
+    expect(container.querySelector(".error")?.getAttribute("role")).toBe(
+      "alert"
+    );
+    expect(container.querySelector(".error")?.className).toBe("status error");
+    expect(container.innerHTML).toBe("");
+    expect(renderer.roots[1].unmounts).toBe(1);
   });
-
-  it("cleans an incomplete render record before retrying", () => {
-    const harness = setup();
-    const createElement = harness.browser.context.dom.createElement;
+  it.each([false, true])(
+    "surfaces missing and failed mounting with reload recovery: %s",
+    (throws) => {
+      const { browser, container } = setup();
+      const surface = createGraphSurface(browser.context, () =>
+        throws ?
+          () => {
+            throw new Error("mount failed");
+          }
+        : null
+      );
+      expect(surface.render("graph-container", [])).toBeNull();
+      expect(container.querySelector(".error")?.textContent).toBe(
+        throws ? GRAPH_RENDER_ERROR : GRAPH_LIBRARY_ERROR
+      );
+      expect(container.querySelector(".error")?.className).toBe("status error");
+      expect(container.querySelector("button")?.textContent).toBe(
+        "Reload graph"
+      );
+      expect(container.querySelector("button")?.getAttribute("type")).toBe(
+        "button"
+      );
+      container.querySelector("button")?.dispatchEvent?.({ type: "click" });
+      expect(browser.nav.reloads).toBe(1);
+      expect(browser.logger.errors).toEqual(
+        throws ?
+          [
+            {
+              message: "Rendering the application graph failed.",
+              detail: expect.any(Error)
+            }
+          ]
+        : []
+      );
+    }
+  );
+  it("cleans an incomplete render record before retrying a DOM failure", () => {
+    const { surface, browser, renderer, container } = setup();
+    const createElement = browser.context.dom.createElement;
     let fail = true;
-    harness.browser.context.dom.createElement = (tagName) => {
+    browser.context.dom.createElement = (tagName) => {
       if (fail) {
         fail = false;
         throw new Error("DOM unavailable");
@@ -160,588 +166,146 @@ describe("render failure", () => {
       return createElement(tagName);
     };
 
-    expect(harness.surface.render("graph-container", RESOURCES)).toBeNull();
-    expect(harness.surface.render("graph-container", RESOURCES)).not.toBeNull();
-  });
-});
-
-describe("empty graph", () => {
-  it("clears the container and keeps a controller that can repopulate", () => {
-    const harness = setup();
-    harness.container.innerHTML = "<div>old</div>";
-    const controller = harness.surface.render("graph-container", []);
-    expect(controller).not.toBeNull();
-    expect(harness.container.innerHTML).toBe("");
-    expect(harness.vendor!.reactDom.roots).toHaveLength(0);
-
-    // Still empty: the same controller answers.
-    expect(controller?.update([])).toBe(controller);
-    expect(controller?.update(null)).toBe(controller);
-
-    const populated = controller?.update(RESOURCES);
-    expect(populated).not.toBe(controller);
-    expect(harness.vendor!.reactDom.roots).toHaveLength(1);
-  });
-
-  it("treats a null resource list as an empty graph", () => {
-    const harness = setup();
-    expect(harness.surface.render("graph-container", null)).not.toBeNull();
-    expect(harness.vendor!.reactDom.roots).toHaveLength(0);
-  });
-
-  it("answers the empty controller when a repopulating render cannot run", () => {
-    const harness = setup();
-    const controller = harness.surface.render("graph-container", []);
-    harness.vendor!.reactDom.createRoot = () => {
-      throw new Error("React exploded");
-    };
-    expect(controller?.update(RESOURCES)).toBe(controller);
-  });
-
-  it("tears the empty render down on request", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", [])?.destroy();
-    expect(harness.container.appended).toEqual([]);
-  });
-});
-
-describe("populated graph", () => {
-  it("mounts the flow in its own host and adds the details panel", () => {
-    const harness = setup();
-    harness.container.innerHTML = "<div>old</div>";
-
-    harness.surface.render("graph-container", RESOURCES);
-
-    expect(harness.container.innerHTML).toBe("");
-    expect(harness.container.style.position).toBe("relative");
-    expect(harness.container.style.display).toBe("block");
-    expect(harness.container.style.minHeight).toBe("450px");
-    const [host, panel] = harness.container.appended as FakeElement[];
-    expect(host.className).toBe("rad-flow-host");
-    expect(host.getAttribute("style")).toContain("position:absolute");
-    expect(panel.id).toBe(PANEL_ID);
-    expect(harness.vendor!.reactDom.hosts).toEqual([host]);
-  });
-
-  it("lays the graph out before mounting it", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES);
-    expect(harness.vendor!.dagre?.graphs).toHaveLength(1);
-    expect(harness.vendor!.dagre?.graphs[0].nodes.map((n) => n.id)).toEqual([
-      "app/web",
-      "app/db"
-    ]);
-  });
-
-  it("skips the details panel when a caller disabled it", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES, {
-      enablePopup: false
-    });
-    expect(harness.container.appended).toHaveLength(1);
-    expect(harness.container.listenerCount("click")).toBe(0);
-  });
-
-  it("replaces a previous render rather than stacking hosts and handlers", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES);
-    const first = harness.container.appended[0] as FakeElement;
-    harness.container.matches.set(".rad-flow-host, #node-popup", [first]);
-
-    harness.surface.render("graph-container", RESOURCES);
-
-    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(1);
-    expect(first.removed).toBe(true);
-    expect(harness.container.listenerCount("click")).toBe(1);
-  });
-
-  it("removes a legend left over from an earlier render", () => {
-    const harness = setup();
-    const stale = createFakeElement("stale-legend");
-    harness.parent.legends.push(stale);
-    harness.surface.render("graph-container", RESOURCES);
-    expect(stale.removed).toBe(true);
-  });
-
-  it("renders the category legend before the container when asked", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES, { showLegend: true });
-    const legend = harness.parent.inserted[0][0] as FakeElement;
-    expect(legend.className).toBe("legend");
-    expect(legend.innerHTML).toContain("Compute");
-    expect(legend.innerHTML).toContain("Data Store");
-    expect(harness.parent.inserted[0][1]).toBe(harness.container);
-  });
-
-  it("builds the legend from the same filtered resources as the graph", () => {
-    const harness = setup();
-    harness.surface.render(
-      "graph-container",
-      [
-        ...RESOURCES,
-        {
-          id: "app/image",
-          name: "image",
-          type: "Radius.Compute/containerImages"
-        }
-      ],
-      { showLegend: true }
+    expect(surface.render("graph-container", [{ id: "web" }])).toBeNull();
+    expect(container.querySelector(".error")?.textContent).toBe(
+      GRAPH_RENDER_ERROR
     );
-    const legend = harness.parent.inserted[0][0] as FakeElement;
-    expect(legend.innerHTML).not.toContain("Registry");
+    expect(surface.render("graph-container", [{ id: "web" }])).not.toBeNull();
+    expect(renderer.roots).toHaveLength(1);
+    surface.destroyAll();
+    expect(renderer.roots[0].unmounts).toBe(1);
   });
-
-  it("renders the deploy status legend while deploying", () => {
-    const harness = setup();
-    harness.surface.render(
-      "graph-container",
-      RESOURCES.map((resource) => ({
-        ...resource,
-        deployStatus: "in_progress"
-      })),
-      {
-        showLegend: true,
-        deployMode: true
+  it("threads callbacks without introducing networking into graph-react", async () => {
+    const { surface, renderer, browser } = setup();
+    surface.render("graph-container", []);
+    const callbacks = renderer.roots[0].props.callbacks;
+    callbacks?.onRetry?.();
+    callbacks?.onOpenExternal?.("javascript:bad");
+    callbacks?.onOpenExternal?.("https://example.test/path");
+    browser.net.handle(OPEN_SOURCE_PATH, () => jsonResponse({}));
+    callbacks?.onOpenSource?.({
+      path: "src/web.ts",
+      line: 3,
+      fallbackUrl: "https://example.test/fallback"
+    });
+    await flushPromises();
+    expect(browser.net.calls[0]).toMatchObject({
+      url: OPEN_SOURCE_PATH,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "src/web.ts", line: 3 })
       }
-    );
-    const legend = harness.parent.inserted[0][0] as FakeElement;
-    expect(legend.innerHTML).toContain("Pending / deploying");
-    expect(legend.innerHTML).not.toContain("Compute");
-  });
-
-  it("shows no legend for a diff, and none when nothing was asked for", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES, {
-      showLegend: true,
-      diffMode: true
     });
-    harness.surface.render("graph-container", RESOURCES);
-    expect(harness.parent.inserted).toEqual([]);
+    expect(browser.nav.reloads).toBe(1);
+    expect(browser.external.opened).toEqual(["https://example.test/path"]);
   });
 
-  it("shows no category legend when the graph contributes none", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", [], { showLegend: true });
-    expect(harness.parent.inserted).toEqual([]);
+  it.each([0, 4, 31])(
+    "posts source line %s with the complete local request contract",
+    async (line) => {
+      const { surface, browser } = setup();
+      browser.net.handle(OPEN_SOURCE_PATH, () => jsonResponse({ ok: true }));
+
+      surface.openLocalSource("src/web.ts", line, "https://github.test/x");
+      await flushPromises();
+
+      expect(browser.net.calls).toHaveLength(1);
+      expect(browser.net.calls[0]).toMatchObject({
+        url: OPEN_SOURCE_PATH,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: "src/web.ts", line })
+        }
+      });
+      expect(browser.external.opened).toEqual([]);
+    }
+  );
+
+  it.each(["http", "not-on-worktree", "network"] as const)(
+    "falls back to safe remote source on a %s failure",
+    async (failure) => {
+      const { surface, browser } = setup();
+      browser.net.handle(OPEN_SOURCE_PATH, () => {
+        if (failure === "network") throw new Error("offline");
+        if (failure === "not-on-worktree")
+          return jsonResponse({ error: "NOT_ON_WORKTREE" }, false, 409);
+        return jsonResponse({}, false, 404);
+      });
+      surface.openLocalSource("src/web.ts", 0, "https://example.test/fallback");
+      await flushPromises();
+      expect(browser.external.opened).toEqual([
+        "https://example.test/fallback"
+      ]);
+      surface.openLocalSource("", 0, "https://example.test/no-local-source");
+      expect(browser.net.calls).toHaveLength(1);
+      expect(browser.external.opened).toEqual([
+        "https://example.test/fallback",
+        "https://example.test/no-local-source"
+      ]);
+    }
+  );
+
+  it("ignores empty and unsafe external URLs without making a request", () => {
+    const { surface, browser } = setup();
+    surface.openExternal("");
+    surface.openExternal("javascript:alert(1)");
+    surface.openLocalSource("", 0, "");
+    expect(browser.external.opened).toEqual([]);
+    expect(browser.net.calls).toEqual([]);
   });
 
-  it("renders without a parent element to hang a legend on", () => {
-    const browser = createFakeBrowser();
-    const container = createFakeElement("graph-container");
-    browser.document.add(container);
-    const surface = createGraphSurface(browser.context, () =>
-      createGraphVendor()
-    );
-    expect(
-      surface.render("graph-container", RESOURCES, { showLegend: true })
-    ).not.toBeNull();
-
-    Object.assign(container, { parentNode: { nodeName: "div" } });
-    expect(
-      surface.render("graph-container", RESOURCES, { showLegend: true })
-    ).not.toBeNull();
-  });
-});
-
-describe("controller", () => {
-  it("re-lays out and pushes an update into the mounted view", () => {
-    const harness = setup();
-    const controller = harness.surface.render("graph-container", RESOURCES);
-    const app = childComponent(harness.vendor!.reactDom.roots[0].rendered[0]);
-    app.type(app.props);
-    harness.vendor!.react.runEffects();
-
-    expect(
-      controller?.update([
-        { id: "app/web", name: "web", deployStatus: "success" }
-      ])
-    ).toBe(controller);
-
-    expect(harness.vendor!.dagre?.graphs).toHaveLength(2);
-    expect(harness.vendor!.reactFlow.nodeUpdates).toHaveLength(1);
-    expect(harness.vendor!.reactFlow.nodeUpdates[0]).toHaveLength(1);
-  });
-
-  it("removes the progress legend when the graph becomes terminal", () => {
-    const harness = setup();
-    const controller = harness.surface.render(
-      "graph-container",
-      [{ id: "app/web", name: "web", deployStatus: "in_progress" }],
-      { showLegend: true, deployMode: true }
-    );
-    const app = childComponent(harness.vendor!.reactDom.roots[0].rendered[0]);
-    app.type(app.props);
-    harness.vendor!.react.runEffects();
-    const legend = harness.parent.inserted[0][0] as FakeElement;
-    expect(legend.innerHTML).toContain("Pending / deploying");
-
-    controller?.update([
-      { id: "app/web", name: "web", deployStatus: "success" }
-    ]);
-
-    expect(legend.innerHTML).toContain("Deployed");
-    expect(legend.innerHTML).not.toContain("Pending / deploying");
-    expect(decodeURIComponent(legend.innerHTML)).not.toContain(
-      "animation:spin"
-    );
-  });
-
-  it("updates a category legend without remounting the graph", () => {
-    const harness = setup();
-    const controller = harness.surface.render(
-      "graph-container",
-      [{ id: "app/web", name: "web", type: "Radius.Compute/containers" }],
-      { showLegend: true }
-    );
-    const app = childComponent(harness.vendor!.reactDom.roots[0].rendered[0]);
-    app.type(app.props);
-    harness.vendor!.react.runEffects();
-    const legend = harness.parent.inserted[0][0] as FakeElement;
-    expect(legend.innerHTML).toContain("Compute");
-
-    controller?.update([
-      { id: "app/cache", name: "cache", type: "Radius.Cache/redisCaches" }
-    ]);
-
-    expect(legend.innerHTML).toContain("Cache");
-    expect(legend.innerHTML).not.toContain("Compute");
-  });
-
-  it("remounts when React has not bound the updater yet", () => {
-    const harness = setup();
-    const controller = harness.surface.render("graph-container", RESOURCES);
-    const next = controller?.update([{ id: "app/new", name: "new" }]);
-    expect(next).not.toBeNull();
-    expect(next).not.toBe(controller);
-    expect(harness.vendor!.reactDom.roots).toHaveLength(2);
-    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(1);
-  });
-
-  it("ignores an update with no resource list", () => {
-    const harness = setup();
-    const controller = harness.surface.render("graph-container", RESOURCES);
-    expect(controller?.update(null)).toBe(controller);
-    expect(harness.vendor!.dagre?.graphs).toHaveLength(1);
-  });
-
-  it("falls back to the empty render when the graph is emptied", () => {
-    const harness = setup();
-    const controller = harness.surface.render("graph-container", RESOURCES);
-    const [host, panel] = harness.container.appended as FakeElement[];
-    const emptied = controller?.update([]);
-    expect(emptied).not.toBe(controller);
-    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(1);
-    expect(host.removed).toBe(true);
-    expect(panel.removed).toBe(true);
-    expect(harness.container.innerHTML).toBe("");
-  });
-
-  it("unmounts the view, removes the panel and the host on destroy", () => {
-    const harness = setup();
-    const controller = harness.surface.render("graph-container", RESOURCES);
-    const [host, panel] = harness.container.appended as FakeElement[];
-
-    controller?.destroy();
-
-    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(1);
-    expect(host.removed).toBe(true);
-    expect(panel.removed).toBe(true);
-    expect(harness.container.listenerCount("click")).toBe(0);
-    // Idempotent: a second destroy has nothing left to do.
-    expect(() => controller?.destroy()).not.toThrow();
-    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(1);
-  });
-
-  it("prevents a stale populated controller from changing its replacement", () => {
-    const harness = setup();
-    const first = harness.surface.render("graph-container", RESOURCES);
-    const replacement = harness.surface.render("graph-container", RESOURCES);
-
-    expect(first?.update([{ id: "app/stale", name: "stale" }])).toBe(first);
-    first?.destroy();
-
-    expect(harness.vendor!.dagre?.graphs).toHaveLength(2);
-    expect(harness.vendor!.reactDom.roots[1].unmounts).toBe(0);
-    replacement?.destroy();
-    expect(harness.vendor!.reactDom.roots[1].unmounts).toBe(1);
-  });
-
-  it("prevents a stale empty controller from destroying a populated graph", () => {
-    const harness = setup();
-    const empty = harness.surface.render("graph-container", []);
-    const populated = empty?.update(RESOURCES);
-
-    expect(empty?.update([{ id: "app/stale", name: "stale" }])).toBe(empty);
-    empty?.destroy();
-
-    expect(harness.vendor!.dagre?.graphs).toHaveLength(1);
-    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(0);
-    populated?.destroy();
-    expect(harness.vendor!.reactDom.roots[0].unmounts).toBe(1);
-  });
-
-  it("destroys every active container through the page-level cleanup", () => {
-    const harness = setup();
-    const second = createFakeElement("graph-secondary");
-    harness.browser.document.add(second);
-    harness.surface.render("graph-container", RESOURCES);
-    harness.surface.render("graph-secondary", RESOURCES);
-
-    harness.surface.destroyAll();
-
-    expect(harness.vendor!.reactDom.roots.map((root) => root.unmounts)).toEqual(
-      [1, 1]
-    );
-  });
-});
-
-describe("opening source", () => {
-  it("posts the repo-relative path to the local server", async () => {
-    const harness = setup();
-    harness.browser.net.handle(OPEN_SOURCE_PATH, () =>
-      jsonResponse({ ok: true })
-    );
-
-    harness.surface.openLocalSource("src/web.ts", 4, "https://github.test/x");
-    await flushPromises();
-
-    expect(harness.browser.net.calls[0].init).toEqual({
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: "src/web.ts", line: 4 })
-    });
-    expect(harness.browser.external.opened).toEqual([]);
-  });
-
-  it("falls back to the remote URL when the file is not on this checkout", async () => {
-    const harness = setup();
-    harness.browser.net.handle(OPEN_SOURCE_PATH, () =>
-      jsonResponse({ error: "NOT_ON_WORKTREE" }, false, 409)
-    );
-
-    harness.surface.openLocalSource("src/web.ts", 0, "https://github.test/x");
-    await flushPromises();
-
-    expect(harness.browser.external.opened).toEqual(["https://github.test/x"]);
-  });
-
-  it("falls back when the request itself fails", async () => {
-    const harness = setup();
-    harness.browser.net.handle(OPEN_SOURCE_PATH, () =>
-      Promise.reject(new Error("offline"))
-    );
-
-    harness.surface.openLocalSource("src/web.ts", 0, "https://github.test/x");
-    await flushPromises();
-
-    expect(harness.browser.external.opened).toEqual(["https://github.test/x"]);
-  });
-
-  it("opens the remote URL directly when there is no local path", () => {
-    const harness = setup();
-    harness.surface.openLocalSource("", 0, "https://github.test/x");
-    expect(harness.browser.net.calls).toEqual([]);
-    expect(harness.browser.external.opened).toEqual(["https://github.test/x"]);
-  });
-
-  it("ignores empty and unsafe external URLs", () => {
-    const harness = setup();
-    harness.surface.openExternal("");
-    harness.surface.openExternal("javascript:alert(1)");
-    expect(harness.browser.external.opened).toEqual([]);
-  });
-
-  it("sends the node's line number with the request", async () => {
-    const harness = setup();
-    harness.browser.net.handle(OPEN_SOURCE_PATH, () => jsonResponse({}));
-    harness.surface.openLocalSource("src/web.ts", 31, "");
-    await flushPromises();
-    expect(harness.browser.net.calls[0].init?.body).toBe(
-      JSON.stringify({ path: "src/web.ts", line: 31 })
-    );
-  });
-});
-
-describe("loading and error states", () => {
-  it("shows the generation progress panel", () => {
-    const harness = setup();
-    harness.surface.setLoading("graph-container");
-    expect(harness.container.innerHTML).toBe(GRAPH_LOADING_HTML);
-    expect(harness.container.innerHTML).toContain('id="progress-steps"');
-  });
-
-  it("shows a message as text, never as markup", () => {
-    const harness = setup();
-    harness.surface.setError("graph-container", "<img src=x onerror=1>");
-    const status = harness.container.appended[0] as FakeElement;
-    expect(harness.container.innerHTML).toBe("");
-    expect(status.className).toBe("status error");
-    expect(status.getAttribute("role")).toBe("alert");
-    expect(status.textContent).toBe("<img src=x onerror=1>");
-  });
-
-  it("tears down an active render before showing loading or error state", () => {
-    const loading = setup();
-    loading.surface.render("graph-container", RESOURCES);
-    loading.surface.setLoading("graph-container");
-    expect(loading.vendor!.reactDom.roots[0].unmounts).toBe(1);
-
-    const failing = setup();
-    failing.surface.render("graph-container", RESOURCES);
-    failing.surface.setError("graph-container", "failed");
-    expect(failing.vendor!.reactDom.roots[0].unmounts).toBe(1);
-  });
-});
-
-describe("node interactions", () => {
-  it("routes details-panel external links through the graph surface", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES, {
-      repoUrl: "https://github.test/o/r"
-    });
-    const url = "https://github.test/o/r/blob/main/src/web.ts#L4";
-    const row = createFakeElement("row");
-    row.setAttribute("data-external-url", url);
-    row.ancestors.set("[data-external-url]", row);
-
-    harness.container.dispatch("click", { target: row });
-
-    expect(harness.browser.external.opened).toEqual([url]);
-  });
-
-  it("wires a card click to the details panel", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES, {
-      repoUrl: "https://github.test/o/r"
-    });
-    const panel = harness.container.appended[1] as FakeElement;
-    // The card component the view built is reachable through the node types the
-    // application was given, so drive it the way React would.
-    const app = childComponent<{ initialNodes: Array<{ data: unknown }> }>(
-      harness.vendor!.reactDom.roots[0].rendered[0]
-    );
-    const nodeData = app.props.initialNodes[0].data;
-    const tree = app.type(app.props) as { props: Record<string, unknown> };
-    const nodeTypes = tree.props.nodeTypes as {
-      rad: (props: { data: unknown }) => unknown;
+  it("does not act on callbacks from a replaced root or a late failed source request", async () => {
+    const { surface, browser, renderer } = setup();
+    let reject: (error: Error) => void = () => {
+      throw new Error("request not started");
     };
-    const card = findByClass(nodeTypes.rad({ data: nodeData }), "rad-node");
-    const owner = createFakeElement("card");
-
-    (card?.props.onClick as (event: unknown) => void)({
-      currentTarget: owner
-    });
-
-    expect(panel.style.display).toBe("");
-    expect(panel.innerHTML).toContain("View app definition");
-    expect(panel.innerHTML).toContain(
-      "https://github.test/o/r/blob/main/.radius/app.bicep"
+    browser.net.handle(
+      OPEN_SOURCE_PATH,
+      () =>
+        new Promise((_resolve, rejectRequest) => {
+          reject = rejectRequest;
+        })
     );
-
-    (card?.props.onClick as (event: unknown) => void)({});
-    const dots = findByClass(
-      nodeTypes.rad({ data: nodeData }),
-      "rad-node__dots nodrag nopan nokey"
-    );
-    const dot = createFakeElement("dots");
-    dot.ancestors.set(".rad-node", owner);
-    (
-      dots?.props.onClick as (event: {
-        preventDefault(): void;
-        stopPropagation(): void;
-        currentTarget: unknown;
-      }) => void
-    )({
-      preventDefault() {},
-      stopPropagation() {},
-      currentTarget: dot
+    surface.render("graph-container", []);
+    const callbacks = renderer.roots[0].props.callbacks;
+    callbacks?.onOpenSource?.({
+      path: "src/web.ts",
+      line: 0,
+      fallbackUrl: "https://example.test/fallback"
     });
-    expect(panel.style.display).toBe("none");
-    (
-      dots?.props.onClick as (event: {
-        preventDefault(): void;
-        stopPropagation(): void;
-      }) => void
-    )({
-      preventDefault() {},
-      stopPropagation() {}
-    });
+    await flushPromises();
+    surface.destroyAll();
+    reject(new Error("late request failed"));
+    await flushPromises();
+    callbacks?.onOpenExternal?.("https://example.test/stale");
+    callbacks?.onRetry?.();
+    callbacks?.onOpenSource?.({ path: "stale", line: 0, fallbackUrl: "" });
+    expect(browser.external.opened).toEqual([]);
+    expect(browser.nav.reloads).toBe(0);
+    expect(browser.net.calls).toHaveLength(1);
   });
 
-  it("dismisses the panel when the same card is clicked again", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES, {
-      repoUrl: "https://github.test/o/r"
-    });
-    const panel = harness.container.appended[1] as FakeElement;
-    const app = childComponent<{ initialNodes: Array<{ data: unknown }> }>(
-      harness.vendor!.reactDom.roots[0].rendered[0]
-    );
-    const nodeData = app.props.initialNodes[0].data;
-    const tree = app.type(app.props) as { props: Record<string, unknown> };
-    const nodeTypes = tree.props.nodeTypes as {
-      rad: (props: { data: unknown }) => unknown;
-    };
-    const card = findByClass(nodeTypes.rad({ data: nodeData }), "rad-node");
-    const owner = createFakeElement("card");
-    const click = card?.props.onClick as (event: unknown) => void;
-
-    click({ currentTarget: owner });
-    expect(panel.style.display).toBe("");
-
-    click({ currentTarget: owner });
-    expect(panel.style.display).toBe("none");
-
-    // A third click re-opens, so the node keeps normal toggle behavior.
-    click({ currentTarget: owner });
-    expect(panel.style.display).toBe("");
-  });
-
-  it("does not create or open a details panel when popups are disabled", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES, {
-      enablePopup: false
-    });
-    expect(harness.container.appended).toHaveLength(1);
-    expect(harness.container.listenerCount("click")).toBe(0);
-
-    const app = childComponent<{ initialNodes: Array<{ data: unknown }> }>(
-      harness.vendor!.reactDom.roots[0].rendered[0]
-    );
-    const tree = app.type(app.props) as { props: Record<string, unknown> };
-    const nodeTypes = tree.props.nodeTypes as {
-      rad: (props: { data: unknown }) => unknown;
-    };
-    const card = findByClass(
-      nodeTypes.rad({ data: app.props.initialNodes[0].data }),
-      "rad-node"
-    );
-    expect(() =>
-      (card?.props.onClick as (event: unknown) => void)({
-        currentTarget: createFakeElement("card")
-      })
-    ).not.toThrow();
-    harness.surface.destroyAll();
-  });
-
-  it("routes the mounted error boundary reload through navigation", () => {
-    const harness = setup();
-    harness.surface.render("graph-container", RESOURCES);
-    const boundaryElement = harness.vendor!.reactDom.roots[0].rendered[0] as {
-      type: {
-        new (props: Record<string, unknown>): {
-          state: Record<string, unknown>;
-          render(): unknown;
-        };
-        getDerivedStateFromError(): Record<string, unknown>;
+  it("cleans every host and reports unmount failures without abandoning later roots", () => {
+    const { browser, renderer } = setup();
+    browser.document.add(createFakeElement("other"));
+    const surface = createGraphSurface(browser.context, () => (host, props) => {
+      const root = renderer.mount(host, props);
+      return {
+        ...root,
+        unmount() {
+          root.unmount();
+          throw new Error("unmount failed");
+        }
       };
-      props: Record<string, unknown>;
-    };
-    const boundary = new boundaryElement.type(boundaryElement.props);
-    boundary.state = boundaryElement.type.getDerivedStateFromError();
-    const fallback = boundary.render();
-    const button = findByClass(fallback, "rad-btn rad-btn--secondary");
-    (button?.props.onClick as () => void)();
-    expect(harness.browser.nav.reloads).toBe(1);
+    });
+    surface.render("graph-container", []);
+    surface.render("other", []);
+    expect(() => surface.destroyAll()).toThrow(AggregateError);
+    expect(renderer.roots.map((root) => root.unmounts)).toEqual([1, 1]);
+    for (const root of renderer.roots)
+      expect(root.host).toMatchObject({ removed: true });
+    expect(() => surface.destroyAll()).not.toThrow();
   });
 });
