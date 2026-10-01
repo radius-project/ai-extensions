@@ -645,6 +645,7 @@ export const DEPLOY_CANCELLED_MESSAGE = "Deployment cancelled";
 export const DEPLOY_TIMED_OUT_MESSAGE = "Deployment timed out";
 export const DEPLOY_MONITOR_TIMED_OUT_MESSAGE =
   "Deployment monitoring timed out; the workflow may still be running.";
+export { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "./deploy-messages.js";
 export const DEPLOY_FAILED_MESSAGE = "Deployment failed";
 export const MAX_DEPLOY_MESSAGE_LENGTH = 500;
 
