@@ -224,6 +224,51 @@ describe("bounded workflow read policy", () => {
     });
   });
 
+  it("gives a shared flight its own bounded deadline without replenishing credits or cooldowns", async () => {
+    const f = fixture(10);
+    const meter = { extraGets: 0 };
+    expect(f.context.chargeRetries(1)).toBe(true);
+    let stopped = false;
+    const flight = f.context
+      .forSharedFlight(30000, { stopped: () => stopped })
+      .withRetryMeter(meter);
+    f.advance(10);
+    f.stop();
+    expect(flight.observation).toBe(f.context.observation);
+    expect(flight.remaining()).toBe(29990);
+    expect(flight.limit(60000).deadline).toBe(30000);
+    const read = vi.fn(async () => response());
+    expect((await flight.read("run", 30000, read)).decision).toEqual({
+      state: "exhausted",
+      reason: "attempts"
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(meter.extraGets).toBe(1);
+    expect(f.context.chargeRetries(1)).toBe(false);
+    await flight.read("limited", 30000, async () =>
+      response(200, {
+        retryAfter: { state: "delay", milliseconds: 60000 }
+      })
+    );
+    expect(f.cooldowns.check("limited")).toMatchObject({
+      state: "deferred",
+      reason: "not-before"
+    });
+    f.advance(30000);
+    expect(flight.check()).toEqual({ state: "exhausted", reason: "elapsed" });
+    stopped = true;
+    expect(flight.check()).toEqual({ state: "stopped", reason: "cancelled" });
+  });
+
+  it.each([-1, 0, Infinity, NaN])(
+    "rejects invalid shared-flight timeout %s",
+    (timeout) => {
+      expect(() =>
+        fixture().context.forSharedFlight(timeout, { stopped: () => false })
+      ).toThrow("shared-flight timeout");
+    }
+  );
+
   it.each([-1, Infinity, NaN])(
     "rejects invalid phase timeout %s",
     (timeout) => {

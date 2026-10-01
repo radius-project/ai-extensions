@@ -755,21 +755,21 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       const detach = options.onStop?.(stop);
       const usage = { extraGets: 0 };
       const flightContext = context
-        ?.limit(
+        ?.forSharedFlight(
           isRunScoped ?
             WORKFLOW_READ_LIMITS.artifactRunMs
-          : WORKFLOW_READ_LIMITS.artifactRepositoryMs
-        )
-        .withRetryMeter(usage)
-        .withCancellation({
-          stopped: () => stopped,
-          onStop: (listener) => {
-            listeners.add(listener);
-            return () => {
-              listeners.delete(listener);
-            };
+          : WORKFLOW_READ_LIMITS.artifactRepositoryMs,
+          {
+            stopped: () => stopped,
+            onStop: (listener) => {
+              listeners.add(listener);
+              return () => {
+                listeners.delete(listener);
+              };
+            }
           }
-        });
+        )
+        .withRetryMeter(usage);
       const work = async () => {
         let result = await fetchOnce(flightContext, ledger);
         ensureCurrent(flightContext);

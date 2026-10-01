@@ -7,7 +7,9 @@ import {
   DEPLOY_STATUS_FILES,
   collectWorkflowFailure,
   confirmedWorkflowConclusion,
-  observeWorkflowRun
+  observeWorkflowRun,
+  WORKFLOW_READ_LIMITS,
+  type WorkflowReadContext
 } from "@radius-project/core";
 import {
   createWorkflowArtifactReader,
@@ -507,6 +509,228 @@ describe("artifact cleanup and compatibility", () => {
   });
 
   describe("artifact shared-flight policy ownership", () => {
+    it.each([
+      { phase: "listing", shortFirst: true },
+      { phase: "download", shortFirst: true },
+      { phase: "listing", shortFirst: false },
+      { phase: "download", shortFirst: false }
+    ])(
+      "keeps a long subscriber's $phase alive when shortFirst=$shortFirst",
+      async ({ phase, shortFirst }) => {
+        vi.useFakeTimers();
+        const session = createWorkflowReadSession();
+        const short = session.observe(10);
+        const long = session.observe(30000);
+        const waiting = deferred();
+        const started = deferred();
+        let signal: AbortSignal | undefined;
+        const run = vi.fn<WorkflowRunner>(async (args, options) => {
+          if (args[0] === "api") {
+            if (phase === "listing") {
+              signal = options.signal;
+              started.resolve();
+              await waiting.promise;
+            }
+            return {
+              code: 0,
+              stdout: `HTTP/2 200\n\n${JSON.stringify({ artifacts: [artifact] })}`,
+              stderr: ""
+            };
+          }
+          if (phase === "download") {
+            signal = options.signal;
+            started.resolve();
+            await waiting.promise;
+          }
+          writeFileSync(
+            path.join(args[6], DEPLOY_STATUS_FILES.progress),
+            JSON.stringify(progress)
+          );
+          return { code: 0, stdout: "", stderr: "" };
+        });
+        const reader = createWorkflowArtifactReader(
+          { repo: "org/app", runId: 41, session, ttlMs: 0 },
+          run
+        );
+        const first = reader
+          .read(shortFirst ? short : long)
+          .catch((error: unknown) => error);
+        await started.promise;
+        const second = reader
+          .read(shortFirst ? long : short)
+          .catch((error: unknown) => error);
+        try {
+          await vi.advanceTimersByTimeAsync(10);
+          expect(await (shortFirst ? first : second)).toMatchObject({
+            reason: "elapsed"
+          });
+          expect(signal?.aborted).toBe(false);
+        } finally {
+          waiting.resolve();
+          await vi.runAllTimersAsync();
+        }
+        expect(await (shortFirst ? second : first)).toMatchObject({
+          status: "ok",
+          progress: { sequence: 1 }
+        });
+        expect(await reader.read(long)).toMatchObject({ status: "stale" });
+        expect(
+          run.mock.calls.filter(([args]) => args[0] === "run")
+        ).toHaveLength(1);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
+    it.each([
+      { runId: 41, timeout: WORKFLOW_READ_LIMITS.artifactRunMs },
+      { runId: undefined, timeout: WORKFLOW_READ_LIMITS.artifactRepositoryMs }
+    ])(
+      "retains the fixed flight cap $timeout even when a later subscriber has more time",
+      async ({ runId, timeout }) => {
+        vi.useFakeTimers();
+        const session = createWorkflowReadSession();
+        const waiting = deferred();
+        const contexts: WorkflowReadContext[] = [];
+        const reader = createDeployStatusReader({
+          repo: "org/app",
+          runId,
+          listArtifacts: async (_repo, _runId, _prefix, context) => {
+            if (!context) throw new Error("Missing flight context");
+            contexts.push(context);
+            await waiting.promise;
+            return [];
+          },
+          downloadArtifact: async () => {
+            throw new Error("No artifact was listed");
+          }
+        });
+        const first = reader
+          .read(session.observe(timeout + 1000))
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(timeout - 1);
+        const second = reader
+          .read(session.observe(timeout))
+          .catch((error: unknown) => error);
+        try {
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await first).toMatchObject({ reason: "elapsed" });
+          expect(await second).toMatchObject({ reason: "elapsed" });
+          expect(contexts).toHaveLength(1);
+          expect(contexts[0].check()).toEqual({
+            state: "stopped",
+            reason: "cancelled"
+          });
+        } finally {
+          waiting.resolve();
+          await vi.runAllTimersAsync();
+        }
+        expect(await reader.read(session.observe(30000))).toMatchObject({
+          status: "missing"
+        });
+        expect(contexts).toHaveLength(2);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
+    it("charges retries after the admitting subscriber expires without replenishing or duplicating credits", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const short = session.observe(10);
+      const long = session.observe(30000);
+      expect(short.chargeRetries(1)).toBe(true);
+      const run = vi
+        .fn<WorkflowRunner>()
+        .mockResolvedValueOnce({
+          code: 1,
+          stdout: "HTTP/2 503\n\n{}",
+          stderr: ""
+        })
+        .mockResolvedValue({
+          code: 0,
+          stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+          stderr: ""
+        });
+      const reader = createWorkflowArtifactReader(
+        { repo: "org/app", runId: 41, session, ttlMs: 0 },
+        run
+      );
+      const first = reader.read(short).catch((error: unknown) => error);
+      const second = reader.read(long);
+      const projection = reader.graph(long.limit(20000));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await first).toMatchObject({ reason: "elapsed" });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await second).toMatchObject({ status: "missing" });
+      expect(await projection).toMatchObject({ status: "missing" });
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(short.chargeRetries(1)).toBe(false);
+      expect(long.chargeRetries(1)).toBe(true);
+      expect(long.chargeRetries(1)).toBe(false);
+      run.mockImplementation(async () => ({
+        code: 1,
+        stdout: "HTTP/2 503\n\n{}",
+        stderr: ""
+      }));
+      expect(await reader.read(long)).toMatchObject({
+        status: "error",
+        error: { decision: { state: "exhausted", reason: "attempts" } }
+      });
+      expect(run).toHaveBeenCalledTimes(3);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each(["elapsed", "cancelled"] as const)(
+      "stops the shared worker when every subscriber is %s",
+      async (reason) => {
+        vi.useFakeTimers();
+        const session = createWorkflowReadSession();
+        const firstController = new AbortController();
+        const secondController = new AbortController();
+        const waiting = deferred();
+        const started = deferred();
+        let signal: AbortSignal | undefined;
+        const run = vi.fn<WorkflowRunner>(async (_args, options) => {
+          signal = options.signal;
+          started.resolve();
+          await waiting.promise;
+          return {
+            code: 0,
+            stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+            stderr: ""
+          };
+        });
+        const reader = createWorkflowArtifactReader(
+          { repo: "org/app", runId: 41, session },
+          run
+        );
+        const first = reader
+          .read(session.observe(10, firstController.signal))
+          .catch((error: unknown) => error);
+        await started.promise;
+        const second = reader
+          .read(session.observe(20, secondController.signal))
+          .catch((error: unknown) => error);
+        try {
+          if (reason === "cancelled") firstController.abort();
+          else await vi.advanceTimersByTimeAsync(10);
+          expect(await first).toMatchObject({ reason });
+          expect(signal?.aborted).toBe(false);
+          if (reason === "cancelled") secondController.abort();
+          else await vi.advanceTimersByTimeAsync(10);
+          expect(await second).toMatchObject({ reason });
+          expect(signal?.aborted).toBe(true);
+        } finally {
+          waiting.resolve();
+          await vi.runAllTimersAsync();
+        }
+        expect(await reader.read(session.observe(30000))).toMatchObject({
+          status: "missing"
+        });
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
     it("reuses an attempted successful opaque download across repository finalization reads", async () => {
       const context = createWorkflowReadSession().observe(30000);
       const run = vi.fn<WorkflowRunner>(async () => ({
@@ -823,7 +1047,7 @@ describe("artifact cleanup and compatibility", () => {
       await Promise.all([reader.read(owner), reader.read(joiner)]);
       await vi.advanceTimersByTimeAsync(1001);
       expect(await reader.read(joiner)).toMatchObject({ status: "missing" });
-      expect(timeouts).toEqual([1000, 20000]);
+      expect(timeouts).toEqual([20000, 20000]);
       expect(vi.getTimerCount()).toBe(0);
     });
 
