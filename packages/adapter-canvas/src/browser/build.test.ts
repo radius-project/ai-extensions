@@ -19,7 +19,8 @@ import {
   createBrowserCompiler,
   makeInlineSafe,
   SHARED_ENTRY_GLOBALS,
-  validateBrowserEntrySpecs
+  validateBrowserEntrySpecs,
+  withScopeFallback
 } from "./build.js";
 import type { BrowserBuild, BrowserEntrySpec } from "./build.js";
 import {
@@ -643,5 +644,77 @@ describe("renderer browser script wiring", () => {
     expect(() => loadBrowserStyle("unknown")).toThrow(
       'Unknown browser entry "unknown".'
     );
+  });
+});
+
+describe("withScopeFallback", () => {
+  it("leaves a stylesheet without @scope unchanged", () => {
+    const style = ".a{color:red}";
+    expect(withScopeFallback(style, () => "unused")).toBe(style);
+    expect(withScopeFallback("")).toBe("");
+  });
+
+  it("appends an unscoped copy with the scoped rules' specificity", () => {
+    const style =
+      "@scope (.radius-graph){.react-flow{direction:ltr}}" +
+      "@scope(.radius-graph[data-radius-appearance=default])to ([data-radius-appearance=custom]){:scope{--rad-bg:Canvas}:scope .legend,.rad-node{color:red}@media (prefers-reduced-motion:reduce){:scope .rad-node{transition:none}}}" +
+      ".radius-graph .base{position:relative}" +
+      "@keyframes radius-graph-dashdraw{0%{stroke-dashoffset:10}}";
+
+    const [scoped, fallback] = withScopeFallback(style).split("\n");
+
+    expect(scoped).toBe(style);
+    expect(fallback).not.toMatch(/@scope|:scope|&/);
+    expect(fallback).toContain(
+      ":where(.radius-graph) .react-flow{direction:ltr}"
+    );
+    expect(fallback).toContain(
+      ":where(.radius-graph[data-radius-appearance=default]):is(*,:root){--rad-bg:Canvas}"
+    );
+    expect(fallback).toContain(
+      ":where(.radius-graph[data-radius-appearance=default]):is(*,:root) .legend,:where(.radius-graph[data-radius-appearance=default]) .rad-node{color:red}"
+    );
+    expect(fallback).toContain(
+      "@media(prefers-reduced-motion:reduce){:where(.radius-graph[data-radius-appearance=default]):is(*,:root) .rad-node{transition:none}}"
+    );
+    expect(fallback).not.toContain(".base");
+    expect(fallback).not.toContain("@keyframes");
+  });
+
+  it("passes the unscoped nesting to the transform", () => {
+    const seen: string[] = [];
+    expect(
+      withScopeFallback("@scope ( .g ){:scope .a{top:0}}", (css) => {
+        seen.push(css);
+        return ".g .a{top:0}";
+      })
+    ).toBe("@scope ( .g ){:scope .a{top:0}}\n.g .a{top:0}");
+    expect(seen).toEqual([":where(.g){&:is(*,:root) .a{top:0}}"]);
+  });
+
+  it("rejects an @scope prelude it cannot unscope", () => {
+    expect(() =>
+      withScopeFallback("@scope (.g:not(.x)){.a{top:0}}", (css) => css)
+    ).toThrow("cannot unscope");
+    expect(() => withScopeFallback("@scope{.a{top:0}}", (css) => css)).toThrow(
+      "cannot unscope"
+    );
+  });
+
+  it("rejects an unterminated @scope block", () => {
+    expect(() =>
+      withScopeFallback("@scope (.g){.a{top:0}", (css) => css)
+    ).toThrow("unterminated @scope block");
+  });
+
+  it.each([
+    ["an @scope rule", "@scope (.g){.a{top:0}}"],
+    ["a :scope selector", ":scope .a{top:0}"],
+    ["a nesting selector", ".g{& .a{top:0}}"],
+    ["a leading nesting selector", "& .a{top:0}"]
+  ])("rejects a transform that retains %s", (_label, output) => {
+    expect(() =>
+      withScopeFallback("@scope (.g){.a{top:0}}", () => output)
+    ).toThrow("retained scoped selectors");
   });
 });

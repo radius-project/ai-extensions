@@ -1011,12 +1011,12 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       {
         id: "redis",
         name: "redis",
-        type: "Applications.Datastores/redisCaches"
+        type: "Radius.Data/redisCaches"
       },
       {
         id: "postgres",
         name: "postgres",
-        type: "Applications.Datastores/postgreSqlDatabases"
+        type: "Radius.Data/postgreSqlDatabases"
       },
       {
         id: "frontend-image",
@@ -1067,7 +1067,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
           {
             id: "redis",
             name: "redis",
-            type: "Applications.Datastores/redisCaches",
+            type: "Radius.Data/redisCaches",
             connections: []
           },
           {
@@ -1079,7 +1079,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
           {
             id: "postgres",
             name: "postgres",
-            type: "Applications.Datastores/postgreSqlDatabases",
+            type: "Radius.Data/postgreSqlDatabases",
             connections: []
           }
         ]
@@ -1103,7 +1103,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
         {
           id: "redis",
           name: "redis",
-          type: "Applications.Datastores/redisCaches",
+          type: "Radius.Data/redisCaches",
           status: "success"
         }
       ]

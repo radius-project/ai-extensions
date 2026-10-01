@@ -50,34 +50,19 @@ export async function resolveRecipeOutputs(
 ) {
   const resolved = [];
 
-  // Normalize type: Applications.Core/containers -> Radius.Compute/containers, etc.
-  function normalizeType(type) {
-    const typeMap = {
-      "Applications.Core/containers": "Radius.Compute/containers",
-      "Applications.Core/gateways": "Radius.Networking/gateways",
-      "Applications.Core/httpRoutes": "Radius.Networking/routes",
-      "Applications.Core/volumes": "Radius.Compute/persistentVolumes",
-      "Applications.Core/secretStores": "Radius.Security/secrets",
-      "Applications.Core/extenders": "Radius.Core/extenders",
-      "Applications.Datastores/sqlDatabases": "Radius.Data/sqlServerDatabases",
-      "Applications.Datastores/mongoDatabases": "Radius.Data/mongoDatabases",
-      "Applications.Datastores/redisCaches": "Radius.Data/redisCaches",
-      "Applications.Messaging/rabbitMQQueues": "Radius.Messaging/rabbitMQ"
-    };
-    return typeMap[type] || type;
-  }
-
   for (const appRes of appResources) {
-    const rawType = appRes.type.split("@")[0];
-    const baseType = normalizeType(rawType);
+    const baseType = appRes.type.split("@")[0];
 
-    // Match a recipe from the default recipe pack by resource type (try both
-    // normalized and raw). Recipe resolution for custom/unlisted types is
-    // owned by recipe packs at deploy time and the radius-app-bicep skill —
-    // this modeling code no longer fabricates outputs when nothing matches.
+    // Match a recipe from the default recipe pack by resource type. Only
+    // `Radius.*` types are supported, so a legacy `Applications.*` type is
+    // refused before lookup, even if a pack still keys it, rather than being
+    // silently resolved. Recipe resolution for custom/unlisted types is owned
+    // by recipe packs at deploy time and the radius-app-bicep skill — this
+    // modeling code no longer fabricates outputs when nothing matches.
     const matchingRecipe =
-      recipes.find((r) => r.resourceType === baseType) ||
-      recipes.find((r) => r.resourceType === rawType);
+      baseType.toLowerCase().startsWith("radius.") ?
+        recipes.find((r) => r.resourceType === baseType)
+      : undefined;
 
     let outputResources = matchingRecipe?.concreteResources || [];
 

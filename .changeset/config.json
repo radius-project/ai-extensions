@@ -21,7 +21,6 @@
     "prereleaseTemplate": "{tag}-{commit-short}"
   },
   "ignore": [
-    "@radius-project/core",
     "@radius-project/adapter-shared",
     "@radius-project/adapter-canvas"
   ]

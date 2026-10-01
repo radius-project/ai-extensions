@@ -6,7 +6,7 @@
 
 import { createCommandAction } from "../command-action.js";
 import type { CommandActionHandle } from "../command-action.js";
-import { escapeBrowserHtml } from "../html.js";
+import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
 import { requireSuccessfulJsonResponse, ServerResponseError } from "../http.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readBoolean, readString } from "../json.js";

@@ -35,6 +35,8 @@ Both documents track their own delivery status; the test plan's phase table is t
 ### Package boundaries
 
 - `packages/core` owns UI-agnostic product logic. It must not depend on adapters, the Copilot SDK, HTTP implementations, the DOM, or browser globals. Outside behavior is represented by typed ports.
+- `packages/graph-react` owns browser-safe graph presentation: Dagre layout, React Flow nodes and edges, details, legend, and the `base.css`/`styles.css` stylesheets. It may depend only on core's browser-safe `/graph` and `/domain` subpaths, React and ReactDOM as peers, the exactly pinned `@xyflow/react`, and bundled Dagre. It must not depend on an adapter, the Copilot SDK, Node built-ins, the core root barrel, or host data fetching; hosts supply data and callbacks. Its packed `exports` are a public contract, while `./presentation` stays workspace-only for the Canvas adapter.
+- Test `packages/graph-react` with collocated unit tests (`*.test.ts`) and browser component tests (`*.browser.test.ts`, the `graph-react-component` Vitest project) for rendering, focus, lifecycle, and styling. A change to its exports, manifest, build, or stylesheets also runs `pnpm run test:integration:libraries`; a change to Canvas graph rendering also runs the owning critical journey and visual checks. Headlamp compatibility is real-host qualification: a scheduled release gate, not pull-request evidence.
 - `packages/adapter-shared` owns reusable Node adapter behavior such as managed `rad` and Bicep execution.
 - `packages/adapter-canvas` owns Copilot SDK wiring, loopback HTTP, server-rendered pages, browser behavior, and concrete external adapters.
 - Adapters may depend on core; core never depends on an adapter. Shared product behavior moves into core instead of being copied between adapters.
@@ -161,6 +163,7 @@ pnpm run lint
 pnpm run format:check
 pnpm run coverage
 pnpm run build
+pnpm run test:integration:libraries
 pnpm run test:integration:windows-process
 pnpm run test:integration:artifact
 pnpm run test:component

@@ -3,9 +3,13 @@ import coverageBaseline from "./coverage-baseline.json" with { type: "json" };
 
 export default defineConfig({
   test: {
-    projects: ["packages/*/vitest.config.ts"],
+    projects: [
+      "packages/*/vitest.config.ts",
+      "packages/graph-react/vitest.component.config.ts"
+    ],
     coverage: {
       provider: "v8",
+      reportOnFailure: true,
       reporter: ["text", "json-summary", "lcov"],
       include: [
         "packages/*/src/**/*.ts",
@@ -96,7 +100,8 @@ export default defineConfig({
         "packages/adapter-canvas/src/runtime/**":
           coverageBaseline.newlyExtracted.runtime,
         "packages/adapter-canvas/src/browser/**":
-          coverageBaseline.newlyExtracted.browser
+          coverageBaseline.newlyExtracted.browser,
+        "packages/graph-react/src/**": coverageBaseline.packages["graph-react"]
       }
     }
   }

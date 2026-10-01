@@ -54,6 +54,50 @@ const baseline = {
 };
 
 describe("coverage summary", () => {
+  it.each([
+    "/repo/packages/graph-react/src/graph.ts",
+    "C:\\repo\\packages\\graph-react\\src\\graph.ts"
+  ])(
+    "reports the extracted graph with the real baseline for %s",
+    (graphPath) => {
+      const accepted = JSON.parse(
+        readFileSync(
+          new URL("../../../../coverage-baseline.json", import.meta.url),
+          "utf8"
+        )
+      );
+      const complete = { total: 100, covered: 100, skipped: 0, pct: 100 };
+      const rows = summarizeCoverage(
+        {
+          ...summary,
+          [graphPath]: {
+            statements: complete,
+            branches: { total: 200, covered: 199, skipped: 0, pct: 99.5 },
+            functions: complete,
+            lines: complete
+          }
+        },
+        accepted
+      );
+
+      expect(accepted.packages["graph-react"].branches).toBeGreaterThanOrEqual(
+        accepted.newlyExtracted.browser.branches
+      );
+      expect(rows.find((row) => row.scope === "graph-react")).toEqual({
+        scope: "graph-react",
+        metrics: {
+          statements: { current: 100, baseline: 100, delta: 0 },
+          branches: { current: 99.5, baseline: 99.5, delta: 0 },
+          functions: { current: 100, baseline: 100, delta: 0 },
+          lines: { current: 100, baseline: 100, delta: 0 }
+        }
+      });
+      expect(formatCoverageMarkdown(rows)).toContain(
+        "| `graph-react` | 100.00% | +0.00 pp | 99.50% | +0.00 pp |"
+      );
+    }
+  );
+
   it("calculates aggregate and per-package percentages and baseline deltas", () => {
     const rows = summarizeCoverage(summary, baseline);
 

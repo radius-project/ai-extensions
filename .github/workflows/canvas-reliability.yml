@@ -48,6 +48,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Chromium for shared graph reliability
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Run extended reliability checks
         run: pnpm run test:reliability
 

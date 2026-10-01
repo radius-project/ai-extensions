@@ -3,11 +3,7 @@ import {
   createFakeBrowserScope,
   createFakeElement
 } from "../../../test/support/browser/fakes.js";
-import {
-  childComponent,
-  createGraphVendor,
-  findByClass
-} from "../../../test/support/browser/graph-vendor.js";
+import { createRecordingMount } from "../../../test/support/browser/graph-mount.js";
 import { PAGE_REGISTRY_GLOBAL } from "../globals.js";
 import { resolvePageRegistry } from "../registry.js";
 import { GRAPH_ENTRY_GLOBALS, installGraphEntry } from "./graph.js";
@@ -46,8 +42,8 @@ function baseFixture() {
 
 function fixture() {
   const base = baseFixture();
-  const vendor = createGraphVendor();
-  return { ...base, vendor };
+  const renderer = createRecordingMount();
+  return { ...base, vendor: renderer.mount, renderer };
 }
 
 function fixtureWithoutVendor() {
@@ -76,7 +72,7 @@ describe("graph browser entry", () => {
   });
 
   it("renders filtered resources with threaded options and a legend, then destroys them on teardown", () => {
-    const { browser, container, legends, vendor } = fixture();
+    const { browser, container, vendor, renderer } = fixture();
     installGraphEntry(browser.scope, vendor);
 
     const rendered = callGlobal(
@@ -102,32 +98,25 @@ describe("graph browser entry", () => {
     expect(rendered).not.toBeNull();
     // Only the one genuine resource-shaped entry became a node, threading
     // repoUrl into its source link.
-    const root = vendor.reactDom.roots[0];
-    const app = childComponent<{
-      initialNodes: ReadonlyArray<{ data: { sourceUrl: string } }>;
-    }>(root.rendered[0]);
-    expect(app.props.initialNodes).toHaveLength(1);
-    expect(app.props.initialNodes[0].data.sourceUrl).toContain(
-      "https://github.com/octo/app"
-    );
+    const root = renderer.roots[0];
+    expect(root.props.graph.resources).toHaveLength(1);
+    expect(root.props.options?.repoUrl).toBe("https://github.com/octo/app");
     // showLegend threaded through and diffMode (false) did not suppress it.
-    expect(legends.length).toBeGreaterThan(0);
-    expect(container.appended.length + legends.length).toBeGreaterThan(0);
+    expect(root.props.options?.showLegend).toBe(true);
+    expect(root.props.graph.kind).toBe("modeled");
+    expect(container.children.length).toBeGreaterThan(0);
 
     resolvePageRegistry(browser.scope).teardownAll();
-    expect(vendor.reactDom.roots.every((r) => r.unmounts > 0)).toBe(true);
+    expect(renderer.roots.every((r) => r.unmounts > 0)).toBe(true);
   });
 
   // The option allowlist here is the only thing standing between a page and a
   // silently dropped setting: the renderer takes `unknown`, so a name missing
   // from the list costs a behavior, not a type error.
-  it.each([
-    ["feature", undefined],
-    ["", "_blank"]
-  ])(
+  it.each([["feature"], [""]])(
     "threads a workspace branch of %j through to the card's source link",
-    (workspaceBranch, target) => {
-      const { browser, vendor } = fixture();
+    (workspaceBranch) => {
+      const { browser, vendor, renderer } = fixture();
       installGraphEntry(browser.scope, vendor);
 
       callGlobal(
@@ -145,22 +134,16 @@ describe("graph browser entry", () => {
         }
       );
 
-      const app = childComponent<{
-        initialNodes: ReadonlyArray<{ data: unknown }>;
-      }>(vendor.reactDom.roots[0].rendered[0]);
-      const tree = app.type(app.props) as { props: Record<string, unknown> };
-      const nodeTypes = tree.props.nodeTypes as {
-        rad: (props: { data: unknown }) => unknown;
-      };
-      const card = nodeTypes.rad({ data: app.props.initialNodes[0].data });
-      expect(
-        findByClass(card, "rad-node__source nodrag nopan nokey")?.props.target
-      ).toBe(target);
+      expect(renderer.roots[0].props.options?.workspaceBranch).toBe(
+        workspaceBranch
+      );
+      expect(renderer.roots[0].props.options?.baseBranch).toBe("main");
+      expect(renderer.roots[0].props.graph.kind).toBe("diff");
     }
   );
 
   it("treats a non-array resources argument as none and renders nothing", () => {
-    const { browser, vendor } = fixture();
+    const { browser, vendor, renderer } = fixture();
     installGraphEntry(browser.scope, vendor);
 
     const rendered = callGlobal(
@@ -172,7 +155,7 @@ describe("graph browser entry", () => {
     );
 
     expect(rendered).not.toBeNull();
-    expect(vendor.reactDom.roots).toHaveLength(0);
+    expect(renderer.roots[0].props.graph.resources).toEqual([]);
   });
 
   it("ignores a non-record options argument and a non-string container id", () => {

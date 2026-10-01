@@ -2,6 +2,7 @@
   "name": "@radius-project/core",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "description": "UI-agnostic core for the Radius Canvas product: repo modeling, application graph build/diff, compute-platform abstraction, and workflow generation. No SDK / HTTP / DOM dependencies.",
   "type": "module",
   "engines": {
@@ -11,9 +12,41 @@
   "exports": {
     ".": "./src/index.ts",
     "./graph": "./src/graph/index.ts",
+    "./domain": "./src/domain/index.ts",
     "./modeling": "./src/modeling/index.ts",
     "./platforms": "./src/platforms/index.ts",
     "./remediations": "./src/remediations.ts"
+  },
+  "files": [
+    "dist"
+  ],
+  "typesVersions": {
+    "*": {
+      "graph": [
+        "dist/graph/index.d.ts"
+      ],
+      "domain": [
+        "dist/domain/index.d.ts"
+      ]
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "main": "./dist/graph/index.js",
+    "types": "./dist/graph/index.d.ts",
+    "exports": {
+      "./graph": {
+        "types": "./dist/graph/index.d.ts",
+        "import": "./dist/graph/index.js",
+        "default": "./dist/graph/index.js"
+      },
+      "./domain": {
+        "types": "./dist/domain/index.d.ts",
+        "import": "./dist/domain/index.js",
+        "default": "./dist/domain/index.js"
+      },
+      "./package.json": "./package.json"
+    }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",

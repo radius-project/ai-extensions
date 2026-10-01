@@ -39,20 +39,21 @@ Start with the status table. Use the phase sections for the work still to come. 
 
 ## Required checks
 
-| Check                       | Required when                                                                    | What it protects                                                        |
-|-----------------------------|----------------------------------------------------------------------------------|-------------------------------------------------------------------------|
-| Focused module tests        | Every behavior change                                                            | Rules, validation, state changes, escaping, and error handling          |
-| Extension setup tests       | Canvas setup, actions, tools, lifecycle, callbacks, or branch handling change    | Registration, open, reopen, close, reconnect, and cleanup               |
-| Local API tests             | A page route, API route, cache, stream, or destructive action changes            | Requests, responses, errors, state, cleanup, and safe failure           |
-| Cancellation tests          | Async work, external calls, subprocesses, navigation, close, or shutdown changes | Leaked work, late mutation, false cancellation, and duplicate cleanup   |
-| GitHub authentication tests | Token, account, scope, package, or `gh` command behavior changes                 | Wrong identity, unsafe fallback, leaked token, and unclear auth failure |
-| Packaged-extension test     | Runtime, page, browser, dependency, build, or packaging changes                  | Missing code, duplicate setup, broken startup, and broken shutdown      |
-| Chromium behavior tests     | Browser behavior changes after Phase 6 begins                                    | Real events, focus, forms, polling, navigation, and browser rendering   |
-| End-to-end workflow tests   | A supported workflow crosses the browser and server                              | Regressions that smaller tests cannot see                               |
-| Accessibility and keyboard  | An interactive page or material page state changes after Phase 6 begins          | Unusable controls, poor focus order, missing announcements, and WCAG    |
-| Screenshot review           | A selected stable visual state changes after Phase 7 begins                      | Layout, clipping, theme, graph, and status presentation                 |
-| Real-host check             | Before release after Phase 8 qualification                                       | Installation, discovery, panel lifecycle, focus, reopen, and reconnect  |
-| Cloud E2E                   | Never required for merge; scheduled and on demand                                | That real Azure and GitHub accept what the extension sends              |
+| Check                       | Required when                                                                    | What it protects                                                                                           |
+|-----------------------------|----------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
+| Focused module tests        | Every behavior change                                                            | Rules, validation, state changes, escaping, and error handling                                             |
+| Extension setup tests       | Canvas setup, actions, tools, lifecycle, callbacks, or branch handling change    | Registration, open, reopen, close, reconnect, and cleanup                                                  |
+| Local API tests             | A page route, API route, cache, stream, or destructive action changes            | Requests, responses, errors, state, cleanup, and safe failure                                              |
+| Cancellation tests          | Async work, external calls, subprocesses, navigation, close, or shutdown changes | Leaked work, late mutation, false cancellation, and duplicate cleanup                                      |
+| GitHub authentication tests | Token, account, scope, package, or `gh` command behavior changes                 | Wrong identity, unsafe fallback, leaked token, and unclear auth failure                                    |
+| Packaged-extension test     | Runtime, page, browser, dependency, build, or packaging changes                  | Missing code, duplicate setup, broken startup, and broken shutdown                                         |
+| Chromium behavior tests     | Browser behavior changes after Phase 6 begins                                    | Real events, focus, forms, polling, navigation, and browser rendering                                      |
+| End-to-end workflow tests   | A supported workflow crosses the browser and server                              | Regressions that smaller tests cannot see                                                                  |
+| Accessibility and keyboard  | An interactive page or material page state changes after Phase 6 begins          | Unusable controls, poor focus order, missing announcements, and WCAG                                       |
+| Screenshot review           | A selected stable visual state changes after Phase 7 begins                      | Layout, clipping, theme, graph, and status presentation                                                    |
+| Real-host check             | Before release after Phase 8 qualification                                       | Installation, discovery, panel lifecycle, focus, reopen, and reconnect                                     |
+| Cloud E2E                   | Never required for merge; scheduled and on demand                                | That real Azure and GitHub accept what the extension sends                                                 |
+| Headlamp compatibility      | Never required for merge; scheduled and on demand                                | That published library candidates load and render in the real Headlamp host without changing its own graph |
 
 Tests that do not open a browser do not retry. Browser and host checks may retry once to collect useful failure information, but the original failure remains visible and a retry-only pass is recorded as flaky. Setting a check aside requires a linked issue, owner, narrow scope, and clear end condition. Safety checks cannot be skipped or set aside.
 

@@ -26,13 +26,14 @@ A stable release publishes exactly one tag, `<plugin>@<version>`, and it points 
 |----------------------------|----------------------------------|-------------------------------------------------------|
 | `plugins/*/`               | -                                | **The discovery anchor.** Plugin manifest and readme. |
 | `extensions/*/`            | the plugin name                  | **The shipped extension.** Package, skills, assets.   |
-| `packages/core/`           | `@radius-project/core`           | UI-agnostic product core.                             |
+| `packages/core/`           | `@radius-project/core`           | UI-agnostic product core and graph model library.     |
+| `packages/graph-react/`    | `@radius-project/graph-react`    | React graph renderer library.                         |
 | `packages/adapter-shared/` | `@radius-project/adapter-shared` | Shared adapter helpers.                               |
 | `packages/adapter-canvas/` | `@radius-project/adapter-canvas` | Copilot canvas adapter; builds the bundle.            |
 
-Today `plugins/` holds one entry, `radius`, paired with `extensions/radius/`. The split mirrors [`github/awesome-copilot`](https://github.com/github/awesome-copilot): `pnpm-workspace.yaml` lists `extensions/*` because that is where a plugin's `package.json` lives, while `plugins/` stays the directory the registry scans. All packages are `private: true` and none is published to a registry. The three `packages/*` entries are listed in `ignore` in [`.changeset/config.json`](../../.changeset/config.json), so their `version` fields are inert - nothing consumes them, and internal dependencies use `workspace:*`, which resolves by path rather than by range.
+Today `plugins/` holds one entry, `radius`, paired with `extensions/radius/`. The split mirrors [`github/awesome-copilot`](https://github.com/github/awesome-copilot): `pnpm-workspace.yaml` lists `extensions/*` because that is where a plugin's `package.json` lives, while `plugins/` stays the directory the registry scans. All packages are `private: true` and none is published to a registry. `@radius-project/adapter-shared` and `@radius-project/adapter-canvas` are listed in `ignore` in [`.changeset/config.json`](../../.changeset/config.json), so their `version` fields are inert - nothing consumes them, and internal dependencies use `workspace:*`, which resolves by path rather than by range. The two graph libraries, `@radius-project/core` and `@radius-project/graph-react`, declare `publishConfig.access: public` and are versioned separately from plugins with `pnpm run version:libraries`. They stay `private: true` so nothing can publish them before a publish workflow exists.
 
-Because every package is private, [`privatePackages.version`](https://changesets.dev/guide/config#privatepackages) is enabled so Changesets versions plugins it will never publish to a registry. `privatePackages.tag` is deliberately disabled: the generic Changesets tag command scans every eligible package and tags the source commit, while the release workflow must create only the selected plugin's tag, on its artifact commit. The `ignore` list keeps the internal `packages/*` workspaces inert.
+Because every package is private, [`privatePackages.version`](https://changesets.dev/guide/config#privatepackages) is enabled so Changesets versions plugins it will never publish to a registry. `privatePackages.tag` is deliberately disabled: the generic Changesets tag command scans every eligible package and tags the source commit, while the release workflow must create only the selected plugin's tag, on its artifact commit. The `ignore` list keeps the internal adapter workspaces inert.
 
 Each plugin package owns a `build` script that assembles its own `.artifacts/<name>/`. That is the contract CI relies on: `pnpm --filter <plugin> run build` is how any plugin is built, so a new one plugs in without touching a workflow. The output is git-ignored and never assembled in place; on a release branch, the assembled tree is published at `plugins/<name>/`, while `extensions/<name>/` remains source-only on `main`.
 
@@ -120,7 +121,7 @@ Nothing in the release pipeline is keyed to `radius`, so a second plugin is a di
 
 ## If a package is ever published
 
-Publishing (say) `@radius-project/core` so third parties can build their own adapters would change the model: remove it from `ignore` in `.changeset/config.json`, flip `private` to `false`, and start naming it in changesets alongside the plugins. Nothing here has to be undone first - the `ignore` list is the only thing standing between this setup and full independent per-package versioning.
+The graph libraries are already versioned independently, so publishing them, for example for the Radius Dashboard, needs two changes: flip `private` to `false` in both manifests and the packed-manifest check in `scripts/library-artifacts.mjs`, and add a workflow step that publishes the packed tarballs. Publishing an adapter workspace would also mean removing it from `ignore` in `.changeset/config.json`.
 
 ## What the edge channel does
 

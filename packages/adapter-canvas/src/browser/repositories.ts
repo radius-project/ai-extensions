@@ -11,7 +11,8 @@
 // than dispatched with an empty branch the server would resolve to the
 // repository default.
 
-import { escapeBrowserHtml, hasClassToken } from "./html.js";
+import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
+import { hasClassToken } from "./html.js";
 import { isRecord, readArray, readString } from "./json.js";
 import type { EntryScope } from "./lifecycle.js";
 import type {

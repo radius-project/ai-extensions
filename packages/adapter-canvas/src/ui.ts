@@ -10,17 +10,13 @@
 // values.
 
 import { escapeHtml } from "./shared.js";
+import { radiusBrandMarkSvg } from "@radius-project/graph-react/brand";
 import { ICON_APP, ICON_ENV, ICON_DEP } from "./navicons.js";
 
-// The Radius brand mark (orange dial). `size` in px.
+// The Radius brand mark (orange dial), owned by the shared graph library so the
+// canvas and every other host draw the same mark. `size` in px.
 export function radiusMark(size = 28) {
-  return (
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="${size}" height="${size}" aria-hidden="true">` +
-    `<circle cx="64" cy="64" r="64" fill="var(--rad-brand, #da4c2a)"/>` +
-    `<circle cx="64" cy="64" r="56" fill="var(--rad-brand-dark, #bb311e)" opacity="0.3"/>` +
-    `<line x1="64" y1="64" x2="34" y2="28" stroke="#fff" stroke-width="7" stroke-linecap="round"/>` +
-    `<circle cx="64" cy="64" r="8" fill="#fff"/></svg>`
-  );
+  return radiusBrandMarkSvg({ size });
 }
 
 // Top-level navigation: Applications / Environments / Deployments.

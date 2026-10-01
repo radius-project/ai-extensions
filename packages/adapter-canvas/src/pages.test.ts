@@ -25,7 +25,7 @@ const sampleResources = [
   {
     id: "app/web",
     name: "web",
-    type: "Applications.Core/containers",
+    type: "Radius.Compute/containers",
     connections: []
   }
 ];
@@ -136,9 +136,10 @@ describe("remaining pages smoke-render without removed tokens", () => {
     // A var(--rad-foo, <fallback>) whose token is never defined silently
     // paints its light-only fallback in every theme (e.g. the --rad-muted
     // regression). Guard every page against undefined --rad-* references.
+    // The shared renderer also defines per-node defaults as quoted JS style keys.
     const shell = pageShell("t", "");
     const defined = new Set(
-      [...shell.matchAll(/(--rad-[a-z0-9-]+)\s*:/g)].map((m) => m[1])
+      [...shell.matchAll(/(--rad-[a-z0-9-]+)["']?\s*:/g)].map((m) => m[1])
     );
     const html = cases
       .flatMap(([, primary, secondary]) => [primary(), secondary?.() || ""])

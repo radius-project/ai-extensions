@@ -826,15 +826,23 @@ describe("hasRadiusApplicationModel", () => {
     [
       "the current Radius application type",
       "resource app 'Radius.Core/applications@2025-08-01-preview' = {}\n"
-    ],
-    [
-      "the legacy Radius application type",
-      "resource app 'Applications.Core/applications@2023-10-01-preview' = {}\n"
     ]
   ])("recognizes a root app.bicep containing %s", async (_label, content) => {
     const testWorkspace = await workspace({ "app.bicep": content });
     try {
       expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(true);
+    } finally {
+      await testWorkspace.cleanup();
+    }
+  });
+
+  it("rejects a root app.bicep declaring a retired Applications.Core application", async () => {
+    const testWorkspace = await workspace({
+      "app.bicep":
+        "resource app 'Applications.Core/applications@2023-10-01-preview' = {}\n"
+    });
+    try {
+      expect(await hasRadiusApplicationModel(testWorkspace.dir)).toBe(false);
     } finally {
       await testWorkspace.cleanup();
     }
