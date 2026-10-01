@@ -8,7 +8,10 @@ import type {
 } from "./environments-types.js";
 import { classifyVerifyFailure } from "./verify-failure-classification.js";
 import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
-import { isWorkflowReadLimitError } from "@radius-project/adapter-shared";
+import {
+  createWorkflowReadBudget,
+  isWorkflowReadLimitError
+} from "@radius-project/adapter-shared";
 
 // The `environments` family, minus `POST /api/create-environment`, which is
 // large enough to live in its own `create-environment*.ts` seams. The five
@@ -501,13 +504,38 @@ export async function handleBypassVerification(
       return;
     }
 
+    const scope = dependencies.readInstanceEntry(
+      context.instanceId
+    )?.observation;
+    if (!scope) {
+      json(503, { error: "Workflow observation stopped." });
+      return;
+    }
+    const observationStopped = (): boolean =>
+      scope.stopped ||
+      dependencies.readInstanceEntry(context.instanceId)?.observation !== scope;
+    if (observationStopped()) {
+      json(503, { error: "Workflow observation stopped." });
+      return;
+    }
+    const observation = scope.observe(
+      selectedExecutor,
+      WORKFLOW_READ_LIMITS.verificationMs
+    );
+    const readVariables = createWorkflowReadBudget(
+      (args, options) => selectedExecutor.run(args, options),
+      20000,
+      undefined,
+      observation.context
+    );
+
     // 3. Confirm the target is a Radius-managed environment, reading under the
     //    pinned executor so the check runs as the authorized identity — not the
     //    server's ambient gh auth. Anything without the RADIUS_MANAGED marker
     //    was not created by this extension and is not a valid bypass target.
     let managed = false;
     try {
-      const varsResult = await selectedExecutor.run(
+      const varsResult = await readVariables(
         [
           "api",
           `/repos/${repo}/environments/${encodeURIComponent(
@@ -528,11 +556,19 @@ export async function handleBypassVerification(
         .map((line) => line.trim())
         .includes("RADIUS_MANAGED");
     } catch (e) {
+      if (observationStopped()) {
+        json(503, { error: "Workflow observation stopped." });
+        return;
+      }
       json(502, {
         error:
           "Could not confirm the environment before recording a bypass: " +
           dependencies.errorMessage(e)
       });
+      return;
+    }
+    if (observationStopped()) {
+      json(503, { error: "Workflow observation stopped." });
       return;
     }
     if (!managed) {
@@ -548,11 +584,6 @@ export async function handleBypassVerification(
     //    falling through to the outer client-error handler. Only a terminal run
     //    that genuinely *failed* (not cancelled, timed out or skipped) and whose
     //    classification is a bypassable category is allowed through.
-    const entry = dependencies.readInstanceEntry(context.instanceId);
-    const observation = entry?.observation?.observe(
-      selectedExecutor,
-      WORKFLOW_READ_LIMITS.verificationMs
-    );
     let detail: Awaited<ReturnType<typeof dependencies.getRunDetail>>;
     try {
       detail = await dependencies.getRunDetail(
@@ -562,7 +593,7 @@ export async function handleBypassVerification(
         observation
       );
     } catch (e) {
-      if (entry?.observation?.stopped) {
+      if (observationStopped()) {
         json(503, { error: "Workflow observation stopped." });
         return;
       }
@@ -573,7 +604,7 @@ export async function handleBypassVerification(
       });
       return;
     }
-    if (entry?.observation?.stopped) {
+    if (observationStopped()) {
       json(503, { error: "Workflow observation stopped." });
       return;
     }
@@ -619,7 +650,7 @@ export async function handleBypassVerification(
           observation
         )) || "";
     } catch (e) {
-      if (entry?.observation?.stopped) {
+      if (observationStopped()) {
         json(503, { error: "Workflow observation stopped." });
         return;
       }
@@ -630,7 +661,7 @@ export async function handleBypassVerification(
       });
       return;
     }
-    if (entry?.observation?.stopped) {
+    if (observationStopped()) {
       json(503, { error: "Workflow observation stopped." });
       return;
     }
