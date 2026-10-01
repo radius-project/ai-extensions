@@ -1,33 +1,18 @@
-import {
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync
-} from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { cliExec } from "./gh.js";
-import {
-  ARTIFACT_PAGE_SIZE,
-  MAX_ARTIFACT_PAGES,
-  DEPLOY_STATUS_ARTIFACT_PREFIX,
-  isLiveSlotArtifactName,
-  createDeployStatusReader as createCoreDeployStatusReader,
-  deployStatusKeys,
-  lookupDeployStatus
-} from "@radius-project/core";
+import { cliExec, redactGhCredentials } from "./gh.js";
+import { deployStatusKeys, lookupDeployStatus } from "@radius-project/core";
 import type {
-  ArtifactFiles,
   DeployStatus,
   DeployProgress,
-  DeployProgressResource,
-  DeployStatusReaderOptions as CoreDeployStatusReaderOptions,
-  ListArtifacts,
-  DownloadArtifact,
-  WorkflowArtifact
+  DeployProgressResource
 } from "@radius-project/core";
-
+import {
+  createWorkflowArtifactReader,
+  createWorkflowArtifactReads
+} from "@radius-project/adapter-shared";
+import type {
+  WorkflowRunner,
+  WorkflowArtifactReaderOptions
+} from "@radius-project/adapter-shared";
 export {
   DEPLOY_STATUS_FILES,
   DEPLOY_STATUS_ARTIFACT_PREFIX,
@@ -52,196 +37,30 @@ export type {
   DownloadArtifact,
   ReaderStatus
 } from "@radius-project/core";
+export type { WorkflowArtifactReaderOptions as DeployStatusReaderOptions } from "@radius-project/adapter-shared";
 
-export type DeployStatusReaderOptions = Omit<
-  CoreDeployStatusReaderOptions,
-  "listArtifacts" | "downloadArtifact"
-> & {
-  listArtifacts?: ListArtifacts;
-  downloadArtifact?: DownloadArtifact;
-};
-
-export function createDeployStatusReader(options: DeployStatusReaderOptions) {
-  return createCoreDeployStatusReader({
-    ...options,
-    allowApplicationFallback: options.allowApplicationFallback ?? true,
-    listArtifacts: options.listArtifacts ?? listWorkflowArtifacts,
-    downloadArtifact: options.downloadArtifact ?? downloadWorkflowArtifact
-  });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function ghJsonArray(args: string[], timeout = 20000): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    cliExec("gh", args, { timeout }, (err, stdout, stderr) => {
-      if (err) {
-        const text = String(stderr || err.message || "");
-        const error: Error & { code?: string } = new Error(text);
-        // 403/401 on an artifact read means the credential cannot see this
-        // repo's Actions data; retrying will not fix it, so classify it apart
-        // from a transient failure.
-        if (/HTTP 40[13]\b/.test(text) || /\bForbidden\b/i.test(text))
-          error.code = "GH_ARTIFACT_AUTH";
-        reject(error);
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout.trim() || "null"));
-      } catch (e) {
-        reject(e);
-      }
+const run: WorkflowRunner = (args, options) =>
+  new Promise((resolve) => {
+    cliExec("gh", args, options, (error, stdout, stderr) => {
+      resolve({
+        code: error ? (error.code ?? 1) : 0,
+        stdout,
+        stderr: redactGhCredentials(stderr || error?.message || "")
+      });
     });
   });
-}
-
-/**
- * listWorkflowArtifacts - list artifacts for one run when `runId` is given, else
- * the newest artifacts across the repo.
- *
- * The per-run endpoint is what makes live status possible: it is readable while
- * the run is still in progress. The repo-wide endpoint returns newest-first and
- * is how a fresh canvas session finds the last deploy without knowing a run id.
- *
- * The repo-wide read is paginated, which matters more than it looks. A single
- * page covers the newest 100 artifacts in the ENTIRE repository, and a repo
- * whose CI uploads test reports or build output on every push can easily produce
- * that many between two deploys. Reading only the first page would push the
- * deploy-status artifact off the end and render "Nothing deployed yet" for an
- * application that is in fact deployed — the exact symptom this transport
- * exists to eliminate.
- *
- * Paging stops as soon as a page yields a non-live-slot artifact matching
- * `namePrefix`, because the listing is newest-first and nothing better can
- * appear later. Live-slot names are ignored by the stop predicate even though
- * they carry the prefix: a repo-wide read discards them (their sequences are
- * only comparable within one run), and stopping on a page that holds only
- * live slots would hide the previous deploy's terminal artifact sitting on
- * the next page. Paging also stops at a short page (end of the list) or the
- * page budget, so a repo with no deploy-status artifact at all costs a
- * bounded number of calls rather than walking its entire artifact history.
- */
-export const listWorkflowArtifacts: ListArtifacts = async (
-  repo,
-  runId,
-  namePrefix
-) => {
-  // A single run has few artifacts, so one page always covers it.
-  if (runId) {
-    const data = await ghJsonArray([
-      "api",
-      `/repos/${repo}/actions/runs/${runId}/artifacts?per_page=${ARTIFACT_PAGE_SIZE}`
-    ]);
-    if (!isRecord(data) || !Array.isArray(data.artifacts)) return [];
-    return data.artifacts.filter((a): a is WorkflowArtifact => isRecord(a));
-  }
-
-  const found: WorkflowArtifact[] = [];
-  const prefix = namePrefix || DEPLOY_STATUS_ARTIFACT_PREFIX;
-  for (let page = 1; page <= MAX_ARTIFACT_PAGES; page++) {
-    const data = await ghJsonArray([
-      "api",
-      `/repos/${repo}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=${page}`
-    ]);
-    if (!isRecord(data) || !Array.isArray(data.artifacts)) break;
-    const batch = data.artifacts.filter((a): a is WorkflowArtifact =>
-      isRecord(a)
-    );
-    found.push(...batch);
-    if (
-      batch.some(
-        (a) =>
-          typeof a.name === "string" &&
-          a.name.startsWith(prefix) &&
-          !isLiveSlotArtifactName(a.name)
-      )
-    )
-      break;
-    if (batch.length < ARTIFACT_PAGE_SIZE) break; // end of the listing
-  }
-  return found;
-};
-
-/**
- * downloadWorkflowArtifact - download an artifact and return its files keyed by
- * name.
- *
- * Uses `gh run download`, which handles the redirect to blob storage, the auth
- * header, and the unzip. Reaching for the REST zip endpoint directly would mean
- * carrying a ZIP decoder in this repo for no benefit — Node has none built in.
- *
- * Only text files are read back; a file too large to be a status document is
- * skipped rather than loaded into memory.
- */
-export const downloadWorkflowArtifact: DownloadArtifact = async (
-  repo,
-  artifact
-) => {
-  const runId = artifact?.workflow_run?.id;
-  if (!runId || !artifact?.name) return null;
-  const dir = mkdtempSync(path.join(os.tmpdir(), "rad-deploy-artifact-"));
-  try {
-    await new Promise<void>((resolve, reject) => {
-      cliExec(
-        "gh",
-        [
-          "run",
-          "download",
-          String(runId),
-          "--name",
-          artifact.name,
-          "--dir",
-          dir,
-          "--repo",
-          repo
-        ],
-        { timeout: 60000 },
-        (err, _stdout, stderr) => {
-          if (err) {
-            const text = String(stderr || err.message || "");
-            const error: Error & { code?: string } = new Error(text);
-            if (/HTTP 40[13]\b/.test(text) || /\bForbidden\b/i.test(text))
-              error.code = "GH_ARTIFACT_AUTH";
-            reject(error);
-            return;
-          }
-          resolve();
-        }
-      );
-    });
-    return readArtifactDir(dir);
-  } finally {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
-  }
-};
-
-const MAX_ARTIFACT_FILE_BYTES = 8 * 1024 * 1024;
-
-function readArtifactDir(dir: string): ArtifactFiles {
-  const files: ArtifactFiles = {};
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return files;
-  }
-  for (const name of names) {
-    const full = path.join(dir, name);
-    try {
-      const info = statSync(full);
-      if (!info.isFile() || info.size > MAX_ARTIFACT_FILE_BYTES) continue;
-      files[name] = readFileSync(full, "utf8");
-    } catch {
-      /* skip unreadable entries */
-    }
-  }
-  return files;
+export const { listWorkflowArtifacts, downloadWorkflowArtifact } =
+  createWorkflowArtifactReads(run);
+export function createDeployStatusReader(
+  options: WorkflowArtifactReaderOptions
+) {
+  return createWorkflowArtifactReader(
+    {
+      ...options,
+      allowApplicationFallback: options.allowApplicationFallback ?? true
+    },
+    run
+  );
 }
 
 /**

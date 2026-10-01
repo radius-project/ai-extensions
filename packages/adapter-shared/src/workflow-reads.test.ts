@@ -7,6 +7,7 @@ import type {
 import {
   readWorkflowRun,
   readWorkflowLog,
+  readWorkflowLogWithMetadata,
   selectedWorkflowJson,
   SelectedGhAuthorizationError,
   isGitHubRateLimitError,
@@ -77,6 +78,73 @@ describe("selected-account workflow reads", () => {
 });
 
 describe("workflow execution failure boundaries", () => {
+  it("returns missing JSON when a returned 404 has accessible repository evidence", async () => {
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) =>
+        args[1] === "repos/org/app" ?
+          { code: 0, stdout: "org/app", stderr: "" }
+        : { code: 1, stdout: "", stderr: "HTTP 404" }
+    });
+    await expect(
+      selectedWorkflowJson(executor, "org/app", ["api", "fixture"])
+    ).resolves.toEqual({ state: "missing" });
+  });
+  it("retains a masked returned JSON 404 authorization error", async () => {
+    const executor = successfulSelectedGhExecutor({
+      run: async () => ({ code: 1, stdout: "", stderr: "HTTP 404" })
+    });
+    await expect(
+      selectedWorkflowJson(executor, "org/app", ["api", "fixture"])
+    ).rejects.toMatchObject({ status: 404, login: "alice" });
+  });
+  it.each([
+    "HTTP 401",
+    "HTTP 403",
+    "Resource protected by organization SAML enforcement"
+  ])(
+    "preserves selected JSON helper returned authorization: %s",
+    async (stderr) => {
+      const executor = successfulSelectedGhExecutor({
+        run: async () => ({ code: 1, stdout: "", stderr })
+      });
+      await expect(
+        selectedWorkflowJson(executor, "org/app", ["api", "fixture"])
+      ).rejects.toBeInstanceOf(SelectedGhAuthorizationError);
+    }
+  );
+  it.each(["{", "[]"])(
+    "preserves the legacy selected JSON helper for %s",
+    async (stdout) => {
+      const executor = successfulSelectedGhExecutor({
+        run: async () => ({ code: 0, stdout, stderr: "" })
+      });
+      expect(
+        await selectedWorkflowJson(executor, "org/app", ["api", "fixture"])
+      ).toEqual(
+        stdout === "{" ? { state: "fallback" } : { state: "value", value: [] }
+      );
+    }
+  );
+
+  it("explicitly marks formatted log transport metadata unavailable", async () => {
+    expect(
+      await readWorkflowLogWithMetadata(
+        {
+          mode: "ambient",
+          run: async () => ({
+            code: 0,
+            stdout: "Retry-After: 1\nHTTP 429",
+            stderr: ""
+          })
+        },
+        "org/app",
+        41
+      )
+    ).toEqual({
+      value: "Retry-After: 1\nHTTP 429",
+      metadata: { source: "unavailable", reason: "opaque-command" }
+    });
+  });
   it("keeps returned rate-limit responses pollable and returned masked 404 authorization explicit", async () => {
     for (const stderr of ["HTTP 429", "HTTP 403 Retry-After: 60"]) {
       const executor = successfulSelectedGhExecutor({
@@ -269,21 +337,21 @@ describe("workflow execution failure boundaries", () => {
     expect(await fetchRunLog(repo, 41, log)).toBeNull();
   });
 
-  it("does not retry status-only missing or malformed evidence", async () => {
-    for (const final of ["null", "[]", "{}"]) {
+  it("does not repeat a run GET with missing or malformed evidence", async () => {
+    for (const final of ["null", "[]"]) {
       const executor = scripted(
-        [ok("[]"), ok(final)],
+        [ok(`HTTP/2 200\n\n${final}`)],
         [
-          commandArgs,
-          ["run", "view", "41", "--json", "status,conclusion", "--repo", repo]
+          [
+            "api",
+            "repos/org/app/actions/runs/41",
+            "--include",
+            "--method",
+            "GET"
+          ]
         ]
       );
-      const result = await getRunDetail(repo, 41, executor);
-      expect(result).toEqual(
-        final === "{}" ?
-          { status: undefined, conclusion: undefined, jobs: [], steps: [] }
-        : null
-      );
+      expect(await getRunDetail(repo, 41, executor)).toBeNull();
     }
   });
 
@@ -349,8 +417,8 @@ describe("selected-account workflow reads", () => {
       login: "alice",
       run: async (args) => {
         calls.push(args);
-        return args[0] === "api" ?
-            { code: 0, stdout: "contoso/store", stderr: "" }
+        return args[1] === "repos/contoso/store" ?
+            { code: 0, stdout: "HTTP/2 200\n\n{}", stderr: "" }
           : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
       }
     });
@@ -358,7 +426,10 @@ describe("selected-account workflow reads", () => {
     await expect(
       getRunDetail("contoso/store", "41", executor)
     ).resolves.toBeNull();
-    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
+    expect(calls.map((args) => args[1])).toEqual([
+      "repos/contoso/store/actions/runs/41",
+      "repos/contoso/store"
+    ]);
   });
 
   it.each([["run detail", 403, "detail"]])(
@@ -385,7 +456,7 @@ describe("selected-account workflow reads", () => {
     }
   );
 
-  it("keeps transient selected-account run detail pollable after its fallback", async () => {
+  it("keeps transient selected-account run detail pollable without an immediate retry", async () => {
     let calls = 0;
     const executor = successfulSelectedGhExecutor({
       login: "alice",
@@ -402,7 +473,7 @@ describe("selected-account workflow reads", () => {
     await expect(
       getRunDetail("contoso/store", "41", executor)
     ).resolves.toBeNull();
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
   });
 
   it("surfaces selected-account authorization failure while reading a failed run log", async () => {

@@ -1636,33 +1636,36 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     const execution: WorkflowExecution = {
       mode: "ambient",
       run: async (args, options) => {
-        if (
-          args.join(" ") ===
-          "run view 77 --json status,conclusion,jobs --repo acme/widgets"
-        ) {
-          record("get-run-detail");
-          expect(options).toEqual({ timeout: 15000 });
+        if (args[0] === "api") {
+          if (!args[1].includes("/jobs")) record("get-run-detail");
+          expect(options.timeout).toBeGreaterThan(0);
+          expect(options.timeout).toBeLessThanOrEqual(15000);
           return {
             code: 0,
             stderr: "",
-            stdout: JSON.stringify({
-              status: "completed",
-              conclusion,
-              jobs: [
-                {
-                  steps: [
-                    {
-                      name:
-                        conclusion === "success" ? "Run rad commands" : (
-                          "Azure Login (OIDC)"
-                        ),
-                      status: "completed",
-                      conclusion
-                    }
-                  ]
-                }
-              ]
-            })
+            stdout:
+              "HTTP/2 200\n\n" +
+              JSON.stringify(
+                args[1].includes("/jobs") ?
+                  {
+                    total_count: 1,
+                    jobs: [
+                      {
+                        steps: [
+                          {
+                            name:
+                              conclusion === "success" ? "Run rad commands" : (
+                                "Azure Login (OIDC)"
+                              ),
+                            status: "completed",
+                            conclusion
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                : { status: "completed", conclusion }
+              )
           };
         }
         if (

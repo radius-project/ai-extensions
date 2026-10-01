@@ -406,7 +406,7 @@ export function isRepoNotFoundError(errText?: string | null): boolean {
 
 function workflowExecution(executor?: SelectedGhExecutor): WorkflowExecution {
   return executor ?
-      { mode: "selected", executor }
+      { mode: "selected", executor, prepare: () => executor.verifyIdentity() }
     : {
         mode: "ambient",
         run: (args, options) =>
@@ -414,7 +414,7 @@ function workflowExecution(executor?: SelectedGhExecutor): WorkflowExecution {
             // Resolve CLI callback failures as nonzero results rather than rejecting,
             // preserving ambient readers' null/status-fallback behavior.
             cliExec("gh", args, options, (error, stdout, stderr) => {
-              resolve({ code: error ? 1 : 0, stdout, stderr });
+              resolve({ code: error ? (error.code ?? 1) : 0, stdout, stderr });
             });
           })
       };
