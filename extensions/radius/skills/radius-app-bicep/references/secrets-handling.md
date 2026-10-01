@@ -228,20 +228,23 @@ A data store or broker that Radius provisions is created with the username you g
 
 ### Choosing the value
 
-Use `myadmin` unless the user asks for a username or the application fixes one. To decide, find the username the client's authentication call receives (or the user part of its URI) and trace it back through the checked-in source:
+**When refreshing a model, keep the username it already has.** If the existing `.radius/app.bicep` sets `username` on the same resource (same type and `name`), keep that value and skip the rules below, unless the user asks to change it. Azure and AWS do not allow renaming a database's administrator login, so a changed username fails the next deploy against the existing server. Still re-bind every consumer to it as [One username, one source](#one-username-one-source) requires. If rule 3 below finds the application fixes a different value, stop and report the conflict instead of changing either one.
+
+For a new resource, use `myadmin` unless the user asks for a username or the application fixes one. To decide, find the username the client's authentication call receives (or the user part of its URI) and trace it back through the checked-in source:
 
 1. **The user asks for a username.** Use it. Compose, `.env`, Helm, and Kubernetes files are not a request.
-2. **The trace reaches something a container can set:** an environment variable (even with a fallback such as `process.env.QUEUE_USER || 'guest'`), a command-line argument, or a framework setting that environment variables override, such as ASP.NET Core `RabbitMQ__UserName` or Spring Boot `SPRING_RABBITMQ_USERNAME`. If the read can't be traced, for example inside a prebuilt library, the environment variable the selected profile sets counts. Use `myadmin` and set that variable on every consumer.
-3. **The trace ends at a literal nothing can override:** a string in the connection code, or a checked-in config file read with no environment override. The application fixes this login. Use that exact value. If the [Azure provider value rules](azure-provider-value-rules.md) for the selected Recipe reject it, stop and report the conflict. Do not rename it.
+2. **The trace reaches something a container can set:** an environment variable (even with a fallback such as `process.env.QUEUE_USER || 'guest'`), a command-line argument, or a framework setting that environment variables override, such as ASP.NET Core `RabbitMQ__UserName` or Spring Boot `SPRING_RABBITMQ_USERNAME`. If the read can't be traced, for example inside a prebuilt library, the environment variable the selected profile sets counts; if the profile sets none either, stop and report that the username source could not be found. Use `myadmin`, and on each consumer set the variable that consumer reads.
+3. **The trace ends at a literal nothing can override:** a string in the connection code, or a checked-in config file read with no environment override. The application fixes this login. Use that exact value. If the type's schema description or the [Azure provider value rules](azure-provider-value-rules.md) for the selected Recipe rule it out, such as RabbitMQ `guest`, which works only over loopback, stop and report the conflict. Do not rename it.
 
-| What the authentication call receives                                              | Rule | Username                              |
-|------------------------------------------------------------------------------------|------|---------------------------------------|
-| `process.env.ORDER_QUEUE_USERNAME`, which Compose sets to `username`               | 2    | `myadmin`; set `ORDER_QUEUE_USERNAME` |
-| `process.env.QUEUE_USER \|\| 'guest'`                                              | 2    | `myadmin`; set `QUEUE_USER`           |
-| `builder.Configuration["RabbitMQ:UserName"]`; `appsettings.json` sets `shop`       | 2    | `myadmin`; set `RabbitMQ__UserName`   |
-| Read inside a prebuilt library; Compose sets `QUEUE_USER=orders`                   | 2    | `myadmin`; set `QUEUE_USER`           |
-| `amqp.connect('amqp://shop:' + password + '@' + host)`                             | 3    | `shop`                                |
-| `config['queue']['user']` from a checked-in `config.ini`, with no environment read | 3    | the value in `config.ini`             |
+| What the authentication call receives                                              | Rule | Username                                  |
+|------------------------------------------------------------------------------------|------|-------------------------------------------|
+| `process.env.ORDER_QUEUE_USERNAME`, which Compose sets to `username`               | 2    | `myadmin`; set `ORDER_QUEUE_USERNAME`     |
+| `process.env.QUEUE_USER \|\| 'guest'`                                              | 2    | `myadmin`; set `QUEUE_USER`               |
+| `amqp.connect('amqp://guest:guest@' + host)`                                       | 3    | stop and report: schema rules out `guest` |
+| `builder.Configuration["RabbitMQ:UserName"]`; `appsettings.json` sets `shop`       | 2    | `myadmin`; set `RabbitMQ__UserName`       |
+| Read inside a prebuilt library; Compose sets `QUEUE_USER=orders`                   | 2    | `myadmin`; set `QUEUE_USER`               |
+| `amqp.connect('amqp://shop:' + password + '@' + host)`                             | 3    | `shop`                                    |
+| `config['queue']['user']` from a checked-in `config.ini`, with no environment read | 3    | the value in `config.ini`                 |
 
 `myadmin` fits the Azure PostgreSQL, MySQL, and SQL username rules and avoids `guest`, which RabbitMQ restricts to loopback connections. Record the rule and the file and line the trace ended at in the requirement ledger, so a regeneration reaches the same answer. Do not add a username to a type whose schema defines none.
 

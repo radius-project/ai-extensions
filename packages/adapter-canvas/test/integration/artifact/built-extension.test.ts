@@ -912,6 +912,20 @@ describe("P0-C built Radius extension artifact", () => {
       /\|\s*`process\.env\.ORDER_QUEUE_USERNAME`, which Compose sets to `username`\s*\|\s*2\s*\|\s*`myadmin`; set `ORDER_QUEUE_USERNAME`\s*\|/u
     );
     expect(secretsGuidance).not.toMatch(/\|\s*4\s*\|/u);
+    // A cloud database admin login can't be renamed, so a refresh must keep
+    // the username the existing model set.
+    expect(secretsGuidance).toContain(
+      "**When refreshing a model, keep the username it already has.**"
+    );
+    expect(skillGuidance).toContain(
+      "Keep every provisioned service username the existing model sets."
+    );
+    expect(secretsGuidance).toContain(
+      "if the profile sets none either, stop and report that the username source could not be found"
+    );
+    expect(secretsGuidance).toMatch(
+      /\|\s*`amqp\.connect\('amqp:\/\/guest:guest@' \+ host\)`\s*\|\s*3\s*\|\s*stop and report/u
+    );
     // A shared username var must land in the same place with the same name
     // on every regeneration.
     expect(secretsGuidance).toContain(
