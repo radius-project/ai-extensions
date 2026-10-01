@@ -205,7 +205,8 @@ const FAKE_CLI_ENV_KEYS = [
   "RADIUS_FAKE_CLI_SCENARIO",
   "RADIUS_FAKE_CLI_LOG",
   "RADIUS_RAD_BINARY",
-  "RADIUS_RAD_SKIP_VERSION_CHECK"
+  "RADIUS_RAD_SKIP_VERSION_CHECK",
+  "RADIUS_GRAPH_CACHE_DIR"
 ] as const;
 
 /**
@@ -266,6 +267,9 @@ export function planHarnessProcess(
   // The shim has no version to report. A real `rad` must answer the product's
   // version check, so cloud mode deliberately leaves this unset.
   env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+  // Scenarios script different graphs for the same model, so a cached compile
+  // from an earlier step must never answer a later one.
+  env.RADIUS_GRAPH_CACHE_DIR = "off";
   return { env, unsetEnv: [], useFakeCli: true, interceptFetch: true };
 }
 
@@ -1288,6 +1292,7 @@ export class CanvasHarness {
       "RADIUS_FAKE_CLI_LOG",
       "RADIUS_RAD_BINARY",
       "RADIUS_RAD_SKIP_VERSION_CHECK",
+      "RADIUS_GRAPH_CACHE_DIR",
       "RADIUS_CREDENTIALS_FILE"
     ];
     const originalEnv = Object.fromEntries(
