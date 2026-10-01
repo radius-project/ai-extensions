@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { observeWorkflowRun } from "@radius-project/core";
+import { createWorkflowReadSession } from "./workflow-read-budget.js";
 import {
   readWorkflowRun,
   readWorkflowRunWithMetadata,
   SelectedGhAuthorizationError,
   type WorkflowCommandResult,
   type WorkflowExecution,
+  type WorkflowReadRequest,
   type WorkflowRunner
 } from "./workflow-reads.js";
 
@@ -56,6 +58,232 @@ function scripted(
 afterEach(() => vi.useRealTimers());
 
 describe("bounded REST workflow detail composition", () => {
+  describe.each(["run", "jobs"] as const)("%s policy outcomes", (phase) => {
+    it.each([false, true])(
+      "keeps legacy temporary failures one-shot (selected=%s)",
+      async (selected) => {
+        const { execution, run } = scripted(
+          [...(phase === "jobs" ? [reply(runData)] : []), reply({}, 503)],
+          selected
+        );
+        const result = await readWorkflowRunWithMetadata(
+          execution,
+          "org/app",
+          41
+        );
+        expect(result).toMatchObject({
+          reason: "read-failed",
+          completeness: phase === "run" ? "unavailable" : "status-only"
+        });
+        expect(result.decision).toBeUndefined();
+        expect(run).toHaveBeenCalledTimes(phase === "run" ? 1 : 2);
+      }
+    );
+
+    it.each(["timeout", "cancelled"] as const)(
+      "reports %s before admission without a phase GET",
+      async (reason) => {
+        let now = 0;
+        const controller = new AbortController();
+        const context = createWorkflowReadSession({
+          monotonic: () => now,
+          wall: () => 0,
+          sleep: async () => {
+            throw new Error("Unexpected retry");
+          },
+          jitter: () => 0
+        }).observe(15000, controller.signal);
+        const interrupt = () => {
+          if (reason === "cancelled") controller.abort();
+          else now = 15000;
+        };
+        const request: WorkflowReadRequest = {
+          context,
+          identity: "alice",
+          onDecision: (decision) => {
+            if (decision.state === "ready") interrupt();
+          }
+        };
+        if (phase === "run") interrupt();
+        const { execution, run } = scripted(
+          phase === "jobs" ? [reply(runData)] : [],
+          true
+        );
+
+        const result = await readWorkflowRunWithMetadata(
+          execution,
+          "org/app",
+          41,
+          request
+        );
+
+        expect(result).toMatchObject({
+          reason,
+          completeness: phase === "run" ? "unavailable" : "status-only",
+          value:
+            phase === "run" ? null : (
+              { data: { conclusion: "failure" }, includeJobs: false }
+            ),
+          decision:
+            reason === "cancelled" ?
+              { state: "stopped", reason: "cancelled" }
+            : { state: "exhausted", reason: "elapsed" }
+        });
+        expect(result.evidence).toEqual([
+          ...(phase === "jobs" ?
+            [
+              {
+                phase: "run",
+                response: expect.objectContaining({ status: 200 })
+              }
+            ]
+          : []),
+          { phase, response: { source: "unavailable", reason } }
+        ]);
+        expect(run).toHaveBeenCalledTimes(phase === "run" ? 0 : 1);
+      }
+    );
+
+    it.each(["timeout", "cancelled"] as const)(
+      "retains %s and HTTP evidence when interrupted during retry",
+      async (reason) => {
+        let now = 0;
+        const controller = new AbortController();
+        const sleep = vi.fn(async () => {
+          if (reason === "cancelled") controller.abort();
+          else now = 15000;
+        });
+        const context = createWorkflowReadSession({
+          monotonic: () => now,
+          wall: () => 0,
+          sleep,
+          jitter: () => 0
+        }).observe(15000, controller.signal);
+        const { execution, run } = scripted(
+          [...(phase === "jobs" ? [reply(runData)] : []), reply({}, 503)],
+          true
+        );
+        const result = await readWorkflowRunWithMetadata(
+          execution,
+          "org/app",
+          41,
+          { context, identity: "alice" }
+        );
+        expect(result).toMatchObject({
+          reason,
+          completeness: phase === "run" ? "unavailable" : "status-only",
+          value:
+            phase === "run" ? null : (
+              { data: { conclusion: "failure" }, includeJobs: false }
+            )
+        });
+        expect(result.evidence.slice(-2)).toEqual([
+          { phase, response: expect.objectContaining({ status: 503 }) },
+          { phase, response: { source: "unavailable", reason } }
+        ]);
+        expect(sleep).toHaveBeenCalledTimes(1);
+        expect(run).toHaveBeenCalledTimes(phase === "run" ? 1 : 2);
+      }
+    );
+
+    it("retains deferral and avoids another GET under a protected restriction", async () => {
+      const context = createWorkflowReadSession().observe(15000);
+      const { execution, run } = scripted(
+        [
+          ...(phase === "jobs" ? [reply(runData)] : []),
+          reply({ message: "secondary rate limit" }, 403),
+          ...(phase === "jobs" ? [reply(runData)] : [])
+        ],
+        true
+      );
+      const request = { context, identity: "alice" };
+      for (let call = 0; call < 2; call++) {
+        const result = await readWorkflowRunWithMetadata(
+          execution,
+          "org/app",
+          41,
+          request
+        );
+        expect(result).toMatchObject({
+          reason: "deferred",
+          completeness: phase === "run" ? "unavailable" : "status-only",
+          decision: { state: "deferred", reason: "missing-deadline" },
+          value:
+            phase === "run" ? null : (
+              { data: { conclusion: "failure" }, includeJobs: false }
+            )
+        });
+        expect(result.evidence.at(-1)).toEqual({
+          phase,
+          response: { source: "unavailable", reason: "deferred" }
+        });
+      }
+      expect(run).toHaveBeenCalledTimes(phase === "run" ? 1 : 3);
+    });
+
+    it.each([401, 403])(
+      "preserves explicit-context selected authorization HTTP %i",
+      async (status) => {
+        const { execution, run } = scripted(
+          [...(phase === "jobs" ? [reply(runData)] : []), reply({}, status)],
+          true
+        );
+        await expect(
+          readWorkflowRunWithMetadata(execution, "org/app", 41, {
+            context: createWorkflowReadSession().observe(15000),
+            identity: "alice"
+          })
+        ).rejects.toMatchObject({
+          name: "SelectedGhAuthorizationError",
+          login: "alice",
+          status
+        });
+        expect(run).toHaveBeenCalledTimes(phase === "run" ? 1 : 2);
+      }
+    );
+  });
+
+  it("shares explicit retry credits across run, jobs and subsequent reads", async () => {
+    let now = 0;
+    const context = createWorkflowReadSession({
+      monotonic: () => now,
+      wall: () => 0,
+      sleep: async (milliseconds) => {
+        now += milliseconds;
+      },
+      jitter: () => 0
+    }).observe(15000);
+    const { execution, run } = scripted([
+      reply({}, 503),
+      reply(runData),
+      reply({}, 503),
+      reply({ total_count: 1, jobs: [job] }),
+      reply({}, 503)
+    ]);
+    const onDecision = vi.fn();
+    const request = { context, identity: "ambient", onDecision };
+    expect(
+      await readWorkflowRunWithMetadata(execution, "org/app", 41, request)
+    ).toMatchObject({
+      completeness: "complete",
+      value: { data: { conclusion: "failure", jobs: [job] } }
+    });
+    expect(run).toHaveBeenCalledTimes(4);
+    expect(
+      await readWorkflowRunWithMetadata(execution, "org/app", 41, request)
+    ).toMatchObject({
+      completeness: "unavailable",
+      reason: "read-failed",
+      decision: { state: "exhausted", reason: "attempts" }
+    });
+    expect(run).toHaveBeenCalledTimes(5);
+    expect(onDecision.mock.calls.map(([decision]) => decision)).toEqual([
+      { state: "ready" },
+      { state: "ready" },
+      { state: "exhausted", reason: "attempts" }
+    ]);
+  });
+
   it.each(["run", "repository"] as const)(
     "retains actionable redacted selected %s authorization diagnostics",
     async (phase) => {

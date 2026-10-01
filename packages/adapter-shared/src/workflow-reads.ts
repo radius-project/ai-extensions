@@ -11,7 +11,6 @@ import {
 } from "./workflow-read-response.js";
 import {
   createWorkflowReadBudget,
-  createWorkflowReadSession,
   isWorkflowReadLimitError
 } from "./workflow-read-budget.js";
 
@@ -269,7 +268,8 @@ export interface WorkflowRunResponse {
     | "pagination"
     | "timeout"
     | "output-limit"
-    | "cancelled";
+    | "cancelled"
+    | "deferred";
   evidence: WorkflowReadEvidence[];
   decision?: WorkflowReadDecision;
 }
@@ -407,37 +407,31 @@ export async function readWorkflowRunWithMetadata(
   };
   try {
     if (execution.mode === "selected") await execution.prepare?.();
-    const context =
-      request?.context ?? createWorkflowReadSession().observe(15000);
-    const phaseDeadline = context.clock.monotonic() + 15000;
+    const context = request?.context;
     const bounded = createWorkflowReadBudget(
       run,
       15000,
       10 * 1024 * 1024,
       context
     );
+    const phaseDeadline = context ? context.clock.monotonic() + 15000 : 0;
     const read = async (endpoint: string, phase: "run" | "jobs") => {
-      const response = await readWorkflowApiWithPolicy(
-        bounded,
-        endpoint,
-        { timeout: 15000 },
-        context,
-        JSON.stringify([
-          request?.identity ?? execution.mode,
-          repo,
-          String(runId),
-          phase
-        ]),
-        phaseDeadline,
-        (result) => evidence.push({ phase, response: result.metadata })
-      );
+      // Only lifecycle owners can supply a retry ledger shared across reads.
+      const response =
+        request ?
+          await readWorkflowApiWithPolicy(
+            bounded,
+            endpoint,
+            { timeout: 15000 },
+            request.context,
+            JSON.stringify([request.identity, repo, String(runId), phase]),
+            phaseDeadline,
+            (result) => evidence.push({ phase, response: result.metadata })
+          )
+        : await readWorkflowApi(bounded, endpoint, { timeout: 15000 });
       decision = response.decision;
-      request?.onDecision?.(response.decision);
-      if (
-        response.metadata.source === "unavailable" &&
-        response.metadata.reason === "deferred"
-      )
-        evidence.push({ phase, response: response.metadata });
+      if (decision) request?.onDecision?.(decision);
+      if (!request) evidence.push({ phase, response: response.metadata });
       if (execution.mode === "selected") {
         const metadata = response.metadata;
         if (
@@ -466,11 +460,22 @@ export async function readWorkflowRunWithMetadata(
         )
           await probe(execution.executor);
       }
-      return response;
+      const policyReason: WorkflowRunResponse["reason"] =
+        decision?.state === "stopped" ? "cancelled"
+        : decision?.state === "exhausted" && decision.reason === "elapsed" ?
+          "timeout"
+        : decision?.state === "deferred" ? "deferred"
+        : undefined;
+      if (!response.ok && policyReason)
+        evidence.push({
+          phase,
+          response: { source: "unavailable", reason: policyReason }
+        });
+      return { ...response, policyReason };
     };
     const endpoint = `repos/${repo}/actions/runs/${runId}`;
     const detail = await read(endpoint, "run");
-    if (!detail.ok) return incomplete("read-failed");
+    if (!detail.ok) return incomplete(detail.policyReason ?? "read-failed");
     if (!isRecord(detail.value)) return incomplete("invalid-data");
     const data = detail.value;
     // gh's JSON exporter decodes nullable conclusions into Go strings.
@@ -488,7 +493,8 @@ export async function readWorkflowRunWithMetadata(
         `${endpoint}/jobs?per_page=100&page=${page}`,
         "jobs"
       );
-      if (!response.ok) return incomplete("read-failed");
+      if (!response.ok)
+        return incomplete(response.policyReason ?? "read-failed");
       if (
         !isRecord(response.value) ||
         !Array.isArray(response.value.jobs) ||
