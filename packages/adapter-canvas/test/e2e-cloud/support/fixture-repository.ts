@@ -29,8 +29,10 @@ export const FIXTURE_REPOSITORY = `${FIXTURE_REPO_OWNER}/${FIXTURE_REPO_NAME}`;
 export const FIXTURE_RADIUS_DIRECTORY = ".radius";
 /** The application name declared by the pinned fixture model. */
 export const FIXTURE_APPLICATION_NAME = "cloud-e2e";
+/** The Kubernetes namespace selected by the fixture environment journey. */
+export const FIXTURE_KUBERNETES_NAMESPACE = "default";
 /** The target-cluster namespace created for the fixture's Radius environment. */
-export const FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE = `default-${FIXTURE_APPLICATION_NAME}`;
+export const FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE = `${FIXTURE_KUBERNETES_NAMESPACE}-${FIXTURE_APPLICATION_NAME}`;
 
 /**
  * The scheduled Cloud E2E cleanup workflow deletes tagged groups with this
