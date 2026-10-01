@@ -36,7 +36,7 @@ LC_ALL=C tr '[:upper:]' '[:lower:]' \
 1. Artifact names starting with `radius-deploy-status-<sanitized-environment>-`.
 2. When tier 1 matches nothing, names starting with the bare literal `radius-deploy-status-`. This recovers the case where the producer's `cut -c1-80` truncated into or past the application segment (a long environment name), and any future divergence in the sanitizer.
 
-In both tiers the artifact is accepted only when its payload reports an application and environment matching the current selection, compared case-insensitively after sanitization. Expired artifacts are skipped, since their bytes are gone.
+In both tiers the artifact is accepted only when its payload reports an application and environment matching the current selection, compared case-insensitively after sanitization. Direct core callers require their supplied application; Canvas permits a guessed application fallback only during repo-wide discovery, never within an identified run. Expired artifacts are skipped, since their bytes are gone.
 
 The two sanitizer implementations agree on multi-byte input even though `sed` counts bytes and JavaScript counts UTF-16 code units: every character outside `[a-z0-9._-]` is outside the class in both, so a multi-byte character is a single run either way and collapses to one `-`. The length cap is likewise safe, because by the time it applies the string is pure ASCII.
 
@@ -122,11 +122,11 @@ The one exception is `schemaVersion`. An unrecognized version is rejected outrig
 
 ## Read path
 
-`createDeployStatusReader` in [`packages/adapter-canvas/src/deploy-artifacts.ts`](../../packages/adapter-canvas/src/deploy-artifacts.ts):
+`createDeployStatusReader` in [`packages/core/src/deploy-artifact-evidence.ts`](../../packages/core/src/deploy-artifact-evidence.ts) owns the evidence decisions and reader caches. [`packages/adapter-canvas/src/deploy-artifacts.ts`](../../packages/adapter-canvas/src/deploy-artifacts.ts) supplies its existing local GitHub listing, download and filesystem implementations; their shared transport extraction remains pending.
 
 1. List artifacts — scoped to the run being monitored when there is one, else newest-first repo-wide.
 2. Select up to nine candidates by the two-tier prefix match: eight live slots plus the fixed terminal artifact. Repo-wide reads drop live-slot candidates first, because `sequence` restarts at 1 for every run and a cancelled run's higher-sequenced slot would otherwise beat a newer completed run's terminal artifact.
-3. Download uninspected artifact IDs with `gh run download`, validate application and environment identity, and reject an explicit `runId` that differs from the active run.
+3. Download uninspected artifact IDs with `gh run download`, validate application and environment identity, and reject conflicting listing/payload execution identities. Run-scoped evidence must identify the requested run; a legacy payload without `runId` can use its listing's execution identity.
 4. Select the numerically greatest valid `sequence` within an active run; on a repo-wide read (where sequences are only comparable within one run), the newest-listed terminal artifact wins instead.
 5. Classify the outcome as `ok`, `missing`, `malformed`, `auth`, `error`, or `stale`.
 

@@ -167,6 +167,92 @@ function start(actualReader?: DeployedGraphStatusReader): Harness {
 
 describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
   it.each([
+    "valid",
+    "wrong-app",
+    "wrong-run",
+    "wrong-environment",
+    "malformed",
+    "graph-budget-exhausted",
+    "auth"
+  ] as const)(
+    "projects only validated %s evidence through the Canvas core reader",
+    async (mode) => {
+      const reader = createDeployStatusReader({
+        repo: "octo/app",
+        runId: 42,
+        environment: "prod",
+        application: "billing",
+        listArtifacts: async () => [
+          {
+            id: 1,
+            name: "radius-deploy-status-prod-billing",
+            workflow_run: { id: 42 }
+          }
+        ],
+        downloadArtifact: async () => {
+          if (mode === "auth")
+            throw Object.assign(new Error("HTTP 403"), {
+              code: "GH_ARTIFACT_AUTH"
+            });
+          return {
+            [DEPLOY_STATUS_FILES.progress]: JSON.stringify({
+              schemaVersion: mode === "malformed" ? 2 : 1,
+              application: mode === "wrong-app" ? "foreign" : "billing",
+              environment: mode === "wrong-environment" ? "dev" : "prod",
+              runId: mode === "wrong-run" ? 99 : 42,
+              sequence: 1,
+              resources: [
+                {
+                  name: "api",
+                  type: "Radius.Compute/containers",
+                  status: "failed"
+                }
+              ]
+            }),
+            ...(mode === "graph-budget-exhausted" ?
+              {
+                [DEPLOY_STATUS_FILES.graph]:
+                  "{".repeat(8 * 1024 * 1024) +
+                  JSON.stringify({ resources: [{ name: "foreign" }] })
+              }
+            : {})
+          };
+        }
+      });
+      const harness = start(reader);
+      harness.state.contextRepo = "octo/app";
+      harness.state.deployRunId = 42;
+      harness.state.deployStatus = "in_progress";
+      harness.modeledResources.push({
+        name: "api",
+        type: "Radius.Compute/containers"
+      });
+      const entry = await container!.getOrCreate("artifact-panel");
+      const response = await fetch(
+        `${entry.baseUrl}/api/deployed-graph?application=billing&environment=prod`
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({
+        resources: expect.arrayContaining([
+          expect.objectContaining({
+            name: "api",
+            deployStatus:
+              mode === "valid" || mode === "graph-budget-exhausted" ?
+                "failed"
+              : "pending"
+          })
+        ])
+      });
+      if (mode === "graph-budget-exhausted") {
+        expect(body).toHaveProperty("resources.length", 1);
+        expect(await reader.graph()).toMatchObject({ graph: null });
+        expect((await reader.progress())?.resources).toHaveLength(1);
+      }
+      expect(harness.state.deployStatus).toBe("in_progress");
+    }
+  );
+  it.each([
     ["cancelled", "", undefined, "Deployment cancelled"],
     ["timed_out", "", undefined, "Deployment timed out"],
     [

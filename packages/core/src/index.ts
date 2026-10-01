@@ -14,6 +14,32 @@
 // docs/design/radius-extension-modularization.md for the target layout.
 
 export {
+  ARTIFACT_PAGE_SIZE,
+  MAX_ARTIFACT_PAGES,
+  DEPLOY_STATUS_FILES,
+  DEPLOY_STATUS_ARTIFACT_PREFIX,
+  DEPLOY_PROGRESS_SCHEMA_VERSION,
+  MAX_ARTIFACT_CANDIDATES,
+  isLiveSlotArtifactName,
+  sanitizeArtifactSegment,
+  deployStatusArtifactPrefix,
+  selectDeployStatusArtifacts,
+  parseDeployProgressArtifact,
+  parseDeployGraphArtifact,
+  confirmArtifactIdentity,
+  createDeployStatusReader
+} from "./deploy-artifact-evidence.js";
+export type {
+  ArtifactFiles,
+  DeployProgress,
+  DeployProgressResource,
+  DeployStatusReaderOptions,
+  DownloadArtifact,
+  ListArtifacts,
+  ReaderStatus,
+  WorkflowArtifact
+} from "./deploy-artifact-evidence.js";
+export {
   applicationGraphToResources,
   computeGraphDiff,
   deployStatusKeys,
