@@ -488,18 +488,23 @@ describe("readEnvironmentVariables", () => {
     );
   });
 
-  it("retains Radius state variables after more than one default page of entries", () => {
-    const variables = readEnvironmentVariables({
-      variables: [
-        ...Array.from({ length: 10 }, (_, index) => ({
+  it("flattens paginated responses before indexing Radius state variables", () => {
+    const variables = readEnvironmentVariables([
+      {
+        variables: Array.from({ length: 30 }, (_, index) => ({
           name: `AZURE_VALUE_${index}`,
           value: String(index)
-        })),
-        { name: "RADIUS_STATE_BACKEND", value: "oci" },
-        { name: "RADIUS_STATE_REGISTRY", value: "ghcr.io/state" }
-      ]
-    });
+        }))
+      },
+      {
+        variables: [
+          { name: "RADIUS_STATE_BACKEND", value: "oci" },
+          { name: "RADIUS_STATE_REGISTRY", value: "ghcr.io/state" }
+        ]
+      }
+    ]);
 
+    expect(variables.size).toBe(32);
     expect(variables.get("RADIUS_STATE_BACKEND")).toBe("oci");
     expect(variables.get("RADIUS_STATE_REGISTRY")).toBe("ghcr.io/state");
   });
@@ -510,7 +515,7 @@ describe("environmentVariablesApiPath", () => {
     expect(
       environmentVariablesApiPath("owner/repo", "radtest/name with spaces")
     ).toBe(
-      "repos/owner/repo/environments/radtest%2Fname%20with%20spaces/variables?per_page=100"
+      "repos/owner/repo/environments/radtest%2Fname%20with%20spaces/variables?per_page=30"
     );
   });
 });

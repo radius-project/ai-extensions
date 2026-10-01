@@ -2394,6 +2394,29 @@ describe("createCloudFixture", () => {
         );
       });
 
+      it("uses the two-minute Entra deletion timeout by default", async () => {
+        const harness = await createHarness(
+          [
+            {
+              tool: "az",
+              match: APP_LIST,
+              respond: { stdout: APP_LIST_RESULT }
+            }
+          ],
+          {},
+          {
+            assertionTimeoutMs: 2_000,
+            assertionPollIntervalMs: 120_000
+          }
+        );
+        await harness.fixture.assertAppRegistrationExists();
+
+        await expect(
+          harness.fixture.assertAppRegistrationAbsent()
+        ).rejects.toThrow(/Timed out after 120000ms/);
+        expect(harness.fake.waits).toEqual([120_000]);
+      });
+
       it("allows Entra longer than ordinary assertions to converge", async () => {
         const harness = await createHarness(
           [

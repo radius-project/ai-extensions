@@ -465,15 +465,20 @@ export function readEnvironmentVariables(
   payload: unknown
 ): ReadonlyMap<string, string> {
   const context = "the GitHub environment's variables";
-  const record = asRecord(payload);
-  const list = record?.variables;
-  if (!Array.isArray(list))
-    throw new Error(`${context} response carried no "variables" array.`);
   const variables = new Map<string, string>();
-  for (const entry of list) {
-    const item = asRecord(entry);
-    if (!item || typeof item.name !== "string") continue;
-    variables.set(item.name, typeof item.value === "string" ? item.value : "");
+  const pages = Array.isArray(payload) ? payload : [payload];
+  for (const page of pages) {
+    const list = asRecord(page)?.variables;
+    if (!Array.isArray(list))
+      throw new Error(`${context} response carried no "variables" array.`);
+    for (const entry of list) {
+      const item = asRecord(entry);
+      if (!item || typeof item.name !== "string") continue;
+      variables.set(
+        item.name,
+        typeof item.value === "string" ? item.value : ""
+      );
+    }
   }
   return variables;
 }
@@ -485,7 +490,7 @@ export function environmentVariablesApiPath(
 ): string {
   return (
     `repos/${repository}/environments/${encodeURIComponent(environmentName)}/variables` +
-    "?per_page=100"
+    "?per_page=30"
   );
 }
 
