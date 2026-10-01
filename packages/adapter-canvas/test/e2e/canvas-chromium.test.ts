@@ -18,7 +18,8 @@ import {
   type CanvasHarness,
   type FakeCliCommand
 } from "./support/canvas-harness.js";
-import type { Locator, Page } from "@playwright/test";
+import type { Locator, Page, TestInfo } from "@playwright/test";
+import { collectWorkflowFailure } from "@radius-project/core";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
@@ -29,10 +30,12 @@ import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
 import {
   ARTIFACT_PAGE_SIZE,
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
 } from "../../src/deploy-artifacts.js";
-import type { CanvasGraphResource } from "../../src/shared.js";
+import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
+import { createUnconfirmedMonitor } from "../support/server/unconfirmed-monitor.js";
 import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 import {
   DEPLOYED_GRAPH_STATE_ID,
@@ -58,6 +61,23 @@ const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
 const DIFF_BASE_BRANCH = "main";
+
+async function captureDeployEvidence(
+  page: Page,
+  testInfo: TestInfo,
+  name: string
+): Promise<void> {
+  const screenshotPath = testInfo.outputPath(name + ".png");
+  await page.screenshot({
+    path: screenshotPath,
+    fullPage: true,
+    animations: "disabled"
+  });
+  await testInfo.attach(name, {
+    path: screenshotPath,
+    contentType: "image/png"
+  });
+}
 
 async function stubPageStateGraphRequests(page: Page): Promise<void> {
   await page.route("**/api/discover-branches", async (route) => {
@@ -3696,96 +3716,132 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeVisible();
   });
 
-  test("shows retained timeout details through the real graph route in Chromium @safety", async ({
-    page,
-    canvas
-  }) => {
-    await page.clock.install();
-    const resources: CanvasGraphResource[] = [
-      {
-        id: "app/web",
-        name: "web",
-        type: "Radius.Compute/containers",
-        codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
-        deployStatus: "in_progress"
-      },
-      {
-        id: "app/db",
-        name: "db",
-        type: "Radius.Data/sqlDatabases",
-        codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
-        deployStatus: "success"
-      }
-    ];
-    const topology = resources.map(({ id, name, type, codeReference }) => ({
-      id,
-      name,
-      type,
-      codeReference
-    }));
-    settleDeployStatuses(resources, "monitor_timed_out");
-    await canvas.seedState({
-      ...baseCanvasState(canvas.workspacePath),
-      graphResources: topology,
-      deployingResources: resources,
-      deployStatus: "failed",
-      deployErrorKind: "run-unconfirmed",
-      deployRunId: 7,
-      deployEnvName: "fixture-environment",
-      deployAppName: "radius-app"
-    });
-    const scenario = defaultFakeCliScenario();
-    await canvas.setScenario({
-      ...scenario,
-      commands: [
-        ...scenario.commands,
+  for (const completed of [false, true]) {
+    test(`shows retained ${completed ? "unconfirmed completion" : "timeout"} details through the real graph route in Chromium @safety`, async ({
+      page,
+      canvas
+    }, testInfo) => {
+      await page.clock.install();
+      const resources: CanvasGraphResource[] = [
         {
-          tool: "gh",
-          args: [
-            "api",
-            `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
-          ],
-          stdout: JSON.stringify({ artifacts: [] })
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+          deployStatus: "in_progress"
+        },
+        {
+          id: "app/db",
+          name: "db",
+          type: "Radius.Data/sqlDatabases",
+          codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+          deployStatus: "success"
         }
-      ]
-    });
-    await routeDeployedPage(page, () => "failed");
-    await page.unroute("**/api/deployed-graph**");
-    let graphRequests = 0;
-    page.on("request", (request) => {
-      if (new URL(request.url()).pathname === "/api/deployed-graph") {
-        graphRequests++;
+      ];
+      const topology = resources.map(({ id, name, type, codeReference }) => ({
+        id,
+        name,
+        type,
+        codeReference
+      }));
+      const monitorState: CanvasState = {};
+      if (completed) {
+        await createUnconfirmedMonitor("future_conclusion").monitor.run({
+          entry: { state: monitorState },
+          repo: REPOSITORY,
+          branch: WORKTREE_BRANCH,
+          provider: "azure",
+          requestedEnvironment: "fixture-environment",
+          resources,
+          log: () => {}
+        });
+      } else {
+        settleDeployStatuses(resources, "monitor_timed_out");
       }
+      await canvas.seedState({
+        ...baseCanvasState(canvas.workspacePath),
+        ...monitorState,
+        graphResources: topology,
+        deployingResources: resources,
+        deployStatus: "failed",
+        deployErrorKind: "run-unconfirmed",
+        deployRunId: completed ? monitorState.deployRunId : 7,
+        deployEnvName: "fixture-environment",
+        deployAppName: "radius-app"
+      });
+      const scenario = defaultFakeCliScenario();
+      await canvas.setScenario({
+        ...scenario,
+        commands: [
+          ...scenario.commands,
+          {
+            tool: "gh",
+            args: [
+              "api",
+              `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
+            ],
+            stdout: JSON.stringify({ artifacts: [] })
+          }
+        ]
+      });
+      await routeDeployedPage(page, () => "failed");
+      await page.unroute("**/api/deployed-graph**");
+      let graphRequests = 0;
+      page.on("request", (request) => {
+        if (new URL(request.url()).pathname === "/api/deployed-graph") {
+          graphRequests++;
+        }
+      });
+
+      await gotoCanvas(page, canvas, "deployed");
+
+      await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(1);
+      await expect(page.getByAltText("Deployed", { exact: true })).toHaveCount(
+        1
+      );
+      await expect(
+        page.getByAltText("In progress", { exact: true })
+      ).toHaveCount(0);
+      const details = page
+        .locator(".rad-node")
+        .filter({ hasText: "web" })
+        .getByRole("button", { name: "Show details" });
+      await details.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#node-popup")).toContainText(
+        completed ?
+          DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
+        : DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+      );
+      if (completed) {
+        await expect(page.locator("#node-popup")).not.toContainText(
+          "may still be running"
+        );
+        await expect(page.locator("#node-popup")).not.toContainText(
+          "Deployment failed"
+        );
+      }
+      const detailsAccessibility = await new AxeBuilder({ page })
+        .include("#node-popup")
+        .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+        .analyze();
+      expect(detailsAccessibility.violations).toEqual([]);
+      if (completed) {
+        await expect(page.locator("#node-popup")).toBeVisible();
+        await captureDeployEvidence(
+          page,
+          testInfo,
+          "unconfirmed-completion-resource-details"
+        );
+      }
+      const requestsAfterSettlement = graphRequests;
+      await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS * 2);
+      expect(graphRequests).toBe(requestsAfterSettlement);
+      await expect(
+        page.getByAltText("In progress", { exact: true })
+      ).toHaveCount(0);
     });
-
-    await gotoCanvas(page, canvas, "deployed");
-
-    await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(1);
-    await expect(page.getByAltText("Deployed", { exact: true })).toHaveCount(1);
-    await expect(page.getByAltText("In progress", { exact: true })).toHaveCount(
-      0
-    );
-    const details = page
-      .locator(".rad-node")
-      .filter({ hasText: "web" })
-      .getByRole("button", { name: "Show details" });
-    await details.focus();
-    await page.keyboard.press("Enter");
-    await expect(page.locator("#node-popup")).toContainText(
-      DEPLOY_MONITOR_TIMED_OUT_MESSAGE
-    );
-    const detailsAccessibility = await new AxeBuilder({ page })
-      .include("#node-popup")
-      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
-      .analyze();
-    expect(detailsAccessibility.violations).toEqual([]);
-    const requestsAfterSettlement = graphRequests;
-    await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS * 2);
-    expect(graphRequests).toBe(requestsAfterSettlement);
-    await expect(page.getByAltText("In progress", { exact: true })).toHaveCount(
-      0
-    );
-  });
+  }
 
   test("preserves graph zoom while a deployment refreshes in Chromium", async ({
     page,
@@ -4088,6 +4144,128 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(chip).toBeVisible();
     await expect(page.locator("#deploy-progress-modal")).toBeAttached();
   });
+
+  for (const evidence of [
+    "primary failure with unavailable diagnostics",
+    "unconfirmed completion",
+    "primary failure with unavailable workflow log"
+  ]) {
+    test(`preserves ${evidence} and keyboard dismissal @safety`, async ({
+      page,
+      canvas
+    }, testInfo) => {
+      const unconfirmed = evidence === "unconfirmed completion";
+      const workflowLogUnavailable =
+        evidence === "primary failure with unavailable workflow log";
+      const monitorState: CanvasState = {};
+      if (unconfirmed) {
+        await createUnconfirmedMonitor("future_conclusion").monitor.run({
+          entry: { state: monitorState },
+          repo: REPOSITORY,
+          branch: WORKTREE_BRANCH,
+          provider: "azure",
+          requestedEnvironment: "fixture-environment",
+          resources: [],
+          log: () => {}
+        });
+      }
+      let error =
+        unconfirmed ?
+          monitorState.deployError
+        : "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
+          "Error: recipe quota <img src=x>\n\nThe control-plane log could not be read.";
+      if (workflowLogUnavailable) {
+        const failure = await collectWorkflowFailure(
+          { repo: REPOSITORY, runId: 77 },
+          {
+            status: "completed",
+            conclusion: "failure",
+            steps: [{ name: "Run rad commands", conclusion: "failure" }]
+          },
+          { provider: "azure", resourcesTouched: true },
+          {
+            readLog: async () => {
+              throw new Error("fixture-private-log-read-error");
+            },
+            readControlPlaneLog: async () => null
+          }
+        );
+        error = failure.message;
+      }
+      if (typeof error !== "string")
+        throw new Error("Missing monitor diagnostic");
+      await page.route("**/api/deploy-status**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: "failed",
+            active: false,
+            error,
+            errorKind: unconfirmed ? monitorState.deployErrorKind : null,
+            deployRunUrl:
+              unconfirmed ?
+                monitorState.deployRunUrl
+              : `https://github.com/${REPOSITORY}/actions/runs/77`,
+            repairing: false,
+            handoff: { pending: false, state: "idle" },
+            attempt: { targetRepo: "", environment: "" }
+          })
+        });
+      });
+      await page.goto(
+        `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
+      );
+      await expect(page.locator("#deploy-progress-title")).toContainText(
+        "failed"
+      );
+      await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+        error
+      );
+      await expect(page.locator("#deploy-progress-subtitle img")).toHaveCount(
+        0
+      );
+      await expect(page.locator("#deploy-fail-repair-note")).toBeHidden();
+      await expect(page.locator("#deploy-progress-modal")).toBeVisible();
+      if (unconfirmed) {
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
+        );
+        await expect(
+          page.locator("#deploy-progress-subtitle")
+        ).not.toContainText("may still be running");
+      }
+      if (workflowLogUnavailable) {
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "Deployment failed (failure). Failed step: Run rad commands."
+        );
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "The workflow log could not be read."
+        );
+        await expect(
+          page.locator("#deploy-progress-subtitle")
+        ).not.toContainText("fixture-private-log-read-error");
+        await expect(
+          page.locator("#deploy-progress-subtitle")
+        ).not.toContainText("The control-plane log could not be read.");
+      }
+      await expectNoWcagViolations(page);
+      if (unconfirmed || workflowLogUnavailable) {
+        await captureDeployEvidence(
+          page,
+          testInfo,
+          unconfirmed ?
+            "unconfirmed-completion-dialog"
+          : "workflow-log-unavailable-dialog"
+        );
+      }
+      const back = page.locator("#deploy-fail-back");
+      await back.focus();
+      await expect(back).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#deploy-progress-modal")).toBeHidden();
+    });
+  }
 
   test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({
     page,

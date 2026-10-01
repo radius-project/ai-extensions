@@ -14,6 +14,7 @@ import * as core from "./index.js";
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
   "observeWorkflowRun",
+  "confirmedWorkflowConclusion",
   "collectWorkflowFailure",
   "extractErrorLines",
   "extractGitHubActionsStepLog",
@@ -79,6 +80,7 @@ const EXPECTED_VALUES = [
   "RADIUS_WORKFLOW_REPO",
   "RADIUS_WORKFLOW_DIR",
   "DEPLOY_DISPATCHER_FILE",
+  "DEPLOY_RAD_COMMANDS_STEP",
   "DEPLOY_AZURE_FILE",
   "DEPLOY_AWS_FILE",
   "DEFAULT_STATE_ARCHIVE",
