@@ -49,14 +49,16 @@ import {
   radiusApplicationSelector,
   RADIUS_WORKLOAD_RESOURCES,
   RADIUS_RENDERED_RESOURCES,
-  findNewWorkflowRunId,
-  readWorkflowRunIds,
   readKubernetesWorkloads,
   readKubernetesResourceNames,
   isKubernetesWorkloadReady,
   type KubernetesWorkload
 } from "./deploy-journey.js";
 import { DELETE_OPERATION_TIMEOUT_MS } from "./cloud-timeout-budget.js";
+import {
+  findNewWorkflowRunId,
+  readWorkflowRunIds
+} from "./workflow-run-discovery.js";
 
 /** The Entra application the product creates, as the fixture observed it. */
 export interface AppRegistrationRecord {

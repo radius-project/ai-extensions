@@ -21,6 +21,7 @@
 // the point of asserting it at all.
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -470,6 +471,28 @@ describe("cloud-e2e-cleanup.yml", () => {
       "gh workflow run delete-application.yml"
     );
     expect(radiusCleanup?.run).toContain('gh run watch "$run_id"');
+    const supportModule = radiusCleanup?.run?.match(
+      /const \{ findNewWorkflowRunId, readWorkflowRunIds \} = await import\(\s*"([^"]+)"\s*\)/
+    )?.[1];
+    expect(supportModule).toBe(
+      "./packages/adapter-canvas/test/e2e-cloud/support/workflow-run-discovery.ts"
+    );
+    const importResult = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `await import(${JSON.stringify(supportModule)})`
+      ],
+      {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8"
+      }
+    );
+    expect(importResult).toMatchObject({
+      status: 0,
+      stderr: ""
+    });
     expect(fallbackProtectedSteps).toHaveLength(4);
     for (const step of fallbackProtectedSteps) {
       expect(step.if).toContain(
