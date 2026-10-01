@@ -478,6 +478,17 @@ export function readEnvironmentVariables(
   return variables;
 }
 
+/** Builds the paginated GitHub API path for every variable in an Environment. */
+export function environmentVariablesApiPath(
+  repository: string,
+  environmentName: string
+): string {
+  return (
+    `repos/${repository}/environments/${encodeURIComponent(environmentName)}/variables` +
+    "?per_page=100"
+  );
+}
+
 /** Narrows `az ad sp show --id <appId> -o json`. */
 export function readServicePrincipalObjectId(payload: unknown): string {
   const record = asRecord(payload);

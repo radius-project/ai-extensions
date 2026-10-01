@@ -341,6 +341,16 @@ describe("createCloudFixture", () => {
         "Assertion timeout"
       ],
       [
+        "zero Entra app deletion timeout",
+        { entraAppDeletionTimeoutMs: 0 },
+        "Entra app deletion timeout"
+      ],
+      [
+        "non-finite Entra app deletion timeout",
+        { entraAppDeletionTimeoutMs: Number.POSITIVE_INFINITY },
+        "Entra app deletion timeout"
+      ],
+      [
         "zero poll interval",
         { assertionPollIntervalMs: 0 },
         "Assertion poll interval"
@@ -2384,6 +2394,32 @@ describe("createCloudFixture", () => {
         );
       });
 
+      it("allows Entra longer than ordinary assertions to converge", async () => {
+        const harness = await createHarness(
+          [
+            {
+              tool: "az",
+              match: APP_LIST,
+              respond: { stdout: APP_LIST_RESULT },
+              times: 4
+            },
+            { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
+          ],
+          {},
+          {
+            assertionTimeoutMs: 2_000,
+            assertionPollIntervalMs: 1_000,
+            entraAppDeletionTimeoutMs: 4_000
+          }
+        );
+        await harness.fixture.assertAppRegistrationExists();
+
+        await expect(
+          harness.fixture.assertAppRegistrationAbsent()
+        ).resolves.toBeUndefined();
+        expect(harness.fake.waits).toEqual([1_000, 1_000, 1_000]);
+      });
+
       it("propagates a failing lookup rather than reading it as absence", async () => {
         const { fixture } = await observedHarness([
           failing("az", APP_LIST, "AADSTS700016")
@@ -3983,6 +4019,36 @@ describe("createCloudFixture", () => {
     // A run reported this step reclaimed while the app registration was still
     // live and not even in Entra's deleted items, which then wedged the next
     // run at the clean-slate check.
+    it("allows Entra longer than ordinary cleanup assertions to converge", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            },
+            times: 4
+          },
+          { tool: "az", match: ["ad", "app", "delete"], respond: {} },
+          { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
+        ],
+        {},
+        {
+          assertionTimeoutMs: 2_000,
+          assertionPollIntervalMs: 1_000,
+          entraAppDeletionTimeoutMs: 4_000
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
+      );
+      expect(fake.waits).toEqual([1_000, 1_000, 1_000]);
+    });
+
     it("fails when the app registration survives a delete that reported success", async () => {
       const { fixture } = await createHarness(
         [
@@ -3998,7 +4064,11 @@ describe("createCloudFixture", () => {
           { tool: "az", match: ["ad", "app", "delete"], respond: {} }
         ],
         {},
-        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+        {
+          assertionTimeoutMs: 2000,
+          assertionPollIntervalMs: 1000,
+          entraAppDeletionTimeoutMs: 2000
+        }
       );
 
       const error = await captureError(fixture.reclaimLeakedProductArtifacts());
@@ -4031,7 +4101,11 @@ describe("createCloudFixture", () => {
           }
         ],
         {},
-        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+        {
+          assertionTimeoutMs: 2000,
+          assertionPollIntervalMs: 1000,
+          entraAppDeletionTimeoutMs: 2000
+        }
       );
 
       const error = await captureError(fixture.reclaimLeakedProductArtifacts());
