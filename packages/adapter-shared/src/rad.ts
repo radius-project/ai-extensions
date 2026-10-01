@@ -125,6 +125,7 @@ export interface ExpectedDigest {
 export interface BicepCompileConfig extends Record<string, unknown> {
   experimentalFeaturesEnabled: Record<string, unknown> & {
     extensibility: boolean;
+    ociEnabled: boolean;
   };
   extensions: Record<string, unknown> & { radius: string };
 }
@@ -236,10 +237,11 @@ export function managedBicepEnv(
 }
 
 // The Bicep settings a Radius compile needs regardless of which extension tag is
-// selected. `extensibility` gates the `extension` keyword itself.
+// selected. `extensibility` gates the keyword; `ociEnabled` enables OCI pulls.
 export const RADIUS_BICEP_EXPERIMENTAL_FEATURES: Readonly<{
   extensibility: boolean;
-}> = Object.freeze({ extensibility: true });
+  ociEnabled: boolean;
+}> = Object.freeze({ extensibility: true, ociEnabled: true });
 export const MODELED_APP_GRAPH_FLAGS: readonly string[] = Object.freeze([
   "--include-icons"
 ]);
@@ -1515,9 +1517,9 @@ function requireRadiusExtensionRef(ref: string, reason: string): string {
  * Bicep setting (analyzers, formatting, moduleAliases, cloud, ...) are all
  * preserved. Every extension alias pointing at a local file (not a `br:`/`oci:`
  * ref) is copied into `dir` preserving its relative path so bicep resolves it.
- * `extensibility` is force-enabled and a `radius` alias is backfilled from
- * `radiusExtensionRef` only when the repo config omits it, so `extension radius`
- * always resolves; nothing else in the repo config is rewritten.
+ * `extensibility` and `ociEnabled` are force-enabled. A `radius` alias is
+ * backfilled from `radiusExtensionRef` only when the repo config omits it, so
+ * `extension radius` resolves; nothing else in the repo config is rewritten.
  *
  * `radiusExtensionRef` is the reference derived from the rad binary that will
  * run the compile (see {@link resolveRadiusExtensionRef}). It is used only when
@@ -1544,14 +1546,15 @@ export function writeBicepCompileConfig(
   if (repository.kind === "parsed") {
     const parsed = repository.config;
     // Use the repository config verbatim, then ensure only what a Radius
-    // compile requires (extensibility on, a resolvable `radius` alias).
+    // compile requires (extensibility and OCI on, a resolvable `radius` alias).
     const experimentalFeaturesEnabled: Record<string, unknown> & {
       extensibility: boolean;
+      ociEnabled: boolean;
     } = {
       ...(isPlainObject(parsed.experimentalFeaturesEnabled) ?
         parsed.experimentalFeaturesEnabled
       : {}),
-      extensibility: true
+      ...RADIUS_BICEP_EXPERIMENTAL_FEATURES
     };
 
     const extensionsSource =

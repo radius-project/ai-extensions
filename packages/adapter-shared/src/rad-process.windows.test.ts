@@ -67,7 +67,7 @@ describeWindows("spawnRad Windows process integration", () => {
           radPath: selected ?? "",
           readVersion: async () => "edge"
         })
-      ).resolves.toBe("br:biceptypes.azurecr.io/radius:latest");
+      ).resolves.toBe("br:ghcr.io/radius-project/bicep-types-radius:edge");
       await expect(
         spawnRad(selected ?? "", [childHarnessPath, "success", "two words"], {
           cwd: graphDirectory,

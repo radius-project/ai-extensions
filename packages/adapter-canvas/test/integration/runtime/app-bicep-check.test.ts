@@ -4468,8 +4468,8 @@ function controlFakeJsonRpc(directory: string, control: object): void {
 
 function disabledSecureValueRule(): object {
   return {
-    experimentalFeaturesEnabled: { extensibility: true },
-    extensions: { radius: "br:biceptypes.azurecr.io/radius:0.50" },
+    experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
+    extensions: { radius: "br:ghcr.io/radius-project/bicep-types-radius:0.50" },
     analyzers: {
       core: { rules: { [secureValueRule]: { level: "off" } } }
     }
