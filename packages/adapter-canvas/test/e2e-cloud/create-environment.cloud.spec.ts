@@ -116,6 +116,7 @@ import {
 } from "./support/deploy-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
+  FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
   isFixtureRepositoryProvisioned,
   resolveFixtureClusterTarget,
   resolveFixtureLocation
@@ -350,6 +351,9 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
+    fixture.registerNamespaceCleanupTarget(
+      FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE
+    );
     // CanvasHarness loads the server directly rather than the extension
     // composition root. Install one durable store inside the disposable clone's
     // git directory so every serial harness sees the same ownership records

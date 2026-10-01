@@ -38,6 +38,7 @@ import {
   CLOUD_E2E_LEASE_REF,
   environmentName as buildEnvironmentName,
   FIXTURE_BASELINE_SHA,
+  FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
   FIXTURE_REPO_DEFAULT_BRANCH,
   FIXTURE_REPOSITORY,
   resourceGroupName,
@@ -162,6 +163,8 @@ export interface CloudFixture {
     application: string,
     namespace: string
   ): void;
+  /** Registers a fixture-owned namespace that reclamation may remove. */
+  registerNamespaceCleanupTarget(namespace: string): void;
   /** Records that the journey verified Radius removed the application. */
   recordApplicationDeletionSucceeded(
     application: string,
@@ -726,6 +729,7 @@ export async function createCloudFixture(
     string,
     { application: string; namespace: string; deletionVerified: boolean }
   >();
+  const namespaceCleanupTargets = new Set<string>();
   const APP_REGISTRATION_KEY = "app-registration";
   const GITHUB_ENVIRONMENT_KEY = "github-environment";
   const roleAssignmentKey = (principalId: string) =>
@@ -1128,6 +1132,18 @@ export async function createCloudFixture(
       );
     },
 
+    registerNamespaceCleanupTarget(namespace) {
+      const target = requireValue(
+        namespace,
+        "A namespace is required to register namespace cleanup."
+      );
+      if (target !== FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE)
+        throw new Error(
+          `Namespace cleanup is restricted to the fixture-owned namespace ${FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE}.`
+        );
+      namespaceCleanupTargets.add(target);
+    },
+
     recordApplicationDeletionSucceeded(application, namespace) {
       fixture.registerApplicationCleanupTarget(application, namespace);
       const target = applicationCleanupTargets.get(
@@ -1304,6 +1320,24 @@ export async function createCloudFixture(
             });
           }
         );
+
+      for (const namespace of namespaceCleanupTargets)
+        await attempt(`Kubernetes namespace ${namespace}`, async () => {
+          const kubeconfig = await clusterKubeconfig(assertionTimeoutMs);
+          const result = await commands.runKubectl(
+            [
+              "--kubeconfig",
+              kubeconfig,
+              "delete",
+              "namespace",
+              namespace,
+              "--ignore-not-found=true",
+              "--wait=true"
+            ],
+            assertionTimeoutMs
+          );
+          expectSuccess(result, `kubectl delete namespace ${namespace}`);
+        });
 
       if (applicationDeletionFailed)
         throw new Error(
