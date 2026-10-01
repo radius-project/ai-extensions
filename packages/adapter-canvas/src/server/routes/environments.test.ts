@@ -985,6 +985,49 @@ describe("environments — bypass-verification", () => {
     }
   );
 
+  it("does not adopt a replacement instance while reading the request body", async () => {
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("Unexpected artifact reader");
+    });
+    const replacement = createWorkflowObservationScope(() => {
+      throw new Error("Unexpected artifact reader");
+    });
+    let entry: EnvironmentsInstanceEntry = { observation: scope };
+    const body = deferred<string>();
+    const started = deferred<void>();
+    const { run, executor } = scriptedExecutor();
+    const { recording, ctx } = context("POST", "/api/bypass-verification", "");
+    const pending = handleBypassVerification(
+      {
+        ...ctx,
+        readTextBody: () => {
+          started.resolve();
+          return body.promise;
+        }
+      },
+      passingDeps({
+        readInstanceEntry: () => entry,
+        getSelectedGitHubExecutor: () => executor
+      })
+    );
+    try {
+      await started.promise;
+      entry = { observation: replacement };
+      body.resolve(bypassBody());
+      await pending;
+      expect(recording.status).toBe(503);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "Workflow observation stopped."
+      });
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      body.resolve(bypassBody());
+      scope.stop();
+      replacement.stop();
+      await pending;
+    }
+  });
+
   it.each([
     ["run", false],
     ["run", true],
@@ -1051,7 +1094,10 @@ describe("environments — bypass-verification", () => {
       "/api/bypass-verification",
       JSON.stringify({ repo: "o/r", environment: "dev" })
     );
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(recording.headerOrder).toEqual(["Content-Type"]);
     expect(JSON.parse(recording.body)).toEqual({
@@ -1072,7 +1118,10 @@ describe("environments — bypass-verification", () => {
         runId: "555"
       })
     );
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(JSON.parse(recording.body)).toEqual({
       error: "repo, environment, operationId and runId are required."
@@ -1090,7 +1139,10 @@ describe("environments — bypass-verification", () => {
         runId: { not: "scalar" }
       })
     );
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(JSON.parse(recording.body).error).toContain("are required");
   });
@@ -1123,7 +1175,10 @@ describe("environments — bypass-verification", () => {
 
   it("an empty body parses to {} and 400s rather than throwing", async () => {
     const { recording, ctx } = context("POST", "/api/bypass-verification", "");
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(JSON.parse(recording.body)).toEqual({
       error: "repo, environment, operationId and runId are required."
@@ -1138,7 +1193,10 @@ describe("environments — bypass-verification", () => {
     );
     await handleBypassVerification(
       ctx,
-      deps({ getOperation: () => bypassOp() })
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => bypassOp()
+      })
     );
     expect(recording.status).toBe(409);
     expect(JSON.parse(recording.body).error).toContain(
@@ -1152,7 +1210,10 @@ describe("environments — bypass-verification", () => {
       "/api/bypass-verification",
       bypassBody()
     );
-    await handleBypassVerification(ctx, deps({ getOperation: () => null }));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined, getOperation: () => null })
+    );
     expect(recording.status).toBe(409);
   });
 
@@ -1165,6 +1226,7 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       deps({
+        readInstanceEntry: () => undefined,
         getOperation: () => bypassOp(),
         hasCompleteVerificationIdentity: () => false
       })
@@ -1184,6 +1246,7 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       deps({
+        readInstanceEntry: () => undefined,
         getOperation: () => bypassOp(),
         hasCompleteVerificationIdentity: () => true,
         getSelectedGitHubExecutor: () => undefined
@@ -1478,7 +1541,10 @@ describe("environments — bypass-verification", () => {
       "/api/bypass-verification",
       "{bad"
     );
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(typeof JSON.parse(recording.body).error).toBe("string");
   });

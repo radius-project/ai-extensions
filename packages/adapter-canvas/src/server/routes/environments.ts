@@ -430,6 +430,7 @@ export async function handleBypassVerification(
     response.writeHead(status);
     response.end(JSON.stringify(payload));
   };
+  const scope = dependencies.readInstanceEntry(context.instanceId)?.observation;
   const body = await context.readTextBody();
   let data: { [key: string]: unknown };
   try {
@@ -504,9 +505,6 @@ export async function handleBypassVerification(
       return;
     }
 
-    const scope = dependencies.readInstanceEntry(
-      context.instanceId
-    )?.observation;
     if (!scope) {
       json(503, { error: "Workflow observation stopped." });
       return;
