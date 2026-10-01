@@ -569,8 +569,8 @@ describe("deployed-graph deletion inventory", () => {
     async (status) => {
       const { deps } = setup();
       const originalReader = deps.createDeployStatusReader;
-      deps.createDeployStatusReader = (options) => ({
-        ...originalReader(options),
+      deps.createDeployStatusReader = (options, instanceId) => ({
+        ...originalReader(options, instanceId),
         read: () => Promise.resolve({ status, progress: actual })
       });
       const payload = payloadOf(await run(url, handleDeployedGraph, deps));
@@ -627,8 +627,8 @@ describe("deployed-graph deletion inventory", () => {
     async (method) => {
       const { deps } = setup();
       const originalReader = deps.createDeployStatusReader;
-      deps.createDeployStatusReader = (options) => ({
-        ...originalReader(options),
+      deps.createDeployStatusReader = (options, instanceId) => ({
+        ...originalReader(options, instanceId),
         [method]: () => Promise.reject(new Error("Artifact unavailable"))
       });
       const payload = payloadOf(await run(url, handleDeployedGraph, deps));
@@ -649,8 +649,8 @@ describe("deployed-graph deletion inventory", () => {
     async (change) => {
       const { deps, state } = setup({ deployRunId: 42 });
       const originalReader = deps.createDeployStatusReader;
-      deps.createDeployStatusReader = (options) => ({
-        ...originalReader(options),
+      deps.createDeployStatusReader = (options, instanceId) => ({
+        ...originalReader(options, instanceId),
         read: () => {
           Object.assign(state!, change);
           return Promise.resolve({ status: "ok", progress: actual });
