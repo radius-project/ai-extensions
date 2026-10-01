@@ -8,6 +8,7 @@ import {
   confirmArtifactIdentity,
   createDeployStatusReader,
   DEPLOY_CANCELLED_MESSAGE,
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
   DEPLOY_FAILED_MESSAGE,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   DEPLOY_STATUS_ARTIFACT_PREFIX,
@@ -38,6 +39,13 @@ import {
   projectDeployedGraph
 } from "@radius-project/core";
 import type { DeployStatus } from "@radius-project/core";
+import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE as completedUnconfirmedMessage } from "./deploy-messages.js";
+
+it("re-exports the browser-safe completed but unconfirmed message", () => {
+  expect(DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE).toBe(
+    completedUnconfirmedMessage
+  );
+});
 
 function progressPayload(overrides: Partial<DeployProgress> = {}): string {
   return JSON.stringify({
