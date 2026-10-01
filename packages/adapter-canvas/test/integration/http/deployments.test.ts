@@ -370,15 +370,14 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         mode: "ambient",
         run: async (args) => {
           calls.push(args.join(" "));
-          if (
-            args.join(" ") ===
-            "run view 42 --json status,conclusion,jobs --repo org/app"
-          ) {
+          if (args[0] === "api") {
             return {
               code: 0,
               stderr: "",
               stdout:
-                '{"status":"completed","conclusion":"failure","jobs":[{"name":"deploy","steps":[{"name":"Run rad commands","conclusion":"failure"},{"name":"Persist Radius state (rad shutdown)","conclusion":"failure"}]}]}'
+                args[1].includes("/jobs") ?
+                  'HTTP/2 200\n\n{"total_count":1,"jobs":[{"name":"deploy","steps":[{"name":"Run rad commands","conclusion":"failure"},{"name":"Persist Radius state (rad shutdown)","conclusion":"failure"}]}]}'
+                : 'HTTP/2 200\n\n{"status":"completed","conclusion":"failure"}'
             };
           }
           if (args.join(" ") === "run view 42 --log --repo org/app") {
@@ -478,7 +477,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       ).toBe(mode === "unavailable");
       expect(JSON.stringify(body)).not.toContain("fixture-private");
       expect(calls).toEqual([
-        "run view 42 --json status,conclusion,jobs --repo org/app",
+        "api repos/org/app/actions/runs/42 --include --method GET",
+        "api repos/org/app/actions/runs/42/jobs?per_page=100&page=1 --include --method GET",
         "graph",
         "progress",
         "run view 42 --log --repo org/app",
@@ -1607,13 +1607,11 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
             (args) =>
               JSON.stringify(args) ===
               JSON.stringify([
-                "run",
-                "view",
-                "42",
-                "--json",
-                "status,conclusion,jobs",
-                "--repo",
-                "acme/widgets"
+                "api",
+                "repos/acme/widgets/actions/runs/42",
+                "--include",
+                "--method",
+                "GET"
               ])
           )
         ).toBe(true);

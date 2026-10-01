@@ -2833,157 +2833,195 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBeLessThanOrEqual(4);
   });
 
-  test("retries verification through the selected account and returned run URL @safety", async ({
-    page,
-    canvas
-  }) => {
-    const operationId = await canvas.seedRestartedVerificationFailure();
-    const exactCreatedAt = new Date().toISOString();
-    const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
-    const scenario = defaultFakeCliScenario();
-    scenario.commands.push(
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "list",
-          "--workflow=radius-verify-credentials.yml",
-          "--limit",
-          "1",
-          "--json",
-          "databaseId",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: '[{"databaseId":40}]'
-      },
-      {
-        tool: "gh",
-        args: [
-          "workflow",
-          "run",
-          "radius-verify-credentials.yml",
-          "-f",
-          "environment=fixture-environment",
-          "-f",
-          `radius_operation=${operationId}`,
-          "--repo",
-          REPOSITORY,
-          "--ref",
-          WORKTREE_BRANCH
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
-      },
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "list",
-          "--workflow=radius-verify-credentials.yml",
-          "--limit",
-          "10",
-          "--json",
-          "databaseId,createdAt,displayTitle,event,headBranch",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: JSON.stringify([
+  for (const jobsUnavailable of [false, true]) {
+    test(`retries verification through the selected account and returned run URL (jobs unavailable: ${jobsUnavailable}) @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const operationId = await canvas.seedRestartedVerificationFailure();
+      const exactCreatedAt = new Date().toISOString();
+      const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
+      const scenario = defaultFakeCliScenario();
+      scenario.commands.push(
+        {
+          tool: "gh",
+          args: [
+            "run",
+            "list",
+            "--workflow=radius-verify-credentials.yml",
+            "--limit",
+            "1",
+            "--json",
+            "databaseId",
+            "--repo",
+            REPOSITORY
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: '[{"databaseId":40}]'
+        },
+        {
+          tool: "gh",
+          args: [
+            "workflow",
+            "run",
+            "radius-verify-credentials.yml",
+            "-f",
+            "environment=fixture-environment",
+            "-f",
+            `radius_operation=${operationId}`,
+            "--repo",
+            REPOSITORY,
+            "--ref",
+            WORKTREE_BRANCH
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
+        },
+        {
+          tool: "gh",
+          args: [
+            "run",
+            "list",
+            "--workflow=radius-verify-credentials.yml",
+            "--limit",
+            "10",
+            "--json",
+            "databaseId,createdAt,displayTitle,event,headBranch",
+            "--repo",
+            REPOSITORY
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: JSON.stringify([
+            {
+              databaseId: 42,
+              createdAt: decoyCreatedAt,
+              displayTitle:
+                "Radius verify fixture-environment [another-operation]",
+              event: "workflow_dispatch",
+              headBranch: WORKTREE_BRANCH
+            },
+            {
+              databaseId: 41,
+              createdAt: exactCreatedAt,
+              displayTitle: `Radius verify fixture-environment [${operationId}]`,
+              event: "workflow_dispatch",
+              headBranch: WORKTREE_BRANCH
+            }
+          ])
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `repos/${REPOSITORY}/actions/runs/41`,
+            "--include",
+            "--method",
+            "GET"
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout:
+            "HTTP/2 200\n\n" +
+            JSON.stringify({
+              status: "completed",
+              conclusion: "success"
+            })
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `repos/${REPOSITORY}/actions/runs/41/jobs?per_page=100&page=1`,
+            "--include",
+            "--method",
+            "GET"
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout:
+            jobsUnavailable ?
+              'HTTP/2.0 429 Too Many Requests\nRetry-After: 120\r\n\r\n{"message":"secondary rate limit"}'
+            : 'HTTP/2 200\n\n{"jobs":[],"total_count":0}',
+          exitCode: jobsUnavailable ? 1 : 0
+        }
+      );
+      await canvas.setScenario(scenario);
+      await gotoCanvas(page, canvas, "environment");
+
+      const retry = page.locator("#env-progress-command-retry-verification");
+      await expect(retry).toBeVisible();
+      await expect(retry).toHaveText("Retry verification");
+      await retry.click();
+
+      await expect
+        .poll(async () =>
+          (await canvas.cliCalls()).some(
+            (call) =>
+              call.tool === "gh" &&
+              call.args[0] === "workflow" &&
+              call.args.includes(`radius_operation=${operationId}`)
+          )
+        )
+        .toBe(true);
+      await expect
+        .poll(
+          async () => (await canvas.operationRecord(operationId))["state"],
           {
-            databaseId: 42,
-            createdAt: decoyCreatedAt,
-            displayTitle:
-              "Radius verify fixture-environment [another-operation]",
-            event: "workflow_dispatch",
-            headBranch: WORKTREE_BRANCH
-          },
-          {
-            databaseId: 41,
-            createdAt: exactCreatedAt,
-            displayTitle: `Radius verify fixture-environment [${operationId}]`,
-            event: "workflow_dispatch",
-            headBranch: WORKTREE_BRANCH
+            timeout: 15_000
           }
-        ])
-      },
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "view",
-          "41",
-          "--json",
-          "status,conclusion,jobs",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: JSON.stringify({
-          status: "completed",
-          conclusion: "success",
-          jobs: []
-        })
-      }
-    );
-    await canvas.setScenario(scenario);
-    await gotoCanvas(page, canvas, "environment");
+        )
+        .toBe("succeeded");
 
-    const retry = page.locator("#env-progress-command-retry-verification");
-    await expect(retry).toBeVisible();
-    await expect(retry).toHaveText("Retry verification");
-    await retry.click();
-
-    await expect
-      .poll(async () =>
-        (await canvas.cliCalls()).some(
+      const record = await canvas.operationRecord(operationId);
+      expect(record["verification"]).toMatchObject({
+        baselineRunId: 40,
+        runId: "41",
+        runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
+        operationMarker: operationId
+      });
+      expect(record["providerRecovery"]).toMatchObject({
+        mutations: [
+          expect.objectContaining({
+            kind: "github_workflow.dispatch_retry",
+            status: "confirmed",
+            providerIdempotencyKey: operationId
+          })
+        ]
+      });
+      expect(
+        (await canvas.cliCalls()).filter(
           (call) =>
             call.tool === "gh" &&
-            call.args[0] === "workflow" &&
-            call.args.includes(`radius_operation=${operationId}`)
+            call.args[0] === "run" &&
+            call.args.includes(
+              "databaseId,createdAt,displayTitle,event,headBranch"
+            )
         )
-      )
-      .toBe(true);
-    await expect
-      .poll(async () => (await canvas.operationRecord(operationId))["state"], {
-        timeout: 15_000
-      })
-      .toBe("succeeded");
-
-    const record = await canvas.operationRecord(operationId);
-    expect(record["verification"]).toMatchObject({
-      baselineRunId: 40,
-      runId: "41",
-      runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
-      operationMarker: operationId
+      ).toEqual([]);
+      await expect(page.locator("body")).toContainText("Environment created");
+      const calls = await canvas.cliCalls();
+      expect(
+        calls.filter(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "api" &&
+            call.args[1] === `repos/${REPOSITORY}/actions/runs/41`
+        )
+      ).toHaveLength(1);
+      expect(
+        calls.filter(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "api" &&
+            call.args[1] ===
+              `repos/${REPOSITORY}/actions/runs/41/jobs?per_page=100&page=1`
+        )
+      ).toHaveLength(1);
+      await page.locator("#env-progress-details > summary").click();
+      await expect(
+        page.getByRole("button", { name: "Download diagnostic snapshot" })
+      ).toBeHidden();
+      await expectNoWcagViolations(page);
     });
-    expect(record["providerRecovery"]).toMatchObject({
-      mutations: [
-        expect.objectContaining({
-          kind: "github_workflow.dispatch_retry",
-          status: "confirmed",
-          providerIdempotencyKey: operationId
-        })
-      ]
-    });
-    expect(
-      (await canvas.cliCalls()).filter(
-        (call) =>
-          call.tool === "gh" &&
-          call.args[0] === "run" &&
-          call.args.includes(
-            "databaseId,createdAt,displayTitle,event,headBranch"
-          )
-      )
-    ).toEqual([]);
-    await expect(page.locator("body")).toContainText("Environment created");
-    await page.locator("#env-progress-details > summary").click();
-    await expect(
-      page.getByRole("button", { name: "Download diagnostic snapshot" })
-    ).toBeHidden();
-    await expectNoWcagViolations(page);
-  });
+  }
 
   test("pauses an interrupted setup before offering exact-run cancellation and deletion by keyboard @safety", async ({
     page,
@@ -3717,130 +3755,143 @@ test.describe("Radius Canvas in Chromium", () => {
   });
 
   for (const completed of [false, true]) {
-    test(`shows retained ${completed ? "unconfirmed completion" : "timeout"} details through the real graph route in Chromium @safety`, async ({
-      page,
-      canvas
-    }, testInfo) => {
-      await page.clock.install();
-      const resources: CanvasGraphResource[] = [
-        {
-          id: "app/web",
-          name: "web",
-          type: "Radius.Compute/containers",
-          codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
-          deployStatus: "in_progress"
-        },
-        {
-          id: "app/db",
-          name: "db",
-          type: "Radius.Data/sqlDatabases",
-          codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
-          deployStatus: "success"
-        }
-      ];
-      const topology = resources.map(({ id, name, type, codeReference }) => ({
-        id,
-        name,
-        type,
-        codeReference
-      }));
-      const monitorState: CanvasState = {};
-      if (completed) {
-        await createUnconfirmedMonitor("future_conclusion").monitor.run({
-          entry: { state: monitorState },
-          repo: REPOSITORY,
-          branch: WORKTREE_BRANCH,
-          provider: "azure",
-          requestedEnvironment: "fixture-environment",
-          resources,
-          log: () => {}
-        });
-      } else {
-        settleDeployStatuses(resources, "monitor_timed_out");
-      }
-      await canvas.seedState({
-        ...baseCanvasState(canvas.workspacePath),
-        ...monitorState,
-        graphResources: topology,
-        deployingResources: resources,
-        deployStatus: "failed",
-        deployErrorKind: "run-unconfirmed",
-        deployRunId: completed ? monitorState.deployRunId : 7,
-        deployEnvName: "fixture-environment",
-        deployAppName: "radius-app"
-      });
-      const scenario = defaultFakeCliScenario();
-      await canvas.setScenario({
-        ...scenario,
-        commands: [
-          ...scenario.commands,
+    for (const evidence of ["missing", "malformed", "auth"] as const) {
+      test(`shows retained ${completed ? "unconfirmed completion" : "timeout"} details despite ${evidence} artifacts through the real graph route in Chromium @safety`, async ({
+        page,
+        canvas
+      }, testInfo) => {
+        await page.clock.install();
+        const resources: CanvasGraphResource[] = [
           {
-            tool: "gh",
-            args: [
-              "api",
-              `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
-            ],
-            stdout: JSON.stringify({ artifacts: [] })
+            id: "app/web",
+            name: "web",
+            type: "Radius.Compute/containers",
+            codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+            deployStatus: "in_progress"
+          },
+          {
+            id: "app/db",
+            name: "db",
+            type: "Radius.Data/sqlDatabases",
+            codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+            deployStatus: "success"
           }
-        ]
-      });
-      await routeDeployedPage(page, () => "failed");
-      await page.unroute("**/api/deployed-graph**");
-      let graphRequests = 0;
-      page.on("request", (request) => {
-        if (new URL(request.url()).pathname === "/api/deployed-graph") {
-          graphRequests++;
+        ];
+        const topology = resources.map(({ id, name, type, codeReference }) => ({
+          id,
+          name,
+          type,
+          codeReference
+        }));
+        const monitorState: CanvasState = {};
+        if (completed) {
+          await createUnconfirmedMonitor("future_conclusion").monitor.run({
+            entry: { state: monitorState },
+            repo: REPOSITORY,
+            branch: WORKTREE_BRANCH,
+            provider: "azure",
+            requestedEnvironment: "fixture-environment",
+            resources,
+            log: () => {}
+          });
+        } else {
+          settleDeployStatuses(resources, "monitor_timed_out");
         }
+        await canvas.seedState({
+          ...baseCanvasState(canvas.workspacePath),
+          ...monitorState,
+          graphResources: topology,
+          deployingResources: resources,
+          deployStatus: "failed",
+          deployErrorKind: "run-unconfirmed",
+          deployRunId: completed ? monitorState.deployRunId : 7,
+          deployEnvName: "fixture-environment",
+          deployAppName: "radius-app"
+        });
+        const scenario = defaultFakeCliScenario();
+        await canvas.setScenario({
+          ...scenario,
+          commands: [
+            ...scenario.commands,
+            {
+              tool: "gh",
+              args: [
+                "api",
+                `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`,
+                "--include",
+                "--method",
+                "GET"
+              ],
+              stdout:
+                `HTTP/2 ${evidence === "auth" ? 403 : 200}\n\n` +
+                (evidence === "malformed" ?
+                  '{"message":"not a listing"}'
+                : JSON.stringify({ artifacts: [] })),
+              exitCode: evidence === "auth" ? 1 : 0,
+              stderr: evidence === "auth" ? "HTTP 403 Forbidden" : ""
+            }
+          ]
+        });
+        await routeDeployedPage(page, () => "failed");
+        await page.unroute("**/api/deployed-graph**");
+        let graphRequests = 0;
+        page.on("request", (request) => {
+          if (new URL(request.url()).pathname === "/api/deployed-graph") {
+            graphRequests++;
+          }
+        });
+
+        await gotoCanvas(page, canvas, "deployed");
+
+        await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(
+          1
+        );
+        await expect(
+          page.getByAltText("Deployed", { exact: true })
+        ).toHaveCount(1);
+        await expect(
+          page.getByAltText("In progress", { exact: true })
+        ).toHaveCount(0);
+        const details = page
+          .locator(".rad-node")
+          .filter({ hasText: "web" })
+          .getByRole("button", { name: "Show details" });
+        await details.focus();
+        await page.keyboard.press("Enter");
+        await expect(page.locator("#node-popup")).toContainText(
+          completed ?
+            DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
+          : DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+        );
+        if (completed) {
+          await expect(page.locator("#node-popup")).not.toContainText(
+            "may still be running"
+          );
+          await expect(page.locator("#node-popup")).not.toContainText(
+            "Deployment failed"
+          );
+        }
+        const detailsAccessibility = await new AxeBuilder({ page })
+          .include("#node-popup")
+          .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+          .analyze();
+        expect(detailsAccessibility.violations).toEqual([]);
+        if (completed) {
+          await expect(page.locator("#node-popup")).toBeVisible();
+          await captureDeployEvidence(
+            page,
+            testInfo,
+            "unconfirmed-completion-resource-details"
+          );
+        }
+        const requestsAfterSettlement = graphRequests;
+        await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS * 2);
+        expect(graphRequests).toBe(requestsAfterSettlement);
+        await expect(
+          page.getByAltText("In progress", { exact: true })
+        ).toHaveCount(0);
       });
-
-      await gotoCanvas(page, canvas, "deployed");
-
-      await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(1);
-      await expect(page.getByAltText("Deployed", { exact: true })).toHaveCount(
-        1
-      );
-      await expect(
-        page.getByAltText("In progress", { exact: true })
-      ).toHaveCount(0);
-      const details = page
-        .locator(".rad-node")
-        .filter({ hasText: "web" })
-        .getByRole("button", { name: "Show details" });
-      await details.focus();
-      await page.keyboard.press("Enter");
-      await expect(page.locator("#node-popup")).toContainText(
-        completed ?
-          DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
-        : DEPLOY_MONITOR_TIMED_OUT_MESSAGE
-      );
-      if (completed) {
-        await expect(page.locator("#node-popup")).not.toContainText(
-          "may still be running"
-        );
-        await expect(page.locator("#node-popup")).not.toContainText(
-          "Deployment failed"
-        );
-      }
-      const detailsAccessibility = await new AxeBuilder({ page })
-        .include("#node-popup")
-        .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
-        .analyze();
-      expect(detailsAccessibility.violations).toEqual([]);
-      if (completed) {
-        await expect(page.locator("#node-popup")).toBeVisible();
-        await captureDeployEvidence(
-          page,
-          testInfo,
-          "unconfirmed-completion-resource-details"
-        );
-      }
-      const requestsAfterSettlement = graphRequests;
-      await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS * 2);
-      expect(graphRequests).toBe(requestsAfterSettlement);
-      await expect(
-        page.getByAltText("In progress", { exact: true })
-      ).toHaveCount(0);
-    });
+    }
   }
 
   test("preserves graph zoom while a deployment refreshes in Chromium", async ({

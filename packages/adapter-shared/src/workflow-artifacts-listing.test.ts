@@ -1,13 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { ARTIFACT_PAGE_SIZE, MAX_ARTIFACT_PAGES } from "@radius-project/core";
+import { createWorkflowArtifactReads } from "./workflow-artifacts.js";
+import type { WorkflowRunner } from "./workflow-reads.js";
 
-const childProcess = {
-  execFile: vi.fn(),
-  execFileSync: vi.fn()
-};
-vi.mock("node:child_process", () => childProcess);
-
-const { listWorkflowArtifacts, ARTIFACT_PAGE_SIZE, MAX_ARTIFACT_PAGES } =
-  await import("./deploy-artifacts.js");
+const run = vi.fn<WorkflowRunner>();
+const { listWorkflowArtifacts } = createWorkflowArtifactReads(run);
 
 // Build a page of artifact names as the GitHub listing endpoint returns them.
 function page(names: string[]) {
@@ -28,33 +25,32 @@ function noise(count: number, offset = 0) {
 }
 
 function requestedPaths(): string[] {
-  return childProcess.execFile.mock.calls.map((call) => {
-    const args = call[1] as string[];
-    return args[args.length - 1];
+  return run.mock.calls.map((call) => {
+    const args = call[0];
+    return args[1];
   });
 }
 
 // Serve one JSON body per successive `gh api` call.
 function serve(bodies: string[]) {
   let call = 0;
-  childProcess.execFile.mockImplementation((_file, _args, _opts, cb) => {
+  run.mockImplementation(async () => {
     const body = bodies[Math.min(call, bodies.length - 1)];
     call++;
-    cb(null, body, "");
-    return { stdin: { end() {} } };
+    return { code: 0, stdout: `HTTP/2 200\n\n${body}`, stderr: "" };
   });
 }
 
 describe("listWorkflowArtifacts", () => {
   beforeEach(() => {
-    childProcess.execFile.mockReset();
+    run.mockReset();
   });
 
   it("reads a single page for a run-scoped listing", async () => {
     serve([page(["radius-deploy-status-dev-todolist"])]);
     const found = await listWorkflowArtifacts("octo/app", 12345);
     expect(found).toHaveLength(1);
-    expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
     expect(requestedPaths()[0]).toContain("/actions/runs/12345/artifacts");
   });
 
@@ -78,7 +74,7 @@ describe("listWorkflowArtifacts", () => {
     expect(
       found.some((a) => a.name === "radius-deploy-status-dev-todolist")
     ).toBe(true);
-    expect(childProcess.execFile).toHaveBeenCalledTimes(3);
+    expect(run).toHaveBeenCalledTimes(3);
     expect(requestedPaths()[2]).toContain("page=3");
   });
 
@@ -91,7 +87,7 @@ describe("listWorkflowArtifacts", () => {
       page(noise(ARTIFACT_PAGE_SIZE, 100))
     ]);
     await listWorkflowArtifacts("octo/app", null, "radius-deploy-status-dev-");
-    expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it("keeps paging past a page that only holds live-slot artifacts", async () => {
@@ -119,13 +115,13 @@ describe("listWorkflowArtifacts", () => {
     expect(
       found.some((a) => a.name === "radius-deploy-status-dev-todolist")
     ).toBe(true);
-    expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it("stops at a short page rather than requesting past the end", async () => {
     serve([page(noise(3))]);
     await listWorkflowArtifacts("octo/app", null, "radius-deploy-status-dev-");
-    expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it("gives up after the page budget instead of walking the whole history", async () => {
@@ -133,7 +129,7 @@ describe("listWorkflowArtifacts", () => {
     // calls, not a walk of its entire artifact history.
     serve([page(noise(ARTIFACT_PAGE_SIZE))]);
     await listWorkflowArtifacts("octo/app", null, "radius-deploy-status-dev-");
-    expect(childProcess.execFile).toHaveBeenCalledTimes(MAX_ARTIFACT_PAGES);
+    expect(run).toHaveBeenCalledTimes(MAX_ARTIFACT_PAGES);
   });
 
   it("falls back to the bare prefix when no environment prefix is given", async () => {
@@ -144,11 +140,15 @@ describe("listWorkflowArtifacts", () => {
       ])
     ]);
     await listWorkflowArtifacts("octo/app", null);
-    expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
-  it("returns an empty list when the response is not a listing", async () => {
+  it("reports malformed rather than absence when the response is not a listing", async () => {
     serve(['{"message":"Not Found"}']);
-    expect(await listWorkflowArtifacts("octo/app", null)).toEqual([]);
+    await expect(listWorkflowArtifacts("octo/app", null)).rejects.toMatchObject(
+      {
+        code: "GH_ARTIFACT_MALFORMED"
+      }
+    );
   });
 });

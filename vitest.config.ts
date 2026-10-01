@@ -24,6 +24,12 @@ export default defineConfig({
           functions: 100,
           lines: 100
         },
+        "packages/adapter-shared/src/workflow-artifacts.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
         "packages/core/src/workflow-observation.ts": {
           statements: 100,
           branches: 100,
@@ -37,6 +43,18 @@ export default defineConfig({
           lines: 100
         },
         "packages/adapter-shared/src/workflow-reads.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-shared/src/workflow-read-response.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-shared/src/workflow-read-budget.ts": {
           statements: 100,
           branches: 100,
           functions: 100,

@@ -44,26 +44,32 @@ export function createUnconfirmedMonitor(
               {
                 mode: "ambient",
                 run: async (args) => {
-                  reads.push(args);
+                  const jobs = args[1].includes("/jobs");
+                  if (!jobs) reads.push(args);
                   return {
                     code: 0,
                     stderr: "",
-                    stdout: JSON.stringify({
-                      status: "completed",
-                      conclusion,
-                      jobs: [
-                        {
-                          name: "deploy",
-                          steps: [
-                            {
-                              name: "Run rad commands",
-                              status: "completed",
-                              conclusion: "failure"
-                            }
-                          ]
-                        }
-                      ]
-                    })
+                    stdout:
+                      "HTTP/2 200\n\n" +
+                      JSON.stringify(
+                        jobs ?
+                          {
+                            total_count: 1,
+                            jobs: [
+                              {
+                                name: "deploy",
+                                steps: [
+                                  {
+                                    name: "Run rad commands",
+                                    status: "completed",
+                                    conclusion: "failure"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        : { status: "completed", conclusion }
+                      )
                   };
                 }
               },
