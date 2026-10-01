@@ -197,6 +197,7 @@ export interface CloudFixtureOptions {
   readonly githubRunId?: string;
   readonly assertionTimeoutMs?: number;
   readonly assertionPollIntervalMs?: number;
+  readonly entraAppDeletionTimeoutMs?: number;
 }
 
 const DEFAULT_LOCATION = "westus3";
@@ -204,6 +205,7 @@ const DEFAULT_NODE_COUNT = 1;
 const CLUSTER_NODE_SIZE = "Standard_B2s";
 const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_ENTRA_APP_DELETION_TIMEOUT_MS = 120_000;
 
 function requireGitObjectId(value: string, context: string): string {
   const normalized = value.trim();
@@ -255,6 +257,10 @@ export async function createCloudFixture(
   const assertionPollIntervalMs = requirePositiveNumber(
     options.assertionPollIntervalMs ?? DEFAULT_ASSERTION_POLL_INTERVAL_MS,
     "Assertion poll interval"
+  );
+  const entraAppDeletionTimeoutMs = requirePositiveNumber(
+    options.entraAppDeletionTimeoutMs ?? DEFAULT_ENTRA_APP_DELETION_TIMEOUT_MS,
+    "Entra app deletion timeout"
   );
   const uniqueId = shortenUniqueId(ports.newUniqueId());
   const configuredResourceGroup = options.resourceGroup?.trim() || undefined;
@@ -990,14 +996,14 @@ export async function createCloudFixture(
       let found: AppRegistrationRecord[] = [];
       await pollForValue({
         ports,
-        timeoutMs: assertionTimeoutMs,
+        timeoutMs: entraAppDeletionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
         probe: async () => {
           found = [...(await listAppRegistrations(commands, expectedAppName))];
           return found.length === 0 ? true : undefined;
         },
         timeoutMessage: () =>
-          `Timed out after ${assertionTimeoutMs}ms waiting for app registration "${expectedAppName}" to be ` +
+          `Timed out after ${entraAppDeletionTimeoutMs}ms waiting for app registration "${expectedAppName}" to be ` +
           `deleted; ${found.length} still exist(s) (${found
             .map((app) => app.appId)
             .join(", ")}).`
@@ -1465,7 +1471,7 @@ export async function createCloudFixture(
           let survivors: readonly string[] = [app.appId];
           await pollForValue({
             ports,
-            timeoutMs: assertionTimeoutMs,
+            timeoutMs: entraAppDeletionTimeoutMs,
             intervalMs: assertionPollIntervalMs,
             probe: async () => {
               const remaining = await listAppRegistrations(
@@ -1480,7 +1486,7 @@ export async function createCloudFixture(
             timeoutMessage: () =>
               `az ad app delete ${app.objectId} ` +
               `${objectIdNotFound ? `reported the object id was already absent and the client-id retry did not remove it` : "succeeded"}, ` +
-              `but app registration ${survivors.join(", ")} was still listed after ${assertionTimeoutMs}ms.`
+              `but app registration ${survivors.join(", ")} was still listed after ${entraAppDeletionTimeoutMs}ms.`
           });
         });
       }
