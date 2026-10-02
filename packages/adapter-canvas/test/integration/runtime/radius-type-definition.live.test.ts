@@ -34,6 +34,35 @@ const representativeTypes = [
   "Radius.Data/redisCaches",
   "Radius.AI/models"
 ] as const;
+// The "Provisioned service usernames" section of the radius-app-bicep skill's
+// references/secrets-handling.md depends on these upstream contract facts.
+// The resolved schema keeps no property descriptions, so the RabbitMQ check
+// asserts that username is readable and not sensitive instead of matching the
+// "exposed as a read-only connection value" description.
+const GUIDANCE = "Provisioned service usernames in secrets-handling.md";
+const usernameTypes = [
+  "Radius.Messaging/rabbitMQ",
+  "Radius.Data/mySqlDatabases",
+  "Radius.Data/postgreSqlDatabases",
+  "Radius.Data/sqlServerDatabases"
+] as const;
+const adminLoginTypes = new Set<string>([
+  "Radius.Data/mySqlDatabases",
+  "Radius.Data/postgreSqlDatabases",
+  "Radius.Data/sqlServerDatabases"
+]);
+const ADMIN_LOGIN_MAPPING =
+  /^\s*administratorLogin:\s*'\{\{context\.resource\.properties\.username\}\}'\s*$/mu;
+
+interface ResolvedResource {
+  type: string;
+  schema: {
+    properties?: {
+      properties?: { properties?: Record<string, Record<string, unknown>> };
+    };
+  };
+  recipe?: { status?: string; definition?: unknown };
+}
 
 describe.skipIf(!LIVE)("live generated Radius definition compatibility", () => {
   it("resolves representative definitions from the managed Radius release", async () => {
@@ -80,6 +109,64 @@ describe.skipIf(!LIVE)("live generated Radius definition compatibility", () => {
           },
           required: expect.arrayContaining(["name", "properties"])
         });
+      }
+    } finally {
+      fs.rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("keeps the upstream username contract the skill guidance relies on", async () => {
+    const cacheRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "radius-type-live-")
+    );
+    try {
+      const contract = await resolver.resolveRadiusTypes([...usernameTypes], {
+        cacheRoot,
+        processTimeoutMs: 30_000,
+        fetchTimeoutMs: 30_000
+      });
+
+      expect(contract.notFound, `${GUIDANCE} names these types`).toEqual([]);
+      const resources = contract.resources as ResolvedResource[];
+      expect(resources.map((resource) => resource.type)).toEqual(usernameTypes);
+
+      for (const resource of resources) {
+        const username =
+          resource.schema.properties?.properties?.properties?.username;
+        expect(
+          username,
+          `${GUIDANCE} sets username on ${resource.type}, so its schema must define it`
+        ).toBeDefined();
+        expect(
+          username?.type,
+          `${GUIDANCE} writes a string username on ${resource.type}`
+        ).toBe("string");
+        expect(
+          username?.readOnly,
+          `${GUIDANCE} sets username on ${resource.type}, so it must stay writable`
+        ).not.toBe(true);
+
+        if (resource.type === "Radius.Messaging/rabbitMQ") {
+          expect(
+            username?.writeOnly,
+            `${GUIDANCE} binds consumers to rabbitMQ.properties.username, so it must stay readable`
+          ).not.toBe(true);
+          expect(
+            username?.sensitive,
+            `${GUIDANCE} passes rabbitMQ.properties.username through plain env.value, so it must not be sensitive`
+          ).not.toBe(true);
+        }
+
+        if (adminLoginTypes.has(resource.type)) {
+          expect(
+            resource.recipe?.status,
+            `${GUIDANCE} keeps the existing username on refresh because the Azure pack maps it to administratorLogin for ${resource.type}`
+          ).toBe("available");
+          expect(
+            resource.recipe?.definition,
+            `${GUIDANCE} keeps the existing username on refresh because the Azure pack maps it to administratorLogin for ${resource.type}`
+          ).toMatch(ADMIN_LOGIN_MAPPING);
+        }
       }
     } finally {
       fs.rmSync(cacheRoot, { recursive: true, force: true });
