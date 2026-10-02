@@ -355,13 +355,15 @@ const GRAPH_STYLE_SAMPLE = `(() => {
 // text color switches instantly. Running axe mid-transition can sample any
 // background between the disabled gray and the final enabled color, so its
 // reported contrast ratio is not representative of the steady-state UI.
-// Waiting for every running CSSTransition/Animation to finish before
-// analyze() ensures axe always reads the final, stable colors.
+// Waiting for the running CSS transitions before analyze() ensures axe
+// always reads the final, stable colors without hanging on unrelated
+// infinite keyframe animations such as loading spinners.
 async function waitForTransitionsToSettle(page: Page): Promise<void> {
   await page.evaluate(() =>
     Promise.all(
       document
         .getAnimations()
+        .filter((animation) => animation instanceof CSSTransition)
         .map((animation) => animation.finished.catch(() => undefined))
     )
   );
