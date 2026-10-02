@@ -913,6 +913,17 @@ describe("P0-C built Radius extension artifact", () => {
     expect(secretsGuidance).toContain(
       "**When refreshing a model, keep the username it already has.**"
     );
+    expect(secretsGuidance).toContain(
+      "If the user asks to change it, keep the existing value, tell them the change may require replacing the service, and change it only after they confirm."
+    );
+    expect(secretsGuidance).not.toContain("unless the user asks to change it");
+    // Every one-source form the rule allows must pass the checklists, or a
+    // valid model would be rejected.
+    for (const guidance of [secretsGuidance, skillGuidance]) {
+      expect(guidance).toContain(
+        "`<resource>.properties.username`, the generated `CONNECTION_<CONNECTION>_USERNAME`, one shared `var`, or the schema's authored Secret through `secretKeyRef`"
+      );
+    }
     expect(skillGuidance).toContain(
       "Keep every provisioned service username the existing model sets."
     );
