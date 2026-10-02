@@ -10,7 +10,8 @@ import {
 import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
 import {
   createFakeDependencies,
-  createFakeSession
+  createFakeSession,
+  createFakeServerEntry
 } from "../../test/support/runtime/fakes.js";
 import {
   appBicepHandoffPrompt,
@@ -881,6 +882,44 @@ describe("RU-21: operation-aware host keepalive", () => {
 // RU-18 (extension half): shutdown closes every server and tears down the
 // session exactly once, even under a duplicate/concurrent call.
 describe("RU-18: shutdown is idempotent and closes every server exactly once", () => {
+  it.each(["rejects", "throws", "marking throws"] as const)(
+    "reports a server stop that %s and still closes its sibling and session once",
+    async (failure) => {
+      const { ext, deps } = setup();
+      const close = vi.fn();
+      ext.attachSession(createFakeSession({ close }));
+      deps.servers.set("failed", createFakeServerEntry("failed", "deployed"));
+      const sibling = createFakeServerEntry("sibling", "deployed");
+      deps.servers.set("sibling", sibling);
+      const error = new Error("controlled stop failure");
+      if (failure === "rejects") {
+        vi.mocked(deps.stopServer).mockRejectedValueOnce(error);
+      } else if (failure === "throws") {
+        vi.mocked(deps.stopServer).mockImplementationOnce(() => {
+          throw error;
+        });
+      } else {
+        vi.mocked(
+          deps.operations.markEnvironmentInstanceShuttingDown
+        ).mockImplementationOnce(() => {
+          throw error;
+        });
+      }
+
+      const stopping = ext.shutdown("SIGTERM");
+      expect(ext.shutdown("SIGINT")).toBe(stopping);
+      await stopping;
+      await ext.shutdown("SIGTERM");
+
+      expect(deps.logError).toHaveBeenCalledExactlyOnceWith(
+        "Could not stop Radius canvas failed: controlled stop failure"
+      );
+      expect(deps.stopServer).toHaveBeenCalledWith("sibling", true);
+      expect(sibling.server.close).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(1);
+    }
+  );
+
   it("closes every open canvas server and never twice", async () => {
     const { ext, deps } = setup();
     const closeA = vi.fn((cb?: () => void) => cb?.());

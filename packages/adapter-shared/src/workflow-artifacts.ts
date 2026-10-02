@@ -15,6 +15,8 @@ import {
   DEPLOY_STATUS_ARTIFACT_PREFIX,
   DEPLOY_STATUS_FILES,
   createDeployStatusReader,
+  WorkflowReadInterruptedError,
+  WORKFLOW_READ_LIMITS,
   isLiveSlotArtifactName
 } from "@radius-project/core";
 import type {
@@ -24,17 +26,24 @@ import type {
   ListArtifacts,
   WorkflowArtifact,
   WorkflowReadEvidence,
-  WorkflowResponseMetadata
+  WorkflowResponseMetadata,
+  WorkflowReadContext,
+  WorkflowReadDecision
 } from "@radius-project/core";
 import type { WorkflowRunner } from "./workflow-reads.js";
-import { readWorkflowApi } from "./workflow-read-response.js";
+import { readWorkflowApiWithPolicy } from "./workflow-read-response.js";
+import {
+  createWorkflowReadBudget,
+  createWorkflowReadSession
+} from "./workflow-read-budget.js";
 
 export class WorkflowArtifactReadError extends Error {
   constructor(
     readonly code:
       "GH_ARTIFACT_AUTH" | "GH_ARTIFACT_MALFORMED" | "GH_ARTIFACT_TRANSPORT",
     readonly evidence: readonly WorkflowReadEvidence[],
-    message: string
+    message: string,
+    readonly decision?: WorkflowReadDecision
   ) {
     super(message);
   }
@@ -48,7 +57,11 @@ export type WorkflowArtifactReaderOptions = Omit<
 > &
   Partial<
     Pick<DeployStatusReaderOptions, "listArtifacts" | "downloadArtifact">
-  >;
+  > & {
+    signal?: AbortSignal;
+    identity?: string;
+    session?: ReturnType<typeof createWorkflowReadSession>;
+  };
 
 function malformed(message: string): Error {
   return Object.assign(new Error(message), { code: "GH_ARTIFACT_MALFORMED" });
@@ -160,9 +173,35 @@ function readArtifactDir(
 }
 
 /** Node binding shared by Canvas and direct callers; the host owns execution. */
-export function createWorkflowArtifactReads(run: WorkflowRunner) {
-  async function command(args: string[], timeout: number): Promise<string> {
-    const result = await run(args, { timeout });
+export function createWorkflowArtifactReads(
+  run: WorkflowRunner,
+  identity = "ambient",
+  session = createWorkflowReadSession()
+) {
+  async function command(
+    args: string[],
+    timeout: number,
+    context?: WorkflowReadContext
+  ): Promise<string> {
+    const controller = new AbortController();
+    const limit = context ? Math.min(timeout, context.remaining()) : timeout;
+    if (limit <= 0 || context?.check().state === "stopped")
+      throw new WorkflowReadInterruptedError(
+        context?.check().state === "stopped" ? "cancelled" : "elapsed"
+      );
+    const detach = context?.onStop?.(() => controller.abort());
+    const timer =
+      context ? setTimeout(() => controller.abort(), limit) : undefined;
+    let result;
+    try {
+      result = await run(
+        args,
+        context ? { timeout: limit, signal: controller.signal } : { timeout }
+      );
+    } finally {
+      clearTimeout(timer);
+      detach?.();
+    }
     if (Number(result.code) !== 0) {
       const text =
         result.stderr || `GitHub artifact command failed (${result.code}).`;
@@ -179,8 +218,22 @@ export function createWorkflowArtifactReads(run: WorkflowRunner) {
   const listWorkflowArtifactsWithMetadata = async (
     repo: string,
     runId?: number | string | null,
-    namePrefix?: string
+    namePrefix?: string,
+    suppliedContext?: WorkflowReadContext
   ) => {
+    const context =
+      suppliedContext ??
+      session.observe(
+        runId ?
+          WORKFLOW_READ_LIMITS.artifactRunMs
+        : WORKFLOW_READ_LIMITS.artifactRepositoryMs
+      );
+    const listing = createWorkflowReadBudget(
+      run,
+      runId ? 20000 : 100000,
+      (runId ? 1 : 5) * 10 * 1024 * 1024,
+      context
+    );
     const found: WorkflowArtifact[] = [];
     const evidence: WorkflowReadEvidence[] = [];
     const prefix = namePrefix || DEPLOY_STATUS_ARTIFACT_PREFIX;
@@ -189,8 +242,28 @@ export function createWorkflowArtifactReads(run: WorkflowRunner) {
         runId ?
           `/repos/${repo}/actions/runs/${runId}/artifacts?per_page=${ARTIFACT_PAGE_SIZE}`
         : `/repos/${repo}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=${page}`;
-      const response = await readWorkflowApi(run, endpoint, { timeout: 20000 });
-      evidence.push({ phase: "artifacts", response: response.metadata });
+      const pageDeadline = context.clock.monotonic() + 20000;
+      const bounded = createWorkflowReadBudget(
+        listing,
+        20000,
+        10 * 1024 * 1024,
+        context
+      );
+      const response = await readWorkflowApiWithPolicy(
+        bounded,
+        endpoint,
+        { timeout: 20000 },
+        context,
+        JSON.stringify([identity, repo, String(runId ?? ""), "artifacts"]),
+        pageDeadline,
+        (result) =>
+          evidence.push({ phase: "artifacts", response: result.metadata })
+      );
+      if (
+        response.metadata.source === "unavailable" &&
+        response.metadata.reason === "deferred"
+      )
+        evidence.push({ phase: "artifacts", response: response.metadata });
       if (!response.ok) {
         const status =
           response.metadata.source === "gh-api-include" ?
@@ -198,9 +271,10 @@ export function createWorkflowArtifactReads(run: WorkflowRunner) {
           : null;
         throw new WorkflowArtifactReadError(
           (
-            status === 401 ||
-              status === 403 ||
-              response.commandAuthorizationFailure
+            response.metadata.source === "gh-api-include" ?
+              status === 401 ||
+              response.metadata.classification === "authorization"
+            : response.commandAuthorizationFailure
           ) ?
             "GH_ARTIFACT_AUTH"
           : response.failure === "json" ? "GH_ARTIFACT_MALFORMED"
@@ -208,7 +282,8 @@ export function createWorkflowArtifactReads(run: WorkflowRunner) {
           evidence,
           response.failure === "json" ?
             "GitHub returned malformed artifact listing JSON."
-          : response.diagnostic || "GitHub artifact listing could not be read."
+          : response.diagnostic || "GitHub artifact listing could not be read.",
+          response.decision
         );
       }
       const batch = artifactPage(response.value, evidence);
@@ -229,39 +304,53 @@ export function createWorkflowArtifactReads(run: WorkflowRunner) {
   const listWorkflowArtifacts: ListArtifacts = async (...args) =>
     (await listWorkflowArtifactsWithMetadata(...args)).value;
 
-  const downloadWorkflowArtifact: DownloadArtifact = async (repo, artifact) => {
+  const downloadWorkflowArtifact: DownloadArtifact = async (
+    repo,
+    artifact,
+    suppliedContext
+  ) => {
+    const context = suppliedContext?.limit(60000);
     const runId = artifact.workflow_run?.id;
     if (!runId || !artifact.name) return null;
-    const directory = mkdtempSync(
-      path.join(os.tmpdir(), "rad-deploy-artifact-")
-    );
-    try {
-      await command(
-        [
-          "run",
-          "download",
-          String(runId),
-          "--name",
-          artifact.name,
-          "--dir",
-          directory,
-          "--repo",
-          repo
-        ],
-        60000
+    const work = async () => {
+      const directory = mkdtempSync(
+        path.join(os.tmpdir(), "rad-deploy-artifact-")
       );
-      return readArtifactDir(directory, artifact.name);
-    } finally {
       try {
-        fs.rmSync(directory, { recursive: true, force: true });
-      } catch (error) {
-        console.warn(
-          "Could not remove temporary workflow artifact directory:",
-          directory,
-          error
+        await command(
+          [
+            "run",
+            "download",
+            String(runId),
+            "--name",
+            artifact.name,
+            "--dir",
+            directory,
+            "--repo",
+            repo
+          ],
+          60000,
+          context
         );
+        if (context && context.check().state !== "ready")
+          throw new WorkflowReadInterruptedError(
+            context.check().state === "stopped" ? "cancelled" : "elapsed"
+          );
+        return readArtifactDir(directory, artifact.name);
+      } finally {
+        try {
+          fs.rmSync(directory, { recursive: true, force: true });
+        } catch (error) {
+          console.warn(
+            "Could not remove temporary workflow artifact directory:",
+            directory,
+            error
+          );
+        }
       }
-    }
+    };
+    const pending = work();
+    return context ? context.wait(pending) : pending;
   };
   async function downloadWorkflowArtifactWithMetadata(
     repo: string,
@@ -287,9 +376,24 @@ export function createWorkflowArtifactReader(
   options: WorkflowArtifactReaderOptions,
   run: WorkflowRunner
 ) {
-  const reads = createWorkflowArtifactReads(run);
+  const session = options.session ?? createWorkflowReadSession();
+  const reads = createWorkflowArtifactReads(run, options.identity, session);
   return createDeployStatusReader({
     ...options,
+    createReadContext:
+      options.createReadContext ??
+      (() =>
+        session.observe(
+          options.runId ?
+            WORKFLOW_READ_LIMITS.artifactRunMs
+          : WORKFLOW_READ_LIMITS.artifactRepositoryMs,
+          options.signal
+        )),
+    stopped: () => options.signal?.aborted === true,
+    onStop: (listener) => {
+      options.signal?.addEventListener("abort", listener, { once: true });
+      return () => options.signal?.removeEventListener("abort", listener);
+    },
     listArtifacts: options.listArtifacts ?? reads.listWorkflowArtifacts,
     downloadArtifact: options.downloadArtifact ?? reads.downloadWorkflowArtifact
   });

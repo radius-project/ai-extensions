@@ -3,10 +3,13 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ARTIFACT_PAGE_SIZE,
+  createDeployStatusReader,
   DEPLOY_STATUS_FILES,
   collectWorkflowFailure,
   confirmedWorkflowConclusion,
-  observeWorkflowRun
+  observeWorkflowRun,
+  WORKFLOW_READ_LIMITS,
+  type WorkflowReadContext
 } from "@radius-project/core";
 import {
   createWorkflowArtifactReader,
@@ -18,13 +21,17 @@ import {
   readWorkflowLog,
   type WorkflowRunner
 } from "./workflow-reads.js";
+import { createWorkflowReadSession } from "./workflow-read-budget.js";
 
 const artifact = {
   id: 12,
   name: "radius-deploy-status-dev-app",
   workflow_run: { id: 41 }
 };
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 const progress = {
   schemaVersion: 1,
   application: "app",
@@ -93,18 +100,23 @@ describe("workflow artifact Node binding", () => {
       evidence: [{ response: { status: 200 } }]
     });
   });
-  it("retains raw listing status/timing independently of its legacy 403 auth projection", async () => {
+  it("bounds actual rate-limit retries without the legacy 403 auth projection", async () => {
+    vi.useFakeTimers();
     const reads = createWorkflowArtifactReads(async () => ({
       code: 1,
       stdout:
         'HTTP/2 403\nRetry-After: 12\r\n\r\n{"message":"secondary rate limit"}',
       stderr: ""
     }));
-    await expect(
-      reads.listWorkflowArtifactsWithMetadata("org/app", 41)
-    ).rejects.toMatchObject({
-      code: "GH_ARTIFACT_AUTH",
+    const result = reads
+      .listWorkflowArtifactsWithMetadata("org/app", 41)
+      .catch((error: unknown) => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toMatchObject({
+      code: "GH_ARTIFACT_TRANSPORT",
+      decision: { state: "deferred", reason: "not-before" },
       evidence: [
+        { response: { status: 403 } },
         {
           phase: "artifacts",
           response: {
@@ -119,17 +131,25 @@ describe("workflow artifact Node binding", () => {
   });
 
   it("returns safe explicit failure metadata for framed non-auth transport failures", async () => {
+    vi.useFakeTimers();
     const reads = createWorkflowArtifactReads(async () => ({
       code: 1,
       stdout: 'HTTP/2 503\n\n{"message":"fixture-private"}',
       stderr: ""
     }));
-    const error = await reads
+    const pending = reads
       .listWorkflowArtifacts("org/app")
       .catch((error: unknown) => error);
+    await vi.runAllTimersAsync();
+    const error = await pending;
     expect(error).toMatchObject({
       code: "GH_ARTIFACT_TRANSPORT",
-      evidence: [{ response: { status: 503 } }]
+      evidence: [
+        { response: { status: 503 } },
+        { response: { status: 503 } },
+        { response: { status: 503 } }
+      ],
+      decision: { state: "exhausted", reason: "attempts" }
     });
     expect(JSON.stringify(error)).not.toContain("fixture-private");
   });
@@ -182,7 +202,11 @@ describe("workflow artifact Node binding", () => {
           "--method",
           "GET"
         ],
-        { timeout: 20000 }
+        {
+          timeout: expect.any(Number),
+          maxBuffer: 10 * 1024 * 1024,
+          signal: expect.any(AbortSignal)
+        }
       );
     }
   );
@@ -231,7 +255,8 @@ describe("workflow artifact Node binding", () => {
       expect(await reader.graph()).toEqual({
         graph: null,
         status: "malformed",
-        artifact: null
+        artifact: null,
+        error: result.error
       });
     }
   );
@@ -427,6 +452,50 @@ describe("workflow artifact Node binding", () => {
 });
 
 describe("artifact cleanup and compatibility", () => {
+  it.each(["cancelled", "elapsed"] as const)(
+    "fences an opaque %s download without removing a live worker's directory",
+    async (reason) => {
+      vi.useFakeTimers();
+      const waiting = deferred();
+      const started = deferred();
+      const controller = new AbortController();
+      const context = createWorkflowReadSession().observe(
+        100000,
+        controller.signal
+      );
+      let directory = "";
+      let signal: AbortSignal | undefined;
+      const run = vi.fn<WorkflowRunner>(async (args, options) => {
+        directory = args[6];
+        signal = options.signal;
+        expect(options.timeout).toBe(60000);
+        started.resolve();
+        await waiting.promise;
+        writeFileSync(
+          path.join(directory, DEPLOY_STATUS_FILES.progress),
+          JSON.stringify(progress)
+        );
+        return { code: 0, stdout: "", stderr: "" };
+      });
+      const result = createWorkflowArtifactReads(run)
+        .downloadWorkflowArtifact("org/app", artifact, context)
+        .catch((error: unknown) => error);
+      await started.promise;
+      try {
+        if (reason === "cancelled") controller.abort();
+        else await vi.advanceTimersByTimeAsync(60000);
+        expect(await result).toMatchObject({ reason });
+        expect(signal?.aborted).toBe(true);
+        expect(existsSync(directory)).toBe(true);
+        expect(run).toHaveBeenCalledTimes(1);
+      } finally {
+        waiting.resolve();
+        await vi.runAllTimersAsync();
+      }
+      expect(existsSync(directory)).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
   it("reports a failed opaque download with no stderr without masking cleanup", async () => {
     let directory = "";
     const reads = createWorkflowArtifactReads(async (args) => {
@@ -437,6 +506,765 @@ describe("artifact cleanup and compatibility", () => {
       reads.downloadWorkflowArtifact("org/app", artifact)
     ).rejects.toThrow("GitHub artifact command failed (7).");
     expect(existsSync(directory)).toBe(false);
+  });
+
+  describe("artifact shared-flight policy ownership", () => {
+    it("resumes the same observation after cooldown without replenishing retry credits", async () => {
+      vi.useFakeTimers();
+      vi.spyOn(Math, "random").mockReturnValue(0);
+      const context = createWorkflowReadSession().observe(120000);
+      expect(context.chargeRetries(1)).toBe(true);
+      let calls = 0;
+      const run = vi.fn<WorkflowRunner>(async () => {
+        calls++;
+        return {
+          code: calls >= 4 ? 0 : 1,
+          stdout:
+            calls <= 2 ? "HTTP/2 429\nRetry-After: 30\n\n{}"
+            : calls === 3 ? "HTTP/2 503\n\n{}"
+            : `HTTP/2 200\n\n${JSON.stringify({ artifacts: [artifact] })}`,
+          stderr: ""
+        };
+      });
+      const download = vi.fn(async () => ({
+        [DEPLOY_STATUS_FILES.progress]: JSON.stringify(progress)
+      }));
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        runId: 41,
+        ttlMs: 10000,
+        listArtifacts: createWorkflowArtifactReads(run).listWorkflowArtifacts,
+        downloadArtifact: download
+      });
+      expect(await reader.read(context)).toMatchObject({
+        status: "error",
+        error: { decision: { reason: "not-before" } }
+      });
+      await vi.advanceTimersByTimeAsync(29999);
+      expect(await reader.read(context)).toMatchObject({ status: "error" });
+      expect(calls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await reader.read(context)).toMatchObject({
+        status: "error",
+        error: { decision: { reason: "not-before" } }
+      });
+      expect(calls).toBe(2);
+      await vi.advanceTimersByTimeAsync(30000);
+      const recovered = reader.read(context);
+      await vi.advanceTimersByTimeAsync(750);
+      expect(await recovered).toMatchObject({ status: "ok" });
+      expect(calls).toBe(4);
+      expect(context.chargeRetries(1)).toBe(false);
+      expect(download).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(await reader.read(context)).toMatchObject({ status: "stale" });
+      expect(download).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each([
+      { phase: "listing", shortFirst: true },
+      { phase: "download", shortFirst: true },
+      { phase: "listing", shortFirst: false },
+      { phase: "download", shortFirst: false }
+    ])(
+      "keeps a long subscriber's $phase alive when shortFirst=$shortFirst",
+      async ({ phase, shortFirst }) => {
+        vi.useFakeTimers();
+        const session = createWorkflowReadSession();
+        const short = session.observe(10);
+        const long = session.observe(30000);
+        const waiting = deferred();
+        const started = deferred();
+        let signal: AbortSignal | undefined;
+        const run = vi.fn<WorkflowRunner>(async (args, options) => {
+          if (args[0] === "api") {
+            if (phase === "listing") {
+              signal = options.signal;
+              started.resolve();
+              await waiting.promise;
+            }
+            return {
+              code: 0,
+              stdout: `HTTP/2 200\n\n${JSON.stringify({ artifacts: [artifact] })}`,
+              stderr: ""
+            };
+          }
+          if (phase === "download") {
+            signal = options.signal;
+            started.resolve();
+            await waiting.promise;
+          }
+          writeFileSync(
+            path.join(args[6], DEPLOY_STATUS_FILES.progress),
+            JSON.stringify(progress)
+          );
+          return { code: 0, stdout: "", stderr: "" };
+        });
+        const reader = createWorkflowArtifactReader(
+          { repo: "org/app", runId: 41, session, ttlMs: 0 },
+          run
+        );
+        const first = reader
+          .read(shortFirst ? short : long)
+          .catch((error: unknown) => error);
+        await started.promise;
+        const second = reader
+          .read(shortFirst ? long : short)
+          .catch((error: unknown) => error);
+        try {
+          await vi.advanceTimersByTimeAsync(10);
+          expect(await (shortFirst ? first : second)).toMatchObject({
+            reason: "elapsed"
+          });
+          expect(signal?.aborted).toBe(false);
+        } finally {
+          waiting.resolve();
+          await vi.runAllTimersAsync();
+        }
+        expect(await (shortFirst ? second : first)).toMatchObject({
+          status: "ok",
+          progress: { sequence: 1 }
+        });
+        expect(await reader.read(long)).toMatchObject({ status: "stale" });
+        expect(
+          run.mock.calls.filter(([args]) => args[0] === "run")
+        ).toHaveLength(1);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
+    it.each([
+      { runId: 41, timeout: WORKFLOW_READ_LIMITS.artifactRunMs },
+      { runId: undefined, timeout: WORKFLOW_READ_LIMITS.artifactRepositoryMs }
+    ])(
+      "retains the fixed flight cap $timeout even when a later subscriber has more time",
+      async ({ runId, timeout }) => {
+        vi.useFakeTimers();
+        const session = createWorkflowReadSession();
+        const waiting = deferred();
+        const contexts: WorkflowReadContext[] = [];
+        const reader = createDeployStatusReader({
+          repo: "org/app",
+          runId,
+          listArtifacts: async (_repo, _runId, _prefix, context) => {
+            if (!context) throw new Error("Missing flight context");
+            contexts.push(context);
+            await waiting.promise;
+            return [];
+          },
+          downloadArtifact: async () => {
+            throw new Error("No artifact was listed");
+          }
+        });
+        const first = reader
+          .read(session.observe(timeout + 1000))
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(timeout - 1);
+        const second = reader
+          .read(session.observe(timeout))
+          .catch((error: unknown) => error);
+        try {
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await first).toMatchObject({ reason: "elapsed" });
+          expect(await second).toMatchObject({ reason: "elapsed" });
+          expect(contexts).toHaveLength(1);
+          expect(contexts[0].check()).toEqual({
+            state: "stopped",
+            reason: "cancelled"
+          });
+        } finally {
+          waiting.resolve();
+          await vi.runAllTimersAsync();
+        }
+        expect(await reader.read(session.observe(30000))).toMatchObject({
+          status: "missing"
+        });
+        expect(contexts).toHaveLength(2);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
+    it("charges retries after the admitting subscriber expires without replenishing or duplicating credits", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const short = session.observe(10);
+      const long = session.observe(30000);
+      expect(short.chargeRetries(1)).toBe(true);
+      const run = vi
+        .fn<WorkflowRunner>()
+        .mockResolvedValueOnce({
+          code: 1,
+          stdout: "HTTP/2 503\n\n{}",
+          stderr: ""
+        })
+        .mockResolvedValue({
+          code: 0,
+          stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+          stderr: ""
+        });
+      const reader = createWorkflowArtifactReader(
+        { repo: "org/app", runId: 41, session, ttlMs: 0 },
+        run
+      );
+      const first = reader.read(short).catch((error: unknown) => error);
+      const second = reader.read(long);
+      const projection = reader.graph(long.limit(20000));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await first).toMatchObject({ reason: "elapsed" });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await second).toMatchObject({ status: "missing" });
+      expect(await projection).toMatchObject({ status: "missing" });
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(short.chargeRetries(1)).toBe(false);
+      expect(long.chargeRetries(1)).toBe(true);
+      expect(long.chargeRetries(1)).toBe(false);
+      run.mockImplementation(async () => ({
+        code: 1,
+        stdout: "HTTP/2 503\n\n{}",
+        stderr: ""
+      }));
+      expect(await reader.read(long)).toMatchObject({
+        status: "error",
+        error: { decision: { state: "exhausted", reason: "attempts" } }
+      });
+      expect(run).toHaveBeenCalledTimes(3);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each(["elapsed", "cancelled"] as const)(
+      "stops the shared worker when every subscriber is %s",
+      async (reason) => {
+        vi.useFakeTimers();
+        const session = createWorkflowReadSession();
+        const firstController = new AbortController();
+        const secondController = new AbortController();
+        const waiting = deferred();
+        const started = deferred();
+        let signal: AbortSignal | undefined;
+        const run = vi.fn<WorkflowRunner>(async (_args, options) => {
+          signal = options.signal;
+          started.resolve();
+          await waiting.promise;
+          return {
+            code: 0,
+            stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+            stderr: ""
+          };
+        });
+        const reader = createWorkflowArtifactReader(
+          { repo: "org/app", runId: 41, session },
+          run
+        );
+        const first = reader
+          .read(session.observe(10, firstController.signal))
+          .catch((error: unknown) => error);
+        await started.promise;
+        const second = reader
+          .read(session.observe(20, secondController.signal))
+          .catch((error: unknown) => error);
+        try {
+          if (reason === "cancelled") firstController.abort();
+          else await vi.advanceTimersByTimeAsync(10);
+          expect(await first).toMatchObject({ reason });
+          expect(signal?.aborted).toBe(false);
+          if (reason === "cancelled") secondController.abort();
+          else await vi.advanceTimersByTimeAsync(10);
+          expect(await second).toMatchObject({ reason });
+          expect(signal?.aborted).toBe(true);
+        } finally {
+          waiting.resolve();
+          await vi.runAllTimersAsync();
+        }
+        expect(await reader.read(session.observe(30000))).toMatchObject({
+          status: "missing"
+        });
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
+    it("reuses an attempted successful opaque download across repository finalization reads", async () => {
+      const context = createWorkflowReadSession().observe(30000);
+      const run = vi.fn<WorkflowRunner>(async () => ({
+        code: 0,
+        stdout: `HTTP/2 200\n\n${JSON.stringify({ artifacts: [artifact] })}`,
+        stderr: ""
+      }));
+      const download = vi.fn(async () => ({
+        [DEPLOY_STATUS_FILES.progress]: JSON.stringify(progress)
+      }));
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        ttlMs: 0,
+        listArtifacts: createWorkflowArtifactReads(run).listWorkflowArtifacts,
+        downloadArtifact: download
+      });
+      expect(await reader.read(context)).toMatchObject({ status: "ok" });
+      expect(await reader.read(context.limit(20000))).toMatchObject({
+        status: "stale",
+        progress: { sequence: 1 }
+      });
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(download).toHaveBeenCalledTimes(1);
+      expect(context.chargeRetries(2)).toBe(true);
+    });
+
+    it("starts a fresh flight immediately after the last subscriber leaves and ignores late completion", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const controller = new AbortController();
+      const pending = deferred();
+      let calls = 0;
+      const reader = createWorkflowArtifactReader(
+        { repo: "org/app", runId: 41, session },
+        async () => {
+          if (++calls === 1) await pending.promise;
+          return {
+            code: 0,
+            stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+            stderr: ""
+          };
+        }
+      );
+      const first = reader.read(session.observe(30000, controller.signal));
+      const next = first.catch((error: unknown) => {
+        expect(error).toMatchObject({ reason: "cancelled" });
+        return reader.read(session.observe(30000));
+      });
+      controller.abort();
+      expect(await next).toMatchObject({ status: "missing" });
+      pending.resolve();
+      expect(await reader.read(session.observe(30000))).toMatchObject({
+        status: "missing"
+      });
+      expect(calls).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("refuses an expired reader context before listing", async () => {
+      const run = vi.fn<WorkflowRunner>(async () => {
+        throw new Error("Unexpected list");
+      });
+      const reader = createWorkflowArtifactReader(
+        { repo: "org/app", runId: 41 },
+        run
+      );
+      const context = createWorkflowReadSession().observe(1000).limit(0);
+      await expect(reader.read(context)).rejects.toMatchObject({
+        reason: "elapsed"
+      });
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it.each(["elapsed", "cancelled"] as const)(
+      "does not dispatch an opaque download after %s admission",
+      async (reason) => {
+        const controller = new AbortController();
+        const session = createWorkflowReadSession();
+        const context = session.observe(30000, controller.signal);
+        if (reason === "cancelled") controller.abort();
+        const run = vi.fn<WorkflowRunner>(async () => {
+          throw new Error("Unexpected download");
+        });
+        await expect(
+          createWorkflowArtifactReads(run).downloadWorkflowArtifact(
+            "org/app",
+            artifact,
+            reason === "elapsed" ? context.limit(0) : context
+          )
+        ).rejects.toMatchObject({ reason });
+        expect(run).not.toHaveBeenCalled();
+      }
+    );
+
+    it("refuses a late subscriber before waiting without stopping the admitting download", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const owner = session.observe(30000);
+      const joiner = session.observe(30000);
+      joiner.chargeRetries(2);
+      let calls = 0;
+      const run: WorkflowRunner = async () => ({
+        code: ++calls < 3 ? 1 : 0,
+        stdout:
+          calls < 3 ? "HTTP/2 503\n\n{}" : (
+            `HTTP/2 200\n\n${JSON.stringify({ artifacts: [artifact] })}`
+          ),
+        stderr: ""
+      });
+      const pending = deferred();
+      const download = vi.fn(async () => {
+        await pending.promise;
+        return { [DEPLOY_STATUS_FILES.progress]: JSON.stringify(progress) };
+      });
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        runId: 41,
+        listArtifacts: createWorkflowArtifactReads(run).listWorkflowArtifacts,
+        downloadArtifact: download
+      });
+      const admitting = reader.read(owner);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(download).toHaveBeenCalledTimes(1);
+      expect(await reader.read(joiner)).toMatchObject({
+        status: "error",
+        error: { reason: "attempts" }
+      });
+      pending.resolve();
+      expect(await admitting).toMatchObject({ status: "ok" });
+      expect(await reader.progress(joiner)).toBeNull();
+      expect(await reader.graph(joiner)).toMatchObject({
+        status: "error",
+        graph: null,
+        artifact: null
+      });
+      expect(await reader.controlPlaneLog(joiner)).toBeNull();
+      expect(calls).toBe(3);
+      expect(download).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each([
+      { runId: 41, foreignMalformed: false },
+      { runId: null, foreignMalformed: false },
+      { runId: null, foreignMalformed: true }
+    ])(
+      "retains only unretired accepted evidence after refusing a newer flight (run $runId, foreign malformed $foreignMalformed)",
+      async ({ runId, foreignMalformed }) => {
+        vi.useFakeTimers();
+        const session = createWorkflowReadSession();
+        const owner = session.observe(120000);
+        const joiner = session.observe(120000);
+        expect(joiner.chargeRetries(1)).toBe(true);
+        let calls = 0;
+        const run = vi.fn<WorkflowRunner>(async () => {
+          calls++;
+          const failure =
+            calls === 2 || calls === 3 || calls === 6 || calls === 7;
+          return {
+            code: failure ? 1 : 0,
+            stdout:
+              failure ? "HTTP/2 503\n\n{}" : (
+                `HTTP/2 200\n${calls === 4 ? "Retry-After: 60\n" : ""}\n${JSON.stringify(
+                  {
+                    artifacts:
+                      calls === 5 ?
+                        foreignMalformed ?
+                          [
+                            {
+                              ...artifact,
+                              id: 99,
+                              name: "radius-deploy-status-dev-other"
+                            }
+                          ]
+                        : []
+                      : [
+                          {
+                            ...artifact,
+                            id:
+                              calls === 1 ? 12
+                              : calls === 8 ? 14
+                              : 13
+                          }
+                        ]
+                  }
+                )}`
+              ),
+            stderr: ""
+          };
+        });
+        const reads = createWorkflowArtifactReads(run);
+        const download = vi.fn(
+          async (_repo: string, candidate: { id: number }) => ({
+            [DEPLOY_STATUS_FILES.progress]: JSON.stringify({
+              ...progress,
+              application: candidate.id === 99 ? "other" : "app",
+              sequence: candidate.id - 11
+            }),
+            [DEPLOY_STATUS_FILES.graph]:
+              candidate.id === 99 ?
+                "{broken"
+              : JSON.stringify({
+                  resources: [{ name: `api-${candidate.id}` }]
+                }),
+            [DEPLOY_STATUS_FILES.controlPlane]: `diagnostic-${candidate.id}`
+          })
+        );
+        const reader = createDeployStatusReader({
+          repo: "org/app",
+          runId,
+          application: "app",
+          ttlMs: 100,
+          listArtifacts: reads.listWorkflowArtifacts,
+          downloadArtifact: download
+        });
+        expect(await reader.read(joiner)).toMatchObject({
+          status: "ok",
+          progress: { sequence: 1 }
+        });
+        await vi.advanceTimersByTimeAsync(101);
+        const admitted = reader.read(owner);
+        const refused = reader.read(joiner);
+        await vi.runAllTimersAsync();
+        expect(await admitted).toMatchObject({
+          status: "ok",
+          progress: { sequence: 2 }
+        });
+        expect(await refused).toMatchObject({
+          status: "error",
+          error: { reason: "attempts" }
+        });
+        expect(await reader.read(joiner.limit(10000))).toMatchObject({
+          status: "error",
+          error: { reason: "attempts" }
+        });
+        expect(await reader.progress(joiner)).toMatchObject({ sequence: 1 });
+        expect(await reader.controlPlaneLog(joiner)).toBe("diagnostic-12");
+        expect(await reader.graph(joiner)).toMatchObject({
+          status: "error",
+          graph: { resources: [{ name: "api-12" }] }
+        });
+
+        const independent = session.observe(30000);
+        expect(await reader.read(independent)).toMatchObject({
+          status: "ok",
+          progress: { sequence: 2 }
+        });
+        await expect(
+          reads.listWorkflowArtifacts("org/app", runId, undefined, independent)
+        ).rejects.toMatchObject({
+          decision: { state: "deferred", reason: "not-before" }
+        });
+        expect(run).toHaveBeenCalledTimes(4);
+        expect(download).toHaveBeenCalledTimes(2);
+        if (runId === null) {
+          await vi.advanceTimersByTimeAsync(60100);
+          expect(await reader.read(session.observe(30000))).toMatchObject({
+            status: "missing"
+          });
+          expect(reader.sequence).toBe(-1);
+          await vi.advanceTimersByTimeAsync(101);
+          expect(await reader.graph(joiner)).toMatchObject({
+            status: "error",
+            graph: null,
+            artifact: null
+          });
+          expect(await reader.progress(joiner)).toBeNull();
+          expect(await reader.controlPlaneLog(joiner)).toBeNull();
+          expect(run).toHaveBeenCalledTimes(6);
+          expect(download).toHaveBeenCalledTimes(foreignMalformed ? 3 : 2);
+          await vi.advanceTimersByTimeAsync(101);
+          const replacement = reader.read(session.observe(30000));
+          const secondRefusal = reader.read(joiner);
+          await vi.runAllTimersAsync();
+          expect(await replacement).toMatchObject({
+            status: "ok",
+            progress: { sequence: 3 }
+          });
+          expect(await secondRefusal).toMatchObject({
+            status: "error",
+            error: { reason: "attempts" }
+          });
+          expect(await reader.graph(joiner)).toMatchObject({
+            status: "error",
+            graph: null,
+            artifact: null
+          });
+          expect(await reader.progress(joiner)).toBeNull();
+          expect(await reader.controlPlaneLog(joiner)).toBeNull();
+          expect(run).toHaveBeenCalledTimes(8);
+          expect(download).toHaveBeenCalledTimes(foreignMalformed ? 4 : 3);
+        }
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
+    it("keeps a joiner's later flight on its own original deadline", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const timeouts: number[] = [];
+      const reader = createWorkflowArtifactReader(
+        { repo: "org/app", runId: 41, session, ttlMs: 0 },
+        async (_args, options) => {
+          timeouts.push(options.timeout);
+          return {
+            code: 0,
+            stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+            stderr: ""
+          };
+        }
+      );
+      const owner = session.observe(1000);
+      const joiner = session.observe(2000000);
+      await Promise.all([reader.read(owner), reader.read(joiner)]);
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(await reader.read(joiner)).toMatchObject({ status: "missing" });
+      expect(timeouts).toEqual([20000, 20000]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("defers a subscriber without credits without cancelling the owner's valid retried result", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const owner = session.observe(30000);
+      const joiner = session.observe(30000);
+      expect(joiner.chargeRetries(2)).toBe(true);
+      let calls = 0;
+      const reader = createWorkflowArtifactReader(
+        { repo: "org/app", runId: 41, session, ttlMs: 0 },
+        async () => ({
+          code: ++calls === 1 ? 1 : 0,
+          stdout:
+            calls === 1 ? "HTTP/2 503\n\n{}" : 'HTTP/2 200\n\n{"artifacts":[]}',
+          stderr: ""
+        })
+      );
+      const first = reader.read(owner);
+      const second = reader.read(joiner);
+      await vi.runAllTimersAsync();
+      expect(await first).toMatchObject({ status: "missing" });
+      expect(await second).toMatchObject({
+        status: "error",
+        error: { decision: { state: "exhausted", reason: "attempts" } }
+      });
+      expect(calls).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("deduplicates shared-flight charges across projections of one observation", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const owner = session.observe(30000);
+      const joiner = session.observe(30000);
+      let calls = 0;
+      const reader = createWorkflowArtifactReader(
+        { repo: "org/app", runId: 41, session, ttlMs: 0 },
+        async () => {
+          const failure = ++calls % 2 === 1;
+          return {
+            code: failure ? 1 : 0,
+            stdout:
+              failure ? "HTTP/2 503\n\n{}" : 'HTTP/2 200\n\n{"artifacts":[]}',
+            stderr: ""
+          };
+        }
+      );
+      const initial = Promise.all([
+        reader.read(owner),
+        reader.read(joiner),
+        reader.graph(joiner.limit(25000))
+      ]);
+      await vi.runAllTimersAsync();
+      await initial;
+      const later = reader.read(joiner);
+      await vi.runAllTimersAsync();
+      expect(await later).toMatchObject({ status: "missing" });
+      expect(calls).toBe(4);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+    it.each(["cancelled", "elapsed"] as const)(
+      "detaches a %s subscriber without aborting another observer's flight",
+      async (reason) => {
+        vi.useFakeTimers();
+        const session = createWorkflowReadSession();
+        const controller = new AbortController();
+        const waiting = deferred();
+        const started = deferred();
+        let signal: AbortSignal | undefined;
+        const run = vi.fn<WorkflowRunner>(async (_args, options) => {
+          signal = options.signal;
+          started.resolve();
+          await waiting.promise;
+          return {
+            code: 0,
+            stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+            stderr: ""
+          };
+        });
+        const reader = createWorkflowArtifactReader(
+          { repo: "org/app", runId: 41, session },
+          run
+        );
+        const first = reader.read(session.observe(20000));
+        await started.promise;
+        const second = reader
+          .read(session.observe(10, controller.signal))
+          .catch((error: unknown) => error);
+        if (reason === "cancelled") controller.abort();
+        else await vi.advanceTimersByTimeAsync(10);
+        expect(await second).toMatchObject({ reason });
+        expect(signal?.aborted).toBe(false);
+        waiting.resolve();
+        expect(await first).toMatchObject({ status: "missing" });
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
+    it("does not acquire fresh retry credits when a joining observer later starts a finalization pass", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const firstContext = session.observe(30000);
+      const secondContext = session.observe(30000);
+      let calls = 0;
+      const run = vi.fn<WorkflowRunner>(async () => {
+        calls++;
+        return {
+          code: calls === 3 ? 0 : 1,
+          stdout:
+            calls === 3 ? 'HTTP/2 200\n\n{"artifacts":[]}' : "HTTP/2 503\n\n{}",
+          stderr: ""
+        };
+      });
+      const reader = createWorkflowArtifactReader(
+        { repo: "org/app", runId: 41, session, ttlMs: 0 },
+        run
+      );
+      const first = reader.read(firstContext);
+      const joined = reader.read(secondContext);
+      await vi.runAllTimersAsync();
+      expect(await first).toMatchObject({ status: "missing" });
+      expect(await joined).toMatchObject({ status: "missing" });
+      const later = await reader.read(secondContext);
+      expect(later).toMatchObject({
+        status: "error",
+        error: { decision: { state: "exhausted", reason: "attempts" } }
+      });
+      expect(calls).toBe(4);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("does not repeat a failed opaque candidate through graph/progress/control-plane convenience reads", async () => {
+      vi.useFakeTimers();
+      const session = createWorkflowReadSession();
+      const context = session.observe(30000);
+      const download = vi.fn(async () => {
+        throw new Error("opaque failure");
+      });
+      const listing = vi.fn(async () => [artifact]);
+      const reader = createWorkflowArtifactReader(
+        {
+          repo: "org/app",
+          runId: 41,
+          session,
+          ttlMs: 0,
+          listArtifacts: listing,
+          downloadArtifact: download
+        },
+        async () => {
+          throw new Error("Injected artifact ports own this read");
+        }
+      );
+      expect(await reader.graph(context)).toMatchObject({ status: "error" });
+      await reader.progress(context.limit(10000));
+      await reader.controlPlaneLog(
+        context.withCancellation({ stopped: () => false })
+      );
+      expect(listing).toHaveBeenCalledTimes(1);
+      expect(download).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
   it("marks download metadata unavailable rather than parsing producer diagnostics", async () => {
     const fixture = downloadRunner((directory) => {

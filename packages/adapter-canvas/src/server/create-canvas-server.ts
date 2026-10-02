@@ -197,6 +197,7 @@ export function createCanvasServer(
       if (startingEntry) await startingEntry.catch(() => {});
       const entry = instances.get(instanceId);
       if (!entry) return;
+      entry.observation?.stop();
       instances.delete(instanceId);
       await closeServer(entry.server, force);
       dependencies.onStopped?.(instanceId);

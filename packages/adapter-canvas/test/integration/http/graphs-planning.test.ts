@@ -2,7 +2,11 @@ import { createServer } from "node:http";
 import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createWorkflowArtifactReader } from "@radius-project/adapter-shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  createWorkflowObservationScope,
+  type WorkflowObservationScope
+} from "../../../src/server/services/workflow-observation-scope.js";
 import {
   deployStatusKeys,
   mergeDeployedGraphDisplayMetadata,
@@ -67,7 +71,10 @@ interface Harness {
 // production produces rather than a fixture the fakes invented. Only the
 // artifact reader is scripted: it is the sole seam that would otherwise reach
 // the network.
-function start(actualReader?: DeployedGraphStatusReader): Harness {
+function start(
+  actualReader?: DeployedGraphStatusReader,
+  observation?: WorkflowObservationScope
+): Harness {
   const state: CanvasState = {};
   const reader: ReaderScript = {};
   const readerOptions: DeployedGraphReaderOptions[] = [];
@@ -82,7 +89,8 @@ function start(actualReader?: DeployedGraphStatusReader): Harness {
 
   const routes = createTestRouteTable(
     createGraphsPlanningRoutes({
-      readInstanceEntry: () => (entryMissing ? undefined : { state }),
+      readInstanceEntry: () =>
+        entryMissing ? undefined : { state, observation },
       createDeployStatusReader: (options) => {
         readerOptions.push(options);
         if (actualReader) return actualReader;
@@ -169,6 +177,88 @@ function start(actualReader?: DeployedGraphStatusReader): Harness {
 }
 
 describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
+  it("fences a reader that fulfills after its owning scope stops", async () => {
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("Unexpected reader factory");
+    });
+    const h = start(
+      {
+        graph: async () => {
+          scope.stop();
+          return { graph: [{ name: "late" }], status: "ok", artifact: null };
+        },
+        progress: async () => {
+          throw new Error("Stopped graph must not read progress");
+        },
+        read: async () => {
+          throw new Error("Stopped graph must not read inventory");
+        }
+      },
+      scope
+    );
+    if (!container) throw new Error("Server not initialized");
+    const entry = await container.getOrCreate("late-graph");
+    const response = await fetch(
+      entry.baseUrl + "/api/deployed-graph?repo=octo/app"
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "Workflow observation stopped."
+    });
+    expect(h.state.deployedGraph).toBeUndefined();
+  });
+  it.each(["fulfills", "rejects"] as const)(
+    "completes physical stop before the shared graph runner later %s",
+    async (settlement) => {
+      type Result = { code: number; stdout: string; stderr: string };
+      let complete: (result: Result) => void = () => {
+        throw new Error("Not initialized");
+      };
+      let reject: (error: Error) => void = () => {
+        throw new Error("Not initialized");
+      };
+      const pending = new Promise<Result>((resolve, fail) => {
+        complete = resolve;
+        reject = fail;
+      });
+      const run = vi.fn(async () => pending);
+      const scope = createWorkflowObservationScope((options) =>
+        createWorkflowArtifactReader(options, run)
+      );
+      const reader = scope.reader({ repo: "octo/app", runId: 41 });
+      const h = start(reader, scope);
+      if (!container) throw new Error("Server not initialized");
+      try {
+        const entry = await container.getOrCreate("stopped-graph");
+        const response = fetch(
+          entry.baseUrl + "/api/deployed-graph?repo=octo/app"
+        );
+        await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+        scope.stop();
+        const closing = container.stop("stopped-graph");
+        const result = await response;
+        expect(result.status).toBe(503);
+        expect(await result.json()).toEqual({
+          error: "Workflow observation stopped."
+        });
+        await closing;
+        if (settlement === "fulfills")
+          complete({
+            code: 0,
+            stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+            stderr: ""
+          });
+        else reject(new Error("Late rejected read"));
+        await pending.catch(() => {});
+        expect(h.state.deployedGraph).toBeUndefined();
+        expect(run).toHaveBeenCalledTimes(1);
+      } finally {
+        scope.stop();
+        complete({ code: 0, stdout: "", stderr: "" });
+      }
+    }
+  );
+
   it.each([
     "valid",
     "wrong-app",

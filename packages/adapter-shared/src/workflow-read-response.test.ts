@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
-import type { WorkflowReadTiming } from "@radius-project/core";
+import { describe, expect, it, vi } from "vitest";
+import {
+  createWorkflowReadContext,
+  createWorkflowReadCooldowns,
+  type WorkflowReadTiming
+} from "@radius-project/core";
 import {
   parseWorkflowApiResponse,
-  readWorkflowApi
+  readWorkflowApi,
+  readWorkflowApiWithPolicy
 } from "./workflow-read-response.js";
 
 function response(
@@ -23,6 +28,148 @@ function response(
 }
 
 describe("workflow response metadata", () => {
+  describe.each([403, 429])("rate-limit HTTP %s", (status) => {
+    it.each([
+      ["secondary rate limit", 5, "", "102", "missing-deadline", []],
+      ["secondary rate limit", 0, "", "102", "missing-deadline", []],
+      ["secondary rate limit", 0, "invalid", "102", "invalid-deadline", []],
+      ["API rate limit exceeded", 0, "", "102", "ready", [3000]],
+      ["secondary rate limit", 0, "4", "102", "ready", [4000]],
+      ["secondary rate limit", 0, "2", "105", "ready", [6000]],
+      ["secondary rate limit", 5, "2", "105", "ready", [2000]],
+      ["secondary rate limit", 0, "2", "invalid", "invalid-deadline", []]
+    ] as const)(
+      "bounds %s with remaining=%s Retry-After=%s reset=%s",
+      async (message, remaining, retryAfter, reset, decision, waits) => {
+        let now = 0;
+        const slept: number[] = [];
+        const clock = {
+          monotonic: () => now,
+          wall: () => 100000 + now,
+          jitter: () => 0,
+          sleep: async (ms: number) => {
+            slept.push(ms);
+            now += ms;
+          }
+        };
+        const context = createWorkflowReadContext({
+          clock,
+          cooldowns: createWorkflowReadCooldowns(clock.monotonic),
+          timeout: 15000,
+          stopped: () => false
+        });
+        let calls = 0;
+        const runner = vi.fn(async () =>
+          ++calls === 1 ?
+            {
+              code: 1,
+              stdout: `HTTP/2 ${status}\nDate: Thu, 01 Jan 1970 00:01:40 GMT\nX-RateLimit-Remaining: ${remaining}\nX-RateLimit-Reset: ${reset}\n${retryAfter ? `Retry-After: ${retryAfter}\n` : ""}\n${JSON.stringify({ message })}`,
+              stderr: ""
+            }
+          : { code: 0, stdout: "HTTP/2 200\n\n{}", stderr: "" }
+        );
+        const result = await readWorkflowApiWithPolicy(
+          runner,
+          "/repos/org/app/actions/runs/41",
+          { timeout: 15000 },
+          context,
+          "run",
+          15000
+        );
+        expect(result.decision).toEqual(
+          decision === "ready" ?
+            { state: "ready" }
+          : { state: "deferred", reason: decision }
+        );
+        expect(slept).toEqual(waits);
+        expect(calls).toBe(decision === "ready" ? 2 : 1);
+      }
+    );
+  });
+
+  it.each([
+    ["elapsed", "timeout"],
+    ["cancelled", "cancelled"],
+    ["capacity", "deferred"]
+  ] as const)(
+    "reports unadmitted %s reads without invoking the runner",
+    async (reason, unavailable) => {
+      const clock = {
+        monotonic: () => 0,
+        wall: () => 1234,
+        jitter: () => 0,
+        sleep: () => {
+          throw new Error("Unexpected wait");
+        }
+      };
+      const cooldowns = createWorkflowReadCooldowns(clock.monotonic);
+      if (reason === "capacity")
+        for (let i = 0; i < 32; i++) cooldowns.acquire(`active-${i}`);
+      const context = createWorkflowReadContext({
+        clock,
+        cooldowns,
+        timeout: 1000,
+        stopped: () => reason === "cancelled"
+      });
+      const runner = vi.fn(async () => {
+        throw new Error("Unexpected GET");
+      });
+      const result = await readWorkflowApiWithPolicy(
+        runner,
+        "/repos/org/app/actions/runs/41",
+        { timeout: 1000 },
+        context,
+        "run",
+        reason === "elapsed" ? 0 : 1000
+      );
+      expect(result.metadata).toEqual({
+        source: "unavailable",
+        reason: unavailable
+      });
+      expect(result.decision).toMatchObject({ reason });
+      expect(runner).not.toHaveBeenCalled();
+    }
+  );
+
+  it("executes the real default-observer binding for an admitted GET", async () => {
+    const clock = {
+      monotonic: () => 0,
+      wall: () => 1234,
+      jitter: () => 0,
+      sleep: () => {
+        throw new Error("Unexpected wait");
+      }
+    };
+    const context = createWorkflowReadContext({
+      clock,
+      cooldowns: createWorkflowReadCooldowns(clock.monotonic),
+      timeout: 1000,
+      stopped: () => false
+    });
+    const runner = vi.fn(async () => ({
+      code: 0,
+      stdout: "HTTP/2 200\n\n{}",
+      stderr: ""
+    }));
+    expect(
+      await readWorkflowApiWithPolicy(
+        runner,
+        "/repos/org/app/actions/runs/41",
+        { timeout: 1000 },
+        context,
+        "run",
+        1000
+      )
+    ).toMatchObject({
+      ok: true,
+      decision: { state: "ready" },
+      metadata: { receivedAtEpochMilliseconds: 1234 }
+    });
+    expect(runner).toHaveBeenCalledExactlyOnceWith(
+      ["api", "/repos/org/app/actions/runs/41", "--include", "--method", "GET"],
+      { timeout: 1000 }
+    );
+  });
   it("uses the real status and receipt time without publishing arbitrary headers/body", () => {
     const parsed = response(
       "Authorization: fixture-private\r\nSet-Cookie: fixture-cookie\r\n",

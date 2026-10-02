@@ -354,6 +354,7 @@ export interface RadiusExtensionDependencies {
     instanceId: string,
     page?: string
   ): Promise<CanvasServerEntry>;
+  stopServer(instanceId: string, force?: boolean): Promise<void>;
   getLastWebviewActivityAt(): number;
   workspace: WorkspaceDependencies;
   github: GitHubContentReader;

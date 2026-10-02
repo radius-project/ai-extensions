@@ -823,6 +823,31 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     expect(deps.servers.has("radius-panel")).toBe(false);
   });
 
+  it("reports a failed physical stop after deferred environment work settles", async () => {
+    const { canvas, deps } = setup();
+    let settled: (() => void) | undefined;
+    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
+    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+      (_id, listener) => {
+        settled = listener;
+        return vi.fn();
+      }
+    );
+    vi.mocked(deps.stopServer).mockRejectedValueOnce(
+      new Error("controlled stop failure")
+    );
+    await canvas.open(ctx("radius-panel", { page: "environment" }));
+    await canvas.onClose(ctx("radius-panel"));
+    if (!settled) throw new Error("Missing deferred-close listener");
+    settled();
+    await vi.waitFor(() =>
+      expect(deps.logError).toHaveBeenCalledWith(
+        "Could not stop Radius canvas: Error: controlled stop failure"
+      )
+    );
+    expect(deps.stopServer).toHaveBeenCalledExactlyOnceWith("radius-panel");
+  });
+
   it("cancels a deferred close when the same instance reopens", async () => {
     const { canvas, deps } = setup();
     let settled: (() => void) | undefined;
