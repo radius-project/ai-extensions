@@ -654,6 +654,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(clusterCleanup?.env?.FIXTURE_APPLICATION).toBe(
       "${{ steps.pin.outputs.fixture-application }}"
     );
+    expect(clusterCleanup?.env?.RADIUS_ENVIRONMENT_NAMESPACE).toBe(
+      "${{ steps.pin.outputs.radius-environment-namespace }}"
+    );
     expect(clusterCleanup?.env?.AKS_CLUSTER_NAME).toBe(
       "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}"
     );
@@ -664,6 +667,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("--selector radapp.io/environment");
     expect(script).toContain("selectLeakedClusterWorkloads");
     expect(script).toContain('kubectl delete "${kind,,}/$name"');
+    expect(script).toMatch(
+      /kubectl delete namespace "\$RADIUS_ENVIRONMENT_NAMESPACE" \\\s+--ignore-not-found=true \\\s+--wait=true \\\s+--timeout=5m/
+    );
   });
 
   it("empties the shared resource group of everything but the cluster", async () => {

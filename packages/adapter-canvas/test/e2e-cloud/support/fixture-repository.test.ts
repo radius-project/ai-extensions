@@ -9,7 +9,10 @@ import {
   ENVIRONMENT_NAME_PREFIX,
   environmentName,
   findUnprovisionedFixtureFields,
+  FIXTURE_APPLICATION_NAME,
   FIXTURE_BASELINE_SHA,
+  FIXTURE_KUBERNETES_NAMESPACE,
+  FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
   FIXTURE_REPO_DEFAULT_BRANCH,
   FIXTURE_REPOSITORY,
   FIXTURE_REPOSITORY_PIN,
@@ -32,6 +35,12 @@ describe("pinned baseline constants", () => {
   it("names a default branch and a composed owner/name repository", () => {
     expect(FIXTURE_REPO_DEFAULT_BRANCH).not.toBe("");
     expect(FIXTURE_REPOSITORY.split("/")).toHaveLength(2);
+  });
+
+  it("derives the fixture Radius namespace from the selected Kubernetes namespace and application", () => {
+    expect(FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE).toBe(
+      `${FIXTURE_KUBERNETES_NAMESPACE}-${FIXTURE_APPLICATION_NAME}`
+    );
   });
 
   it("uses a resource group prefix the Radius purge job still sweeps as a safety net", () => {

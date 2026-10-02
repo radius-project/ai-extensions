@@ -114,6 +114,8 @@ import {
 } from "./support/deploy-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
+  FIXTURE_KUBERNETES_NAMESPACE,
+  FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
   isFixtureRepositoryProvisioned,
   resolveFixtureClusterTarget,
   resolveFixtureLocation
@@ -125,7 +127,6 @@ import {
 
 const PROFILE_NAME = "cloud-e2e";
 const WORKFLOW_DIRECTORY = ".github/workflows";
-const KUBERNETES_NAMESPACE = "default";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
@@ -352,6 +353,9 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
+    fixture.registerNamespaceCleanupTarget(
+      FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE
+    );
     // CanvasHarness loads the server directly rather than the extension
     // composition root. Install one durable store inside the disposable clone's
     // git directory so every serial harness sees the same ownership records
@@ -467,7 +471,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         .selectOption(cloud.clusterName);
       await page
         .locator("#azure-namespace-select")
-        .selectOption(KUBERNETES_NAMESPACE);
+        .selectOption(FIXTURE_KUBERNETES_NAMESPACE);
 
       const operationResponse = page.waitForResponse(
         (response) =>
@@ -586,7 +590,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             // The fixture creates its AKS cluster in that same resource group.
             clusterResourceGroup: cloud.resourceGroup,
             cluster: cloud.clusterName,
-            namespace: KUBERNETES_NAMESPACE
+            namespace: FIXTURE_KUBERNETES_NAMESPACE
           }
         })
       ).toEqual([]);
@@ -681,7 +685,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         }, applicationListingPath)
       );
       deployedApplication = requireSingleApplication(applications);
-      deployedNamespace = deploymentNamespace(KUBERNETES_NAMESPACE);
+      deployedNamespace = deploymentNamespace(FIXTURE_KUBERNETES_NAMESPACE);
       cloud.registerApplicationCleanupTarget(
         deployedApplication,
         deployedNamespace

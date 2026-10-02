@@ -38,6 +38,7 @@ import {
   CLOUD_E2E_LEASE_REF,
   environmentName as buildEnvironmentName,
   FIXTURE_BASELINE_SHA,
+  FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
   FIXTURE_REPO_DEFAULT_BRANCH,
   FIXTURE_REPOSITORY,
   resourceGroupName,
@@ -164,6 +165,8 @@ export interface CloudFixture {
     application: string,
     namespace: string
   ): void;
+  /** Registers a fixture-owned namespace that reclamation may remove. */
+  registerNamespaceCleanupTarget(namespace: string): void;
   /** Records that the journey verified Radius removed the application. */
   recordApplicationDeletionSucceeded(
     application: string,
@@ -208,6 +211,7 @@ const CLUSTER_NODE_SIZE = "Standard_B2s";
 const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_ENTRA_APP_DELETION_TIMEOUT_MS = 120_000;
+const FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS = 5 * 60_000;
 
 function requireGitObjectId(value: string, context: string): string {
   const normalized = value.trim();
@@ -728,6 +732,7 @@ export async function createCloudFixture(
     string,
     { application: string; namespace: string; deletionVerified: boolean }
   >();
+  const namespaceCleanupTargets = new Set<string>();
   const APP_REGISTRATION_KEY = "app-registration";
   const GITHUB_ENVIRONMENT_KEY = "github-environment";
   const roleAssignmentKey = (principalId: string) =>
@@ -1130,6 +1135,18 @@ export async function createCloudFixture(
       );
     },
 
+    registerNamespaceCleanupTarget(namespace) {
+      const target = requireValue(
+        namespace,
+        "A namespace is required to register namespace cleanup."
+      );
+      if (target !== FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE)
+        throw new Error(
+          `Namespace cleanup is restricted to the fixture-owned namespace ${FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE}.`
+        );
+      namespaceCleanupTargets.add(target);
+    },
+
     recordApplicationDeletionSucceeded(application, namespace) {
       fixture.registerApplicationCleanupTarget(application, namespace);
       const target = applicationCleanupTargets.get(
@@ -1306,6 +1323,49 @@ export async function createCloudFixture(
             });
           }
         );
+
+      for (const namespace of namespaceCleanupTargets)
+        await attempt(`Kubernetes namespace ${namespace}`, async () => {
+          const kubeconfig = await clusterKubeconfig(assertionTimeoutMs);
+          const deleteResult = await commands.runKubectl(
+            [
+              "--kubeconfig",
+              kubeconfig,
+              "delete",
+              "namespace",
+              namespace,
+              "--ignore-not-found=true",
+              "--wait=false"
+            ],
+            assertionTimeoutMs
+          );
+          expectSuccess(deleteResult, `kubectl delete namespace ${namespace}`);
+          await pollForValue({
+            ports,
+            timeoutMs: FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS,
+            intervalMs: assertionPollIntervalMs,
+            probe: async (remainingMs) => {
+              const context = `kubectl get namespace ${namespace}`;
+              const result = await commands.runKubectl(
+                [
+                  "--kubeconfig",
+                  kubeconfig,
+                  "get",
+                  "namespace",
+                  namespace,
+                  "--output",
+                  "name"
+                ],
+                remainingMs
+              );
+              if (result.code === 0) return undefined;
+              if (isMissingNamespace(result)) return true;
+              throw new CloudCommandError(context, result);
+            },
+            timeoutMessage: () =>
+              `Timed out after ${FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS}ms waiting for Kubernetes namespace ${namespace} to be removed.`
+          });
+        });
 
       if (applicationDeletionFailed)
         throw new Error(
