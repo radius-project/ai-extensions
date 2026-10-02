@@ -92,6 +92,22 @@ const APP_LIST: readonly string[] = [
   "--filter",
   EXACT_NAME_FILTER
 ];
+const graphApplicationUrl = (objectId: string): string =>
+  `https://graph.microsoft.com/v1.0/applications/${objectId}`;
+const graphApplicationDelete = (objectId: string): readonly string[] => [
+  "rest",
+  "--method",
+  "DELETE",
+  "--url",
+  graphApplicationUrl(objectId)
+];
+const graphApplicationGet = (objectId: string): readonly string[] => [
+  "rest",
+  "--method",
+  "GET",
+  "--url",
+  graphApplicationUrl(objectId)
+];
 const SP_LIST: readonly string[] = [
   "ad",
   "sp",
@@ -2770,7 +2786,12 @@ describe("createCloudFixture", () => {
           times: 1
         },
         { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
-        { tool: "az", match: ["ad", "app", "delete"], respond: {} },
+        { tool: "az", match: graphApplicationDelete("obj-1"), respond: {} },
+        {
+          tool: "az",
+          match: graphApplicationGet("obj-1"),
+          respond: { code: 1, stderr: "Request_ResourceNotFound" }
+        },
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
@@ -2859,7 +2880,7 @@ describe("createCloudFixture", () => {
         "ad sp delete --id sp-1 --output none"
       );
       expect(fake.commands.commandLines("az")).toContain(
-        "ad app delete --id obj-1 --output none"
+        "rest --method DELETE --url https://graph.microsoft.com/v1.0/applications/obj-1 --output none"
       );
     });
 
@@ -2892,11 +2913,19 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "az",
-          match: ["ad", "app", "delete"],
+          match: graphApplicationDelete("obj-1"),
           respond: {
             code: 1,
             stderr:
               "ERROR: Resource 'Application_obj-1' does not exist or one of its queried reference-property objects are not present."
+          }
+        },
+        {
+          tool: "az",
+          match: graphApplicationGet("obj-1"),
+          respond: {
+            code: 1,
+            stderr: "Request_ResourceNotFound"
           }
         }
       ]);
@@ -4163,23 +4192,20 @@ describe("createCloudFixture", () => {
           },
           times: 1
         },
-        // app-2's delete lands, so only the app whose delete was refused is
-        // still in the directory when the reclaim confirms the removal.
         {
           tool: "az",
-          match: APP_LIST,
-          respond: {
-            stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
-            ])
-          }
-        },
-        {
-          tool: "az",
-          match: ["ad", "app", "delete", "--id", "obj-1"],
+          match: graphApplicationDelete("obj-1"),
           respond: { code: 3, stderr: "Insufficient privileges" }
         },
-        { tool: "az", match: ["ad", "app", "delete"], respond: {} },
+        { tool: "az", match: graphApplicationDelete("obj-2"), respond: {} },
+        {
+          tool: "az",
+          match: graphApplicationGet("obj-2"),
+          respond: {
+            code: 1,
+            stderr: "Request_ResourceNotFound"
+          }
+        },
         {
           tool: "gh",
           match: ["api", MATCHING_REFS_PATH],
@@ -4217,11 +4243,20 @@ describe("createCloudFixture", () => {
               stdout: JSON.stringify([
                 { appId: "app-1", id: "obj-1", displayName: APP_NAME }
               ])
-            },
-            times: 4
+            }
           },
-          { tool: "az", match: ["ad", "app", "delete"], respond: {} },
-          { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
+          { tool: "az", match: graphApplicationDelete("obj-1"), respond: {} },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: {},
+            times: 3
+          },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: { code: 1, stderr: "Request_ResourceNotFound" }
+          }
         ],
         {},
         {
@@ -4249,7 +4284,12 @@ describe("createCloudFixture", () => {
               ])
             }
           },
-          { tool: "az", match: ["ad", "app", "delete"], respond: {} }
+          { tool: "az", match: graphApplicationDelete("obj-1"), respond: {} },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: {}
+          }
         ],
         {},
         {
@@ -4262,12 +4302,37 @@ describe("createCloudFixture", () => {
       const error = await captureError(fixture.reclaimLeakedProductArtifacts());
 
       expect(error.message).toContain("app registration app-1");
-      expect(error.message).toContain("succeeded");
-      expect(error.message).toContain("still listed after 2000ms");
+      expect(error.message).toContain(
+        "remained directly queryable through Microsoft Graph after 2000ms"
+      );
     });
 
-    it("fails when a delete reporting the app was already absent leaves it listed", async () => {
-      const { fixture } = await createHarness(
+    it("fails when exact Graph deletion verification is unavailable", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        },
+        { tool: "az", match: graphApplicationDelete("obj-1"), respond: {} },
+        {
+          tool: "az",
+          match: graphApplicationGet("obj-1"),
+          respond: { code: 1, stderr: "Graph temporarily unavailable" }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /az rest GET application obj-1 failed.*Graph temporarily unavailable/
+      );
+    });
+
+    it("retries an exact Graph delete when the object remains queryable", async () => {
+      const { fixture, fake } = await createHarness(
         [
           {
             tool: "az",
@@ -4280,12 +4345,24 @@ describe("createCloudFixture", () => {
           },
           {
             tool: "az",
-            match: ["ad", "app", "delete"],
+            match: graphApplicationDelete("obj-1"),
             respond: {
               code: 1,
-              stderr:
-                "ERROR: Resource 'Application_obj-1' does not exist or one of its queried reference-property objects are not present."
-            }
+              stderr: "Request_ResourceNotFound"
+            },
+            times: 1
+          },
+          { tool: "az", match: graphApplicationDelete("obj-1"), respond: {} },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: {},
+            times: 1
+          },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: { code: 1, stderr: "Request_ResourceNotFound" }
           }
         ],
         {},
@@ -4296,15 +4373,17 @@ describe("createCloudFixture", () => {
         }
       );
 
-      const error = await captureError(fixture.reclaimLeakedProductArtifacts());
-
-      expect(error.message).toContain(
-        "reported the object id was already absent and the client-id retry did not remove it"
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
       );
-      expect(error.message).toContain("still listed after 2000ms");
+      expect(
+        fake.commands
+          .commandLines("az")
+          .filter((line) => line.includes("rest --method DELETE"))
+      ).toHaveLength(2);
     });
 
-    it("retries application deletion by client id when object-id deletion reports not found", async () => {
+    it("treats an exact Graph lookup not-found as verified deletion", async () => {
       const { fixture, fake } = await createHarness([
         {
           tool: "az",
@@ -4316,19 +4395,14 @@ describe("createCloudFixture", () => {
           },
           times: 1
         },
+        { tool: "az", match: graphApplicationDelete("obj-1"), respond: {} },
         {
           tool: "az",
-          match: ["ad", "app", "delete", "--id", "obj-1"],
+          match: graphApplicationGet("obj-1"),
           respond: {
             code: 1,
-            stderr:
-              "ERROR: Resource 'Application_obj-1' does not exist or one of its queried reference-property objects are not present."
+            stderr: "Request_ResourceNotFound"
           }
-        },
-        {
-          tool: "az",
-          match: ["ad", "app", "delete", "--id", "app-1"],
-          respond: {}
         }
       ]);
 
@@ -4336,8 +4410,49 @@ describe("createCloudFixture", () => {
         "app registration app-1"
       );
       expect(fake.commands.commandLines("az")).toContain(
-        "ad app delete --id app-1 --output none"
+        "rest --method DELETE --url https://graph.microsoft.com/v1.0/applications/obj-1 --output none"
       );
+    });
+
+    it("shares the deletion deadline between the exact-object DELETE and GET", async () => {
+      let now = NOW;
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            }
+          },
+          {
+            tool: "az",
+            match: graphApplicationDelete("obj-1"),
+            respond: () => {
+              now = new Date(now.getTime() + 1_500);
+              return {};
+            }
+          },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: { code: 1, stderr: "Request_ResourceNotFound" }
+          }
+        ],
+        { readNow: () => now },
+        { entraAppDeletionTimeoutMs: 4_000 }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
+      );
+      expect(
+        fake.commands.calls
+          .filter((call) => call.tool === "az" && call.args[0] === "rest")
+          .map((call) => call.timeoutMs)
+      ).toEqual([4_000, 2_500]);
     });
 
     it("fails when a service principal outlives the application it belonged to", async () => {
@@ -4437,15 +4552,14 @@ describe("createCloudFixture", () => {
               { appId: "app-1", id: "obj-1", displayName: APP_NAME }
             ])
           }
-        },
-        { tool: "az", match: ["ad", "app", "delete"], respond: {} }
+        }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
         /service principal sp-1: .*principal is locked.*preserve app registration app-1/s
       );
       expect(fake.commands.commandLines("az")).not.toContain(
-        "ad app delete --id obj-1 --output none"
+        "rest --method DELETE --url https://graph.microsoft.com/v1.0/applications/obj-1 --output none"
       );
     });
 
