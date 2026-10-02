@@ -45,7 +45,7 @@ resource mysql 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
   properties: {
     environment: environment
     application: app.id
-    username: 'myadmin'
+    username: 'myadmin'   // default username (see Provisioned service usernames)
     password: password
   }
 }
@@ -114,8 +114,34 @@ resource rabbitmq 'Radius.Messaging/rabbitMQ@2025-08-01-preview' = {
     environment: environment
     application: app.id
     queue: 'orders'          // derived from source (e.g. ORDER_QUEUE_NAME)
-    username: 'myadmin'      // authored broker administrator; consumers authenticate as this same value
+    username: 'myadmin'      // default username (see Provisioned service usernames)
     password: rabbitmqCredentials.id
+  }
+}
+
+resource orderContainer 'Radius.Compute/containers@2025-08-01-preview' = {
+  name: 'order-service'
+  properties: {
+    environment: environment
+    application: app.id
+    containers: {
+      order: {
+        image: orderImage.properties.imageReference
+        env: {
+          ORDER_QUEUE_USERNAME: {
+            value: rabbitmq.properties.username   // read from the broker, never a second literal
+          }
+          ORDER_QUEUE_PASSWORD: {
+            valueFrom: {
+              secretKeyRef: {
+                secretName: rabbitmqCredentials.name
+                key: 'password'
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
 ```
@@ -195,6 +221,44 @@ resource credentials 'Radius.Security/secrets@2025-08-01-preview' = {
 ```
 
 The compiler enforces this for predefined and generated custom types alike: Bicep reports `use-secure-value-for-secure-inputs` for any value it cannot prove secure. Radius emits that finding with no severity, so `validate-bicep.mjs` prints it as a `warning` and still **fails** the build — it is not advisory, and it spends a repair attempt. It is also not optional: turning the rule off in `bicepconfig.json` or suppressing it with a `#disable-next-line` or `#disable-diagnostics` directive does not make the model pass, because `validate-bicep.mjs` fails the compile and names the setting instead (see [bicepconfig.json](../SKILL.md#bicepconfigjson)). The same applies to every rule named in this paragraph. Two related rules apply to the parameter itself. `secure-parameter-default` rejects a hardcoded default on a secure parameter. `secure-secrets-in-params` is a **name** heuristic — it reports that a parameter *may* be a credential "according to its name" — so it has two different repairs: add `@secure()` when the parameter really carries the credential, but rename it when it carries a `Radius.Security/secrets` resource ID instead. Adding `@secure()` to a reference parameter trades this warning for a `secure-parameter-target` failure, because a reference property is not sensitive and must not receive a secure parameter.
+
+## Provisioned service usernames
+
+A data store or broker that Radius provisions is created with the username you give it, such as `username` on `Radius.Data/mySqlDatabases` or `Radius.Messaging/rabbitMQ`. Every consumer must then authenticate as that exact value. The username is not a secret, but getting it wrong fails the same way a wrong password does: the model compiles and deploys, and the application is refused at login.
+
+### Choosing the value
+
+**When refreshing a model, keep the username it already has.** If the existing `.radius/app.bicep` sets `username` on the same resource (same type and `name`), keep that value instead of choosing one with the rules below. Azure and AWS do not allow renaming a database's administrator login, so a changed username fails the next deploy against the existing server. If the user asks to change it, keep the existing value, tell them the change may require replacing the service, and change it only after they confirm. Still trace every consumer: re-bind each one to the kept value as [One username, one source](#one-username-one-source) requires, and if rule 3 below finds a consumer that fixes a different literal, stop and report the conflict instead of changing either one.
+
+For a new resource, use `myadmin` unless the user asks for a username or the application fixes one. To decide, trace every consumer: find the username its authentication call receives (or the user part of its URI) and follow it back through the checked-in source. Then apply these rules to the resource as a whole:
+
+1. **The user asks for a username.** Use it. Compose, `.env`, Helm, and Kubernetes files are not a request.
+2. **The trace reaches something a container can set:** an environment variable (even with a fallback such as `process.env.QUEUE_USER || 'guest'`), a command-line argument, or a framework setting that environment variables override, such as ASP.NET Core `RabbitMQ__UserName` or Spring Boot `SPRING_RABBITMQ_USERNAME`. If the read can't be traced, for example inside a prebuilt library, the environment variable the selected profile sets counts; if the profile sets none either, stop and report that the username source could not be found. Use `myadmin`, and on each consumer set the input that consumer's trace reached: its environment variable, command-line argument, or framework setting.
+3. **The trace ends at a literal nothing can override:** a string in the connection code, or a checked-in config file read with no environment override. The application fixes this login. Use that exact value. If the type's schema description or the [Azure provider value rules](azure-provider-value-rules.md) for the selected Recipe rule it out, such as RabbitMQ `guest`, which works only over loopback, stop and report the conflict. Do not rename it.
+
+When one consumer's trace ends at a fixed literal (rule 3), the resource uses that literal, and every other consumer's variable is set to it. Stop and report the conflict when two consumers fix different literals, or when the user asks for a username that differs from a fixed literal.
+
+| What the authentication call receives                                              | Rule | Username                                  |
+|------------------------------------------------------------------------------------|------|-------------------------------------------|
+| `process.env.ORDER_QUEUE_USERNAME`, which Compose sets to `username`               | 2    | `myadmin`; set `ORDER_QUEUE_USERNAME`     |
+| `process.env.QUEUE_USER \|\| 'guest'`                                              | 2    | `myadmin`; set `QUEUE_USER`               |
+| `builder.Configuration["RabbitMQ:UserName"]`; `appsettings.json` sets `shop`       | 2    | `myadmin`; set `RabbitMQ__UserName`       |
+| Read inside a prebuilt library; Compose sets `QUEUE_USER=orders`                   | 2    | `myadmin`; set `QUEUE_USER`               |
+| `amqp.connect('amqp://shop:' + password + '@' + host)`                             | 3    | `shop`                                    |
+| `amqp.connect('amqp://guest:guest@' + host)`                                       | 3    | stop and report: schema rules out `guest` |
+| `config['queue']['user']` from a checked-in `config.ini`, with no environment read | 3    | the value in `config.ini`                 |
+
+`myadmin` fits the Azure PostgreSQL, MySQL, and SQL username rules and avoids `guest`, which RabbitMQ restricts to loopback connections. Record the rule and the file and line the trace ended at in the requirement ledger, so a regeneration reaches the same answer. Do not add a username to a type whose schema defines none.
+
+### One username, one source
+
+Write the username once and give every consumer that same value. Two copies that happen to match today are not a binding: nothing checks that they stay equal.
+
+- When the schema documents the username as readable by consumers, as `Radius.Messaging/rabbitMQ` does ("exposed as a read-only connection value"), bind each consumer's native setting to `<resource>.properties.username`, as `ORDER_QUEUE_USERNAME` does in the [RabbitMQ example](#the-same-property-name-the-opposite-form). When the application reads the generated connection variable (`CONNECTION_<CONNECTION>_USERNAME`) instead, the connection supplies it.
+- Otherwise, declare the value once as `var <resourceSymbolicName>Username` (for example `var mysqlDbUsername = 'myadmin'`), assign that `var` to the resource's `username`, and bind every consumer to the same `var`. Place it with the other `var` declarations in the order [Deterministic output](../SKILL.md#deterministic-output) sets.
+- Always set `username` on the resource when a consumer reads it. Do not rely on a schema default such as RabbitMQ's `radius`: the consumer's binding must name a value the model states.
+- Give consumers the username through plain `env.value`, never through a copy in an authored Secret. A Secret value comes from its own `@secure()` parameter, so the two could differ. If the application can read the username only from a Secret, report it and stop.
+- When the schema takes the username from an authored Secret instead of a resource property, that Secret is the one source. Its value is a deploy-time `@secure()` input with no default that the deployer supplies, so the rules in [Choosing the value](#choosing-the-value) do not apply. Consumers read it through `secretKeyRef` with the same data key, and nothing else authors the username. If a consumer cannot read that Secret, for example because its username is a fixed literal, stop and report it.
 
 ## Recipe-generated secret results
 
@@ -355,6 +419,7 @@ Do not return the definition as deployable with the dependency unwired, silently
 - No authored secret `data.value` references a recipe resource output or guessed convenience property.
 - No authored secret `data.value` interpolates an aggregate credential-bearing URL/config.
 - No secret is hardcoded, assumed URL-safe, or assumed to appear in generic connection variables.
+- Every consumer of a provisioned service username reads it from one source, in one of the forms [One username, one source](#one-username-one-source) allows: `<resource>.properties.username`, the generated `CONNECTION_<CONNECTION>_USERNAME`, one shared `var`, or the schema's authored Secret through `secretKeyRef`. No consumer has its own copy.
 - An explicit `env` entry takes precedence over a generated connection variable of the same name. `disableDefaultEnvVars: true` suppresses all generated variables for that connection, so it is absent whenever the workload relies on a generated secret-backed value.
 - A managed `result.secrets` reference wins over an ordinary generated connection value with the same normalized name; Secret-derived keys that normalize to the same uppercase variable name fail validation.
 - `properties.secrets.name` remains the public Kubernetes Secret name for Recipe outputs; connections use the producer resource ID instead.

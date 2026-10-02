@@ -891,12 +891,87 @@ describe("P0-C built Radius extension artifact", () => {
     expect(rabbitmqExample).not.toMatch(
       /^\s*password:\s*rabbitmqPassword\s*$/mu
     );
-    // `username` is the administrator the broker is provisioned with, not a
-    // value copied from the application's existing deployment.
+    // `username` is the default the broker is provisioned with, not a value
+    // copied from the application's existing deployment.
     expect(rabbitmqExample).toMatch(
-      /username:\s*'myadmin'\s*\/\/ authored broker administrator/u
+      /username:\s*'myadmin'\s*\/\/ default username/u
     );
     expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
+    // Every consumer must authenticate as the broker's username, so the
+    // example binds consumers to the resource rather than to a second copy.
+    expect(rabbitmqExample).toMatch(
+      /ORDER_QUEUE_USERNAME:\s*\{\s*value:\s*rabbitmq\.properties\.username\b/u
+    );
+    expect(rabbitmqExample?.match(/'myadmin'/gu)).toHaveLength(1);
+    // A username set by Compose and read from an environment variable is the
+    // case that looked like a requirement; the rule table pins it to myadmin.
+    expect(secretsGuidance).toMatch(
+      /\|\s*`process\.env\.ORDER_QUEUE_USERNAME`, which Compose sets to `username`\s*\|\s*2\s*\|\s*`myadmin`; set `ORDER_QUEUE_USERNAME`\s*\|/u
+    );
+    // A cloud database admin login can't be renamed, so a refresh must keep
+    // the username the existing model set.
+    expect(secretsGuidance).toContain(
+      "**When refreshing a model, keep the username it already has.**"
+    );
+    expect(secretsGuidance).toContain(
+      "If the user asks to change it, keep the existing value, tell them the change may require replacing the service, and change it only after they confirm."
+    );
+    expect(secretsGuidance).not.toContain("unless the user asks to change it");
+    // A refresh skips choosing a new username but still traces consumers, so a
+    // fixed literal that differs from the kept value stops the run.
+    expect(secretsGuidance).toContain(
+      "Still trace every consumer: re-bind each one to the kept value"
+    );
+    expect(secretsGuidance).not.toContain("skip the rules below");
+    // Every one-source form the rule allows must pass the checklists, or a
+    // valid model would be rejected.
+    for (const guidance of [secretsGuidance, skillGuidance]) {
+      expect(guidance).toContain(
+        "`<resource>.properties.username`, the generated `CONNECTION_<CONNECTION>_USERNAME`, one shared `var`, or the schema's authored Secret through `secretKeyRef`"
+      );
+    }
+    // The SKILL.md refresh rule and checklist must allow the same confirmed
+    // change as the detailed rule.
+    expect(skillGuidance).toContain(
+      "Keep every provisioned service username the existing model sets, unless the user confirms a change after being told it may require replacing the service."
+    );
+    expect(skillGuidance).toContain(
+      "A refreshed model keeps the username the existing model set, unless the user confirmed a change."
+    );
+    expect(secretsGuidance).toContain(
+      "if the profile sets none either, stop and report that the username source could not be found"
+    );
+    expect(secretsGuidance).toMatch(
+      /\|\s*`amqp\.connect\('amqp:\/\/guest:guest@' \+ host\)`\s*\|\s*3\s*\|\s*stop and report/u
+    );
+    // A fixed literal on one consumer decides the resource's username, and a
+    // conflicting request or second literal stops the run.
+    expect(secretsGuidance).toContain(
+      "Stop and report the conflict when two consumers fix different literals, or when the user asks for a username that differs from a fixed literal."
+    );
+    expect(secretsGuidance).toContain(
+      "If a consumer cannot read that Secret, for example because its username is a fixed literal, stop and report it."
+    );
+    // A shared username var must land in the same place with the same name
+    // on every regeneration.
+    expect(secretsGuidance).toContain(
+      "declare the value once as `var <resourceSymbolicName>Username`"
+    );
+    expect(skillGuidance).toContain(
+      "then `param` declarations, then `var` declarations, then the `Radius.Core/applications` resource"
+    );
+    const azureGuidance = readGuidance(
+      "references/azure-provider-value-rules.md"
+    );
+    expect(skillGuidance).toContain(
+      "(references/secrets-handling.md#provisioned-service-usernames)"
+    );
+    expect(azureGuidance).toContain(
+      "(secrets-handling.md#provisioned-service-usernames)"
+    );
+    expect(structureGuidance).toContain(
+      "(secrets-handling.md#one-username-one-source)"
+    );
     expect(secretsGuidance).toContain(
       "Writing `password: rabbitmqPassword` here deploys a broken application"
     );
@@ -1012,16 +1087,20 @@ describe("P0-C built Radius extension artifact", () => {
     expect(rabbitmqExample).toMatch(
       /data:\s*\{\s*password:\s*\{\s*value:\s*rabbitmqPassword\s*\}/u
     );
-    expect(rabbitmqExample).not.toContain("PASSWORD:");
+    expect(rabbitmqExample).not.toMatch(/^\s*PASSWORD:/mu);
 
-    const rabbitmqConsumer = bicepBlocks.find(
+    const rabbitmqConsumers = bicepBlocks.filter(
       (block) =>
         block.includes("secretName: rabbitmqCredentials.name") &&
         block.includes("secretKeyRef")
     );
-    expect(rabbitmqConsumer).toBeDefined();
-    expect(rabbitmqConsumer).toMatch(/key:\s*'password'/u);
-    expect(rabbitmqConsumer).not.toMatch(/key:\s*'PASSWORD'/u);
+    // The broker example and the standalone consumer snippet both read this
+    // Secret, so every reader is checked rather than the first one found.
+    expect(rabbitmqConsumers.length).toBeGreaterThanOrEqual(2);
+    for (const consumer of rabbitmqConsumers) {
+      expect(consumer).toMatch(/key:\s*'password'/u);
+      expect(consumer).not.toMatch(/key:\s*'PASSWORD'/u);
+    }
   });
 
   it("packages the staged type-sensitivity contract both credential scripts share", () => {
