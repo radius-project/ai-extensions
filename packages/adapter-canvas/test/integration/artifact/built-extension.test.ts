@@ -917,6 +917,12 @@ describe("P0-C built Radius extension artifact", () => {
       "If the user asks to change it, keep the existing value, tell them the change may require replacing the service, and change it only after they confirm."
     );
     expect(secretsGuidance).not.toContain("unless the user asks to change it");
+    // A refresh skips choosing a new username but still traces consumers, so a
+    // fixed literal that differs from the kept value stops the run.
+    expect(secretsGuidance).toContain(
+      "Still trace every consumer: re-bind each one to the kept value"
+    );
+    expect(secretsGuidance).not.toContain("skip the rules below");
     // Every one-source form the rule allows must pass the checklists, or a
     // valid model would be rejected.
     for (const guidance of [secretsGuidance, skillGuidance]) {
@@ -924,8 +930,13 @@ describe("P0-C built Radius extension artifact", () => {
         "`<resource>.properties.username`, the generated `CONNECTION_<CONNECTION>_USERNAME`, one shared `var`, or the schema's authored Secret through `secretKeyRef`"
       );
     }
+    // The SKILL.md refresh rule and checklist must allow the same confirmed
+    // change as the detailed rule.
     expect(skillGuidance).toContain(
-      "Keep every provisioned service username the existing model sets."
+      "Keep every provisioned service username the existing model sets, unless the user confirms a change after being told it may require replacing the service."
+    );
+    expect(skillGuidance).toContain(
+      "A refreshed model keeps the username the existing model set, unless the user confirmed a change."
     );
     expect(secretsGuidance).toContain(
       "if the profile sets none either, stop and report that the username source could not be found"
