@@ -61,6 +61,7 @@ readonly PINNED_REF
     fail "RADIUS_INSTALL_REF is not a stable release tag: ${PINNED_REF}"
 readonly PINNED_RELEASE="${PINNED_REF#v}"
 readonly MINOR="${PINNED_RELEASE%.*}"
+readonly GUIDANCE="Re-run the workflow. If it fails again, report it at https://github.com/radius-project/ai-extensions/issues."
 
 extract_run "Install Radius CLI" >"${TEST_ROOT}/install-cli.sh"
 extract_run "Install Radius on control plane" >"${TEST_ROOT}/install-control-plane.sh"
@@ -142,6 +143,8 @@ for release in edge "${MINOR}.999"; do
     fi
     grep -Fq "::error::Installed Radius CLI" "${TEST_ROOT}/step.log" ||
         fail "CLI step did not explain the ${release} mismatch"
+    grep -Fq "${GUIDANCE}" "${TEST_ROOT}/step.log" ||
+        fail "CLI step did not tell the user what to do for ${release}"
 done
 
 for control_plane in "${PINNED_RELEASE}" "${MINOR}.999"; do
@@ -156,6 +159,8 @@ for control_plane in edge "Not installed" "" "${MINOR}" "${MINOR}." "${MINOR}0.0
     fi
     grep -Fq "::error::Installed Radius control plane" "${TEST_ROOT}/step.log" ||
         fail "control-plane step did not explain the '${control_plane}' mismatch"
+    grep -Fq "${GUIDANCE}" "${TEST_ROOT}/step.log" ||
+        fail "control-plane step did not tell the user what to do for '${control_plane}'"
 done
 
 echo "setup-control-plane install tests passed"

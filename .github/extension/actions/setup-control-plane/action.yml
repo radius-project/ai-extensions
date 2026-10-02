@@ -59,7 +59,7 @@ runs:
         rad version
         CLI_VERSION="$(rad version --cli -o json | jq -r .version)"
         if [ "$CLI_VERSION" != "$RADIUS_INSTALL_REF" ]; then
-          echo "::error::Installed Radius CLI $CLI_VERSION, expected $RADIUS_INSTALL_REF."
+          echo "::error::Installed Radius CLI $CLI_VERSION, expected $RADIUS_INSTALL_REF. Re-run the workflow. If it fails again, report it at https://github.com/radius-project/ai-extensions/issues."
           exit 1
         fi
 
@@ -120,6 +120,6 @@ runs:
         CONTROL_PLANE_VERSION="$(jq -r .controlPlane.version <<<"$VERSIONS")"
         if [[ ! "$CONTROL_PLANE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
           [ "${CONTROL_PLANE_VERSION%.*}" != "${CLI_RELEASE%.*}" ]; then
-          echo "::error::Installed Radius control plane $CONTROL_PLANE_VERSION, expected a stable ${CLI_RELEASE%.*}.x release to match the CLI ($CLI_RELEASE)."
+          echo "::error::Installed Radius control plane $CONTROL_PLANE_VERSION, expected a stable ${CLI_RELEASE%.*}.x release to match the CLI ($CLI_RELEASE). Re-run the workflow. If it fails again, report it at https://github.com/radius-project/ai-extensions/issues."
           exit 1
         fi
