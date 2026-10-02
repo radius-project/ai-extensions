@@ -44,15 +44,15 @@ runs:
     - name: Install Radius CLI
       shell: bash
       env:
-        # Pin the Radius install script to a stable release and verify its checksum
-        # before running it, rather than piping from main. The CLI channel stays
-        # `edge` so the workflow still exercises the latest control-plane build.
+        # Install the CLI from a pinned stable Radius release; `rad install kubernetes`
+        # then installs the control plane for the CLI's release. Verify the install
+        # script's checksum before running it, rather than piping from main.
         RADIUS_INSTALL_REF: v0.61.1
         RADIUS_INSTALL_SHA256: bf2fdf0248b39ac2a0222326f8458824924872816737a08af3558bddd16c392b
       run: |
         curl -sSL "https://raw.githubusercontent.com/radius-project/radius/${RADIUS_INSTALL_REF}/deploy/install.sh" -o install-rad.sh
         echo "${RADIUS_INSTALL_SHA256}  install-rad.sh" | sha256sum -c -
-        /bin/bash install-rad.sh edge
+        /bin/bash install-rad.sh --version "$RADIUS_INSTALL_REF"
         rm -f install-rad.sh
         rad version
 
