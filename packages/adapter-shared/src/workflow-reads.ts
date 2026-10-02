@@ -652,7 +652,8 @@ export async function readWorkflowRunWithMetadata(
             ) ?
               "timeout"
             : (
-              response.commandAuthorizationFailure ||
+              (metadata.source === "unavailable" &&
+                response.commandAuthorizationStatus !== null) ||
               (metadata.source === "gh-api-include" &&
                 metadata.classification === "authorization")
             ) ?
