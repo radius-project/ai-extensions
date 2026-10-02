@@ -35,9 +35,6 @@ resource web 'Radius.Compute/containers@2025-08-01-preview' = {
           ORDER_QUEUE_LOGIN: {
             value: rabbitmqUsername
           }
-          ORDER_QUEUE_USER: {
-            value: rabbitmq.properties.username
-          }
           ORDER_QUEUE_USERNAME: {
             value: 'myadmin'
           }

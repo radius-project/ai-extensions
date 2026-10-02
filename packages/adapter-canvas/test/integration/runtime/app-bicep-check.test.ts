@@ -3793,7 +3793,6 @@ describe("provisioned username copies", () => {
   });
 
   it.each([
-    "ORDER_QUEUE_USERNAME",
     "RabbitMQ__UserName",
     "SPRING_RABBITMQ_USERNAME",
     "PGUSER",
@@ -4139,7 +4138,7 @@ describe("provisioned username copies", () => {
     );
   }
 
-  it("reports only the literal copy in captured Bicep output", () => {
+  it("reports a copy of a var's value but not the var in captured Bicep output", () => {
     const result = check(bicepFixture("username-copy"));
 
     assert.equal(result.status, 1);

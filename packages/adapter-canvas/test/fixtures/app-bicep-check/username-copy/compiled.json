@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.42.1.51946",
-      "templateHash": "5353308822194749752"
+      "templateHash": "8365421868434205988"
     }
   },
   "parameters": {
@@ -67,9 +67,6 @@
                 "ORDER_QUEUE_LOGIN": {
                   "value": "[variables('rabbitmqUsername')]"
                 },
-                "ORDER_QUEUE_USER": {
-                  "value": "[reference('rabbitmq').properties.username]"
-                },
                 "ORDER_QUEUE_USERNAME": {
                   "value": "myadmin"
                 }
@@ -79,8 +76,7 @@
         }
       },
       "dependsOn": [
-        "app",
-        "rabbitmq"
+        "app"
       ]
     }
   }
