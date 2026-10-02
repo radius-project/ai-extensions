@@ -1497,56 +1497,45 @@ export async function createCloudFixture(
           continue;
         }
         await attempt(`app registration ${app.appId}`, async () => {
-          const objectIdDeletion = await commands.runAz([
-            "ad",
-            "app",
-            "delete",
-            "--id",
-            app.objectId,
-            "--output",
-            "none"
-          ]);
-          const objectIdNotFound = isAzureResourceNotFound(objectIdDeletion);
-          if (!objectIdNotFound)
-            expectSuccess(objectIdDeletion, `az ad app delete ${app.objectId}`);
-          if (objectIdNotFound) {
-            const appIdDeletion = await commands.runAz([
-              "ad",
-              "app",
-              "delete",
-              "--id",
-              app.appId,
-              "--output",
-              "none"
-            ]);
-            if (!isAzureResourceNotFound(appIdDeletion))
-              expectSuccess(appIdDeletion, `az ad app delete ${app.appId}`);
-          }
-          // Neither a zero exit nor a not-found is proof the object is gone.
-          // A run reported this step reclaimed while the app registration was
-          // still live and absent from Entra's deleted items, which wedged the
-          // next run's clean-slate check. Entra also deletes asynchronously,
-          // so confirm absence the same way the workload step does rather than
-          // trusting the command that claimed to have done it.
-          let survivors: readonly string[] = [app.appId];
+          const applicationUrl =
+            `https://graph.microsoft.com/v1.0/applications/` +
+            encodeURIComponent(app.objectId);
           await pollForValue({
             ports,
             timeoutMs: entraAppDeletionTimeoutMs,
             intervalMs: assertionPollIntervalMs,
             probe: async () => {
-              const remaining = await listAppRegistrations(
-                commands,
-                expectedAppName
-              );
-              survivors = remaining
-                .filter((candidate) => candidate.objectId === app.objectId)
-                .map((candidate) => candidate.appId);
-              return survivors.length === 0 ? true : undefined;
+              const deletion = await commands.runAz([
+                "rest",
+                "--method",
+                "DELETE",
+                "--url",
+                applicationUrl,
+                "--output",
+                "none"
+              ]);
+              if (!isAzureResourceNotFound(deletion))
+                expectSuccess(
+                  deletion,
+                  `az rest DELETE application ${app.objectId}`
+                );
+
+              const lookup = await commands.runAz([
+                "rest",
+                "--method",
+                "GET",
+                "--url",
+                applicationUrl,
+                "--output",
+                "none"
+              ]);
+              if (isAzureResourceNotFound(lookup)) return true;
+              expectSuccess(lookup, `az rest GET application ${app.objectId}`);
+              return undefined;
             },
             timeoutMessage: () =>
-              `az ad app delete ${app.objectId} ` +
-              `${objectIdNotFound ? `reported the object id was already absent and the client-id retry did not remove it` : "succeeded"}, ` +
-              `but app registration ${survivors.join(", ")} was still listed after ${entraAppDeletionTimeoutMs}ms.`
+              `App registration ${app.appId} (object ${app.objectId}) remained directly queryable through ` +
+              `Microsoft Graph after ${entraAppDeletionTimeoutMs}ms of exact-object deletion attempts.`
           });
         });
       }
