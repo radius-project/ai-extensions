@@ -509,6 +509,59 @@ describe("artifact cleanup and compatibility", () => {
   });
 
   describe("artifact shared-flight policy ownership", () => {
+    it("resumes the same observation after cooldown without replenishing retry credits", async () => {
+      vi.useFakeTimers();
+      vi.spyOn(Math, "random").mockReturnValue(0);
+      const context = createWorkflowReadSession().observe(120000);
+      expect(context.chargeRetries(1)).toBe(true);
+      let calls = 0;
+      const run = vi.fn<WorkflowRunner>(async () => {
+        calls++;
+        return {
+          code: calls >= 4 ? 0 : 1,
+          stdout:
+            calls <= 2 ? "HTTP/2 429\nRetry-After: 30\n\n{}"
+            : calls === 3 ? "HTTP/2 503\n\n{}"
+            : `HTTP/2 200\n\n${JSON.stringify({ artifacts: [artifact] })}`,
+          stderr: ""
+        };
+      });
+      const download = vi.fn(async () => ({
+        [DEPLOY_STATUS_FILES.progress]: JSON.stringify(progress)
+      }));
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        runId: 41,
+        ttlMs: 10000,
+        listArtifacts: createWorkflowArtifactReads(run).listWorkflowArtifacts,
+        downloadArtifact: download
+      });
+      expect(await reader.read(context)).toMatchObject({
+        status: "error",
+        error: { decision: { reason: "not-before" } }
+      });
+      await vi.advanceTimersByTimeAsync(29999);
+      expect(await reader.read(context)).toMatchObject({ status: "error" });
+      expect(calls).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await reader.read(context)).toMatchObject({
+        status: "error",
+        error: { decision: { reason: "not-before" } }
+      });
+      expect(calls).toBe(2);
+      await vi.advanceTimersByTimeAsync(30000);
+      const recovered = reader.read(context);
+      await vi.advanceTimersByTimeAsync(750);
+      expect(await recovered).toMatchObject({ status: "ok" });
+      expect(calls).toBe(4);
+      expect(context.chargeRetries(1)).toBe(false);
+      expect(download).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(await reader.read(context)).toMatchObject({ status: "stale" });
+      expect(download).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
     it.each([
       { phase: "listing", shortFirst: true },
       { phase: "download", shortFirst: true },

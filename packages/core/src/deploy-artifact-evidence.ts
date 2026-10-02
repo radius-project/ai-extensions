@@ -497,8 +497,12 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   } = options;
 
   let cache: { at: number; result: ReadResult; usage: object } | null = null;
+  interface DownloadRecord {
+    work: Promise<void>;
+    result?: { files: ArtifactFiles | null } | { error: unknown };
+  }
   interface ReadLedger {
-    downloads: Map<number, Promise<ArtifactFiles | null>>;
+    downloads: Map<number, DownloadRecord>;
     failure?: ReadResult;
     accepted?: { result: ReadResult; retirement: number };
     receipts: WeakMap<object, { count: number; admitted: boolean }>;
@@ -520,6 +524,8 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   let lastGoodUsage: object | undefined;
   let retirement = 0;
   const inspectedArtifacts = new Map<number, ReadResult>();
+  // Keep payload slots bounded by the listing, independently of attempt receipts.
+  const retainedDownloads = new Map<number, DownloadRecord>();
   // A run-scoped read follows one in-flight deployment through its rotating
   // live slots; a repo-wide read looks for the newest terminal artifact and is
   // not tied to any run.
@@ -542,11 +548,29 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       );
   }
 
+  function canResume(
+    result: ReadResult,
+    context?: WorkflowReadContext
+  ): boolean {
+    const decision = isRecord(result.error) ? result.error.decision : null;
+    return (
+      !!context &&
+      isRecord(decision) &&
+      decision.state === "deferred" &&
+      decision.reason === "not-before" &&
+      typeof decision.notBefore === "number" &&
+      Number.isFinite(decision.notBefore) &&
+      context.clock.monotonic() >= decision.notBefore
+    );
+  }
+
   async function fetchOnce(
     context: WorkflowReadContext | undefined,
     ledger: ReadLedger
   ): Promise<ReadResult> {
     ensureCurrent(context);
+    if (ledger.failure && canResume(ledger.failure, context))
+      delete ledger.failure;
     if (ledger.failure) return ledger.failure;
     if (!repo) return empty("missing");
     let artifacts: WorkflowArtifact[];
@@ -571,7 +595,6 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       );
     }
     let candidates = selectDeployStatusArtifacts(artifacts, environment);
-    if (candidates.length === 0) return empty("missing");
 
     const expectedRunId = Number(runId);
     // A repo-wide read is not scoped to any run, and `sequence` restarts at 1
@@ -580,18 +603,22 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     // newer completed run's fixed-name terminal artifact.
     if (!isRunScoped) {
       candidates = candidates.filter((a) => !isLiveSlotArtifactName(a.name));
-      if (candidates.length === 0) return empty("missing");
     }
     // Ring slots overwrite by uploading with new artifact IDs, so an ID that
     // dropped out of the listing never comes back. Prune the cache to the
     // current listing so a long-running deploy cannot accumulate payloads that
     // will never be referenced again.
-    if (inspectedArtifacts.size > 0) {
-      const listedIds = new Set(candidates.map((c) => c.id));
-      for (const cachedId of [...inspectedArtifacts.keys()]) {
-        if (!listedIds.has(cachedId)) inspectedArtifacts.delete(cachedId);
+    const listedIds = new Set(candidates.map((c) => c.id));
+    for (const cachedId of inspectedArtifacts.keys()) {
+      if (!listedIds.has(cachedId)) inspectedArtifacts.delete(cachedId);
+    }
+    for (const [id, record] of retainedDownloads) {
+      if (!listedIds.has(id)) {
+        delete record.result;
+        retainedDownloads.delete(id);
       }
     }
+    if (candidates.length === 0) return empty("missing");
 
     let sawMalformed = false;
     // A candidate that could not be read proves nothing about whether this
@@ -618,16 +645,42 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       if (!result) {
         let files: ArtifactFiles | null;
         try {
-          let work = ledger.downloads.get(artifact.id);
-          if (!work) {
-            work =
+          let record = ledger.downloads.get(artifact.id);
+          if (!record) {
+            const pending =
               context ?
                 downloadArtifact(repo, artifact, context)
               : downloadArtifact(repo, artifact);
-            ledger.downloads.set(artifact.id, work);
+            const previous = retainedDownloads.get(artifact.id);
+            if (previous) delete previous.result;
+            const download: DownloadRecord = {
+              // Ledger receipts retain completion, never the promise's payload.
+              work: pending.then(
+                (files) => {
+                  if (
+                    retainedDownloads.get(artifact.id) === download &&
+                    (!context || context.check().state === "ready")
+                  )
+                    download.result = { files };
+                },
+                (error: unknown) => {
+                  if (
+                    retainedDownloads.get(artifact.id) === download &&
+                    (!context || context.check().state === "ready")
+                  )
+                    download.result = { error };
+                }
+              )
+            };
+            retainedDownloads.set(artifact.id, download);
+            ledger.downloads.set(artifact.id, download);
+            record = download;
           }
-          files = await work;
+          await record.work;
           ensureCurrent(context);
+          const retained = retainedDownloads.get(artifact.id)?.result;
+          if (retained && "error" in retained) throw retained.error;
+          files = retained?.files ?? null;
         } catch (e) {
           ensureCurrent(context);
           if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
@@ -739,7 +792,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       receipts: new WeakMap()
     };
     if (context) ledgers.set(context.observation, ledger);
-    if (cache && now() - cache.at < ttlMs)
+    if (cache && now() - cache.at < ttlMs && !canResume(cache.result, context))
       return ledger.receipts.get(cache.usage)?.admitted === false ?
           empty("error", new WorkflowReadInterruptedError("attempts"))
         : accept(ledger, cache.result);
