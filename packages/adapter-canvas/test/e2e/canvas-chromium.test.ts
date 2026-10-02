@@ -19,7 +19,12 @@ import {
   type FakeCliCommand
 } from "./support/canvas-harness.js";
 import type { Locator, Page, TestInfo } from "@playwright/test";
-import { collectWorkflowFailure } from "@radius-project/core";
+import {
+  collectWorkflowFailure,
+  describeWorkflowProtection,
+  parseWorkflowProtection
+} from "@radius-project/core";
+import { pendingEnvironment } from "../../../adapter-shared/test/fixtures/workflow-observation.js";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
@@ -3870,6 +3875,49 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeVisible();
   });
 
+  test("renders protection observations as historical text while a deploy waits and completes @safety", async ({
+    page,
+    canvas
+  }) => {
+    await routeDeployedPage(page, () => "in_progress");
+    const logs = [
+      describeWorkflowProtection(parseWorkflowProtection([pendingEnvironment]))
+    ];
+    let status = "in_progress";
+    await page.route("**/api/deploy-status**", async (route) => {
+      const since = Number(
+        new URL(route.request().url()).searchParams.get("since") ?? 0
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status,
+          active: status === "in_progress",
+          repairing: false,
+          logsNew: logs.slice(since),
+          logTotal: logs.length,
+          attempt: { id: "protection-fixture" }
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    const output = page.locator("#deployed-log-output");
+    await expect(output).toContainText(logs[0]);
+    await expect(output.locator("review")).toHaveCount(0);
+    await expectNoWcagViolations(page);
+    logs.push(
+      "Observation: workflow completed; earlier protection observations are historical."
+    );
+    status = "complete";
+    await expect(output).toContainText(logs[1]);
+    await expect(output).toContainText("Required reviewers are configured.");
+    await expect(output).not.toContainText("approved");
+    await page.getByRole("link", { name: "Deployments", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/page=deploying/);
+  });
+
   for (const completed of [false, true]) {
     for (const evidence of ["missing", "malformed", "auth"] as const) {
       test(`shows retained ${completed ? "unconfirmed completion" : "timeout"} details despite ${evidence} artifacts through the real graph route in Chromium @safety`, async ({
@@ -4315,7 +4363,8 @@ test.describe("Radius Canvas in Chromium", () => {
   for (const evidence of [
     "primary failure with unavailable diagnostics",
     "unconfirmed completion",
-    "primary failure with unavailable workflow log"
+    "primary failure with unavailable workflow log",
+    "post-deployment teardown failure"
   ]) {
     test(`preserves ${evidence} and keyboard dismissal @safety`, async ({
       page,
@@ -4358,6 +4407,33 @@ test.describe("Radius Canvas in Chromium", () => {
           }
         );
         error = failure.message;
+      }
+      if (evidence === "post-deployment teardown failure") {
+        const steps = [
+          {
+            name: "Run rad commands",
+            status: "completed",
+            conclusion: "success"
+          },
+          { name: "Teardown", status: "completed", conclusion: "failure" }
+        ];
+        error = (
+          await collectWorkflowFailure(
+            { repo: REPOSITORY, runId: 77 },
+            {
+              status: "completed",
+              conclusion: "failure",
+              steps,
+              jobs: [{ name: "deploy", steps }]
+            },
+            { provider: "azure", resourcesTouched: true },
+            {
+              readLog: async () =>
+                "deploy\tTeardown\t2026-01-01 Error: <teardown>",
+              readControlPlaneLog: async () => null
+            }
+          )
+        ).message;
       }
       if (typeof error !== "string")
         throw new Error("Missing monitor diagnostic");

@@ -19,6 +19,12 @@ afterEach(() => {
 
 it.each([
   {
+    name: "post-deployment teardown failure",
+    error:
+      "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed.\n\nError: <teardown>",
+    errorKind: null
+  },
+  {
     name: "primary and unavailable secondary evidence",
     error:
       "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
