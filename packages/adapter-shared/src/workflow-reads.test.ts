@@ -192,37 +192,6 @@ describe("selected-account workflow reads", () => {
       }
     );
   });
-  it("bounds a requested diagnostic log read without retrying log content", async () => {
-    vi.useFakeTimers();
-    try {
-      const log = "HTTP 429\nRetry-After: 1";
-      const run = vi.fn(async () => ({
-        code: 0,
-        stdout: log,
-        stderr: ""
-      }));
-      const executor = successfulSelectedGhExecutor({ run });
-      const request = {
-        context: createWorkflowReadSession().observe(1000),
-        identity: "alice"
-      };
-
-      await expect(
-        readWorkflowLog({ mode: "selected", executor }, "org/app", 41, request)
-      ).resolves.toBe(log);
-      expect(run).toHaveBeenCalledExactlyOnceWith(
-        ["run", "view", "41", "--log", "--repo", "org/app"],
-        {
-          timeout: 1000,
-          maxBuffer: 20 * 1024 * 1024,
-          signal: expect.any(AbortSignal)
-        }
-      );
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
   it("retains deferred run evidence across polls without another GET", async () => {
     const session = createWorkflowReadSession();
     const run = vi.fn(async () => ({

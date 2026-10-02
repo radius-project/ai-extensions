@@ -171,7 +171,8 @@ export interface DeploymentsDependencies {
   // non-terminal-state conflict, which is the only thing that unlocks the
   // force-delete path in the UI.
   probeDeleteConflict(
-    request: DeleteConflictRequest
+    request: DeleteConflictRequest,
+    instanceId: string
   ): Promise<DeleteConflictProbe>;
 }
 
@@ -611,11 +612,10 @@ export async function handleDeleteDeployment(
     if (force) {
       let proof: DeleteConflictProbe;
       try {
-        proof = await dependencies.probeDeleteConflict({
-          repo,
-          environment,
-          application
-        });
+        proof = await dependencies.probeDeleteConflict(
+          { repo, environment, application },
+          context.instanceId
+        );
       } catch (error) {
         releaseReservation();
         respond(503, {
@@ -859,11 +859,14 @@ export async function handleDeleteConflict(
   }
   let probe: DeleteConflictProbe;
   try {
-    probe = await dependencies.probeDeleteConflict({
-      repo,
-      environment,
-      application
-    });
+    probe = await dependencies.probeDeleteConflict(
+      {
+        repo,
+        environment,
+        application
+      },
+      context.instanceId
+    );
   } catch (error) {
     // Never fail the click: an unreadable probe simply leaves the ordinary
     // delete path in place.
