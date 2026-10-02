@@ -59,6 +59,133 @@ afterEach(() => vi.useRealTimers());
 
 describe("bounded REST workflow detail composition", () => {
   describe.each(["run", "jobs"] as const)("%s policy outcomes", (phase) => {
+    it.each(["timeout", "cancelled", "output-limit"] as const)(
+      "publishes a terminal decision after in-flight %s",
+      async (reason) => {
+        vi.useFakeTimers();
+        let now = 0;
+        const controller = new AbortController();
+        const context = createWorkflowReadSession({
+          monotonic: () => now,
+          wall: () => 0,
+          sleep: async () => {
+            throw new Error("Unexpected retry");
+          },
+          jitter: () => 0
+        }).observe(60000, controller.signal);
+        const onDecision = vi.fn();
+        const run = vi.fn<WorkflowRunner>(async (args) => {
+          if (phase === "jobs" && !args[1].includes("/jobs"))
+            return reply(runData);
+          if (reason === "cancelled") controller.abort();
+          if (reason === "timeout") now = 15000;
+          return reason === "output-limit" ?
+              {
+                code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+                stdout: "",
+                stderr: ""
+              }
+            : reply({}, 403);
+        });
+        const result = await readWorkflowRunWithMetadata(
+          {
+            mode: "selected",
+            executor: { login: "alice", run, errorMessage: String }
+          },
+          "org/app",
+          41,
+          { context, identity: "alice", onDecision }
+        );
+        const terminal =
+          reason === "cancelled" ?
+            { state: "stopped", reason: "cancelled" }
+          : {
+              state: "exhausted",
+              reason: reason === "timeout" ? "elapsed" : "ineligible"
+            };
+        expect(result).toMatchObject({
+          reason,
+          completeness: phase === "run" ? "unavailable" : "status-only",
+          decision: terminal,
+          value: phase === "run" ? null : { data: { conclusion: "failure" } }
+        });
+        expect(onDecision.mock.calls.map(([decision]) => decision)).toEqual([
+          ...(phase === "jobs" ? [{ state: "ready" }] : []),
+          terminal
+        ]);
+        expect(result.evidence.at(-1)).toEqual({
+          phase,
+          response: { source: "unavailable", reason }
+        });
+        expect(vi.getTimerCount()).toBe(0);
+      }
+    );
+
+    describe.each(["framed", "unframed", "rejected"] as const)(
+      "%s missing response",
+      (missing) => {
+        it.each(["timeout", "cancelled"] as const)(
+          "bounds the permission probe and retains %s instead of late authorization",
+          async (reason) => {
+            vi.useFakeTimers();
+            let now = 0;
+            const controller = new AbortController();
+            const context = createWorkflowReadSession({
+              monotonic: () => now,
+              wall: () => 0,
+              sleep: async () => {
+                throw new Error("Unexpected retry");
+              },
+              jitter: () => 0
+            }).observe(1000, controller.signal);
+            const onDecision = vi.fn();
+            const run = vi.fn<WorkflowRunner>(async (args, options) => {
+              if (args[1] === "repos/org/app") {
+                expect(options.timeout).toBe(600);
+                expect(options.signal).toBeInstanceOf(AbortSignal);
+                if (reason === "cancelled") controller.abort();
+                else now = 1000;
+                if (missing === "rejected") throw new Error("HTTP 403");
+                return reply({}, 403);
+              }
+              if (phase === "jobs" && !args[1].includes("/jobs"))
+                return reply(runData);
+              now = 400;
+              if (missing === "rejected") throw new Error("HTTP 404");
+              return missing === "framed" ?
+                  reply({}, 404)
+                : { code: 1, stdout: "", stderr: "HTTP 404" };
+            });
+            const result = await readWorkflowRunWithMetadata(
+              {
+                mode: "selected",
+                executor: { login: "alice", run, errorMessage: String }
+              },
+              "org/app",
+              41,
+              { context, identity: "alice", onDecision }
+            );
+            const terminal =
+              reason === "cancelled" ?
+                { state: "stopped", reason: "cancelled" }
+              : { state: "exhausted", reason: "elapsed" };
+            expect(result).toMatchObject({
+              reason,
+              decision: terminal,
+              completeness: phase === "run" ? "unavailable" : "status-only"
+            });
+            expect(result.evidence).toContainEqual({
+              phase: "repository",
+              response: { source: "unavailable", reason }
+            });
+            expect(onDecision).toHaveBeenLastCalledWith(terminal);
+            expect(run).toHaveBeenCalledTimes(phase === "run" ? 2 : 3);
+            expect(vi.getTimerCount()).toBe(0);
+          }
+        );
+      }
+    );
+
     it.each([false, true])(
       "keeps legacy temporary failures one-shot (selected=%s)",
       async (selected) => {
@@ -359,6 +486,19 @@ describe("bounded REST workflow detail composition", () => {
     }
   );
 
+  it("preserves authorization when a rejected missing run needs a permission probe", async () => {
+    const { execution } = scripted(
+      [new Error("HTTP 404"), reply({}, 403)],
+      true
+    );
+    await expect(
+      readWorkflowRunWithMetadata(execution, "org/app", 41)
+    ).rejects.toMatchObject({
+      name: "SelectedGhAuthorizationError",
+      status: 403
+    });
+  });
+
   it.each([
     { code: 1, stdout: "", stderr: "ordinary" },
     new Error("ordinary"),
@@ -379,10 +519,13 @@ describe("bounded REST workflow detail composition", () => {
     }
   );
 
-  it("keeps repository-probe timeout separate from the primary detail deadline", async () => {
+  it("counts repository-probe timeout against the primary detail deadline", async () => {
     vi.useFakeTimers({ toFake: ["performance", "setTimeout", "clearTimeout"] });
-    const run: WorkflowRunner = async (args) =>
-      args[1] === "repos/org/app" ? new Promise(() => {}) : reply({}, 404);
+    const run = vi.fn<WorkflowRunner>(async (args) => {
+      if (args[1] === "repos/org/app") return new Promise(() => {});
+      vi.advanceTimersByTime(14000);
+      return reply({}, 404);
+    });
     const result = readWorkflowRunWithMetadata(
       {
         mode: "selected",
@@ -394,11 +537,17 @@ describe("bounded REST workflow detail composition", () => {
     await vi.advanceTimersByTimeAsync(15000);
     expect(await result).toMatchObject({
       completeness: "unavailable",
+      reason: "timeout",
       evidence: [
         { phase: "run" },
-        { phase: "repository", response: { reason: "timeout" } }
+        { phase: "repository", response: { reason: "timeout" } },
+        { phase: "run", response: { reason: "timeout" } }
       ]
     });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls[1][1]).toMatchObject({ timeout: 1000 });
+    expect(run.mock.calls[1][1].signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("does not publish a run that resolves after its deadline", async () => {

@@ -15,7 +15,8 @@ import {
   isGitHubRateLimitError,
   isSelectedGhAuthorizationError,
   selectedCommandAuthorizationError,
-  type SelectedWorkflowExecutor
+  type SelectedWorkflowExecutor,
+  type WorkflowRunner
 } from "./workflow-reads.js";
 
 function successfulSelectedGhExecutor(
@@ -53,6 +54,144 @@ function fetchRunLog(
   return readWorkflowLog({ mode: "selected", executor }, repo, runId);
 }
 describe("selected-account workflow reads", () => {
+  it.each(["before-log", "during-log", "during-probe"] as const)(
+    "cancels %s without leaking work or starting another command",
+    async (when) => {
+      vi.useFakeTimers();
+      try {
+        const controller = new AbortController();
+        const context = createWorkflowReadSession().observe(
+          1000,
+          controller.signal
+        );
+        const run = vi.fn<WorkflowRunner>(async (args) => {
+          if (when === "during-probe" && args[0] === "run")
+            return { code: 1, stdout: "", stderr: "HTTP 404" };
+          controller.abort();
+          return new Promise(() => {});
+        });
+        if (when === "before-log") controller.abort();
+        await expect(
+          readWorkflowLog(
+            {
+              mode: "selected",
+              executor: successfulSelectedGhExecutor({ run })
+            },
+            "org/app",
+            41,
+            { context, identity: "alice" }
+          )
+        ).rejects.toMatchObject({ reason: "cancelled" });
+        expect(run).toHaveBeenCalledTimes(
+          when === "before-log" ? 0
+          : when === "during-log" ? 1
+          : 2
+        );
+        if (when !== "before-log")
+          expect(run.mock.calls.at(-1)?.[1].signal?.aborted).toBe(true);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  describe.each(["returned", "rejected"] as const)("%s log 404", (missing) => {
+    it("does not give an uncooperative legacy permission probe a fresh deadline", async () => {
+      vi.useFakeTimers({
+        toFake: ["performance", "setTimeout", "clearTimeout"]
+      });
+      try {
+        const run = vi.fn<WorkflowRunner>(async (args) => {
+          if (args[0] !== "run") return new Promise(() => {});
+          vi.advanceTimersByTime(29500);
+          if (missing === "rejected") throw new Error("HTTP 404");
+          return { code: 1, stdout: "", stderr: "HTTP 404" };
+        });
+        const result = expect(
+          readWorkflowLog(
+            {
+              mode: "selected",
+              executor: successfulSelectedGhExecutor({ run })
+            },
+            "org/app",
+            41
+          )
+        ).rejects.toMatchObject({ reason: "timeout" });
+        await vi.advanceTimersByTimeAsync(500);
+        await result;
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(run.mock.calls[1][1].timeout).toBe(500);
+        expect(run.mock.calls[1][1].signal?.aborted).toBe(true);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["timeout", "cancelled", "authorized", "denied"] as const)(
+      "shares the remaining log deadline and cancellation with a %s permission probe",
+      async (outcome) => {
+        vi.useFakeTimers();
+        try {
+          let now = 0;
+          const controller = new AbortController();
+          const context = createWorkflowReadSession({
+            monotonic: () => now,
+            wall: () => 0,
+            sleep: async () => {
+              throw new Error("Unexpected retry");
+            },
+            jitter: () => 0
+          }).observe(1000, controller.signal);
+          const run = vi.fn<WorkflowRunner>(async (args, options) => {
+            if (args[0] === "run") {
+              now = 400;
+              if (missing === "rejected") throw new Error("HTTP 404");
+              return { code: 1, stdout: "", stderr: "HTTP 404" };
+            }
+            expect(args).toEqual([
+              "api",
+              "repos/org/app",
+              "--jq",
+              ".full_name"
+            ]);
+            expect(options.timeout).toBe(600);
+            expect(options.signal).toBeInstanceOf(AbortSignal);
+            if (outcome === "cancelled") controller.abort();
+            if (outcome === "timeout") now = 1000;
+            if (missing === "rejected" && outcome !== "authorized")
+              throw new Error("HTTP 403");
+            return outcome === "authorized" ?
+                { code: 0, stdout: "org/app", stderr: "" }
+              : { code: 1, stdout: "", stderr: "HTTP 403" };
+          });
+          const result = readWorkflowLog(
+            {
+              mode: "selected",
+              executor: successfulSelectedGhExecutor({ run })
+            },
+            "org/app",
+            41,
+            { context, identity: "alice" }
+          );
+          if (outcome === "authorized")
+            await expect(result).resolves.toBeNull();
+          else if (outcome === "denied")
+            await expect(result).rejects.toMatchObject({
+              name: "SelectedGhAuthorizationError",
+              login: "alice",
+              status: 403
+            });
+          else await expect(result).rejects.toMatchObject({ reason: outcome });
+          expect(run).toHaveBeenCalledTimes(2);
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    );
+  });
   it("bounds a requested diagnostic log read without retrying log content", async () => {
     vi.useFakeTimers();
     try {

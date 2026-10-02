@@ -9,6 +9,42 @@ import {
 afterEach(() => vi.useRealTimers());
 
 describe("one logical workflow read budget", () => {
+  it.each(["context", "caller", "deadline"] as const)(
+    "preserves %s interruption over a concurrent command rejection",
+    async (source) => {
+      vi.useFakeTimers();
+      let now = 0;
+      const controller = new AbortController();
+      const context = createWorkflowReadSession({
+        monotonic: () => now,
+        wall: () => 0,
+        sleep: async () => {
+          throw new Error("Unexpected retry");
+        },
+        jitter: () => 0
+      }).observe(100, source === "context" ? controller.signal : undefined);
+      const run = createWorkflowReadBudget(
+        async () => {
+          if (source === "deadline") now = 100;
+          else controller.abort();
+          throw new Error("HTTP 403");
+        },
+        100,
+        10,
+        context
+      );
+      await expect(
+        run([], {
+          timeout: 100,
+          ...(source === "caller" ? { signal: controller.signal } : {})
+        })
+      ).rejects.toMatchObject({
+        reason: source === "deadline" ? "timeout" : "cancelled"
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
   it("cleans up a sleep cancelled synchronously while its listener is registered", async () => {
     vi.useFakeTimers();
     const { clock } = createWorkflowReadSession().observe(100);

@@ -83,6 +83,11 @@ export function createWorkflowReadBudget(
     };
     const detach = context?.onStop?.(stop);
     options.signal?.addEventListener("abort", stop, { once: true });
+    const checkInterrupted = () => {
+      if (options.signal?.aborted || context?.check().state === "stopped")
+        throw new WorkflowReadLimitError("cancelled");
+      if (now() >= deadline) throw new WorkflowReadLimitError("timeout");
+    };
     try {
       const result = await Promise.race([
         run(args, {
@@ -102,9 +107,7 @@ export function createWorkflowReadBudget(
         }),
         stopped
       ]);
-      if (options.signal?.aborted || context?.check().state === "stopped")
-        throw new WorkflowReadLimitError("cancelled");
-      if (now() >= deadline) throw new WorkflowReadLimitError("timeout");
+      checkInterrupted();
       remainingBytes -=
         Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr);
       if (
@@ -114,6 +117,9 @@ export function createWorkflowReadBudget(
       )
         throw new WorkflowReadLimitError("output-limit");
       return result;
+    } catch (error) {
+      checkInterrupted();
+      throw error;
     } finally {
       clearTimeout(timer);
       detach?.();
