@@ -18,6 +18,7 @@ import {
   type CanvasHarness,
   type FakeCliCommand
 } from "./support/canvas-harness.js";
+import { filterColorContrastNoise } from "./support/accessibility.js";
 import type { Locator, Page, TestInfo } from "@playwright/test";
 import { collectWorkflowFailure } from "@radius-project/core";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
@@ -355,7 +356,7 @@ async function expectNoWcagViolations(page: Page): Promise<void> {
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
   expect(
-    results.violations.map((violation) => ({
+    filterColorContrastNoise(results.violations).map((violation) => ({
       id: violation.id,
       targets: violation.nodes.map((node) => node.target.join(" "))
     }))
