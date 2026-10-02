@@ -70,6 +70,7 @@ export type {
   WorkflowReadRequest
 } from "./workflow-reads.js";
 export {
+  createWorkflowReadBudget,
   createWorkflowReadSession,
   isWorkflowReadLimitError
 } from "./workflow-read-budget.js";

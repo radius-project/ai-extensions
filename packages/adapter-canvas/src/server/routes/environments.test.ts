@@ -36,16 +36,37 @@ import {
   isTerminalState as isSetupTerminalState
 } from "../../operations.js";
 import {
+  extractErrorLines,
+  extractGitHubActionsStepLog,
+  explainOidcEnterpriseClaim,
+  explainNoSubscriptions,
   isSelectedGhAuthorizationError,
   SelectedGhAuthorizationError
 } from "../../deploy.js";
 import { createTestRouteTable } from "../../../test/support/server/route-table.js";
+import { createWorkflowObservationScope } from "../services/workflow-observation-scope.js";
+import { observeWorkflowRun } from "@radius-project/core";
+import {
+  readWorkflowRun,
+  readWorkflowLog,
+  type WorkflowCommandResult
+} from "@radius-project/adapter-shared";
 
 interface Recording {
   headers: Record<string, string>;
   headerOrder: string[];
   status: number;
   body: string;
+}
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {
+    throw new Error("Promise not initialized");
+  };
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
 }
 
 function recorder() {
@@ -845,8 +866,12 @@ describe("environments — bypass-verification", () => {
     });
   // Deps that carry a bypass all the way through to the marker write: a
   // Radius-managed env whose run is a terminal permissions failure.
-  const passingDeps = (over: Partial<EnvironmentsDependencies> = {}) =>
-    deps({
+  const passingDeps = (over: Partial<EnvironmentsDependencies> = {}) => {
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("Unexpected artifact reader");
+    });
+    return deps({
+      readInstanceEntry: () => ({ observation: scope }),
       getOperation: () => bypassOp(),
       getSelectedGitHubExecutor: () => scriptedExecutor().executor,
       hasCompleteVerificationIdentity: () => true,
@@ -863,6 +888,205 @@ describe("environments — bypass-verification", () => {
       explainNoSubscriptions: () => "",
       ...over
     });
+  };
+
+  it.each(["missing", "unscoped", "stopped"] as const)(
+    "refuses a bypass before any external read for a %s instance",
+    async (state) => {
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("Unexpected artifact reader");
+      });
+      if (state === "stopped") scope.stop();
+      const { run, executor } = scriptedExecutor();
+      const { recording, ctx } = context(
+        "POST",
+        "/api/bypass-verification",
+        bypassBody()
+      );
+      await handleBypassVerification(
+        ctx,
+        passingDeps({
+          readInstanceEntry: () =>
+            state === "missing" ? undefined
+            : state === "unscoped" ? {}
+            : { observation: scope },
+          getSelectedGitHubExecutor: () => executor
+        })
+      );
+      expect(recording.status).toBe(503);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "Workflow observation stopped."
+      });
+      expect(run).not.toHaveBeenCalled();
+      scope.stop();
+    }
+  );
+
+  it.each(["stopped", "removed", "replaced"] as const)(
+    "refuses a bypass when its instance is %s during the environment read",
+    async (state) => {
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("Unexpected artifact reader");
+      });
+      const replacement = createWorkflowObservationScope(() => {
+        throw new Error("Unexpected artifact reader");
+      });
+      let entry: EnvironmentsInstanceEntry | undefined = { observation: scope };
+      const started = deferred<void>();
+      const result = deferred<GhResult>();
+      const run = vi.fn<SelectedGhExecutor["run"]>((_args, options) => {
+        expect(options?.signal).toBeInstanceOf(AbortSignal);
+        started.resolve();
+        return result.promise;
+      });
+      const getRunDetail = vi.fn<EnvironmentsDependencies["getRunDetail"]>();
+      const fetchRunLog = vi.fn<EnvironmentsDependencies["fetchRunLog"]>();
+      const { recording, ctx } = context(
+        "POST",
+        "/api/bypass-verification",
+        bypassBody()
+      );
+      const pending = handleBypassVerification(
+        ctx,
+        passingDeps({
+          readInstanceEntry: () => entry,
+          getSelectedGitHubExecutor: () =>
+            successfulSelectedGhExecutor({ run }),
+          getRunDetail,
+          fetchRunLog
+        })
+      );
+      try {
+        await started.promise;
+        if (state === "stopped") {
+          scope.stop();
+          entry = undefined;
+        } else {
+          entry =
+            state === "removed" ? undefined : { observation: replacement };
+          result.resolve(ok(managedVars));
+        }
+        await pending;
+        expect(recording.status).toBe(503);
+        expect(JSON.parse(recording.body)).toEqual({
+          error: "Workflow observation stopped."
+        });
+        expect(run).toHaveBeenCalledOnce();
+        if (state === "stopped")
+          expect(run.mock.calls[0][1]?.signal?.aborted).toBe(true);
+        expect(getRunDetail).not.toHaveBeenCalled();
+        expect(fetchRunLog).not.toHaveBeenCalled();
+      } finally {
+        result.resolve(ok(managedVars));
+        scope.stop();
+        replacement.stop();
+        await pending;
+      }
+    }
+  );
+
+  it("does not adopt a replacement instance while reading the request body", async () => {
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("Unexpected artifact reader");
+    });
+    const replacement = createWorkflowObservationScope(() => {
+      throw new Error("Unexpected artifact reader");
+    });
+    let entry: EnvironmentsInstanceEntry = { observation: scope };
+    const body = deferred<string>();
+    const started = deferred<void>();
+    const { run, executor } = scriptedExecutor();
+    const { recording, ctx } = context("POST", "/api/bypass-verification", "");
+    const pending = handleBypassVerification(
+      {
+        ...ctx,
+        readTextBody: () => {
+          started.resolve();
+          return body.promise;
+        }
+      },
+      passingDeps({
+        readInstanceEntry: () => entry,
+        getSelectedGitHubExecutor: () => executor
+      })
+    );
+    try {
+      await started.promise;
+      entry = { observation: replacement };
+      body.resolve(bypassBody());
+      await pending;
+      expect(recording.status).toBe(503);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "Workflow observation stopped."
+      });
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      body.resolve(bypassBody());
+      scope.stop();
+      replacement.stop();
+      await pending;
+    }
+  });
+
+  it.each([
+    ["run", false],
+    ["run", true],
+    ["log", false],
+    ["log", true]
+  ] as const)(
+    "refuses a bypass after physical stop during %s (rejected=%s)",
+    async (phase, rejected) => {
+      const scope = createWorkflowObservationScope(
+        () => {
+          throw new Error("Unexpected artifact reader");
+        },
+        {
+          monotonic: () => 0,
+          wall: () => 0,
+          jitter: () => 0,
+          sleep: () => {
+            throw new Error("Unexpected wait");
+          }
+        }
+      );
+      const { run, executor } = scriptedExecutor();
+      let observation: object | undefined;
+      const { recording, ctx } = context(
+        "POST",
+        "/api/bypass-verification",
+        bypassBody()
+      );
+      await handleBypassVerification(
+        ctx,
+        passingDeps({
+          readInstanceEntry: () => ({ observation: scope }),
+          getSelectedGitHubExecutor: () => executor,
+          getRunDetail: async (_repo, _id, selected, request) => {
+            expect(selected).toBe(executor);
+            expect(request?.context.deadline).toBe(45000);
+            observation = request?.context.observation;
+            if (phase === "run") {
+              scope.stop();
+              if (rejected) throw new Error("Stopped run read rejected");
+            }
+            return { status: "completed", conclusion: "failure", steps: [] };
+          },
+          fetchRunLog: async (_repo, _id, selected, request) => {
+            expect(selected).toBe(executor);
+            expect(request?.context.observation).toBe(observation);
+            scope.stop();
+            if (rejected) throw new Error("Stopped log read rejected");
+            return "Forbidden";
+          }
+        })
+      );
+      expect(recording.status).toBe(503);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "Workflow observation stopped."
+      });
+      expect(run.mock.calls.map(([args]) => args[0])).toEqual(["api"]);
+    }
+  );
 
   it("400s when a required field is missing", async () => {
     const { recording, ctx } = context(
@@ -870,7 +1094,10 @@ describe("environments — bypass-verification", () => {
       "/api/bypass-verification",
       JSON.stringify({ repo: "o/r", environment: "dev" })
     );
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(recording.headerOrder).toEqual(["Content-Type"]);
     expect(JSON.parse(recording.body)).toEqual({
@@ -891,7 +1118,10 @@ describe("environments — bypass-verification", () => {
         runId: "555"
       })
     );
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(JSON.parse(recording.body)).toEqual({
       error: "repo, environment, operationId and runId are required."
@@ -909,7 +1139,10 @@ describe("environments — bypass-verification", () => {
         runId: { not: "scalar" }
       })
     );
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(JSON.parse(recording.body).error).toContain("are required");
   });
@@ -942,7 +1175,10 @@ describe("environments — bypass-verification", () => {
 
   it("an empty body parses to {} and 400s rather than throwing", async () => {
     const { recording, ctx } = context("POST", "/api/bypass-verification", "");
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(JSON.parse(recording.body)).toEqual({
       error: "repo, environment, operationId and runId are required."
@@ -957,7 +1193,10 @@ describe("environments — bypass-verification", () => {
     );
     await handleBypassVerification(
       ctx,
-      deps({ getOperation: () => bypassOp() })
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => bypassOp()
+      })
     );
     expect(recording.status).toBe(409);
     expect(JSON.parse(recording.body).error).toContain(
@@ -971,7 +1210,10 @@ describe("environments — bypass-verification", () => {
       "/api/bypass-verification",
       bypassBody()
     );
-    await handleBypassVerification(ctx, deps({ getOperation: () => null }));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined, getOperation: () => null })
+    );
     expect(recording.status).toBe(409);
   });
 
@@ -984,6 +1226,7 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       deps({
+        readInstanceEntry: () => undefined,
         getOperation: () => bypassOp(),
         hasCompleteVerificationIdentity: () => false
       })
@@ -1003,6 +1246,7 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       deps({
+        readInstanceEntry: () => undefined,
         getOperation: () => bypassOp(),
         hasCompleteVerificationIdentity: () => true,
         getSelectedGitHubExecutor: () => undefined
@@ -1297,7 +1541,10 @@ describe("environments — bypass-verification", () => {
       "/api/bypass-verification",
       "{bad"
     );
-    await handleBypassVerification(ctx, deps({}));
+    await handleBypassVerification(
+      ctx,
+      deps({ readInstanceEntry: () => undefined })
+    );
     expect(recording.status).toBe(400);
     expect(typeof JSON.parse(recording.body).error).toBe("string");
   });
@@ -2201,6 +2448,286 @@ describe("environments — verify-status", () => {
     ...over
   });
 
+  describe.each(["ambient", "selected"] as const)("%s bounded logs", (mode) => {
+    it.each(["output-limit", "expired", "in-flight"] as const)(
+      "retains the confirmed failure when the log is %s",
+      async (limit) => {
+        vi.useFakeTimers();
+        const scope = createWorkflowObservationScope(() => {
+          throw new Error("Unexpected artifact reader");
+        });
+        const operation = {
+          repo: "o/r",
+          environment: "dev",
+          context: { githubLogin: "octocat" },
+          currentStage: "verify",
+          verification: { dispatchedAt: 1, runId: 55 }
+        };
+        let complete: (result: WorkflowCommandResult) => void = () => {};
+        const pending = new Promise<WorkflowCommandResult>((resolve) => {
+          complete = resolve;
+        });
+        const run = vi.fn(async () =>
+          limit === "in-flight" ? pending : (
+            {
+              code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+              stdout: "",
+              stderr: ""
+            }
+          )
+        );
+        const executor = successfulSelectedGhExecutor({ run });
+        const finish = vi.fn();
+        const persistOperations = vi.fn(async () => {});
+        const { recording, ctx } = context(
+          "GET",
+          "/api/verify-status?repo=o/r" +
+            (mode === "selected" ? "&operationId=op1" : "")
+        );
+        try {
+          const handling = handleVerifyStatus(
+            ctx,
+            deps({
+              readInstanceEntry: () => ({
+                state: { verifyRunId: 55 },
+                observation: scope
+              }),
+              getOperation: () => operation,
+              getSelectedGitHubExecutor: () => executor,
+              hasCompleteVerificationIdentity: () => true,
+              getRunDetail: async (_repo, _id, _executor, request) => {
+                request?.onDecision?.({
+                  state: "deferred",
+                  reason: "missing-deadline"
+                });
+                if (limit === "expired") vi.advanceTimersByTime(45000);
+                return detail({
+                  conclusion: "failure",
+                  steps: [{ name: "Azure Login (OIDC)", conclusion: "failure" }]
+                });
+              },
+              fetchRunLog: (repo, runId, selected, request) => {
+                expect(selected).toBe(
+                  mode === "selected" ? executor : undefined
+                );
+                if (!request) throw new Error("Missing observation");
+                return readWorkflowLog(
+                  mode === "selected" ? { mode, executor } : { mode, run },
+                  repo,
+                  runId,
+                  request
+                );
+              },
+              extractErrorLines,
+              extractGitHubActionsStepLog,
+              explainOidcEnterpriseClaim,
+              explainNoSubscriptions,
+              finish,
+              persistBestEffort,
+              persistOperations,
+              reportOperationDiagnostic: () => {}
+            })
+          );
+          if (limit === "in-flight") await vi.advanceTimersByTimeAsync(30000);
+          await handling;
+          const payload = JSON.parse(recording.body);
+          expect(recording.status).toBe(200);
+          expect(payload).toMatchObject({
+            state: "failed",
+            runId: 55,
+            runUrl: "https://github.com/o/r/actions/runs/55",
+            category: "generic"
+          });
+          expect(payload.error).toContain(
+            "Credential verification failed (failure)."
+          );
+          expect(payload.error).toContain("Failed step: Azure Login (OIDC).");
+          expect(payload.error).toContain(
+            "Workflow evidence deferred: missing-deadline."
+          );
+          expect(payload.error).toContain(
+            limit === "output-limit" ?
+              "The verification log could not be read: the output limit was exceeded."
+            : "The verification log could not be read: the read timed out."
+          );
+          expect(run).toHaveBeenCalledTimes(limit === "expired" ? 0 : 1);
+          if (mode === "selected") {
+            expect(finish).toHaveBeenCalledExactlyOnceWith(
+              operation,
+              "failed_partial",
+              expect.objectContaining({
+                failure: expect.objectContaining({
+                  code: "verify-run-failed",
+                  evidence: payload.error
+                })
+              })
+            );
+            expect(persistOperations).toHaveBeenCalledOnce();
+          } else {
+            expect(finish).not.toHaveBeenCalled();
+            expect(persistOperations).not.toHaveBeenCalled();
+          }
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          complete({ code: 0, stdout: "", stderr: "" });
+          scope.stop();
+          vi.useRealTimers();
+        }
+      }
+    );
+  });
+
+  it.each(["cancelled", "superseded", "authorization", "unexpected"] as const)(
+    "preserves %s handling when a failed run's log rejects",
+    async (failure) => {
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("Unexpected artifact reader");
+      });
+      const operation = {
+        repo: "o/r",
+        environment: "dev",
+        context: { githubLogin: "octocat" },
+        currentStage: "verify",
+        verification: { dispatchedAt: 1, runId: 55 }
+      };
+      const executor = successfulSelectedGhExecutor({
+        run: async () => {
+          if (failure === "cancelled") scope.stop();
+          if (failure === "superseded") operation.verification.runId = 77;
+          if (failure === "authorization")
+            throw new SelectedGhAuthorizationError("octocat", 403, "denied");
+          if (failure === "unexpected")
+            throw new Error("Unexpected log failure");
+          return {
+            code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+            stdout: "",
+            stderr: ""
+          };
+        }
+      });
+      const finish = vi.fn();
+      const persistOperations = vi.fn(async () => {});
+      const { recording, ctx } = context(
+        "GET",
+        "/api/verify-status?repo=o/r&operationId=op1"
+      );
+      try {
+        await handleVerifyStatus(
+          ctx,
+          deps({
+            readInstanceEntry: () => ({ observation: scope }),
+            getOperation: () => operation,
+            getSelectedGitHubExecutor: () => executor,
+            hasCompleteVerificationIdentity: () => true,
+            getRunDetail: async () => detail({ conclusion: "failure" }),
+            fetchRunLog: (repo, runId, _executor, request) =>
+              readWorkflowLog(
+                { mode: "selected", executor },
+                repo,
+                runId,
+                request
+              ),
+            isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+            addLegacyStep: vi.fn(),
+            finish,
+            persistBestEffort,
+            persistOperations,
+            reportOperationDiagnostic: () => {}
+          })
+        );
+        const payload = JSON.parse(recording.body);
+        if (failure === "authorization") {
+          expect(payload).toMatchObject({
+            state: "failed",
+            terminal: true,
+            code: "verification-retry-github-account-unavailable"
+          });
+          expect(finish).toHaveBeenCalledExactlyOnceWith(
+            operation,
+            "failed_partial",
+            expect.objectContaining({
+              failure: expect.objectContaining({ code: payload.code })
+            })
+          );
+          expect(persistOperations).toHaveBeenCalledOnce();
+        } else {
+          expect(payload).toEqual(
+            failure === "cancelled" ?
+              { state: "pending", error: "Workflow observation stopped." }
+            : failure === "superseded" ? { state: "pending", runId: 77 }
+            : { state: "unknown", error: "Unexpected log failure" }
+          );
+          expect(finish).not.toHaveBeenCalled();
+          expect(persistOperations).not.toHaveBeenCalled();
+        }
+        expect(recording.status).toBe(failure === "cancelled" ? 503 : 200);
+      } finally {
+        scope.stop();
+      }
+    }
+  );
+
+  it.each(["pending", "failure", "stopped-log"] as const)(
+    "retains scoped uncertainty for %s verification without changing its primary verdict",
+    async (outcome) => {
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("Unexpected artifact reader");
+      });
+      const { recording, ctx } = context("GET", "/api/verify-status?repo=o/r");
+      let observation: object | undefined;
+      await handleVerifyStatus(
+        ctx,
+        deps({
+          readInstanceEntry: () => ({
+            state: { verifyRunId: 55 },
+            observation: scope
+          }),
+          getRunDetail: async (_repo, _id, executor, request) => {
+            expect(executor).toBeUndefined();
+            if (!request) throw new Error("Missing observation");
+            observation = request.context.observation;
+            request.onDecision?.({ state: "ready" });
+            request.onDecision?.({ state: "exhausted", reason: "ineligible" });
+            request.onDecision?.({
+              state: "deferred",
+              reason: "missing-deadline"
+            });
+            return outcome === "pending" ? null : (
+                detail({ conclusion: "failure" })
+              );
+          },
+          fetchRunLog: async (_repo, _id, _executor, request) => {
+            expect(request?.context.observation).toBe(observation);
+            if (outcome === "stopped-log") scope.stop();
+            return "";
+          },
+          extractErrorLines: () => [],
+          extractGitHubActionsStepLog: () => "",
+          explainOidcEnterpriseClaim: () => "",
+          explainNoSubscriptions: () => ""
+        })
+      );
+      const payload = JSON.parse(recording.body);
+      expect(recording.status).toBe(outcome === "stopped-log" ? 503 : 200);
+      if (outcome === "pending")
+        expect(payload).toMatchObject({
+          state: "pending",
+          activity: "Workflow evidence deferred: missing-deadline."
+        });
+      else if (outcome === "failure") {
+        expect(payload.state).toBe("failed");
+        expect(payload.error).toContain(
+          "Workflow evidence deferred: missing-deadline."
+        );
+      } else
+        expect(payload).toEqual({
+          state: "pending",
+          error: "Workflow observation stopped."
+        });
+      scope.stop();
+    }
+  );
+
   it("reports unknown for a missing repo", async () => {
     const { recording, ctx } = context("GET", "/api/verify-status");
     await handleVerifyStatus(ctx, deps({}));
@@ -2210,6 +2737,47 @@ describe("environments — verify-status", () => {
       error: "No repository specified."
     });
   });
+
+  it.each([false, true])(
+    "fences an obsolete failure log before publishing verification failure (rejected=%s)",
+    async (rejected) => {
+      const operation = {
+        repo: "o/r",
+        environment: "dev",
+        state: "running",
+        context: { githubLogin: "alice" },
+        verification: { runId: "55" }
+      };
+      const finish = vi.fn();
+      const { recording, ctx } = context(
+        "GET",
+        "/api/verify-status?repo=o/r&operationId=op1"
+      );
+      await handleVerifyStatus(
+        ctx,
+        deps({
+          readInstanceEntry: () => undefined,
+          getOperation: () => operation,
+          hasCompleteVerificationIdentity: () => true,
+          getSelectedGitHubExecutor: () =>
+            successfulSelectedGhExecutor({ login: "alice" }),
+          getRunDetail: async () => detail({ conclusion: "failure" }),
+          fetchRunLog: async () => {
+            operation.verification.runId = "77";
+            if (rejected) throw new Error("Late obsolete log failure");
+            return "Old failed run";
+          },
+          finish
+        })
+      );
+      expect(JSON.parse(recording.body)).toEqual({
+        state: "pending",
+        runId: "77"
+      });
+      expect(operation.state).toBe("running");
+      expect(finish).not.toHaveBeenCalled();
+    }
+  );
 
   it("rejects an operation id that does not match a tracked operation", async () => {
     const { recording, ctx } = context(
@@ -3053,99 +3621,129 @@ describe("environments — real loopback", () => {
     }
   });
 
-  it("records a verification bypass over controlled HTTP with a valid mutation nonce", async () => {
-    const run = vi.fn(((args: readonly string[]) =>
-      args[0] === "api" ?
-        Promise.resolve({ code: 0, stdout: "RADIUS_MANAGED", stderr: "" })
-      : Promise.resolve({
-          code: 0,
-          stdout: "",
-          stderr: ""
-        })) as SelectedGhExecutor["run"]);
-    const envListCacheDelete = vi.fn();
-    // Wire the real nonce validator (not the `() => true` stub) so this test
-    // actually proves the route's nonce-required security contract: the request
-    // succeeds only because it carries the correct nonce and same-origin
-    // headers, and would fail if that validation were broken or removed.
-    const nonce = "controlled-bypass-nonce";
-    let serverBaseUrl = "";
-    const container = createControlledEnvironmentServer(
-      {
-        envListCacheDelete,
-        getOperation: () => ({
-          repo: "octo/app",
-          environment: "dev",
-          context: { githubLogin: "octocat" },
-          verification: { runId: "555" }
-        }),
-        getSelectedGitHubExecutor: () => successfulSelectedGhExecutor({ run }),
-        hasCompleteVerificationIdentity: () => true,
-        getRunDetail: () =>
-          Promise.resolve({
-            status: "completed",
-            conclusion: "failure",
-            steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
-          }),
-        fetchRunLog: () =>
-          Promise.resolve(
-            "Error from server (Forbidden): cannot list resource"
-          ),
-        extractGitHubActionsStepLog: () => "",
-        explainOidcEnterpriseClaim: () => "",
-        explainNoSubscriptions: () => ""
-      },
-      {
-        validateBrowserMutation: (context) =>
-          validateBrowserMutationRequest({
-            request: context.request,
-            baseUrl: serverBaseUrl,
-            nonce
-          })
-      }
-    );
-    try {
-      const controlled = await container.getOrCreate("bypass-verification");
-      serverBaseUrl = controlled.baseUrl;
-      const origin = new URL(serverBaseUrl).origin;
-      const res = await fetch(controlled.baseUrl + "/api/bypass-verification", {
-        method: "POST",
-        headers: {
-          origin,
-          "sec-fetch-site": "same-origin",
-          "x-radius-mutation-nonce": nonce
-        },
-        body: JSON.stringify({
-          repo: "octo/app",
-          environment: "dev",
-          operationId: "op1",
-          runId: "555"
+  it.each([false, true])(
+    "handles a verification bypass over controlled HTTP (stop during environment read=%s)",
+    async (stopDuringRead) => {
+      const started = deferred<void>();
+      const variables = deferred<WorkflowCommandResult>();
+      const run = vi.fn<SelectedGhExecutor["run"]>((args) => {
+        if (args[0] === "api") {
+          started.resolve();
+          return variables.promise;
+        }
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      });
+      const envListCacheDelete = vi.fn();
+      // Wire the real nonce validator (not the `() => true` stub) so this test
+      // actually proves the route's nonce-required security contract: the request
+      // succeeds only because it carries the correct nonce and same-origin
+      // headers, and would fail if that validation were broken or removed.
+      const nonce = "controlled-bypass-nonce";
+      let serverBaseUrl = "";
+      const getRunDetail = vi.fn<EnvironmentsDependencies["getRunDetail"]>(() =>
+        Promise.resolve({
+          status: "completed",
+          conclusion: "failure",
+          steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
         })
-      });
-
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({
-        success: true,
-        category: "permissions"
-      });
-      expect(run).toHaveBeenCalledWith(
-        [
-          "variable",
-          "set",
-          "RADIUS_VERIFICATION_BYPASSED",
-          "--body",
-          "555",
-          "--env",
-          "dev",
-          "--repo",
-          "octo/app"
-        ],
-        { timeout: 20000 }
       );
-      expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
-    } finally {
-      await container.stopAll();
+      const fetchRunLog = vi.fn<EnvironmentsDependencies["fetchRunLog"]>(() =>
+        Promise.resolve("Error from server (Forbidden): cannot list resource")
+      );
+      const container = createControlledEnvironmentServer(
+        {
+          readInstanceEntry: (id) => container.instances.get(id),
+          envListCacheDelete,
+          getOperation: () => ({
+            repo: "octo/app",
+            environment: "dev",
+            context: { githubLogin: "octocat" },
+            verification: { runId: "555" }
+          }),
+          getSelectedGitHubExecutor: () =>
+            successfulSelectedGhExecutor({ run }),
+          hasCompleteVerificationIdentity: () => true,
+          getRunDetail,
+          fetchRunLog,
+          extractGitHubActionsStepLog: () => "",
+          explainOidcEnterpriseClaim: () => "",
+          explainNoSubscriptions: () => ""
+        },
+        {
+          validateBrowserMutation: (context) =>
+            validateBrowserMutationRequest({
+              request: context.request,
+              baseUrl: serverBaseUrl,
+              nonce
+            })
+        }
+      );
+      try {
+        const controlled = await container.getOrCreate("bypass-verification");
+        controlled.observation = createWorkflowObservationScope(() => {
+          throw new Error("Unexpected artifact reader");
+        });
+        serverBaseUrl = controlled.baseUrl;
+        const origin = new URL(serverBaseUrl).origin;
+        const pending = fetch(controlled.baseUrl + "/api/bypass-verification", {
+          method: "POST",
+          headers: {
+            origin,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": nonce
+          },
+          body: JSON.stringify({
+            repo: "octo/app",
+            environment: "dev",
+            operationId: "op1",
+            runId: "555"
+          })
+        });
+        await started.promise;
+        if (stopDuringRead) {
+          const closing = container.stop("bypass-verification");
+          const res = await pending;
+          expect(res.status).toBe(503);
+          expect(res.headers.get("content-type")).toBe("application/json");
+          expect(await res.json()).toEqual({
+            error: "Workflow observation stopped."
+          });
+          await closing;
+          expect(container.instances.has("bypass-verification")).toBe(false);
+          expect(run).toHaveBeenCalledOnce();
+          expect(getRunDetail).not.toHaveBeenCalled();
+          expect(fetchRunLog).not.toHaveBeenCalled();
+          expect(envListCacheDelete).not.toHaveBeenCalled();
+          return;
+        }
+        variables.resolve({ code: 0, stdout: "RADIUS_MANAGED", stderr: "" });
+        const res = await pending;
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+          success: true,
+          category: "permissions"
+        });
+        expect(run).toHaveBeenCalledWith(
+          [
+            "variable",
+            "set",
+            "RADIUS_VERIFICATION_BYPASSED",
+            "--body",
+            "555",
+            "--env",
+            "dev",
+            "--repo",
+            "octo/app"
+          ],
+          { timeout: 20000 }
+        );
+        expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
+      } finally {
+        variables.resolve({ code: 0, stdout: "RADIUS_MANAGED", stderr: "" });
+        await container.stopAll();
+      }
     }
-  });
+  );
 
   it("rejects a bypass-verification POST that omits the mutation nonce with 403", async () => {
     // The security contract: `/api/bypass-verification` is `nonce-required`, so
@@ -3206,6 +3804,85 @@ describe("environments — real loopback", () => {
       await container.stopAll();
     }
   });
+
+  it.each(["run", "log"] as const)(
+    "completes stopped %s HTTP reads and allows physical close and reopen",
+    async (phase) => {
+      const makeScope = () =>
+        createWorkflowObservationScope(() => {
+          throw new Error("Unexpected artifact reader");
+        });
+      let scope = makeScope();
+      type Result = { code: number; stdout: string; stderr: string };
+      let complete: (result: Result) => void = () => {
+        throw new Error("Read not initialized");
+      };
+      const pending = new Promise<Result>((resolve) => {
+        complete = resolve;
+      });
+      const runner = vi.fn(() => pending);
+      const container = createControlledEnvironmentServer({
+        readInstanceEntry: () => ({
+          state: { verifyRunId: 555 },
+          observation: scope
+        }),
+        getRunDetail: (repo, id, _executor, request) =>
+          phase === "run" ?
+            observeWorkflowRun(
+              { repo, runId: id },
+              {
+                readRun: (targetRepo, targetId) =>
+                  readWorkflowRun(
+                    { mode: "ambient", run: runner },
+                    targetRepo,
+                    targetId,
+                    request
+                  )
+              }
+            )
+          : Promise.resolve({
+              status: "completed",
+              conclusion: "failure",
+              steps: []
+            }),
+        fetchRunLog: (repo, id, _executor, request) =>
+          readWorkflowLog({ mode: "ambient", run: runner }, repo, id, request)
+      });
+      try {
+        const first = await container.getOrCreate("stopped-verification");
+        const response = fetch(
+          first.baseUrl + "/api/verify-status?repo=octo/app"
+        );
+        await vi.waitFor(() => expect(runner).toHaveBeenCalledTimes(1));
+        scope.stop();
+        const closing = container.stop("stopped-verification");
+        const result = await response;
+        expect(result.status).toBe(503);
+        expect(result.headers.get("cache-control")).toBe("no-store");
+        expect(await result.json()).toEqual({
+          state: "pending",
+          error: "Workflow observation stopped."
+        });
+        await closing;
+        complete({
+          code: 0,
+          stdout: 'HTTP/2 200\n\n{"status":"completed","conclusion":"success"}',
+          stderr: ""
+        });
+        scope = makeScope();
+        const reopened = await container.getOrCreate("stopped-verification");
+        const fresh = await fetch(reopened.baseUrl + "/api/verify-status");
+        expect(fresh.status).toBe(200);
+        await fresh.json();
+        expect(scope.stopped).toBe(false);
+        expect(runner).toHaveBeenCalledTimes(1);
+      } finally {
+        scope.stop();
+        complete({ code: 0, stdout: "", stderr: "" });
+        await container.stopAll();
+      }
+    }
+  );
 
   it("answers GET verify-status for a missing repo", async () => {
     const res = await fetch(baseUrl + "/api/verify-status");
