@@ -5,6 +5,7 @@ export default defineConfig({
     include: [
       "src/deploy-artifacts.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
+      "../core/src/workflow-read-policy.test.ts",
       "../adapter-shared/src/workflow-artifacts*.test.ts",
       "../adapter-shared/src/workflow-read*.test.ts",
       "../adapter-shared/src/workflow-run-response.test.ts",

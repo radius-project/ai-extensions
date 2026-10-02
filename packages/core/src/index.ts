@@ -9,6 +9,21 @@
 // This barrel is the package's public surface: only names an adapter actually
 // imports belong here. Helpers that exist for a sibling core module stay
 // exported from their own module and out of this file.
+
+export {
+  createWorkflowReadContext,
+  createWorkflowReadCooldowns,
+  isSecondaryWorkflowRateLimitMessage,
+  WorkflowReadInterruptedError,
+  WORKFLOW_READ_LIMITS
+} from "./workflow-read-policy.js";
+export type {
+  WorkflowReadClock,
+  WorkflowReadContext,
+  WorkflowReadCooldowns,
+  WorkflowReadDecision,
+  WorkflowReadReason
+} from "./workflow-read-policy.js";
 //
 // Modules are extracted incrementally from the canvas adapter; see
 // docs/design/radius-extension-modularization.md for the target layout.
