@@ -131,7 +131,8 @@ jobs:
             '' \
             '## Validation' \
             '' \
-            "- \`bash build/scripts/verify-contrib-consumers.sh\`")"
+            "- \`bash build/scripts/verify-contrib-consumers.sh\`" \
+            "- deploy a sample app with this pin and confirm \`rad version\` reports \`$TAG\` for the CLI and control plane")"
           if [ -n "$existing_pr" ]; then
             gh api --method PATCH "repos/$repo/pulls/$existing_pr" \
               -f title="$title" \
