@@ -181,9 +181,13 @@ describe("verify-status HTTP contract — failure classification", () => {
         }
         if (args.join(" ") === "run view 91 --log --repo octo/app") {
           expect(options).toEqual({
-            timeout: 30000,
-            maxBuffer: 20 * 1024 * 1024
+            timeout: expect.any(Number),
+            maxBuffer: 20 * 1024 * 1024,
+            signal: expect.any(AbortSignal)
           });
+          expect(options?.timeout).toBeGreaterThan(0);
+          expect(options?.timeout).toBeLessThanOrEqual(30000);
+          expect(options?.signal?.aborted).toBe(false);
           return {
             code: 0,
             stderr: "",
