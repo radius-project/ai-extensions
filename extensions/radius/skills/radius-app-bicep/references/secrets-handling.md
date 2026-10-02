@@ -260,6 +260,8 @@ Write the username once and give every consumer that same value. Two copies that
 - Give consumers the username through plain `env.value`, never through a copy in an authored Secret. A Secret value comes from its own `@secure()` parameter, so the two could differ. If the application can read the username only from a Secret, report it and stop.
 - When the schema takes the username from an authored Secret instead of a resource property, that Secret is the one source. Its value is a deploy-time `@secure()` input with no default that the deployer supplies, so the rules in [Choosing the value](#choosing-the-value) do not apply. Consumers read it through `secretKeyRef` with the same data key, and nothing else authors the username. If a consumer cannot read that Secret, for example because its username is a fixed literal, stop and report it.
 
+`validate-bicep.mjs` reports a consumer that repeats a resource's username as `username-copy`. It checks only container variables whose name contains `user` or `login`, and only string literals and `var` references in the same template, so a clean result does not prove every consumer is bound to one source.
+
 ## Recipe-generated secret results
 
 Some Recipes generate sensitive values such as access keys, URLs, or connection strings through `result.secrets`. Their contract varies:
