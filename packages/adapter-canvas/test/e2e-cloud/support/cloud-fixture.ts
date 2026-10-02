@@ -209,6 +209,7 @@ const CLUSTER_NODE_SIZE = "Standard_B2s";
 const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_ENTRA_APP_DELETION_TIMEOUT_MS = 120_000;
+const FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS = 5 * 60_000;
 
 function requireGitObjectId(value: string, context: string): string {
   const normalized = value.trim();
@@ -1324,7 +1325,7 @@ export async function createCloudFixture(
       for (const namespace of namespaceCleanupTargets)
         await attempt(`Kubernetes namespace ${namespace}`, async () => {
           const kubeconfig = await clusterKubeconfig(assertionTimeoutMs);
-          const result = await commands.runKubectl(
+          const deleteResult = await commands.runKubectl(
             [
               "--kubeconfig",
               kubeconfig,
@@ -1332,11 +1333,36 @@ export async function createCloudFixture(
               "namespace",
               namespace,
               "--ignore-not-found=true",
-              "--wait=true"
+              "--wait=false"
             ],
             assertionTimeoutMs
           );
-          expectSuccess(result, `kubectl delete namespace ${namespace}`);
+          expectSuccess(deleteResult, `kubectl delete namespace ${namespace}`);
+          await pollForValue({
+            ports,
+            timeoutMs: FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS,
+            intervalMs: assertionPollIntervalMs,
+            probe: async (remainingMs) => {
+              const context = `kubectl get namespace ${namespace}`;
+              const result = await commands.runKubectl(
+                [
+                  "--kubeconfig",
+                  kubeconfig,
+                  "get",
+                  "namespace",
+                  namespace,
+                  "--output",
+                  "name"
+                ],
+                remainingMs
+              );
+              if (result.code === 0) return undefined;
+              if (isMissingNamespace(result)) return true;
+              throw new CloudCommandError(context, result);
+            },
+            timeoutMessage: () =>
+              `Timed out after ${FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS}ms waiting for Kubernetes namespace ${namespace} to be removed.`
+          });
         });
 
       if (applicationDeletionFailed)
