@@ -7,6 +7,7 @@ import {
   readWorkflowLog,
   selectedWorkflowJson,
   type WorkflowExecution,
+  type WorkflowRunReadOptions,
   type WorkflowReadRequest
 } from "@radius-project/adapter-shared";
 export {
@@ -270,7 +271,8 @@ export function getRunDetail(
   repo: string,
   runId: number | string,
   executor?: SelectedGhExecutor,
-  request?: WorkflowReadRequest
+  request?: WorkflowReadRequest,
+  options?: WorkflowRunReadOptions
 ): Promise<WorkflowRunDetail | null> {
   return observeWorkflowRun(
     { repo, runId },
@@ -280,7 +282,8 @@ export function getRunDetail(
           workflowExecution(executor),
           targetRepo,
           targetRunId,
-          request
+          request,
+          options
         )
     }
   );
