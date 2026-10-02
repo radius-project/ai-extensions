@@ -3268,7 +3268,7 @@ const deployMonitorService = createDeployMonitorService({
       afterRunId
     ),
   getRunDetail: (repo, runId, request) =>
-    getRunDetail(repo, runId, undefined, request),
+    getRunDetail(repo, runId, undefined, request, { includeProtection: true }),
   createStatusReader: (state, repo, branch, runId) =>
     deployStatusReaderFromState(state, repo, branch, runId),
   buildDeployStatusMap,

@@ -26,6 +26,8 @@ const EXPECTED_FUNCTIONS = [
   "sanitizeArtifactSegment",
   "selectDeployStatusArtifacts",
   "observeWorkflowRun",
+  "parseWorkflowProtection",
+  "describeWorkflowProtection",
   "confirmedWorkflowConclusion",
   "collectWorkflowFailure",
   "extractErrorLines",
