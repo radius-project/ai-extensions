@@ -388,8 +388,11 @@ function bicepFixture(name: string, file = "compiled.json"): string {
 test.each([
   "aggregate-secret-alias",
   "aggregate-secret-module",
+  "aks-store-demo-after",
+  "aks-store-demo-before",
   "interpolated-ref",
-  "local-module-ref"
+  "local-module-ref",
+  "username-copy"
 ])("keeps captured %s output on the documented Bicep version", (fixture) => {
   const compiled = JSON.parse(bicepFixture(fixture)) as {
     metadata?: { _generator?: { version?: string } };
@@ -4128,6 +4131,48 @@ describe("provisioned username copies", () => {
       result.stderr,
       /set at service\.rabbitmq\.properties\.username,/u
     );
+  });
+
+  function usernameCopyPaths(stderr: string): string[] {
+    return usernameCopies(stderr).map((line) =>
+      line.replace(/^.*error username-copy: /u, "").replace(/: this.*$/u, "")
+    );
+  }
+
+  it("reports only the literal copy in captured Bicep output", () => {
+    const result = check(bicepFixture("username-copy"));
+
+    assert.equal(result.status, 1);
+    assert.deepEqual(
+      result.stderr.trim().split("\n"),
+      usernameCopies(result.stderr)
+    );
+    assert.deepEqual(usernameCopyPaths(result.stderr), [
+      "web.properties.containers.web.env.ORDER_QUEUE_USERNAME"
+    ]);
+    assert.match(result.stderr, /set at rabbitmq\.properties\.username,/u);
+  });
+
+  // Real models generated for aks-store-demo before and after the shared
+  // username guidance. They pass every other check today, but these cases
+  // assert only username-copy findings, not the exit status, so a later
+  // unrelated check does not break them.
+  it("reports both copied consumer usernames in the captured aks-store-demo model", () => {
+    const result = check(bicepFixture("aks-store-demo-before"));
+
+    assert.deepEqual(usernameCopyPaths(result.stderr), [
+      "makelineServiceContainer.properties.containers.service.env.ORDER_QUEUE_USERNAME",
+      "orderServiceContainer.properties.containers.service.env.ORDER_QUEUE_USERNAME"
+    ]);
+    for (const line of usernameCopies(result.stderr)) {
+      assert.match(line, /set at rabbitmqBroker\.properties\.username,/u);
+    }
+  });
+
+  it("accepts consumers bound to the broker in the captured aks-store-demo model", () => {
+    const result = check(bicepFixture("aks-store-demo-after"));
+
+    assert.deepEqual(usernameCopies(result.stderr), []);
   });
 });
 

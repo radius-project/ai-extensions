@@ -1,0 +1,87 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "5353308822194749752"
+    }
+  },
+  "parameters": {
+    "environment": {
+      "type": "string"
+    }
+  },
+  "variables": {
+    "rabbitmqUsername": "myadmin"
+  },
+  "imports": {
+    "radius": {
+      "provider": "Radius",
+      "version": "0.61"
+    }
+  },
+  "resources": {
+    "app": {
+      "import": "radius",
+      "type": "Radius.Core/applications@2025-08-01-preview",
+      "properties": {
+        "name": "test-app",
+        "properties": {
+          "environment": "[parameters('environment')]"
+        }
+      }
+    },
+    "rabbitmq": {
+      "import": "radius",
+      "type": "Radius.Messaging/rabbitMQ@2025-08-01-preview",
+      "properties": {
+        "name": "rabbitmq",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('app').id]",
+          "codeReference": "src/queue.ts#L1",
+          "queue": "orders",
+          "username": "[variables('rabbitmqUsername')]"
+        }
+      },
+      "dependsOn": [
+        "app"
+      ]
+    },
+    "web": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "web",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('app').id]",
+          "codeReference": "src/web.ts#L1",
+          "containers": {
+            "web": {
+              "image": "example.invalid/web:latest",
+              "env": {
+                "ORDER_QUEUE_LOGIN": {
+                  "value": "[variables('rabbitmqUsername')]"
+                },
+                "ORDER_QUEUE_USER": {
+                  "value": "[reference('rabbitmq').properties.username]"
+                },
+                "ORDER_QUEUE_USERNAME": {
+                  "value": "myadmin"
+                }
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "app",
+        "rabbitmq"
+      ]
+    }
+  }
+}
