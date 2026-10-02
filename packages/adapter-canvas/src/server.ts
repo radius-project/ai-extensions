@@ -3249,7 +3249,8 @@ const deployOutcomeService = createDeployOutcomeService({
   projectSafeGraphResources: (graph) =>
     canvasGraphResources(projectSafeApplicationGraph(graph).resources),
   settleDeployStatuses,
-  fetchRunLog,
+  fetchRunLog: (repo, runId, request) =>
+    fetchRunLog(repo, runId, undefined, request),
   cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),

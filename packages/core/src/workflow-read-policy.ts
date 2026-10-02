@@ -192,6 +192,10 @@ export interface WorkflowReadContext {
   check(phaseDeadline?: number): WorkflowReadDecision;
   remaining(phaseDeadline?: number): number;
   limit(milliseconds: number): WorkflowReadContext;
+  forSharedFlight(
+    milliseconds: number,
+    cancellation: Pick<WorkflowReadContextOptions, "stopped" | "onStop">
+  ): WorkflowReadContext;
   withRetryMeter(meter: { extraGets: number }): WorkflowReadContext;
   chargeRetries(count: number): boolean;
   withCancellation(
@@ -228,7 +232,7 @@ function contextFor(
   meters: { extraGets: number }[] = []
 ): WorkflowReadContext {
   const { clock, cooldowns, stopped } = options;
-  const deadline = Math.min(budget.deadline, phaseDeadline);
+  const deadline = phaseDeadline;
 
   function check(phaseDeadline = deadline): WorkflowReadDecision {
     if (stopped()) return { state: "stopped", reason: "cancelled" };
@@ -257,6 +261,20 @@ function contextFor(
     },
     withCancellation: (cancellation) =>
       contextFor({ ...options, ...cancellation }, budget, deadline, meters),
+    forSharedFlight(milliseconds, cancellation) {
+      if (!Number.isFinite(milliseconds) || milliseconds <= 0)
+        throw new Error(
+          "Workflow shared-flight timeout must be positive and finite."
+        );
+      // The worker owns its deadline; subscribers retain their own waits.
+      // Keep the admitting observation's credits and session cooldowns.
+      return contextFor(
+        { ...options, ...cancellation },
+        budget,
+        clock.monotonic() + milliseconds,
+        meters
+      );
+    },
     withRetryMeter: (meter) =>
       contextFor(options, budget, deadline, [...meters, meter]),
     chargeRetries(count) {
