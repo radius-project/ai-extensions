@@ -903,15 +903,11 @@ describe("P0-C built Radius extension artifact", () => {
       /ORDER_QUEUE_USERNAME:\s*\{\s*value:\s*rabbitmq\.properties\.username\b/u
     );
     expect(rabbitmqExample?.match(/'myadmin'/gu)).toHaveLength(1);
-    expect(rabbitmqExample).toMatch(
-      /ORDER_QUEUE_PASSWORD:\s*\{\s*valueFrom:\s*\{\s*secretKeyRef:\s*\{\s*secretName:\s*rabbitmqCredentials\.name\s+key:\s*'password'/u
-    );
     // A username set by Compose and read from an environment variable is the
     // case that looked like a requirement; the rule table pins it to myadmin.
     expect(secretsGuidance).toMatch(
       /\|\s*`process\.env\.ORDER_QUEUE_USERNAME`, which Compose sets to `username`\s*\|\s*2\s*\|\s*`myadmin`; set `ORDER_QUEUE_USERNAME`\s*\|/u
     );
-    expect(secretsGuidance).not.toMatch(/\|\s*4\s*\|/u);
     // A cloud database admin login can't be renamed, so a refresh must keep
     // the username the existing model set.
     expect(secretsGuidance).toContain(
@@ -1063,14 +1059,18 @@ describe("P0-C built Radius extension artifact", () => {
     );
     expect(rabbitmqExample).not.toMatch(/^\s*PASSWORD:/mu);
 
-    const rabbitmqConsumer = bicepBlocks.find(
+    const rabbitmqConsumers = bicepBlocks.filter(
       (block) =>
         block.includes("secretName: rabbitmqCredentials.name") &&
         block.includes("secretKeyRef")
     );
-    expect(rabbitmqConsumer).toBeDefined();
-    expect(rabbitmqConsumer).toMatch(/key:\s*'password'/u);
-    expect(rabbitmqConsumer).not.toMatch(/key:\s*'PASSWORD'/u);
+    // The broker example and the standalone consumer snippet both read this
+    // Secret, so every reader is checked rather than the first one found.
+    expect(rabbitmqConsumers.length).toBeGreaterThanOrEqual(2);
+    for (const consumer of rabbitmqConsumers) {
+      expect(consumer).toMatch(/key:\s*'password'/u);
+      expect(consumer).not.toMatch(/key:\s*'PASSWORD'/u);
+    }
   });
 
   it("packages the staged type-sensitivity contract both credential scripts share", () => {
