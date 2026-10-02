@@ -17,6 +17,7 @@ You do **not** need a design doc for minor changes such as documentation updates
 - [GitHub Radius: Extracting a Reusable Library from Canvas](./2026-09-github-radius.md) proposes sharing existing application and environment coordination across frontends, including Canvas.
 - [GitHub Radius library: staged implementation plan](./2026-09-github-radius-implementation-plan.md) sequences that extraction into independently mergeable capabilities while preserving Canvas contracts and coordinating with concurrent work.
 - [GitHub Radius migration inventory](./2026-09-github-radius-migration-inventory.md) records current capability ownership, compatibility contracts, known gaps, and stage 0 characterization evidence.
+- [Automated pull request review triage](./2026-10-automated-pr-review-triage.md) proposes assessing every pull request for functionality, safety, maintainability, and lint compliance, and requesting human review only when evidence is missing or judgment is needed.
 
 ## How to create one
 
