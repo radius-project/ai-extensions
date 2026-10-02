@@ -3166,6 +3166,152 @@ describe("createCloudFixture", () => {
       ).toBeLessThan(calls.findIndex((line) => line.startsWith("kubectl ")));
     });
 
+    it("deletes a registered fixture-owned namespace", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "namespace", "default-cloud-e2e"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["get", "namespace", "default-cloud-e2e"],
+          respond: {
+            code: 1,
+            stderr:
+              'Error from server (NotFound): namespaces "default-cloud-e2e" not found'
+          }
+        }
+      ]);
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "Kubernetes namespace default-cloud-e2e"
+      ]);
+      expect(fake.commands.commandLines("kubectl")).toContain(
+        `--kubeconfig ${WORKSPACE}/kubeconfig delete namespace default-cloud-e2e --ignore-not-found=true --wait=false`
+      );
+    });
+
+    it("polls for five minutes until the fixture-owned namespace is absent", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["delete", "namespace", "default-cloud-e2e"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["get", "namespace", "default-cloud-e2e"],
+            respond: { stdout: "namespace/default-cloud-e2e" },
+            times: 2
+          },
+          {
+            tool: "kubectl",
+            match: ["get", "namespace", "default-cloud-e2e"],
+            respond: {
+              code: 1,
+              stderr:
+                'Error from server (NotFound): namespaces "default-cloud-e2e" not found'
+            }
+          }
+        ],
+        {},
+        { assertionPollIntervalMs: 1000 }
+      );
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "Kubernetes namespace default-cloud-e2e"
+      ]);
+      expect(fake.waits).toEqual([1000, 1000]);
+    });
+
+    it("reports a fixture namespace deletion failure", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        failing(
+          "kubectl",
+          ["delete", "namespace", "default-cloud-e2e"],
+          "namespace is terminating"
+        )
+      ]);
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes namespace default-cloud-e2e: .*namespace is terminating/
+      );
+    });
+
+    it("reports a fixture namespace absence-check failure", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "namespace", "default-cloud-e2e"],
+          respond: {}
+        },
+        failing(
+          "kubectl",
+          ["get", "namespace", "default-cloud-e2e"],
+          "Unauthorized"
+        )
+      ]);
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes namespace default-cloud-e2e: .*kubectl get namespace default-cloud-e2e failed.*Unauthorized/
+      );
+    });
+
+    it("reports when the fixture-owned namespace remains after five minutes", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["delete", "namespace", "default-cloud-e2e"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["get", "namespace", "default-cloud-e2e"],
+            respond: { stdout: "namespace/default-cloud-e2e" }
+          }
+        ],
+        {},
+        { assertionPollIntervalMs: 5 * 60_000 }
+      );
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes namespace default-cloud-e2e: Timed out after 300000ms waiting for Kubernetes namespace default-cloud-e2e to be removed/
+      );
+    });
+
     it("continues normal teardown after a verified application deletion leaked workloads", async () => {
       let workloadsDeleted = false;
       const { fixture, fake } = await createHarness(
@@ -3305,6 +3451,25 @@ describe("createCloudFixture", () => {
         expect(() =>
           fixture.registerApplicationCleanupTarget(application, namespace)
         ).toThrow(message);
+      }
+    );
+
+    it("rejects an empty namespace cleanup target", async () => {
+      const { fixture } = await createHarness();
+
+      expect(() => fixture.registerNamespaceCleanupTarget(" ")).toThrow(
+        /namespace/
+      );
+    });
+
+    it.each(["default", "radius-system", "kube-system"])(
+      "rejects cleanup of the non-fixture namespace %s",
+      async (namespace) => {
+        const { fixture } = await createHarness();
+
+        expect(() => fixture.registerNamespaceCleanupTarget(namespace)).toThrow(
+          /restricted to the fixture-owned namespace default-cloud-e2e/
+        );
       }
     );
 
