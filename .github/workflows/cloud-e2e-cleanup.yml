@@ -237,7 +237,7 @@ jobs:
                 import { readFile } from "node:fs/promises";
                 const [beforeFile, afterFile] = process.argv.slice(2);
                 const { findNewWorkflowRunId, readWorkflowRunIds } = await import(
-                  "./packages/adapter-canvas/test/e2e-cloud/support/deploy-journey.ts"
+                  "./packages/adapter-canvas/test/e2e-cloud/support/workflow-run-discovery.ts"
                 );
                 const [before, after] = await Promise.all(
                   [beforeFile, afterFile].map(async (file) =>

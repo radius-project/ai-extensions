@@ -100,14 +100,12 @@ import {
   describeProblems as describeDeploymentProblems,
   findDeleteEnvironmentRefusalProblems,
   findDeployedApplicationProblems,
-  findNewWorkflowRunId,
   findSurvivingArtifactProblems,
   REQUIRED_LIFECYCLE_WORKFLOWS,
   readApplicationNames,
   readDeploymentRows,
   readDeployStatusSnapshot,
   readOptionalDispatchedWorkflowRunId,
-  readWorkflowRunIds,
   readWorkflowRunStatus,
   quiesceOwnedWorkflowRuns,
   repositoryListingPath,
@@ -122,6 +120,10 @@ import {
   resolveFixtureClusterTarget,
   resolveFixtureLocation
 } from "./support/fixture-repository.js";
+import {
+  findNewWorkflowRunId,
+  readWorkflowRunIds
+} from "./support/workflow-run-discovery.js";
 
 const PROFILE_NAME = "cloud-e2e";
 const WORKFLOW_DIRECTORY = ".github/workflows";
