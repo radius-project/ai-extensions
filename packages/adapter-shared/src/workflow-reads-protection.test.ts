@@ -112,6 +112,26 @@ it.each([
     reason: "authorization"
   },
   {
+    result: { code: 1, stdout: "", stderr: "HTTP 401 Unauthorized" },
+    reason: "authorization"
+  },
+  {
+    result: {
+      code: 1,
+      stdout: "",
+      stderr: "Resource protected by organization SAML enforcement"
+    },
+    reason: "authorization"
+  },
+  {
+    result: {
+      code: 1,
+      stdout: "",
+      stderr: "HTTP 403 Forbidden: API rate limit exceeded"
+    },
+    reason: "read-failed"
+  },
+  {
     result: { code: 1, stdout: "", stderr: "CLI unavailable" },
     reason: "read-failed"
   }
@@ -237,7 +257,16 @@ describe.each(["ambient", "selected"] as const)(
         );
         expect(result).toMatchObject({
           completeness: "complete",
-          value: { includeJobs: true, protection: { state: "unavailable" } }
+          value: {
+            includeJobs: true,
+            protection: {
+              state: "unavailable",
+              reason:
+                status === 401 || status === 403 ?
+                  "authorization"
+                : "read-failed"
+            }
+          }
         });
         expect(result.reason).toBeUndefined();
         expect(result.evidence.map((item) => item.phase)).toEqual([
@@ -249,6 +278,71 @@ describe.each(["ambient", "selected"] as const)(
           runArgs,
           jobsArgs,
           protectionArgs
+        ]);
+      }
+    );
+
+    it.each(["no observation", "retry exhaustion"] as const)(
+      "trusts framed rate-limit evidence over HTTP 403 stderr with %s",
+      async (policy) => {
+        const { clock } = fixtureClock();
+        const onDecision = vi.fn();
+        const request =
+          policy === "retry exhaustion" ?
+            {
+              context: createWorkflowReadSession(clock).observe(30000),
+              identity: mode,
+              onDecision
+            }
+          : undefined;
+        const run = vi.fn<WorkflowRunner>(async (args) => {
+          if (JSON.stringify(args) === JSON.stringify(runArgs))
+            return response({ status: "waiting", conclusion: null });
+          if (JSON.stringify(args) === JSON.stringify(jobsArgs))
+            return response({ total_count: 0, jobs: [] });
+          if (JSON.stringify(args) === JSON.stringify(protectionArgs))
+            return {
+              ...response({}, 403, "retry-after: 0\n"),
+              stderr: "gh: Forbidden (HTTP 403)"
+            };
+          throw new Error("Unexpected command");
+        });
+        const result = await readWorkflowRunWithMetadata(
+          execution(mode, run),
+          "org/app",
+          41,
+          request,
+          { includeProtection: true }
+        );
+        expect(result).toMatchObject({
+          completeness: "complete",
+          value: {
+            data: { status: "waiting", conclusion: "", jobs: [] },
+            includeJobs: true,
+            protection: {
+              state: "unavailable",
+              reason: "read-failed",
+              response: {
+                source: "gh-api-include",
+                status: 403,
+                classification: "rate-limit"
+              }
+            }
+          }
+        });
+        expect(result.reason).toBeUndefined();
+        expect(result.decision).toBeUndefined();
+        expect(result.value?.protection?.decision).toEqual(
+          request ? { state: "exhausted", reason: "attempts" } : undefined
+        );
+        expect(
+          onDecision.mock.calls.map(([decision]) => decision.state)
+        ).toEqual(request ? ["ready", "ready"] : []);
+        expect(run.mock.calls.map(([args]) => args)).toEqual([
+          runArgs,
+          jobsArgs,
+          protectionArgs,
+          ...(request ? [protectionArgs, protectionArgs] : [])
         ]);
       }
     );
