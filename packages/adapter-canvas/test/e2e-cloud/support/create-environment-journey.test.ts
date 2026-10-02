@@ -4,6 +4,7 @@ import {
   classifyWorkflowPublication,
   cloudCanvasState,
   describeWorkflowPublication,
+  environmentVariablesApiPath,
   environmentSubjectSuffix,
   evaluateCreateEnvironmentGate,
   expectedFederatedCredentialSubjects,
@@ -484,6 +485,37 @@ describe("readEnvironmentVariables", () => {
   it("rejects a payload with no variables array", () => {
     expect(() => readEnvironmentVariables({ variables: {} })).toThrow(
       /no "variables" array/
+    );
+  });
+
+  it("flattens paginated responses before indexing Radius state variables", () => {
+    const variables = readEnvironmentVariables([
+      {
+        variables: Array.from({ length: 30 }, (_, index) => ({
+          name: `AZURE_VALUE_${index}`,
+          value: String(index)
+        }))
+      },
+      {
+        variables: [
+          { name: "RADIUS_STATE_BACKEND", value: "oci" },
+          { name: "RADIUS_STATE_REGISTRY", value: "ghcr.io/state" }
+        ]
+      }
+    ]);
+
+    expect(variables.size).toBe(32);
+    expect(variables.get("RADIUS_STATE_BACKEND")).toBe("oci");
+    expect(variables.get("RADIUS_STATE_REGISTRY")).toBe("ghcr.io/state");
+  });
+});
+
+describe("environmentVariablesApiPath", () => {
+  it("requests every supported Environment variable in one page", () => {
+    expect(
+      environmentVariablesApiPath("owner/repo", "radtest/name with spaces")
+    ).toBe(
+      "repos/owner/repo/environments/radtest%2Fname%20with%20spaces/variables?per_page=30"
     );
   });
 });

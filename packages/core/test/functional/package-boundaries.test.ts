@@ -306,6 +306,7 @@ describe("core package in a host without HTTP or DOM globals", () => {
     expect(manifest.exports).toEqual({
       ".": "./src/index.ts",
       "./graph": "./src/graph/index.ts",
+      "./domain": "./src/domain/index.ts",
       "./modeling": "./src/modeling/index.ts",
       "./platforms": "./src/platforms/index.ts",
       "./remediations": "./src/remediations.ts"

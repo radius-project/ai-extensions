@@ -38,6 +38,7 @@ import {
   CLOUD_E2E_LEASE_REF,
   environmentName as buildEnvironmentName,
   FIXTURE_BASELINE_SHA,
+  FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
   FIXTURE_REPO_DEFAULT_BRANCH,
   FIXTURE_REPOSITORY,
   resourceGroupName,
@@ -162,6 +163,13 @@ export interface CloudFixture {
     application: string,
     namespace: string
   ): void;
+  /** Registers a fixture-owned namespace that reclamation may remove. */
+  registerNamespaceCleanupTarget(namespace: string): void;
+  /** Records that the journey verified Radius removed the application. */
+  recordApplicationDeletionSucceeded(
+    application: string,
+    namespace: string
+  ): void;
   /**
    * Best-effort removal of product-created state left behind by this run.
    *
@@ -192,6 +200,7 @@ export interface CloudFixtureOptions {
   readonly githubRunId?: string;
   readonly assertionTimeoutMs?: number;
   readonly assertionPollIntervalMs?: number;
+  readonly entraAppDeletionTimeoutMs?: number;
 }
 
 const DEFAULT_LOCATION = "westus3";
@@ -199,6 +208,8 @@ const DEFAULT_NODE_COUNT = 1;
 const CLUSTER_NODE_SIZE = "Standard_B2s";
 const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_ENTRA_APP_DELETION_TIMEOUT_MS = 120_000;
+const FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS = 5 * 60_000;
 
 function requireGitObjectId(value: string, context: string): string {
   const normalized = value.trim();
@@ -250,6 +261,10 @@ export async function createCloudFixture(
   const assertionPollIntervalMs = requirePositiveNumber(
     options.assertionPollIntervalMs ?? DEFAULT_ASSERTION_POLL_INTERVAL_MS,
     "Assertion poll interval"
+  );
+  const entraAppDeletionTimeoutMs = requirePositiveNumber(
+    options.entraAppDeletionTimeoutMs ?? DEFAULT_ENTRA_APP_DELETION_TIMEOUT_MS,
+    "Entra app deletion timeout"
   );
   const uniqueId = shortenUniqueId(ports.newUniqueId());
   const configuredResourceGroup = options.resourceGroup?.trim() || undefined;
@@ -713,8 +728,9 @@ export async function createCloudFixture(
   const observedCredentialApps = new Map<string, AppRegistrationRecord>();
   const applicationCleanupTargets = new Map<
     string,
-    { application: string; namespace: string }
+    { application: string; namespace: string; deletionVerified: boolean }
   >();
+  const namespaceCleanupTargets = new Set<string>();
   const APP_REGISTRATION_KEY = "app-registration";
   const GITHUB_ENVIRONMENT_KEY = "github-environment";
   const roleAssignmentKey = (principalId: string) =>
@@ -985,14 +1001,14 @@ export async function createCloudFixture(
       let found: AppRegistrationRecord[] = [];
       await pollForValue({
         ports,
-        timeoutMs: assertionTimeoutMs,
+        timeoutMs: entraAppDeletionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
         probe: async () => {
           found = [...(await listAppRegistrations(commands, expectedAppName))];
           return found.length === 0 ? true : undefined;
         },
         timeoutMessage: () =>
-          `Timed out after ${assertionTimeoutMs}ms waiting for app registration "${expectedAppName}" to be ` +
+          `Timed out after ${entraAppDeletionTimeoutMs}ms waiting for app registration "${expectedAppName}" to be ` +
           `deleted; ${found.length} still exist(s) (${found
             .map((app) => app.appId)
             .join(", ")}).`
@@ -1108,9 +1124,35 @@ export async function createCloudFixture(
         `${requiredNamespace}\n${requiredApplication}`,
         {
           application: requiredApplication,
-          namespace: requiredNamespace
+          namespace: requiredNamespace,
+          deletionVerified:
+            applicationCleanupTargets.get(
+              `${requiredNamespace}\n${requiredApplication}`
+            )?.deletionVerified ?? false
         }
       );
+    },
+
+    registerNamespaceCleanupTarget(namespace) {
+      const target = requireValue(
+        namespace,
+        "A namespace is required to register namespace cleanup."
+      );
+      if (target !== FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE)
+        throw new Error(
+          `Namespace cleanup is restricted to the fixture-owned namespace ${FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE}.`
+        );
+      namespaceCleanupTargets.add(target);
+    },
+
+    recordApplicationDeletionSucceeded(application, namespace) {
+      fixture.registerApplicationCleanupTarget(application, namespace);
+      const target = applicationCleanupTargets.get(
+        `${namespace}\n${application}`
+      );
+      if (!target)
+        throw new Error("The application cleanup target was not registered.");
+      target.deletionVerified = true;
     },
 
     async readApplicationWorkloads(application, namespace) {
@@ -1192,11 +1234,13 @@ export async function createCloudFixture(
       };
 
       const applicationFailureStart = failures.length;
-      for (const target of applicationCleanupTargets.values())
+      for (const target of applicationCleanupTargets.values()) {
+        if (target.deletionVerified) continue;
         await attempt(
           `Radius application ${target.application} in ${environmentName}`,
           () => deleteApplicationResources(target.application)
         );
+      }
       const applicationDeletionFailed =
         failures.length > applicationFailureStart;
 
@@ -1210,7 +1254,7 @@ export async function createCloudFixture(
                 "--kubeconfig",
                 kubeconfig,
                 "delete",
-                "all",
+                RADIUS_WORKLOAD_RESOURCES,
                 "--namespace",
                 target.namespace,
                 "--selector",
@@ -1220,7 +1264,7 @@ export async function createCloudFixture(
               ],
               assertionTimeoutMs
             );
-            if (result.code === 0 || isMissingNamespace(result)) return;
+            if (isMissingNamespace(result)) return;
             // `kubectl delete --wait=true` prints its "deleted" lines and then
             // blocks until every object is finalized, so a delete that removed
             // everything can still be killed by this step's own budget.
@@ -1230,10 +1274,13 @@ export async function createCloudFixture(
             // terminating objects; poll for their absence the same way the
             // delete assertion does and report the delete only if something
             // outlives the deadline.
-            const failure = new CloudCommandError(
-              `kubectl delete all -n ${target.namespace}`,
-              result
-            );
+            const failure =
+              result.code === 0 ?
+                undefined
+              : new CloudCommandError(
+                  `kubectl delete ${RADIUS_WORKLOAD_RESOURCES} -n ${target.namespace}`,
+                  result
+                );
             let lastSeen: readonly string[] = [];
             await pollForValue({
               ports,
@@ -1260,7 +1307,7 @@ export async function createCloudFixture(
                   )
                     throw listFailure;
                   throw new Error(
-                    `${failure.message}\n  The follow-up listing also failed: ${describeError(listFailure)}`,
+                    `${failure ? `${failure.message}\n  The follow-up listing also failed` : "The follow-up listing failed"}: ${describeError(listFailure)}`,
                     { cause: listFailure }
                   );
                 }
@@ -1269,11 +1316,54 @@ export async function createCloudFixture(
                 return survivors.length === 0 ? true : undefined;
               },
               timeoutMessage: () =>
-                `${failure.message}\n  Still present after ${assertionTimeoutMs}ms: ` +
+                `${failure ? `${failure.message}\n  ` : ""}Still present after ${assertionTimeoutMs}ms: ` +
                 lastSeen.join(", ")
             });
           }
         );
+
+      for (const namespace of namespaceCleanupTargets)
+        await attempt(`Kubernetes namespace ${namespace}`, async () => {
+          const kubeconfig = await clusterKubeconfig(assertionTimeoutMs);
+          const deleteResult = await commands.runKubectl(
+            [
+              "--kubeconfig",
+              kubeconfig,
+              "delete",
+              "namespace",
+              namespace,
+              "--ignore-not-found=true",
+              "--wait=false"
+            ],
+            assertionTimeoutMs
+          );
+          expectSuccess(deleteResult, `kubectl delete namespace ${namespace}`);
+          await pollForValue({
+            ports,
+            timeoutMs: FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS,
+            intervalMs: assertionPollIntervalMs,
+            probe: async (remainingMs) => {
+              const context = `kubectl get namespace ${namespace}`;
+              const result = await commands.runKubectl(
+                [
+                  "--kubeconfig",
+                  kubeconfig,
+                  "get",
+                  "namespace",
+                  namespace,
+                  "--output",
+                  "name"
+                ],
+                remainingMs
+              );
+              if (result.code === 0) return undefined;
+              if (isMissingNamespace(result)) return true;
+              throw new CloudCommandError(context, result);
+            },
+            timeoutMessage: () =>
+              `Timed out after ${FIXTURE_NAMESPACE_DELETION_TIMEOUT_MS}ms waiting for Kubernetes namespace ${namespace} to be removed.`
+          });
+        });
 
       if (applicationDeletionFailed)
         throw new Error(
@@ -1441,7 +1531,7 @@ export async function createCloudFixture(
           let survivors: readonly string[] = [app.appId];
           await pollForValue({
             ports,
-            timeoutMs: assertionTimeoutMs,
+            timeoutMs: entraAppDeletionTimeoutMs,
             intervalMs: assertionPollIntervalMs,
             probe: async () => {
               const remaining = await listAppRegistrations(
@@ -1456,7 +1546,7 @@ export async function createCloudFixture(
             timeoutMessage: () =>
               `az ad app delete ${app.objectId} ` +
               `${objectIdNotFound ? `reported the object id was already absent and the client-id retry did not remove it` : "succeeded"}, ` +
-              `but app registration ${survivors.join(", ")} was still listed after ${assertionTimeoutMs}ms.`
+              `but app registration ${survivors.join(", ")} was still listed after ${entraAppDeletionTimeoutMs}ms.`
           });
         });
       }

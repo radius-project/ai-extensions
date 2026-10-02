@@ -27,34 +27,37 @@ describe("ambient workflow callback binding", () => {
   });
 
   const detailArgs = [
-    "run",
-    "view",
-    "41",
-    "--json",
-    "status,conclusion,jobs",
-    "--repo",
-    "contoso/store"
+    "api",
+    "repos/contoso/store/actions/runs/41",
+    "--include",
+    "--method",
+    "GET"
   ];
-  const statusArgs = [
-    "run",
-    "view",
-    "41",
-    "--json",
-    "status,conclusion",
-    "--repo",
-    "contoso/store"
+  const jobsArgs = [
+    "api",
+    "repos/contoso/store/actions/runs/41/jobs?per_page=100&page=1",
+    "--include",
+    "--method",
+    "GET"
   ];
 
   it("reads and normalizes ambient run details from callback stdout", async () => {
     const steps = [
       { name: "Deploy", status: "completed", conclusion: "failure" }
     ];
-    const jobs = [{ steps }];
-    vi.mocked(gh.cliExec).mockImplementationOnce((_cmd, _args, _opts, cb) => {
+    const jobs = [{ name: "deploy", steps }];
+    vi.mocked(gh.cliExec).mockImplementation((_cmd, args, opts, cb) => {
+      expect(opts.timeout).toBeGreaterThan(0);
+      expect(opts.timeout).toBeLessThanOrEqual(15000);
       queueMicrotask(() =>
         cb(
           null,
-          JSON.stringify({ status: "completed", conclusion: "failure", jobs }),
+          "HTTP/2 200\n\n" +
+            JSON.stringify(
+              args[1].includes("/jobs") ?
+                { jobs, total_count: 1 }
+              : { status: "completed", conclusion: "failure" }
+            ),
           "diagnostic stderr is not run JSON"
         )
       );
@@ -67,48 +70,44 @@ describe("ambient workflow callback binding", () => {
       jobs,
       steps
     });
-    expect(gh.cliExec).toHaveBeenCalledExactlyOnceWith(
-      "gh",
+    expect(vi.mocked(gh.cliExec).mock.calls.map((call) => call[1])).toEqual([
       detailArgs,
-      { timeout: 15000 },
-      expect.any(Function)
-    );
+      jobsArgs
+    ]);
   });
 
-  it("ignores partial stdout on callback failure and reads status-only fallback", async () => {
+  it("preserves the known run when jobs fail without rereading the run", async () => {
     vi.mocked(gh.cliExec)
       .mockImplementationOnce((_cmd, _args, _opts, cb) => {
         queueMicrotask(() =>
           cb(
-            new Error("detail read failed"),
-            '{"status":"completed","conclusion":"success"}',
-            "gh: Forbidden (HTTP 403)"
+            null,
+            'HTTP/2 200\n\n{"status":"in_progress","conclusion":null}',
+            ""
           )
         );
         return new ChildProcess();
       })
       .mockImplementationOnce((_cmd, _args, _opts, cb) => {
         queueMicrotask(() =>
-          cb(null, '{"status":"in_progress","conclusion":null}', "")
+          cb(new Error("jobs unavailable"), "HTTP/2 503\n\n{}", "")
         );
         return new ChildProcess();
       });
 
     await expect(getRunDetail("contoso/store", "41")).resolves.toEqual({
       status: "in_progress",
-      conclusion: null,
+      conclusion: "",
       jobs: [],
       steps: []
     });
-    expect(
-      vi.mocked(gh.cliExec).mock.calls.map((call) => call.slice(0, 3))
-    ).toEqual([
-      ["gh", detailArgs, { timeout: 15000 }],
-      ["gh", statusArgs, { timeout: 15000 }]
+    expect(vi.mocked(gh.cliExec).mock.calls.map((call) => call[1])).toEqual([
+      detailArgs,
+      jobsArgs
     ]);
   });
 
-  it("returns unavailable detail when both callbacks fail without a selected-account probe", async () => {
+  it("returns unavailable detail after one failed callback without retry or selected-account probe", async () => {
     const fail: typeof gh.cliExec = (_cmd, _args, _opts, cb) => {
       queueMicrotask(() =>
         cb(
@@ -124,11 +123,8 @@ describe("ambient workflow callback binding", () => {
       .mockImplementationOnce(fail);
 
     await expect(getRunDetail("contoso/store", "41")).resolves.toBeNull();
-    expect(
-      vi.mocked(gh.cliExec).mock.calls.map((call) => call.slice(0, 3))
-    ).toEqual([
-      ["gh", detailArgs, { timeout: 15000 }],
-      ["gh", statusArgs, { timeout: 15000 }]
+    expect(vi.mocked(gh.cliExec).mock.calls.map((call) => call[1])).toEqual([
+      detailArgs
     ]);
   });
 

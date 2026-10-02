@@ -365,9 +365,7 @@ async function routeDeployments(
 const INVENTORY_RESOURCES = Array.from({ length: 10 }, (_, index) => ({
   name: `reported-resource-${index + 1}`,
   type:
-    index % 2 === 0 ?
-      "Applications.Core/containers"
-    : "Applications.Datastores/redisCaches"
+    index % 2 === 0 ? "Radius.Compute/containers" : "Radius.Data/redisCaches"
 }));
 
 async function routeDeletionInventory(
@@ -537,7 +535,7 @@ test.describe("Radius Canvas visual baselines", () => {
     await expect(page.locator("#graph-app")).toHaveValue("radius-app");
     await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
     await expectWorktreeBranchRequests(requests.loadGraph);
-    await expect(page.locator("#node-popup")).toBeHidden();
+    await expect(page.locator("[data-radius-details]")).toBeHidden();
     await expectBuiltInResourceTypeIcons(page, 3);
     await screenshot(page, "vi-01-modeled-graph-light.png");
   });
@@ -557,7 +555,7 @@ test.describe("Radius Canvas visual baselines", () => {
     await expect(page.locator("#graph-app")).toHaveValue("radius-app");
     await expect(page.locator("#graph-branch")).toHaveValue(WORKTREE_BRANCH);
     await expectWorktreeBranchRequests(requests.loadGraph);
-    await expect(page.locator("#node-popup")).toBeHidden();
+    await expect(page.locator("[data-radius-details]")).toBeHidden();
     await expectBuiltInResourceTypeIcons(page, 3);
     await screenshot(page, "vi-01-modeled-graph-dark.png");
   });
@@ -583,7 +581,7 @@ test.describe("Radius Canvas visual baselines", () => {
         .filter({ hasText: "web" })
         .getByRole("button", { name: "Show details" })
         .click();
-      await expect(page.locator("#node-popup")).toBeVisible();
+      await expect(page.locator("[data-radius-details]")).toBeVisible();
       await screenshot(page, `vi-02-modeled-graph-details-${theme}.png`);
     });
   }
@@ -629,7 +627,7 @@ test.describe("Radius Canvas visual baselines", () => {
         .filter({ hasText: "cache" })
         .getByRole("button", { name: "Show details" })
         .click();
-      await expect(page.locator("#node-popup")).toContainText(
+      await expect(page.locator("[data-radius-details]")).toContainText(
         "No recipe pack registered in this environment resolves Radius.Data/redisCaches."
       );
       await screenshot(page, `vi-03-planned-unresolved-${theme}.png`);
@@ -834,10 +832,12 @@ test.describe("Radius Canvas visual baselines", () => {
           .click();
         await expect(
           page
-            .locator("#node-popup")
+            .locator("[data-radius-details]")
             .getByText(outcome.expectedMessage, { exact: true })
         ).toBeVisible();
-        await expect(page.locator("#node-popup")).not.toContainText("creating");
+        await expect(page.locator("[data-radius-details]")).not.toContainText(
+          "creating"
+        );
         await expect(
           successfulNode.getByAltText("Deployed", { exact: true })
         ).toBeInViewport();

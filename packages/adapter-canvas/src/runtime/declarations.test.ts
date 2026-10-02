@@ -233,41 +233,22 @@ describe("RU-03: tool declarations", () => {
     expect(decl.parameters.required).toEqual(["file", "target"]);
   });
 
-  describe("RU-19: conditional PR graph diff guidance", () => {
-    it("limits generation to worktrees that contain a Radius model", () => {
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "Only when the pull request's worktree contains a Radius app.bicep model"
+  describe("RU-19: session start guidance", () => {
+    it("does not ask the agent to generate a graph diff before pull requests", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "radius_generate_pr_diff_markdown"
       );
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "either already present when this session started, or created by a Radius tool or Radius Canvas action in this session"
-      );
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "Do not call radius_generate_pr_diff_markdown for unrelated pull requests"
-      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toMatch(/pull request/i);
     });
 
-    it("requires exact returned markdown only when a graph diff exists", () => {
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "If it returns a Mermaid application graph diff"
+    it("tells the PR diff tool not to run automatically before pull requests", () => {
+      const decl = RADIUS_TOOL_DECLARATIONS.find(
+        (t) => t.name === "radius_generate_pr_diff_markdown"
       );
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "exact returned markdown at the TOP"
+      expect(decl?.description).toContain(
+        "do not call it automatically before creating a pull request"
       );
-    });
-
-    it("keeps unavailable graph explanations out of the PR body", () => {
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "create the pull request without a graph diff section"
-      );
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "Do not add a sentence to the PR body"
-      );
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "Report the reason in chat"
-      );
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "describe the change itself normally"
-      );
+      expect(decl?.description).not.toContain("BEFORE creating the PR");
     });
 
     it("never requires publishing the current worktree for a graph diff", () => {

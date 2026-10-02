@@ -3,9 +3,13 @@ import coverageBaseline from "./coverage-baseline.json" with { type: "json" };
 
 export default defineConfig({
   test: {
-    projects: ["packages/*/vitest.config.ts"],
+    projects: [
+      "packages/*/vitest.config.ts",
+      "packages/graph-react/vitest.component.config.ts"
+    ],
     coverage: {
       provider: "v8",
+      reportOnFailure: true,
       reporter: ["text", "json-summary", "lcov"],
       include: [
         "packages/*/src/**/*.ts",
@@ -18,6 +22,18 @@ export default defineConfig({
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
+        "packages/core/src/deploy-artifact-evidence.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-shared/src/workflow-artifacts.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
         "packages/core/src/workflow-observation.ts": {
           statements: 100,
           branches: 100,
@@ -31,6 +47,18 @@ export default defineConfig({
           lines: 100
         },
         "packages/adapter-shared/src/workflow-reads.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-shared/src/workflow-read-response.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-shared/src/workflow-read-budget.ts": {
           statements: 100,
           branches: 100,
           functions: 100,
@@ -72,7 +100,8 @@ export default defineConfig({
         "packages/adapter-canvas/src/runtime/**":
           coverageBaseline.newlyExtracted.runtime,
         "packages/adapter-canvas/src/browser/**":
-          coverageBaseline.newlyExtracted.browser
+          coverageBaseline.newlyExtracted.browser,
+        "packages/graph-react/src/**": coverageBaseline.packages["graph-react"]
       }
     }
   }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createDeployMonitorService,
   type DeployMonitorDependencies,
@@ -19,6 +19,7 @@ import { createPlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import type { DeployOutcomeRequest } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import {
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE as explanation,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
 } from "../../deploy-artifacts.js";
@@ -135,6 +136,260 @@ function settleRecorder() {
     }
   };
 }
+
+describe("workflow evidence uncertainty", () => {
+  it.each([null, undefined, "", "   "])(
+    "keeps completed+%j unconfirmed for the existing bound",
+    async (conclusion) => {
+      const { request: input, state } = request({
+        resources: [{ name: "db", deployStatus: "pending" }]
+      });
+      let reads = 0;
+      let sleeps = 0;
+      await createDeployMonitorService(
+        dependencies({
+          getRunDetail: async () => {
+            reads++;
+            return { status: "completed", conclusion, steps: [] };
+          },
+          sleep: async (ms) => {
+            expect(ms).toBe(5000);
+            sleeps++;
+          },
+          settleDeployStatuses
+        })
+      ).run(input);
+      expect(reads).toBe(240);
+      expect(sleeps).toBe(240);
+      expect(state.deployStatus).toBe("failed");
+      expect(state.deployErrorKind).toBe("run-unconfirmed");
+      expect(state.deployError).toBe(
+        explanation +
+          " View the full run: https://github.com/acme/widgets/actions/runs/77"
+      );
+      expect(input.resources[0].deployMessage).toBe(explanation);
+    }
+  );
+
+  it.each(["future_conclusion", "Success", " success "])(
+    "stops completed+%j before progress, heartbeat or further reads",
+    async (conclusion) => {
+      const resources: CanvasGraphResource[] = [
+        {
+          name: "running",
+          deployStatus: "in_progress",
+          deployMessage: "creating"
+        },
+        {
+          name: "pending",
+          deployStatus: "pending",
+          outputResources: [{ name: "pending-output", deployStatus: "pending" }]
+        },
+        { name: "failed", deployStatus: "failed", deployMessage: "quota" },
+        { name: "failed-without-detail", deployStatus: "failed" },
+        {
+          name: "ready",
+          deployStatus: "success",
+          deployMessage: "ready",
+          outputResources: [{ name: "ready-output", type: "container" }]
+        }
+      ];
+      const { request: input, state, logs } = request({ resources });
+      const published: unknown[] = [];
+      Object.defineProperty(state, "deployStatus", {
+        get: () => (published.length ? "failed" : "in_progress"),
+        set: (status: string) => {
+          published.push({
+            status,
+            error: state.deployError,
+            kind: state.deployErrorKind,
+            resources: structuredClone(resources)
+          });
+        }
+      });
+      const getRunDetail = vi.fn(async () => ({
+        status: "completed",
+        conclusion,
+        steps: [{ name: "Run rad commands", status: "in_progress" }]
+      }));
+      const sleep = vi.fn(async () => {});
+      const progress = vi.fn(async () => null);
+      const graph = vi.fn(async () => ({
+        graph: null,
+        status: "missing" as const
+      }));
+      const controlPlaneLog = vi.fn(async () => null);
+      const outcome = settleRecorder();
+      await createDeployMonitorService(
+        dependencies({
+          getRunDetail,
+          sleep,
+          outcome: outcome.outcome,
+          createStatusReader: async () => ({
+            progress,
+            graph,
+            controlPlaneLog
+          }),
+          settleDeployStatuses
+        })
+      ).run(input);
+      expect(getRunDetail).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(progress).not.toHaveBeenCalled();
+      expect(graph).not.toHaveBeenCalled();
+      expect(controlPlaneLog).not.toHaveBeenCalled();
+      expect(outcome.calls).toEqual([]);
+      expect(state.deployStartedAt).toBeUndefined();
+      expect(state.deployFinishedAt).toBeUndefined();
+      expect(logs).toEqual([
+        "Waiting for the deploy workflow to start...",
+        "Tracking deploy run: https://github.com/acme/widgets/actions/runs/77",
+        "⚠ " + explanation
+      ]);
+      expect(
+        resources.map(({ deployStatus, deployMessage }) => [
+          deployStatus,
+          deployMessage
+        ])
+      ).toEqual([
+        ["failed", explanation],
+        ["failed", explanation],
+        ["failed", "quota"],
+        ["failed", explanation],
+        ["success", "ready"]
+      ]);
+      expect(resources[1].outputResources?.[0].deployStatus).toBe("failed");
+      expect(resources[4].outputResources?.[0]).toMatchObject({
+        deployStatus: "success",
+        portalUrl: "https://portal.test/azure/container"
+      });
+      expect(published).toEqual([
+        {
+          status: "failed",
+          error:
+            explanation +
+            " View the full run: https://github.com/acme/widgets/actions/runs/77",
+          kind: "run-unconfirmed",
+          resources
+        }
+      ]);
+    }
+  );
+
+  it("stops after mixed unavailable and running observations without another sleep", async () => {
+    const { request: input } = request({ resources: [{ name: "db" }] });
+    const observations: Array<DeployRunDetail | null> = [
+      null,
+      { status: "in_progress", conclusion: "future_conclusion", steps: [] },
+      { status: "completed", conclusion: "future_conclusion", steps: [] }
+    ];
+    const getRunDetail = vi.fn(async () => {
+      const value = observations.shift();
+      if (value === undefined) throw new Error("unexpected observation");
+      return value;
+    });
+    const sleep = vi.fn(async () => {});
+    await createDeployMonitorService(
+      dependencies({ getRunDetail, sleep, settleDeployStatuses })
+    ).run(input);
+    expect(getRunDetail).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(observations).toEqual([]);
+  });
+
+  it.each([
+    "Completed",
+    "in_progress",
+    "waiting",
+    "queued",
+    "future_status",
+    undefined
+  ])(
+    "does not stop or infer completion from status %j and an unsupported conclusion",
+    async (status) => {
+      const { request: input, state } = request({
+        resources: [{ name: "db" }]
+      });
+      const getRunDetail = vi.fn(async () => ({
+        status,
+        conclusion: "future_conclusion",
+        steps: []
+      }));
+      const sleep = vi.fn(async () => {});
+      await createDeployMonitorService(
+        dependencies({ getRunDetail, sleep, settleDeployStatuses })
+      ).run(input);
+      expect(getRunDetail).toHaveBeenCalledTimes(240);
+      expect(sleep).toHaveBeenCalledTimes(240);
+      expect(state.deployError).toBe(
+        "Timed out waiting for the deploy workflow to complete. It may still be running — view it at https://github.com/acme/widgets/actions/runs/77"
+      );
+      expect(input.resources[0].deployMessage).toBe(
+        DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+      );
+    }
+  );
+
+  it.each([null, { status: "in_progress", conclusion: "failure", steps: [] }])(
+    "retains reported completion through later %j but not across monitor invocations",
+    async (later) => {
+      let reads = 0;
+      const service = createDeployMonitorService(
+        dependencies({
+          getRunDetail: async () =>
+            ++reads === 1 ?
+              { status: "completed", conclusion: null, steps: [] }
+            : later,
+          settleDeployStatuses
+        })
+      );
+      const first = request({ resources: [{ name: "db" }] });
+      await service.run(first.request);
+      expect(reads).toBe(240);
+      expect(first.state.deployError).toContain(explanation);
+      const second = request({ resources: [{ name: "db" }] });
+      await service.run(second.request);
+      expect(reads).toBe(480);
+      expect(second.state.deployError).toContain("It may still be running");
+    }
+  );
+
+  it.each([null, undefined, "", "   "])(
+    "recovers from completed+%j through unavailable and conflicting observations",
+    async (conclusion) => {
+      const { request: input, state } = request({
+        resources: [{ name: "db" }]
+      });
+      const observations: Array<DeployRunDetail | null> = [
+        { status: "waiting", conclusion: null, steps: [] },
+        null,
+        { status: "completed", conclusion, steps: [] },
+        { status: "queued", conclusion: "future_conclusion", steps: [] },
+        { status: "future_status", conclusion: "success", steps: [] },
+        { status: "Completed", conclusion: "success", steps: [] },
+        { conclusion: "failure", steps: [] },
+        { status: "in_progress", conclusion: "failure", steps: [] },
+        completedRun()
+      ];
+      const recorder = settleRecorder();
+      await createDeployMonitorService(
+        dependencies({
+          getRunDetail: async (repo, runId) => {
+            expect([repo, runId]).toEqual(["acme/widgets", 77]);
+            const detail = observations.shift();
+            if (detail === undefined) throw new Error("unexpected read");
+            return detail;
+          },
+          outcome: recorder.outcome
+        })
+      ).run(input);
+      expect(recorder.calls).toHaveLength(1);
+      expect(recorder.calls[0].conclusion).toBe("success");
+      expect(state.deployErrorKind).toBeUndefined();
+      expect(observations).toEqual([]);
+    }
+  );
+});
 
 describe("deploy monitor construction", () => {
   it.each([
@@ -1005,6 +1260,7 @@ describe("deploy monitor settlement", () => {
       repo: "acme/widgets",
       runId: 77,
       provider: "azure",
+      status: "completed",
       conclusion: "failure",
       statusReader
     });
@@ -1380,33 +1636,36 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     const execution: WorkflowExecution = {
       mode: "ambient",
       run: async (args, options) => {
-        if (
-          args.join(" ") ===
-          "run view 77 --json status,conclusion,jobs --repo acme/widgets"
-        ) {
-          record("get-run-detail");
-          expect(options).toEqual({ timeout: 15000 });
+        if (args[0] === "api") {
+          if (!args[1].includes("/jobs")) record("get-run-detail");
+          expect(options.timeout).toBeGreaterThan(0);
+          expect(options.timeout).toBeLessThanOrEqual(15000);
           return {
             code: 0,
             stderr: "",
-            stdout: JSON.stringify({
-              status: "completed",
-              conclusion,
-              jobs: [
-                {
-                  steps: [
-                    {
-                      name:
-                        conclusion === "success" ? "Run rad commands" : (
-                          "Azure Login (OIDC)"
-                        ),
-                      status: "completed",
-                      conclusion
-                    }
-                  ]
-                }
-              ]
-            })
+            stdout:
+              "HTTP/2 200\n\n" +
+              JSON.stringify(
+                args[1].includes("/jobs") ?
+                  {
+                    total_count: 1,
+                    jobs: [
+                      {
+                        steps: [
+                          {
+                            name:
+                              conclusion === "success" ? "Run rad commands" : (
+                                "Azure Login (OIDC)"
+                              ),
+                            status: "completed",
+                            conclusion
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                : { status: "completed", conclusion }
+              )
           };
         }
         if (

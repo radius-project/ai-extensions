@@ -341,6 +341,16 @@ describe("createCloudFixture", () => {
         "Assertion timeout"
       ],
       [
+        "zero Entra app deletion timeout",
+        { entraAppDeletionTimeoutMs: 0 },
+        "Entra app deletion timeout"
+      ],
+      [
+        "non-finite Entra app deletion timeout",
+        { entraAppDeletionTimeoutMs: Number.POSITIVE_INFINITY },
+        "Entra app deletion timeout"
+      ],
+      [
         "zero poll interval",
         { assertionPollIntervalMs: 0 },
         "Assertion poll interval"
@@ -2384,6 +2394,55 @@ describe("createCloudFixture", () => {
         );
       });
 
+      it("uses the two-minute Entra deletion timeout by default", async () => {
+        const harness = await createHarness(
+          [
+            {
+              tool: "az",
+              match: APP_LIST,
+              respond: { stdout: APP_LIST_RESULT }
+            }
+          ],
+          {},
+          {
+            assertionTimeoutMs: 2_000,
+            assertionPollIntervalMs: 120_000
+          }
+        );
+        await harness.fixture.assertAppRegistrationExists();
+
+        await expect(
+          harness.fixture.assertAppRegistrationAbsent()
+        ).rejects.toThrow(/Timed out after 120000ms/);
+        expect(harness.fake.waits).toEqual([120_000]);
+      });
+
+      it("allows Entra longer than ordinary assertions to converge", async () => {
+        const harness = await createHarness(
+          [
+            {
+              tool: "az",
+              match: APP_LIST,
+              respond: { stdout: APP_LIST_RESULT },
+              times: 4
+            },
+            { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
+          ],
+          {},
+          {
+            assertionTimeoutMs: 2_000,
+            assertionPollIntervalMs: 1_000,
+            entraAppDeletionTimeoutMs: 4_000
+          }
+        );
+        await harness.fixture.assertAppRegistrationExists();
+
+        await expect(
+          harness.fixture.assertAppRegistrationAbsent()
+        ).resolves.toBeUndefined();
+        expect(harness.fake.waits).toEqual([1_000, 1_000, 1_000]);
+      });
+
       it("propagates a failing lookup rather than reading it as absence", async () => {
         const { fixture } = await observedHarness([
           failing("az", APP_LIST, "AADSTS700016")
@@ -3080,8 +3139,13 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "kubectl",
-          match: ["delete", "all"],
+          match: ["delete", RADIUS_WORKLOAD_RESOURCES],
           respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["get", RADIUS_RENDERED_RESOURCES],
+          respond: { stdout: JSON.stringify({ items: [] }) }
         }
       ]);
       fixture.registerApplicationCleanupTarget("demo", "default-demo");
@@ -3090,16 +3154,231 @@ describe("createCloudFixture", () => {
         `Radius application demo in ${ENVIRONMENT}`,
         "Kubernetes workloads for demo in default-demo"
       ]);
-      expect(fake.commands.commandLines("kubectl")).toEqual([
-        `--kubeconfig ${WORKSPACE}/kubeconfig delete all --namespace default-demo ` +
+      expect(fake.commands.commandLines("kubectl")).toContain(
+        `--kubeconfig ${WORKSPACE}/kubeconfig delete ${RADIUS_WORKLOAD_RESOURCES} --namespace default-demo ` +
           "--selector radapp.io/application=demo --ignore-not-found=true --wait=true"
-      ]);
+      );
       const calls = fake.commands.calls.map(
         ({ tool, args }) => `${tool} ${args.join(" ")}`
       );
       expect(
         calls.findIndex((line) => line.startsWith("gh run view "))
       ).toBeLessThan(calls.findIndex((line) => line.startsWith("kubectl ")));
+    });
+
+    it("deletes a registered fixture-owned namespace", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "namespace", "default-cloud-e2e"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["get", "namespace", "default-cloud-e2e"],
+          respond: {
+            code: 1,
+            stderr:
+              'Error from server (NotFound): namespaces "default-cloud-e2e" not found'
+          }
+        }
+      ]);
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "Kubernetes namespace default-cloud-e2e"
+      ]);
+      expect(fake.commands.commandLines("kubectl")).toContain(
+        `--kubeconfig ${WORKSPACE}/kubeconfig delete namespace default-cloud-e2e --ignore-not-found=true --wait=false`
+      );
+    });
+
+    it("polls for five minutes until the fixture-owned namespace is absent", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["delete", "namespace", "default-cloud-e2e"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["get", "namespace", "default-cloud-e2e"],
+            respond: { stdout: "namespace/default-cloud-e2e" },
+            times: 2
+          },
+          {
+            tool: "kubectl",
+            match: ["get", "namespace", "default-cloud-e2e"],
+            respond: {
+              code: 1,
+              stderr:
+                'Error from server (NotFound): namespaces "default-cloud-e2e" not found'
+            }
+          }
+        ],
+        {},
+        { assertionPollIntervalMs: 1000 }
+      );
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "Kubernetes namespace default-cloud-e2e"
+      ]);
+      expect(fake.waits).toEqual([1000, 1000]);
+    });
+
+    it("reports a fixture namespace deletion failure", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        failing(
+          "kubectl",
+          ["delete", "namespace", "default-cloud-e2e"],
+          "namespace is terminating"
+        )
+      ]);
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes namespace default-cloud-e2e: .*namespace is terminating/
+      );
+    });
+
+    it("reports a fixture namespace absence-check failure", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", "namespace", "default-cloud-e2e"],
+          respond: {}
+        },
+        failing(
+          "kubectl",
+          ["get", "namespace", "default-cloud-e2e"],
+          "Unauthorized"
+        )
+      ]);
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes namespace default-cloud-e2e: .*kubectl get namespace default-cloud-e2e failed.*Unauthorized/
+      );
+    });
+
+    it("reports when the fixture-owned namespace remains after five minutes", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["delete", "namespace", "default-cloud-e2e"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["get", "namespace", "default-cloud-e2e"],
+            respond: { stdout: "namespace/default-cloud-e2e" }
+          }
+        ],
+        {},
+        { assertionPollIntervalMs: 5 * 60_000 }
+      );
+      fixture.registerNamespaceCleanupTarget("default-cloud-e2e");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /Kubernetes namespace default-cloud-e2e: Timed out after 300000ms waiting for Kubernetes namespace default-cloud-e2e to be removed/
+      );
+    });
+
+    it("continues normal teardown after a verified application deletion leaked workloads", async () => {
+      let workloadsDeleted = false;
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["get", RADIUS_RENDERED_RESOURCES],
+            respond: () => ({
+              stdout: JSON.stringify({
+                items:
+                  workloadsDeleted ?
+                    []
+                  : [
+                      {
+                        kind: "HorizontalPodAutoscaler",
+                        metadata: { name: "sleeper" }
+                      }
+                    ]
+              })
+            })
+          },
+          {
+            tool: "kubectl",
+            match: ["delete", RADIUS_WORKLOAD_RESOURCES],
+            respond: () => {
+              workloadsDeleted = true;
+              return {};
+            }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+      fixture.recordApplicationDeletionSucceeded("demo", "default-demo");
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent("demo", "default-demo")
+      ).rejects.toThrow(
+        /1 workload resource\(s\) remain: "HorizontalPodAutoscaler\/sleeper"/
+      );
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "Kubernetes workloads for demo in default-demo"
+      ]);
+
+      const gh = fake.commands.commandLines("gh");
+      expect(
+        gh.some((line) =>
+          line.startsWith("workflow run delete-application.yml")
+        )
+      ).toBe(false);
+      expect(gh).toContain(`api ${ENVIRONMENT_PATH}`);
+      expect(gh).toContain(`api ${MATCHING_REFS_PATH}`);
+      expect(fake.commands.commandLines("gh-package")).toContain(
+        `api ${PACKAGE_PATH}`
+      );
+      expect(fake.commands.commandLines("az")).toContain(
+        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id,appId:appId} -o json`
+      );
+      expect(fake.commands.commandLines("kubectl")).toContain(
+        `--kubeconfig ${WORKSPACE}/kubeconfig delete ${RADIUS_WORKLOAD_RESOURCES} --namespace default-demo ` +
+          "--selector radapp.io/application=demo --ignore-not-found=true --wait=true"
+      );
     });
 
     it("treats an already-missing application namespace as reclaimed", async () => {
@@ -3111,7 +3390,7 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "kubectl",
-          match: ["delete", "all"],
+          match: ["delete", RADIUS_WORKLOAD_RESOURCES],
           respond: {
             code: 1,
             stderr:
@@ -3136,8 +3415,14 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "kubectl",
-          match: ["delete", "all"],
+          match: ["delete", RADIUS_WORKLOAD_RESOURCES],
           respond: {},
+          times: 2
+        },
+        {
+          tool: "kubectl",
+          match: ["get", RADIUS_RENDERED_RESOURCES],
+          respond: { stdout: JSON.stringify({ items: [] }) },
           times: 2
         }
       ]);
@@ -3147,7 +3432,7 @@ describe("createCloudFixture", () => {
       await fixture.reclaimLeakedProductArtifacts();
       await fixture.reclaimLeakedProductArtifacts();
 
-      expect(fake.commands.commandLines("kubectl")).toHaveLength(2);
+      expect(fake.commands.commandLines("kubectl")).toHaveLength(4);
       expect(
         fake.commands
           .commandLines("az")
@@ -3166,6 +3451,25 @@ describe("createCloudFixture", () => {
         expect(() =>
           fixture.registerApplicationCleanupTarget(application, namespace)
         ).toThrow(message);
+      }
+    );
+
+    it("rejects an empty namespace cleanup target", async () => {
+      const { fixture } = await createHarness();
+
+      expect(() => fixture.registerNamespaceCleanupTarget(" ")).toThrow(
+        /namespace/
+      );
+    });
+
+    it.each(["default", "radius-system", "kube-system"])(
+      "rejects cleanup of the non-fixture namespace %s",
+      async (namespace) => {
+        const { fixture } = await createHarness();
+
+        expect(() => fixture.registerNamespaceCleanupTarget(namespace)).toThrow(
+          /restricted to the fixture-owned namespace default-cloud-e2e/
+        );
       }
     );
 
@@ -3392,7 +3696,11 @@ describe("createCloudFixture", () => {
             match: ["aks", "get-credentials"],
             respond: {}
           },
-          failing("kubectl", ["delete", "all"], "namespace unavailable"),
+          failing(
+            "kubectl",
+            ["delete", RADIUS_WORKLOAD_RESOURCES],
+            "namespace unavailable"
+          ),
           {
             tool: "kubectl",
             match: ["get", RADIUS_RENDERED_RESOURCES],
@@ -3436,7 +3744,7 @@ describe("createCloudFixture", () => {
           },
           {
             tool: "kubectl",
-            match: ["delete", "all"],
+            match: ["delete", RADIUS_WORKLOAD_RESOURCES],
             respond: {
               code: 1,
               stdout: 'deployment.apps "sleeper" deleted from default-demo\n'
@@ -3483,7 +3791,11 @@ describe("createCloudFixture", () => {
             match: ["aks", "get-credentials"],
             respond: {}
           },
-          failing("kubectl", ["delete", "all"], "namespace unavailable"),
+          failing(
+            "kubectl",
+            ["delete", RADIUS_WORKLOAD_RESOURCES],
+            "namespace unavailable"
+          ),
           {
             tool: "kubectl",
             match: ["get", RADIUS_RENDERED_RESOURCES],
@@ -3533,7 +3845,11 @@ describe("createCloudFixture", () => {
           match: ["aks", "get-credentials"],
           respond: {}
         },
-        failing("kubectl", ["delete", "all"], "namespace unavailable"),
+        failing(
+          "kubectl",
+          ["delete", RADIUS_WORKLOAD_RESOURCES],
+          "namespace unavailable"
+        ),
         {
           tool: "kubectl",
           match: ["get", RADIUS_RENDERED_RESOURCES],
@@ -3569,7 +3885,7 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "kubectl",
-          match: ["delete", "all"],
+          match: ["delete", RADIUS_WORKLOAD_RESOURCES],
           respond: {
             code: 1,
             stdout: 'deployment.apps "sleeper" deleted from default-demo\n'
@@ -3601,7 +3917,11 @@ describe("createCloudFixture", () => {
           match: ["aks", "get-credentials"],
           respond: {}
         },
-        failing("kubectl", ["delete", "all"], "etcdserver: request timed out"),
+        failing(
+          "kubectl",
+          ["delete", RADIUS_WORKLOAD_RESOURCES],
+          "etcdserver: request timed out"
+        ),
         {
           tool: "kubectl",
           match: ["get", RADIUS_RENDERED_RESOURCES],
@@ -3629,7 +3949,7 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "kubectl",
-          match: ["delete", "all"],
+          match: ["delete", RADIUS_WORKLOAD_RESOURCES],
           respond: {
             code: 1,
             stderr:
@@ -3664,8 +3984,13 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "kubectl",
-          match: ["delete", "all"],
+          match: ["delete", RADIUS_WORKLOAD_RESOURCES],
           respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["get", RADIUS_RENDERED_RESOURCES],
+          respond: { stdout: JSON.stringify({ items: [] }) }
         }
       ]);
       fixture.registerApplicationCleanupTarget("demo", "default-demo");
@@ -3685,8 +4010,10 @@ describe("createCloudFixture", () => {
         `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id,appId:appId} -o json`
       );
       expect(fake.commands.commandLines("kubectl")).toEqual([
-        `--kubeconfig ${WORKSPACE}/kubeconfig delete all --namespace default-demo ` +
-          "--selector radapp.io/application=demo --ignore-not-found=true --wait=true"
+        `--kubeconfig ${WORKSPACE}/kubeconfig delete ${RADIUS_WORKLOAD_RESOURCES} --namespace default-demo ` +
+          "--selector radapp.io/application=demo --ignore-not-found=true --wait=true",
+        `--kubeconfig ${WORKSPACE}/kubeconfig get ${RADIUS_RENDERED_RESOURCES} --namespace default-demo ` +
+          "--selector radapp.io/application=demo --output json"
       ]);
     });
 
@@ -3705,7 +4032,11 @@ describe("createCloudFixture", () => {
             match: ["aks", "get-credentials"],
             respond: {}
           },
-          failing("kubectl", ["delete", "all"], "namespace unavailable"),
+          failing(
+            "kubectl",
+            ["delete", RADIUS_WORKLOAD_RESOURCES],
+            "namespace unavailable"
+          ),
           {
             tool: "kubectl",
             match: ["get", RADIUS_RENDERED_RESOURCES],
@@ -3876,6 +4207,36 @@ describe("createCloudFixture", () => {
     // A run reported this step reclaimed while the app registration was still
     // live and not even in Entra's deleted items, which then wedged the next
     // run at the clean-slate check.
+    it("allows Entra longer than ordinary cleanup assertions to converge", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            },
+            times: 4
+          },
+          { tool: "az", match: ["ad", "app", "delete"], respond: {} },
+          { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
+        ],
+        {},
+        {
+          assertionTimeoutMs: 2_000,
+          assertionPollIntervalMs: 1_000,
+          entraAppDeletionTimeoutMs: 4_000
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
+      );
+      expect(fake.waits).toEqual([1_000, 1_000, 1_000]);
+    });
+
     it("fails when the app registration survives a delete that reported success", async () => {
       const { fixture } = await createHarness(
         [
@@ -3891,7 +4252,11 @@ describe("createCloudFixture", () => {
           { tool: "az", match: ["ad", "app", "delete"], respond: {} }
         ],
         {},
-        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+        {
+          assertionTimeoutMs: 2000,
+          assertionPollIntervalMs: 1000,
+          entraAppDeletionTimeoutMs: 2000
+        }
       );
 
       const error = await captureError(fixture.reclaimLeakedProductArtifacts());
@@ -3924,7 +4289,11 @@ describe("createCloudFixture", () => {
           }
         ],
         {},
-        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+        {
+          assertionTimeoutMs: 2000,
+          assertionPollIntervalMs: 1000,
+          entraAppDeletionTimeoutMs: 2000
+        }
       );
 
       const error = await captureError(fixture.reclaimLeakedProductArtifacts());

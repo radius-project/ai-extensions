@@ -392,11 +392,9 @@ export async function handleDeployedGraph(
   const inventoryDeployStatus = state.deployStatus;
   const inventoryStartedAt = state.deployStartedAt;
   const inventoryFinishedAt = state.deployFinishedAt;
-  // The app selector is a hint, not a hard filter: the reader falls back to an
-  // env-only match when the selected app has no artifact yet (the app name can
-  // itself be a guess from the repo short name). Surface the app it actually
-  // resolved so the page can say which one is on screen rather than mislabeling
-  // another app's status under the selected name.
+  // Only repo-wide discovery permits a guessed app-name fallback. An active
+  // run requires matching application identity. Surface the actual resolved
+  // application for a repo-wide fallback rather than mislabeling its status.
   let resolvedApp: string | null = requestedApp || null;
   const messageByKey = new Map<string, string>();
   try {

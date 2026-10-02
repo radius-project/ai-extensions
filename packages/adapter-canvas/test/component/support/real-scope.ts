@@ -29,6 +29,7 @@ export type RouteHandler = (
 ) => Response | Promise<Response>;
 
 export interface RealScope {
+  readonly scope: object;
   readonly context: BrowserContext;
   readonly host: HTMLElement;
   /** Every request the callout made, in order. */
@@ -116,6 +117,7 @@ export function createRealScope(options: RealScopeOptions = {}): RealScope {
   window.document.body.appendChild(host);
 
   return {
+    scope,
     context: resolveBrowserContext(scope),
     host,
     requests,

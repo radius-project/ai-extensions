@@ -425,57 +425,23 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   /* ─── Graph + node cards ──────────────────────────────────────────────── */
   #graph-container { width: 100%; height: 450px; border-radius: var(--rad-radius-lg); position: relative; background: var(--rad-bg-subtle); }
   #graph-container:empty { background: transparent; }
-  .legend { display: flex; gap: 12px; margin: 8px 0; flex-wrap: wrap; }
-  .legend-item { display: flex; align-items: center; gap: 4px; font-size: 12px; }
-  .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
-  .legend-swatch { width: 14px; height: 12px; border-radius: 3px; border: 2px solid var(--rad-node-border); box-sizing: border-box; }
-  .rad-node {
-    position: relative; width: 220px; min-height: 104px;
-    background: var(--rad-surface); border: 2.5px solid var(--rad-node-border);
-    border-radius: 16px; padding: 16px 18px;
-    pointer-events: auto; cursor: pointer;
+  /* Canvas keeps the legend in document flow above a fixed-height drawing area.
+     Standalone graph consumers retain the shared fill-container layout. */
+  #graph-container:has(> .rad-flow-host) { height: auto; background: transparent; }
+  .rad-flow-host { position: relative; width: 100%; }
+  .rad-flow-host > .radius-graph { display: block; height: auto; background: transparent; }
+  .rad-flow-host .radius-graph__viewport { height: 450px; border-radius: var(--rad-radius-lg); background: var(--rad-bg-subtle); }
+  :root {
+    --radius-graph-background: var(--rad-bg);
+    --radius-graph-text: var(--rad-text);
+    --radius-graph-muted: var(--rad-text-tertiary);
+    --radius-graph-accent: var(--rad-link);
+    --radius-graph-font: var(--rad-font);
+    --radius-graph-danger: var(--rad-danger);
+    --radius-graph-added: var(--rad-diff-added);
+    --radius-graph-modified: var(--rad-diff-modified);
+    --radius-graph-removed: var(--rad-diff-removed);
   }
-  .rad-node__head { display: flex; align-items: center; gap: 10px; }
-  .rad-node__head--with-badge { padding-right: 22px; }
-  .rad-node__icon { width: 40px; height: 40px; flex: none; object-fit: contain; }
-  /* Monochrome (currentColor) type-pack icons are painted through a CSS mask so
-     they follow the canvas theme instead of always rendering black. The
-     mask-image itself is set inline per node. */
-  .rad-node__icon--themed {
-    display: block; background-color: var(--rad-text, currentColor);
-    -webkit-mask-size: contain; mask-size: contain;
-    -webkit-mask-position: center; mask-position: center;
-    -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
-  }
-  .rad-node__badge { position: absolute; right: 12px; top: 12px; width: 22px; height: 22px; object-fit: contain; pointer-events: none; }
-  .rad-node__title {
-    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    font-weight: 600; font-size: 16px; color: var(--rad-text);
-  }
-  .rad-node__type {
-    width: 100%; min-width: 0; overflow: hidden; white-space: nowrap;
-    font-size: 13px; line-height: 18px; color: var(--rad-text-tertiary); margin-top: 6px;
-  }
-  .rad-node__source {
-    display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
-    font-size: 12px; font-weight: 500; color: var(--rad-link); text-decoration: none; cursor: pointer;
-    pointer-events: auto; background: none; border: none; padding: 0; font-family: inherit;
-    min-height: 24px;
-  }
-  .rad-node__source:hover { text-decoration: underline; }
-  .rad-node__source-glyph { font-family: var(--rad-mono); font-weight: 600; }
-  .rad-node__dots {
-    position: absolute; right: 10px; bottom: 10px; margin: 0; padding: 2px 4px;
-    font-size: 12px; font-weight: 700; letter-spacing: 1px; line-height: 1;
-    color: var(--rad-text-tertiary); background: none; border: none; border-radius: 4px;
-    cursor: pointer; pointer-events: auto;
-    min-width: 24px; min-height: 24px;
-  }
-  .rad-node__dots:hover { background: var(--rad-bg-subtle); color: var(--rad-text); }
-  .rad-node__portal {
-    display: block; color: inherit; text-decoration: none; cursor: pointer;
-  }
-  .rad-node__portal:focus-visible { outline: 2px solid var(--rad-link); outline-offset: 2px; }
 
   .field { margin: 8px 0; }
   .field-label { font-weight: 500; color: var(--rad-text-tertiary); font-size: 12px; }
@@ -501,46 +467,6 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .rad-feedback__link + .rad-feedback__link { border-top: 1px solid var(--rad-stroke); }
   .rad-feedback__link:hover { background: var(--rad-bg-subtle); text-decoration: underline; }
 
-  /* ─── React Flow overrides ────────────────────────────────────────────────
-     React Flow ships opinionated defaults (node chrome, visible connection
-     handles, a light canvas). We render our own figma .rad-node cards, so strip
-     React Flow's node box and hide the handles; the card supplies all visuals. */
-  .rad-flow-host { width: 100%; height: 100%; }
-  .react-flow, .react-flow__renderer, .react-flow__pane {
-    width: 100%; height: 100%; background: transparent;
-  }
-  .react-flow__node { font-family: var(--rad-font); font-size: 13px; }
-  /* Custom "rad" node type: no default background/border/padding — the card owns it. */
-  .react-flow__node-rad {
-    background: transparent; border: none; border-radius: 0; padding: 0;
-    box-shadow: none; width: auto;
-  }
-  .react-flow__node-rad.selected, .react-flow__node-rad:focus, .react-flow__node-rad:focus-visible {
-    outline: none; box-shadow: none;
-  }
-  .rad-node-shell { position: relative; }
-  /* Edge handles exist only so React Flow can route edges; make them invisible
-     and non-interactive so they never intercept card clicks. */
-  .react-flow__handle.rad-handle {
-    width: 1px; height: 1px; min-width: 0; min-height: 0;
-    background: transparent; border: none; opacity: 0; pointer-events: none;
-  }
-  .react-flow__attribution { background: transparent; font-size: 10px; }
-  .react-flow__attribution a { color: var(--rad-text-tertiary); }
-  .react-flow__controls { box-shadow: 0 1px 4px var(--rad-shadow); border-radius: 6px; overflow: hidden; }
-  .react-flow__controls-button {
-    background: var(--rad-surface); border-bottom: 1px solid var(--rad-stroke);
-    color: var(--rad-text); width: 26px; height: 26px;
-  }
-  .react-flow__controls-button:hover { background: var(--rad-bg-subtle); }
-  .react-flow__controls-button svg { fill: currentColor; }
-  .react-flow__minimap { background: var(--rad-surface); border: 1px solid var(--rad-stroke); border-radius: 6px; }
-  /* The dot grid is painted by React Flow onto an SVG <circle fill> PRESENTATION
-     ATTRIBUTE, and Chromium does not substitute var() there — a var() passed via
-     the Background "color" prop is discarded and the dots fall back to black.
-     Theme it as a CSS property instead, which does resolve var(). */
-  .react-flow__background circle { fill: var(--rad-grid); }
-  .react-flow__background path { stroke: var(--rad-grid); }
   /* Delete confirmation dialog (Figma type-to-confirm flow). Global because
      every surface that can delete a deployment shares this one dialog. */
   .rad-ddlg { max-width:480px; width:90%; margin:0; padding:0; background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 24px var(--rad-shadow); overflow:hidden; }

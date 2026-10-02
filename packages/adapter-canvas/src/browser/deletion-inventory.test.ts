@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { deletionInventoryResources } from "./deletion-inventory.js";
 
 describe("deletionInventoryResources", () => {
-  const resources = [{ name: "web", type: "Applications.Core/containers" }];
+  const resources = [{ name: "web", type: "Radius.Compute/containers" }];
 
   function payload(overrides: Record<string, unknown> = {}) {
     return {

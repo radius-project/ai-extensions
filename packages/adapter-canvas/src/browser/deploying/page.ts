@@ -16,7 +16,7 @@ import {
   forceDeletePrompt,
   probeDeleteConflict
 } from "../force-delete.js";
-import { escapeBrowserHtml } from "../html.js";
+import { escapeBrowserHtml } from "@radius-project/graph-react/presentation";
 import { isRecord, readBoolean, readRecord, readString } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";

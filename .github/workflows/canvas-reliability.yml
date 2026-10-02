@@ -48,6 +48,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Chromium for shared graph reliability
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Run extended reliability checks
         run: pnpm run test:reliability
 
@@ -107,7 +110,7 @@ jobs:
             if [[ -n "$issue_number" ]]; then
               gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
             else
-              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label test-failure
             fi
           elif [[ -n "$issue_number" ]]; then
             gh issue close "$issue_number" \

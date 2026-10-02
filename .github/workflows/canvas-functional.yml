@@ -219,7 +219,7 @@ jobs:
             if [[ -n "$issue_number" ]]; then
               gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
             else
-              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label test-failure
             fi
           elif [[ -n "$issue_number" ]]; then
             gh issue close "$issue_number" \

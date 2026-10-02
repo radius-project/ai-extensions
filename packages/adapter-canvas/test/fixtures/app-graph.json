@@ -1,7 +1,7 @@
 {
   "resources": [
     {
-      "id": "/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/radius-app/resources/web",
+      "id": "/planes/radius/local/resourcegroups/default/providers/Radius.Core/applications/radius-app/resources/web",
       "name": "web",
       "type": "Radius.Compute/containers",
       "provisioningState": "NotSpecified",
@@ -17,7 +17,7 @@
       ]
     },
     {
-      "id": "/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/radius-app/resources/db",
+      "id": "/planes/radius/local/resourcegroups/default/providers/Radius.Core/applications/radius-app/resources/db",
       "name": "db",
       "type": "Radius.Data/redisCaches",
       "provisioningState": "NotSpecified",

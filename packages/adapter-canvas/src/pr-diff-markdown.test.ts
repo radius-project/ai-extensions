@@ -16,7 +16,7 @@ const container = (
 ): CanvasGraphResource => ({
   id,
   name: id.split("/").pop(),
-  type: "Applications.Core/containers@2023-10-01-preview",
+  type: "Radius.Compute/containers@2023-10-01-preview",
   connections: connTargets.map((t) => ({
     id: t,
     name: t.split("/").pop(),
@@ -26,7 +26,7 @@ const container = (
 const datastore = (id: string, kind: string): CanvasGraphResource => ({
   id,
   name: id.split("/").pop(),
-  type: `Applications.Datastores/${kind}@2023-10-01-preview`,
+  type: `Radius.Data/${kind}@2023-10-01-preview`,
   connections: []
 });
 

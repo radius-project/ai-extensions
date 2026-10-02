@@ -65,7 +65,9 @@ describe("pageShell", () => {
     );
     expect(html).not.toContain("localStorage");
     expect(markupWithoutBrowserBundles(html)).not.toContain("matchMedia");
-    expect(html).not.toContain("prefers-color-scheme");
+    expect(markupWithoutBrowserBundles(html)).not.toContain(
+      "prefers-color-scheme"
+    );
     expect(html).not.toContain(
       "--rad-bg-subtle: var(--background-color-segmented"
     );
@@ -86,9 +88,9 @@ describe("pageShell", () => {
   it("keeps React Flow chrome transparent over the themed graph surface", () => {
     const html = pageShell("My Title", '<div id="graph-container"></div>');
     const flowStyles = html.match(
-      /\.react-flow, \.react-flow__renderer, \.react-flow__pane\s*\{([^}]*)\}/
+      /\.radius-graph \.react-flow,\s*\.radius-graph \.react-flow__renderer,\s*\.radius-graph \.react-flow__pane\s*\{([^}]*)\}/
     )?.[1];
-    expect(flowStyles).toContain("background: transparent");
+    expect(flowStyles).toMatch(/background:\s*transparent/);
   });
 
   it("loads esbuild's React Flow stylesheet before Radius graph overrides", () => {
@@ -121,9 +123,9 @@ describe("pageShell", () => {
   it("constrains graph type labels to the node card width", () => {
     const html = pageShell("My Title", "<p>hello</p>");
     const typeStyles = html.match(/\.rad-node__type\s*\{([^}]*)\}/)?.[1];
-    expect(typeStyles).toContain("width: 100%");
-    expect(typeStyles).toContain("overflow: hidden");
-    expect(typeStyles).toContain("white-space: nowrap");
+    expect(typeStyles).toMatch(/width:\s*100%/);
+    expect(typeStyles).toMatch(/overflow:\s*hidden/);
+    expect(typeStyles).toMatch(/white-space:\s*nowrap/);
   });
 
   it("constrains graph titles to the node card width", () => {
@@ -132,17 +134,17 @@ describe("pageShell", () => {
     const badgeHeadStyles = html.match(
       /\.rad-node__head--with-badge\s*\{([^}]*)\}/
     )?.[1];
-    expect(titleStyles).toContain("min-width: 0");
-    expect(titleStyles).toContain("overflow: hidden");
-    expect(titleStyles).toContain("text-overflow: ellipsis");
-    expect(titleStyles).toContain("white-space: nowrap");
-    expect(badgeHeadStyles).toContain("padding-right: 22px");
+    expect(titleStyles).toMatch(/min-width:\s*0/);
+    expect(titleStyles).toMatch(/overflow:\s*hidden/);
+    expect(titleStyles).toMatch(/text-overflow:\s*ellipsis/);
+    expect(titleStyles).toMatch(/white-space:\s*nowrap/);
+    expect(badgeHeadStyles).toMatch(/padding-right:\s*22px/);
   });
 
   it("shows a pointer over a deployed node portal link", () => {
     const html = pageShell("My Title", "<p>hello</p>");
     const portalStyles = html.match(/\.rad-node__portal\s*\{([^}]*)\}/)?.[1];
-    expect(portalStyles).toContain("cursor: pointer");
+    expect(portalStyles).toMatch(/cursor:\s*pointer/);
   });
 
   it("derives graph line colours from text/background, not host border tokens", () => {

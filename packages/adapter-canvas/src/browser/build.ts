@@ -1,4 +1,4 @@
-import { buildSync } from "esbuild";
+import { buildSync, transformSync } from "esbuild";
 import type { BuildOptions, BuildResult } from "esbuild";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -345,6 +345,75 @@ export interface BrowserEntryBundle {
   readonly inputs: readonly string[];
 }
 
+// Canvas renders in the system WebView, and macOS WebKit before Safari 17.4
+// drops every `@scope` block, which would leave the graph unstyled. The graph
+// stylesheet therefore ships an unscoped copy after the scoped rules.
+//
+// Each `@scope (root)` becomes a nested `:where(root)` rule, which esbuild
+// lowers to plain descendant selectors, so the copy keeps each scoped rule's
+// specificity: `:where()` adds none, like the implicit scope root, and
+// `:scope` becomes `&:is(*,:root)`, which matches the root and counts as one
+// pseudo-class, like `:scope`. Scoped declarations beat unscoped ones of equal
+// specificity, so a browser that supports `@scope` resolves exactly as before.
+// Following the scoped rules, the copy likewise beats the graph's unscoped rules
+// of equal specificity in a browser that drops `@scope`.
+// The copy drops `to (...)` scope limits; Canvas never nests a custom-appearance
+// graph inside a default one, so that limit has nothing to exclude there.
+
+export type CssTransform = (css: string) => string;
+
+const SCOPE_ROOT_SELECTOR = "&:is(*,:root)";
+const SCOPE_PRELUDE = /@scope\s*\(([^()]+)\)\s*(?:to\s*\([^()]+\)\s*)?\{/g;
+
+const lowerNesting: CssTransform = (css) =>
+  transformSync(css, {
+    loader: "css",
+    minify: true,
+    // Safari 15 predates CSS nesting, so esbuild emits flat selectors.
+    target: ["safari15"],
+    logLevel: "silent"
+  }).code;
+
+// Only the scoped rules are copied, so the graph's unscoped rules keep their
+// place ahead of the copy.
+function scopeBody(style: string, start: number): string {
+  let depth = 1;
+  for (let index = start; index < style.length; index += 1) {
+    if (style[index] === "{") depth += 1;
+    else if (style[index] === "}" && --depth === 0) {
+      return style.slice(start, index);
+    }
+  }
+  throw new Error("Graph stylesheet has an unterminated @scope block.");
+}
+
+export function withScopeFallback(
+  style: string,
+  transform: CssTransform = lowerNesting
+): string {
+  const preludes = [...style.matchAll(SCOPE_PRELUDE)];
+  const scopeCount = style.match(/@scope\b/g)?.length ?? 0;
+  if (scopeCount === 0) return style;
+  if (preludes.length !== scopeCount) {
+    throw new Error(
+      "Graph stylesheet has an @scope prelude the Canvas fallback cannot unscope."
+    );
+  }
+  const nested = preludes
+    .map(
+      (prelude) =>
+        `:where(${prelude[1].trim()}){${scopeBody(style, prelude.index + prelude[0].length)}}`
+    )
+    .join("");
+  const fallback = transform(
+    nested.replace(/:scope\b/g, SCOPE_ROOT_SELECTOR)
+  ).trim();
+  if (/@scope\b|:scope\b/.test(fallback) || /(?:^|[{},\s])&/.test(fallback)) {
+    throw new Error("Canvas graph style fallback retained scoped selectors.");
+  }
+  return `${style}\n${fallback}`;
+}
+
 const runEsbuild: BrowserBuild = (options) => buildSync(options);
 
 function browserEntrySource(spec: BrowserEntrySpec): string {
@@ -352,33 +421,10 @@ function browserEntrySource(spec: BrowserEntrySpec): string {
   if (spec.name !== "graph") {
     return `${installer}\ninstall(globalThis);\n`;
   }
-  return `import * as react from "react";
-import { createRoot } from "react-dom/client";
-import ReactFlow, {
-  Background,
-  Controls,
-  Handle,
-  Position,
-  useEdgesState,
-  useNodesState
-} from "reactflow";
-import dagre from "dagre";
-import "reactflow/dist/style.css";
+  return `import { mountRadiusGraph } from "@radius-project/graph-react";
+import "@radius-project/graph-react/styles.css";
 ${installer}
-install(globalThis, {
-  react,
-  reactDom: { createRoot },
-  reactFlow: {
-    default: ReactFlow,
-    Background,
-    Controls,
-    Handle,
-    Position,
-    useEdgesState,
-    useNodesState
-  },
-  dagre
-});
+install(globalThis, mountRadiusGraph);
 `;
 }
 
@@ -469,7 +515,7 @@ export function compileBrowserEntrySpec(
   }
   return {
     script: code,
-    style: makeInlineStyleSafe(styleFiles[0]?.text ?? ""),
+    style: makeInlineStyleSafe(withScopeFallback(styleFiles[0]?.text ?? "")),
     inputs: Object.keys(output.metafile.inputs).map((input) =>
       resolve(BROWSER_SOURCE_DIR, input)
     )

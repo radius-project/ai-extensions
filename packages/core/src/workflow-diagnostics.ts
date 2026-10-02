@@ -2,6 +2,10 @@ import type {
   WorkflowRunDetail,
   WorkflowTarget
 } from "./workflow-observation.js";
+import { confirmedWorkflowConclusion } from "./workflow-observation.js";
+
+// Must match the step in .github/extension/actions/run-rad-commands/action.yml.
+export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 
 export interface WorkflowFailureReads {
   readLog(repo: string, runId: number | string): Promise<string | null>;
@@ -17,7 +21,8 @@ export interface WorkflowFailure {
 
 export async function collectWorkflowFailure(
   target: WorkflowTarget,
-  run: Pick<WorkflowRunDetail, "conclusion" | "steps">,
+  run: Pick<WorkflowRunDetail, "status" | "conclusion" | "steps"> &
+    Partial<Pick<WorkflowRunDetail, "jobs">>,
   context: Pick<
     DeployCloudAuthDriftInput,
     "provider" | "resourcesTouched" | "environmentPreviouslyVerified"
@@ -25,6 +30,16 @@ export async function collectWorkflowFailure(
   reads: WorkflowFailureReads
 ): Promise<WorkflowFailure> {
   const { conclusion, steps } = run;
+  const url =
+    "https://github.com/" + target.repo + "/actions/runs/" + target.runId;
+  if (!confirmedWorkflowConclusion(run)) {
+    return {
+      message: "Workflow outcome is unconfirmed. View the full run: " + url,
+      radiusError: "",
+      authDriftMessage: "",
+      narration: []
+    };
+  }
   const failedSteps = steps.filter(
     (step) =>
       step.conclusion &&
@@ -38,73 +53,87 @@ export async function collectWorkflowFailure(
         failedStepNames: failedSteps.map((step) => step.name)
       })
     : "";
-  const lead =
-    "Deployment failed" + (conclusion ? " (" + conclusion + ")" : "") + ".";
-  const url =
-    "https://github.com/" + target.repo + "/actions/runs/" + target.runId;
+  const lead = "Deployment failed (" + conclusion + ").";
   const narration: string[] = [];
   let message = lead;
-  let radiusError: string;
+  if (failedSteps.length) {
+    message +=
+      " Failed step: " + failedSteps.map((step) => step.name).join(", ") + ".";
+  }
+  let log: string | null = null;
+  const unavailable: string[] = [];
   try {
-    if (failedSteps.length) {
-      message +=
-        " Failed step: " +
-        failedSteps.map((step) => step.name).join(", ") +
-        ".";
-    }
-    const log = await reads.readLog(target.repo, target.runId);
-    const claimHelp = explainOidcEnterpriseClaim(
-      extractGitHubActionsStepLog(log, "Azure Login (OIDC)")
+    log = await reads.readLog(target.repo, target.runId);
+  } catch {
+    unavailable.push("The workflow log could not be read.");
+  }
+  const claimHelp = explainOidcEnterpriseClaim(
+    extractGitHubActionsStepLog(log, "Azure Login (OIDC)")
+  );
+  if (claimHelp)
+    message = claimHelp + "\n\n\u2014 raw error \u2014\n" + message;
+  const deploySteps = steps.filter(
+    (step) => step.name === DEPLOY_RAD_COMMANDS_STEP
+  );
+  const deployLog = extractGitHubActionsStepLog(log, DEPLOY_RAD_COMMANDS_STEP);
+  const logJobs = new Set(
+    deployLog.split("\n").map((line) => line.split("\t")[0])
+  );
+  const matchingJobs = run.jobs?.filter(
+    (job) => job.name && logJobs.has(job.name)
+  );
+  const primary =
+    (
+      deploySteps.length === 1 &&
+      deploySteps[0].conclusion === "failure" &&
+      logJobs.size === 1 &&
+      matchingJobs?.length === 1 &&
+      matchingJobs[0].steps?.some(
+        (step) =>
+          step.name === DEPLOY_RAD_COMMANDS_STEP &&
+          step.conclusion === "failure"
+      )
+    ) ?
+      extractRadDeployError(deployLog)
+    : "";
+  const detail = primary || extractRadDeployError(log);
+  if (detail) {
+    message += "\n\n" + detail;
+    narration.push(
+      "",
+      "──────── failure details ────────",
+      ...detail.split("\n").map((line) => "  " + line),
+      "─────────────────────────────────"
     );
-    if (claimHelp)
-      message = claimHelp + "\n\n\u2014 raw error \u2014\n" + message;
-    const detail = extractRadDeployError(log);
-    if (detail) {
-      message += "\n\n" + detail;
+  }
+  let controlPlaneLog: string | null = null;
+  try {
+    controlPlaneLog = await reads.readControlPlaneLog();
+  } catch {
+    unavailable.push("The control-plane log could not be read.");
+  }
+  if (controlPlaneLog) {
+    const tail = controlPlaneLog
+      .replace(/\s+$/, "")
+      .split("\n")
+      .slice(-40)
+      .join("\n");
+    if (tail.trim()) {
+      message += "\n\n— control-plane log —\n" + tail;
       narration.push(
         "",
-        "──────── failure details ────────",
-        ...detail.split("\n").map((line) => "  " + line),
-        "─────────────────────────────────"
+        "──────── control-plane log ────────",
+        ...tail.split("\n").map((line) => "  " + line),
+        "───────────────────────────────────"
       );
     }
-    let controlPlaneLog: string | null = null;
-    try {
-      controlPlaneLog = await reads.readControlPlaneLog();
-    } catch {
-      // Best-effort evidence must not mask the run's failure.
-    }
-    if (controlPlaneLog) {
-      const tail = controlPlaneLog
-        .replace(/\s+$/, "")
-        .split("\n")
-        .slice(-40)
-        .join("\n");
-      if (tail.trim()) {
-        message += "\n\n— control-plane log —\n" + tail;
-        narration.push(
-          "",
-          "──────── control-plane log ────────",
-          ...tail.split("\n").map((line) => "  " + line),
-          "───────────────────────────────────"
-        );
-      }
-    }
-    message += "\n\nView the full run: " + url;
-    radiusError = detail;
-  } catch {
-    return {
-      message:
-        lead +
-        " The failure details could not be read; see the full run: " +
-        url +
-        ".",
-      radiusError: "",
-      authDriftMessage,
-      narration: []
-    };
   }
-  return { message, radiusError, authDriftMessage, narration };
+  for (const note of unavailable) {
+    message += "\n\n" + note;
+    narration.push(note);
+  }
+  message += "\n\nView the full run: " + url;
+  return { message, radiusError: detail, authDriftMessage, narration };
 }
 
 export function extractErrorLines(logText?: string | null, max = 12): string[] {

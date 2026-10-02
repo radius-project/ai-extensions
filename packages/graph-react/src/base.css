@@ -1,0 +1,130 @@
+@import "./flow.css";
+
+/* Keep geometry and hit testing common; the skin is optional. */
+.radius-graph {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.radius-graph *,
+.radius-graph *::before,
+.radius-graph *::after {
+  box-sizing: border-box;
+}
+.radius-graph__viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.radius-graph .rad-node-shell,
+.radius-graph .rad-node {
+  position: relative;
+}
+.radius-graph .rad-node {
+  width: 220px;
+  min-height: 104px;
+  pointer-events: auto;
+}
+.radius-graph .rad-node__head {
+  display: flex;
+  align-items: center;
+}
+.radius-graph .rad-node__icon {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  object-fit: contain;
+}
+/* Monochrome (currentColor) icons are painted through a CSS mask so they follow
+   the host theme instead of always rendering black. The mask-image itself is
+   set inline per node. */
+.radius-graph .rad-node__icon--themed {
+  display: block;
+  background-color: var(--rad-text, currentColor);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+.radius-graph .rad-node__badge {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  width: 22px;
+  height: 22px;
+  pointer-events: none;
+}
+.radius-graph :where(.rad-node__title, .rad-node__type) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.radius-graph .rad-node__dots,
+.radius-graph .rad-node__source {
+  min-height: 24px;
+  pointer-events: auto;
+}
+.radius-graph .rad-node__dots {
+  min-width: 24px;
+}
+.radius-graph .react-flow__controls-button {
+  min-width: 24px;
+  min-height: 24px;
+}
+.radius-graph .react-flow__node-rad {
+  background: transparent;
+  border: none;
+  padding: 0;
+  width: auto;
+}
+.radius-graph .react-flow,
+.radius-graph .react-flow__renderer,
+.radius-graph .react-flow__pane {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+.radius-graph .react-flow__handle.rad-handle {
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  background: transparent;
+  border: none;
+  opacity: 0;
+  pointer-events: none;
+}
+/* React Flow v12 centres handles on the card border; v11 set them 4px outside
+   it, which leaves the established gap between an edge and its cards. */
+.radius-graph .react-flow__handle.rad-handle.react-flow__handle-top {
+  top: -4px;
+  transform: translate(-50%, 0);
+}
+.radius-graph .react-flow__handle.rad-handle.react-flow__handle-bottom {
+  bottom: -4px;
+  transform: translate(-50%, 0);
+}
+.radius-graph [data-radius-part="details"] {
+  position: absolute;
+  z-index: 1000;
+  min-width: 220px;
+  max-width: 380px;
+}
+.radius-graph [data-radius-part="details-icon"] {
+  flex: none;
+}
+.radius-graph :where(.radius-graph__edge .react-flow__edge-path) {
+  stroke: var(--radius-graph-edge-color, currentColor);
+  stroke-width: var(--radius-graph-edge-width, var(--rad-edge-default-width));
+  stroke-dasharray: var(--rad-edge-default-dash);
+}
+.radius-graph [data-radius-part="legend-icon"] {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  vertical-align: middle;
+}

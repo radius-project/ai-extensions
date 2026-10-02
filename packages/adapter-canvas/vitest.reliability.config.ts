@@ -4,6 +4,11 @@ export default defineConfig({
   test: {
     include: [
       "src/deploy-artifacts.test.ts",
+      "../core/src/deploy-artifact-evidence.test.ts",
+      "../adapter-shared/src/workflow-artifacts*.test.ts",
+      "../adapter-shared/src/workflow-read*.test.ts",
+      "../adapter-shared/src/workflow-run-response.test.ts",
+      "../adapter-shared/src/workflow-observation.test.ts",
       "src/gh*.test.ts",
       "src/workspace.test.ts",
       "src/server/create-canvas-server.test.ts",
@@ -22,6 +27,16 @@ export default defineConfig({
       "test/integration/runtime/bicep-security-rules.test.ts"
     ],
     environment: "node",
-    testTimeout: 15_000
+    testTimeout: 15_000,
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "canvas-reliability"
+        }
+      },
+      "../graph-react/vitest.config.ts",
+      "../graph-react/vitest.component.config.ts"
+    ]
   }
 });

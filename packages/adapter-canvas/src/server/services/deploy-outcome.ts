@@ -1,5 +1,7 @@
 import {
   collectWorkflowFailure,
+  confirmedWorkflowConclusion,
+  type WorkflowRunDetail,
   type WorkflowStep
 } from "@radius-project/core";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
@@ -53,8 +55,10 @@ export interface DeployOutcomeRequest {
   runId: number | string;
   provider: string;
   resources: CanvasGraphResource[];
+  status: WorkflowRunDetail["status"];
   conclusion: string | null | undefined;
   steps: readonly DeployRunStep[];
+  jobs?: WorkflowRunDetail["jobs"];
   statusReader: DeployOutcomeStatusReader;
   // 0 when the rad-commands step was never observed running, which is also the
   // signal that no duration line should be logged.
@@ -109,7 +113,12 @@ export function createDeployOutcomeService(
     let deployed: unknown = null;
     let graphStatus: string | null = null;
     for (let g = 0; g < 3; g++) {
-      const gr = await statusReader.graph();
+      let gr: DeployGraphRead;
+      try {
+        gr = await statusReader.graph();
+      } catch {
+        return { deployed: null, graphStatus: "unavailable" };
+      }
       graphStatus = gr.status;
       // Permission failures will not resolve by retrying.
       if (gr.status === "auth") break;
@@ -142,6 +151,10 @@ export function createDeployOutcomeService(
         setStatus,
         pollDeployStatus
       } = request;
+
+      if (!confirmedWorkflowConclusion(request)) {
+        throw new Error("The workflow outcome could not be confirmed.");
+      }
 
       log("🗺  Retrieving deploy status and application graph…");
       const { deployed, graphStatus } = await readDeployedGraph(statusReader);
@@ -197,6 +210,10 @@ export function createDeployOutcomeService(
         log(
           "  ⚠ The deploy status artifact was found but could not be parsed. Continuing."
         );
+      } else if (graphStatus === "unavailable") {
+        log(
+          "  ⚠ The deploy status artifact could not be read. The workflow outcome is unchanged."
+        );
       } else {
         log(
           "  ⚠ Deployed graph not available (the deploy may not have published one)."
@@ -224,7 +241,12 @@ export function createDeployOutcomeService(
       // may immediately start a repair handoff using this error and graph.
       const failure = await collectWorkflowFailure(
         { repo, runId: request.runId },
-        { conclusion, steps: [...request.steps] },
+        {
+          status: request.status,
+          conclusion,
+          steps: [...request.steps],
+          jobs: request.jobs
+        },
         { provider, resourcesTouched: deployStepStartedAt > 0 },
         {
           readLog: dependencies.fetchRunLog,

@@ -1,7 +1,7 @@
 import { requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
 import { clearGraphProgress, createGraphProgress } from "../graph/progress.js";
-import { githubRepositoryUrl } from "../graph/model.js";
+import { githubRepositoryUrl } from "@radius-project/graph-react/presentation";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { readArray, readBoolean, readNumber, readString } from "../json.js";
 import {

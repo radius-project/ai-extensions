@@ -13,7 +13,7 @@ function dependencies(
     setSourceRefResources: () => true,
     fetchBicepSelection: () =>
       Promise.resolve({
-        content: "resource app 'Applications.Core/applications@2023' = {}",
+        content: "resource app 'Radius.Core/applications@2023' = {}",
         fromWorkspace: false,
         branch: "feat",
         bicepPath: ""

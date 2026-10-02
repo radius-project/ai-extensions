@@ -13,7 +13,16 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "createDeployStatusReader",
+  "confirmArtifactIdentity",
+  "deployStatusArtifactPrefix",
+  "isLiveSlotArtifactName",
+  "parseDeployGraphArtifact",
+  "parseDeployProgressArtifact",
+  "sanitizeArtifactSegment",
+  "selectDeployStatusArtifacts",
   "observeWorkflowRun",
+  "confirmedWorkflowConclusion",
   "collectWorkflowFailure",
   "extractErrorLines",
   "extractGitHubActionsStepLog",
@@ -62,6 +71,12 @@ const EXPECTED_FUNCTIONS = [
 ] as const;
 
 const EXPECTED_VALUES = [
+  "ARTIFACT_PAGE_SIZE",
+  "MAX_ARTIFACT_PAGES",
+  "DEPLOY_STATUS_FILES",
+  "DEPLOY_STATUS_ARTIFACT_PREFIX",
+  "DEPLOY_PROGRESS_SCHEMA_VERSION",
+  "MAX_ARTIFACT_CANDIDATES",
   "APP_ORIGIN_REPO_PATH",
   "APP_ORIGIN_ROOT_PATH",
   "RECIPE_PACK_REF",
@@ -79,6 +94,7 @@ const EXPECTED_VALUES = [
   "RADIUS_WORKFLOW_REPO",
   "RADIUS_WORKFLOW_DIR",
   "DEPLOY_DISPATCHER_FILE",
+  "DEPLOY_RAD_COMMANDS_STEP",
   "DEPLOY_AZURE_FILE",
   "DEPLOY_AWS_FILE",
   "DEFAULT_STATE_ARCHIVE",

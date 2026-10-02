@@ -1,7 +1,10 @@
 import { optionalBrowserFunction, requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
 import { createGraphProgress } from "../graph/progress.js";
-import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
+import {
+  githubRepositoryUrl,
+  parseGraphResources
+} from "@radius-project/graph-react/presentation";
 import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
 import { deletionInventoryResources } from "../deletion-inventory.js";
 import {

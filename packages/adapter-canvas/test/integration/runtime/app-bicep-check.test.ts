@@ -19,7 +19,7 @@ import {
 import {
   githubSourceReferenceUrl,
   srcPathFromRef
-} from "../../../src/browser/graph/model.js";
+} from "@radius-project/graph-react/presentation";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),

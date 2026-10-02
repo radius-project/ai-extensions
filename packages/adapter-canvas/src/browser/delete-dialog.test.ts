@@ -168,7 +168,7 @@ describe("delete dialog resource list", () => {
   const named = (count: number): { name: string; type: string }[] =>
     Array.from({ length: count }, (_, index) => ({
       name: `resource-${index + 1}`,
-      type: "Applications.Core/containers"
+      type: "Radius.Compute/containers"
     }));
 
   it("keeps the existing sentence and renders no list without resources", () => {
@@ -200,7 +200,7 @@ describe("delete dialog resource list", () => {
       app: "store",
       environment: "prod",
       resources: [
-        { name: "frontend", type: "Applications.Core/containers" },
+        { name: "frontend", type: "Radius.Compute/containers" },
         { name: "cart", displayType: "Redis cache", type: "Radius.Data/redis" }
       ]
     });
@@ -213,7 +213,7 @@ describe("delete dialog resource list", () => {
       "aria-label": "Resources to be deleted"
     });
     expect(resourceItems(specs)).toEqual([
-      ["frontend", "Applications.Core/containers"],
+      ["frontend", "Radius.Compute/containers"],
       ["cart", "Redis cache"]
     ]);
     expect(specs[specs.length - 1].id).toBe(DELETE_DIALOG_STEP2_BUTTON_ID);
@@ -272,7 +272,7 @@ describe("delete dialog resource list", () => {
         { name: "frontend" },
         { name: "   " },
         { name: 42 },
-        { type: "Applications.Core/containers" },
+        { type: "Radius.Compute/containers" },
         null,
         "cart",
         { name: "  worker  " }
@@ -337,7 +337,7 @@ describe("delete dialog resource list", () => {
       {
         app: "store",
         environment: "prod",
-        resources: [{ name: "frontend", type: "Applications.Core/containers" }]
+        resources: [{ name: "frontend", type: "Radius.Compute/containers" }]
       },
       "abandon"
     );
@@ -377,7 +377,7 @@ describe("delete deployment dialog", () => {
       onConfirm: (app, environment) => confirmed.push([app, environment])
     });
     dialog?.open("store", "prod", [
-      { name: "frontend", type: "Applications.Core/containers" },
+      { name: "frontend", type: "Radius.Compute/containers" },
       ...Array.from({ length: DELETE_DIALOG_RESOURCE_LIMIT }, (_, index) => ({
         name: `extra-${index}`
       }))
@@ -393,7 +393,7 @@ describe("delete deployment dialog", () => {
         .filter((element) => element.className === "rad-ddlg__resource")
         .map(fakeText)
     ).toEqual([
-      "frontendApplications.Core/containers",
+      "frontendRadius.Compute/containers",
       ...Array.from(
         { length: DELETE_DIALOG_RESOURCE_LIMIT - 1 },
         (_, index) => `extra-${index}`

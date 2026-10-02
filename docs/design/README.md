@@ -35,10 +35,17 @@ The [`radius-design-doc`](../../.github/skills/radius-design-doc/SKILL.md) skill
 - Implementation begins only after the design is approved and merged.
 - If the design changes materially during implementation, open a follow-up pull request that updates the doc.
 
+## Status
+
+A design doc on `main` is approved: merging the pull request is the approval. Do not add a `Draft`, `In review`, or `Approved` status. The pull request that would need to change it is the one that merges the doc, so it is never current.
+
+- A later pull request may add `- **Status**: Implemented` or `- **Status**: Superseded by [<doc>](./<doc>.md)`, because a later change is what makes either one true.
+- Do not describe the review state of other pull requests or issues, such as "draft", "in review", "still open", or "pending". That changes without a commit to the doc, so it goes stale. Write only what stays true once the doc merges, for example "Stage 1C adds shared transport ([#916](https://github.com/radius-project/ai-extensions/pull/916))".
+- Track live progress of a multi-PR effort in a GitHub tracking issue with sub-issues or a task list, which GitHub keeps current. Link that issue from the doc instead of copying its state.
+
 ## Naming convention
 
-| Item          | Convention                                     |
-|---------------|------------------------------------------------|
-| Design doc    | `YYYY-MM-short-name.md`                        |
-| Doc assets    | `YYYY-MM-short-name/` (same name, no `.md`)    |
-| Status values | `Draft`, `In review`, `Approved`, `Superseded` |
+| Item       | Convention                                  |
+|------------|---------------------------------------------|
+| Design doc | `YYYY-MM-short-name.md`                     |
+| Doc assets | `YYYY-MM-short-name/` (same name, no `.md`) |

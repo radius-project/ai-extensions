@@ -18,7 +18,8 @@ import {
   type CanvasHarness,
   type FakeCliCommand
 } from "./support/canvas-harness.js";
-import type { Locator, Page } from "@playwright/test";
+import type { Locator, Page, TestInfo } from "@playwright/test";
+import { collectWorkflowFailure } from "@radius-project/core";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
@@ -29,10 +30,12 @@ import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
 import {
   ARTIFACT_PAGE_SIZE,
+  DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
 } from "../../src/deploy-artifacts.js";
-import type { CanvasGraphResource } from "../../src/shared.js";
+import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
+import { createUnconfirmedMonitor } from "../support/server/unconfirmed-monitor.js";
 import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 import {
   DEPLOYED_GRAPH_STATE_ID,
@@ -58,6 +61,23 @@ const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
 const DIFF_BASE_BRANCH = "main";
+
+async function captureDeployEvidence(
+  page: Page,
+  testInfo: TestInfo,
+  name: string
+): Promise<void> {
+  const screenshotPath = testInfo.outputPath(name + ".png");
+  await page.screenshot({
+    path: screenshotPath,
+    fullPage: true,
+    animations: "disabled"
+  });
+  await testInfo.attach(name, {
+    path: screenshotPath,
+    contentType: "image/png"
+  });
+}
 
 async function stubPageStateGraphRequests(page: Page): Promise<void> {
   await page.route("**/api/discover-branches", async (route) => {
@@ -270,7 +290,7 @@ async function seed(canvas: CanvasHarness): Promise<void> {
     [
       "extension radius",
       "",
-      "resource app 'Applications.Core/applications@2023-10-01-preview' = {",
+      "resource app 'Radius.Core/applications@2023-10-01-preview' = {",
       "  name: 'radius-app'",
       "}"
     ].join("\n"),
@@ -288,6 +308,47 @@ async function gotoCanvas(
   await page.goto(`${canvas.baseUrl}/?page=${canvasPage}`);
   await page.waitForLoadState("domcontentloaded");
 }
+
+// Simulates a WebView older than Safari 17.4, which drops every @scope block.
+function withoutScopedRules(html: string): string {
+  let unscoped = "";
+  let index = 0;
+  for (const match of html.matchAll(/@scope\b[^{]*\{/g)) {
+    if (match.index < index) continue;
+    let end = match.index + match[0].length;
+    for (let depth = 1; depth > 0; end++) {
+      if (end >= html.length) throw new Error("Unterminated @scope block");
+      if (html[end] === "{") depth++;
+      else if (html[end] === "}") depth--;
+    }
+    unscoped += html.slice(index, match.index);
+    index = end;
+  }
+  return unscoped + html.slice(index);
+}
+
+const GRAPH_STYLE_SAMPLE = `(() => {
+  const properties = [
+    "display", "position", "z-index", "box-sizing", "width", "color",
+    "background-color", "border-top-style", "border-top-width",
+    "border-top-color", "border-top-left-radius", "padding-top", "font-size",
+    "font-weight", "white-space", "stroke", "stroke-width", "cursor"
+  ];
+  const selectors = [
+    ".radius-graph", ".react-flow", ".react-flow__renderer",
+    ".react-flow__pane", ".react-flow__node", ".rad-node",
+    ".rad-node__title", ".rad-node__type", ".react-flow__edge-path",
+    ".react-flow__controls-button"
+  ];
+  return Object.fromEntries(selectors.map((selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return [selector, null];
+    const style = getComputedStyle(element);
+    return [selector, Object.fromEntries(
+      properties.map((name) => [name, style.getPropertyValue(name)])
+    )];
+  }));
+})()`;
 
 async function expectNoWcagViolations(page: Page): Promise<void> {
   const results = await new AxeBuilder({ page })
@@ -863,7 +924,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await details.focus();
     await page.keyboard.press("Enter");
 
-    const panel = page.locator("#node-popup");
+    const panel = page.locator("[data-radius-details]");
     await expect(panel).toContainText("Concrete type");
     await expect(panel).toContainText(
       "Microsoft.ContainerService/managedClusters@2024-01-01"
@@ -900,9 +961,42 @@ test.describe("Radius Canvas in Chromium", () => {
       "Microsoft.DBforPostgreSQL/flexibleServers"
     );
     await postgres.getByRole("button", { name: "Show details" }).click();
-    await expect(page.locator("#node-popup")).toContainText(
+    await expect(page.locator("[data-radius-details]")).toContainText(
       "Microsoft.DBforPostgreSQL/flexibleServers"
     );
+  });
+
+  test("styles the graph identically in a WebView without @scope support", async ({
+    page,
+    canvas
+  }) => {
+    const sampleGraphStyles = async (): Promise<unknown> => {
+      await expect(page.locator(".rad-node")).toHaveCount(3);
+      await expect(page.locator(".react-flow__edge-path")).not.toHaveCount(0);
+      return page.evaluate(GRAPH_STYLE_SAMPLE);
+    };
+    await gotoCanvas(page, canvas, "graph");
+    const scoped = await sampleGraphStyles();
+
+    let served = "";
+    await page.route(/\/\?page=graph$/, async (route) => {
+      const response = await route.fetch();
+      served = withoutScopedRules(await response.text());
+      await route.fulfill({ response, body: served });
+    });
+    await page.reload();
+    await page.waitForLoadState("domcontentloaded");
+    const unscoped = await sampleGraphStyles();
+
+    expect(served).not.toContain("@scope");
+    expect(served).toContain(":where(.radius-graph) .react-flow");
+    expect(unscoped).toEqual(scoped);
+    // Scoped React Flow and theme rules still apply without @scope.
+    expect(unscoped).toMatchObject({
+      ".react-flow__renderer": { "z-index": "4" },
+      ".rad-node": { "border-top-style": "solid", cursor: "pointer" },
+      ".rad-node__title": { "font-weight": "600", "white-space": "nowrap" }
+    });
   });
 
   test("keeps the document canvas dark while navigating between top-level panes", async ({
@@ -1086,7 +1180,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.selectOption("#graph-branch", WORKTREE_BRANCH);
     await expect(page.locator(".rad-node")).toHaveCount(3);
 
-    const panel = page.locator("#node-popup");
+    const panel = page.locator("[data-radius-details]");
     await expect(panel).toBeHidden();
 
     const webCard = page
@@ -1123,7 +1217,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.selectOption("#graph-branch", WORKTREE_BRANCH);
     await expect(page.locator(".rad-node")).toHaveCount(3);
 
-    const panel = page.locator("#node-popup");
+    const panel = page.locator("[data-radius-details]");
     await expect(panel).toBeHidden();
 
     const title = page
@@ -2813,157 +2907,195 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBeLessThanOrEqual(4);
   });
 
-  test("retries verification through the selected account and returned run URL @safety", async ({
-    page,
-    canvas
-  }) => {
-    const operationId = await canvas.seedRestartedVerificationFailure();
-    const exactCreatedAt = new Date().toISOString();
-    const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
-    const scenario = defaultFakeCliScenario();
-    scenario.commands.push(
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "list",
-          "--workflow=radius-verify-credentials.yml",
-          "--limit",
-          "1",
-          "--json",
-          "databaseId",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: '[{"databaseId":40}]'
-      },
-      {
-        tool: "gh",
-        args: [
-          "workflow",
-          "run",
-          "radius-verify-credentials.yml",
-          "-f",
-          "environment=fixture-environment",
-          "-f",
-          `radius_operation=${operationId}`,
-          "--repo",
-          REPOSITORY,
-          "--ref",
-          WORKTREE_BRANCH
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
-      },
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "list",
-          "--workflow=radius-verify-credentials.yml",
-          "--limit",
-          "10",
-          "--json",
-          "databaseId,createdAt,displayTitle,event,headBranch",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: JSON.stringify([
+  for (const jobsUnavailable of [false, true]) {
+    test(`retries verification through the selected account and returned run URL (jobs unavailable: ${jobsUnavailable}) @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const operationId = await canvas.seedRestartedVerificationFailure();
+      const exactCreatedAt = new Date().toISOString();
+      const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
+      const scenario = defaultFakeCliScenario();
+      scenario.commands.push(
+        {
+          tool: "gh",
+          args: [
+            "run",
+            "list",
+            "--workflow=radius-verify-credentials.yml",
+            "--limit",
+            "1",
+            "--json",
+            "databaseId",
+            "--repo",
+            REPOSITORY
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: '[{"databaseId":40}]'
+        },
+        {
+          tool: "gh",
+          args: [
+            "workflow",
+            "run",
+            "radius-verify-credentials.yml",
+            "-f",
+            "environment=fixture-environment",
+            "-f",
+            `radius_operation=${operationId}`,
+            "--repo",
+            REPOSITORY,
+            "--ref",
+            WORKTREE_BRANCH
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
+        },
+        {
+          tool: "gh",
+          args: [
+            "run",
+            "list",
+            "--workflow=radius-verify-credentials.yml",
+            "--limit",
+            "10",
+            "--json",
+            "databaseId,createdAt,displayTitle,event,headBranch",
+            "--repo",
+            REPOSITORY
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: JSON.stringify([
+            {
+              databaseId: 42,
+              createdAt: decoyCreatedAt,
+              displayTitle:
+                "Radius verify fixture-environment [another-operation]",
+              event: "workflow_dispatch",
+              headBranch: WORKTREE_BRANCH
+            },
+            {
+              databaseId: 41,
+              createdAt: exactCreatedAt,
+              displayTitle: `Radius verify fixture-environment [${operationId}]`,
+              event: "workflow_dispatch",
+              headBranch: WORKTREE_BRANCH
+            }
+          ])
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `repos/${REPOSITORY}/actions/runs/41`,
+            "--include",
+            "--method",
+            "GET"
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout:
+            "HTTP/2 200\n\n" +
+            JSON.stringify({
+              status: "completed",
+              conclusion: "success"
+            })
+        },
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `repos/${REPOSITORY}/actions/runs/41/jobs?per_page=100&page=1`,
+            "--include",
+            "--method",
+            "GET"
+          ],
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout:
+            jobsUnavailable ?
+              'HTTP/2.0 429 Too Many Requests\nRetry-After: 120\r\n\r\n{"message":"secondary rate limit"}'
+            : 'HTTP/2 200\n\n{"jobs":[],"total_count":0}',
+          exitCode: jobsUnavailable ? 1 : 0
+        }
+      );
+      await canvas.setScenario(scenario);
+      await gotoCanvas(page, canvas, "environment");
+
+      const retry = page.locator("#env-progress-command-retry-verification");
+      await expect(retry).toBeVisible();
+      await expect(retry).toHaveText("Retry verification");
+      await retry.click();
+
+      await expect
+        .poll(async () =>
+          (await canvas.cliCalls()).some(
+            (call) =>
+              call.tool === "gh" &&
+              call.args[0] === "workflow" &&
+              call.args.includes(`radius_operation=${operationId}`)
+          )
+        )
+        .toBe(true);
+      await expect
+        .poll(
+          async () => (await canvas.operationRecord(operationId))["state"],
           {
-            databaseId: 42,
-            createdAt: decoyCreatedAt,
-            displayTitle:
-              "Radius verify fixture-environment [another-operation]",
-            event: "workflow_dispatch",
-            headBranch: WORKTREE_BRANCH
-          },
-          {
-            databaseId: 41,
-            createdAt: exactCreatedAt,
-            displayTitle: `Radius verify fixture-environment [${operationId}]`,
-            event: "workflow_dispatch",
-            headBranch: WORKTREE_BRANCH
+            timeout: 15_000
           }
-        ])
-      },
-      {
-        tool: "gh",
-        args: [
-          "run",
-          "view",
-          "41",
-          "--json",
-          "status,conclusion,jobs",
-          "--repo",
-          REPOSITORY
-        ],
-        env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: JSON.stringify({
-          status: "completed",
-          conclusion: "success",
-          jobs: []
-        })
-      }
-    );
-    await canvas.setScenario(scenario);
-    await gotoCanvas(page, canvas, "environment");
+        )
+        .toBe("succeeded");
 
-    const retry = page.locator("#env-progress-command-retry-verification");
-    await expect(retry).toBeVisible();
-    await expect(retry).toHaveText("Retry verification");
-    await retry.click();
-
-    await expect
-      .poll(async () =>
-        (await canvas.cliCalls()).some(
+      const record = await canvas.operationRecord(operationId);
+      expect(record["verification"]).toMatchObject({
+        baselineRunId: 40,
+        runId: "41",
+        runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
+        operationMarker: operationId
+      });
+      expect(record["providerRecovery"]).toMatchObject({
+        mutations: [
+          expect.objectContaining({
+            kind: "github_workflow.dispatch_retry",
+            status: "confirmed",
+            providerIdempotencyKey: operationId
+          })
+        ]
+      });
+      expect(
+        (await canvas.cliCalls()).filter(
           (call) =>
             call.tool === "gh" &&
-            call.args[0] === "workflow" &&
-            call.args.includes(`radius_operation=${operationId}`)
+            call.args[0] === "run" &&
+            call.args.includes(
+              "databaseId,createdAt,displayTitle,event,headBranch"
+            )
         )
-      )
-      .toBe(true);
-    await expect
-      .poll(async () => (await canvas.operationRecord(operationId))["state"], {
-        timeout: 15_000
-      })
-      .toBe("succeeded");
-
-    const record = await canvas.operationRecord(operationId);
-    expect(record["verification"]).toMatchObject({
-      baselineRunId: 40,
-      runId: "41",
-      runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
-      operationMarker: operationId
+      ).toEqual([]);
+      await expect(page.locator("body")).toContainText("Environment created");
+      const calls = await canvas.cliCalls();
+      expect(
+        calls.filter(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "api" &&
+            call.args[1] === `repos/${REPOSITORY}/actions/runs/41`
+        )
+      ).toHaveLength(1);
+      expect(
+        calls.filter(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "api" &&
+            call.args[1] ===
+              `repos/${REPOSITORY}/actions/runs/41/jobs?per_page=100&page=1`
+        )
+      ).toHaveLength(1);
+      await page.locator("#env-progress-details > summary").click();
+      await expect(
+        page.getByRole("button", { name: "Download diagnostic snapshot" })
+      ).toBeHidden();
+      await expectNoWcagViolations(page);
     });
-    expect(record["providerRecovery"]).toMatchObject({
-      mutations: [
-        expect.objectContaining({
-          kind: "github_workflow.dispatch_retry",
-          status: "confirmed",
-          providerIdempotencyKey: operationId
-        })
-      ]
-    });
-    expect(
-      (await canvas.cliCalls()).filter(
-        (call) =>
-          call.tool === "gh" &&
-          call.args[0] === "run" &&
-          call.args.includes(
-            "databaseId,createdAt,displayTitle,event,headBranch"
-          )
-      )
-    ).toEqual([]);
-    await expect(page.locator("body")).toContainText("Environment created");
-    await page.locator("#env-progress-details > summary").click();
-    await expect(
-      page.getByRole("button", { name: "Download diagnostic snapshot" })
-    ).toBeHidden();
-    await expectNoWcagViolations(page);
-  });
+  }
 
   test("pauses an interrupted setup before offering exact-run cancellation and deletion by keyboard @safety", async ({
     page,
@@ -3515,7 +3647,7 @@ test.describe("Radius Canvas in Chromium", () => {
       { length: DELETE_DIALOG_RESOURCE_LIMIT + 3 },
       (_, index) => ({
         name: index === 0 ? hostileName : `reported-resource-${index}`,
-        type: "Applications.Core/containers"
+        type: "Radius.Compute/containers"
       })
     );
     await page.route("**/api/deployed-graph**", async (route) => {
@@ -3563,7 +3695,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(list.locator("img")).toHaveCount(0);
     await expect(list).not.toContainText("never-deployed");
     await expect(list).toContainText("+3 more");
-    await expect(list).toContainText("Applications.Core/containers");
+    await expect(list).toContainText("Radius.Compute/containers");
     const next = dialog.getByRole("button", {
       name: /have read and understand/i
     });
@@ -3696,96 +3828,145 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeVisible();
   });
 
-  test("shows retained timeout details through the real graph route in Chromium @safety", async ({
-    page,
-    canvas
-  }) => {
-    await page.clock.install();
-    const resources: CanvasGraphResource[] = [
-      {
-        id: "app/web",
-        name: "web",
-        type: "Radius.Compute/containers",
-        codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
-        deployStatus: "in_progress"
-      },
-      {
-        id: "app/db",
-        name: "db",
-        type: "Radius.Data/sqlDatabases",
-        codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
-        deployStatus: "success"
-      }
-    ];
-    const topology = resources.map(({ id, name, type, codeReference }) => ({
-      id,
-      name,
-      type,
-      codeReference
-    }));
-    settleDeployStatuses(resources, "monitor_timed_out");
-    await canvas.seedState({
-      ...baseCanvasState(canvas.workspacePath),
-      graphResources: topology,
-      deployingResources: resources,
-      deployStatus: "failed",
-      deployErrorKind: "run-unconfirmed",
-      deployRunId: 7,
-      deployEnvName: "fixture-environment",
-      deployAppName: "radius-app"
-    });
-    const scenario = defaultFakeCliScenario();
-    await canvas.setScenario({
-      ...scenario,
-      commands: [
-        ...scenario.commands,
-        {
-          tool: "gh",
-          args: [
-            "api",
-            `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
-          ],
-          stdout: JSON.stringify({ artifacts: [] })
+  for (const completed of [false, true]) {
+    for (const evidence of ["missing", "malformed", "auth"] as const) {
+      test(`shows retained ${completed ? "unconfirmed completion" : "timeout"} details despite ${evidence} artifacts through the real graph route in Chromium @safety`, async ({
+        page,
+        canvas
+      }, testInfo) => {
+        await page.clock.install();
+        const resources: CanvasGraphResource[] = [
+          {
+            id: "app/web",
+            name: "web",
+            type: "Radius.Compute/containers",
+            codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+            deployStatus: "in_progress"
+          },
+          {
+            id: "app/db",
+            name: "db",
+            type: "Radius.Data/sqlDatabases",
+            codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+            deployStatus: "success"
+          }
+        ];
+        const topology = resources.map(({ id, name, type, codeReference }) => ({
+          id,
+          name,
+          type,
+          codeReference
+        }));
+        const monitorState: CanvasState = {};
+        if (completed) {
+          await createUnconfirmedMonitor("future_conclusion").monitor.run({
+            entry: { state: monitorState },
+            repo: REPOSITORY,
+            branch: WORKTREE_BRANCH,
+            provider: "azure",
+            requestedEnvironment: "fixture-environment",
+            resources,
+            log: () => {}
+          });
+        } else {
+          settleDeployStatuses(resources, "monitor_timed_out");
         }
-      ]
-    });
-    await routeDeployedPage(page, () => "failed");
-    await page.unroute("**/api/deployed-graph**");
-    let graphRequests = 0;
-    page.on("request", (request) => {
-      if (new URL(request.url()).pathname === "/api/deployed-graph") {
-        graphRequests++;
-      }
-    });
+        await canvas.seedState({
+          ...baseCanvasState(canvas.workspacePath),
+          ...monitorState,
+          graphResources: topology,
+          deployingResources: resources,
+          deployStatus: "failed",
+          deployErrorKind: "run-unconfirmed",
+          deployRunId: completed ? monitorState.deployRunId : 7,
+          deployEnvName: "fixture-environment",
+          deployAppName: "radius-app"
+        });
+        const scenario = defaultFakeCliScenario();
+        await canvas.setScenario({
+          ...scenario,
+          commands: [
+            ...scenario.commands,
+            {
+              tool: "gh",
+              args: [
+                "api",
+                `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`,
+                "--include",
+                "--method",
+                "GET"
+              ],
+              stdout:
+                `HTTP/2 ${evidence === "auth" ? 403 : 200}\n\n` +
+                (evidence === "malformed" ?
+                  '{"message":"not a listing"}'
+                : JSON.stringify({ artifacts: [] })),
+              exitCode: evidence === "auth" ? 1 : 0,
+              stderr: evidence === "auth" ? "HTTP 403 Forbidden" : ""
+            }
+          ]
+        });
+        await routeDeployedPage(page, () => "failed");
+        await page.unroute("**/api/deployed-graph**");
+        let graphRequests = 0;
+        page.on("request", (request) => {
+          if (new URL(request.url()).pathname === "/api/deployed-graph") {
+            graphRequests++;
+          }
+        });
 
-    await gotoCanvas(page, canvas, "deployed");
+        await gotoCanvas(page, canvas, "deployed");
 
-    await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(1);
-    await expect(page.getByAltText("Deployed", { exact: true })).toHaveCount(1);
-    await expect(page.getByAltText("In progress", { exact: true })).toHaveCount(
-      0
-    );
-    const details = page
-      .locator(".rad-node")
-      .filter({ hasText: "web" })
-      .getByRole("button", { name: "Show details" });
-    await details.focus();
-    await page.keyboard.press("Enter");
-    await expect(page.locator("#node-popup")).toContainText(
-      DEPLOY_MONITOR_TIMED_OUT_MESSAGE
-    );
-    const detailsAccessibility = await new AxeBuilder({ page })
-      .include("#node-popup")
-      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
-      .analyze();
-    expect(detailsAccessibility.violations).toEqual([]);
-    const requestsAfterSettlement = graphRequests;
-    await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS * 2);
-    expect(graphRequests).toBe(requestsAfterSettlement);
-    await expect(page.getByAltText("In progress", { exact: true })).toHaveCount(
-      0
-    );
-  });
+        await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(
+          1
+        );
+        await expect(
+          page.getByAltText("Deployed", { exact: true })
+        ).toHaveCount(1);
+        await expect(
+          page.getByAltText("In progress", { exact: true })
+        ).toHaveCount(0);
+        const details = page
+          .locator(".rad-node")
+          .filter({ hasText: "web" })
+          .getByRole("button", { name: "Show details" });
+        await details.focus();
+        await page.keyboard.press("Enter");
+        await expect(page.locator("[data-radius-details]")).toContainText(
+          completed ?
+            DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
+          : DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+        );
+        if (completed) {
+          await expect(page.locator("[data-radius-details]")).not.toContainText(
+            "may still be running"
+          );
+          await expect(page.locator("[data-radius-details]")).not.toContainText(
+            "Deployment failed"
+          );
+        }
+        const detailsAccessibility = await new AxeBuilder({ page })
+          .include("[data-radius-details]")
+          .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+          .analyze();
+        expect(detailsAccessibility.violations).toEqual([]);
+        if (completed) {
+          await expect(page.locator("[data-radius-details]")).toBeVisible();
+          await captureDeployEvidence(
+            page,
+            testInfo,
+            "unconfirmed-completion-resource-details"
+          );
+        }
+        const requestsAfterSettlement = graphRequests;
+        await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS * 2);
+        expect(graphRequests).toBe(requestsAfterSettlement);
+        await expect(
+          page.getByAltText("In progress", { exact: true })
+        ).toHaveCount(0);
+      });
+    }
+  }
 
   test("preserves graph zoom while a deployment refreshes in Chromium", async ({
     page,
@@ -4088,6 +4269,128 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(chip).toBeVisible();
     await expect(page.locator("#deploy-progress-modal")).toBeAttached();
   });
+
+  for (const evidence of [
+    "primary failure with unavailable diagnostics",
+    "unconfirmed completion",
+    "primary failure with unavailable workflow log"
+  ]) {
+    test(`preserves ${evidence} and keyboard dismissal @safety`, async ({
+      page,
+      canvas
+    }, testInfo) => {
+      const unconfirmed = evidence === "unconfirmed completion";
+      const workflowLogUnavailable =
+        evidence === "primary failure with unavailable workflow log";
+      const monitorState: CanvasState = {};
+      if (unconfirmed) {
+        await createUnconfirmedMonitor("future_conclusion").monitor.run({
+          entry: { state: monitorState },
+          repo: REPOSITORY,
+          branch: WORKTREE_BRANCH,
+          provider: "azure",
+          requestedEnvironment: "fixture-environment",
+          resources: [],
+          log: () => {}
+        });
+      }
+      let error =
+        unconfirmed ?
+          monitorState.deployError
+        : "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
+          "Error: recipe quota <img src=x>\n\nThe control-plane log could not be read.";
+      if (workflowLogUnavailable) {
+        const failure = await collectWorkflowFailure(
+          { repo: REPOSITORY, runId: 77 },
+          {
+            status: "completed",
+            conclusion: "failure",
+            steps: [{ name: "Run rad commands", conclusion: "failure" }]
+          },
+          { provider: "azure", resourcesTouched: true },
+          {
+            readLog: async () => {
+              throw new Error("fixture-private-log-read-error");
+            },
+            readControlPlaneLog: async () => null
+          }
+        );
+        error = failure.message;
+      }
+      if (typeof error !== "string")
+        throw new Error("Missing monitor diagnostic");
+      await page.route("**/api/deploy-status**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: "failed",
+            active: false,
+            error,
+            errorKind: unconfirmed ? monitorState.deployErrorKind : null,
+            deployRunUrl:
+              unconfirmed ?
+                monitorState.deployRunUrl
+              : `https://github.com/${REPOSITORY}/actions/runs/77`,
+            repairing: false,
+            handoff: { pending: false, state: "idle" },
+            attempt: { targetRepo: "", environment: "" }
+          })
+        });
+      });
+      await page.goto(
+        `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
+      );
+      await expect(page.locator("#deploy-progress-title")).toContainText(
+        "failed"
+      );
+      await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+        error
+      );
+      await expect(page.locator("#deploy-progress-subtitle img")).toHaveCount(
+        0
+      );
+      await expect(page.locator("#deploy-fail-repair-note")).toBeHidden();
+      await expect(page.locator("#deploy-progress-modal")).toBeVisible();
+      if (unconfirmed) {
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
+        );
+        await expect(
+          page.locator("#deploy-progress-subtitle")
+        ).not.toContainText("may still be running");
+      }
+      if (workflowLogUnavailable) {
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "Deployment failed (failure). Failed step: Run rad commands."
+        );
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "The workflow log could not be read."
+        );
+        await expect(
+          page.locator("#deploy-progress-subtitle")
+        ).not.toContainText("fixture-private-log-read-error");
+        await expect(
+          page.locator("#deploy-progress-subtitle")
+        ).not.toContainText("The control-plane log could not be read.");
+      }
+      await expectNoWcagViolations(page);
+      if (unconfirmed || workflowLogUnavailable) {
+        await captureDeployEvidence(
+          page,
+          testInfo,
+          unconfirmed ?
+            "unconfirmed-completion-dialog"
+          : "workflow-log-unavailable-dialog"
+        );
+      }
+      const back = page.locator("#deploy-fail-back");
+      await back.focus();
+      await expect(back).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#deploy-progress-modal")).toBeHidden();
+    });
+  }
 
   test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({
     page,

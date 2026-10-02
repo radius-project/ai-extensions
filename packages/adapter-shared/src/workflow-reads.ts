@@ -1,4 +1,13 @@
-import type { WorkflowRunRead } from "@radius-project/core";
+import type {
+  WorkflowReadEvidence,
+  WorkflowResponseMetadata,
+  WorkflowRunRead
+} from "@radius-project/core";
+import { readWorkflowApi } from "./workflow-read-response.js";
+import {
+  createWorkflowReadBudget,
+  isWorkflowReadLimitError
+} from "./workflow-read-budget.js";
 
 export interface WorkflowCommandResult {
   code: string | number;
@@ -9,9 +18,10 @@ export interface WorkflowCommandResult {
 export interface WorkflowReadOptions {
   timeout: number;
   maxBuffer?: number;
+  signal?: AbortSignal;
 }
 
-/** The runner enforces the supplied timeout and output-buffer limit. */
+/** The host runner enforces command bounds and redacts credentials in diagnostics. */
 export type WorkflowRunner = (
   args: string[],
   options: WorkflowReadOptions
@@ -29,7 +39,11 @@ export type WorkflowExecution =
   | { mode: "ambient"; run: WorkflowRunner }
   // Selected readers classify rejected authorization evidence through
   // executor.errorMessage; unexpected workflow-read rejections propagate.
-  | { mode: "selected"; executor: SelectedWorkflowExecutor };
+  | {
+      mode: "selected";
+      executor: SelectedWorkflowExecutor;
+      prepare?: () => Promise<void>;
+    };
 
 export class SelectedGhAuthorizationError extends Error {
   readonly login: string;
@@ -240,20 +254,265 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-async function workflowJson(
+export interface WorkflowRunResponse {
+  value: WorkflowRunRead | null;
+  completeness: "complete" | "status-only" | "unavailable";
+  reason?:
+    "read-failed" | "invalid-data" | "pagination" | "timeout" | "output-limit";
+  evidence: WorkflowReadEvidence[];
+}
+
+function nextJobsPage(
+  link: string | null,
+  endpoint: string,
+  repositoryId: unknown,
+  current: number
+): number | null {
+  if (link === null) return null;
+  const links = link.split(/,\s*(?=<)/);
+  const next = links.filter((part) => /;\s*rel="next"\s*$/.test(part));
+  if (next.length === 0) return null;
+  if (next.length !== 1) return -1;
+  const match = /^<([^>]+)>;\s*rel="next"\s*$/.exec(next[0]);
+  if (!match) return -1;
+  let url: URL;
+  try {
+    url = new URL(match[1]);
+  } catch {
+    return -1;
+  }
+  const pathname = url.pathname.replace(/^\/api\/v3/, "");
+  const numericPath =
+    typeof repositoryId === "number" && Number.isSafeInteger(repositoryId) ?
+      `/${endpoint.replace(/^repos\/[^/]+\/[^/]+/, `repositories/${repositoryId}`)}`
+    : "";
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    (pathname !== `/${endpoint}` && pathname !== numericPath) ||
+    [...url.searchParams.keys()].some(
+      (key) => key !== "page" && key !== "per_page"
+    ) ||
+    url.searchParams.getAll("page").length !== 1 ||
+    url.searchParams.getAll("per_page").length !== 1 ||
+    url.searchParams.get("per_page") !== "100"
+  )
+    return -1;
+  const page = Number(url.searchParams.get("page"));
+  return Number.isSafeInteger(page) && page === current + 1 ? page : -1;
+}
+
+export async function readWorkflowRunWithMetadata(
   execution: WorkflowExecution,
   repo: string,
-  args: string[]
-): Promise<SelectedWorkflowJsonRead> {
-  if (execution.mode === "selected") {
-    return selectedWorkflowJson(execution.executor, repo, args);
+  runId: number | string
+): Promise<WorkflowRunResponse> {
+  if (
+    !/^[\w-]+\/[\w.-]+$/.test(repo) ||
+    repo.split("/").some((part) => part === "." || part === "..") ||
+    !/^[1-9]\d*$/.test(String(runId)) ||
+    !Number.isSafeInteger(Number(runId))
+  ) {
+    throw new Error("A repository and positive workflow run ID are required.");
   }
-  const result = await execution.run(args, { timeout: 15000 });
-  if (Number(result.code) !== 0) return { state: "fallback" };
+  const evidence: WorkflowReadEvidence[] = [];
+  let value: WorkflowRunRead | null = null;
+  const incomplete = (
+    reason: NonNullable<WorkflowRunResponse["reason"]>
+  ): WorkflowRunResponse => ({
+    value,
+    completeness: value ? "status-only" : "unavailable",
+    reason,
+    evidence
+  });
+  const run =
+    execution.mode === "ambient" ? execution.run : execution.executor.run;
+  let repositoryProbe: Promise<void> | undefined;
+  const probe = (executor: SelectedWorkflowExecutor): Promise<void> => {
+    repositoryProbe ??= (async () => {
+      try {
+        const result = await readWorkflowApi(
+          createWorkflowReadBudget(run),
+          `repos/${repo}`,
+          { timeout: 15000 }
+        );
+        evidence.push({ phase: "repository", response: result.metadata });
+        const status =
+          result.metadata.source === "gh-api-include" ?
+            (
+              result.metadata.classification === "authorization" ||
+              result.metadata.status === 404
+            ) ?
+              result.metadata.status
+            : null
+          : result.commandMissing ? 404
+          : result.commandAuthorizationStatus;
+        if (status === 401 || status === 403 || status === 404)
+          throw new SelectedGhAuthorizationError(
+            executor.login,
+            status,
+            result.diagnostic ?
+              executor.errorMessage(new Error(result.diagnostic))
+            : "Repository access could not be confirmed."
+          );
+      } catch (error) {
+        if (isSelectedGhAuthorizationError(error)) throw error;
+        const detail = executor.errorMessage(error);
+        const status = selectedFailureStatus("", detail);
+        if (
+          !isRateLimitFailure("", detail) &&
+          (status === 401 || status === 403 || status === 404)
+        )
+          throw new SelectedGhAuthorizationError(
+            executor.login,
+            status,
+            detail
+          );
+        evidence.push({
+          phase: "repository",
+          response: {
+            source: "unavailable",
+            reason:
+              isWorkflowReadLimitError(error) ?
+                error.reason
+              : "invalid-response"
+          }
+        });
+      }
+    })();
+    return repositoryProbe;
+  };
   try {
-    return { state: "value", value: JSON.parse(result.stdout.trim()) };
-  } catch {
-    return { state: "fallback" };
+    if (execution.mode === "selected") await execution.prepare?.();
+    const bounded = createWorkflowReadBudget(run);
+    const read = async (endpoint: string, phase: "run" | "jobs") => {
+      const response = await readWorkflowApi(bounded, endpoint, {
+        timeout: 15000
+      });
+      evidence.push({ phase, response: response.metadata });
+      if (execution.mode === "selected") {
+        const metadata = response.metadata;
+        if (
+          metadata.source === "gh-api-include" &&
+          metadata.classification === "authorization"
+        )
+          throw new SelectedGhAuthorizationError(
+            execution.executor.login,
+            metadata.status === 401 ? 401 : 403,
+            response.diagnostic ?
+              execution.executor.errorMessage(new Error(response.diagnostic))
+            : "Workflow state could not be read."
+          );
+        if (
+          metadata.source === "unavailable" &&
+          response.commandAuthorizationStatus !== null
+        )
+          throw new SelectedGhAuthorizationError(
+            execution.executor.login,
+            response.commandAuthorizationStatus,
+            execution.executor.errorMessage(new Error(response.diagnostic))
+          );
+        if (
+          (metadata.source === "gh-api-include" && metadata.status === 404) ||
+          (metadata.source === "unavailable" && response.commandMissing)
+        )
+          await probe(execution.executor);
+      }
+      return response;
+    };
+    const endpoint = `repos/${repo}/actions/runs/${runId}`;
+    const detail = await read(endpoint, "run");
+    if (!detail.ok) return incomplete("read-failed");
+    if (!isRecord(detail.value)) return incomplete("invalid-data");
+    const data = detail.value;
+    // gh's JSON exporter decodes nullable conclusions into Go strings.
+    value = {
+      data: {
+        status: data.status,
+        conclusion: data.conclusion === null ? "" : data.conclusion
+      },
+      includeJobs: false
+    };
+    const jobs: Record<string, unknown>[] = [];
+    let page = 1;
+    for (;;) {
+      const response = await read(
+        `${endpoint}/jobs?per_page=100&page=${page}`,
+        "jobs"
+      );
+      if (!response.ok) return incomplete("read-failed");
+      if (
+        !isRecord(response.value) ||
+        !Array.isArray(response.value.jobs) ||
+        response.value.jobs.length > 100 ||
+        typeof response.value.total_count !== "number" ||
+        !Number.isSafeInteger(response.value.total_count) ||
+        response.value.total_count < 0
+      )
+        return incomplete("invalid-data");
+      for (const job of response.value.jobs) {
+        if (!isRecord(job) || (job.steps != null && !Array.isArray(job.steps)))
+          return incomplete("invalid-data");
+        const steps: Record<string, unknown>[] = [];
+        for (const step of job.steps ?? []) {
+          if (!isRecord(step)) return incomplete("invalid-data");
+          steps.push({
+            name: step.name,
+            status: step.status,
+            conclusion: step.conclusion === null ? "" : step.conclusion
+          });
+        }
+        jobs.push({ name: job.name, steps });
+      }
+      const next = nextJobsPage(
+        response.nextLink,
+        `${endpoint}/jobs`,
+        isRecord(data.repository) ? data.repository.id : undefined,
+        page
+      );
+      if (next === null) {
+        if (jobs.length !== response.value.total_count)
+          return incomplete("pagination");
+        return {
+          value: { data: { ...value.data, jobs }, includeJobs: true },
+          completeness: "complete",
+          evidence
+        };
+      }
+      if (
+        next === -1 ||
+        page >= 100 ||
+        jobs.length >= response.value.total_count
+      )
+        return incomplete("pagination");
+      page = next;
+    }
+  } catch (error) {
+    if (isWorkflowReadLimitError(error)) {
+      evidence.push({
+        phase: value ? "jobs" : "run",
+        response: { source: "unavailable", reason: error.reason }
+      });
+      return incomplete(error.reason);
+    }
+    if (execution.mode === "selected") {
+      if (isSelectedGhAuthorizationError(error)) throw error;
+      if (
+        selectedFailureStatus("", execution.executor.errorMessage(error)) ===
+        404
+      ) {
+        await probe(execution.executor);
+        return incomplete("read-failed");
+      }
+      const authorization = rejectedSelectedAuthorizationError(
+        execution.executor,
+        error
+      );
+      if (authorization) throw authorization;
+    }
+    throw error;
   }
 }
 
@@ -262,34 +521,10 @@ export async function readWorkflowRun(
   repo: string,
   runId: number | string
 ): Promise<WorkflowRunRead | null> {
-  const args = [
-    "run",
-    "view",
-    String(runId),
-    "--json",
-    "status,conclusion,jobs",
-    "--repo",
-    repo
-  ];
-  const detail = await workflowJson(execution, repo, args);
-  if (detail.state === "missing") return null;
-  if (detail.state === "value" && isRecord(detail.value)) {
-    return { data: detail.value, includeJobs: true };
-  }
-  const status = await workflowJson(execution, repo, [
-    "run",
-    "view",
-    String(runId),
-    "--json",
-    "status,conclusion",
-    "--repo",
-    repo
-  ]);
-  if (status.state !== "value" || !isRecord(status.value)) return null;
-  return { data: status.value, includeJobs: false };
+  return (await readWorkflowRunWithMetadata(execution, repo, runId)).value;
 }
 
-export async function readWorkflowLog(
+async function readWorkflowLogValue(
   execution: WorkflowExecution,
   repo: string,
   runId: number | string
@@ -346,4 +581,23 @@ export async function readWorkflowLog(
     { timeout: 30000, maxBuffer: 1024 * 1024 * 20 }
   );
   return Number(result.code) !== 0 || !result.stdout ? null : result.stdout;
+}
+
+export async function readWorkflowLogWithMetadata(
+  execution: WorkflowExecution,
+  repo: string,
+  runId: number | string
+): Promise<{ value: string | null; metadata: WorkflowResponseMetadata }> {
+  return {
+    value: await readWorkflowLogValue(execution, repo, runId),
+    metadata: { source: "unavailable", reason: "opaque-command" }
+  };
+}
+
+export async function readWorkflowLog(
+  execution: WorkflowExecution,
+  repo: string,
+  runId: number | string
+): Promise<string | null> {
+  return (await readWorkflowLogWithMetadata(execution, repo, runId)).value;
 }

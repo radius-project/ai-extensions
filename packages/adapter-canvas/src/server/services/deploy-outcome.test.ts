@@ -8,6 +8,10 @@ import {
 } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import {
+  createWorkflowArtifactReader,
+  WorkflowArtifactReadError
+} from "@radius-project/adapter-shared";
+import {
   MAX_DEPLOY_MESSAGE_LENGTH,
   settleDeployStatuses
 } from "../../deploy-artifacts.js";
@@ -74,6 +78,7 @@ function outcomeRequest(overrides: Partial<DeployOutcomeRequest> = {}): {
     runId: 42,
     provider: "azure",
     resources: [],
+    status: "completed",
     conclusion: "success",
     steps: [],
     statusReader: statusReader(missingReads()),
@@ -117,6 +122,57 @@ describe("deploy outcome construction", () => {
 });
 
 describe("deploy outcome on success", () => {
+  it.each([
+    "secondary rate limit",
+    "Resource protected by organization SAML enforcement"
+  ])(
+    "retains the artifact 403 projection without activating graph retries: %s",
+    async (message) => {
+      let reads = 0;
+      const reader = createWorkflowArtifactReader(
+        { repo: "acme/widgets", runId: 42 },
+        async () => {
+          reads++;
+          return {
+            code: 1,
+            stderr: "",
+            stdout: `HTTP/2 403\n\n${JSON.stringify({ message })}`
+          };
+        }
+      );
+      const { request, state, logs } = outcomeRequest({ statusReader: reader });
+      const service = createDeployOutcomeService(
+        dependencies({
+          sleep: () => {
+            throw new Error("403 must not activate graph retries");
+          }
+        })
+      );
+      await service.settle(request);
+      expect(reads).toBe(1);
+      expect(state.deployStatus).toBe("complete");
+      expect(logs.join("\n")).toContain("access denied");
+      const evidence = await reader.read();
+      expect(evidence.status).toBe("auth");
+      expect(evidence.error).toBeInstanceOf(WorkflowArtifactReadError);
+      expect(evidence.error).toMatchObject({
+        code: "GH_ARTIFACT_AUTH",
+        evidence: [
+          {
+            response: {
+              source: "gh-api-include",
+              status: 403,
+              classification:
+                message === "secondary rate limit" ? "rate-limit" : (
+                  "authorization"
+                ),
+              retryAfter: { state: "absent" }
+            }
+          }
+        ]
+      });
+    }
+  );
   it("saves the published graph, settles the resources, and reports the provider", async () => {
     const resource: CanvasGraphResource = {
       id: "r1",
@@ -351,6 +407,51 @@ describe("deploy outcome on success", () => {
 });
 
 describe("deploy outcome on failure", () => {
+  it.each(["success", "failure", "cancelled", "timed_out"])(
+    "retains confirmed %s when graph retrieval throws without leaking the exception",
+    async (conclusion) => {
+      const resources: CanvasGraphResource[] = [
+        { name: "db", deployStatus: "pending" }
+      ];
+      const { request, state, logs, polls } = outcomeRequest({
+        conclusion,
+        resources,
+        steps: [{ name: "Run rad commands", conclusion }],
+        statusReader: {
+          graph: () =>
+            Promise.reject(new Error("fixture-private-transport-detail")),
+          controlPlaneLog: async () => null
+        }
+      });
+      const service = createDeployOutcomeService(
+        dependencies({
+          settleDeployStatuses,
+          fetchRunLog: async () => null,
+          sleep: () => {
+            throw new Error("unexpected retry");
+          }
+        })
+      );
+      await service.settle(request);
+      expect(state.deployStatus).toBe(
+        conclusion === "success" ? "complete" : "failed"
+      );
+      expect(state.deployErrorKind).toBeUndefined();
+      expect(resources[0].deployStatus).toBe(
+        conclusion === "success" ? "success" : "failed"
+      );
+      expect(polls).toEqual([true]);
+      expect(logs).toContain(
+        "  ⚠ The deploy status artifact could not be read. The workflow outcome is unchanged."
+      );
+      expect(JSON.stringify({ state, logs })).not.toContain("fixture-private");
+      if (conclusion !== "success")
+        expect(state.deployError).toContain(
+          `Deployment failed (${conclusion}).`
+        );
+    }
+  );
+
   it("builds the failure from the failed steps, the run log, and the control-plane log", async () => {
     const { request, logs, state } = outcomeRequest({
       conclusion: "failure",
@@ -459,8 +560,8 @@ describe("deploy outcome on failure", () => {
 
     expect(state.deployStatus).toBe("failed");
     expect(state.deployError).toBe(
-      "Deployment failed (failure). The failure details could not be read; " +
-        "see the full run: https://github.com/acme/widgets/actions/runs/42."
+      "Deployment failed (failure).\n\nThe workflow log could not be read.\n\n" +
+        "View the full run: https://github.com/acme/widgets/actions/runs/42"
     );
   });
 
@@ -506,8 +607,8 @@ describe("deploy outcome on failure", () => {
 
     expect(state.deployErrorKind).toBe("cloud-auth-drift");
     expect(state.deployError).toContain(
-      "Deployment failed (failure). The failure details could not be read; " +
-        "see the full run: https://github.com/acme/widgets/actions/runs/42."
+      "Deployment failed (failure). Failed step: Azure Login (OIDC).\n\nThe workflow log could not be read.\n\n" +
+        "View the full run: https://github.com/acme/widgets/actions/runs/42"
     );
     expect(state.deployError).toMatch(
       /^Cloud authentication or authorization failed/
@@ -556,33 +657,58 @@ describe("deploy outcome on failure", () => {
     expect(state.deployErrorKind).toBeUndefined();
   });
 
-  it("reports a conclusion-less failure without inventing one", async () => {
-    const { request, state } = outcomeRequest({ conclusion: null, steps: [] });
-    const service = createDeployOutcomeService(dependencies());
+  it.each(["in_progress", undefined])(
+    "refuses terminal settlement for observed status %j before reading or mutating state",
+    async (status) => {
+      const { request, state, logs, polls, statusCalls } = outcomeRequest({
+        status,
+        conclusion: "failure",
+        resources: [{ name: "db", deployStatus: "pending" }],
+        statusReader: {
+          graph: () => {
+            throw new Error("Unconfirmed workflow must not read the graph");
+          },
+          controlPlaneLog: () => {
+            throw new Error("Unconfirmed workflow must not read diagnostics");
+          }
+        }
+      });
+      const diagnosticReads: string[] = [];
+      const service = createDeployOutcomeService(
+        dependencies({
+          fetchRunLog: async () => {
+            diagnosticReads.push("workflow");
+            return "Error: unconfirmed";
+          }
+        })
+      );
+      await expect(service.settle(request)).rejects.toThrow(
+        "The workflow outcome could not be confirmed."
+      );
+      expect(state).toEqual({});
+      expect(request.resources).toEqual([
+        { name: "db", deployStatus: "pending" }
+      ]);
+      expect(logs).toEqual([]);
+      expect(polls).toEqual([]);
+      expect(statusCalls).toEqual([]);
+      expect(diagnosticReads).toEqual([]);
+    }
+  );
 
-    await service.settle(request);
+  it.each([null, undefined, "", "future_conclusion"])(
+    "refuses to settle an unconfirmed conclusion %j",
+    async (conclusion) => {
+      const { request, state } = outcomeRequest({ conclusion, steps: [] });
+      const service = createDeployOutcomeService(dependencies());
 
-    expect(state.deployError).toContain("Deployment failed.");
-    expect(state.deployError).not.toContain("Failed step:");
-  });
-
-  it("omits the conclusion from the degraded message when there was none", async () => {
-    // The catch-branch fallback must not print "(null)": a conclusion-less run
-    // that also fails its log read gets a degraded message with no parenthetical.
-    const { request, state } = outcomeRequest({ conclusion: null });
-    const service = createDeployOutcomeService(
-      dependencies({
-        fetchRunLog: () => Promise.reject(new Error("network down"))
-      })
-    );
-
-    await service.settle(request);
-
-    expect(state.deployError).toBe(
-      "Deployment failed. The failure details could not be read; " +
-        "see the full run: https://github.com/acme/widgets/actions/runs/42."
-    );
-  });
+      await expect(service.settle(request)).rejects.toThrow(
+        "The workflow outcome could not be confirmed."
+      );
+      expect(state.deployStatus).toBeUndefined();
+      expect(state.deployError).toBeUndefined();
+    }
+  );
 
   it("keeps the run-log details when the control-plane log cannot be read", async () => {
     const { request, state } = outcomeRequest({
@@ -600,7 +726,10 @@ describe("deploy outcome on failure", () => {
     await service.settle(request);
 
     expect(state.deployError).toContain("Error: { code: Boom }");
-    expect(state.deployError).not.toContain("control-plane log");
+    expect(state.deployError).toContain(
+      "The control-plane log could not be read."
+    );
+    expect(state.deployError).not.toContain("artifact expired");
   });
 
   it("ignores a control-plane log that is only whitespace", async () => {
@@ -722,9 +851,7 @@ describe("deploy outcome settles red nodes with an explanation (Exception 5.1)",
     await service.settle(request);
 
     expect(settled).toEqual([["failure", ""]]);
-    expect(state.deployError).toContain(
-      "The failure details could not be read"
-    );
+    expect(state.deployError).toContain("The workflow log could not be read");
   });
 
   it("settles the graph before the panel can observe a terminal failure", async () => {

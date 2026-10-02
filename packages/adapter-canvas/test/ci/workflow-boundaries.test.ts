@@ -218,6 +218,8 @@ describe("workflow package boundaries", () => {
     for (const entry of [
       "packages/core/src/workflow-observation.ts",
       "packages/core/src/workflow-diagnostics.ts",
+      "packages/core/src/deploy-artifact-evidence.ts",
+      "packages/adapter-shared/src/workflow-artifacts.ts",
       "packages/adapter-shared/src/workflow-reads.ts"
     ]) {
       expect(reachableFiles(files, entry)).toContain(entry);

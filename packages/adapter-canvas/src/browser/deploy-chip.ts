@@ -1,6 +1,6 @@
 import { beginEntry, NOOP_TEARDOWN } from "./lifecycle.js";
 import { isRecord, readBoolean, readNumber, readString } from "./json.js";
-import { safeExternalUrl } from "./external-url.js";
+import { safeExternalUrl } from "@radius-project/graph-react/presentation";
 import type { BrowserTeardown } from "./lifecycle.js";
 import type { BrowserContext, DomElement } from "./ports.js";
 

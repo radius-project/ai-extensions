@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   buildRemediation,
   computeGraphDiff,
+  DEPLOY_RAD_COMMANDS_STEP,
   deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
@@ -1970,10 +1971,9 @@ export function addGraphProgress(
 // artifact repo-wide, which is what a fresh canvas session with no run in flight
 // needs.
 //
-// The application name only breaks ties between artifacts in the same
-// environment; it is never a lookup key and never a hard filter. That is why the
-// ordinary `resolveRepoAppName` is good enough here even though it falls back to
-// the repository's short name: a wrong guess cannot hide a real artifact.
+// Repo-wide discovery permits a guessed application name as a tie-breaker.
+// An active run instead requires matching application and execution evidence;
+// another application's progress must not paint this deployment's graph.
 async function deployStatusReaderFromState(
   state: CanvasState,
   repo: string,
@@ -2924,15 +2924,7 @@ export function triggerDeployFailureNotice(
 const DEPLOY_WORKFLOW_FILE = "run-rad-commands.yml";
 const DELETE_WORKFLOW_FILE = "delete-application.yml";
 
-// Name of the step inside the run-rad-commands composite action that executes
-// the `rad` commands (and therefore `rad deploy`). The deploy monitor keys its
-// in-flight handling — start time, per-resource status polling, the "still
-// running" heartbeat — on finding a step with this exact name, so a mismatch
-// silently disables all of it. It is exported so a test can pin it.
-//
-// Do not guess at this value: it must match
-// radius-project/ai-extensions .github/extension/actions/run-rad-commands/action.yml.
-export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
+export { DEPLOY_RAD_COMMANDS_STEP } from "@radius-project/core";
 
 // ── POST /api/deploy composition root ────────────────────────────────────────
 // One complete dependency object per deploy service, each narrowed to the seams
