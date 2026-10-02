@@ -3946,6 +3946,17 @@ describe("provisioned username copies", () => {
       variables: undefined
     },
     {
+      name: "a consumer that reads the generated connection username",
+      resources: {
+        rabbitmq: rabbitMq("myadmin"),
+        web: radiusResource(containersType, {
+          connections: { rabbitmq: { source: "[reference('rabbitmq').id]" } },
+          containers: { web: { image: "example/web:latest" } }
+        })
+      },
+      variables: undefined
+    },
+    {
       name: "a consumer that has no provisioned username to repeat",
       resources: {
         rabbitmq: radiusResource(rabbitMqType, { queue: "orders" }),
