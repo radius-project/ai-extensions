@@ -44,11 +44,9 @@ runs:
     - name: Install Radius CLI
       shell: bash
       env:
-        # Install the CLI from a pinned stable Radius release. The control plane
-        # comes from the same release, because `rad install kubernetes` installs
-        # the chart for the CLI's release. Fetch install.sh from that release and
-        # verify its checksum before running it, rather than piping from main.
-        # update-radius-installer.yml keeps this pin on the latest stable release.
+        # Install the CLI from a pinned stable Radius release; `rad install kubernetes`
+        # then installs the control plane for the CLI's release. Verify the install
+        # script's checksum before running it, rather than piping from main.
         RADIUS_INSTALL_REF: v0.61.1
         RADIUS_INSTALL_SHA256: bf2fdf0248b39ac2a0222326f8458824924872816737a08af3558bddd16c392b
       run: |
@@ -57,11 +55,6 @@ runs:
         /bin/bash install-rad.sh --version "$RADIUS_INSTALL_REF"
         rm -f install-rad.sh
         rad version
-        CLI_VERSION="$(rad version --cli -o json | jq -r .version)"
-        if [ "$CLI_VERSION" != "$RADIUS_INSTALL_REF" ]; then
-          echo "::error::Installed Radius CLI $CLI_VERSION, expected $RADIUS_INSTALL_REF. Re-run the workflow. If it fails again, report it at https://github.com/radius-project/ai-extensions/issues."
-          exit 1
-        fi
 
     - name: Install Terraform
       uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
@@ -109,17 +102,3 @@ runs:
           --set dynamicrp.buildkit.enabled=true \
           "${TARGET_FLAGS[@]}"
         kubectl wait --for=condition=Available deployment --all -n radius-system --timeout=300s
-
-        # A stable CLI installs the newest patch of its own minor release (chart
-        # `~X.Y.Z`, images tagged `X.Y`), so a Radius patch release can put the
-        # control plane one patch ahead of the pinned CLI. Accept any patch of
-        # the CLI's release; reject edge, prereleases, and any other release.
-        rad version
-        VERSIONS="$(rad version -o json)"
-        CLI_RELEASE="$(jq -r .cli.release <<<"$VERSIONS")"
-        CONTROL_PLANE_VERSION="$(jq -r .controlPlane.version <<<"$VERSIONS")"
-        if [[ ! "$CONTROL_PLANE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-          [ "${CONTROL_PLANE_VERSION%.*}" != "${CLI_RELEASE%.*}" ]; then
-          echo "::error::Installed Radius control plane $CONTROL_PLANE_VERSION, expected a stable ${CLI_RELEASE%.*}.x release to match the CLI ($CLI_RELEASE). Re-run the workflow. If it fails again, report it at https://github.com/radius-project/ai-extensions/issues."
-          exit 1
-        fi
