@@ -1504,31 +1504,46 @@ export async function createCloudFixture(
             ports,
             timeoutMs: entraAppDeletionTimeoutMs,
             intervalMs: assertionPollIntervalMs,
-            probe: async () => {
-              const deletion = await commands.runAz([
-                "rest",
-                "--method",
-                "DELETE",
-                "--url",
-                applicationUrl,
-                "--output",
-                "none"
-              ]);
+            probe: async (remainingMs) => {
+              const deadline = ports.now().getTime() + remainingMs;
+              const deletion = await commands.runAz(
+                [
+                  "rest",
+                  "--method",
+                  "DELETE",
+                  "--url",
+                  applicationUrl,
+                  "--output",
+                  "none"
+                ],
+                remainingCommandTimeout(
+                  deadline,
+                  ports.now,
+                  `DELETE application ${app.objectId}`
+                )
+              );
               if (!isAzureResourceNotFound(deletion))
                 expectSuccess(
                   deletion,
                   `az rest DELETE application ${app.objectId}`
                 );
 
-              const lookup = await commands.runAz([
-                "rest",
-                "--method",
-                "GET",
-                "--url",
-                applicationUrl,
-                "--output",
-                "none"
-              ]);
+              const lookup = await commands.runAz(
+                [
+                  "rest",
+                  "--method",
+                  "GET",
+                  "--url",
+                  applicationUrl,
+                  "--output",
+                  "none"
+                ],
+                remainingCommandTimeout(
+                  deadline,
+                  ports.now,
+                  `GET application ${app.objectId}`
+                )
+              );
               if (isAzureResourceNotFound(lookup)) return true;
               expectSuccess(lookup, `az rest GET application ${app.objectId}`);
               return undefined;

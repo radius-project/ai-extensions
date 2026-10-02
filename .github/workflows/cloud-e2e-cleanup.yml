@@ -912,7 +912,7 @@ jobs:
                 sleep 5
                 continue
               fi
-              if grep -Eqi "does not exist|Request_ResourceNotFound|Directory_ObjectNotFound" "$lookup_error"; then
+              if grep -Eqi "Request_ResourceNotFound" "$lookup_error"; then
                 absent=1
                 break
               else

@@ -4414,6 +4414,47 @@ describe("createCloudFixture", () => {
       );
     });
 
+    it("shares the deletion deadline between the exact-object DELETE and GET", async () => {
+      let now = NOW;
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            }
+          },
+          {
+            tool: "az",
+            match: graphApplicationDelete("obj-1"),
+            respond: () => {
+              now = new Date(now.getTime() + 1_500);
+              return {};
+            }
+          },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: { code: 1, stderr: "Request_ResourceNotFound" }
+          }
+        ],
+        { readNow: () => now },
+        { entraAppDeletionTimeoutMs: 4_000 }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
+      );
+      expect(
+        fake.commands.calls
+          .filter((call) => call.tool === "az" && call.args[0] === "rest")
+          .map((call) => call.timeoutMs)
+      ).toEqual([4_000, 2_500]);
+    });
+
     it("fails when a service principal outlives the application it belonged to", async () => {
       const { fixture } = await createHarness(
         [
