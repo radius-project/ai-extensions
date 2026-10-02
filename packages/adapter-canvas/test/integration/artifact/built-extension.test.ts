@@ -922,6 +922,14 @@ describe("P0-C built Radius extension artifact", () => {
     expect(secretsGuidance).toMatch(
       /\|\s*`amqp\.connect\('amqp:\/\/guest:guest@' \+ host\)`\s*\|\s*3\s*\|\s*stop and report/u
     );
+    // A fixed literal on one consumer decides the resource's username, and a
+    // conflicting request or second literal stops the run.
+    expect(secretsGuidance).toContain(
+      "Stop and report the conflict when two consumers fix different literals, or when the user asks for a username that differs from a fixed literal."
+    );
+    expect(secretsGuidance).toContain(
+      "If a consumer cannot read that Secret, for example because its username is a fixed literal, stop and report it."
+    );
     // A shared username var must land in the same place with the same name
     // on every regeneration.
     expect(secretsGuidance).toContain(
