@@ -1,5 +1,7 @@
 import type { CanvasState } from "../../shared.js";
 import type { SelectedGhExecutor } from "../../gh.js";
+import type { WorkflowReadRequest } from "@radius-project/adapter-shared";
+import type { WorkflowObservationScope } from "../services/workflow-observation-scope.js";
 
 // Type surface for the `environments` route module (see `environments.ts`).
 // These are declarations only — erased at compile time — extracted so the
@@ -13,6 +15,7 @@ import type { SelectedGhExecutor } from "../../gh.js";
 // mutates the live `state.verifyRunId` in place.
 export interface EnvironmentsInstanceEntry {
   state?: CanvasState;
+  observation?: WorkflowObservationScope;
 }
 
 // The delete OperationRecord as this route sees it. Typed as broadly as
@@ -201,12 +204,14 @@ export interface EnvironmentsDependencies {
   getRunDetail(
     repo: string,
     runId: number | string,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    request?: WorkflowReadRequest
   ): Promise<EnvironmentRunDetail | null>;
   fetchRunLog(
     repo: string,
     runId: number | string,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    request?: WorkflowReadRequest
   ): Promise<string | null>;
   extractErrorLines(logText?: string | null, max?: number): string[];
   extractGitHubActionsStepLog(

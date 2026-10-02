@@ -1,4 +1,5 @@
 import { ChildProcess } from "node:child_process";
+import { createWorkflowReadSession } from "@radius-project/adapter-shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   explainNoSubscriptions,
@@ -24,6 +25,7 @@ describe("ambient workflow callback binding", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   const detailArgs = [
@@ -40,6 +42,40 @@ describe("ambient workflow callback binding", () => {
     "--method",
     "GET"
   ];
+
+  it("propagates jobs cancellation through the callback wrapper without losing the confirmed run", async () => {
+    const controller = new AbortController();
+    const onDecision = vi.fn();
+    vi.mocked(gh.cliExec).mockImplementation((_cmd, args, options, cb) => {
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      queueMicrotask(() => {
+        if (args[1].includes("/jobs")) controller.abort();
+        cb(
+          null,
+          'HTTP/2 200\n\n{"status":"completed","conclusion":"failure"}',
+          ""
+        );
+      });
+      return new ChildProcess();
+    });
+    await expect(
+      getRunDetail("contoso/store", 41, undefined, {
+        context: createWorkflowReadSession().observe(1000, controller.signal),
+        identity: "ambient",
+        onDecision
+      })
+    ).resolves.toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      jobs: []
+    });
+    expect(onDecision.mock.calls.map(([decision]) => decision)).toEqual([
+      { state: "ready" },
+      { state: "stopped", reason: "cancelled" }
+    ]);
+    expect(gh.cliExec).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(gh.cliExec).mock.calls[1][2].signal?.aborted).toBe(true);
+  });
 
   it("reads and normalizes ambient run details from callback stdout", async () => {
     const steps = [
@@ -76,7 +112,7 @@ describe("ambient workflow callback binding", () => {
     ]);
   });
 
-  it("preserves the known run when jobs fail without rereading the run", async () => {
+  it("preserves the known run without retrying jobs for a legacy caller", async () => {
     vi.mocked(gh.cliExec)
       .mockImplementationOnce((_cmd, _args, _opts, cb) => {
         queueMicrotask(() =>
@@ -88,7 +124,8 @@ describe("ambient workflow callback binding", () => {
         );
         return new ChildProcess();
       })
-      .mockImplementationOnce((_cmd, _args, _opts, cb) => {
+      .mockImplementation((_cmd, args, _opts, cb) => {
+        expect(args).toEqual(jobsArgs);
         queueMicrotask(() =>
           cb(new Error("jobs unavailable"), "HTTP/2 503\n\n{}", "")
         );
@@ -162,9 +199,17 @@ describe("ambient workflow callback binding", () => {
       expect(gh.cliExec).toHaveBeenCalledExactlyOnceWith(
         "gh",
         ["run", "view", "41", "--log", "--repo", "contoso/store"],
-        { timeout: 30000, maxBuffer: 20 * 1024 * 1024 },
+        {
+          timeout: expect.any(Number),
+          maxBuffer: 20 * 1024 * 1024,
+          signal: expect.any(AbortSignal)
+        },
         expect.any(Function)
       );
+      expect(vi.mocked(gh.cliExec).mock.calls[0][2].timeout).toBeGreaterThan(0);
+      expect(
+        vi.mocked(gh.cliExec).mock.calls[0][2].timeout
+      ).toBeLessThanOrEqual(30000);
     }
   );
 });

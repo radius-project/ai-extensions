@@ -1,7 +1,10 @@
 import type {
   WorkflowReadTiming,
-  WorkflowResponseMetadata
+  WorkflowResponseMetadata,
+  WorkflowReadContext,
+  WorkflowReadDecision
 } from "@radius-project/core";
+import { isSecondaryWorkflowRateLimitMessage } from "@radius-project/core";
 import type {
   WorkflowCommandResult,
   WorkflowReadOptions,
@@ -9,6 +12,7 @@ import type {
 } from "./workflow-reads.js";
 
 export interface WorkflowApiResponse {
+  decision?: WorkflowReadDecision;
   metadata: WorkflowResponseMetadata;
   value: unknown;
   nextLink: string | null;
@@ -18,6 +22,54 @@ export interface WorkflowApiResponse {
   commandAuthorizationStatus: 401 | 403 | null;
   commandMissing: boolean;
   diagnostic: string;
+}
+
+export async function readWorkflowApiWithPolicy(
+  run: WorkflowRunner,
+  endpoint: string,
+  options: WorkflowReadOptions,
+  context: WorkflowReadContext,
+  key: string,
+  phaseDeadline: number,
+  observe: (response: WorkflowApiResponse) => void = () => {}
+): Promise<WorkflowApiResponse & { decision: WorkflowReadDecision }> {
+  const result = await context.read(
+    key,
+    phaseDeadline,
+    async () => {
+      const response = await readWorkflowApi(
+        run,
+        endpoint,
+        options,
+        context.clock.wall
+      );
+      observe(response);
+      return response;
+    },
+    (response) => isSecondaryWorkflowRateLimitMessage(message(response.value))
+  );
+  if (result.response) return { ...result.response, decision: result.decision };
+  return {
+    ok: false,
+    metadata: {
+      source: "unavailable",
+      reason:
+        result.decision.state === "stopped" ? "cancelled"
+        : result.decision.reason === "elapsed" ? "timeout"
+        : "deferred"
+    },
+    value: null,
+    nextLink: null,
+    failure: "response",
+    commandAuthorizationFailure: false,
+    commandAuthorizationStatus: null,
+    commandMissing: false,
+    diagnostic:
+      result.decision.reason === "capacity" ?
+        "Automatic workflow reads are deferred because this observation already retains 32 protected retry restrictions."
+      : `Workflow read ${result.decision.state}: ${result.decision.reason}.`,
+    decision: result.decision
+  };
 }
 
 const absent: WorkflowReadTiming = { state: "absent" };
@@ -154,9 +206,8 @@ export function parseWorkflowApiResponse(
       (rateLimitRemaining === 0 ||
         retryAfter.state === "delay" ||
         retryAfter.state === "deadline" ||
-        /secondary rate limit|(?:API|primary) rate limit (?:exceeded|reached)/i.test(
-          detail
-        )));
+        isSecondaryWorkflowRateLimitMessage(message(value)) ||
+        /(?:API|primary) rate limit (?:exceeded|reached)/i.test(detail)));
   return {
     metadata: {
       source: "gh-api-include",

@@ -5,6 +5,7 @@ export default defineConfig({
     include: [
       "src/deploy-artifacts.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
+      "../core/src/workflow-read-policy.test.ts",
       "../adapter-shared/src/workflow-artifacts*.test.ts",
       "../adapter-shared/src/workflow-read*.test.ts",
       "../adapter-shared/src/workflow-run-response.test.ts",
@@ -13,6 +14,9 @@ export default defineConfig({
       "src/workspace.test.ts",
       "src/server/create-canvas-server.test.ts",
       "src/server/services/discovery.test.ts",
+      "src/server/services/workflow-observation-scope.test.ts",
+      "src/server/services/deploy-{monitor,outcome,request}.test.ts",
+      "test/integration/runtime/runtime-contracts.test.ts",
       "src/server/services/github-environment-variable-rollback.test.ts",
       "src/browser/{heartbeat,lifecycle,repositories}.test.ts",
       "src/browser/environment/**/*.test.ts",

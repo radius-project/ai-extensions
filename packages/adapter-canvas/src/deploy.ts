@@ -6,7 +6,8 @@ import {
   readWorkflowRun,
   readWorkflowLog,
   selectedWorkflowJson,
-  type WorkflowExecution
+  type WorkflowExecution,
+  type WorkflowReadRequest
 } from "@radius-project/adapter-shared";
 export {
   SelectedGhAuthorizationError,
@@ -268,13 +269,19 @@ export function selectWorkflowRunId(
 export function getRunDetail(
   repo: string,
   runId: number | string,
-  executor?: SelectedGhExecutor
+  executor?: SelectedGhExecutor,
+  request?: WorkflowReadRequest
 ): Promise<WorkflowRunDetail | null> {
   return observeWorkflowRun(
     { repo, runId },
     {
       readRun: (targetRepo, targetRunId) =>
-        readWorkflowRun(workflowExecution(executor), targetRepo, targetRunId)
+        readWorkflowRun(
+          workflowExecution(executor),
+          targetRepo,
+          targetRunId,
+          request
+        )
     }
   );
 }
@@ -282,9 +289,10 @@ export function getRunDetail(
 export function fetchRunLog(
   repo: string,
   runId: number | string,
-  executor?: SelectedGhExecutor
+  executor?: SelectedGhExecutor,
+  request?: WorkflowReadRequest
 ): Promise<string | null> {
-  return readWorkflowLog(workflowExecution(executor), repo, runId);
+  return readWorkflowLog(workflowExecution(executor), repo, runId, request);
 }
 
 // Detects the Azure Login (azure/login) "No subscriptions found" failure that

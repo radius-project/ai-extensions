@@ -6,6 +6,7 @@ import type {
   RequestHandlerFactoryInput
 } from "./ports.js";
 import { createCanvasServer } from "./create-canvas-server.js";
+import { createWorkflowObservationScope } from "./services/workflow-observation-scope.js";
 
 let nextPort = 41000;
 
@@ -88,6 +89,80 @@ function setup() {
 }
 
 describe("createCanvasServer (SU-02)", () => {
+  it.each(["stop", "stopAll"] as const)(
+    "%s cancels observation exactly once before pending socket cleanup completes",
+    async (method) => {
+      const { container, fakeServers, dependencies } = setup();
+      const entry = await container.getOrCreate("panel");
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("No reader expected");
+      });
+      entry.observation = scope;
+      const stopObservation = vi.spyOn(scope, "stop");
+      const stopped = vi.fn();
+      dependencies.onStopped = stopped;
+      let finishClosing: (() => void) | undefined;
+      fakeServers[0].close = (callback) => {
+        expect(stopObservation).toHaveBeenCalledTimes(1);
+        expect(scope.stopped).toBe(true);
+        finishClosing = callback;
+        fakeServers[0].closeCalls++;
+        return fakeServers[0];
+      };
+      const stop = () =>
+        method === "stop" ? container.stop("panel") : container.stopAll();
+
+      const first = stop();
+      const duplicate = stop();
+      expect(stopObservation).toHaveBeenCalledTimes(1);
+      expect(container.instances.size).toBe(0);
+      expect(stopped).not.toHaveBeenCalled();
+      let finished = false;
+      void first.then(() => {
+        finished = true;
+      });
+      await Promise.resolve();
+      expect(finished).toBe(false);
+      if (!finishClosing) throw new Error("Socket close was not requested");
+      finishClosing();
+      await Promise.all([first, duplicate]);
+      await stop();
+
+      expect(stopObservation).toHaveBeenCalledTimes(1);
+      expect(fakeServers[0].closeCalls).toBe(1);
+      expect(fakeServers[0].forceCalls).toBe(method === "stopAll" ? 1 : 0);
+      expect(stopped).toHaveBeenCalledExactlyOnceWith("panel");
+    }
+  );
+
+  it("cancels observation before forced socket cleanup rejects and does not stop it twice", async () => {
+    const { container, fakeServers, dependencies } = setup();
+    const entry = await container.getOrCreate("panel");
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("No reader expected");
+    });
+    entry.observation = scope;
+    const stopObservation = vi.spyOn(scope, "stop");
+    const stopped = vi.fn();
+    dependencies.onStopped = stopped;
+    fakeServers[0].closeAllConnections = () => {
+      expect(stopObservation).toHaveBeenCalledTimes(1);
+      expect(scope.stopped).toBe(true);
+      throw new Error("controlled socket cleanup failure");
+    };
+
+    await expect(container.stopAll()).rejects.toThrow(
+      "controlled socket cleanup failure"
+    );
+    await container.stop("panel");
+    await container.stopAll();
+
+    expect(stopObservation).toHaveBeenCalledTimes(1);
+    expect(container.instances.size).toBe(0);
+    expect(fakeServers[0].closeCalls).toBe(0);
+    expect(stopped).not.toHaveBeenCalled();
+  });
+
   it("creates isolated state, reuses one instance, and preserves its page by default", async () => {
     const { container, dependencies } = setup();
 

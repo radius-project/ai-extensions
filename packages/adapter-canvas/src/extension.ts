@@ -62,6 +62,7 @@ import {
 import {
   servers,
   getOrCreateServer,
+  stopServer,
   hasActiveEnvironmentTasks,
   markEnvironmentInstanceShuttingDown,
   onEnvironmentTasksSettled,
@@ -131,6 +132,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   servers,
   getOrCreateServer,
+  stopServer,
   getLastWebviewActivityAt,
   workspace: {
     hasRadiusApplicationModel,

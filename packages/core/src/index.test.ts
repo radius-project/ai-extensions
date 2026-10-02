@@ -13,6 +13,10 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "createWorkflowReadContext",
+  "createWorkflowReadCooldowns",
+  "isSecondaryWorkflowRateLimitMessage",
+  "WorkflowReadInterruptedError",
   "createDeployStatusReader",
   "confirmArtifactIdentity",
   "deployStatusArtifactPrefix",
@@ -71,6 +75,7 @@ const EXPECTED_FUNCTIONS = [
 ] as const;
 
 const EXPECTED_VALUES = [
+  "WORKFLOW_READ_LIMITS",
   "ARTIFACT_PAGE_SIZE",
   "MAX_ARTIFACT_PAGES",
   "DEPLOY_STATUS_FILES",
