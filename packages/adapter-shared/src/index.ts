@@ -67,6 +67,7 @@ export type {
 } from "./workflow-reads.js";
 export type {
   WorkflowRunResponse,
+  WorkflowRunReadOptions,
   WorkflowReadRequest
 } from "./workflow-reads.js";
 export {
