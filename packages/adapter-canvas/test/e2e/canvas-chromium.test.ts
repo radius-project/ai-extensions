@@ -18,7 +18,6 @@ import {
   type CanvasHarness,
   type FakeCliCommand
 } from "./support/canvas-harness.js";
-import { filterColorContrastNoise } from "./support/accessibility.js";
 import type { Locator, Page, TestInfo } from "@playwright/test";
 import { collectWorkflowFailure } from "@radius-project/core";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
@@ -351,12 +350,30 @@ const GRAPH_STYLE_SAMPLE = `(() => {
   }));
 })()`;
 
+// Buttons such as #plan-btn animate background-color (and opacity) over a
+// 0.15s CSS transition when they go from disabled to enabled, while their
+// text color switches instantly. Running axe mid-transition can sample any
+// background between the disabled gray and the final enabled color, so its
+// reported contrast ratio is not representative of the steady-state UI.
+// Waiting for every running CSSTransition/Animation to finish before
+// analyze() ensures axe always reads the final, stable colors.
+async function waitForTransitionsToSettle(page: Page): Promise<void> {
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .map((animation) => animation.finished.catch(() => undefined))
+    )
+  );
+}
+
 async function expectNoWcagViolations(page: Page): Promise<void> {
+  await waitForTransitionsToSettle(page);
   const results = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
   expect(
-    filterColorContrastNoise(results.violations).map((violation) => ({
+    results.violations.map((violation) => ({
       id: violation.id,
       targets: violation.nodes.map((node) => node.target.join(" "))
     }))
