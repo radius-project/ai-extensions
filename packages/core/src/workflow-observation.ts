@@ -1,3 +1,5 @@
+import type { WorkflowProtectionEvidence } from "./workflow-protection.js";
+
 export interface WorkflowStep {
   name?: string;
   status?: string;
@@ -10,6 +12,7 @@ export interface WorkflowJob {
 }
 
 export interface WorkflowRunDetail {
+  protection?: WorkflowProtectionEvidence;
   status?: string;
   conclusion?: string | null;
   jobs: WorkflowJob[];
@@ -17,6 +20,7 @@ export interface WorkflowRunDetail {
 }
 
 export interface WorkflowRunRead {
+  protection?: WorkflowProtectionEvidence;
   data: Record<string, unknown>;
   includeJobs: boolean;
 }
@@ -78,6 +82,7 @@ export async function observeWorkflowRun(
     }
   }
   return {
+    ...(read.protection ? { protection: read.protection } : {}),
     status: typeof data.status === "string" ? data.status : undefined,
     conclusion:
       typeof data.conclusion === "string" || data.conclusion === null ?
