@@ -44,7 +44,7 @@ const identity = {
   release: "v0.60.0",
   version: "v0.60.0",
   commit,
-  extension: "br:biceptypes.azurecr.io/radius:0.60"
+  extension: "br:ghcr.io/radius-project/bicep-types-radius:0.60"
 };
 const managedVersion = {
   release: identity.release,
@@ -265,10 +265,10 @@ describe("resource selection and release identity", () => {
 
   it("uses the shared canonical release policy", () => {
     expect(resolver.deriveExtensionReference("0.60.0")).toBe(
-      "br:biceptypes.azurecr.io/radius:0.60"
+      "br:ghcr.io/radius-project/bicep-types-radius:0.60"
     );
     expect(resolver.deriveExtensionReference("v0.61.0-rc.1")).toBe(
-      "br:biceptypes.azurecr.io/radius:0.61.0-rc.1"
+      "br:ghcr.io/radius-project/bicep-types-radius:0.61.0-rc.1"
     );
     expect(() => resolver.deriveExtensionReference("pr-720")).toThrow(
       /pull-request.*no Radius Bicep types.*published/iu
@@ -296,7 +296,7 @@ describe("resource selection and release identity", () => {
           commit
         })
       ).extension
-    ).toBe("br:biceptypes.azurecr.io/radius:0.61.0-rc.1");
+    ).toBe("br:ghcr.io/radius-project/bicep-types-radius:0.61.0-rc.1");
     expect(
       resolver.parseRadiusIdentity(
         JSON.stringify({
@@ -367,7 +367,7 @@ describe("resource selection and release identity", () => {
     );
   });
 
-  it("allows edge from an executable RADIUS_RAD_BINARY override and warns that latest is mutable", async () => {
+  it("allows edge from an executable RADIUS_RAD_BINARY override and warns that edge is mutable", async () => {
     const cacheRoot = temporaryDirectory();
     const warn = vi.fn();
     seedCache(cacheRoot);
@@ -388,9 +388,11 @@ describe("resource selection and release identity", () => {
       }
     );
 
-    expect(contract.extension).toBe("br:biceptypes.azurecr.io/radius:latest");
+    expect(contract.extension).toBe(
+      "br:ghcr.io/radius-project/bicep-types-radius:edge"
+    );
     expect(warn).toHaveBeenCalledWith(
-      expect.stringMatching(/mutable.*latest.*may not match.*binary/iu)
+      expect.stringMatching(/mutable.*:edge.*may not match.*binary/iu)
     );
   });
 
@@ -1616,8 +1618,10 @@ describe("command boundary", () => {
     fs.writeFileSync(managedBinary, binaryContents);
     if (process.platform !== "win32") fs.chmodSync(managedBinary, 0o755);
     const stagedConfig = JSON.stringify({
-      experimentalFeaturesEnabled: { extensibility: true },
-      extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
+      experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
+      extensions: {
+        radius: "br:ghcr.io/radius-project/bicep-types-radius:edge"
+      }
     });
     const stagedConfigPath = path.join(staging, "bicepconfig.json");
     fs.writeFileSync(stagedConfigPath, stagedConfig);
@@ -1966,7 +1970,7 @@ describe("command boundary", () => {
     expect(configured).toBe(identity.extension);
   });
 
-  it("routes an edge override warning while staging mutable latest", async () => {
+  it("routes an edge override warning while staging mutable edge", async () => {
     const staging = stagingDirectory();
     const cacheRoot = temporaryDirectory();
     const calls: string[] = [];
@@ -2017,7 +2021,7 @@ describe("command boundary", () => {
 
     expect(status).toBe(0);
     expect(stderr).toMatch(
-      /Warning:.*edge.*mutable.*latest.*may not match.*configured Radius binary/iu
+      /Warning:.*edge.*mutable.*:edge.*may not match.*configured Radius binary/iu
     );
     expect(runRadImpl).toHaveBeenCalledExactlyOnceWith(
       process.execPath,
@@ -2036,9 +2040,9 @@ describe("command boundary", () => {
       fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
     );
     expect(stagedConfig).toEqual({
-      experimentalFeaturesEnabled: { extensibility: true },
+      experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
       extensions: {
-        radius: "br:biceptypes.azurecr.io/radius:latest"
+        radius: "br:ghcr.io/radius-project/bicep-types-radius:edge"
       }
     });
     expect(calls).toEqual(
@@ -2332,7 +2336,7 @@ describe("command boundary", () => {
         fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
       )
     ).toEqual({
-      experimentalFeaturesEnabled: { extensibility: true },
+      experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
       extensions: { radius: identity.extension }
     });
   });
@@ -2413,7 +2417,7 @@ describe("command boundary", () => {
         fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
       )
     ).toEqual({
-      experimentalFeaturesEnabled: { extensibility: true },
+      experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
       extensions: { radius: identity.extension }
     });
     expect(result.stderr).toBe("");
@@ -2431,7 +2435,7 @@ describe("staged Bicep configuration", () => {
         fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
       )
     ).toEqual({
-      experimentalFeaturesEnabled: { extensibility: true },
+      experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
       extensions: { radius: identity.extension }
     });
     const blankRoot = temporaryDirectory();
@@ -2455,9 +2459,13 @@ describe("staged Bicep configuration", () => {
       path.join(root, ".radius", "bicepconfig.json"),
       JSON.stringify({
         analyzers: { core: { enabled: false } },
-        experimentalFeaturesEnabled: { symbolicNameCodegen: true },
+        experimentalFeaturesEnabled: {
+          symbolicNameCodegen: true,
+          ociEnabled: false
+        },
         extensions: {
           radius: `  ${identity.extension}  `,
+          aws: "br:ghcr.io/radius-project/bicep-types-aws:0.61.0",
           customTypes: "./custom-types.tgz"
         }
       })
@@ -2473,10 +2481,12 @@ describe("staged Bicep configuration", () => {
       analyzers: { core: { enabled: false } },
       experimentalFeaturesEnabled: {
         symbolicNameCodegen: true,
-        extensibility: true
+        extensibility: true,
+        ociEnabled: true
       },
       extensions: {
         radius: identity.extension,
+        aws: "br:ghcr.io/radius-project/bicep-types-aws:0.61.0",
         customTypes: "./custom-types.tgz"
       }
     });
@@ -2498,7 +2508,7 @@ describe("staged Bicep configuration", () => {
         fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
       )
     ).toEqual({
-      experimentalFeaturesEnabled: { extensibility: true },
+      experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
       extensions: {
         customTypes: "./custom-types.tgz",
         radius: identity.extension
@@ -2513,7 +2523,9 @@ describe("staged Bicep configuration", () => {
     fs.writeFileSync(
       config,
       JSON.stringify({
-        extensions: { radius: "br:biceptypes.azurecr.io/radius:0.59" }
+        extensions: {
+          radius: "br:ghcr.io/radius-project/bicep-types-radius:0.59"
+        }
       })
     );
     await expect(
@@ -2530,6 +2542,23 @@ describe("staged Bicep configuration", () => {
     await expect(
       resolver.writeStagedBicepConfig(root, identity.extension)
     ).rejects.toThrow(/Invalid Radius staging/u);
+  });
+
+  it("rejects a legacy ACR Radius pin without rewriting the current config", async () => {
+    const root = temporaryDirectory();
+    const staging = stagingDirectory(root);
+    const config = path.join(root, ".radius", "bicepconfig.json");
+    const original = JSON.stringify({
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:0.60" }
+    });
+    fs.writeFileSync(config, original);
+
+    await expect(
+      resolver.writeStagedBicepConfig(staging, identity.extension)
+    ).rejects.toThrow(/does not match managed Radius extension/u);
+
+    expect(fs.readFileSync(config, "utf8")).toBe(original);
+    expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(false);
   });
 
   it("rejects malformed config sections, aliases, and staging records", async () => {

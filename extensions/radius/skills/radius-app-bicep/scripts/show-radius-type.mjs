@@ -281,7 +281,8 @@ export async function writeStagedBicepConfig(stagingInput, extension) {
     ...config,
     experimentalFeaturesEnabled: {
       ...experimentalFeaturesEnabled,
-      extensibility: true
+      extensibility: true,
+      ociEnabled: true
     },
     extensions: {
       ...extensions,

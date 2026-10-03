@@ -33,9 +33,10 @@ function mockGithub(
 }
 
 const CONFIG = JSON.stringify({
-  experimentalFeaturesEnabled: { extensibility: true },
+  experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
   extensions: {
-    radius: "br:biceptypes.azurecr.io/radius:latest",
+    radius: "br:ghcr.io/radius-project/bicep-types-radius:edge",
+    aws: "br:ghcr.io/radius-project/bicep-types-aws:edge",
     customTypes: "./custom-types.tgz"
   }
 });
@@ -63,9 +64,9 @@ test("artifact fingerprint changes with config and local extension content", () 
     fs.writeFileSync(
       path.join(dir, "bicepconfig.json"),
       JSON.stringify({
-        experimentalFeaturesEnabled: { extensibility: true },
+        experimentalFeaturesEnabled: { extensibility: true, ociEnabled: true },
         extensions: {
-          radius: "br:biceptypes.azurecr.io/radius:v2",
+          radius: "br:ghcr.io/radius-project/bicep-types-radius:v2",
           customTypes: "./custom-types.tgz"
         }
       })
@@ -115,7 +116,7 @@ test("returns null when the branch has no committed bicepconfig.json", async () 
 
 test("stages config but copies no artifact for OCI-only extensions", async () => {
   const config = JSON.stringify({
-    extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
+    extensions: { radius: "br:ghcr.io/radius-project/bicep-types-radius:edge" }
   });
   const gh = mockGithub({ [CONFIG_API]: config }, {});
   const dir = await stageRemoteRadArtifacts(
@@ -177,7 +178,7 @@ test("skips a missing artifact and logs it", async () => {
 test("refuses a traversing local extension reference", async () => {
   const config = JSON.stringify({
     extensions: {
-      radius: "br:biceptypes.azurecr.io/radius:latest",
+      radius: "br:ghcr.io/radius-project/bicep-types-radius:edge",
       evil: "../../secret.tgz"
     }
   });

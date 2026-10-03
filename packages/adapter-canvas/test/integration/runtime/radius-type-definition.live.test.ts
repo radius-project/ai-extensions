@@ -51,7 +51,7 @@ describe.skipIf(!LIVE)("live generated Radius definition compatibility", () => {
       );
 
       expect(contract.extension).toMatch(
-        /^br:biceptypes\.azurecr\.io\/radius:/u
+        /^br:ghcr\.io\/radius-project\/bicep-types-radius:/u
       );
       expect(contract.notFound).toEqual([]);
       expect(

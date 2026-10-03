@@ -1050,7 +1050,7 @@ describe("graph planning workflows", () => {
         "rad app graph failed: rad exited with code 1",
         '/tmp/rad-bicep-abc/app.bicep(31,5) : Error BCP035: The specified "object" declaration is missing the following required properties: "application".',
         '/tmp/rad-bicep-abc/app.bicep(42,18) : Error BCP062: The referenced declaration with name "redis" is not valid.',
-        "Compiled with radius extension: br:ghcr.io/radius-project/bicep-types-radius:latest"
+        "Compiled with radius extension: br:ghcr.io/radius-project/bicep-types-radius:edge"
       ].join("\n");
       const harness = start({
         selections: { main: selectionOf() },
