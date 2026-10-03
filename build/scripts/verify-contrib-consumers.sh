@@ -3,10 +3,12 @@
 set -euo pipefail
 
 readonly CATALOG_REPO="${CATALOG_REPO:-radius-project/radius}"
-readonly CATALOG_REF="${CATALOG_REF:-9cdf55cdddec5ff5d382ca49877606e2b9fff3e8}"
 readonly DEFAULTS_YAML="${DEFAULTS_YAML:-}"
 readonly CATALOG_HELPER="${CATALOG_HELPER:-.github/extension/scripts/contrib-catalog.sh}"
 readonly EXTENSION_DIR="${EXTENSION_DIR:-.github/extension}"
+readonly RELEASE_FILE="${RELEASE_FILE:-packages/adapter-shared/src/radius-release.ts}"
+readonly CONTROL_PLANE_ACTION="${CONTROL_PLANE_ACTION:-${EXTENSION_DIR}/actions/setup-control-plane/action.yml}"
+CATALOG_REF="${CATALOG_REF:-}"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -21,11 +23,51 @@ require_tools() {
     done
 }
 
+read_install_ref() {
+    sed -nE 's/^[[:space:]]+RADIUS_INSTALL_REF: ([^[:space:]]+)$/\1/p' \
+        "${CONTROL_PLANE_ACTION}"
+}
+
+# The catalog ref defaults to the Radius release the deploy control plane pins,
+# the same release load-contrib-catalog derives at run time. CATALOG_REF may
+# still be set explicitly to verify a different ref.
+resolve_catalog_ref() {
+    [[ -z "${CATALOG_REF}" ]] || return 0
+    [[ -f "${CONTROL_PLANE_ACTION}" ]] ||
+        fail "set CATALOG_REF or provide ${CONTROL_PLANE_ACTION}."
+    CATALOG_REF="$(read_install_ref)"
+    [[ -n "${CATALOG_REF}" ]] ||
+        fail "${CONTROL_PLANE_ACTION} does not define RADIUS_INSTALL_REF."
+}
+
+# One Radius release per plugin build: the control-plane installer, the managed
+# rad CLI used while modeling, and the recipe catalog must not disagree.
+verify_release_pin_consistency() {
+    [[ -f "${CONTROL_PLANE_ACTION}" ]] || return 0
+    [[ -f "${RELEASE_FILE}" ]] ||
+        fail "release file not found: ${RELEASE_FILE}"
+
+    local install_ref release_tag catalog_action catalog_default
+    install_ref="$(read_install_ref)"
+    [[ "${install_ref}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        fail "${CONTROL_PLANE_ACTION} must pin RADIUS_INSTALL_REF to a stable release tag, found: ${install_ref:-none}"
+    release_tag="$(sed -nE 's/^export const RADIUS_RELEASE_TAG = "([^"]+)";$/\1/p' "${RELEASE_FILE}")"
+    [[ "${release_tag}" == "${install_ref}" ]] ||
+        fail "${RELEASE_FILE} pins ${release_tag:-no release}, but ${CONTROL_PLANE_ACTION} pins ${install_ref}; the modeling CLI and the deploy control plane must use the same Radius release."
+
+    catalog_action="${EXTENSION_DIR}/actions/load-contrib-catalog/action.yml"
+    if [[ -f "${catalog_action}" ]]; then
+        catalog_default="$(yq -r '.inputs."catalog-ref".default // ""' "${catalog_action}")"
+        [[ -z "${catalog_default}" ]] ||
+            fail "${catalog_action} must not pin catalog-ref; it derives the ref from RADIUS_INSTALL_REF."
+    fi
+}
+
 validate_catalog_source() {
     [[ "${CATALOG_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
         fail "invalid catalog repository: ${CATALOG_REPO}"
-    [[ "${CATALOG_REF}" =~ ^[0-9a-f]{40}$ ]] ||
-        fail "catalog ref must be a lowercase 40-character commit SHA."
+    [[ "${CATALOG_REF}" =~ ^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] ||
+        fail "catalog ref must be a lowercase 40-character commit SHA or a stable release tag."
 }
 
 verify_single_source_of_truth() {
@@ -48,13 +90,6 @@ verify_single_source_of_truth() {
                 '.. | select(tag != "!!map" and tag != "!!seq" and tag != "!!null")' \
                 "${file}"
         )"
-        if [[ "${file}" == "${EXTENSION_DIR}/actions/load-contrib-catalog/action.yml" ]]; then
-            local action_catalog_ref
-            action_catalog_ref="$(yq -r '.inputs.catalog-ref.default' "${file}")"
-            [[ "${action_catalog_ref}" == "${CATALOG_REF}" ]] ||
-                fail "${file} must default catalog-ref to the verifier pin ${CATALOG_REF}."
-            scalar_values="$(printf '%s\n' "${scalar_values}" | grep -Fvx "${CATALOG_REF}" || true)"
-        fi
         violations="$(
             printf '%s\n' "${scalar_values}" |
                 grep -Ein -e '^[0-9a-f]{40}$' -e '^(main|latest|edge)$' || true
@@ -362,15 +397,17 @@ fetch_defaults_catalog() {
 main() {
     command -v yq >/dev/null 2>&1 ||
         fail "yq is required to verify contrib consumers."
-    validate_catalog_source
     [[ -d "${EXTENSION_DIR}" ]] || fail "extension directory not found: ${EXTENSION_DIR}"
     verify_single_source_of_truth
+    verify_release_pin_consistency
     if [[ "${1:-}" == --source-of-truth-only ]]; then
         echo "Extension workflows use defaults.yaml as their sole contrib ref source."
         return 0
     fi
     [[ -z "${1:-}" ]] || fail "unknown argument: $1"
 
+    resolve_catalog_ref
+    validate_catalog_source
     require_tools
     [[ -f "${CATALOG_HELPER}" ]] || fail "catalog helper not found: ${CATALOG_HELPER}"
 
