@@ -3,14 +3,17 @@
 set -euo pipefail
 
 readonly ACTION_FILE="${ACTION_FILE:-.github/extension/actions/setup-control-plane/action.yml}"
+readonly RELEASE_FILE="${RELEASE_FILE:-packages/adapter-shared/src/radius-release.ts}"
 readonly RADIUS_RELEASE_API_URL="${RADIUS_RELEASE_API_URL:-https://api.github.com/repos/radius-project/radius/releases/latest}"
 readonly RADIUS_RAW_BASE_URL="${RADIUS_RAW_BASE_URL:-https://raw.githubusercontent.com/radius-project/radius}"
 INSTALLER_TEMP=""
 ACTION_TEMP=""
+RELEASE_TEMP=""
 
 cleanup() {
     [[ -z "${INSTALLER_TEMP}" ]] || rm -f "${INSTALLER_TEMP}"
     [[ -z "${ACTION_TEMP}" ]] || rm -f "${ACTION_TEMP}"
+    [[ -z "${RELEASE_TEMP}" ]] || rm -f "${RELEASE_TEMP}"
 }
 trap cleanup EXIT
 
@@ -35,6 +38,7 @@ write_output() {
 main() {
     require_tools
     [[ -f "${ACTION_FILE}" ]] || fail "action file not found: ${ACTION_FILE}"
+    [[ -f "${RELEASE_FILE}" ]] || fail "release file not found: ${RELEASE_FILE}"
 
     local -a api_headers=()
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -71,7 +75,11 @@ main() {
     [[ "$(grep -Ec '^[[:space:]]+RADIUS_INSTALL_SHA256: ' "${ACTION_FILE}")" -eq 1 ]] ||
         fail "${ACTION_FILE} must contain exactly one RADIUS_INSTALL_SHA256."
 
-    local current_tag current_checksum
+    [[ "$(grep -Ec "^export const RADIUS_RELEASE_TAG = \"[^\"]+\";$" "${RELEASE_FILE}")" -eq 1 ]] ||
+        fail "${RELEASE_FILE} must contain exactly one RADIUS_RELEASE_TAG."
+
+    local current_tag current_checksum current_release_tag
+    current_release_tag="$(sed -nE "s/^export const RADIUS_RELEASE_TAG = \"([^\"]+)\";$/\1/p" "${RELEASE_FILE}")"
     current_tag="$(sed -nE 's/^[[:space:]]+RADIUS_INSTALL_REF: ([^[:space:]]+)$/\1/p' "${ACTION_FILE}")"
     current_checksum="$(sed -nE 's/^[[:space:]]+RADIUS_INSTALL_SHA256: ([0-9a-f]+)$/\1/p' "${ACTION_FILE}")"
     [[ -n "${current_tag}" && "${current_checksum}" =~ ^[0-9a-f]{64}$ ]] ||
@@ -79,7 +87,8 @@ main() {
 
     write_output tag "${tag}"
     write_output checksum "${checksum}"
-    if [[ "${current_tag}" == "${tag}" && "${current_checksum}" == "${checksum}" ]]; then
+    if [[ "${current_tag}" == "${tag}" && "${current_checksum}" == "${checksum}" &&
+        "${current_release_tag}" == "${tag}" ]]; then
         write_output changed false
         echo "Radius installer is already pinned to ${tag}."
         return 0
@@ -93,8 +102,15 @@ main() {
         fail "failed to update the Radius installer release."
     grep -Fq "RADIUS_INSTALL_SHA256: ${checksum}" "${ACTION_TEMP}" ||
         fail "failed to update the Radius installer checksum."
+    RELEASE_TEMP="${RELEASE_FILE}.tmp"
+    sed -E "s/^(export const RADIUS_RELEASE_TAG = )\"[^\"]+\";$/\1\"${tag}\";/" \
+        "${RELEASE_FILE}" >"${RELEASE_TEMP}"
+    grep -Fq "export const RADIUS_RELEASE_TAG = \"${tag}\";" "${RELEASE_TEMP}" ||
+        fail "failed to update the Radius release tag."
     mv "${ACTION_TEMP}" "${ACTION_FILE}"
     ACTION_TEMP=""
+    mv "${RELEASE_TEMP}" "${RELEASE_FILE}"
+    RELEASE_TEMP=""
 
     write_output changed true
     echo "Updated Radius installer pin from ${current_tag} to ${tag}."

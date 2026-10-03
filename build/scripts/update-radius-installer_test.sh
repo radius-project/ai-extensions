@@ -64,12 +64,17 @@ runs:
 YAML
 }
 
+write_release() {
+    printf '// fixture\nexport const RADIUS_RELEASE_TAG = "%s";\n' "$1" >"${RELEASE_FILE}"
+}
+
 run_update() {
     : >"${GITHUB_OUTPUT}"
     PATH="${TEST_ROOT}/bin:${PATH}" bash "${UPDATER}"
 }
 
 export ACTION_FILE="${TEST_ROOT}/action.yml"
+export RELEASE_FILE="${TEST_ROOT}/radius-release.ts"
 export CURL_LOG="${TEST_ROOT}/curl.log"
 export GITHUB_OUTPUT="${TEST_ROOT}/output"
 export INSTALLER_FIXTURE="${TEST_ROOT}/install.sh"
@@ -82,7 +87,10 @@ readonly EXPECTED_CHECKSUM
 readonly OLD_CHECKSUM="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 write_action v1.2.2 "${OLD_CHECKSUM}"
+write_release v1.2.2
 run_update >/dev/null
+grep -Fq "RADIUS_RELEASE_TAG = \"v1.2.3\";" "${RELEASE_FILE}" ||
+    fail "updater did not replace the plugin release tag"
 grep -Fq "RADIUS_INSTALL_REF: v1.2.3" "${ACTION_FILE}" ||
     fail "updater did not replace the stable release tag"
 grep -Fq "RADIUS_INSTALL_SHA256: ${EXPECTED_CHECKSUM}" "${ACTION_FILE}" ||
@@ -95,12 +103,30 @@ grep -Fq "/bin/bash install-rad.sh edge" "${ACTION_FILE}" ||
     fail "updater changed the edge CLI channel"
 
 cp "${ACTION_FILE}" "${TEST_ROOT}/before.yml"
+cp "${RELEASE_FILE}" "${TEST_ROOT}/before.ts"
 run_update >/dev/null
 cmp -s "${TEST_ROOT}/before.yml" "${ACTION_FILE}" ||
     fail "updater rewrote an already-current action"
+cmp -s "${TEST_ROOT}/before.ts" "${RELEASE_FILE}" ||
+    fail "updater rewrote an already-current release file"
 grep -Fxq "changed=false" "${GITHUB_OUTPUT}" ||
     fail "updater did not report the no-op"
 
+# A drifted release file must be repaired even when the action is current.
+write_release v1.2.2
+run_update >/dev/null
+grep -Fq "RADIUS_RELEASE_TAG = \"v1.2.3\";" "${RELEASE_FILE}" ||
+    fail "updater did not repair a drifted release file"
+grep -Fxq "changed=true" "${GITHUB_OUTPUT}" ||
+    fail "updater did not report the release file repair"
+
+write_release v1.2.3
+printf 'export const RADIUS_RELEASE_TAG = "v1.2.1";\n' >>"${RELEASE_FILE}"
+if run_update >/dev/null 2>&1; then
+    fail "updater accepted duplicate release constants"
+fi
+
+write_release v1.2.2
 write_action v1.2.2 "${OLD_CHECKSUM}"
 printf '        RADIUS_INSTALL_REF: v1.2.1\n' >>"${ACTION_FILE}"
 cp "${ACTION_FILE}" "${TEST_ROOT}/malformed.yml"
