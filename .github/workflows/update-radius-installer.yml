@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   update:
-    name: Update stable installer pin
+    name: Update stable Radius pin
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -71,7 +71,9 @@ jobs:
           BRANCH: automation/update-radius-installer
           CHECKSUM: ${{ steps.update.outputs.checksum }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          INSTALLER_PATH: .github/extension/actions/setup-control-plane/action.yml
+          PIN_PATHS: >-
+            .github/extension/actions/setup-control-plane/action.yml
+            packages/adapter-shared/src/radius-release.ts
           TAG: ${{ steps.update.outputs.tag }}
         run: |
           set -euo pipefail
@@ -95,39 +97,45 @@ jobs:
               -f sha="$base_sha" >/dev/null
           fi
 
-          file_sha="$(gh api "repos/$repo/contents/$INSTALLER_PATH?ref=$BRANCH" --jq .sha)"
-          desired_sha="$(git hash-object "$INSTALLER_PATH")"
-          if [ "$file_sha" = "$desired_sha" ]; then
-            echo "Pull request #$existing_pr already contains the $TAG installer pin."
-            exit 0
-          fi
-          content="$(base64 -w 0 "$INSTALLER_PATH")"
-          message="chore: update Radius installer to $TAG
+          message="chore: update Radius to $TAG
 
           Signed-off-by: radius-release-manager[bot] <323233809+radius-release-manager[bot]@users.noreply.github.com>"
-          commit_sha="$(
-            jq -n \
-              --arg branch "$BRANCH" \
-              --arg content "$content" \
-              --arg message "$message" \
-              --arg sha "$file_sha" \
-              '{branch: $branch, content: $content, message: $message, sha: $sha}' |
-              gh api --method PUT "repos/$repo/contents/$INSTALLER_PATH" \
-                --input - --jq .commit.sha
-          )"
-          verified="$(gh api "repos/$repo/commits/$commit_sha" --jq .commit.verification.verified)"
-          [ "$verified" = true ] || {
-            echo "::error::GitHub did not create a verified update commit: $commit_sha"
-            exit 1
-          }
-
-          title="chore: update Radius installer to $TAG"
+          committed=false
+          for path in $PIN_PATHS; do
+            file_sha="$(gh api "repos/$repo/contents/$path?ref=$BRANCH" --jq .sha)"
+            desired_sha="$(git hash-object "$path")"
+            if [ "$file_sha" = "$desired_sha" ]; then
+              continue
+            fi
+            content="$(base64 -w 0 "$path")"
+            commit_sha="$(
+              jq -n \
+                --arg branch "$BRANCH" \
+                --arg content "$content" \
+                --arg message "$message" \
+                --arg sha "$file_sha" \
+                '{branch: $branch, content: $content, message: $message, sha: $sha}' |
+                gh api --method PUT "repos/$repo/contents/$path" \
+                  --input - --jq .commit.sha
+            )"
+            verified="$(gh api "repos/$repo/commits/$commit_sha" --jq .commit.verification.verified)"
+            [ "$verified" = true ] || {
+              echo "::error::GitHub did not create a verified update commit: $commit_sha"
+              exit 1
+            }
+            committed=true
+          done
+          if [ "$committed" = false ]; then
+            echo "Pull request #$existing_pr already contains the $TAG pins."
+            exit 0
+          fi
+          title="chore: update Radius to $TAG"
           body="$(printf '%s\n' \
             '## Summary' \
             '' \
             "- pin the Radius installer source to stable release \`$TAG\`" \
             "- verify \`deploy/install.sh\` with SHA-256 \`$CHECKSUM\`" \
-            "- keep the installed Radius CLI channel on \`edge\`" \
+            "- pin the modeling CLI and recipe catalog to \`$TAG\`, matching the control plane" \
             '' \
             '## Validation' \
             '' \

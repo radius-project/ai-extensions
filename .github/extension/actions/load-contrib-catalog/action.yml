@@ -14,9 +14,13 @@ inputs:
     required: false
     default: radius-project/radius
   catalog-ref:
-    description: Git ref of catalog-repo to fetch the catalog from.
+    description: >-
+      Git ref of catalog-repo to fetch the catalog from. Defaults to the
+      RADIUS_INSTALL_REF pinned by the setup-control-plane action, so the recipe
+      catalog and the deploy control plane always come from the same Radius
+      release. Set it only to deliberately diverge for testing.
     required: false
-    default: 9cdf55cdddec5ff5d382ca49877606e2b9fff3e8
+    default: ""
   yq-version:
     description: Pinned yq version installed to read the catalog.
     required: false
@@ -44,6 +48,14 @@ runs:
         # artifact: a set of pinned resource-type and recipe-pack refs kept in
         # sync and validated by Radius CI. Rather than vendor a copy here, fetch
         # the single file from the Radius repository at the requested ref.
+        if [ -z "${CATALOG_REF}" ]; then
+          CONTROL_PLANE_ACTION="$(cd "${GITHUB_ACTION_PATH}/../setup-control-plane" && pwd)/action.yml"
+          CATALOG_REF="$(sed -nE 's/^[[:space:]]+RADIUS_INSTALL_REF: ([^[:space:]]+)$/\1/p' "$CONTROL_PLANE_ACTION")"
+          test -n "${CATALOG_REF}" || {
+            echo "::error::Could not read RADIUS_INSTALL_REF from ${CONTROL_PLANE_ACTION}"
+            exit 1
+          }
+        fi
         DEFAULTS_YAML="${RUNNER_TEMP:-/tmp}/radius-defaults.yaml"
         CATALOG_URL="https://raw.githubusercontent.com/${CATALOG_REPO}/${CATALOG_REF}/deploy/manifest/defaults.yaml"
         curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
