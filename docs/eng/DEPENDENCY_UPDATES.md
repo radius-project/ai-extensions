@@ -17,11 +17,12 @@ Dependabot is configured by [`.github/dependabot.yml`](../../.github/dependabot.
 |------------------------------------------------------------------------------------------|-------------------------------------------------------------|
 | `flow.css does not match the pinned @xyflow/react`                                       | [React Flow](#react-flow-xyflowreact)                       |
 | `React Flow no longer ships <hook>, which hosts may style`                               | [React Flow](#react-flow-xyflowreact)                       |
+| `The Headlamp fixture must use graph-react's @xyflow/react pin`                          | [React Flow](#react-flow-xyflowreact)                       |
 | A `THIRD-PARTY-NOTICES.txt` marker is missing after a bundled dependency changes version | [Bundled third-party notices](#bundled-third-party-notices) |
 
 ## React Flow (`@xyflow/react`)
 
-`@radius-project/graph-react` pins `@xyflow/react` to an exact version in `packages/graph-react/package.json`. That pin is the only place the version is written: the stylesheet generator, the packed-manifest check, and the notice test all read it. Dependabot updates it for you, so the only manual work is reviewing what the new version changes:
+`@radius-project/graph-react` pins `@xyflow/react` to an exact version in `packages/graph-react/package.json`. That pin is the source of truth: the stylesheet generator, the packed-manifest check, and the notice test all read it, and a test fails until the Headlamp fixture matches it. Dependabot updates the pin for you; the manual work is regenerating the stylesheet, updating the Headlamp fixture, and reviewing what the new version changes:
 
 - **Vendored stylesheet.** `packages/graph-react/src/flow.css` is a scoped copy of React Flow's `dist/style.css`, stamped with the version it was generated from. It is checked into source and must be regenerated, and reviewed, whenever the pin changes.
 - **Public styling hooks.** Hosts may style `.radius-graph__edge .react-flow__edge-path`, `.react-flow__controls`, `.react-flow__controls-button`, `.react-flow__background`, and the `--xy-background-pattern-color` custom property. A test fails if the vendored stylesheet loses one of them; that change requires a graph-react major release. See [Styling contract](../../packages/graph-react/README.md#styling-contract) in the graph-react README for the full contract.
@@ -30,11 +31,11 @@ To unblock a Dependabot pull request that bumps `@xyflow/react`:
 
 1. Check out the Dependabot branch and run `pnpm install`.
 2. Run `node scripts/graph-vendor-styles.mjs` to regenerate `packages/graph-react/src/flow.css`.
-3. Review the `flow.css` diff alongside the React Flow release notes. Look for changes to the supported hooks above, node and handle markup, `Controls`, `Background`, and viewport behavior.
-4. Run `pnpm run coverage`, `pnpm run test:integration:libraries`, `pnpm run test:component`, and `pnpm run test:chromium`. If **Visual comparisons** then reports an intended rendering change, follow [Canvas visual baselines](../../CONTRIBUTING.md#canvas-visual-baselines).
-5. Commit `flow.css` to the Dependabot branch. Add a [changeset](../../CONTRIBUTING.md#changesets) when the update changes shipped graph behavior or appearance; a removed or renamed supported hook is a major change.
-
-The Headlamp qualification fixture (`scripts/fixtures/headlamp/package.json` and `TOOL_VERSIONS` in `scripts/fixtures/headlamp/contracts.mjs`) pins Headlamp's own React Flow peer, which is a different host's version. It is checked only by the scheduled real-host qualification, so it does not need to change to unblock a pull request.
+3. Set `@xyflow/react` to the new version in `scripts/fixtures/headlamp/package.json` and in `TOOL_VERSIONS` in `scripts/fixtures/headlamp/contracts.mjs`. Dependabot does not update this fixture, and the Headlamp qualification must run the React Flow version graph-react ships: it extracts graph-react into the fixture without installing graph-react's dependencies, so both use the fixture's copy.
+4. Review the `flow.css` diff alongside the React Flow release notes. Look for changes to the supported hooks above, node and handle markup, `Controls`, `Background`, and viewport behavior.
+5. Run `pnpm run coverage`, `pnpm run test:integration:libraries`, `pnpm run test:component`, and `pnpm run test:chromium`. If **Visual comparisons** then reports an intended rendering change, follow [Canvas visual baselines](../../CONTRIBUTING.md#canvas-visual-baselines).
+6. Run the **Headlamp Compatibility** workflow on the Dependabot branch. It is not a pull request check, so start it manually.
+7. Commit `flow.css` and the fixture changes to the Dependabot branch. Add a [changeset](../../CONTRIBUTING.md#changesets) when the update changes shipped graph behavior or appearance; a removed or renamed supported hook is a major change.
 
 ## Bundled third-party notices
 

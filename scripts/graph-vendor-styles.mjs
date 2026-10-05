@@ -22,6 +22,13 @@ export const supportedFlowHooks = [
   "--xy-background-pattern-color"
 ];
 
+// Matches a complete class name or custom property, so a longer identifier such
+// as `.react-flow__controls-button` cannot satisfy `.react-flow__controls`.
+export function hasFlowHook(css, hook) {
+  const escaped = hook.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(css);
+}
+
 // graph-react's exact @xyflow/react pin is the single source of truth for the
 // React Flow version. Every other contract derives from it.
 export function pinnedFlowVersion(

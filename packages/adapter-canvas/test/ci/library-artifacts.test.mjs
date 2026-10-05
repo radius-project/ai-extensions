@@ -11,6 +11,7 @@ import {
 import {
   assertInstalledFlowVersion,
   expectedScopedFlowStyles,
+  hasFlowHook,
   hoistKeyframes,
   pinnedFlowVersion,
   renameKeyframes,
@@ -157,11 +158,40 @@ describe("packed library contracts", () => {
     "keeps the supported styling hook %s in the vendored stylesheet",
     (hook) => {
       expect(
-        readFileSync(scopedFlowStylesPath, "utf8"),
+        hasFlowHook(readFileSync(scopedFlowStylesPath, "utf8"), hook),
         `React Flow no longer ships ${hook}, which hosts may style. Removing it is a graph-react major release; see docs/eng/DEPENDENCY_UPDATES.md.`
-      ).toContain(hook);
+      ).toBe(true);
     }
   );
+
+  it("detects a renamed controls container even when the button class remains", () => {
+    const css = readFileSync(scopedFlowStylesPath, "utf8").replace(
+      /\.react-flow__controls(?![\w-])/g,
+      ".vendor-controls"
+    );
+    expect(hasFlowHook(css, ".react-flow__controls-button")).toBe(true);
+    expect(hasFlowHook(css, ".react-flow__controls")).toBe(false);
+  });
+
+  it.each([
+    [".react-flow__background-pattern", ".react-flow__background"],
+    ["--xy-background-pattern-color-default", "--xy-background-pattern-color"],
+    ["--xy-background-pattern-color-x", "--xy-background-pattern-color"]
+  ])("does not accept %s as the hook %s", (css, hook) => {
+    expect(hasFlowHook(`${css} {}`, hook)).toBe(false);
+  });
+
+  it.each([
+    [".react-flow__controls { }", ".react-flow__controls"],
+    [".react-flow__controls:hover { }", ".react-flow__controls"],
+    [".a .react-flow__edge-path, .b {}", ".react-flow__edge-path"],
+    [
+      "color: var(--xy-background-pattern-color);",
+      "--xy-background-pattern-color"
+    ]
+  ])("finds the hook in %s", (css, hook) => {
+    expect(hasFlowHook(css, hook)).toBe(true);
+  });
 
   it.each(['@import "external.css";', "@font-face { font-family: other; }"])(
     "rejects unreviewed global vendor inputs: %s",
