@@ -21,9 +21,9 @@ write_control_plane() {
 }
 
 # A valid pin is read from the control-plane action.
-write_control_plane 'runs:' '  steps:' '    - env:' '        RADIUS_INSTALL_REF: v1.2.3' '      run: echo ok'
-[[ "$(bash "${RESOLVER}" "" "${TEST_ROOT}/action.yml")" == "v1.2.3" ]] ||
-    fail "resolver did not read RADIUS_INSTALL_REF from the control-plane action"
+write_control_plane 'runs:' '  steps:' '    - env:' '        RADIUS_INSTALL_REF: v1.2.3' '        RADIUS_INSTALL_COMMIT: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' '      run: echo ok'
+[[ "$(bash "${RESOLVER}" "" "${TEST_ROOT}/action.yml")" == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]] ||
+    fail "resolver did not read RADIUS_INSTALL_COMMIT from the control-plane action"
 
 # An explicit ref overrides the pin.
 [[ "$(bash "${RESOLVER}" "abc123" "${TEST_ROOT}/action.yml")" == "abc123" ]] ||
@@ -32,11 +32,11 @@ write_control_plane 'runs:' '  steps:' '    - env:' '        RADIUS_INSTALL_REF:
 # A missing or malformed pin fails instead of fetching an unintended ref.
 write_control_plane 'runs:' '  steps:' '    - run: echo ok'
 if bash "${RESOLVER}" "" "${TEST_ROOT}/action.yml" >/dev/null 2>&1; then
-    fail "resolver accepted a control-plane action without RADIUS_INSTALL_REF"
+    fail "resolver accepted a control-plane action without RADIUS_INSTALL_COMMIT"
 fi
-write_control_plane 'runs:' '  steps:' '    - env:' '        RADIUS_INSTALL_REF:' '      run: echo ok'
+write_control_plane 'runs:' '  steps:' '    - env:' '        RADIUS_INSTALL_COMMIT:' '      run: echo ok'
 if bash "${RESOLVER}" "" "${TEST_ROOT}/action.yml" >/dev/null 2>&1; then
-    fail "resolver accepted an empty RADIUS_INSTALL_REF"
+    fail "resolver accepted an empty RADIUS_INSTALL_COMMIT"
 fi
 if bash "${RESOLVER}" "" "${TEST_ROOT}/missing.yml" >/dev/null 2>&1; then
     fail "resolver accepted a missing control-plane action"
@@ -46,7 +46,7 @@ fi
 # sibling control-plane action carries a pin the resolver can read.
 grep -Fq 'resolve-catalog-ref.sh' "${ACTION_YML}" ||
     fail "load-contrib-catalog does not call resolve-catalog-ref.sh"
-[[ "$(bash "${RESOLVER}" "")" == "$(sed -nE 's/^[[:space:]]+RADIUS_INSTALL_REF: ([^[:space:]]+)$/\1/p' "${CONTROL_PLANE_YML}")" ]] ||
+[[ "$(bash "${RESOLVER}" "")" == "$(sed -nE 's/^[[:space:]]+RADIUS_INSTALL_COMMIT: ([^[:space:]]+)$/\1/p' "${CONTROL_PLANE_YML}")" ]] ||
     fail "resolver did not match the shipped control-plane pin"
 
 echo "resolve-catalog-ref tests passed"

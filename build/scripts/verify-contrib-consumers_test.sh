@@ -76,9 +76,9 @@ rm "${TEST_ROOT}/policy/bad.yml"
 # must name one Radius release.
 mkdir -p "${TEST_ROOT}/pins/actions/setup-control-plane" "${TEST_ROOT}/pins/actions/load-contrib-catalog"
 write_pin_fixture() {
-    local install_ref="$1" release_tag="$2" catalog_default="$3"
+    local install_ref="$1" release_tag="$2" catalog_default="$3" install_commit="${4:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
     printf '%s\n' '---' 'name: cp' 'runs:' '  using: composite' '  steps:' \
-        '    - shell: bash' '      env:' "        RADIUS_INSTALL_REF: ${install_ref}" \
+        '    - shell: bash' '      env:' "        RADIUS_INSTALL_REF: ${install_ref}" "        RADIUS_INSTALL_COMMIT: ${install_commit}" \
         '      run: echo ok' >"${TEST_ROOT}/pins/actions/setup-control-plane/action.yml"
     printf '%s\n' '---' 'name: catalog' 'inputs:' '  catalog-ref:' '    required: false' \
         "    default: \"${catalog_default}\"" 'runs:' '  using: composite' '  steps:' \
@@ -101,6 +101,11 @@ fi
 write_pin_fixture v1.2.3 v1.2.3 "9cdf55cdddec5ff5d382ca49877606e2b9fff3e8"
 if run_pin_check 2>/dev/null; then
     fail "pin check accepted a separately pinned catalog-ref"
+fi
+
+write_pin_fixture v1.2.3 v1.2.3 "" "v1.2.3"
+if run_pin_check 2>/dev/null; then
+    fail "pin check accepted a non-SHA release commit"
 fi
 
 write_pin_fixture main v1.2.3 ""
@@ -254,7 +259,7 @@ if find "${TEST_ROOT}/tmp" -mindepth 1 -print -quit | grep -q .; then
 fi
 
 # Without an explicit CATALOG_REF the verifier fetches the catalog at the
-# release the control plane pins.
+# immutable commit of the release the control plane pins.
 write_pin_fixture v1.2.3 v1.2.3 ""
 : >"${CURL_LOG}"
 PATH="${TEST_ROOT}/bin:${PATH}" \
@@ -262,8 +267,8 @@ PATH="${TEST_ROOT}/bin:${PATH}" \
     EXTENSION_DIR="${TEST_ROOT}/pins" \
     RELEASE_FILE="${TEST_ROOT}/pins/release.ts" \
     bash "${VERIFIER}" >/dev/null 2>&1 || true
-grep -Fq "radius-project/radius/v1.2.3/deploy/manifest/defaults.yaml" "${CURL_LOG}" ||
-    fail "verifier did not default the catalog ref to the control-plane release"
+grep -Fq "radius-project/radius/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/deploy/manifest/defaults.yaml" "${CURL_LOG}" ||
+    fail "verifier did not default the catalog ref to the control-plane release commit"
 
 # A pack that no longer declares the name the workflow attaches would otherwise
 # only fail at deploy time, when `rad recipe-pack show` cannot resolve it.

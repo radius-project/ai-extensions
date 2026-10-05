@@ -28,16 +28,22 @@ read_install_ref() {
         "${CONTROL_PLANE_ACTION}"
 }
 
-# The catalog ref defaults to the Radius release the deploy control plane pins,
-# the same release load-contrib-catalog derives at run time. CATALOG_REF may
+read_install_commit() {
+    sed -nE 's/^[[:space:]]+RADIUS_INSTALL_COMMIT: ([^[:space:]]+)$/\1/p' \
+        "${CONTROL_PLANE_ACTION}"
+}
+
+# The catalog ref defaults to the immutable commit of the Radius release the
+# deploy control plane pins, the same commit load-contrib-catalog derives at run
+# time. CATALOG_REF may
 # still be set explicitly to verify a different ref.
 resolve_catalog_ref() {
     [[ -z "${CATALOG_REF}" ]] || return 0
     [[ -f "${CONTROL_PLANE_ACTION}" ]] ||
         fail "set CATALOG_REF or provide ${CONTROL_PLANE_ACTION}."
-    CATALOG_REF="$(read_install_ref)"
+    CATALOG_REF="$(read_install_commit)"
     [[ -n "${CATALOG_REF}" ]] ||
-        fail "${CONTROL_PLANE_ACTION} does not define RADIUS_INSTALL_REF."
+        fail "${CONTROL_PLANE_ACTION} does not define RADIUS_INSTALL_COMMIT."
 }
 
 # One Radius release per plugin build: the control-plane installer, the managed
@@ -47,10 +53,13 @@ verify_release_pin_consistency() {
     [[ -f "${RELEASE_FILE}" ]] ||
         fail "release file not found: ${RELEASE_FILE}"
 
-    local install_ref release_tag catalog_action catalog_default
+    local install_ref install_commit release_tag catalog_action catalog_default
     install_ref="$(read_install_ref)"
     [[ "${install_ref}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
         fail "${CONTROL_PLANE_ACTION} must pin RADIUS_INSTALL_REF to a stable release tag, found: ${install_ref:-none}"
+    install_commit="$(read_install_commit)"
+    [[ "${install_commit}" =~ ^[0-9a-f]{40}$ ]] ||
+        fail "${CONTROL_PLANE_ACTION} must pin RADIUS_INSTALL_COMMIT to the 40-character commit of ${install_ref}, found: ${install_commit:-none}"
     release_tag="$(sed -nE 's/^export const RADIUS_RELEASE_TAG = "([^"]+)";$/\1/p' "${RELEASE_FILE}")"
     [[ "${release_tag}" == "${install_ref}" ]] ||
         fail "${RELEASE_FILE} pins ${release_tag:-no release}, but ${CONTROL_PLANE_ACTION} pins ${install_ref}; the modeling CLI and the deploy control plane must use the same Radius release."
@@ -59,7 +68,7 @@ verify_release_pin_consistency() {
     if [[ -f "${catalog_action}" ]]; then
         catalog_default="$(yq -r '.inputs."catalog-ref".default // ""' "${catalog_action}")"
         [[ -z "${catalog_default}" ]] ||
-            fail "${catalog_action} must not pin catalog-ref; it derives the ref from RADIUS_INSTALL_REF."
+            fail "${catalog_action} must not pin catalog-ref; it derives the ref from RADIUS_INSTALL_COMMIT."
     fi
 }
 
@@ -87,7 +96,7 @@ verify_single_source_of_truth() {
 
         scalar_values="$(
             yq -r \
-                '.. | select(tag != "!!map" and tag != "!!seq" and tag != "!!null")' \
+                '.. | select(tag != "!!map" and tag != "!!seq" and tag != "!!null") | select((path | .[-1]) != "RADIUS_INSTALL_COMMIT")' \
                 "${file}"
         )"
         violations="$(

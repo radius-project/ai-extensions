@@ -133,7 +133,7 @@ Change `load-contrib-catalog` to `curl` the single catalog file from `radius-pro
 ##### Disadvantages
 
 - Adds a runtime network dependency on `raw.githubusercontent.com/radius-project/radius`. Mitigated by `curl --retry` and a pinnable `catalog-ref`.
-- The catalog ref and the action ref are conceptually distinct (radius ref vs. `ai-extensions` ref); `catalog-ref` is empty by default and derives from `RADIUS_INSTALL_REF` in `setup-control-plane`, so the catalog, the control plane, and the modeling CLI (`RADIUS_RELEASE_TAG` in `adapter-shared`) share one Radius release. `verify-contrib-consumers.sh` fails when they differ.
+- The catalog ref and the action ref are conceptually distinct (radius ref vs. `ai-extensions` ref); `catalog-ref` is empty by default and derives from `RADIUS_INSTALL_COMMIT` (the commit of `RADIUS_INSTALL_REF`) in `setup-control-plane`, so the catalog, the control plane, and the modeling CLI (`RADIUS_RELEASE_TAG` in `adapter-shared`) share one Radius release. `verify-contrib-consumers.sh` fails when they differ.
 
 #### Proposed option
 
@@ -144,7 +144,7 @@ Change `load-contrib-catalog` to `curl` the single catalog file from `radius-pro
 The `load-contrib-catalog` composite action gains three optional inputs (`.github/extension/actions/load-contrib-catalog/action.yml`):
 
 - `catalog-repo` — default `radius-project/radius`. Repository hosting `deploy/manifest/defaults.yaml`.
-- `catalog-ref` — default empty. When empty, the action uses the Radius release tag pinned by `RADIUS_INSTALL_REF` in `setup-control-plane`. An explicit value (a release tag or commit SHA) overrides it.
+- `catalog-ref` — default empty. When empty, the action uses the immutable commit pinned by `RADIUS_INSTALL_COMMIT` in `setup-control-plane`. An explicit value (a release tag or commit SHA) overrides it.
 - `yq-version` — default `v4.53.3`. Pinned `yq` installed to read the catalog (matches the version pinned in radius's `build/tools.yaml`).
 
 The action's exported environment contract is unchanged: it still writes `RADIUS_DEFAULTS_YAML` and `RADIUS_CONTRIB_CATALOG_HELPER` to `GITHUB_ENV` for later steps and `scripts/contrib-catalog.sh` to consume.

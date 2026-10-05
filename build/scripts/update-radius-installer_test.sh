@@ -40,6 +40,9 @@ done
 printf '%s\n' "${url}" >>"${CURL_LOG}"
 if [[ "${url}" == */releases/latest ]]; then
     printf '%s\n' "${RELEASE_JSON}"
+elif [[ "${url}" == */commits/* ]]; then
+    [[ "${FAIL_COMMIT_CURL:-}" != true ]] || exit 22
+    printf '%s\n' "${COMMIT_SHA}"
 else
     [[ "${FAIL_INSTALLER_CURL:-}" != true ]] || exit 22
     [[ -n "${output}" ]]
@@ -60,6 +63,7 @@ runs:
       env:
         RADIUS_INSTALL_REF: ${ref}
         RADIUS_INSTALL_SHA256: ${checksum}
+        RADIUS_INSTALL_COMMIT: ${COMMIT:-$OLD_COMMIT}
       run: /bin/bash install-rad.sh --version "\$RADIUS_INSTALL_REF"
 YAML
 }
@@ -79,11 +83,14 @@ export CURL_LOG="${TEST_ROOT}/curl.log"
 export GITHUB_OUTPUT="${TEST_ROOT}/output"
 export INSTALLER_FIXTURE="${TEST_ROOT}/install.sh"
 export RADIUS_RELEASE_API_URL="https://example.test/releases/latest"
+export RADIUS_COMMIT_API_URL="https://example.test/commits"
+export COMMIT_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 export RADIUS_RAW_BASE_URL="https://example.test/radius"
 export RELEASE_JSON='{"tag_name":"v1.2.3","prerelease":false,"draft":false}'
 printf '#!/usr/bin/env bash\necho Radius\n' >"${INSTALLER_FIXTURE}"
 EXPECTED_CHECKSUM="$(sha256sum "${INSTALLER_FIXTURE}" | awk '{print $1}')"
 readonly EXPECTED_CHECKSUM
+readonly OLD_COMMIT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 readonly OLD_CHECKSUM="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 write_action v1.2.2 "${OLD_CHECKSUM}"
@@ -95,6 +102,8 @@ grep -Fq "RADIUS_INSTALL_REF: v1.2.3" "${ACTION_FILE}" ||
     fail "updater did not replace the stable release tag"
 grep -Fq "RADIUS_INSTALL_SHA256: ${EXPECTED_CHECKSUM}" "${ACTION_FILE}" ||
     fail "updater did not replace the installer checksum"
+grep -Fq "RADIUS_INSTALL_COMMIT: ${COMMIT_SHA}" "${ACTION_FILE}" ||
+    fail "updater did not record the release commit"
 grep -Fxq "changed=true" "${GITHUB_OUTPUT}" ||
     fail "updater did not report a change"
 grep -Fxq "https://example.test/radius/v1.2.3/deploy/install.sh" "${CURL_LOG}" ||
@@ -160,5 +169,17 @@ export FAIL_CURL=true
 if run_update >/dev/null 2>&1; then
     fail "updater ignored a release API failure"
 fi
+
+# A moved or unresolvable release commit must fail without changing the pin.
+write_action v1.2.2 "${OLD_CHECKSUM}"
+cp "${ACTION_FILE}" "${TEST_ROOT}/before-commit.yml"
+export FAIL_COMMIT_CURL=true
+if run_update >/dev/null 2>&1; then
+    fail "updater ignored a commit lookup failure"
+fi
+unset FAIL_COMMIT_CURL
+cmp -s "${TEST_ROOT}/before-commit.yml" "${ACTION_FILE}" ||
+    fail "commit lookup failure changed the action"
+COMMIT_SHA="not-a-sha" run_update >/dev/null 2>&1 && fail "updater accepted a malformed commit"
 
 echo "Radius installer updater tests passed"
