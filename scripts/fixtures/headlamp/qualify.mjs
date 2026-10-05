@@ -252,7 +252,7 @@ async function exerciseCandidate(page) {
   ).toHaveText(/containers\/web$/);
   const viewport = graph.locator(".react-flow__viewport");
   const previous = await viewport.getAttribute("style");
-  await graph.getByRole("button", { name: "zoom in", exact: true }).click();
+  await graph.getByRole("button", { name: /^zoom in$/i }).click();
   await expect(viewport).not.toHaveAttribute("style", previous);
 
   const sourceGraph = page.getByRole("region", {
