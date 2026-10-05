@@ -456,6 +456,8 @@ export function createDeployMonitorService(
           log(
             detail.status === "completed" ?
               "Observation: workflow completed; earlier protection observations are historical."
+            : detail.status === "queued" || detail.status === "in_progress" ?
+              "Observation: run left the protection wait; continuing to monitor."
             : "Observation: current environment protection was not rechecked; approval status is unknown."
           );
         protectionNotice = nextProtectionNotice;

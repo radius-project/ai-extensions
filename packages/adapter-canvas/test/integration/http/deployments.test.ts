@@ -62,7 +62,7 @@ import { createDeferred } from "../../support/browser/fakes.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 import { createFakeServerEntry } from "../../support/runtime/fakes.js";
-import { pendingEnvironment } from "../../../../adapter-shared/test/fixtures/workflow-observation.js";
+import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 
 let container: CanvasServerContainer | undefined;
 
@@ -537,172 +537,211 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     }
   );
 
-  it("streams real pending-protection evidence without terminal failure or repair", async () => {
-    const harness = start();
-    harness.state.deployStatus = "in_progress";
-    harness.state.deployLogs = [];
-    const waiting = createDeferred<void>();
-    const resume = createDeferred<void>();
-    const calls: string[][] = [];
-    let finished = false;
-    const monitor = createDeployMonitorService({
-      plannedGraph: { recover: async () => null },
-      dispatch: {
-        prepareAndDispatch: async () => ({
-          dispatched: true,
-          workflowFile: "run-rad-commands.yml",
-          dispatchedAt: 1,
-          environment: "dev",
-          baselineRunId: null
-        })
-      },
-      outcome: {
-        settle: async () => {
-          harness.state.deployStatus = "complete";
-        }
-      },
-      deployRadCommandsStep: "Run rad commands",
-      unconfirmedRunKind: "run-unconfirmed",
-      findWorkflowRun: async () => 42,
-      getRunDetail: (repo, runId, request) =>
-        observeWorkflowRun(
-          { repo, runId },
-          {
-            readRun: (targetRepo, targetRun) =>
-              readWorkflowRun(
-                {
-                  mode: "ambient",
-                  run: async (args) => {
-                    calls.push(args);
-                    const value =
-                      args[1].endsWith("pending_deployments") ?
-                        [pendingEnvironment]
-                      : args[1].includes("/jobs") ? { jobs: [], total_count: 0 }
-                      : {
-                          status: finished ? "completed" : "waiting",
-                          conclusion: finished ? "success" : null
-                        };
-                    return {
-                      code: 0,
-                      stderr: "",
-                      stdout: "HTTP/2 200\n\n" + JSON.stringify(value)
-                    };
-                  }
-                },
-                targetRepo,
-                targetRun,
-                request,
-                { includeProtection: true }
-              )
+  it.each(["completed", "queued", "in_progress"])(
+    "streams real pending-protection evidence through %s without terminal failure or repair",
+    async (nextStatus) => {
+      const harness = start();
+      harness.state.deployStatus = "in_progress";
+      harness.state.deployLogs = [];
+      const waiting = createDeferred<void>();
+      const resume = createDeferred<void>();
+      const transitioned = createDeferred<void>();
+      const finish = createDeferred<void>();
+      const calls: string[][] = [];
+      let runStatus = "waiting";
+      const monitor = createDeployMonitorService({
+        plannedGraph: { recover: async () => null },
+        dispatch: {
+          prepareAndDispatch: async () => ({
+            dispatched: true,
+            workflowFile: "run-rad-commands.yml",
+            dispatchedAt: 1,
+            environment: "dev",
+            baselineRunId: null
+          })
+        },
+        outcome: {
+          settle: async () => {
+            harness.state.deployStatus = "complete";
           }
-        ),
-      createStatusReader: async () => ({
-        progress: async () => null,
-        graph: async () => ({ graph: null, status: "missing" }),
-        controlPlaneLog: async () => null
-      }),
-      buildDeployStatusMap: () => new Map(),
-      buildDeployMessageMap: () => new Map(),
-      applyDeployMessages: () => {},
-      applyDeployStatusToResources: () => [],
-      settleDeployStatuses,
-      generatePortalUrl: () => "",
-      optionalString: () => "",
-      errorMessage: String,
-      now: () => 1700000000000,
-      sleep: async () => {
-        waiting.resolve();
-        await resume.promise;
+        },
+        deployRadCommandsStep: "Run rad commands",
+        unconfirmedRunKind: "run-unconfirmed",
+        findWorkflowRun: async () => 42,
+        getRunDetail: (repo, runId, request) =>
+          observeWorkflowRun(
+            { repo, runId },
+            {
+              readRun: (targetRepo, targetRun) =>
+                readWorkflowRun(
+                  {
+                    mode: "ambient",
+                    run: async (args) => {
+                      calls.push(args);
+                      const value =
+                        args[1].endsWith("pending_deployments") ?
+                          [pendingEnvironment]
+                        : args[1].includes("/jobs") ?
+                          { jobs: [], total_count: 0 }
+                        : {
+                            status: runStatus,
+                            conclusion:
+                              runStatus === "completed" ? "success" : null
+                          };
+                      return {
+                        code: 0,
+                        stderr: "",
+                        stdout: "HTTP/2 200\n\n" + JSON.stringify(value)
+                      };
+                    }
+                  },
+                  targetRepo,
+                  targetRun,
+                  request,
+                  { includeProtection: true }
+                )
+            }
+          ),
+        createStatusReader: async () => ({
+          progress: async () => null,
+          graph: async () => ({ graph: null, status: "missing" }),
+          controlPlaneLog: async () => null
+        }),
+        buildDeployStatusMap: () => new Map(),
+        buildDeployMessageMap: () => new Map(),
+        applyDeployMessages: () => {},
+        applyDeployStatusToResources: () => [],
+        settleDeployStatuses,
+        generatePortalUrl: () => "",
+        optionalString: () => "",
+        errorMessage: String,
+        now: () => 1700000000000,
+        sleep: async () => {
+          if (runStatus === "waiting") {
+            waiting.resolve();
+            await resume.promise;
+          } else {
+            transitioned.resolve();
+            await finish.promise;
+          }
+        }
+      });
+      // No observation scope on this fixture: the injected sleep holds the real
+      // monitor while the HTTP consumer reads its in-progress state.
+      const operation = monitor.run({
+        entry: { state: harness.state },
+        repo: "org/app",
+        branch: "feature",
+        provider: "azure",
+        requestedEnvironment: "dev",
+        resources: [],
+        log: (message) => harness.state.deployLogs?.push(message)
+      });
+      try {
+        await waiting.promise;
+        const entry = await container!.getOrCreate("panel-a");
+        const response = await fetch(
+          `${entry.baseUrl}/api/deploy-status?since=0`
+        );
+        expect(await response.json()).toMatchObject({
+          status: "in_progress",
+          active: true,
+          repairing: false,
+          error: null,
+          logsNew: expect.arrayContaining([
+            expect.stringContaining(
+              'environment "production <review>" is waiting on protection rules'
+            )
+          ])
+        });
+        runStatus = nextStatus;
+        resume.resolve();
+        if (nextStatus !== "completed") {
+          await transitioned.promise;
+          const transition = await fetch(
+            `${entry.baseUrl}/api/deploy-status?since=0`
+          );
+          const body = await transition.json();
+          expect(body).toMatchObject({
+            status: "in_progress",
+            active: true,
+            repairing: false,
+            error: null,
+            logsNew: expect.arrayContaining([
+              "Observation: run left the protection wait; continuing to monitor."
+            ])
+          });
+          expect(JSON.stringify(body)).not.toContain(
+            "approval status is unknown"
+          );
+          runStatus = "completed";
+          finish.resolve();
+        }
+        await operation;
+        const terminal = await fetch(
+          `${entry.baseUrl}/api/deploy-status?since=0`
+        );
+        expect(await terminal.json()).toMatchObject({
+          status: "complete",
+          error: null,
+          repairing: false,
+          logsNew: expect.arrayContaining([
+            expect.stringContaining(
+              nextStatus === "completed" ?
+                "earlier protection observations are historical"
+              : "run left the protection wait"
+            )
+          ])
+        });
+        const expectedCalls = [
+          [
+            "api",
+            "repos/org/app/actions/runs/42",
+            "--include",
+            "--method",
+            "GET"
+          ],
+          [
+            "api",
+            "repos/org/app/actions/runs/42/jobs?per_page=100&page=1",
+            "--include",
+            "--method",
+            "GET"
+          ],
+          [
+            "api",
+            "repos/org/app/actions/runs/42/pending_deployments",
+            "--include",
+            "--method",
+            "GET"
+          ],
+          [
+            "api",
+            "repos/org/app/actions/runs/42",
+            "--include",
+            "--method",
+            "GET"
+          ],
+          [
+            "api",
+            "repos/org/app/actions/runs/42/jobs?per_page=100&page=1",
+            "--include",
+            "--method",
+            "GET"
+          ]
+        ];
+        if (nextStatus !== "completed")
+          expectedCalls.push(...expectedCalls.slice(-2));
+        expect(calls).toEqual(expectedCalls);
+        expect(harness.dispatches).toEqual([]);
+      } finally {
+        runStatus = "completed";
+        resume.resolve();
+        finish.resolve();
+        await operation;
       }
-    });
-    // No observation scope on this fixture: the injected sleep holds the real
-    // monitor while the HTTP consumer reads its in-progress state.
-    const operation = monitor.run({
-      entry: { state: harness.state },
-      repo: "org/app",
-      branch: "feature",
-      provider: "azure",
-      requestedEnvironment: "dev",
-      resources: [],
-      log: (message) => harness.state.deployLogs?.push(message)
-    });
-    try {
-      await waiting.promise;
-      const entry = await container!.getOrCreate("panel-a");
-      const response = await fetch(
-        `${entry.baseUrl}/api/deploy-status?since=0`
-      );
-      expect(await response.json()).toMatchObject({
-        status: "in_progress",
-        active: true,
-        repairing: false,
-        error: null,
-        logsNew: expect.arrayContaining([
-          expect.stringContaining(
-            'environment "production <review>" is waiting on protection rules'
-          )
-        ])
-      });
-      finished = true;
-      resume.resolve();
-      await operation;
-      const terminal = await fetch(
-        `${entry.baseUrl}/api/deploy-status?since=0`
-      );
-      expect(await terminal.json()).toMatchObject({
-        status: "complete",
-        error: null,
-        repairing: false,
-        logsNew: expect.arrayContaining([
-          expect.stringContaining(
-            "earlier protection observations are historical"
-          )
-        ])
-      });
-      expect(calls).toEqual([
-        [
-          "api",
-          "repos/org/app/actions/runs/42",
-          "--include",
-          "--method",
-          "GET"
-        ],
-        [
-          "api",
-          "repos/org/app/actions/runs/42/jobs?per_page=100&page=1",
-          "--include",
-          "--method",
-          "GET"
-        ],
-        [
-          "api",
-          "repos/org/app/actions/runs/42/pending_deployments",
-          "--include",
-          "--method",
-          "GET"
-        ],
-        [
-          "api",
-          "repos/org/app/actions/runs/42",
-          "--include",
-          "--method",
-          "GET"
-        ],
-        [
-          "api",
-          "repos/org/app/actions/runs/42/jobs?per_page=100&page=1",
-          "--include",
-          "--method",
-          "GET"
-        ]
-      ]);
-      expect(harness.dispatches).toEqual([]);
-    } finally {
-      finished = true;
-      resume.resolve();
-      await operation;
     }
-  });
+  );
 
   it.each(["primary", "unavailable", "teardown"] as const)(
     "exposes real %s failure evidence to repair polling but keeps notifications passive",

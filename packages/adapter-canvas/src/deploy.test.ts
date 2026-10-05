@@ -5,7 +5,7 @@ import {
   type WorkflowRunner
 } from "@radius-project/adapter-shared";
 import { observeWorkflowRun } from "@radius-project/core";
-import { workflowObservationCases } from "../../adapter-shared/test/fixtures/workflow-observation.js";
+import { workflowObservationCases } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   explainNoSubscriptions,

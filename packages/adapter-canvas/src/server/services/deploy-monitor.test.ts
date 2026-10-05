@@ -14,7 +14,7 @@ import {
   parseWorkflowProtection,
   WORKFLOW_READ_LIMITS
 } from "@radius-project/core";
-import { pendingEnvironment } from "../../../../adapter-shared/test/fixtures/workflow-observation.js";
+import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
 import {
   readWorkflowRun,
@@ -153,6 +153,78 @@ describe("protection observation narration", () => {
     steps: [],
     protection: parseWorkflowProtection([pendingEnvironment])
   };
+  it.each(["queued", "in_progress"])(
+    "narrates leaving protection wait for %s once without implying approval or lost evidence",
+    async (status) => {
+      const f = request();
+      const settled = settleRecorder();
+      const details: DeployRunDetail[] = [
+        waiting,
+        waiting,
+        { status, steps: [] },
+        { status, steps: [] },
+        completedRun()
+      ];
+      await createDeployMonitorService(
+        dependencies({
+          plannedGraph: { recover: async () => null },
+          ...settled,
+          getRunDetail: async () => {
+            expect(settled.calls).toHaveLength(0);
+            const detail = details.shift();
+            if (!detail) throw new Error("Unexpected poll");
+            return detail;
+          }
+        })
+      ).run(f.request);
+      expect(
+        f.logs.filter((line) => line.includes("is waiting on protection rules"))
+      ).toHaveLength(1);
+      expect(
+        f.logs.filter((line) => line.includes("run left the protection wait"))
+      ).toEqual([
+        "Observation: run left the protection wait; continuing to monitor."
+      ]);
+      expect(f.logs.join("\n")).not.toMatch(
+        /approved|approval status is unknown/
+      );
+      expect(settled.calls).toHaveLength(1);
+      expect(settled.calls[0].conclusion).toBe("success");
+    }
+  );
+
+  it("deduplicates lost protection detail while still waiting without claiming the run resumed", async () => {
+    const f = request();
+    const settled = settleRecorder();
+    const details: DeployRunDetail[] = [
+      waiting,
+      { status: "waiting", steps: [] },
+      { status: "waiting", steps: [] },
+      waiting,
+      completedRun()
+    ];
+    await createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: async () => null },
+        ...settled,
+        getRunDetail: async () => {
+          const detail = details.shift();
+          if (!detail) throw new Error("Unexpected poll");
+          return detail;
+        }
+      })
+    ).run(f.request);
+    expect(
+      f.logs.filter((line) => line.includes("protection was not rechecked"))
+    ).toEqual([
+      "Observation: current environment protection was not rechecked; approval status is unknown."
+    ]);
+    expect(f.logs.join("\n")).not.toContain("run left the protection wait");
+    expect(f.logs.join("\n")).toContain(
+      "workflow completed; earlier protection observations are historical"
+    );
+    expect(settled.calls).toHaveLength(1);
+  });
   it("supersedes waiting narration before an unsupported completed conclusion stops observation", async () => {
     const f = request();
     const getRunDetail = vi
@@ -215,7 +287,7 @@ describe("protection observation narration", () => {
       expect(f.logs.join("\n")).toContain("does not establish approval");
       expect(f.logs.join("\n")).toContain("unavailable (authorization)");
       expect(f.logs.join("\n")).toContain("workflow detail is unavailable");
-      expect(f.logs.join("\n")).toContain("protection was not rechecked");
+      expect(f.logs.join("\n")).toContain("run left the protection wait");
       expect(f.logs.join("\n")).toContain(
         "earlier protection observations are historical"
       );

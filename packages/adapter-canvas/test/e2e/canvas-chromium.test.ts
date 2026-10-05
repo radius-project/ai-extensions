@@ -24,7 +24,7 @@ import {
   describeWorkflowProtection,
   parseWorkflowProtection
 } from "@radius-project/core";
-import { pendingEnvironment } from "../../../adapter-shared/test/fixtures/workflow-observation.js";
+import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
@@ -3907,10 +3907,15 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(output.locator("review")).toHaveCount(0);
     await expectNoWcagViolations(page);
     logs.push(
+      "Observation: run left the protection wait; continuing to monitor."
+    );
+    await expect(output).toContainText(logs[1]);
+    await expect(output).not.toContainText("approval status is unknown");
+    logs.push(
       "Observation: workflow completed; earlier protection observations are historical."
     );
     status = "complete";
-    await expect(output).toContainText(logs[1]);
+    await expect(output).toContainText(logs[2]);
     await expect(output).toContainText("Required reviewers are configured.");
     await expect(output).not.toContainText("approved");
     await page.getByRole("link", { name: "Deployments", exact: true }).focus();
