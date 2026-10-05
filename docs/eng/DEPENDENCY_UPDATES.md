@@ -31,7 +31,7 @@ To unblock a Dependabot pull request that bumps `@xyflow/react`:
 1. Check out the Dependabot branch and run `pnpm install`.
 2. Run `node scripts/graph-vendor-styles.mjs` to regenerate `packages/graph-react/src/flow.css`.
 3. Review the `flow.css` diff alongside the React Flow release notes. Look for changes to the supported hooks above, node and handle markup, `Controls`, `Background`, and viewport behavior.
-4. Run `pnpm run test:integration:libraries` and `pnpm run test:component`. If **Visual comparisons** then reports an intended rendering change, follow [Canvas visual baselines](../../CONTRIBUTING.md#canvas-visual-baselines).
+4. Run `pnpm run coverage`, `pnpm run test:integration:libraries`, `pnpm run test:component`, and `pnpm run test:chromium`. If **Visual comparisons** then reports an intended rendering change, follow [Canvas visual baselines](../../CONTRIBUTING.md#canvas-visual-baselines).
 5. Commit `flow.css` to the Dependabot branch. Add a [changeset](../../CONTRIBUTING.md#changesets) when the update changes shipped graph behavior or appearance; a removed or renamed supported hook is a major change.
 
 The Headlamp qualification fixture (`scripts/fixtures/headlamp/package.json` and `TOOL_VERSIONS` in `scripts/fixtures/headlamp/contracts.mjs`) pins Headlamp's own React Flow peer, which is a different host's version. It is checked only by the scheduled real-host qualification, so it does not need to change to unblock a pull request.

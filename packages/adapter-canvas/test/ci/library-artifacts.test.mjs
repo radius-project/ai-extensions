@@ -9,6 +9,7 @@ import {
   validateStylesheetBoundary
 } from "../../../../scripts/library-artifacts.mjs";
 import {
+  assertInstalledFlowVersion,
   expectedScopedFlowStyles,
   hoistKeyframes,
   pinnedFlowVersion,
@@ -141,6 +142,15 @@ describe("packed library contracts", () => {
     expect(
       pinnedFlowVersion({ dependencies: { "@xyflow/react": "12.12.0" } })
     ).toBe("12.12.0");
+  });
+
+  it("points to the runbook when the installed @xyflow/react differs from the pin", () => {
+    expect(() => assertInstalledFlowVersion("12.12.0", "12.11.6")).toThrow(
+      /Installed @xyflow\/react 12\.12\.0 does not match the 12\.11\.6 pin.*docs\/eng\/DEPENDENCY_UPDATES\.md/
+    );
+    expect(() =>
+      assertInstalledFlowVersion("12.11.6", "12.11.6")
+    ).not.toThrow();
   });
 
   it.each(supportedFlowHooks)(
@@ -337,6 +347,14 @@ describe("packed library contracts", () => {
     const value = manifest();
     delete value.exports["./package.json"];
     expect(() => validateLibraryManifest(value, value.name, "0.1.0")).toThrow();
+  });
+
+  it("points to the runbook when the packed @xyflow/react differs from the pin", () => {
+    const value = manifest();
+    value.dependencies["@xyflow/react"] = "0.0.0";
+    expect(() => validateLibraryManifest(value, value.name, "0.1.0")).toThrow(
+      /exact @xyflow\/react pinned in packages\/graph-react\/package\.json; see .*docs\/eng\/DEPENDENCY_UPDATES\.md/
+    );
   });
 
   it("rejects unrecognized library manifests", () => {

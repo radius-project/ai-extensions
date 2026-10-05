@@ -108,6 +108,14 @@ ${keyframes.join("\n")}
 export const staleFlowStylesMessage =
   "packages/graph-react/src/flow.css does not match the pinned @xyflow/react. Run `node scripts/graph-vendor-styles.mjs` and review the diff; see the React Flow steps in docs/eng/DEPENDENCY_UPDATES.md.";
 
+export function assertInstalledFlowVersion(installed, pinned) {
+  assert.equal(
+    installed,
+    pinned,
+    `Installed @xyflow/react ${installed} does not match the ${pinned} pin in packages/graph-react/package.json. Run \`pnpm install\`; see the React Flow steps in docs/eng/DEPENDENCY_UPDATES.md.`
+  );
+}
+
 export function expectedScopedFlowStyles() {
   const pinned = pinnedFlowVersion();
   const cssPath = createRequire(graphManifestPath).resolve(
@@ -115,11 +123,7 @@ export function expectedScopedFlowStyles() {
   );
   const root = resolve(dirname(cssPath), "..");
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  assert.equal(
-    manifest.version,
-    pinned,
-    `Installed @xyflow/react ${manifest.version} does not match the ${pinned} pin in packages/graph-react/package.json. Run \`pnpm install\`.`
-  );
+  assertInstalledFlowVersion(manifest.version, pinned);
   return scopeFlowStyles(
     readFileSync(cssPath, "utf8"),
     readFileSync(join(root, "LICENSE"), "utf8"),
