@@ -103,7 +103,7 @@ export async function collectWorkflowFailure(
     conclusion === "failure" ? failedPostDeploymentTeardown(run) : null;
   const lead =
     teardownJob ?
-      "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed."
+      "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed. Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources. Review the Teardown logs and verify saved state before retrying."
     : "Deployment failed (" + conclusion + ").";
   const narration: string[] = [];
   let message = lead;
@@ -155,7 +155,8 @@ export async function collectWorkflowFailure(
     teardownJob && teardownJobs.size === 1 && teardownJobs.has(teardownJob) ?
       extractRadDeployError(teardownLog)
     : "";
-  const detail = primary || teardownDetail || extractRadDeployError(log);
+  const detail =
+    teardownJob ? teardownDetail : primary || extractRadDeployError(log);
   if (detail) {
     message += "\n\n" + detail;
     narration.push(

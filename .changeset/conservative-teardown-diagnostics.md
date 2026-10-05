@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Distinguish successful deployment commands followed by a confirmed post-deployment teardown failure without claiming that Radius state saving failed or changing repair eligibility.
+**Fixed:** When only post-deployment teardown fails, explain that deployment commands succeeded, resources may have changed, and saved state may be out of date; advise reviewing teardown logs and verifying saved state before retrying.

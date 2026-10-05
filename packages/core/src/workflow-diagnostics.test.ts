@@ -53,6 +53,9 @@ describe("post-deployment teardown evidence", () => {
         /^Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed\. Resources may have changed\./
       );
       expect(result.message).toContain("Failed step: Teardown.");
+      expect(result.message).toContain(
+        "Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources. Review the Teardown logs and verify saved state before retrying."
+      );
       expect(result.message).not.toContain("saving Radius state failed");
       expect(result.radiusError).toBe(log ? "Error: { teardown failed }" : "");
     }
@@ -215,23 +218,66 @@ describe("post-deployment teardown evidence", () => {
 
   it.each([
     {
+      name: "attributed teardown followed by another job's error",
       log: "deploy\tTeardown\t2026-01-01 Error: { teardown }\nother\tOther\t2026-01-01 Error: { unrelated }",
       expected: "Error: { teardown }"
     },
     {
+      name: "unmatched teardown job",
       log: "other\tTeardown\t2026-01-01 Error: { other job }",
-      expected: "Error: { other job }"
+      expected: ""
     },
     {
+      name: "ambiguous teardown jobs",
       log: "deploy\tTeardown\t2026-01-01 Error: { first }\nother\tTeardown\t2026-01-01 Error: { second }",
-      expected: "Error: { second }"
+      expected: ""
+    },
+    {
+      name: "no teardown log and an unrelated error",
+      log: "other\tOther\t2026-01-01 Error: { unrelated }",
+      expected: ""
+    },
+    {
+      name: "attributed teardown without an error followed by an unrelated error",
+      log: "deploy\tTeardown\t2026-01-01 Finishing teardown\nother\tOther\t2026-01-01 Error: { unrelated }",
+      expected: ""
+    },
+    {
+      name: "unstructured error without job attribution",
+      log: "Error: { unattributed }",
+      expected: ""
     }
   ])(
-    "keeps only supported excerpt attribution: $expected",
+    "keeps only supported excerpt attribution for $name",
     async ({ log, expected }) => {
-      expect((await diagnose(run(), log)).radiusError).toBe(expected);
+      const result = await diagnose(run(), log);
+      expect(result.radiusError).toBe(expected);
+      expect(result.message).toMatch(
+        /^Deployment commands completed successfully/
+      );
+      expect(result.message).not.toContain("unrelated");
+      expect(result.narration.join("\n")).not.toContain("unrelated");
+      if (expected) {
+        expect(result.message).toContain(expected);
+        expect(result.narration.join("\n")).toContain(expected);
+      } else {
+        expect(result.message).not.toContain("Error: {");
+        expect(result.narration).toEqual([]);
+      }
     }
   );
+
+  it("preserves whole-log fallback when teardown failure cannot be established", async () => {
+    const observed = run();
+    observed.jobs = [];
+    const result = await diagnose(
+      observed,
+      "other\tOther\t2026-01-01 Error: { generic failure }"
+    );
+    expect(result.message).toMatch(/^Deployment failed/);
+    expect(result.radiusError).toBe("Error: { generic failure }");
+    expect(result.narration.join("\n")).toContain("Error: { generic failure }");
+  });
 });
 
 it("exports the deployment step name used by workflow evidence consumers", () => {
