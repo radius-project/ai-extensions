@@ -532,7 +532,7 @@ describe("P0-C built Radius extension artifact", () => {
     ]) {
       expect(
         notices,
-        `A bundled dependency version changed. Follow "Bundled third-party notices" in docs/eng/DEPENDENCY_UPDATES.md.`
+        `A bundled dependency version changed. Follow "Bundled third-party notices" in docs/eng/DEPENDENCY_UPDATES.md`
       ).toContain(marker);
     }
     expect(notices).not.toContain("===== reactflow@");
