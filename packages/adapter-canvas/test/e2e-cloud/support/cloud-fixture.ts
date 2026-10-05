@@ -76,6 +76,64 @@ function isAzureResourceNotFound(result: CloudCommandResult): boolean {
   );
 }
 
+/**
+ * Extracts a Microsoft Graph error's `error.code`, `az rest`'s only stable,
+ * machine-readable signal for *why* a call failed. Graph wraps failures as
+ * `ERROR: {"error":{"code":"...","message":"..."}}`; everything after the
+ * last `}` (if anything) is discarded so trailing CLI diagnostics can't break
+ * the parse. Returns `undefined` when no such envelope is present, which
+ * callers must treat as "unclassifiable" rather than "not found".
+ */
+function parseGraphErrorCode(result: CloudCommandResult): string | undefined {
+  for (const text of [result.stderr, result.stdout]) {
+    if (!text) continue;
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end === -1 || end < start) continue;
+    try {
+      const parsed: unknown = JSON.parse(text.slice(start, end + 1));
+      const code =
+        (
+          parsed &&
+          typeof parsed === "object" &&
+          "error" in parsed &&
+          parsed.error &&
+          typeof parsed.error === "object" &&
+          "code" in parsed.error
+        ) ?
+          (parsed.error as { code: unknown }).code
+        : undefined;
+      if (typeof code === "string") return code;
+    } catch {
+      // Not a JSON envelope; try the other stream before giving up.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether a failed `az rest` call against an exact Graph object URL proves
+ * that object is gone.
+ *
+ * Message text such as "does not exist" is not proof: Microsoft documents
+ * `error.code` as the stable contract and explicitly warns that message text
+ * can change, and — worse — that same phrase appears in errors about a
+ * *referenced* object, which is exactly the false "it's gone" this exact-object
+ * GET exists to rule out. So this accepts only a recognized not-found
+ * `error.code`, never prose. `az rest` doesn't surface the HTTP status
+ * separately from the Graph body, so the parsed envelope is the only
+ * structured signal available; a response with no parseable code is kept as
+ * an explicit cleanup error rather than assumed to be a deletion proof.
+ */
+function isExactGraphObjectNotFound(result: CloudCommandResult): boolean {
+  if (result.code === 0) return false;
+  const code = parseGraphErrorCode(result);
+  if (code !== undefined) return code === "Request_ResourceNotFound";
+  // No JSON envelope: accept only a bare, exact error code, never a code or
+  // phrase embedded in surrounding prose.
+  return (result.stderr || result.stdout).trim() === "Request_ResourceNotFound";
+}
+
 export interface RoleAssignmentRecord {
   readonly id: string;
   readonly principalId: string;
@@ -1546,7 +1604,7 @@ export async function createCloudFixture(
                   `GET application ${app.objectId}`
                 )
               );
-              if (isAzureResourceNotFound(lookup)) return true;
+              if (isExactGraphObjectNotFound(lookup)) return true;
               expectSuccess(lookup, `az rest GET application ${app.objectId}`);
               return undefined;
             },

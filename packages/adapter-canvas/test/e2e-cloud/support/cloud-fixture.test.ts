@@ -4414,6 +4414,64 @@ describe("createCloudFixture", () => {
       );
     });
 
+    it("treats a JSON-wrapped Graph not-found error code as verified deletion", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          },
+          times: 1
+        },
+        { tool: "az", match: graphApplicationDelete("obj-1"), respond: {} },
+        {
+          tool: "az",
+          match: graphApplicationGet("obj-1"),
+          respond: {
+            code: 1,
+            stderr:
+              'ERROR: {"error":{"code":"Request_ResourceNotFound","message":"Resource does not exist."}}'
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
+      );
+    });
+
+    it("does not treat a generic 'does not exist' message as verified deletion", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          },
+          times: 1
+        },
+        { tool: "az", match: graphApplicationDelete("obj-1"), respond: {} },
+        {
+          tool: "az",
+          match: graphApplicationGet("obj-1"),
+          respond: {
+            code: 1,
+            stderr:
+              "ERROR: Resource 'Application_obj-1' does not exist or one of its queried reference-property objects are not present."
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /az rest GET application obj-1 failed.*does not exist/
+      );
+    });
+
     it("shares the deletion deadline between the exact-object DELETE and GET", async () => {
       let now = NOW;
       const { fixture, fake } = await createHarness(
