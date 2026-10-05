@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { pinnedFlowVersion } from "./graph-vendor-styles.mjs";
 
 const publicExports = {
   "@radius-project/core": {
@@ -55,8 +56,8 @@ export function validateLibraryManifest(manifest, name, coreVersion) {
     assert.equal(manifest.dependencies.dagre, undefined);
     assert.equal(
       manifest.dependencies["@xyflow/react"],
-      "12.11.6",
-      `Packed graph-react depends on @xyflow/react ${manifest.dependencies["@xyflow/react"]}, not the reviewed 12.11.6. Follow the React Flow steps in docs/eng/DEPENDENCY_UPDATES.md.`
+      pinnedFlowVersion(),
+      "Packed graph-react must depend on the exact @xyflow/react pinned in packages/graph-react/package.json."
     );
     assert.equal(manifest.dependencies.react, undefined);
     assert.equal(manifest.dependencies["react-dom"], undefined);

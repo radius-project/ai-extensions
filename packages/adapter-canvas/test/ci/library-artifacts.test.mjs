@@ -11,9 +11,12 @@ import {
 import {
   expectedScopedFlowStyles,
   hoistKeyframes,
+  pinnedFlowVersion,
   renameKeyframes,
   scopeFlowStyles,
-  scopedFlowStylesPath
+  scopedFlowStylesPath,
+  staleFlowStylesMessage,
+  supportedFlowHooks
 } from "../../../../scripts/graph-vendor-styles.mjs";
 
 function manifest() {
@@ -46,7 +49,7 @@ function manifest() {
     },
     dependencies: {
       "@radius-project/core": "0.1.0",
-      "@xyflow/react": "12.11.6"
+      "@xyflow/react": pinnedFlowVersion()
     },
     peerDependencies: {
       react: "^18.3.1 || ^19.2.8",
@@ -59,7 +62,8 @@ function manifest() {
 describe("packed library contracts", () => {
   it("retains the exact pinned vendor rules and license inside the graph scope", () => {
     const css = readFileSync(scopedFlowStylesPath, "utf8");
-    expect(css).toBe(expectedScopedFlowStyles());
+    expect(css, staleFlowStylesMessage).toBe(expectedScopedFlowStyles());
+    expect(css).toContain(`@xyflow/react@${pinnedFlowVersion()}`);
     expect(css).toContain("MIT License");
     expect(css).toContain("Copyright (c) 2019-2025 webkid GmbH");
     expect(css).toContain("@scope (.radius-graph)");
@@ -124,10 +128,35 @@ describe("packed library contracts", () => {
     ).toThrow(message);
   });
 
+  it.each([["^12.11.6"], ["12.x"], ["latest"], [undefined]])(
+    "requires graph-react to pin @xyflow/react exactly, not %s",
+    (version) => {
+      expect(() =>
+        pinnedFlowVersion({ dependencies: { "@xyflow/react": version } })
+      ).toThrow(/must pin @xyflow\/react to an exact version/);
+    }
+  );
+
+  it("reads the exact @xyflow/react pin from a graph-react manifest", () => {
+    expect(
+      pinnedFlowVersion({ dependencies: { "@xyflow/react": "12.12.0" } })
+    ).toBe("12.12.0");
+  });
+
+  it.each(supportedFlowHooks)(
+    "keeps the supported styling hook %s in the vendored stylesheet",
+    (hook) => {
+      expect(
+        readFileSync(scopedFlowStylesPath, "utf8"),
+        `React Flow no longer ships ${hook}, which hosts may style. Removing it is a graph-react major release; see docs/eng/DEPENDENCY_UPDATES.md.`
+      ).toContain(hook);
+    }
+  );
+
   it.each(['@import "external.css";', "@font-face { font-family: other; }"])(
     "rejects unreviewed global vendor inputs: %s",
     (css) => {
-      expect(() => scopeFlowStyles(css, "MIT")).toThrow();
+      expect(() => scopeFlowStyles(css, "MIT", "0.0.0")).toThrow();
     }
   );
 

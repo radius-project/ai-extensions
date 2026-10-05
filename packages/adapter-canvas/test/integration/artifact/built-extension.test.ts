@@ -13,6 +13,7 @@ import {
   type Dirent
 } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -102,6 +103,36 @@ function expectMatchingFile(source: string, destination: string): void {
   const expected = readFileSync(source);
   const actual = readFileSync(destination);
   expect(actual.equals(expected), destination).toBe(true);
+}
+
+// Resolves a dependency the way the bundler does from `fromRoot` and returns
+// the installed package root, so notice expectations follow the lockfile.
+function installedPackageRoot(fromRoot: string, name: string): string {
+  let directory = dirname(
+    createRequire(join(fromRoot, "package.json")).resolve(name)
+  );
+  for (;;) {
+    const manifestPath = join(directory, "package.json");
+    if (
+      existsSync(manifestPath) &&
+      (JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: unknown })
+        .name === name
+    ) {
+      return directory;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) {
+      throw new Error(`Unable to locate the installed ${name} package.`);
+    }
+    directory = parent;
+  }
+}
+
+function bundledNoticeMarker(root: string): string {
+  const { name, version } = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8")
+  ) as { name: string; version: string };
+  return `===== ${name}@${version} =====`;
 }
 
 function prepareBuildWorkspace(
@@ -520,20 +551,22 @@ describe("P0-C built Radius extension artifact", () => {
     );
     expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
-    for (const marker of [
-      "===== react@19.3.0 =====",
-      "===== react-dom@19.3.0 =====",
-      "===== @xyflow/react@12.11.6 =====",
-      "===== @xyflow/system@0.0.82 =====",
-      "===== dagre@0.8.5 =====",
-      "===== graphlib@2.1.8 =====",
-      "===== lodash@4.18.1 =====",
-      "===== yaml@2.9.1 ====="
+    const canvasRoot = join(REPO_ROOT, "packages", "adapter-canvas");
+    const graphRoot = join(REPO_ROOT, "packages", "graph-react");
+    const flow = installedPackageRoot(graphRoot, "@xyflow/react");
+    const dagre = installedPackageRoot(graphRoot, "dagre");
+    const graphlib = installedPackageRoot(dagre, "graphlib");
+    for (const root of [
+      installedPackageRoot(canvasRoot, "react"),
+      installedPackageRoot(canvasRoot, "react-dom"),
+      flow,
+      installedPackageRoot(flow, "@xyflow/system"),
+      dagre,
+      graphlib,
+      installedPackageRoot(graphlib, "lodash"),
+      installedPackageRoot(canvasRoot, "yaml")
     ]) {
-      expect(
-        notices,
-        `A bundled dependency version changed. Follow "Bundled third-party notices" in docs/eng/DEPENDENCY_UPDATES.md`
-      ).toContain(marker);
+      expect(notices).toContain(bundledNoticeMarker(root));
     }
     expect(notices).not.toContain("===== reactflow@");
     expect(notices).not.toContain("===== @reactflow/");
