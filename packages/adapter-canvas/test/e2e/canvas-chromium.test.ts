@@ -4475,6 +4475,14 @@ test.describe("Radius Canvas in Chromium", () => {
       );
       await expect(page.locator("#deploy-fail-repair-note")).toBeHidden();
       await expect(page.locator("#deploy-progress-modal")).toBeVisible();
+      if (evidence === "post-deployment teardown failure") {
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources."
+        );
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "Review the Teardown logs and verify saved state before retrying."
+        );
+      }
       if (unconfirmed) {
         await expect(page.locator("#deploy-progress-subtitle")).toContainText(
           DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE

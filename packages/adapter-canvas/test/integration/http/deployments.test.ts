@@ -743,15 +743,21 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     }
   );
 
-  it.each(["primary", "unavailable", "teardown"] as const)(
+  it.each([
+    "primary",
+    "unavailable",
+    "teardown",
+    "teardown-unattributed"
+  ] as const)(
     "exposes real %s failure evidence to repair polling but keeps notifications passive",
     async (mode) => {
       const calls: string[] = [];
+      const teardown = mode === "teardown" || mode === "teardown-unattributed";
       const harness = start({
         triggerDeployRepairHandoff: (entry) => {
           expect(entry?.state.deployError).toContain(
-            mode === "teardown" ?
-              "Resources may have changed."
+            teardown ?
+              "Review the Teardown logs and verify saved state before retrying."
             : "Failed step: Run rad commands"
           );
           expect(entry?.state.deployingResources?.[0].deployStatus).toBe(
@@ -785,8 +791,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
                           {
                             name: "Run rad commands",
                             status: "completed",
-                            conclusion:
-                              mode === "teardown" ? "success" : "failure"
+                            conclusion: teardown ? "success" : "failure"
                           },
                           {
                             name: "Teardown",
@@ -807,9 +812,11 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
               code: 0,
               stderr: "",
               stdout:
-                (mode === "teardown" ? "" : (
+                (teardown ? "" : (
                   "deploy\tRun rad commands\t2026-01-01 Error: recipe quota exceeded\n"
-                )) + "deploy\tTeardown\t2026-01-01 Error: { teardown failed }"
+                )) +
+                (mode === "teardown-unattributed" ? "other-job" : "deploy") +
+                "\tTeardown\t2026-01-01 Error: { teardown failed }"
             };
           }
           throw new Error("Unexpected workflow read");
@@ -886,8 +893,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           })
         ],
         error: expect.stringContaining(
-          mode === "teardown" ?
-            "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed."
+          teardown ?
+            "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed. Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources. Review the Teardown logs and verify saved state before retrying."
           : "Failed step: Run rad commands, Teardown."
         ),
         errorKind: null
@@ -899,6 +906,11 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         JSON.stringify(body).includes("The workflow log could not be read.")
       ).toBe(mode === "unavailable");
       expect(JSON.stringify(body)).not.toContain("fixture-private");
+      if (teardown) {
+        expect(JSON.stringify(body).includes("teardown failed")).toBe(
+          mode === "teardown"
+        );
+      }
       expect(calls).toEqual([
         "api repos/org/app/actions/runs/42 --include --method GET",
         "api repos/org/app/actions/runs/42/jobs?per_page=100&page=1 --include --method GET",

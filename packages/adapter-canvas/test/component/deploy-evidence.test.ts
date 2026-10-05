@@ -21,7 +21,7 @@ it.each([
   {
     name: "post-deployment teardown failure",
     error:
-      "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed.\n\nError: <teardown>",
+      "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed. Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources. Review the Teardown logs and verify saved state before retrying.\n\nError: <teardown>",
     errorKind: null
   },
   {
