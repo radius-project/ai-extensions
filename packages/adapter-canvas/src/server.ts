@@ -32,8 +32,13 @@ import {
   remediationView,
   stateRegistryForEnvironment
 } from "@radius-project/core";
+import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
 import type { Remediation, RemediationView } from "@radius-project/core";
-import { buildGraphViaRad } from "@radius-project/adapter-shared";
+import {
+  buildGraphViaRad,
+  createWorkflowReadSession,
+  type WorkflowReadRequest
+} from "@radius-project/adapter-shared";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
@@ -269,6 +274,7 @@ import { deployedGraphPage } from "./pages/deployed-graph-page.js";
 import { environmentPage } from "./pages/environment-page.js";
 import { deployingPage } from "./pages/deploying-page.js";
 import { createCanvasServer } from "./server/create-canvas-server.js";
+import { createWorkflowObservationScope } from "./server/services/workflow-observation-scope.js";
 import { createRequestHandler as createScaffoldRequestHandler } from "./server/create-request-handler.js";
 import {
   syncRequestedPage,
@@ -997,12 +1003,24 @@ const deploymentsRoutes = createDeploymentsRoutes({
   get abandonment() {
     return deploymentAbandonmentService;
   },
-  probeDeleteConflict: (request) =>
-    probeDeleteConflict(request, {
+  probeDeleteConflict: (request, instanceId) => {
+    const scope = canvasServer.instances.get(instanceId)?.observation;
+    if (!scope)
+      throw new Error("Workflow observation instance is unavailable.");
+    let observation: WorkflowReadRequest | undefined;
+    const read = () =>
+      (observation ??= scope.observe(
+        undefined,
+        WORKFLOW_READ_LIMITS.deleteConflictMs
+      ));
+    return probeDeleteConflict(request, {
       resolveEnvDeployment,
-      listArtifacts: listWorkflowArtifacts,
-      downloadArtifact: downloadWorkflowArtifact
-    })
+      listArtifacts: (repo, runId) =>
+        listWorkflowArtifacts(repo, runId, undefined, read().context),
+      downloadArtifact: (repo, artifact) =>
+        downloadWorkflowArtifact(repo, artifact, read().context)
+    });
+  }
 });
 
 // Composition root for the `azure-discovery` routes. Four seams:
@@ -1379,7 +1397,12 @@ function triggerGraphRepairHandoff(
 // route. It never parses Bicep or invokes rad through a second path.
 const graphsPlanningRoutes = createGraphsPlanningRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  createDeployStatusReader: (options) => cachedDeployStatusReader(options),
+  createDeployStatusReader: (options, instanceId) => {
+    const scope = canvasServer.instances.get(instanceId)?.observation;
+    if (!scope)
+      throw new Error("Workflow observation instance is unavailable.");
+    return scope.reader(options);
+  },
   loadModeledGraph: async (instanceId, repo, branch) => {
     const outcome = await graphPlanningWorkflows.loadGraph({
       instanceId,
@@ -1814,6 +1837,9 @@ const canvasServer = createCanvasServer(
       });
     },
     onStarted: (instanceId, entry) => {
+      entry.observation = createWorkflowObservationScope(
+        createDeployStatusReader
+      );
       shuttingDownInstances.delete(instanceId);
       entry.state.ghCommandPresentation = GH_COMMAND_PRESENTATION;
       const coordinator = instanceRequestCoordinators.get(instanceId);
@@ -1989,52 +2015,17 @@ async function deployStatusReaderFromState(
     );
     if (application && state) state.deployAppName = application;
   }
-  return cachedDeployStatusReader({
+  const entry = [...canvasServer.instances.values()].find(
+    (candidate) => candidate.state === state
+  );
+  if (!entry?.observation)
+    throw new Error("Workflow observation instance is unavailable.");
+  return entry.observation.reader({
     repo,
     environment,
     application,
     runId: runId ?? state?.deployRunId ?? null
   });
-}
-
-// createDeployStatusReader keeps its TTL cache, single-flight de-dup and
-// monotonic `sequence` guard in the reader instance, so building a fresh reader
-// per request makes all three inert and lets the deploy monitor and an
-// /api/deployed-graph poll download the same artifact concurrently. Cache
-// readers by their identity so callers reading the same deployment share one.
-const deployStatusReaders = new Map<
-  string,
-  ReturnType<typeof createDeployStatusReader>
->();
-const MAX_DEPLOY_STATUS_READERS = 32;
-
-function cachedDeployStatusReader(
-  options: Parameters<typeof createDeployStatusReader>[0]
-): ReturnType<typeof createDeployStatusReader> {
-  const key = [
-    options.repo,
-    options.environment || "",
-    options.application || "",
-    options.runId ?? ""
-  ].join("\n");
-  const existing = deployStatusReaders.get(key);
-  if (existing) {
-    // Refresh LRU position so the cap evicts genuinely idle readers, not the
-    // one a live deploy is actively polling.
-    deployStatusReaders.delete(key);
-    deployStatusReaders.set(key, existing);
-    return existing;
-  }
-  const reader = createDeployStatusReader(options);
-  deployStatusReaders.set(key, reader);
-  // Bounded: each run mints a new key (runId is part of it), so a long session
-  // cycling through deploys/environments must not grow the map without limit.
-  while (deployStatusReaders.size > MAX_DEPLOY_STATUS_READERS) {
-    const oldest = deployStatusReaders.keys().next().value;
-    if (oldest === undefined) break;
-    deployStatusReaders.delete(oldest);
-  }
-  return reader;
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
@@ -3114,9 +3105,13 @@ async function deleteRadiusEnvironmentViaWorkflow(
     };
   }
   const deadline = Date.now() + 30 * 60 * 1000;
+  const reads = createWorkflowReadSession();
   let delayMs = 5000;
   while (Date.now() < deadline) {
-    const detail = await getRunDetail(repo, runId);
+    const detail = await getRunDetail(repo, runId, undefined, {
+      identity: "ambient",
+      context: reads.observe(WORKFLOW_READ_LIMITS.runMs)
+    });
     if (detail && detail.status === "completed") {
       const classified = classifyCompletedDeleteEnvRun(
         detail.conclusion,
@@ -3249,7 +3244,8 @@ const deployOutcomeService = createDeployOutcomeService({
   projectSafeGraphResources: (graph) =>
     canvasGraphResources(projectSafeApplicationGraph(graph).resources),
   settleDeployStatuses,
-  fetchRunLog,
+  fetchRunLog: (repo, runId, request) =>
+    fetchRunLog(repo, runId, undefined, request),
   cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -3271,7 +3267,8 @@ const deployMonitorService = createDeployMonitorService({
       undefined,
       afterRunId
     ),
-  getRunDetail,
+  getRunDetail: (repo, runId, request) =>
+    getRunDetail(repo, runId, undefined, request),
   createStatusReader: (state, repo, branch, runId) =>
     deployStatusReaderFromState(state, repo, branch, runId),
   buildDeployStatusMap,

@@ -1,9 +1,14 @@
 import type {
   WorkflowReadEvidence,
   WorkflowResponseMetadata,
-  WorkflowRunRead
+  WorkflowRunRead,
+  WorkflowReadContext,
+  WorkflowReadDecision
 } from "@radius-project/core";
-import { readWorkflowApi } from "./workflow-read-response.js";
+import {
+  readWorkflowApi,
+  readWorkflowApiWithPolicy
+} from "./workflow-read-response.js";
 import {
   createWorkflowReadBudget,
   isWorkflowReadLimitError
@@ -145,13 +150,13 @@ function rejectedSelectedAuthorizationError(
 
 async function selectedRepositoryAccessError(
   executor: SelectedWorkflowExecutor,
-  repo: string
+  repo: string,
+  run: WorkflowRunner = executor.run
 ): Promise<SelectedGhAuthorizationError | null> {
   try {
-    const result = await executor.run(
-      ["api", `repos/${repo}`, "--jq", ".full_name"],
-      { timeout: 15000 }
-    );
+    const result = await run(["api", `repos/${repo}`, "--jq", ".full_name"], {
+      timeout: 15000
+    });
     if (Number(result.code) === 0) return null;
     if (isRateLimitFailure(result.stdout, result.stderr)) return null;
     const status = selectedFailureStatus(result.stdout, result.stderr);
@@ -164,6 +169,7 @@ async function selectedRepositoryAccessError(
     }
     return null;
   } catch (error) {
+    if (isWorkflowReadLimitError(error)) throw error;
     if (isSelectedGhAuthorizationError(error)) return error;
     const detail = executor.errorMessage(error);
     if (isRateLimitFailure("", detail)) return null;
@@ -258,8 +264,21 @@ export interface WorkflowRunResponse {
   value: WorkflowRunRead | null;
   completeness: "complete" | "status-only" | "unavailable";
   reason?:
-    "read-failed" | "invalid-data" | "pagination" | "timeout" | "output-limit";
+    | "read-failed"
+    | "invalid-data"
+    | "pagination"
+    | "timeout"
+    | "output-limit"
+    | "cancelled"
+    | "deferred";
   evidence: WorkflowReadEvidence[];
+  decision?: WorkflowReadDecision;
+}
+
+export interface WorkflowReadRequest {
+  context: WorkflowReadContext;
+  identity: string;
+  onDecision?(decision: WorkflowReadDecision): void;
 }
 
 function nextJobsPage(
@@ -307,7 +326,8 @@ function nextJobsPage(
 export async function readWorkflowRunWithMetadata(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<WorkflowRunResponse> {
   if (
     !/^[\w-]+\/[\w.-]+$/.test(repo) ||
@@ -319,25 +339,52 @@ export async function readWorkflowRunWithMetadata(
   }
   const evidence: WorkflowReadEvidence[] = [];
   let value: WorkflowRunRead | null = null;
+  let decision: WorkflowReadDecision | undefined;
   const incomplete = (
     reason: NonNullable<WorkflowRunResponse["reason"]>
   ): WorkflowRunResponse => ({
     value,
     completeness: value ? "status-only" : "unavailable",
     reason,
-    evidence
+    evidence,
+    ...(decision ? { decision } : {})
   });
   const run =
     execution.mode === "ambient" ? execution.run : execution.executor.run;
+  const context = request?.context;
+  let budget: WorkflowRunner | undefined;
+  const bounded = () =>
+    (budget ??= createWorkflowReadBudget(
+      run,
+      15000,
+      10 * 1024 * 1024,
+      context
+    ));
+  const interrupted = (error: unknown): WorkflowRunResponse => {
+    if (!isWorkflowReadLimitError(error)) throw error;
+    if (request) {
+      decision =
+        error.reason === "cancelled" ?
+          { state: "stopped", reason: "cancelled" }
+        : {
+            state: "exhausted",
+            reason: error.reason === "timeout" ? "elapsed" : "ineligible"
+          };
+      request.onDecision?.(decision);
+    }
+    evidence.push({
+      phase: value ? "jobs" : "run",
+      response: { source: "unavailable", reason: error.reason }
+    });
+    return incomplete(error.reason);
+  };
   let repositoryProbe: Promise<void> | undefined;
   const probe = (executor: SelectedWorkflowExecutor): Promise<void> => {
     repositoryProbe ??= (async () => {
       try {
-        const result = await readWorkflowApi(
-          createWorkflowReadBudget(run),
-          `repos/${repo}`,
-          { timeout: 15000 }
-        );
+        const result = await readWorkflowApi(bounded(), `repos/${repo}`, {
+          timeout: 15000
+        });
         evidence.push({ phase: "repository", response: result.metadata });
         const status =
           result.metadata.source === "gh-api-include" ?
@@ -358,6 +405,13 @@ export async function readWorkflowRunWithMetadata(
             : "Repository access could not be confirmed."
           );
       } catch (error) {
+        if (isWorkflowReadLimitError(error)) {
+          evidence.push({
+            phase: "repository",
+            response: { source: "unavailable", reason: error.reason }
+          });
+          throw error;
+        }
         if (isSelectedGhAuthorizationError(error)) throw error;
         const detail = executor.errorMessage(error);
         const status = selectedFailureStatus("", detail);
@@ -374,10 +428,7 @@ export async function readWorkflowRunWithMetadata(
           phase: "repository",
           response: {
             source: "unavailable",
-            reason:
-              isWorkflowReadLimitError(error) ?
-                error.reason
-              : "invalid-response"
+            reason: "invalid-response"
           }
         });
       }
@@ -386,12 +437,24 @@ export async function readWorkflowRunWithMetadata(
   };
   try {
     if (execution.mode === "selected") await execution.prepare?.();
-    const bounded = createWorkflowReadBudget(run);
+    const phaseDeadline = context ? context.clock.monotonic() + 15000 : 0;
     const read = async (endpoint: string, phase: "run" | "jobs") => {
-      const response = await readWorkflowApi(bounded, endpoint, {
-        timeout: 15000
-      });
-      evidence.push({ phase, response: response.metadata });
+      // Only lifecycle owners can supply a retry ledger shared across reads.
+      const response =
+        request ?
+          await readWorkflowApiWithPolicy(
+            bounded(),
+            endpoint,
+            { timeout: 15000 },
+            request.context,
+            JSON.stringify([request.identity, repo, String(runId), phase]),
+            phaseDeadline,
+            (result) => evidence.push({ phase, response: result.metadata })
+          )
+        : await readWorkflowApi(bounded(), endpoint, { timeout: 15000 });
+      decision = response.decision;
+      if (decision) request?.onDecision?.(decision);
+      if (!request) evidence.push({ phase, response: response.metadata });
       if (execution.mode === "selected") {
         const metadata = response.metadata;
         if (
@@ -420,11 +483,22 @@ export async function readWorkflowRunWithMetadata(
         )
           await probe(execution.executor);
       }
-      return response;
+      const policyReason: WorkflowRunResponse["reason"] =
+        decision?.state === "stopped" ? "cancelled"
+        : decision?.state === "exhausted" && decision.reason === "elapsed" ?
+          "timeout"
+        : decision?.state === "deferred" ? "deferred"
+        : undefined;
+      if (!response.ok && policyReason)
+        evidence.push({
+          phase,
+          response: { source: "unavailable", reason: policyReason }
+        });
+      return { ...response, policyReason };
     };
     const endpoint = `repos/${repo}/actions/runs/${runId}`;
     const detail = await read(endpoint, "run");
-    if (!detail.ok) return incomplete("read-failed");
+    if (!detail.ok) return incomplete(detail.policyReason ?? "read-failed");
     if (!isRecord(detail.value)) return incomplete("invalid-data");
     const data = detail.value;
     // gh's JSON exporter decodes nullable conclusions into Go strings.
@@ -442,7 +516,8 @@ export async function readWorkflowRunWithMetadata(
         `${endpoint}/jobs?per_page=100&page=${page}`,
         "jobs"
       );
-      if (!response.ok) return incomplete("read-failed");
+      if (!response.ok)
+        return incomplete(response.policyReason ?? "read-failed");
       if (
         !isRecord(response.value) ||
         !Array.isArray(response.value.jobs) ||
@@ -490,20 +565,18 @@ export async function readWorkflowRunWithMetadata(
       page = next;
     }
   } catch (error) {
-    if (isWorkflowReadLimitError(error)) {
-      evidence.push({
-        phase: value ? "jobs" : "run",
-        response: { source: "unavailable", reason: error.reason }
-      });
-      return incomplete(error.reason);
-    }
+    if (isWorkflowReadLimitError(error)) return interrupted(error);
     if (execution.mode === "selected") {
       if (isSelectedGhAuthorizationError(error)) throw error;
       if (
         selectedFailureStatus("", execution.executor.errorMessage(error)) ===
         404
       ) {
-        await probe(execution.executor);
+        try {
+          await probe(execution.executor);
+        } catch (probeError) {
+          return interrupted(probeError);
+        }
         return incomplete("read-failed");
       }
       const authorization = rejectedSelectedAuthorizationError(
@@ -519,20 +592,31 @@ export async function readWorkflowRunWithMetadata(
 export async function readWorkflowRun(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<WorkflowRunRead | null> {
-  return (await readWorkflowRunWithMetadata(execution, repo, runId)).value;
+  return (await readWorkflowRunWithMetadata(execution, repo, runId, request))
+    .value;
 }
 
 async function readWorkflowLogValue(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<string | null> {
+  const raw =
+    execution.mode === "selected" ? execution.executor.run : execution.run;
+  const run = createWorkflowReadBudget(
+    raw,
+    30000,
+    20 * 1024 * 1024,
+    request?.context
+  );
   if (execution.mode === "selected") {
     const executor = execution.executor;
     try {
-      const result = await executor.run(
+      const result = await run(
         ["run", "view", String(runId), "--log", "--repo", repo],
         {
           timeout: 30000,
@@ -543,7 +627,8 @@ async function readWorkflowLogValue(
         if (selectedFailureStatus("", result.stderr) === 404) {
           const repositoryError = await selectedRepositoryAccessError(
             executor,
-            repo
+            repo,
+            run
           );
           if (repositoryError) throw repositoryError;
           return null;
@@ -558,12 +643,14 @@ async function readWorkflowLogValue(
       }
       return result.stdout || null;
     } catch (error) {
+      if (isWorkflowReadLimitError(error)) throw error;
       if (isSelectedGhAuthorizationError(error)) throw error;
       const detail = executor.errorMessage(error);
       if (selectedFailureStatus("", detail) === 404) {
         const repositoryError = await selectedRepositoryAccessError(
           executor,
-          repo
+          repo,
+          run
         );
         if (repositoryError) throw repositoryError;
         return null;
@@ -576,7 +663,7 @@ async function readWorkflowLogValue(
       throw error;
     }
   }
-  const result = await execution.run(
+  const result = await run(
     ["run", "view", String(runId), "--log", "--repo", repo],
     { timeout: 30000, maxBuffer: 1024 * 1024 * 20 }
   );
@@ -586,10 +673,11 @@ async function readWorkflowLogValue(
 export async function readWorkflowLogWithMetadata(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<{ value: string | null; metadata: WorkflowResponseMetadata }> {
   return {
-    value: await readWorkflowLogValue(execution, repo, runId),
+    value: await readWorkflowLogValue(execution, repo, runId, request),
     metadata: { source: "unavailable", reason: "opaque-command" }
   };
 }
@@ -597,7 +685,9 @@ export async function readWorkflowLogWithMetadata(
 export async function readWorkflowLog(
   execution: WorkflowExecution,
   repo: string,
-  runId: number | string
+  runId: number | string,
+  request?: WorkflowReadRequest
 ): Promise<string | null> {
-  return (await readWorkflowLogWithMetadata(execution, repo, runId)).value;
+  return (await readWorkflowLogWithMetadata(execution, repo, runId, request))
+    .value;
 }

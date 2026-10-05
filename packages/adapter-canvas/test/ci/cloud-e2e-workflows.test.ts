@@ -21,6 +21,7 @@
 // the point of asserting it at all.
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -470,6 +471,28 @@ describe("cloud-e2e-cleanup.yml", () => {
       "gh workflow run delete-application.yml"
     );
     expect(radiusCleanup?.run).toContain('gh run watch "$run_id"');
+    const supportModule = radiusCleanup?.run?.match(
+      /const \{ findNewWorkflowRunId, readWorkflowRunIds \} = await import\(\s*"([^"]+)"\s*\)/
+    )?.[1];
+    expect(supportModule).toBe(
+      "./packages/adapter-canvas/test/e2e-cloud/support/workflow-run-discovery.ts"
+    );
+    const importResult = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `await import(${JSON.stringify(supportModule)})`
+      ],
+      {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8"
+      }
+    );
+    expect(importResult).toMatchObject({
+      status: 0,
+      stderr: ""
+    });
     expect(fallbackProtectedSteps).toHaveLength(4);
     for (const step of fallbackProtectedSteps) {
       expect(step.if).toContain(
@@ -598,7 +621,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
   });
 
-  it("verifies Entra application deletion and retries a missing object id by client id", async () => {
+  it("retries and verifies Entra application deletion through the exact Graph object", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const identityCleanup = steps(workflow.jobs?.purge).find(
       (step) =>
@@ -606,11 +629,14 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     const script = identityCleanup?.run ?? "";
 
-    expect(script).toContain('az ad app delete --id "$id"');
-    expect(script).toContain('az ad app delete --id "$app_id"');
+    expect(script).toContain(
+      'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
+    );
+    expect(script).toMatch(/az rest \\\n\s+--method DELETE/);
+    expect(script).toMatch(/az rest \\\n\s+--method GET/);
     expect(script).toContain("Request_ResourceNotFound");
     expect(script).toContain(
-      "application $id (appId $app_id) remained listed after deletion"
+      "application $id (appId $app_id) remained directly queryable through Microsoft Graph after deletion retries"
     );
   });
 
@@ -882,7 +908,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     const destructive = steps(workflow.jobs?.purge).filter(
       (step) =>
         step.run?.includes("az group delete") ||
-        step.run?.includes("az ad app delete") ||
+        step.run?.includes(
+          'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
+        ) ||
         step.run?.includes("-X DELETE") ||
         step.run?.includes("-X PATCH")
     );
@@ -907,7 +935,9 @@ describe("cloud-e2e-cleanup.yml", () => {
 
     const ageGatedDestructiveSteps = steps(job).filter(
       (candidate) =>
-        (candidate.run?.includes("az ad app delete") ||
+        (candidate.run?.includes(
+          'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
+        ) ||
           candidate.run?.includes("-X DELETE")) &&
         candidate.name !==
           "Reset the fixture default branch under the shared lease"
@@ -933,7 +963,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("appId");
     expect(script).toContain("failures+=");
     expect(script.indexOf("az ad sp delete")).toBeLessThan(
-      script.indexOf("az ad app delete")
+      script.indexOf("--method DELETE")
     );
   });
 

@@ -305,26 +305,17 @@ export function createRadiusExtension(
       } catch {}
 
       try {
-        const closes: Array<Promise<void>> = [];
-        for (const [id, entry] of deps.servers) {
+        const closes = [...deps.servers.keys()].map(async (id) => {
           try {
             deps.operations.markEnvironmentInstanceShuttingDown(id);
-            entry.server.closeAllConnections?.();
-            closes.push(
-              new Promise<void>((resolve) => {
-                try {
-                  entry.server.close(() => resolve());
-                } catch {
-                  resolve();
-                }
-              })
+            await deps.stopServer(id, true);
+          } catch (error) {
+            deps.logError(
+              `Could not stop Radius canvas ${id}: ${errorMessage(error)}`
             );
-          } catch {
-            /* ignore */
           }
-          deps.servers.delete(id);
-        }
-        await withTimeout(Promise.all(closes), CLEANUP_TIMEOUT_MS);
+        });
+        await withTimeout(Promise.allSettled(closes), CLEANUP_TIMEOUT_MS);
 
         const session = deps.session.tryGet();
         if (session) {

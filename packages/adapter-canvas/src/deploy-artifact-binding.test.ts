@@ -10,6 +10,7 @@ import {
   downloadWorkflowArtifact
 } from "./deploy-artifacts.js";
 import { probeDeleteConflict } from "./server/services/delete-conflict.js";
+import { createWorkflowReadSession } from "@radius-project/adapter-shared";
 
 vi.mock("./gh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./gh.js")>()),
@@ -19,9 +20,43 @@ vi.mock("./gh.js", async (importOriginal) => ({
 afterEach(() => {
   vi.resetAllMocks();
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 describe("Canvas artifact execution binding", () => {
+  it("retains caller-owned cooldowns across export calls without sharing them between instances", async () => {
+    vi.useFakeTimers();
+    const session = createWorkflowReadSession();
+    const context = session.observe(30000);
+    vi.mocked(cliExec).mockImplementation(
+      (_file, _args, _options, callback) => {
+        callback(null, 'HTTP/2 200\nRetry-After: 60\n\n{"artifacts":[]}', "");
+        return new ChildProcess();
+      }
+    );
+    expect(
+      await listWorkflowArtifacts("org/app", 41, undefined, context)
+    ).toEqual([]);
+    for (const next of [context.limit(10000), session.observe(30000)]) {
+      await expect(
+        listWorkflowArtifacts("org/app", 41, undefined, next)
+      ).rejects.toMatchObject({
+        decision: { state: "deferred", reason: "not-before" }
+      });
+    }
+    expect(cliExec).toHaveBeenCalledTimes(1);
+    expect(
+      await listWorkflowArtifacts(
+        "org/app",
+        41,
+        undefined,
+        createWorkflowReadSession().observe(30000)
+      )
+    ).toEqual([]);
+    expect(cliExec).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([
     { label: "omitted", options: {}, status: "ok" },
     {
@@ -165,7 +200,13 @@ describe("Canvas artifact execution binding", () => {
           "--method",
           "GET"
         ]);
-        expect(options).toEqual({ timeout: 20000 });
+        expect(options).toEqual({
+          timeout: expect.any(Number),
+          maxBuffer: 10 * 1024 * 1024,
+          signal: expect.any(AbortSignal)
+        });
+        expect(options.timeout).toBeGreaterThan(0);
+        expect(options.timeout).toBeLessThanOrEqual(20000);
         callback(
           null,
           "HTTP/2 200\n\n" +
@@ -190,7 +231,12 @@ describe("Canvas artifact execution binding", () => {
           "--dir"
         ]);
         expect(args.slice(7)).toEqual(["--repo", "org/app"]);
-        expect(options).toEqual({ timeout: 60000 });
+        expect(options).toEqual({
+          timeout: expect.any(Number),
+          signal: expect.any(AbortSignal)
+        });
+        expect(options.timeout).toBeGreaterThan(0);
+        expect(options.timeout).toBeLessThanOrEqual(60000);
         directory = args[6];
         writeFileSync(
           path.join(directory, DEPLOY_STATUS_FILES.progress),

@@ -5,6 +5,7 @@ import type {
   DeployProgress,
   DeployProgressResource
 } from "@radius-project/core";
+import type { ListArtifacts, DownloadArtifact } from "@radius-project/core";
 import {
   createWorkflowArtifactReader,
   createWorkflowArtifactReads
@@ -49,8 +50,10 @@ const run: WorkflowRunner = (args, options) =>
       });
     });
   });
-export const { listWorkflowArtifacts, downloadWorkflowArtifact } =
-  createWorkflowArtifactReads(run);
+export const listWorkflowArtifacts: ListArtifacts = (...args) =>
+  createWorkflowArtifactReads(run).listWorkflowArtifacts(...args);
+export const downloadWorkflowArtifact: DownloadArtifact = (...args) =>
+  createWorkflowArtifactReads(run).downloadWorkflowArtifact(...args);
 export function createDeployStatusReader(
   options: WorkflowArtifactReaderOptions
 ) {
