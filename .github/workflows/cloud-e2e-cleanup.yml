@@ -33,9 +33,9 @@ on:
   # This workflow deletes things; nothing a contributor can trigger should
   # reach it.
   schedule:
-    # 02:07 and 14:07 UTC. Twice daily, matching the six-hour age threshold's
-    # cadence, and offset from the 04:23 Cloud E2E run.
-    - cron: "7 2,14 * * *"
+    # 02:23 UTC, once daily, two hours before the 04:23 Cloud E2E run so
+    # leaked state is reclaimed before that run starts.
+    - cron: "23 2 * * *"
   workflow_dispatch:
 
 permissions: {}
