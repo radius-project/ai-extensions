@@ -6,7 +6,7 @@ readonly CATALOG_REPO="${CATALOG_REPO:-radius-project/radius}"
 readonly DEFAULTS_YAML="${DEFAULTS_YAML:-}"
 readonly CATALOG_HELPER="${CATALOG_HELPER:-.github/extension/scripts/contrib-catalog.sh}"
 readonly EXTENSION_DIR="${EXTENSION_DIR:-.github/extension}"
-readonly RELEASE_FILE="${RELEASE_FILE:-packages/adapter-shared/src/radius-release.ts}"
+readonly RELEASE_FILE="${RELEASE_FILE:-packages/adapter-shared/src/radius-release.json}"
 readonly CONTROL_PLANE_ACTION="${CONTROL_PLANE_ACTION:-${EXTENSION_DIR}/actions/setup-control-plane/action.yml}"
 CATALOG_REF="${CATALOG_REF:-}"
 
@@ -53,16 +53,19 @@ verify_release_pin_consistency() {
     [[ -f "${RELEASE_FILE}" ]] ||
         fail "release file not found: ${RELEASE_FILE}"
 
-    local install_ref install_commit release_tag catalog_action catalog_default
+    local install_ref install_commit release_tag release_commit catalog_action catalog_default
     install_ref="$(read_install_ref)"
     [[ "${install_ref}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
         fail "${CONTROL_PLANE_ACTION} must pin RADIUS_INSTALL_REF to a stable release tag, found: ${install_ref:-none}"
     install_commit="$(read_install_commit)"
     [[ "${install_commit}" =~ ^[0-9a-f]{40}$ ]] ||
         fail "${CONTROL_PLANE_ACTION} must pin RADIUS_INSTALL_COMMIT to the 40-character commit of ${install_ref}, found: ${install_commit:-none}"
-    release_tag="$(sed -nE 's/^export const RADIUS_RELEASE_TAG = "([^"]+)";$/\1/p' "${RELEASE_FILE}")"
+    release_tag="$(yq -r '.tag // ""' "${RELEASE_FILE}")"
+    release_commit="$(yq -r '.commit // ""' "${RELEASE_FILE}")"
     [[ "${release_tag}" == "${install_ref}" ]] ||
         fail "${RELEASE_FILE} pins ${release_tag:-no release}, but ${CONTROL_PLANE_ACTION} pins ${install_ref}; the modeling CLI and the deploy control plane must use the same Radius release."
+    [[ "${release_commit}" == "${install_commit}" ]] ||
+        fail "${RELEASE_FILE} pins commit ${release_commit:-none}, but ${CONTROL_PLANE_ACTION} pins ${install_commit}."
 
     catalog_action="${EXTENSION_DIR}/actions/load-contrib-catalog/action.yml"
     if [[ -f "${catalog_action}" ]]; then

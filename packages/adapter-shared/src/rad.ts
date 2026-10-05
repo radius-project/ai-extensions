@@ -420,22 +420,6 @@ function isSelectedExecutableRadOverride(radPath: string): boolean {
   }
 }
 
-export function parseRadVersionOutput(stdout: string): string | null {
-  try {
-    const parsed: unknown = JSON.parse(stdout);
-    const version =
-      isPlainObject(parsed) ?
-        (parsed.version ??
-        (isPlainObject(parsed.cli) ? parsed.cli.version : undefined))
-      : undefined;
-    return typeof version === "string" && version.trim() ?
-        version.trim()
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 function parseRadReleaseOutput(stdout: string): string | null {
   try {
     return radiusCliIdentity(JSON.parse(stdout)).release;
@@ -486,29 +470,8 @@ function readRadBinaryIdentity(
 }
 
 /**
- * radBinaryVersion - best-effort read of a rad binary's own CLI version by
- * running `rad version --cli --output json` and returning its `version` string
- * (e.g. "v0.44.0", or an edge build like "v0.60.0-rc1-1-gdeadbee"), or null when
- * it can't be determined. `rad version --cli` skips the control-plane check but
- * still shells out to Bicep (getCliVersionInfo -> bicep.Version() ->
- * `bicep --version`), so BICEP is pinned to the managed path even during version
- * checks. A timeout plus process-tree kill is a hard backstop so a
- * wedged rad can never stall binary resolution beyond `timeout`. (If bicep isn't
- * installed, rad returns fast with a "bicep not installed" note and still emits
- * `version`.) Never throws — a null result means "version unknown", which callers
- * treat as "leave the existing binary in place".
- */
-export function radBinaryVersion(
-  radPath: string,
-  options: { timeout?: number } = {}
-): Promise<string | null> {
-  return readRadBinaryIdentity(radPath, parseRadVersionOutput, options);
-}
-
-/**
  * radBinaryRelease - best-effort read of the Radius release a rad binary was
- * stamped with (the same 
-elease field modeling uses). Returns null when it
+ * stamped with (the same release field modeling uses). Returns null when it
  * cannot be determined; never throws.
  */
 export function radBinaryRelease(
@@ -516,59 +479,6 @@ export function radBinaryRelease(
   options: { timeout?: number } = {}
 ): Promise<string | null> {
   return readRadBinaryIdentity(radPath, parseRadReleaseOutput, options);
-}
-
-// Parses the numeric major.minor.patch core out of a version string
-// ("v1.2.3", "1.2.3-rc1-1-gdeadbee", "1.2.3+build") into [major, minor, patch].
-// Any prerelease/build suffix is intentionally ignored — only the core drives
-// precedence here. Returns null when the string has no numeric major.minor.patch.
-export function parseVersion(
-  value: string | null | undefined
-): [number, number, number] | null {
-  const m =
-    /^v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(
-      (value || "").trim()
-    );
-  if (!m) return null;
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
-}
-
-/**
- * compareVersions - compare the major.minor.patch core of two rad versions.
- * Returns -1 when a < b, 1 when a > b, and 0 when equal. When either string is
- * unparseable it returns 0, so callers fall back to leaving the current binary
- * in place rather than churning on an unexpected format. Prerelease and build
- * suffixes are intentionally ignored: a developer build with the same core
- * version as the pinned release must not be replaced.
- */
-export function compareVersions(
-  a: string | null | undefined,
-  b: string | null | undefined
-): -1 | 0 | 1 {
-  const pa = parseVersion(a);
-  const pb = parseVersion(b);
-  if (!pa || !pb) return 0;
-  for (let i = 0; i < 3; i++) {
-    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
-  }
-  return 0;
-}
-
-/**
- * radiusExtensionRefForVersion - compatibility entry point for mapping a
- * Git-derived rad CLI version to its stable Radius Bicep release channel.
- *
- * Prerelease, Git-describe, and build suffixes are intentionally ignored. The
- * canonical stamped release path uses {@link radiusExtensionRefForRelease}
- * directly so exact published prerelease tags and edge retain their own policy.
- */
-export function radiusExtensionRefForVersion(
-  version: string | null | undefined
-): string | null {
-  const parsed = parseVersion(version);
-  return parsed ?
-      `${RADIUS_EXTENSION_REGISTRY}:${parsed[0]}.${parsed[1]}`
-    : null;
 }
 
 /**

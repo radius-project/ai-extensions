@@ -73,7 +73,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PIN_PATHS: >-
             .github/extension/actions/setup-control-plane/action.yml
-            packages/adapter-shared/src/radius-release.ts
+            packages/adapter-shared/src/radius-release.json
           TAG: ${{ steps.update.outputs.tag }}
         run: |
           set -euo pipefail
