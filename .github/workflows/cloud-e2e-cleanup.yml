@@ -33,9 +33,9 @@ on:
   # This workflow deletes things; nothing a contributor can trigger should
   # reach it.
   schedule:
-    # 02:07 and 14:07 UTC. Twice daily, matching the six-hour age threshold's
-    # cadence, and offset from the 04:23 Cloud E2E run.
-    - cron: "7 2,14 * * *"
+    # 02:23 UTC, once daily, two hours before the 04:23 Cloud E2E run so
+    # leaked state is reclaimed before that run starts.
+    - cron: "23 2 * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -888,40 +888,42 @@ jobs:
               continue
             fi
             echo "Deleting leaked application $APPLICATION_NAME ($id), created before $cutoff."
+            application_url="https://graph.microsoft.com/v1.0/applications/$id"
             delete_error="$RUNNER_TEMP/delete-application-$id.stderr"
-            if ! az ad app delete --id "$id" 2>"$delete_error"; then
-              if ! grep -Eqi "does not exist|Request_ResourceNotFound|Directory_ObjectNotFound" "$delete_error"; then
-                failures+=("delete application $id (appId $app_id)")
-                continue
-              fi
-              if ! az ad app delete --id "$app_id" 2>"$delete_error" &&
-                ! grep -Eqi "does not exist|Request_ResourceNotFound|Directory_ObjectNotFound" "$delete_error"; then
-                failures+=("delete application $id (appId $app_id)")
-                continue
-              fi
-            fi
+            lookup_error="$RUNNER_TEMP/get-application-$id.stderr"
             absent=0
             verification_failed=0
             for _ in {1..12}; do
-              if ! remaining="$(
-                az ad app list \
-                  --filter "displayName eq '$APPLICATION_NAME'" \
-                  --query "[?id == '$id'] | length(@)" \
-                  -o tsv
-              )"; then
+              if ! az rest \
+                  --method DELETE \
+                  --url "$application_url" \
+                  --output none \
+                  2>"$delete_error" &&
+                ! grep -Eqi "does not exist|Request_ResourceNotFound|Directory_ObjectNotFound" "$delete_error"; then
+                failures+=("delete application $id (appId $app_id)")
+                verification_failed=1
+                break
+              fi
+              if az rest \
+                  --method GET \
+                  --url "$application_url" \
+                  --output none \
+                  2>"$lookup_error"; then
+                sleep 5
+                continue
+              fi
+              if grep -Eqi "Request_ResourceNotFound" "$lookup_error"; then
+                absent=1
+                break
+              else
                 failures+=("verify deletion of application $id (appId $app_id)")
                 verification_failed=1
                 break
               fi
-              if [[ "$remaining" == "0" ]]; then
-                absent=1
-                break
-              fi
-              sleep 5
             done
             if (( absent == 0 )); then
               if (( verification_failed == 0 )); then
-                failures+=("application $id (appId $app_id) remained listed after deletion")
+                failures+=("application $id (appId $app_id) remained directly queryable through Microsoft Graph after deletion retries")
               fi
               continue
             fi

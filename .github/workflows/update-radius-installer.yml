@@ -127,7 +127,7 @@ jobs:
             '' \
             "- pin the Radius installer source to stable release \`$TAG\`" \
             "- verify \`deploy/install.sh\` with SHA-256 \`$CHECKSUM\`" \
-            "- keep the installed Radius CLI channel on \`edge\`" \
+            "- install the Radius CLI and control plane from \`$TAG\`" \
             '' \
             '## Validation' \
             '' \
