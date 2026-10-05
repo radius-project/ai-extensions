@@ -60,7 +60,7 @@ runs:
       env:
         RADIUS_INSTALL_REF: ${ref}
         RADIUS_INSTALL_SHA256: ${checksum}
-      run: /bin/bash install-rad.sh edge
+      run: /bin/bash install-rad.sh --version "\$RADIUS_INSTALL_REF"
 YAML
 }
 
@@ -91,8 +91,8 @@ grep -Fxq "changed=true" "${GITHUB_OUTPUT}" ||
     fail "updater did not report a change"
 grep -Fxq "https://example.test/radius/v1.2.3/deploy/install.sh" "${CURL_LOG}" ||
     fail "updater fetched the installer from the wrong release"
-grep -Fq "/bin/bash install-rad.sh edge" "${ACTION_FILE}" ||
-    fail "updater changed the edge CLI channel"
+grep -Fq "/bin/bash install-rad.sh --version \"\$RADIUS_INSTALL_REF\"" "${ACTION_FILE}" ||
+    fail "updater changed the pinned CLI install command"
 
 cp "${ACTION_FILE}" "${TEST_ROOT}/before.yml"
 run_update >/dev/null
