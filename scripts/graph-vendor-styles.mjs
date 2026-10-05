@@ -5,6 +5,10 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { repoRoot } from "./plugins.mjs";
 
+// The vendor release whose stylesheet and styling hooks were last reviewed.
+// See docs/eng/DEPENDENCY_UPDATES.md before changing it.
+const REVIEWED_FLOW_VERSION = "12.11.6";
+
 export const scopedFlowStylesPath = join(
   repoRoot,
   "packages",
@@ -62,7 +66,7 @@ export function scopeFlowStyles(css, license) {
     renameKeyframes(css.trim(), "dashdraw", "radius-graph-dashdraw")
   );
   return `/*!
-Generated from @xyflow/react@12.11.6 by scripts/graph-vendor-styles.mjs.
+Generated from @xyflow/react@${REVIEWED_FLOW_VERSION} by scripts/graph-vendor-styles.mjs.
 Do not edit: regenerate after reviewing a vendor update.
 
 ${license.trim()}
@@ -81,7 +85,11 @@ export function expectedScopedFlowStyles() {
   const cssPath = fromGraph.resolve("@xyflow/react/dist/style.css");
   const root = resolve(dirname(cssPath), "..");
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  assert.equal(manifest.version, "12.11.6");
+  assert.equal(
+    manifest.version,
+    REVIEWED_FLOW_VERSION,
+    `Installed @xyflow/react ${manifest.version} is not the reviewed ${REVIEWED_FLOW_VERSION}. Follow the React Flow steps in docs/eng/DEPENDENCY_UPDATES.md.`
+  );
   return scopeFlowStyles(
     readFileSync(cssPath, "utf8"),
     readFileSync(join(root, "LICENSE"), "utf8")

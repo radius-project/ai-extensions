@@ -53,7 +53,11 @@ export function validateLibraryManifest(manifest, name, coreVersion) {
   if (name === "@radius-project/graph-react") {
     assert.equal(manifest.dependencies["@radius-project/core"], coreVersion);
     assert.equal(manifest.dependencies.dagre, undefined);
-    assert.equal(manifest.dependencies["@xyflow/react"], "12.11.6");
+    assert.equal(
+      manifest.dependencies["@xyflow/react"],
+      "12.11.6",
+      `Packed graph-react depends on @xyflow/react ${manifest.dependencies["@xyflow/react"]}, not the reviewed 12.11.6. Follow the React Flow steps in docs/eng/DEPENDENCY_UPDATES.md.`
+    );
     assert.equal(manifest.dependencies.react, undefined);
     assert.equal(manifest.dependencies["react-dom"], undefined);
     assert.deepEqual(manifest.peerDependencies, {

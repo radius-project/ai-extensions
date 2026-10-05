@@ -530,7 +530,10 @@ describe("P0-C built Radius extension artifact", () => {
       "===== lodash@4.18.1 =====",
       "===== yaml@2.9.1 ====="
     ]) {
-      expect(notices).toContain(marker);
+      expect(
+        notices,
+        `A bundled dependency version changed. Follow "Bundled third-party notices" in docs/eng/DEPENDENCY_UPDATES.md.`
+      ).toContain(marker);
     }
     expect(notices).not.toContain("===== reactflow@");
     expect(notices).not.toContain("===== @reactflow/");
