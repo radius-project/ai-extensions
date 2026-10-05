@@ -28,6 +28,7 @@ import {
   parseVersion,
   parseRadVersionOutput,
   compareVersions,
+  radBinaryRelease,
   radBinaryVersion,
   releaseAsset,
   ensureRadBinary,
@@ -949,7 +950,7 @@ describe("resolveRadForGraph", () => {
       const mod = await import("./rad.js");
 
       const fakeRad = (version: string) =>
-        `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ version: ${JSON.stringify(version)} }));\n`;
+        `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ version: ${JSON.stringify(version)}, release: ${JSON.stringify(version)} }));\n`;
 
       // The stale binary the extension starts with.
       fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
@@ -2362,13 +2363,23 @@ describeReconcile("ensureRadBinary version reconciliation", () => {
   let bicepBackup: Buffer | null = null;
   let bicepMode: number | null = null;
 
+  // ensureRadBinary caches its resolved path per module, so each test loads a
+  // fresh module to exercise the reconcile path.
+  async function freshEnsureRadBinary(
+    options?: Parameters<typeof ensureRadBinary>[0]
+  ): Promise<string> {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    return mod.ensureRadBinary(options);
+  }
+
   function writeFakeRad(dest: string, version: string): void {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(
       dest,
       `#!/usr/bin/env node
 if (process.argv.includes("version")) {
-  process.stdout.write(JSON.stringify({ version: "${version}" }));
+  process.stdout.write(JSON.stringify({ version: "${version}", release: "${version}" }));
 }
 `,
       "utf8"
@@ -2426,7 +2437,7 @@ if (process.argv.includes("version")) {
 
   const fakeRadSource = (version: string) => `#!/usr/bin/env node
 if (process.argv.includes("version")) {
-  process.stdout.write(JSON.stringify({ version: "${version}" }));
+  process.stdout.write(JSON.stringify({ version: "${version}", release: "${version}" }));
 }
 `;
 
@@ -2451,7 +2462,8 @@ if (process.argv.includes("version")) {
   it.each([
     ["older", "v0.1.0"],
     ["newer", "v99.0.0"],
-    ["unparseable", "edge"]
+    ["unparseable", "edge"],
+    ["prerelease", `${RADIUS_RELEASE_TAG}-rc.1`]
   ])(
     "replaces a %s managed binary with the pinned release",
     async (_label, installed) => {
@@ -2462,13 +2474,13 @@ if (process.argv.includes("version")) {
       const downloadUrl = mockPinnedRelease(calls);
 
       const logs: string[] = [];
-      const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
+      const resolved = await freshEnsureRadBinary({ log: (m) => logs.push(m) });
 
       expect(resolved).toBe(MANAGED_RAD_PATH);
       expect(calls).toContain(RELEASES_API);
       expect(calls).toContain(downloadUrl);
       expect(logs.some((m) => m.includes("pinned release"))).toBe(true);
-      await expect(radBinaryVersion(MANAGED_RAD_PATH)).resolves.toBe(
+      await expect(radBinaryRelease(MANAGED_RAD_PATH)).resolves.toBe(
         RADIUS_RELEASE_TAG
       );
     }
@@ -2480,7 +2492,7 @@ if (process.argv.includes("version")) {
 
     const calls: string[] = [];
     mockHttpsGet({}, calls);
-    const resolved = await ensureRadBinary();
+    const resolved = await freshEnsureRadBinary();
 
     expect(resolved).toBe(MANAGED_RAD_PATH);
     expect(calls).toEqual([]);
@@ -2493,17 +2505,18 @@ if (process.argv.includes("version")) {
     const calls: string[] = [];
     mockHttpsGet({}, calls);
     const logs: string[] = [];
-    const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
+    const resolved = await freshEnsureRadBinary({ log: (m) => logs.push(m) });
 
     expect(resolved).toBe(MANAGED_RAD_PATH);
     expect(logs.some((m) => m.includes(`Could not install rad`))).toBe(true);
-    await expect(radBinaryVersion(MANAGED_RAD_PATH)).resolves.toBe("v0.1.0");
+    await expect(radBinaryRelease(MANAGED_RAD_PATH)).resolves.toBe("v0.1.0");
   });
 
   it.each([
     ["older", "v0.1.0"],
     ["newer", "v99.0.0"],
-    ["unparseable", "edge"]
+    ["unparseable", "edge"],
+    ["prerelease", `${RADIUS_RELEASE_TAG}-rc.1`]
   ])(
     "warns but never replaces or rejects a %s RADIUS_RAD_BINARY",
     async (_label, installed) => {
@@ -2516,7 +2529,7 @@ if (process.argv.includes("version")) {
       mockHttpsGet({}, calls);
 
       const logs: string[] = [];
-      const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
+      const resolved = await freshEnsureRadBinary({ log: (m) => logs.push(m) });
 
       expect(resolved).toBe(override);
       expect(calls).toEqual([]);
@@ -2540,7 +2553,7 @@ if (process.argv.includes("version")) {
     process.env.RADIUS_RAD_BINARY = override;
 
     const logs: string[] = [];
-    const resolved = await ensureRadBinary({ log: (m) => logs.push(m) });
+    const resolved = await freshEnsureRadBinary({ log: (m) => logs.push(m) });
 
     expect(resolved).toBe(override);
     expect(logs.some((m) => m.includes("using it anyway"))).toBe(false);
@@ -2556,7 +2569,7 @@ if (process.argv.includes("version")) {
 
     const calls: string[] = [];
     mockHttpsGet({}, calls);
-    const resolved = await ensureRadBinary();
+    const resolved = await freshEnsureRadBinary();
 
     expect(resolved).toBe(override);
     expect(calls).toEqual([]);

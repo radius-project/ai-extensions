@@ -505,6 +505,19 @@ export function radBinaryVersion(
   return readRadBinaryIdentity(radPath, parseRadVersionOutput, options);
 }
 
+/**
+ * radBinaryRelease - best-effort read of the Radius release a rad binary was
+ * stamped with (the same 
+elease field modeling uses). Returns null when it
+ * cannot be determined; never throws.
+ */
+export function radBinaryRelease(
+  radPath: string,
+  options: { timeout?: number } = {}
+): Promise<string | null> {
+  return readRadBinaryIdentity(radPath, parseRadReleaseOutput, options);
+}
+
 // Parses the numeric major.minor.patch core out of a version string
 // ("v1.2.3", "1.2.3-rc1-1-gdeadbee", "1.2.3+build") into [major, minor, patch].
 // Any prerelease/build suffix is intentionally ignored — only the core drives
@@ -742,17 +755,15 @@ function verifyChecksum(
   }
 }
 
-// compareVersions treats unparseable versions (e.g. "edge") as equal, so the
-// pin check requires both sides to parse before trusting the comparison.
-function isPinnedVersion(version: string | null, tag: string): boolean {
+// The stamped release is the identity modeling uses to pick Bicep types, so the
+// pin matches it exactly (only an optional "v" prefix is ignored). Prerelease,
+// build and developer suffixes are therefore not the pinned release.
+function isPinnedRelease(release: string | null, tag: string): boolean {
   return (
-    version != null &&
-    parseVersion(version) !== null &&
-    parseVersion(tag) !== null &&
-    compareVersions(version, tag) === 0
+    release != null &&
+    release.trim().replace(/^v/u, "") === tag.trim().replace(/^v/u, "")
   );
 }
-
 async function downloadRad(
   log: Logger,
   { releaseInfo = null }: { releaseInfo?: RadReleaseInfo | null } = {}
@@ -764,13 +775,12 @@ async function downloadRad(
   const expected = expectedDigest(assets, asset, tag);
   fs.mkdirSync(MANAGED_RAD_BIN, { recursive: true });
 
-  // True when the managed binary already exists at the pinned release's core
-  // version — the signal that no (further) download is needed. A newer binary
-  // is replaced too, so modeling never runs ahead of the deploy control plane.
+  // True when the managed binary is stamped with exactly the pinned release —
+  // the signal that no (further) download is needed. Any other release (newer,
+  // older, prerelease or developer build) is replaced.
   const upToDate = async (): Promise<boolean> => {
     if (!isExecutableFile(dest)) return false;
-    const current = await radBinaryVersion(dest);
-    return isPinnedVersion(current, tag);
+    return isPinnedRelease(await radBinaryRelease(dest), tag);
   };
   if (await upToDate()) return dest;
 
@@ -835,7 +845,7 @@ async function downloadRad(
  * already matches (or when the check can't run), or a freshly downloaded pinned
  * binary when the managed one differs.
  *
- * Best-effort by design — a failure to read the local version or download the
+ * Best-effort by design — a failure to read the local release or download the
  * pinned release leaves the existing binary in place, so offline/air-gapped use
  * keeps working. Set RADIUS_RAD_SKIP_VERSION_CHECK to skip the check entirely.
  * An explicit RADIUS_RAD_BINARY override is developer-owned: any version is
@@ -847,12 +857,14 @@ async function reconcileWithPinned(
 ): Promise<string> {
   if (process.env.RADIUS_RAD_SKIP_VERSION_CHECK) return existing;
 
-  const localVersion = await radBinaryVersion(existing);
+  const localVersion = await radBinaryRelease(existing);
   if (!localVersion) {
-    log(`Could not determine the version of ${existing}; using it as-is.`);
+    log(
+      `Could not determine the Radius release of ${existing}; using it as-is.`
+    );
     return existing;
   }
-  if (isPinnedVersion(localVersion, RADIUS_RELEASE_TAG)) {
+  if (isPinnedRelease(localVersion, RADIUS_RELEASE_TAG)) {
     return existing;
   }
 
