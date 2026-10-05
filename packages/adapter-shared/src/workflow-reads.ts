@@ -653,9 +653,11 @@ export async function readWorkflowRunWithMetadata(
               "timeout"
             : (
               (metadata.source === "unavailable" &&
-                response.commandAuthorizationStatus !== null) ||
+                (response.commandAuthorizationStatus !== null ||
+                  response.commandMissing)) ||
               (metadata.source === "gh-api-include" &&
-                metadata.classification === "authorization")
+                (metadata.classification === "authorization" ||
+                  metadata.status === 404))
             ) ?
               "authorization"
             : response.failure === "json" ? "invalid-data"

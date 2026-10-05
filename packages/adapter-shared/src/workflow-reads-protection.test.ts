@@ -262,7 +262,7 @@ describe.each(["ambient", "selected"] as const)(
             protection: {
               state: "unavailable",
               reason:
-                status === 401 || status === 403 ?
+                status === 401 || status === 403 || status === 404 ?
                   "authorization"
                 : "read-failed"
             }
@@ -274,6 +274,99 @@ describe.each(["ambient", "selected"] as const)(
           "jobs",
           "protection"
         ]);
+        expect(run.mock.calls.map(([args]) => args)).toEqual([
+          runArgs,
+          jobsArgs,
+          protectionArgs
+        ]);
+      }
+    );
+
+    it.each([
+      ["framed", false],
+      ["framed", true],
+      ["unframed", false],
+      ["unframed", true],
+      ["thrown", false],
+      ["thrown", true]
+    ] as const)(
+      "keeps optional %s HTTP 404 isolated from primary evidence (observation: %s)",
+      async (format, observation) => {
+        const { clock } = fixtureClock();
+        const onDecision = vi.fn();
+        const error = new Error("gh: Not Found (HTTP 404)");
+        const run = vi.fn<WorkflowRunner>(async (args) => {
+          if (JSON.stringify(args) === JSON.stringify(runArgs))
+            return response({ status: "waiting", conclusion: null });
+          if (JSON.stringify(args) === JSON.stringify(jobsArgs))
+            return response({ total_count: 0, jobs: [] });
+          if (JSON.stringify(args) === JSON.stringify(protectionArgs)) {
+            if (format === "thrown") throw error;
+            return format === "framed" ?
+                response({ message: "Not Found" }, 404)
+              : { code: 1, stdout: "", stderr: error.message };
+          }
+          throw new Error("Unexpected command");
+        });
+        const result = readWorkflowRunWithMetadata(
+          execution(mode, run),
+          "org/app",
+          41,
+          observation ?
+            {
+              context: createWorkflowReadSession(clock).observe(30000),
+              identity: mode,
+              onDecision
+            }
+          : undefined,
+          { includeProtection: true }
+        );
+        if (format === "thrown" && mode === "ambient") {
+          await expect(result).rejects.toBe(error);
+        } else {
+          const observed = await result;
+          expect(observed).toMatchObject({
+            completeness: "complete",
+            value: {
+              data: { status: "waiting", conclusion: "", jobs: [] },
+              includeJobs: true,
+              protection: { state: "unavailable", reason: "authorization" }
+            }
+          });
+          expect(observed.reason).toBeUndefined();
+          expect(observed.decision).toBeUndefined();
+          expect(observed.evidence.slice(0, 2)).toMatchObject([
+            {
+              phase: "run",
+              response: { source: "gh-api-include", status: 200 }
+            },
+            {
+              phase: "jobs",
+              response: { source: "gh-api-include", status: 200 }
+            }
+          ]);
+          expect(observed.evidence.map(({ phase }) => phase)).toEqual([
+            "run",
+            "jobs",
+            ...(format === "thrown" ? [] : ["protection"])
+          ]);
+          if (format === "thrown") {
+            expect(observed.value?.protection?.response).toBeUndefined();
+          } else {
+            expect(observed.value?.protection?.response).toMatchObject(
+              format === "framed" ?
+                {
+                  source: "gh-api-include",
+                  status: 404,
+                  classification: "other"
+                }
+              : { source: "unavailable" }
+            );
+          }
+        }
+        expect(
+          onDecision.mock.calls.map(([decision]) => decision.state)
+        ).toEqual(observation ? ["ready", "ready"] : []);
         expect(run.mock.calls.map(([args]) => args)).toEqual([
           runArgs,
           jobsArgs,
