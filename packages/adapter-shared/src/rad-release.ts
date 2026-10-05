@@ -1,4 +1,5 @@
-export const RADIUS_EXTENSION_REGISTRY = "br:biceptypes.azurecr.io/radius";
+export const RADIUS_EXTENSION_REGISTRY =
+  "br:ghcr.io/radius-project/bicep-types-radius";
 
 const SEMVER =
   /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u;
@@ -55,7 +56,7 @@ export function radiusExtensionRefForRelease(
 ): string | null {
   const value = release?.trim() ?? "";
   if (isRadiusEdgeRelease(value)) {
-    return `${RADIUS_EXTENSION_REGISTRY}:latest`;
+    return `${RADIUS_EXTENSION_REGISTRY}:edge`;
   }
   if (isRadiusPullRequestRelease(value)) return null;
 
