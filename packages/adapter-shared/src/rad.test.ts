@@ -16,7 +16,6 @@ import { Socket } from "node:net";
 import {
   RADIUS_EXTENSION_REGISTRY,
   RADIUS_BICEP_EXPERIMENTAL_FEATURES,
-  radiusExtensionRefForVersion,
   resolveRadiusExtensionRef,
   MODELED_APP_GRAPH_FLAGS,
   MANAGED_RAD_PATH,
@@ -33,11 +32,7 @@ import {
   normalizeSha256,
   expectedDigest,
   tryAcquireLock,
-  parseVersion,
-  parseRadVersionOutput,
-  compareVersions,
   radBinaryRelease,
-  radBinaryVersion,
   releaseAsset,
   ensureRadBinary,
   ensureManagedBicep,
@@ -339,55 +334,6 @@ describe("RADIUS_BICEP_EXPERIMENTAL_FEATURES", () => {
 
   it("is frozen so a compile cannot mutate the shared defaults", () => {
     expect(Object.isFrozen(RADIUS_BICEP_EXPERIMENTAL_FEATURES)).toBe(true);
-  });
-});
-
-describe("radiusExtensionRefForVersion", () => {
-  it.each([
-    ["v0.60.0", "br:biceptypes.azurecr.io/radius:0.60"],
-    ["0.60.0", "br:biceptypes.azurecr.io/radius:0.60"],
-    ["v0.59.2", "br:biceptypes.azurecr.io/radius:0.59"],
-    ["v1.2.3", "br:biceptypes.azurecr.io/radius:1.2"],
-    ["v10.20.30", "br:biceptypes.azurecr.io/radius:10.20"]
-  ])("maps rad %s to the matching release-channel tag %s", (version, ref) => {
-    expect(radiusExtensionRefForVersion(version)).toBe(ref);
-  });
-
-  it("maps Git-derived prerelease versions to their stable release channel", () => {
-    for (const version of [
-      "v0.60.0-rc1",
-      "v0.60.0-rc.1",
-      "v0.60.0-rc1-1-gdeadbee",
-      "v0.60.0-rc.1+build.7"
-    ]) {
-      expect(radiusExtensionRefForVersion(version)).toBe(
-        "br:biceptypes.azurecr.io/radius:0.60"
-      );
-    }
-  });
-
-  it("maps stable build metadata to the stable release channel", () => {
-    expect(radiusExtensionRefForVersion("0.60.0+build.7")).toBe(
-      "br:biceptypes.azurecr.io/radius:0.60"
-    );
-  });
-
-  it("does not treat an edge release identity as a Git-derived version", () => {
-    expect(radiusExtensionRefForVersion("edge")).toBeNull();
-  });
-
-  it.each([
-    ["an empty string", ""],
-    ["null", null],
-    ["undefined", undefined],
-    ["a non-numeric version", "vX.Y.Z"],
-    ["a partial version", "0.60"],
-    ["the stable channel name", "stable"],
-    ["the latest tag name", "latest"],
-    ["a pull-request release", "pr-720"],
-    ["an abbreviated commit", "deadbee"]
-  ])("returns null for %s rather than guessing a tag", (_label, version) => {
-    expect(radiusExtensionRefForVersion(version)).toBeNull();
   });
 });
 
@@ -770,25 +716,6 @@ describe("resolveExistingRadBinary", () => {
   });
 });
 
-describe("parseRadVersionOutput", () => {
-  it("reads the top-level version emitted by older rad releases with --cli", () => {
-    expect(
-      parseRadVersionOutput('{"release":"stable","version":"v0.54.0"}')
-    ).toBe("v0.54.0");
-  });
-
-  it("also accepts the combined output shape from newer rad releases", () => {
-    expect(parseRadVersionOutput('{"cli":{"version":"v0.60.0"}}')).toBe(
-      "v0.60.0"
-    );
-  });
-
-  it("returns null for invalid or versionless output", () => {
-    expect(parseRadVersionOutput('{"cli":{}}')).toBeNull();
-    expect(parseRadVersionOutput("not-json")).toBeNull();
-  });
-});
-
 it("rejects a managed edge binary before honoring a repository extension or invoking graph", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-edge-managed-"));
   const home = path.join(root, "home");
@@ -1002,18 +929,15 @@ describe("resolveRadForGraph", () => {
       // Started but deliberately not awaited, exactly as the extension does.
       const warmUp = mod.ensureRadBinary();
       const resolved = await mod.resolveRadForGraph();
-      const releaseRead = await mod.radBinaryVersion(resolved);
+      const releaseRead = await mod.radBinaryRelease(resolved);
       await warmUp;
-      const releaseThatRuns = await mod.radBinaryVersion(resolved);
+      const releaseThatRuns = await mod.radBinaryRelease(resolved);
 
       // Resolving mid-warm-up must not observe the superseded release: without
       // the wait this reads v0.59.0 and then executes the pinned release, pinning
       // bicepconfig to a different schema than the compile actually uses.
       expect(releaseRead).toBe(tag);
       expect(releaseThatRuns).toBe(releaseRead);
-      expect(mod.radiusExtensionRefForVersion(releaseRead)).toBe(
-        mod.radiusExtensionRefForVersion(tag)
-      );
     }
   );
 });
@@ -2255,59 +2179,7 @@ describe("tryAcquireLock", () => {
   });
 });
 
-describe("parseVersion", () => {
-  it("parses a plain v-prefixed release into its numeric core", () => {
-    expect(parseVersion("v1.2.3")).toEqual([1, 2, 3]);
-  });
-
-  it("accepts a bare (unprefixed) version", () => {
-    expect(parseVersion("0.44.0")).toEqual([0, 44, 0]);
-  });
-
-  it("ignores a prerelease/git-describe suffix", () => {
-    expect(parseVersion("v0.60.0-rc1-1-gdeadbee")).toEqual([0, 60, 0]);
-  });
-
-  it("ignores build metadata after a +", () => {
-    expect(parseVersion("1.2.3+build.7")).toEqual([1, 2, 3]);
-  });
-
-  it("returns null for anything without a numeric major.minor.patch", () => {
-    expect(parseVersion("edge")).toBeNull();
-    expect(parseVersion("v1.2")).toBeNull();
-    expect(parseVersion("")).toBeNull();
-    expect(parseVersion(undefined)).toBeNull();
-  });
-});
-
-describe("compareVersions", () => {
-  it("treats identical versions (with or without the v prefix) as equal", () => {
-    expect(compareVersions("v1.2.3", "1.2.3")).toBe(0);
-  });
-
-  it("orders by major, then minor, then patch", () => {
-    expect(compareVersions("v0.44.0", "v0.45.0")).toBe(-1);
-    expect(compareVersions("v0.45.0", "v0.44.0")).toBe(1);
-    expect(compareVersions("v1.0.0", "v0.99.99")).toBe(1);
-    expect(compareVersions("v1.2.3", "v1.2.4")).toBe(-1);
-  });
-
-  it("preserves a developer build with the same core as the latest release", () => {
-    expect(compareVersions("v0.60.0-rc1-1-gdeadbee", "v0.60.0")).toBe(0);
-    expect(compareVersions("v0.60.0", "v0.60.0-rc1-1-gdeadbee")).toBe(0);
-  });
-
-  it("lets a newer core beat a release regardless of its development suffix", () => {
-    expect(compareVersions("v0.60.0-rc1-1-gdeadbee", "v0.48.0")).toBe(1);
-  });
-
-  it("returns 0 when either version is unparseable so callers don't churn", () => {
-    expect(compareVersions("edge", "v1.2.3")).toBe(0);
-    expect(compareVersions("v1.2.3", "not-a-version")).toBe(0);
-  });
-});
-
-describe("radBinaryVersion", () => {
+describe("radBinaryRelease", () => {
   it("resolves to null (never throws) when the binary path does not exist", async () => {
     const missing = path.join(
       os.tmpdir(),
@@ -2315,11 +2187,11 @@ describe("radBinaryVersion", () => {
       `rad-${Date.now()}`
     );
     await expect(
-      radBinaryVersion(missing, { timeout: 2000 })
+      radBinaryRelease(missing, { timeout: 2000 })
     ).resolves.toBeNull();
   });
 
-  it("drains stderr beyond the pipe buffer while reading the version", async () => {
+  it("drains stderr beyond the pipe buffer while reading the release", async () => {
     const directory = fs.mkdtempSync(
       path.join(os.tmpdir(), "rad-version-stderr-")
     );
@@ -2330,7 +2202,7 @@ describe("radBinaryVersion", () => {
       [
         'require("node:module").runMain = () => {};',
         'process.stderr.write("x".repeat(2 * 1024 * 1024), () => {',
-        '  process.stdout.write(JSON.stringify({ version: "v0.60.0" }), () => {',
+        '  process.stdout.write(JSON.stringify({ release: "v0.60.0", commit: "abc" }), () => {',
         "    process.exit(0);",
         "  });",
         "});"
@@ -2345,7 +2217,7 @@ describe("radBinaryVersion", () => {
 
     try {
       await expect(
-        radBinaryVersion(process.execPath, { timeout: 5000 })
+        radBinaryRelease(process.execPath, { timeout: 5000 })
       ).resolves.toBe("v0.60.0");
     } finally {
       if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;

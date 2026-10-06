@@ -69,7 +69,7 @@ YAML
 }
 
 write_release() {
-    printf '// fixture\nexport const RADIUS_RELEASE_TAG = "%s";\n' "$1" >"${RELEASE_FILE}"
+    printf '{"tag":"%s","commit":"%s"}\n' "$1" "${2:-${OLD_COMMIT}}" >"${RELEASE_FILE}"
 }
 
 run_update() {
@@ -78,7 +78,7 @@ run_update() {
 }
 
 export ACTION_FILE="${TEST_ROOT}/action.yml"
-export RELEASE_FILE="${TEST_ROOT}/radius-release.ts"
+export RELEASE_FILE="${TEST_ROOT}/radius-release.json"
 export CURL_LOG="${TEST_ROOT}/curl.log"
 export GITHUB_OUTPUT="${TEST_ROOT}/output"
 export INSTALLER_FIXTURE="${TEST_ROOT}/install.sh"
@@ -96,7 +96,7 @@ readonly OLD_CHECKSUM="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 write_action v1.2.2 "${OLD_CHECKSUM}"
 write_release v1.2.2
 run_update >/dev/null
-grep -Fq "RADIUS_RELEASE_TAG = \"v1.2.3\";" "${RELEASE_FILE}" ||
+[[ "$(jq -r .tag "${RELEASE_FILE}")" == "v1.2.3" && "$(jq -r .commit "${RELEASE_FILE}")" == "${COMMIT_SHA}" ]] ||
     fail "updater did not replace the plugin release tag"
 grep -Fq "RADIUS_INSTALL_REF: v1.2.3" "${ACTION_FILE}" ||
     fail "updater did not replace the stable release tag"
@@ -124,15 +124,23 @@ grep -Fxq "changed=false" "${GITHUB_OUTPUT}" ||
 # A drifted release file must be repaired even when the action is current.
 write_release v1.2.2
 run_update >/dev/null
-grep -Fq "RADIUS_RELEASE_TAG = \"v1.2.3\";" "${RELEASE_FILE}" ||
+[[ "$(jq -r .tag "${RELEASE_FILE}")" == "v1.2.3" && "$(jq -r .commit "${RELEASE_FILE}")" == "${COMMIT_SHA}" ]] ||
     fail "updater did not repair a drifted release file"
 grep -Fxq "changed=true" "${GITHUB_OUTPUT}" ||
     fail "updater did not report the release file repair"
 
+# A stale release commit alone must also be repaired.
+write_release v1.2.3 "${OLD_COMMIT}"
+run_update >/dev/null
+[[ "$(jq -r .tag "${RELEASE_FILE}")" == "v1.2.3" && "$(jq -r .commit "${RELEASE_FILE}")" == "${COMMIT_SHA}" ]] ||
+    fail "updater did not repair a stale release commit"
+grep -Fxq "changed=true" "${GITHUB_OUTPUT}" ||
+    fail "updater did not report the release commit repair"
+
 write_release v1.2.3
-printf 'export const RADIUS_RELEASE_TAG = "v1.2.1";\n' >>"${RELEASE_FILE}"
+printf '{"tag":"v1.2.1"\n' >>"${RELEASE_FILE}"
 if run_update >/dev/null 2>&1; then
-    fail "updater accepted duplicate release constants"
+    fail "updater accepted a malformed release file"
 fi
 
 write_release v1.2.2

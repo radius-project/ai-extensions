@@ -3,7 +3,7 @@
 set -euo pipefail
 
 readonly ACTION_FILE="${ACTION_FILE:-.github/extension/actions/setup-control-plane/action.yml}"
-readonly RELEASE_FILE="${RELEASE_FILE:-packages/adapter-shared/src/radius-release.ts}"
+readonly RELEASE_FILE="${RELEASE_FILE:-packages/adapter-shared/src/radius-release.json}"
 readonly RADIUS_RELEASE_API_URL="${RADIUS_RELEASE_API_URL:-https://api.github.com/repos/radius-project/radius/releases/latest}"
 readonly RADIUS_COMMIT_API_URL="${RADIUS_COMMIT_API_URL:-https://api.github.com/repos/radius-project/radius/commits}"
 readonly RADIUS_RAW_BASE_URL="${RADIUS_RAW_BASE_URL:-https://raw.githubusercontent.com/radius-project/radius}"
@@ -83,14 +83,15 @@ main() {
     [[ "$(grep -Ec '^[[:space:]]+RADIUS_INSTALL_SHA256: ' "${ACTION_FILE}")" -eq 1 ]] ||
         fail "${ACTION_FILE} must contain exactly one RADIUS_INSTALL_SHA256."
 
-    [[ "$(grep -Ec "^export const RADIUS_RELEASE_TAG = \"[^\"]+\";$" "${RELEASE_FILE}")" -eq 1 ]] ||
-        fail "${RELEASE_FILE} must contain exactly one RADIUS_RELEASE_TAG."
+    jq -e '(.tag | type == "string") and (.commit | type == "string")' "${RELEASE_FILE}" >/dev/null 2>&1 ||
+        fail "${RELEASE_FILE} must be a JSON object with string tag and commit."
 
     [[ "$(grep -Ec '^[[:space:]]+RADIUS_INSTALL_COMMIT: ' "${ACTION_FILE}")" -eq 1 ]] ||
         fail "${ACTION_FILE} must contain exactly one RADIUS_INSTALL_COMMIT."
 
-    local current_tag current_checksum current_release_tag current_commit
-    current_release_tag="$(sed -nE "s/^export const RADIUS_RELEASE_TAG = \"([^\"]+)\";$/\1/p" "${RELEASE_FILE}")"
+    local current_tag current_checksum current_release_tag current_release_commit current_commit
+    current_release_tag="$(jq -r .tag "${RELEASE_FILE}")"
+    current_release_commit="$(jq -r .commit "${RELEASE_FILE}")"
     current_tag="$(sed -nE 's/^[[:space:]]+RADIUS_INSTALL_REF: ([^[:space:]]+)$/\1/p' "${ACTION_FILE}")"
     current_commit="$(sed -nE 's/^[[:space:]]+RADIUS_INSTALL_COMMIT: ([0-9a-f]{40})$/\1/p' "${ACTION_FILE}")"
     current_checksum="$(sed -nE 's/^[[:space:]]+RADIUS_INSTALL_SHA256: ([0-9a-f]+)$/\1/p' "${ACTION_FILE}")"
@@ -101,7 +102,7 @@ main() {
     write_output checksum "${checksum}"
     write_output commit "${commit}"
     if [[ "${current_tag}" == "${tag}" && "${current_checksum}" == "${checksum}" &&
-        "${current_release_tag}" == "${tag}" && "${current_commit}" == "${commit}" ]]; then
+        "${current_release_tag}" == "${tag}" && "${current_release_commit}" == "${commit}" && "${current_commit}" == "${commit}" ]]; then
         write_output changed false
         echo "Radius installer is already pinned to ${tag}."
         return 0
@@ -119,9 +120,9 @@ main() {
     grep -Fq "RADIUS_INSTALL_COMMIT: ${commit}" "${ACTION_TEMP}" ||
         fail "failed to update the Radius release commit."
     RELEASE_TEMP="${RELEASE_FILE}.tmp"
-    sed -E "s/^(export const RADIUS_RELEASE_TAG = )\"[^\"]+\";$/\1\"${tag}\";/" \
+    jq --arg tag "${tag}" --arg commit "${commit}" '.tag = $tag | .commit = $commit' \
         "${RELEASE_FILE}" >"${RELEASE_TEMP}"
-    grep -Fq "export const RADIUS_RELEASE_TAG = \"${tag}\";" "${RELEASE_TEMP}" ||
+    [[ "$(jq -r '.tag + " " + .commit' "${RELEASE_TEMP}")" == "${tag} ${commit}" ]] ||
         fail "failed to update the Radius release tag."
     mv "${ACTION_TEMP}" "${ACTION_FILE}"
     ACTION_TEMP=""
