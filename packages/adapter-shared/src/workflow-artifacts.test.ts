@@ -1,3 +1,4 @@
+import { redactCredentials } from "@radius-project/core";
 import fs, { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1427,6 +1428,7 @@ describe("direct workflow observer using production artifact binding", () => {
         { resourcesTouched: true },
         {
           readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: () => reader.controlPlaneLog()
         }
       );

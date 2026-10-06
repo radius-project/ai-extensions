@@ -1,3 +1,4 @@
+import { redactCredentials } from "@radius-project/core";
 import { describe, expect, it } from "vitest";
 import {
   collectWorkflowFailure,
@@ -24,6 +25,71 @@ function restRun(args: string[], conclusion: string, jobs: WorkflowJob[]) {
 }
 
 describe("non-Canvas workflow caller with real core and shared reads", () => {
+  it.each(["ambient", "selected"] as const)(
+    "redacts %s workflow and control-plane evidence before returning shared diagnostics",
+    async (mode) => {
+      const credential = "opaque-observation-fixture";
+      const calls: string[][] = [];
+      const runner: WorkflowRunner = async (args) => {
+        calls.push(args);
+        if (args[0] === "api")
+          return {
+            code: 0,
+            stderr: "",
+            stdout: restRun(args, "failure", [
+              {
+                name: "deploy",
+                steps: [{ name: "Run rad commands", conclusion: "failure" }]
+              }
+            ])
+          };
+        if (args.join(" ") === "run view 41 --log --repo org/app")
+          return {
+            code: 0,
+            stderr: "",
+            stdout: `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} }`
+          };
+        throw new Error("Unexpected mutation or diagnostic read");
+      };
+      const redactor = (value: string) =>
+        redactCredentials(value, [credential]);
+      const execution: WorkflowExecution =
+        mode === "ambient" ?
+          { mode, run: runner }
+        : {
+            mode,
+            executor: {
+              login: "fixture",
+              run: runner,
+              errorMessage: (error) => redactor(String(error))
+            }
+          };
+      const target = { repo: "org/app", runId: 41 };
+      const observed = await observeWorkflowRun(target, {
+        readRun: (repo, runId) => readWorkflowRun(execution, repo, runId)
+      });
+      if (!observed) throw new Error("Expected workflow observation");
+      const failure = await collectWorkflowFailure(
+        target,
+        observed,
+        { resourcesTouched: true },
+        {
+          redactDiagnostic: redactor,
+          readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+          readControlPlaneLog: async () => `provisioning password=${credential}`
+        }
+      );
+      expect(failure.radiusError).toBe("Error: { quota [REDACTED] }");
+      expect(failure.message).toContain("provisioning password=[REDACTED]");
+      expect(JSON.stringify(failure)).not.toContain(credential);
+      expect(calls.map((args) => args.join(" "))).toEqual([
+        "api repos/org/app/actions/runs/41 --include --method GET",
+        "api repos/org/app/actions/runs/41/jobs?per_page=100&page=1 --include --method GET",
+        "run view 41 --log --repo org/app"
+      ]);
+    }
+  );
+
   it.each([
     { name: "in-progress", status: "in_progress", fallback: false },
     { name: "missing status", status: undefined, fallback: false },
@@ -77,6 +143,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
         { resourcesTouched: false },
         {
           readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: async () => {
             calls.push("control-plane");
             return null;
@@ -165,6 +232,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
         { resourcesTouched: true },
         {
           readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: () => {
             calls.push("control-plane");
             throw new Error("fixture-private-artifact-detail");
@@ -241,6 +309,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
           { resourcesTouched: true },
           {
             readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+            redactDiagnostic: redactCredentials,
             readControlPlaneLog: async () => {
               transcript.push("control-plane");
               return null;

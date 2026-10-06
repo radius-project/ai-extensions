@@ -3,6 +3,7 @@ import type {
   WorkflowTarget
 } from "./workflow-observation.js";
 import { confirmedWorkflowConclusion } from "./workflow-observation.js";
+import { redactCredentials } from "./credential-redaction.js";
 
 // Must match the step in .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
@@ -56,6 +57,7 @@ function failedPostDeploymentTeardown(
 export interface WorkflowFailureReads {
   readLog(repo: string, runId: number | string): Promise<string | null>;
   readControlPlaneLog(): Promise<string | null>;
+  redactDiagnostic(value: string): string;
 }
 
 export interface WorkflowFailure {
@@ -75,6 +77,11 @@ export async function collectWorkflowFailure(
   >,
   reads: WorkflowFailureReads
 ): Promise<WorkflowFailure> {
+  if (typeof reads.redactDiagnostic !== "function") {
+    throw new Error("Workflow diagnostics require a credential redactor.");
+  }
+  const redact = (value: string): string =>
+    redactCredentials(reads.redactDiagnostic(value));
   const { conclusion, steps } = run;
   const url =
     "https://github.com/" + target.repo + "/actions/runs/" + target.runId;
@@ -119,7 +126,7 @@ export async function collectWorkflowFailure(
     unavailable.push("The workflow log could not be read.");
   }
   const claimHelp = explainOidcEnterpriseClaim(
-    extractGitHubActionsStepLog(log, "Azure Login (OIDC)")
+    redact(extractGitHubActionsStepLog(log, "Azure Login (OIDC)"))
   );
   if (claimHelp)
     message = claimHelp + "\n\n\u2014 raw error \u2014\n" + message;
@@ -145,7 +152,7 @@ export async function collectWorkflowFailure(
           step.conclusion === "failure"
       )
     ) ?
-      extractRadDeployError(deployLog)
+      extractRadDeployError(redact(deployLog))
     : "";
   const teardownLog = extractGitHubActionsStepLog(log, "Teardown");
   const teardownJobs = new Set(
@@ -153,10 +160,12 @@ export async function collectWorkflowFailure(
   );
   const teardownDetail =
     teardownJob && teardownJobs.size === 1 && teardownJobs.has(teardownJob) ?
-      extractRadDeployError(teardownLog)
+      extractRadDeployError(redact(teardownLog))
     : "";
   const detail =
-    teardownJob ? teardownDetail : primary || extractRadDeployError(log);
+    teardownJob ? teardownDetail : (
+      primary || extractRadDeployError(redact(log || ""))
+    );
   if (detail) {
     message += "\n\n" + detail;
     narration.push(
@@ -173,7 +182,7 @@ export async function collectWorkflowFailure(
     unavailable.push("The control-plane log could not be read.");
   }
   if (controlPlaneLog) {
-    const tail = controlPlaneLog
+    const tail = redact(controlPlaneLog)
       .replace(/\s+$/, "")
       .split("\n")
       .slice(-40)
@@ -193,7 +202,12 @@ export async function collectWorkflowFailure(
     narration.push(note);
   }
   message += "\n\nView the full run: " + url;
-  return { message, radiusError: detail, authDriftMessage, narration };
+  return {
+    message: redact(message),
+    radiusError: detail,
+    authDriftMessage,
+    narration: narration.map(redact)
+  };
 }
 
 export function extractErrorLines(logText?: string | null, max = 12): string[] {

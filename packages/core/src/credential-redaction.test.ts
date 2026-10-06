@@ -16,6 +16,17 @@ describe("redactCredentials", () => {
     ).toBe("authentication token unavailable");
   });
 
+  it("ignores absent and blank credentials and redacts all occurrences at the opaque-value boundary", () => {
+    expect(
+      redactCredentials("abcdefghijk abcdefghijkl abcdefghijkl", [
+        undefined,
+        " ",
+        "abcdefghijk",
+        "abcdefghijkl"
+      ])
+    ).toBe("abcdefghijk [REDACTED] [REDACTED]");
+  });
+
   it.each([
     ["a classic GitHub token", "ghp_fixture_secret"],
     ["a fine-grained GitHub token", "github_pat_fixture_secret"],
