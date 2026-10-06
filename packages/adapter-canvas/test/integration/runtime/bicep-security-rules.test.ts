@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
@@ -1113,14 +1113,51 @@ describe("requestFileReferences", () => {
   it("stops a server that never answers, and waits for it to exit", async () => {
     const app = server({ hang: true, startedFile: "server.pid" });
     const pidFile = path.join(path.dirname(app), "server.pid");
-    const result = await rules.requestFileReferences(process.execPath, app, {
-      timeoutMs: 500
+    const child = spawn(process.execPath, ["jsonrpc", "--stdio"], {
+      cwd: path.dirname(app),
+      stdio: "pipe",
+      windowsHide: true
+    });
+    let startupError: Error | undefined;
+    child.once("error", (error) => {
+      startupError = error;
+    });
+    // Registered before requestFileReferences adds its own listener, so this
+    // flag is set before the request can resolve on the same event.
+    let exited = false;
+    const closed = new Promise<void>((resolve) => {
+      child.once("close", () => {
+        exited = true;
+        resolve();
+      });
     });
 
-    expect(result).toEqual({
-      error: "Bicep did not list the files the compile reads within 500 ms"
-    });
-    expect(isRunning(Number(fs.readFileSync(pidFile, "utf8")))).toBe(false);
+    try {
+      await expect
+        .poll(
+          () => {
+            if (startupError) throw startupError;
+            return fs.existsSync(pidFile);
+          },
+          { timeout: 10_000 }
+        )
+        .toBe(true);
+      const result = await rules.requestFileReferences(process.execPath, app, {
+        timeoutMs: 500,
+        spawnProcess: () => child
+      });
+
+      expect(exited).toBe(true);
+      expect(result).toEqual({
+        error: "Bicep did not list the files the compile reads within 500 ms"
+      });
+      expect(isRunning(Number(fs.readFileSync(pidFile, "utf8")))).toBe(false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+      await closed;
+    }
   });
 
   // Windows has no signal a process can ignore, so this only runs elsewhere.
