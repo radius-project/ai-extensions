@@ -138,6 +138,10 @@ release flow.
 
 Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr:no-changeset`, which replaces the reminder with a note that it was waived.
 
+## Dependency updates
+
+Dependabot opens grouped dependency pull requests weekly. Some pinned dependencies, such as React Flow, need manual steps before their update can merge. See the [dependency updates runbook](./docs/eng/DEPENDENCY_UPDATES.md) for how to triage a failing update.
+
 ## Developer Certificate of Origin
 
 The Radius project follows the [Developer Certificate of Origin](https://developercertificate.org/).

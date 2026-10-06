@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { pinnedFlowVersion } from "../../../../scripts/graph-vendor-styles.mjs";
 import {
   containedPath,
   hash,
@@ -74,6 +75,13 @@ describe("real Headlamp qualification contracts", () => {
       expect(
         fixture.dependencies[name] ?? fixture.devDependencies[name]
       ).toBeUndefined();
+  });
+
+  it("qualifies Headlamp with the React Flow version graph-react ships", () => {
+    expect(
+      TOOL_VERSIONS["@xyflow/react"],
+      "The Headlamp fixture must use graph-react's @xyflow/react pin. Update scripts/fixtures/headlamp/package.json and TOOL_VERSIONS; see the React Flow steps in docs/eng/DEPENDENCY_UPDATES.md."
+    ).toBe(pinnedFlowVersion());
   });
 
   it("hashes exact candidate bytes for receipts", () => {
