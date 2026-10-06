@@ -129,6 +129,14 @@ run_update >/dev/null
 grep -Fxq "changed=true" "${GITHUB_OUTPUT}" ||
     fail "updater did not report the release file repair"
 
+# A stale release commit alone must also be repaired.
+write_release v1.2.3 "${OLD_COMMIT}"
+run_update >/dev/null
+[[ "$(jq -r .tag "${RELEASE_FILE}")" == "v1.2.3" && "$(jq -r .commit "${RELEASE_FILE}")" == "${COMMIT_SHA}" ]] ||
+    fail "updater did not repair a stale release commit"
+grep -Fxq "changed=true" "${GITHUB_OUTPUT}" ||
+    fail "updater did not report the release commit repair"
+
 write_release v1.2.3
 printf '{"tag":"v1.2.1"\n' >>"${RELEASE_FILE}"
 if run_update >/dev/null 2>&1; then
