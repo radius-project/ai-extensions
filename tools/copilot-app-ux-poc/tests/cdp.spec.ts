@@ -1,7 +1,11 @@
 import { expect, test } from "@playwright/test";
 import {
   DEFAULT_CDP_URL,
+  canvasCdpUrls,
   countTestAttributes,
+  findRadiusCanvasTarget,
+  isLoopbackHttpUrl,
+  isRadiusCanvasTitle,
   probeCdpEndpoint,
   resolveCdpUrl,
   selectMainPage,
@@ -147,5 +151,108 @@ test.describe("countTestAttributes", () => {
 
   test("returns an empty object when nothing matches", () => {
     expect(countTestAttributes([])).toEqual({});
+  });
+});
+
+test.describe("isLoopbackHttpUrl", () => {
+  for (const [value, expected] of [
+    ["http://127.0.0.1:51234/?page=graph", true],
+    ["https://localhost:4000/", true],
+    ["http://[::1]:9000/", true],
+    ["ws://127.0.0.1:9222/", false],
+    ["http://tauri.localhost/", false],
+    ["not a url", false],
+    ["", false]
+  ] as const) {
+    test(`returns ${expected} for "${value}"`, () => {
+      expect(isLoopbackHttpUrl(value)).toBe(expected);
+    });
+  }
+});
+
+test.describe("isRadiusCanvasTitle", () => {
+  for (const [title, expected] of [
+    ["Application Graph — Radius", true],
+    ["  Deployments — Radius  ", true],
+    ["Radius", false],
+    ["Application Graph - Radius", false],
+    ["Radius — Docs", false],
+    ["", false]
+  ] as const) {
+    test(`returns ${expected} for "${title}"`, () => {
+      expect(isRadiusCanvasTitle(title)).toBe(expected);
+    });
+  }
+});
+
+test.describe("findRadiusCanvasTarget", () => {
+  const target = (url: string, title: string | Error) => ({
+    url: () => url,
+    title: async () => {
+      if (title instanceof Error) {
+        throw title;
+      }
+      return title;
+    }
+  });
+
+  test("returns the first loopback target with a Radius title", async () => {
+    const radius = target(
+      "http://127.0.0.1:5000/?page=graph",
+      "Graph — Radius"
+    );
+    const found = await findRadiusCanvasTarget([
+      target("http://tauri.localhost/", "Graph — Radius"),
+      target("http://127.0.0.1:6000/", "Other canvas"),
+      radius,
+      target("http://127.0.0.1:7000/", "Later — Radius")
+    ]);
+    expect(found).toBe(radius);
+  });
+
+  test("skips targets whose title cannot be read", async () => {
+    const radius = target("http://localhost:5000/", "Deployments — Radius");
+    const found = await findRadiusCanvasTarget([
+      target("http://127.0.0.1:5001/", new Error("Frame was detached")),
+      radius
+    ]);
+    expect(found).toBe(radius);
+  });
+
+  test("returns undefined when no Radius canvas is open", async () => {
+    expect(await findRadiusCanvasTarget([])).toBeUndefined();
+    expect(
+      await findRadiusCanvasTarget([target("http://127.0.0.1:1/", "Editor")])
+    ).toBeUndefined();
+  });
+});
+
+test.describe("canvasCdpUrls", () => {
+  test("uses the IPv6 loopback when the app uses the IPv4 loopback", () => {
+    expect(canvasCdpUrls("http://127.0.0.1:9222", undefined)).toEqual([
+      "http://[::1]:9222"
+    ]);
+  });
+
+  test("uses the IPv4 loopback when the app uses the IPv6 loopback", () => {
+    expect(canvasCdpUrls("http://[::1]:9333", "  ")).toEqual([
+      "http://127.0.0.1:9333"
+    ]);
+  });
+
+  test("tries both families when the app uses localhost", () => {
+    expect(canvasCdpUrls("http://localhost:9222", undefined)).toEqual([
+      "http://127.0.0.1:9222",
+      "http://[::1]:9222"
+    ]);
+  });
+
+  test("uses a valid override and rejects a remote one", () => {
+    expect(
+      canvasCdpUrls("http://127.0.0.1:9222", "http://localhost:9444/")
+    ).toEqual(["http://localhost:9444"]);
+    expect(() =>
+      canvasCdpUrls("http://127.0.0.1:9222", "http://example.com:9222")
+    ).toThrow(/COPILOT_APP_CANVAS_CDP_URL must point to a loopback host/);
   });
 });
