@@ -193,3 +193,11 @@ export type {
   WorkflowFailure,
   WorkflowFailureReads
 } from "./workflow-diagnostics.js";
+export {
+  parseWorkflowProtection,
+  describeWorkflowProtection
+} from "./workflow-protection.js";
+export type {
+  WorkflowProtectionEvidence,
+  WorkflowPendingEnvironment
+} from "./workflow-protection.js";

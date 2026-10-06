@@ -27,6 +27,6 @@ export type WorkflowResponseMetadata =
     };
 
 export interface WorkflowReadEvidence {
-  phase: "run" | "jobs" | "repository" | "artifacts";
+  phase: "run" | "jobs" | "repository" | "artifacts" | "protection";
   response: WorkflowResponseMetadata;
 }
