@@ -595,13 +595,29 @@ describe("P0-C built Radius extension artifact", () => {
       "### Authoring evidence and deployment readiness"
     );
     expect(skillGuidance).toContain(
-      "A missing, unselected, or unprovisioned deployment Environment is never a permanent modeling failure."
+      "When no Environment is named and no contract is supplied, a missing, unselected, or unprovisioned deployment Environment is not a permanent modeling failure."
     );
     expect(skillGuidance).toContain(
-      "A missing deployment Environment, Environment contract, or Recipe-registration evidence is not a failure of either kind."
+      "Only when no deployment Environment is named and no Environment contract is supplied, missing Environment-registration evidence is not a failure of either kind."
     );
     expect(runtimeGuidance).toContain(
-      "A missing or unselected deployment Environment is not a reason to reject the model."
+      "Only when no Environment is named and no contract is supplied, a missing or unselected deployment Environment is not a reason to reject the model."
+    );
+    expect(skillGuidance).toContain(
+      "Missing evidence for that named target remains an authoring blocker"
+    );
+    expect(skillGuidance).toContain(
+      "it does not establish AWS Recipe behavior"
+    );
+    expect(skillGuidance).toContain("do not substitute Azure evidence");
+    expect(skillGuidance).toContain(
+      "For generated custom types, inspect the authored Recipe and its pack"
+    );
+    expect(runtimeGuidance).toContain(
+      "registration of a required Recipe in a named target Environment cannot be proved"
+    );
+    expect(runtimeGuidance).toContain(
+      "an explicit target profile still requires its own exact Recipe behavior"
     );
   });
 

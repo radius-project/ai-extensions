@@ -111,13 +111,13 @@ describe("appBicepHandoffPrompt", () => {
   it("lets modeling proceed without a selected deployment Environment", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
     expect(msg).toContain(
-      "No deployment Environment is selected for this model."
+      "This Canvas handoff supplies no deployment Environment contract."
     );
     expect(msg).toContain(
-      "Do not require evidence that an Environment registers its Recipes"
+      "Only when no Environment is named and no contract is supplied"
     );
     expect(msg).toContain(
-      "A missing deployment Environment is not a permanent modeling failure."
+      "In that no-target case, missing Environment-registration evidence is not a permanent modeling failure."
     );
   });
 
@@ -130,7 +130,7 @@ describe("appBicepHandoffPrompt", () => {
       { attemptToken: "tok", instanceId: "app-graph", branches: ["feat"] }
     );
     expect(
-      msg.indexOf("A missing deployment Environment is not a permanent")
+      msg.indexOf("In that no-target case, missing Environment-registration")
     ).toBeLessThan(msg.indexOf("radius_report_modeling_failure"));
   });
 
@@ -322,6 +322,39 @@ function modelStatus(
   };
 }
 
+describe("modeling Environment context", () => {
+  it.each([
+    ["generate", () => appBicepHandoffPrompt("octo/app")],
+    ["refresh", () => appModelRefreshPrompt(modelStatus("octo/app", "feat"))],
+    [
+      "re-check",
+      () => appModelUnverifiedPrompt(modelStatus("octo/app", "feat"))
+    ]
+  ])(
+    "%s preserves user-supplied target checks instead of assuming no target",
+    (_name, prompt) => {
+      const text = prompt();
+
+      expect(text).toContain(
+        "If the user names a target Environment or supplies its contract"
+      );
+      expect(text).toContain(
+        "follow the skill's named-Environment checks for Recipe behavior and registration; do not bypass them."
+      );
+      expect(text).toContain(
+        "Only when no Environment is named and no contract is supplied"
+      );
+      expect(text).toContain(
+        "Azure Recipe evidence does not establish AWS Recipe behavior."
+      );
+      expect(text).not.toContain("No deployment Environment is selected");
+      expect(text).not.toContain(
+        "Do not require evidence that an Environment registers its Recipes"
+      );
+    }
+  );
+});
+
 describe("appModelRefreshPrompt", () => {
   const status = modelStatus("octo/app", "feat", {
     status: "source-changed",
@@ -338,7 +371,7 @@ describe("appModelRefreshPrompt", () => {
     expect(text).toContain("predates the refresh");
     expect(text).toContain("Do not commit or push");
     expect(text).toContain(
-      "A missing deployment Environment is not a permanent modeling failure."
+      "In that no-target case, missing Environment-registration evidence is not a permanent modeling failure."
     );
   });
 
@@ -413,7 +446,7 @@ describe("appModelUnverifiedPrompt", () => {
     expect(text).toContain("would be lost");
     expect(text).toContain("Do not regenerate first");
     expect(text).toContain(
-      "No deployment Environment is selected for this model."
+      "This Canvas handoff supplies no deployment Environment contract."
     );
   });
 
@@ -485,10 +518,12 @@ describe("deployRepairHandoffPrompt", () => {
     expect(out).toContain("https://github.com/octo/app/actions/runs/42");
   });
 
-  it("does not claim that no Environment is selected, because a deploy has one", () => {
+  it("does not supply graph-only Environment guidance during deploy repair", () => {
     expect(
       deployRepairHandoffPrompt("octo/app", "feat", failure)
-    ).not.toContain("No deployment Environment is selected");
+    ).not.toContain(
+      "This Canvas handoff supplies no deployment Environment contract."
+    );
   });
 
   it("points at the tools that repair the model and redeploy", () => {

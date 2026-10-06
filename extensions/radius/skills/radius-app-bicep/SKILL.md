@@ -170,7 +170,7 @@ Do not retry on your own. Say which kind of failure it looks like and let the us
 - **Looks transient** — a network error fetching a schema, a registry timeout, an interrupted download. Offer to run modeling again.
 - **Looks permanent** — no Dockerfile, a required backing service with no Radius type that cannot be provisioned on Azure, no source that resolves to a runnable profile. Report it and do not offer a retry, because the same run would fail the same way. If the Canvas handoff that started this run supplied `radius_report_modeling_failure` arguments, call that tool once with the supplied instance, repository, branch, and attempt token plus an actionable failure summary; this lets the waiting graph stop requesting the same impossible model. Never call it for a transient failure, cancellation, user-declined action, or a run that wrote `app.bicep`.
 
-A missing deployment Environment, Environment contract, or Recipe-registration evidence is not a failure of either kind. Do not stop the run for it; continue modeling as described in [Authoring evidence and deployment readiness](#authoring-evidence-and-deployment-readiness).
+Only when no deployment Environment is named and no Environment contract is supplied, missing Environment-registration evidence is not a failure of either kind. In that no-target case, continue modeling as described in [Authoring evidence and deployment readiness](#authoring-evidence-and-deployment-readiness). If the user names an Environment or supplies its contract, do not bypass the required Recipe-behavior and registration checks. Missing evidence for that named target remains an authoring blocker; report the missing evidence instead of silently switching to the default profile.
 
 ## Origin record (`app.origin.json`)
 
@@ -312,10 +312,12 @@ Do not follow a `defaults.yaml`, GitHub, registry, module, or provider-source UR
 You do not need a deployment Environment to author an application model. The graph views build the model on the client, without a Radius control plane. At deploy time, the deploy workflow registers the release-pinned provider Recipe pack, and any generated `custom-recipe-pack.bicep`, on the selected Environment.
 
 - **Authoring evidence (required, blocks publishing):** source compatibility, the exact resolved schema and API version, the selected Recipe's behavior, credential shape, safe omitted inputs, and checker exit `0`. The selected Recipe is the resolver's managed-default `recipe.definition`, unless explicit target evidence selects a different Recipe.
-- **Deployment readiness (does not block authoring):** registration of each emitted type's Recipe in a specific Environment. When the user does not name an Environment and no Environment contract is supplied, model against the managed-default Recipe profile. Do not search for registration evidence, and do not treat its absence as a blocker. In the final reply, say that Recipe registration is checked when the model is deployed.
+- **Deployment readiness (does not block authoring):** registration of each emitted type's Recipe in a specific Environment. When the user does not name an Environment and no Environment contract is supplied, model against the managed-default Azure Recipe profile. Do not search for registration evidence, and do not treat its absence as a blocker. In the final reply, say that Recipe registration is checked when the model is deployed.
 - **Named Environment:** when the user names a target Environment or supplies its Recipe or registration contract, model against that contract. Then a required type that the Environment does not register, or a selected Recipe whose behavior conflicts with the application, is an authoring blocker.
 
-A missing, unselected, or unprovisioned deployment Environment is never a permanent modeling failure.
+The managed-default profile supplies Azure Recipe evidence only; it does not establish AWS Recipe behavior. If the user selects AWS or another explicit Recipe profile, use the exact Recipe evidence supplied in the modeling context or target repository. If that evidence is missing and the model depends on its behavior, report an authoring blocker; do not substitute Azure evidence. For generated custom types, inspect the authored Recipe and its pack as required by [Custom Resource Types](references/custom-resource-types.md); the built-in Azure pack does not establish their behavior.
+
+When no Environment is named and no contract is supplied, a missing, unselected, or unprovisioned deployment Environment is not a permanent modeling failure.
 
 The following is the allow-list of predefined types this skill emits when one fits the need:
 

@@ -47,11 +47,10 @@ const SKILL_HANDOFF =
   "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
 const RECIPE_PACK_NOTE =
   "Recipes are supplied by recipe packs, not by inline per-type recipes fabricated in app.bicep or in the graph. When no built-in type fits, the radius-app-bicep skill generates a custom resource type together with a recipe pack for it; follow the skill rather than inventing a singleton recipe here.";
-// Graph views model without a control plane, and the deploy workflow registers
-// the recipe pack on the selected environment. Registration evidence is
-// deployment readiness, so a model must not wait for an environment (#962).
+// Canvas supplies no Environment contract; the user's request can still name
+// a target whose Recipe and registration checks must remain in force (#962).
 const ENVIRONMENT_INDEPENDENT_NOTE =
-  "No deployment Environment is selected for this model. Model it against the managed-default Recipe profile that the radius-app-bicep skill resolves. Do not require evidence that an Environment registers its Recipes: the deploy workflow registers them when the model is deployed. A missing deployment Environment is not a permanent modeling failure.";
+  "This Canvas handoff supplies no deployment Environment contract. If the user names a target Environment or supplies its contract, follow the skill's named-Environment checks for Recipe behavior and registration; do not bypass them. Only when no Environment is named and no contract is supplied, model against the managed-default Azure Recipe profile that the radius-app-bicep skill resolves, and leave registration checks to deployment readiness. Azure Recipe evidence does not establish AWS Recipe behavior. In that no-target case, missing Environment-registration evidence is not a permanent modeling failure.";
 
 // Turns a branches array (which may contain undefined/empty entries meaning
 // "the default branch for the current state") into a human-readable phrase
