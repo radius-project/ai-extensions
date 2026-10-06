@@ -1,6 +1,6 @@
 # Component Catalog
 
-Maps common application components to Radius resource types, with detection cues from source code (client libraries across npm / PyPI / NuGet / RubyGems, plus manifest and connection-string hints). Use this to turn the selected deployment profile and its pinned source support into types to emit. Always verify the type against the exact configured extension, registered schema, and Environment recipe.
+Maps common application components to Radius resource types, with detection cues from source code (client libraries across npm / PyPI / NuGet / RubyGems, plus manifest and connection-string hints). Use this to turn the selected deployment profile and its pinned source support into types to emit. Always verify the type against the exact configured extension, resolved schema, and selected Recipe.
 
 Match by **wire protocol, not only a library or type name**: MariaDB clients can map to MySQL, Valkey to Redis, and DocumentDB / Cosmos DB's Mongo API to MongoDB only when protocol versions and authentication modes are compatible. A concrete recipe may back an abstract messaging type with Event Hubs, Service Bus, or another managed service; verify that the application client supports the actual endpoint, TLS, and authentication contract.
 

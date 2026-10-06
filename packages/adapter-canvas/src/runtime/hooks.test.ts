@@ -108,6 +108,32 @@ describe("appBicepHandoffPrompt", () => {
     expect(appBicepHandoffPrompt("acme/widgets")).toContain("recipe packs");
   });
 
+  it("lets modeling proceed without a selected deployment Environment", () => {
+    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    expect(msg).toContain(
+      "No deployment Environment is selected for this model."
+    );
+    expect(msg).toContain(
+      "Do not require evidence that an Environment registers its Recipes"
+    );
+    expect(msg).toContain(
+      "A missing deployment Environment is not a permanent modeling failure."
+    );
+  });
+
+  it("states Environment independence before the permanent-failure callback", () => {
+    const msg = appBicepHandoffPrompt(
+      "acme/widgets",
+      "graph",
+      ["feat"],
+      "app-graph",
+      { attemptToken: "tok", instanceId: "app-graph", branches: ["feat"] }
+    );
+    expect(
+      msg.indexOf("A missing deployment Environment is not a permanent")
+    ).toBeLessThan(msg.indexOf("radius_report_modeling_failure"));
+  });
+
   it("names the selected branch in the opening line and gives cross-branch commit/push guidance", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
     expect(msg).toContain("(branch `feat`)");
@@ -311,6 +337,9 @@ describe("appModelRefreshPrompt", () => {
     expect(text).toContain("radius_generate_app");
     expect(text).toContain("predates the refresh");
     expect(text).toContain("Do not commit or push");
+    expect(text).toContain(
+      "A missing deployment Environment is not a permanent modeling failure."
+    );
   });
 
   it("omits the repo phrase when the repo is unknown", () => {
@@ -383,6 +412,9 @@ describe("appModelUnverifiedPrompt", () => {
     expect(text).toContain("ask whether they want the model regenerated");
     expect(text).toContain("would be lost");
     expect(text).toContain("Do not regenerate first");
+    expect(text).toContain(
+      "No deployment Environment is selected for this model."
+    );
   });
 
   it("omits the repo phrase when the repo is unknown", () => {
@@ -451,6 +483,12 @@ describe("deployRepairHandoffPrompt", () => {
     expect(out).toContain("`feat`");
     expect(out).toContain("BCP037");
     expect(out).toContain("https://github.com/octo/app/actions/runs/42");
+  });
+
+  it("does not claim that no Environment is selected, because a deploy has one", () => {
+    expect(
+      deployRepairHandoffPrompt("octo/app", "feat", failure)
+    ).not.toContain("No deployment Environment is selected");
   });
 
   it("points at the tools that repair the model and redeploy", () => {

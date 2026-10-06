@@ -572,6 +572,39 @@ describe("P0-C built Radius extension artifact", () => {
     expect(notices).not.toContain("===== @reactflow/");
   });
 
+  it("packages environment-independent authoring so a missing deploy Environment cannot block modeling", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const skillGuidance = readGuidance("SKILL.md");
+    const runtimeGuidance = readGuidance("references/runtime-contract.md");
+
+    // Regression guard for #962: #637 made target-Environment registration a
+    // pre-authoring stop, which blocked every graph opened before deployment.
+    for (const guidance of filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .map((path) => readFileSync(path, "utf8"))) {
+      expect(guidance).not.toContain(
+        "target-Environment registration required by the model is unavailable"
+      );
+      expect(guidance).not.toContain(
+        "Also prove that the target Environment registers every emitted type"
+      );
+    }
+    expect(skillGuidance).toContain(
+      "### Authoring evidence and deployment readiness"
+    );
+    expect(skillGuidance).toContain(
+      "A missing, unselected, or unprovisioned deployment Environment is never a permanent modeling failure."
+    );
+    expect(skillGuidance).toContain(
+      "A missing deployment Environment, Environment contract, or Recipe-registration evidence is not a failure of either kind."
+    );
+    expect(runtimeGuidance).toContain(
+      "A missing or unselected deployment Environment is not a reason to reject the model."
+    );
+  });
+
   it("packages the managed-secret modeling contract in executable examples and platform rules", () => {
     assertCurrentArtifact();
     const readGuidance = (relativePath: string): string =>

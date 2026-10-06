@@ -1,6 +1,6 @@
 # Bicep Structure Rules
 
-These rules apply to all generated `app.bicep` files. Resolve property names and types from the exact extension configured by the target repository and the matching registered schema/recipe contract. This file covers structural patterns only.
+These rules apply to all generated `app.bicep` files. Resolve property names and types from the exact extension configured by the target repository and the matching resolved schema and selected Recipe contract. This file covers structural patterns only.
 
 ## General
 
@@ -10,7 +10,7 @@ These rules apply to all generated `app.bicep` files. Resolve property names and
 - Exactly ONE `Radius.Core/applications` resource using the matching `resources[].apiVersion` returned by `show-radius-type.mjs`
 - The `@<apiVersion>` shown in the examples below (e.g. `2025-08-01-preview`) is illustrative; replace it with the matching `resources[].apiVersion` returned by `show-radius-type.mjs`
 - All output files go in `.radius/` directory
-- Compile with an extension compatible with the exact target Environment schema and Recipe contract; stale mutable metadata never overrides deployment-required wiring
+- Compile with an extension compatible with the resolved schema and the selected Recipe contract (a named target Environment's contract when one is supplied); stale mutable metadata never overrides deployment-required wiring
 - Emit every exact type, workload role, native key/value, secret binding, and relationship required by the selected compatible deployment profile
 
 ## Radius.Compute/containers structure

@@ -47,6 +47,11 @@ const SKILL_HANDOFF =
   "Author the application model with the radius-app-bicep skill by calling the radius_generate_app tool, and follow that skill through to the end; it writes and stages .radius/app.bicep in the working tree.";
 const RECIPE_PACK_NOTE =
   "Recipes are supplied by recipe packs, not by inline per-type recipes fabricated in app.bicep or in the graph. When no built-in type fits, the radius-app-bicep skill generates a custom resource type together with a recipe pack for it; follow the skill rather than inventing a singleton recipe here.";
+// Graph views model without a control plane, and the deploy workflow registers
+// the recipe pack on the selected environment. Registration evidence is
+// deployment readiness, so a model must not wait for an environment (#962).
+const ENVIRONMENT_INDEPENDENT_NOTE =
+  "No deployment Environment is selected for this model. Model it against the managed-default Recipe profile that the radius-app-bicep skill resolves. Do not require evidence that an Environment registers its Recipes: the deploy workflow registers them when the model is deployed. A missing deployment Environment is not a permanent modeling failure.";
 
 // Turns a branches array (which may contain undefined/empty entries meaning
 // "the default branch for the current state") into a human-readable phrase
@@ -192,6 +197,7 @@ export function appBicepHandoffPrompt(
     : `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
     "",
     RECIPE_PACK_NOTE,
+    ENVIRONMENT_INDEPENDENT_NOTE,
     ...(failureReport && failureReport.branches.length ?
       [failureReportInstruction(repo, failureReport)]
     : [])
@@ -251,7 +257,8 @@ export function appModelRefreshPrompt(status: AppModelStatus): string {
     "Regenerate from the current source rather than editing the existing file, and tell the user the graph they are looking at predates the refresh so they know to reopen it.",
     "The model is on the current workspace branch, so writing the working tree is enough. Do not commit or push it as part of the refresh.",
     "",
-    RECIPE_PACK_NOTE
+    RECIPE_PACK_NOTE,
+    ENVIRONMENT_INDEPENDENT_NOTE
   ].join("\n");
 }
 
@@ -289,7 +296,8 @@ export function appModelUnverifiedPrompt(status: AppModelStatus): string {
     `If they agree: ${SKILL_HANDOFF}`,
     "If they would rather keep their edits, leave the file alone. Repairing one specific problem in place is the alternative that preserves them.",
     "",
-    RECIPE_PACK_NOTE
+    RECIPE_PACK_NOTE,
+    ENVIRONMENT_INDEPENDENT_NOTE
   ].join("\n");
 }
 
