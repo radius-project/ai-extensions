@@ -1,0 +1,23 @@
+{
+  "name": "copilot-app-ux-poc",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows-only Playwright proof of concept for UX test automation of the GitHub Copilot desktop app over CDP",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "launch-app": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/launch-app.ps1",
+    "test": "playwright test",
+    "test:list": "playwright test --list",
+    "typecheck": "tsc --noEmit",
+    "dump-a11y": "node scripts/dump-a11y.ts",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3"
+  }
+}
