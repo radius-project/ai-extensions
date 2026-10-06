@@ -131,7 +131,7 @@ function prepareBuildWorkspace(
     join(workspaceAdapter, "node_modules"),
     "junction"
   );
-  for (const packageName of ["adapter-shared", "core"]) {
+  for (const packageName of ["adapter-shared", "core", "graph-react"]) {
     symlinkSync(
       join(REPO_ROOT, "packages", packageName),
       join(workspaceRoot, "packages", packageName),
@@ -1329,6 +1329,47 @@ describe("P0-C built Radius extension artifact", () => {
       expect(existsSync(staleSkill)).toBe(false);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it("builds and installs from an isolated workspace with all required assets", () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-complete-install-assets-")
+    );
+    const installDir = join(workspaceRoot, "installed");
+    const installPath = join(installDir, "extension.mjs");
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      const result = spawnSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          RADIUS_SOURCE_REF: SOURCE_REF,
+          RADIUS_CANVAS_INSTALL_PATH: installPath
+        }
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("[canvas] installed");
+      expect(existsSync(installPath)).toBe(true);
+      expectMatchingFile(
+        SOURCE_CODE_REFERENCE,
+        join(
+          installDir,
+          "skills",
+          "radius-app-bicep",
+          "references",
+          "source-code-references.md"
+        )
+      );
+      expect(existsSync(join(workspaceRoot, ".artifacts", "radius"))).toBe(
+        true
+      );
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
     }
   });
 
