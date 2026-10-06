@@ -2,6 +2,7 @@ import type { DeployProgress } from "../../deploy-artifacts.js";
 import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../deploy-artifacts.js";
 import {
   confirmedWorkflowConclusion,
+  describeWorkflowProtection,
   WORKFLOW_READ_LIMITS,
   WorkflowReadInterruptedError,
   type WorkflowReadContext,
@@ -38,7 +39,7 @@ export type DeployRunDetail = Pick<
   WorkflowRunDetail,
   "status" | "conclusion" | "steps"
 > &
-  Partial<Pick<WorkflowRunDetail, "jobs">>;
+  Partial<Pick<WorkflowRunDetail, "jobs" | "protection">>;
 
 export interface DeployMonitorStatusReader extends DeployOutcomeStatusReader {
   progress(context?: WorkflowReadContext): Promise<DeployProgress | null>;
@@ -329,6 +330,7 @@ export function createDeployMonitorService(
       let lastStatusPollAt = 0;
       // Announce only new transitions, not the same status every tick.
       const statusAnnounced = new Set<string>();
+      let protectionNotice = "";
 
       // Fold the newest published status map into the graph. Merging is
       // conservative: a resource missing from the payload keeps its current
@@ -435,9 +437,31 @@ export function createDeployMonitorService(
         );
         assertCurrent();
         if (!detail) {
+          if (protectionNotice) {
+            log(
+              "Observation: workflow detail is unavailable; current protection status is unknown."
+            );
+            protectionNotice = "";
+          }
           await sleep(POLL_INTERVAL_MS);
           continue;
         }
+        const nextProtectionNotice =
+          detail.status === "waiting" && detail.protection ?
+            describeWorkflowProtection(detail.protection)
+          : "";
+        if (nextProtectionNotice && nextProtectionNotice !== protectionNotice)
+          log(nextProtectionNotice);
+        else if (!nextProtectionNotice && protectionNotice)
+          log(
+            detail.status === "completed" ?
+              "Observation: workflow completed; earlier protection observations are historical."
+            : detail.status === "queued" || detail.status === "in_progress" ?
+              "Observation: run left the protection wait; continuing to monitor."
+            : "Observation: current environment protection was not rechecked; approval status is unknown."
+          );
+        protectionNotice = nextProtectionNotice;
+
         if (detail.status === "completed") {
           completionObserved = true;
           if (

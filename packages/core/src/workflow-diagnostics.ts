@@ -7,6 +7,52 @@ import { confirmedWorkflowConclusion } from "./workflow-observation.js";
 // Must match the step in .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 
+function failedPostDeploymentTeardown(
+  run: Pick<WorkflowRunDetail, "steps"> &
+    Partial<Pick<WorkflowRunDetail, "jobs">>
+): string | null {
+  const relevant = (steps: WorkflowRunDetail["steps"]) =>
+    steps.filter(
+      (step) =>
+        step.name === DEPLOY_RAD_COMMANDS_STEP || step.name === "Teardown"
+    );
+  const matches = (steps: WorkflowRunDetail["steps"]) => {
+    const selected = relevant(steps);
+    return (
+      selected.length === 2 &&
+      steps.every(
+        (step) =>
+          step.name === "Teardown" ||
+          step.conclusion === "success" ||
+          step.conclusion === "skipped"
+      ) &&
+      selected.every((step) => step.status === "completed") &&
+      selected.filter(
+        (step) =>
+          step.name === DEPLOY_RAD_COMMANDS_STEP &&
+          step.conclusion === "success"
+      ).length === 1 &&
+      selected.filter(
+        (step) => step.name === "Teardown" && step.conclusion === "failure"
+      ).length === 1
+    );
+  };
+  const jobs = run.jobs;
+  if (!jobs || !matches(run.steps)) return null;
+  const candidates = jobs
+    .map((job) => ({ ...job, steps: job.steps ?? [] }))
+    .filter((job) => relevant(job.steps).length > 0);
+  if (candidates.length !== 1) return null;
+  const job = candidates[0];
+  if (
+    !job.name ||
+    jobs.filter((other) => other.name === job.name).length !== 1 ||
+    !matches(job.steps)
+  )
+    return null;
+  return job.name;
+}
+
 export interface WorkflowFailureReads {
   readLog(repo: string, runId: number | string): Promise<string | null>;
   readControlPlaneLog(): Promise<string | null>;
@@ -53,7 +99,12 @@ export async function collectWorkflowFailure(
         failedStepNames: failedSteps.map((step) => step.name)
       })
     : "";
-  const lead = "Deployment failed (" + conclusion + ").";
+  const teardownJob =
+    conclusion === "failure" ? failedPostDeploymentTeardown(run) : null;
+  const lead =
+    teardownJob ?
+      "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed. Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources. Review the Teardown logs and verify saved state before retrying."
+    : "Deployment failed (" + conclusion + ").";
   const narration: string[] = [];
   let message = lead;
   if (failedSteps.length) {
@@ -96,7 +147,16 @@ export async function collectWorkflowFailure(
     ) ?
       extractRadDeployError(deployLog)
     : "";
-  const detail = primary || extractRadDeployError(log);
+  const teardownLog = extractGitHubActionsStepLog(log, "Teardown");
+  const teardownJobs = new Set(
+    teardownLog.split("\n").map((line) => line.split("\t")[0])
+  );
+  const teardownDetail =
+    teardownJob && teardownJobs.size === 1 && teardownJobs.has(teardownJob) ?
+      extractRadDeployError(teardownLog)
+    : "";
+  const detail =
+    teardownJob ? teardownDetail : primary || extractRadDeployError(log);
   if (detail) {
     message += "\n\n" + detail;
     narration.push(

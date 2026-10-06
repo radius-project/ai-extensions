@@ -1,5 +1,11 @@
 import { ChildProcess } from "node:child_process";
-import { createWorkflowReadSession } from "@radius-project/adapter-shared";
+import {
+  createWorkflowReadSession,
+  readWorkflowRun,
+  type WorkflowRunner
+} from "@radius-project/adapter-shared";
+import { observeWorkflowRun } from "@radius-project/core";
+import { workflowObservationCases } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   explainNoSubscriptions,
@@ -15,6 +21,239 @@ import {
 import * as gh from "./gh.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
+
+describe.each(["ambient", "selected"] as const)(
+  "%s Canvas/direct observation parity",
+  (mode) => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1_700_000_000_000);
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    });
+    it.each(workflowObservationCases)(
+      "preserves $name evidence and exact read effects",
+      async (scenario) => {
+        const paths = [
+          "repos/org/app/actions/runs/41",
+          "repos/org/app/actions/runs/41/jobs?per_page=100&page=1",
+          ...((
+            scenario.status === "waiting" && scenario.jobsTotal === undefined
+          ) ?
+            ["repos/org/app/actions/runs/41/pending_deployments"]
+          : [])
+        ];
+        function runner() {
+          let index = 0;
+          return vi.fn<WorkflowRunner>(async (args) => {
+            expect(args).toEqual([
+              "api",
+              paths[index++],
+              "--include",
+              "--method",
+              "GET"
+            ]);
+            const status =
+              args[1].endsWith("pending_deployments") ?
+                scenario.protectionStatus
+              : 200;
+            const value =
+              args[1].endsWith("pending_deployments") ? scenario.pending
+              : args[1].includes("/jobs") ?
+                {
+                  total_count: scenario.jobsTotal ?? scenario.jobs.length,
+                  jobs: scenario.jobs
+                }
+              : { status: scenario.status, conclusion: scenario.conclusion };
+            return {
+              code: status === 200 ? 0 : 1,
+              stderr: "",
+              stdout: `HTTP/2 ${status}\n\n${JSON.stringify(value)}`
+            };
+          });
+        }
+        const directRun = runner();
+        const direct = await observeWorkflowRun(
+          { repo: "org/app", runId: 41 },
+          {
+            readRun: (repo, runId) =>
+              readWorkflowRun(
+                mode === "ambient" ?
+                  { mode, run: directRun }
+                : {
+                    mode,
+                    executor: successfulSelectedGhExecutor({ run: directRun })
+                  },
+                repo,
+                runId,
+                undefined,
+                { includeProtection: true }
+              )
+          }
+        );
+        const canvasRun = runner();
+        if (mode === "ambient")
+          vi.spyOn(gh, "cliExec").mockImplementation(
+            (command, args, options, callback) => {
+              expect(command).toBe("gh");
+              void canvasRun(args, {
+                ...options,
+                timeout: options.timeout ?? 15000
+              }).then((result) =>
+                callback(
+                  Number(result.code) === 0 ? null : (
+                    new Error("HTTP " + scenario.protectionStatus)
+                  ),
+                  result.stdout,
+                  result.stderr
+                )
+              );
+              return new ChildProcess();
+            }
+          );
+        const canvas = await getRunDetail(
+          "org/app",
+          41,
+          mode === "selected" ?
+            successfulSelectedGhExecutor({ run: canvasRun })
+          : undefined,
+          undefined,
+          { includeProtection: true }
+        );
+        expect(canvas).toEqual(direct);
+        expect(canvasRun.mock.calls.map(([args]) => args)).toEqual(
+          directRun.mock.calls.map(([args]) => args)
+        );
+        expect(canvasRun).toHaveBeenCalledTimes(paths.length);
+        expect(canvas?.protection?.state).toBe(scenario.protectionState);
+      }
+    );
+    it.each(["retry", "cooldown", "cancelled"] as const)(
+      "preserves request-bearing %s policy through the real Canvas binding",
+      async (scenario) => {
+        async function observe(canvas: boolean) {
+          let now = 0;
+          let pendingReads = 0;
+          let decisions = 0;
+          const controller = new AbortController();
+          const session = createWorkflowReadSession({
+            monotonic: () => now,
+            wall: () => 1_700_000_000_000 + now,
+            sleep: async (milliseconds) => {
+              now += milliseconds;
+            },
+            jitter: () => 0
+          });
+          const run = vi.fn<WorkflowRunner>(async (args) => {
+            expect(args[0]).toBe("api");
+            expect(args.slice(2)).toEqual(["--include", "--method", "GET"]);
+            let status = 200;
+            let headers = "";
+            let value: unknown;
+            if (args[1].endsWith("/pending_deployments")) {
+              pendingReads++;
+              status =
+                scenario === "cooldown" ? 429
+                : pendingReads === 1 ? 503
+                : 200;
+              headers = status === 429 ? "retry-after: 60\n" : "";
+              value = status === 200 ? [] : { message: "Unavailable" };
+            } else if (args[1].endsWith("/jobs?per_page=100&page=1")) {
+              value = { jobs: [], total_count: 0 };
+            } else {
+              expect(args[1]).toBe("repos/org/app/actions/runs/41");
+              value = { status: "waiting", conclusion: null };
+            }
+            return {
+              code: status === 200 ? 0 : 1,
+              stderr: "",
+              stdout: `HTTP/2 ${status}\n${headers}\n${JSON.stringify(value)}`
+            };
+          });
+          if (canvas && mode === "ambient")
+            vi.spyOn(gh, "cliExec").mockImplementation(
+              (_command, args, options, callback) => {
+                void run(args, {
+                  ...options,
+                  timeout: options.timeout ?? 15000
+                }).then((result) =>
+                  callback(
+                    Number(result.code) === 0 ? null : (
+                      new Error("Fixture read failed")
+                    ),
+                    result.stdout,
+                    result.stderr
+                  )
+                );
+                return new ChildProcess();
+              }
+            );
+          const executor = successfulSelectedGhExecutor({ run });
+          const read = () => {
+            const request = {
+              identity: mode,
+              context: session.observe(30000, controller.signal),
+              onDecision: () => {
+                if (++decisions === 2 && scenario === "cancelled")
+                  controller.abort();
+              }
+            };
+            return canvas ?
+                getRunDetail(
+                  "org/app",
+                  41,
+                  mode === "selected" ? executor : undefined,
+                  request,
+                  { includeProtection: true }
+                )
+              : observeWorkflowRun(
+                  { repo: "org/app", runId: 41 },
+                  {
+                    readRun: (repo, runId) =>
+                      readWorkflowRun(
+                        mode === "selected" ?
+                          { mode, executor }
+                        : { mode, run },
+                        repo,
+                        runId,
+                        request,
+                        { includeProtection: true }
+                      )
+                  }
+                );
+          };
+          const first = await read();
+          now += 5000;
+          const second = scenario === "cooldown" ? await read() : null;
+          return {
+            first,
+            second,
+            calls: run.mock.calls.map(([args]) => args),
+            pendingReads
+          };
+        }
+        const direct = await observe(false);
+        const canvas = await observe(true);
+        expect(canvas).toEqual(direct);
+        expect(canvas.pendingReads).toBe(
+          scenario === "cancelled" ? 0
+          : scenario === "retry" ? 2
+          : 1
+        );
+        expect(canvas.first?.protection).toMatchObject(
+          scenario === "retry" ?
+            { state: "observed" }
+          : {
+              state: "unavailable",
+              reason: scenario === "cooldown" ? "deferred" : "cancelled"
+            }
+        );
+      }
+    );
+  }
+);
 
 describe("ambient workflow callback binding", () => {
   beforeEach(() => {
