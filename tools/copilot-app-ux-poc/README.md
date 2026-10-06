@@ -13,7 +13,7 @@ The app uses Tauri with Microsoft Edge WebView2. It is not an Electron app, so `
 - **Not supported.** The app has no public test API. Some elements have `data-testid` attributes, but they are internal and can change. Locators use test IDs, roles, and text, so app updates can break them.
 - **Security risk while the port is open.** Port 9222 gives full control of the app and the signed-in account to any local process. Open the port only for a test run. Quit the app when the run is complete.
 - **Real profile.** The tests use your real WebView2 profile (`%LOCALAPPDATA%\com.github.githubapp\EBWebView`) and your real GitHub account.
-- **No data changes.** The smoke tests do not click or type. The Radius canvas test clicks menu items to open a tab, and closes the tab again if it opened it. No test types text, sends prompts, starts sessions, or changes data. Keep new tests like this too.
+- **No data changes by default.** The smoke tests do not click or type. The Radius canvas test clicks menu items to open a tab, and closes the tab again if it opened it. These tests do not type text, send prompts, start sessions, or change data. The [modeling journey](#modeling-journey-opt-in) is the only exception, and it is off by default.
 - **Quitting ends sessions.** To start the app with the CDP port, you must quit the app fully first. This stops all running agent sessions.
 
 ## Prerequisites
@@ -80,6 +80,72 @@ The canvas page runs in a second WebView2 browser process. Both processes get th
 
 This behavior is not documented, and an app or WebView2 update can change it.
 
+## Modeling journey (opt-in)
+
+`tests/modeling-journey.spec.ts` is like the cloud end-to-end suite in `packages/adapter-canvas/test/e2e-cloud`. The cloud suite uses a fixture repository that already has `.radius/app.bicep`, and it drives the canvas in a test harness. This journey starts from a clean fixture repository with no `.radius/` folder, and it uses the real Copilot app.
+
+> [!CAUTION]
+> This journey changes real data. It sends a prompt in a new Autopilot session, pushes a commit to the fixture default branch, and creates and deletes a GitHub environment, an Azure federated credential, and a Kubernetes deployment. It uses your signed-in GitHub account and your Azure CLI login. Use a fixture repository and Azure resources that are only for tests.
+
+The journey is off by default. `npm test` skips it. When `COPILOT_APP_E2E_JOURNEY=1` is set, all required values must be valid, or test collection stops with a list of the problems.
+
+### Steps of the journey
+
+1. **Check the fixture.** The default branch must point to the baseline SHA, and the baseline must not contain `.radius/app.bicep`.
+2. **Model the app.** On the **New** page, the journey selects the fixture project, sets **Autopilot** mode, and sends a prompt that runs the `radius-app-bicep` skill. It reads the worktree path from the session information dialog.
+3. **Wait for the model.** It waits until `.radius/app.bicep`, `bicepconfig.json`, and `app.origin.json` exist and are staged. The skill stages them as its last step. Then it attaches `app.bicep` to the report.
+4. **Show the graph.** It opens the Radius canvas and waits for a graph node.
+5. **Publish the model.** It commits the model in the session worktree and pushes it to the fixture default branch. This must be a fast-forward from the baseline. The deploy flow reads `app.bicep` from GitHub, so this step is necessary.
+6. **Create the environment.** It uses the credential profile, or creates it on the credentials page. Then it creates the environment and waits for the operation to succeed.
+7. **Deploy.** It deploys the single application from the default branch, and waits for the status `complete` and for the deployment row.
+8. **Refuse a live delete.** A delete of the environment must return `409` with code `app-deployed`.
+9. **Delete the deployment.** It waits until the deployment row is gone.
+10. **Delete the environment.** It waits for the operation to succeed, and checks that the GitHub environment is gone.
+
+At the end, the journey resets the fixture default branch to the baseline SHA. If a deployment or an environment can still exist, the journey does not reset the branch, because the canvas delete flows need the workflow files on that branch. The report then shows `manual-cleanup` annotations. The journey does not archive the session. Archive it in the app when you no longer need it.
+
+### Setup
+
+1. Create a private fixture repository. Copy `Dockerfile` and `README.md` from `radius-project/ai-extensions-fixture`, but do not copy the `.radius/` folder. Record the SHA of the first commit on the default branch.
+2. Add the repository to the Copilot app as a project.
+3. Install the Radius plugin in the app.
+4. Sign in with `gh auth login` and `az login`. The account must be able to push to the fixture and to create resources in the Azure subscription.
+5. Make an Azure resource group and an AKS cluster for the test, or use existing test resources.
+
+### Configuration
+
+| Variable                                | Required | Default              | Value                                                   |
+|-----------------------------------------|----------|----------------------|---------------------------------------------------------|
+| `COPILOT_APP_E2E_JOURNEY`               | Yes      |                      | Set to `1` to run the journey.                          |
+| `COPILOT_APP_E2E_REPO`                  | Yes      |                      | Fixture repository as `owner/name`.                     |
+| `COPILOT_APP_E2E_BASELINE_SHA`          | Yes      |                      | Full SHA of the clean default branch.                   |
+| `COPILOT_APP_E2E_AZURE_TENANT_ID`       | Yes      |                      | Azure tenant GUID.                                      |
+| `COPILOT_APP_E2E_AZURE_SUBSCRIPTION_ID` | Yes      |                      | Azure subscription GUID.                                |
+| `COPILOT_APP_E2E_AZURE_RESOURCE_GROUP`  | Yes      |                      | Resource group of the AKS cluster.                      |
+| `COPILOT_APP_E2E_AKS_CLUSTER`           | Yes      |                      | AKS cluster name.                                       |
+| `COPILOT_APP_E2E_PROJECT`               | No       | Repository name      | Project name in the app project picker.                 |
+| `COPILOT_APP_E2E_DEFAULT_BRANCH`        | No       | `main`               | Default branch of the fixture.                          |
+| `COPILOT_APP_E2E_NAMESPACE`             | No       | `default`            | Kubernetes namespace.                                   |
+| `COPILOT_APP_E2E_CREDENTIAL_PROFILE`    | No       | `copilot-app-ux-e2e` | Credential profile name. The journey creates it if new. |
+| `COPILOT_APP_E2E_ENV_NAME`              | No       | `uxe2e-<random>`     | Environment name.                                       |
+
+### Run the journey
+
+1. Start the app with `.\scripts\launch-app.ps1`, as in [Steps](#steps).
+2. Set the variables and run the journey:
+
+   ```powershell
+   $env:COPILOT_APP_E2E_JOURNEY = "1"
+   $env:COPILOT_APP_E2E_REPO = "<owner>/<fixture>"
+   $env:COPILOT_APP_E2E_BASELINE_SHA = "<sha>"
+   # Set the Azure variables too.
+   npm run test:journey
+   ```
+
+The journey can take more than two hours. Its timeout is four hours. Do not use the app while it runs, because the journey changes the selected page and session.
+
+The unit tests in `tests/journey.spec.ts` check the configuration, the response parsers, and the readiness rules. They do not need the app.
+
 ## Accessibility dump
 
 To find stable locators, save an ARIA snapshot of the app and a count of all `data-test*` attribute values:
@@ -92,16 +158,21 @@ The script writes `output/a11y-dump.json`. It does not change the app.
 
 ## Files
 
-| Path                          | Purpose                                                                                                         |
-|-------------------------------|-----------------------------------------------------------------------------------------------------------------|
-| `scripts/launch-app.ps1`      | Starts the app with the CDP port open and waits for the endpoint.                                               |
-| `fixtures/cdp.ts`             | Validates the CDP URLs, checks the endpoint, selects the main app page, finds the canvas page, counts test IDs. |
-| `fixtures/app.ts`             | Playwright fixture. Connects over CDP, gives `appPage`, and disconnects. It does not quit.                      |
-| `tests/smoke.spec.ts`         | Read-only smoke tests against the running app.                                                                  |
-| `fixtures/radius-canvas.ts`   | Opens or selects the Radius canvas tab, finds the canvas page, and closes the tab it opened.                    |
-| `tests/radius-canvas.spec.ts` | Opens the Radius canvas and checks its page.                                                                    |
-| `tests/cdp.spec.ts`           | Unit tests for `fixtures/cdp.ts`. No app needed.                                                                |
-| `scripts/dump-a11y.ts`        | Saves the ARIA snapshot and the `data-test*` counts.                                                            |
+| Path                             | Purpose                                                                                                         |
+|----------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| `scripts/launch-app.ps1`         | Starts the app with the CDP port open and waits for the endpoint.                                               |
+| `fixtures/cdp.ts`                | Validates the CDP URLs, checks the endpoint, selects the main app page, finds the canvas page, counts test IDs. |
+| `fixtures/app.ts`                | Playwright fixture. Connects over CDP, gives `appPage`, and disconnects. It does not quit.                      |
+| `tests/smoke.spec.ts`            | Read-only smoke tests against the running app.                                                                  |
+| `fixtures/radius-canvas.ts`      | Opens or selects the Radius canvas tab, finds the canvas page, and closes the tab it opened.                    |
+| `tests/radius-canvas.spec.ts`    | Opens the Radius canvas and checks its page.                                                                    |
+| `tests/cdp.spec.ts`              | Unit tests for `fixtures/cdp.ts`. No app needed.                                                                |
+| `fixtures/journey.ts`            | Configuration and response parsers for the modeling journey.                                                    |
+| `fixtures/app-ui.ts`             | Starts a session from the New page and reads the session information dialog.                                    |
+| `fixtures/commands.ts`           | Runs `git` and `gh` with an argument list and no shell.                                                         |
+| `tests/modeling-journey.spec.ts` | Opt-in journey: model a clean repository, then deploy and delete through the canvas.                            |
+| `tests/journey.spec.ts`          | Unit tests for `fixtures/journey.ts`. No app needed.                                                            |
+| `scripts/dump-a11y.ts`           | Saves the ARIA snapshot and the `data-test*` counts.                                                            |
 
 ## Notes
 

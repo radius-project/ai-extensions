@@ -11,6 +11,7 @@
     "launch-app": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/launch-app.ps1",
     "test": "playwright test",
     "test:list": "playwright test --list",
+    "test:journey": "playwright test tests/modeling-journey.spec.ts",
     "typecheck": "tsc --noEmit",
     "dump-a11y": "node scripts/dump-a11y.ts",
     "report": "playwright show-report"
