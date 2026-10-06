@@ -29,6 +29,13 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
     "redacts %s workflow and control-plane evidence before returning shared diagnostics",
     async (mode) => {
       const credential = "opaque-observation-fixture";
+      const namedCredential = "unregistered-observation-fixture";
+      const nested = JSON.stringify(
+        JSON.stringify({ client_secret: namedCredential })
+      );
+      const sanitizedNested = JSON.stringify(
+        JSON.stringify({ client_secret: "[REDACTED]" })
+      );
       const calls: string[][] = [];
       const runner: WorkflowRunner = async (args) => {
         calls.push(args);
@@ -47,7 +54,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
           return {
             code: 0,
             stderr: "",
-            stdout: `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} }`
+            stdout: `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} ${nested} }`
           };
         throw new Error("Unexpected mutation or diagnostic read");
       };
@@ -79,9 +86,12 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
           readControlPlaneLog: async () => `provisioning password=${credential}`
         }
       );
-      expect(failure.radiusError).toBe("Error: { quota [REDACTED] }");
+      expect(failure.radiusError).toBe(
+        `Error: { quota [REDACTED] ${sanitizedNested} }`
+      );
       expect(failure.message).toContain("provisioning password=[REDACTED]");
       expect(JSON.stringify(failure)).not.toContain(credential);
+      expect(JSON.stringify(failure)).not.toContain(namedCredential);
       expect(calls.map((args) => args.join(" "))).toEqual([
         "api repos/org/app/actions/runs/41 --include --method GET",
         "api repos/org/app/actions/runs/41/jobs?per_page=100&page=1 --include --method GET",

@@ -273,6 +273,13 @@ describe("deploy outcome construction", () => {
   describe("diagnostic publication redaction", () => {
     it("publishes only sanitized workflow and control-plane details to errors, resources, and logs", async () => {
       const credential = "opaque-outcome-fixture";
+      const namedCredential = "unregistered-outcome-fixture";
+      const nested = JSON.stringify(
+        JSON.stringify({ client_secret: namedCredential })
+      );
+      const expected = `Error: { quota [REDACTED] ${JSON.stringify(
+        JSON.stringify({ client_secret: "[REDACTED]" })
+      )} }`;
       const f = outcomeRequest({
         conclusion: "failure",
         steps: [{ name: "Run rad commands", conclusion: "failure" }],
@@ -292,16 +299,14 @@ describe("deploy outcome construction", () => {
         dependencies({
           settleDeployStatuses,
           fetchRunLog: async () =>
-            `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} }`,
+            `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} ${nested} }`,
           redactDiagnostic: (value) => redactCredentials(value, [credential])
         })
       ).settle(f.request);
       expect(f.state.deployStatus).toBe("failed");
-      expect(f.state.deployError).toContain("Error: { quota [REDACTED] }");
+      expect(f.state.deployError).toContain(expected);
       expect(f.state.deployError).toContain("password=[REDACTED]");
-      expect(f.request.resources[0].deployMessage).toBe(
-        "Error: { quota [REDACTED] }"
-      );
+      expect(f.request.resources[0].deployMessage).toBe(expected);
       expect(
         JSON.stringify({
           state: f.state,
@@ -309,6 +314,14 @@ describe("deploy outcome construction", () => {
           resources: f.request.resources
         })
       ).not.toContain(credential);
+      for (const publication of [
+        f.state.deployError,
+        f.request.resources[0].deployMessage,
+        f.logs.join("\n")
+      ]) {
+        expect(publication).toContain(expected);
+        expect(publication).not.toContain(namedCredential);
+      }
     });
   });
 

@@ -305,9 +305,22 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 describe("deployments routes real-loopback HIT (RF-05)", () => {
   it("returns the same sanitized diagnostics as the direct caller without publishing raw credentials", async () => {
     const credential = "opaque-http-diagnostic-fixture";
+    const namedCredential = "unregistered-http-workflow-fixture";
+    const controlCredential = "unregistered-http-control-fixture";
+    const nested = JSON.stringify(
+      JSON.stringify({ client_secret: namedCredential })
+    );
+    const safeNested = JSON.stringify(
+      JSON.stringify({ client_secret: "[REDACTED]" })
+    );
+    const safeControl = JSON.stringify(
+      JSON.stringify({ password: "[REDACTED]" })
+    );
     const redactDiagnostic = (value: string) =>
       redactGhCredentials(value, { GH_TOKEN: credential });
-    const controlPlane = `provisioning client_secret="${credential}"`;
+    const controlPlane =
+      `provisioning client_secret="${credential}" ` +
+      JSON.stringify(JSON.stringify({ password: controlCredential }));
     const execution: WorkflowExecution = {
       mode: "ambient",
       run: async (args) => {
@@ -337,7 +350,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           return {
             code: 0,
             stderr: "",
-            stdout: `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} }`
+            stdout: `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} ${nested} }`
           };
         throw new Error("Unexpected command");
       }
@@ -357,9 +370,16 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         readControlPlaneLog: async () => controlPlane
       }
     );
+    const repairSnapshots: {
+      state: string | undefined;
+      error: string | null | undefined;
+    }[] = [];
     const harness = start({
       triggerDeployRepairHandoff: (entry) => {
-        expect(JSON.stringify(entry?.state)).not.toContain(credential);
+        repairSnapshots.push({
+          state: JSON.stringify(entry?.state),
+          error: entry?.state.deployError
+        });
         return false;
       }
     });
@@ -408,6 +428,24 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(body.logs).toEqual(expect.arrayContaining(direct.narration));
     expect(body.error).toContain('client_secret="[REDACTED]"');
     expect(JSON.stringify(body)).not.toContain(credential);
+    expect(repairSnapshots).toHaveLength(1);
+    for (const snapshot of repairSnapshots) {
+      for (const value of [credential, namedCredential, controlCredential])
+        expect(snapshot.state).not.toContain(value);
+      expect(snapshot.error).toContain(safeNested);
+      expect(snapshot.error).toContain(safeControl);
+    }
+    expect(body.error).toContain(safeNested);
+    expect(body.error).toContain(safeControl);
+    expect(body.resources[0].deployMessage).toContain(safeNested);
+    expect(body.logs.join("\n")).toContain(safeNested);
+    expect(body.logs.join("\n")).toContain(safeControl);
+    for (const value of [namedCredential, controlCredential]) {
+      expect(body.error).not.toContain(value);
+      expect(body.resources[0].deployMessage).not.toContain(value);
+      expect(body.logs.join("\n")).not.toContain(value);
+      expect(JSON.stringify(body)).not.toContain(value);
+    }
   });
 
   it.each(["deferred", "exhausted"] as const)(

@@ -118,6 +118,10 @@ export async function collectWorkflowFailure(
     message +=
       " Failed step: " + failedSteps.map((step) => step.name).join(", ") + ".";
   }
+  // Sanitize raw fields before composing already-sanitized excerpts. A clipped
+  // quoted value must not consume the following diagnostics on another pass.
+  message = redact(message);
+  const runLink = redact("\n\nView the full run: " + url);
   let log: string | null = null;
   const unavailable: string[] = [];
   try {
@@ -125,11 +129,13 @@ export async function collectWorkflowFailure(
   } catch {
     unavailable.push("The workflow log could not be read.");
   }
-  const claimHelp = explainOidcEnterpriseClaim(
-    redact(extractGitHubActionsStepLog(log, "Azure Login (OIDC)"))
+  const claimHelp = redact(
+    explainOidcEnterpriseClaim(
+      redact(extractGitHubActionsStepLog(log, "Azure Login (OIDC)"))
+    )
   );
   if (claimHelp)
-    message = claimHelp + "\n\n\u2014 raw error \u2014\n" + message;
+    message = claimHelp + redact("\n\n\u2014 raw error \u2014\n") + message;
   const deploySteps = steps.filter(
     (step) => step.name === DEPLOY_RAD_COMMANDS_STEP
   );
@@ -170,9 +176,9 @@ export async function collectWorkflowFailure(
     message += "\n\n" + detail;
     narration.push(
       "",
-      "──────── failure details ────────",
+      redact("──────── failure details ────────"),
       ...detail.split("\n").map((line) => "  " + line),
-      "─────────────────────────────────"
+      redact("─────────────────────────────────")
     );
   }
   let controlPlaneLog: string | null = null;
@@ -188,25 +194,26 @@ export async function collectWorkflowFailure(
       .slice(-40)
       .join("\n");
     if (tail.trim()) {
-      message += "\n\n— control-plane log —\n" + tail;
+      message += redact("\n\n— control-plane log —\n") + tail;
       narration.push(
         "",
-        "──────── control-plane log ────────",
+        redact("──────── control-plane log ────────"),
         ...tail.split("\n").map((line) => "  " + line),
-        "───────────────────────────────────"
+        redact("───────────────────────────────────")
       );
     }
   }
   for (const note of unavailable) {
-    message += "\n\n" + note;
-    narration.push(note);
+    const safeNote = redact(note);
+    message += "\n\n" + safeNote;
+    narration.push(safeNote);
   }
-  message += "\n\nView the full run: " + url;
+  message += runLink;
   return {
-    message: redact(message),
+    message,
     radiusError: detail,
     authDriftMessage,
-    narration: narration.map(redact)
+    narration
   };
 }
 

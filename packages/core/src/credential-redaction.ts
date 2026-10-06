@@ -7,7 +7,54 @@ const RECOGNIZABLE_CREDENTIAL_PATTERNS = [
 ] as const;
 
 const NAMED_CREDENTIAL_PATTERN =
-  /((?:access[_-]?token|refresh[_-]?token|client[_-]?secret|federated[_-]?token|password)["']?\s*[:=]\s*)(?:"([^"]*)"|'([^']*)'|([^"',}\s]+))/gi;
+  /(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|federated[_-]?token|password)(?:\\*["'])?\s*[:=]\s*/gi;
+
+function redactNamedCredentials(value: string): string {
+  let result = "";
+  let consumed = 0;
+  for (const match of value.matchAll(NAMED_CREDENTIAL_PATTERN)) {
+    if (match.index < consumed) continue;
+    const start = match.index + match[0].length;
+    let quoteIndex = start;
+    while (value[quoteIndex] === "\\") quoteIndex++;
+    const quote = value[quoteIndex];
+    if (quote === '"' || quote === "'") {
+      const delimiter = value.slice(start, quoteIndex + 1);
+      const escapeCount = quoteIndex - start;
+      let backslashes = 0;
+      let end = quoteIndex + 1;
+      for (; end < value.length; end++) {
+        const character = value[end];
+        if (character === "\\") {
+          backslashes++;
+          continue;
+        }
+        // Re-escaped embedded quotes differ from a close, including after a
+        // trailing literal backslash, by one encoded backslash.
+        if (
+          character === quote &&
+          backslashes >= escapeCount &&
+          (backslashes - escapeCount) % (2 * (escapeCount + 1)) === 0
+        )
+          break;
+        backslashes = 0;
+      }
+      result += value.slice(consumed, start) + delimiter + REDACTED;
+      if (end < value.length) {
+        result += delimiter;
+        end++;
+      }
+      consumed = end;
+    } else {
+      let end = start;
+      while (end < value.length && !/["',}\s]/.test(value.charAt(end))) end++;
+      if (end === start) continue;
+      result += value.slice(consumed, start) + REDACTED;
+      consumed = end;
+    }
+  }
+  return result + value.slice(consumed);
+}
 
 /**
  * Redacts recognizable credentials and opaque values known by the caller.
@@ -28,17 +75,5 @@ export function redactCredentials(
   }
   for (const pattern of RECOGNIZABLE_CREDENTIAL_PATTERNS)
     redacted = redacted.replace(pattern, REDACTED);
-  return redacted.replace(
-    NAMED_CREDENTIAL_PATTERN,
-    (
-      _match,
-      prefix: string,
-      doubleQuoted: string | undefined,
-      singleQuoted: string | undefined
-    ) =>
-      prefix +
-      (doubleQuoted !== undefined ? `"${REDACTED}"`
-      : singleQuoted !== undefined ? `'${REDACTED}'`
-      : REDACTED)
-  );
+  return redactNamedCredentials(redacted);
 }
