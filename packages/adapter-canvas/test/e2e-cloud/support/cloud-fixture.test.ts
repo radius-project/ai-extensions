@@ -4383,6 +4383,101 @@ describe("createCloudFixture", () => {
       ).toHaveLength(2);
     });
 
+    it("polls without repeating a DELETE that Graph already accepted", async () => {
+      // Under Application.ReadWrite.OwnedBy a repeat DELETE of the
+      // soft-deleted object answers 403, which failed scheduled runs (#974).
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+              ])
+            }
+          },
+          {
+            tool: "az",
+            match: graphApplicationDelete("obj-1"),
+            respond: {},
+            times: 1
+          },
+          {
+            tool: "az",
+            match: graphApplicationDelete("obj-1"),
+            respond: {
+              code: 1,
+              stderr:
+                'ERROR: Forbidden({"error":{"code":"Authorization_RequestDenied"}})'
+            }
+          },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: {},
+            times: 2
+          },
+          {
+            tool: "az",
+            match: graphApplicationGet("obj-1"),
+            respond: { code: 1, stderr: "Request_ResourceNotFound" }
+          }
+        ],
+        {},
+        {
+          assertionTimeoutMs: 2_000,
+          assertionPollIntervalMs: 1_000,
+          entraAppDeletionTimeoutMs: 4_000
+        }
+      );
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
+      );
+      const graphCalls = fake.commands
+        .commandLines("az")
+        .filter((line) => line.startsWith("rest --method"));
+      expect(graphCalls.map((line) => line.split(" ")[2])).toEqual([
+        "DELETE",
+        "GET",
+        "GET",
+        "GET"
+      ]);
+    });
+
+    it("fails closed when Graph refuses the first exact-object DELETE", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        },
+        {
+          tool: "az",
+          match: graphApplicationDelete("obj-1"),
+          respond: {
+            code: 1,
+            stderr:
+              'ERROR: Forbidden({"error":{"code":"Authorization_RequestDenied"}})'
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /app registration app-1: az rest DELETE application obj-1 failed.*Authorization_RequestDenied/
+      );
+      expect(
+        fake.commands
+          .commandLines("az")
+          .some((line) => line.startsWith("rest --method GET"))
+      ).toBe(false);
+    });
+
     it("treats an exact Graph lookup not-found as verified deletion", async () => {
       const { fixture, fake } = await createHarness([
         {
