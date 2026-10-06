@@ -5,6 +5,44 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { repoRoot } from "./plugins.mjs";
 
+const graphManifestPath = join(
+  repoRoot,
+  "packages",
+  "graph-react",
+  "package.json"
+);
+
+// Vendor class names and custom properties that hosts may style. Removing or
+// renaming one is a graph-react major release.
+export const supportedFlowHooks = [
+  ".react-flow__edge-path",
+  ".react-flow__controls",
+  ".react-flow__controls-button",
+  ".react-flow__background",
+  "--xy-background-pattern-color"
+];
+
+// Matches a complete class name or custom property, so a longer identifier such
+// as `.react-flow__controls-button` cannot satisfy `.react-flow__controls`.
+export function hasFlowHook(css, hook) {
+  const escaped = hook.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(css);
+}
+
+// graph-react's exact @xyflow/react pin is the single source of truth for the
+// React Flow version. Every other contract derives from it.
+export function pinnedFlowVersion(
+  manifest = JSON.parse(readFileSync(graphManifestPath, "utf8"))
+) {
+  const version = manifest.dependencies?.["@xyflow/react"];
+  assert.match(
+    String(version),
+    /^\d+\.\d+\.\d+$/,
+    `packages/graph-react/package.json must pin @xyflow/react to an exact version, not ${version}.`
+  );
+  return version;
+}
+
 export const scopedFlowStylesPath = join(
   repoRoot,
   "packages",
@@ -56,13 +94,13 @@ export function hoistKeyframes(css) {
   return { rules: rules + css.slice(index), keyframes };
 }
 
-export function scopeFlowStyles(css, license) {
+export function scopeFlowStyles(css, license, version) {
   assert.doesNotMatch(css, /@(?:import|font-face)\b/);
   const { rules, keyframes } = hoistKeyframes(
     renameKeyframes(css.trim(), "dashdraw", "radius-graph-dashdraw")
   );
   return `/*!
-Generated from @xyflow/react@12.11.6 by scripts/graph-vendor-styles.mjs.
+Generated from @xyflow/react@${version} by scripts/graph-vendor-styles.mjs.
 Do not edit: regenerate after reviewing a vendor update.
 
 ${license.trim()}
@@ -74,17 +112,29 @@ ${keyframes.join("\n")}
 `;
 }
 
-export function expectedScopedFlowStyles() {
-  const fromGraph = createRequire(
-    join(repoRoot, "packages", "graph-react", "package.json")
+export const staleFlowStylesMessage =
+  "packages/graph-react/src/flow.css does not match the pinned @xyflow/react. Run `node scripts/graph-vendor-styles.mjs` and review the diff; see the React Flow steps in docs/eng/DEPENDENCY_UPDATES.md.";
+
+export function assertInstalledFlowVersion(installed, pinned) {
+  assert.equal(
+    installed,
+    pinned,
+    `Installed @xyflow/react ${installed} does not match the ${pinned} pin in packages/graph-react/package.json. Run \`pnpm install\`; see the React Flow steps in docs/eng/DEPENDENCY_UPDATES.md.`
   );
-  const cssPath = fromGraph.resolve("@xyflow/react/dist/style.css");
+}
+
+export function expectedScopedFlowStyles() {
+  const pinned = pinnedFlowVersion();
+  const cssPath = createRequire(graphManifestPath).resolve(
+    "@xyflow/react/dist/style.css"
+  );
   const root = resolve(dirname(cssPath), "..");
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  assert.equal(manifest.version, "12.11.6");
+  assertInstalledFlowVersion(manifest.version, pinned);
   return scopeFlowStyles(
     readFileSync(cssPath, "utf8"),
-    readFileSync(join(root, "LICENSE"), "utf8")
+    readFileSync(join(root, "LICENSE"), "utf8"),
+    pinned
   );
 }
 
@@ -94,7 +144,11 @@ if (
 ) {
   const expected = expectedScopedFlowStyles();
   if (process.argv[2] === "--check") {
-    assert.equal(readFileSync(scopedFlowStylesPath, "utf8"), expected);
+    assert.equal(
+      readFileSync(scopedFlowStylesPath, "utf8"),
+      expected,
+      staleFlowStylesMessage
+    );
   } else {
     assert.equal(process.argv.length, 2, "Use no arguments or --check.");
     writeFileSync(scopedFlowStylesPath, expected);

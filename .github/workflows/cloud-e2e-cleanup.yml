@@ -893,16 +893,23 @@ jobs:
             lookup_error="$RUNNER_TEMP/get-application-$id.stderr"
             absent=0
             verification_failed=0
+            # Once Graph accepts a DELETE, only poll. Under
+            # Application.ReadWrite.OwnedBy, a repeat DELETE that reaches the
+            # soft-deleted object answers 403 Authorization_RequestDenied.
+            delete_accepted=0
             for _ in {1..12}; do
-              if ! az rest \
-                  --method DELETE \
-                  --url "$application_url" \
-                  --output none \
-                  2>"$delete_error" &&
-                ! grep -Eqi "does not exist|Request_ResourceNotFound|Directory_ObjectNotFound" "$delete_error"; then
-                failures+=("delete application $id (appId $app_id)")
-                verification_failed=1
-                break
+              if (( delete_accepted == 0 )); then
+                if az rest \
+                    --method DELETE \
+                    --url "$application_url" \
+                    --output none \
+                    2>"$delete_error"; then
+                  delete_accepted=1
+                elif ! grep -Eqi "does not exist|Request_ResourceNotFound|Directory_ObjectNotFound" "$delete_error"; then
+                  failures+=("delete application $id (appId $app_id)")
+                  verification_failed=1
+                  break
+                fi
               fi
               if az rest \
                   --method GET \
