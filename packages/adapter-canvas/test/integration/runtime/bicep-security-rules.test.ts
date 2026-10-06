@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
@@ -1113,43 +1113,14 @@ describe("requestFileReferences", () => {
   it("stops a server that never answers, and waits for it to exit", async () => {
     const app = server({ hang: true, startedFile: "server.pid" });
     const pidFile = path.join(path.dirname(app), "server.pid");
-    const child = spawn(process.execPath, ["jsonrpc", "--stdio"], {
-      cwd: path.dirname(app),
-      stdio: "pipe",
-      windowsHide: true
-    });
-    let startupError: Error | undefined;
-    child.once("error", (error) => {
-      startupError = error;
-    });
-    const closed = new Promise<void>((resolve) => {
-      child.once("close", () => resolve());
+    const result = await rules.requestFileReferences(process.execPath, app, {
+      timeoutMs: 500
     });
 
-    try {
-      await expect
-        .poll(() => {
-          if (startupError) throw startupError;
-          return fs.existsSync(pidFile);
-        })
-        .toBe(true);
-      const result = await rules.requestFileReferences(process.execPath, app, {
-        timeoutMs: 500,
-        spawnProcess: () => child
-      });
-
-      expect(result).toEqual({
-        error: "Bicep did not list the files the compile reads within 500 ms"
-      });
-      await expect
-        .poll(() => isRunning(Number(fs.readFileSync(pidFile, "utf8"))))
-        .toBe(false);
-    } finally {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-      }
-      await closed;
-    }
+    expect(result).toEqual({
+      error: "Bicep did not list the files the compile reads within 500 ms"
+    });
+    expect(isRunning(Number(fs.readFileSync(pidFile, "utf8")))).toBe(false);
   });
 
   // Windows has no signal a process can ignore, so this only runs elsewhere.
