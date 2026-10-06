@@ -1,5 +1,37 @@
 # radius
 
+## 0.2.1
+
+### Patch Changes
+
+- [#352](https://github.com/radius-project/ai-extensions/pull/352) [@zachcasper](https://github.com/zachcasper) - **Fixed:** Keep the planned application graph and Radius type lookups working after the Azure Recipe Pack in `resource-types-contrib` moved to `recipe-packs/azure-aks/azure-aks.bicep` and the Kubernetes pack to `recipe-packs/kubernetes/default.bicep`. Recipe lookups now use the `azure-aks` pack entry from newer Radius releases and still fall back to the `azure` entry from older ones.
+
+- [#939](https://github.com/radius-project/ai-extensions/pull/939) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Recover from eligible temporary workflow-read failures with bounded retries that respect GitHub's retry deadlines across polling, while retaining confirmed deployment and credential-verification outcomes when diagnostic evidence is unavailable. Resume artifact reads after timed cooldowns and release retired payloads during long deployments.
+
+  When a closed Canvas instance is physically stopped, Radius ends its local deployment monitoring and subsequent automatic repair handoff without cancelling the GitHub workflow. Monitoring continues during the existing deferred close for an active environment task.
+
+- [#857](https://github.com/radius-project/ai-extensions/pull/857) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Show every resource listed in the delete confirmation without clipping the last entry or the remaining-count line. On macOS the list could outgrow its height limit and hide part of what the deletion would destroy behind a scrollbar that stays invisible until you interact with it.
+
+- [#894](https://github.com/radius-project/ai-extensions/pull/894) [@kachawla](https://github.com/kachawla) - **Security:** Application model validation now fails when a Bicep credential-safety rule has been turned off instead of passing silently. A rule set to `off` or `info` in `bicepconfig.json`, a disabled Bicep linter, or a `#disable-next-line` or `#disable-diagnostics` directive naming one of these rules previously let a model with a hardcoded credential in a sensitive property validate cleanly. Validation now names the setting and the rule so it can be removed and the underlying problem fixed. This covers `use-secure-value-for-secure-inputs`, `secure-parameter-default`, `secure-secrets-in-params`, `outputs-should-not-contain-secrets`, and `secure-params-in-nested-deploy`. Settings for other rules in `bicepconfig.json` are still preserved.
+
+- [#893](https://github.com/radius-project/ai-extensions/pull/893) [@kachawla](https://github.com/kachawla) - **Security:** Pass Azure environment variables into the generated workflows' shell steps through the environment instead of substituting them into the script, so a value containing shell syntax is treated as data rather than as commands. No reconfiguration is needed; the same variables are read and resolve to the same values.
+
+- [#926](https://github.com/radius-project/ai-extensions/pull/926) [@kachawla](https://github.com/kachawla) - **Fixed:** Deploy and delete workflows now install the Radius CLI and control plane from the pinned stable Radius release instead of the latest unreleased `edge` build, so an unreleased Radius change can no longer break or change deployments.
+
+- [#907](https://github.com/radius-project/ai-extensions/pull/907) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Preserve confirmed deployment outcomes when diagnostic logs or graph artifacts cannot be read, keep attributable deployment errors ahead of teardown errors, and avoid treating an unconfirmed workflow outcome as a confirmed failure.
+
+  Stop waiting when GitHub reports a completed workflow with an unsupported outcome. Report that the outcome could not be confirmed without suggesting the workflow is still running or starting automatic repair; missing outcomes retain their recovery window.
+
+- [#915](https://github.com/radius-project/ai-extensions/pull/915) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Reject conflicting deployment-artifact identities and unsafe status files, retire stale evidence even when another application's graph is malformed, and report malformed artifact listings as unavailable evidence rather than a missing deployment. Allow later reads to recover after an unexpected failure; bound malformed graph scanning and decoding while keeping valid progress readable even when a later graph cannot be recovered.
+
+- [#888](https://github.com/radius-project/ai-extensions/pull/888) [@sk593](https://github.com/sk593) - **Changed:** Remove the transitional Azure recipe-pack compatibility shim now that the Radius defaults catalog points at the pack-only recipe pack. The Azure deploy workflow no longer probes the downloaded pack for the legacy `environmentName`, `environmentNamespace`, `azureSubscriptionId`, and `azureResourceGroup` parameters, and passes only the parameters the pack-only artifact owns. Workflows already committed to a repository keep deploying unchanged and do not need to be regenerated: each loads the catalog its own pinned ref names, and the shim they still carry passes a legacy parameter only while the pack it downloads declares one.
+
+- [#927](https://github.com/radius-project/ai-extensions/pull/927) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Stop blocking pull request creation in worktrees that contain a Radius application model. Radius no longer requires an application graph diff before every pull request, no longer opens the graph-diff canvas after a pull request is created, and no longer tells the agent to generate a graph diff for unrelated pull requests. Ask for a graph diff explicitly when you want one.
+
+- [#720](https://github.com/radius-project/ai-extensions/pull/720) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Select stable and exact release-candidate Radius Bicep types from the CLI's stamped release, allow edge's mutable latest types only for an executable `RADIUS_RAD_BINARY` developer override, and stop before modeling edge managed binaries or pull-request builds. Keep relative developer CLI paths usable when graph compilation changes working directories.
+
+- [#914](https://github.com/radius-project/ai-extensions/pull/914) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Avoid immediately repeating failed workflow reads and retain a confirmed run outcome when job details are unavailable.
+
 ## 0.2.0
 
 ### Minor Changes
