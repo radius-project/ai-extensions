@@ -10,16 +10,17 @@ The app uses Tauri with Microsoft Edge WebView2. It is not an Electron app, so `
 ## Limits
 
 - **Windows only.** On macOS (WKWebView) and Linux (WebKitGTK), the app has no CDP endpoint.
-- **Not supported.** The app has no public test API and no known `data-testid` attributes. Locators use roles and text, so app updates can break them.
+- **Not supported.** The app has no public test API. Some elements have `data-testid` attributes, but they are internal and can change. Locators use test IDs, roles, and text, so app updates can break them.
 - **Security risk while the port is open.** Port 9222 gives full control of the app and the signed-in account to any local process. Open the port only for a test run. Quit the app when the run is complete.
 - **Real profile.** The tests use your real WebView2 profile (`%LOCALAPPDATA%\com.github.githubapp\EBWebView`) and your real GitHub account.
-- **Read-only.** The tests do not click or type. They do not send prompts, start sessions, or change data. Keep new tests read-only too.
+- **No data changes.** The smoke tests do not click or type. The Radius canvas test clicks menu items to open a tab, and closes the tab again if it opened it. No test types text, sends prompts, starts sessions, or changes data. Keep new tests like this too.
 - **Quitting ends sessions.** To start the app with the CDP port, you must quit the app fully first. This stops all running agent sessions.
 
 ## Prerequisites
 
 - Windows 10 or Windows 11.
 - The GitHub Copilot app at `%LOCALAPPDATA%\Programs\GitHub Copilot\github.exe`. The PoC was written for version 1.1.26.
+- For the Radius canvas test: the Radius plugin installed in the app, and an open project session.
 - Node.js 24.
 - Windows PowerShell 5.1 or PowerShell 7.
 
@@ -40,7 +41,7 @@ The app uses Tauri with Microsoft Edge WebView2. It is not an Electron app, so `
    .\scripts\launch-app.ps1
    ```
 
-   The script stops with an error if the app is already running, or if another process already uses the port. It sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<Port>` only for the app process. Then it waits for `http://localhost:<Port>/json/version` to answer. Use `-Port` to change the port and `-TimeoutSeconds` to change the wait time.
+   The script stops with an error if the app is already running, or if another process already uses the port. It sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<Port>` only for the app process. Then it waits for `http://127.0.0.1:<Port>/json/version` to answer. Use `-Port` to change the port and `-TimeoutSeconds` to change the wait time.
 
 4. Run the tests:
 
@@ -48,7 +49,7 @@ The app uses Tauri with Microsoft Edge WebView2. It is not an Electron app, so `
    npm test
    ```
 
-   If you used a different port, set `COPILOT_APP_CDP_URL` first, for example `$env:COPILOT_APP_CDP_URL = "http://localhost:9333"`. The URL must point to a loopback host.
+   If you used a different port, set `COPILOT_APP_CDP_URL` first, for example `$env:COPILOT_APP_CDP_URL = "http://127.0.0.1:9333"`. The URL must point to a loopback host. Do not use `localhost`. See [Radius canvas test](#radius-canvas-test).
 
 5. Open the HTML report:
 
@@ -58,7 +59,26 @@ The app uses Tauri with Microsoft Edge WebView2. It is not an Electron app, so `
 
 6. Quit the app to close the CDP port. Start the app again in the usual way.
 
-If the CDP endpoint is not reachable, the smoke tests are skipped with a message. The unit tests in `tests/cdp.spec.ts` do not need the app, so they always run.
+If the CDP endpoint is not reachable, the smoke and canvas tests are skipped with a message. The unit tests in `tests/cdp.spec.ts` do not need the app, so they always run.
+
+## Radius canvas test
+
+`tests/radius-canvas.spec.ts` opens the Radius canvas in the selected session. It uses the UI path **Add tab** > **Canvas** > **Radius**. If a Radius tab is already open, the test selects that tab and does not close it.
+
+The test then makes sure that:
+
+- The Radius tab is selected.
+- The canvas page has a Radius title (`<page> — Radius`).
+- The canvas page shows a heading.
+
+It attaches a screenshot of the canvas page and of the app window.
+
+The canvas page runs in a second WebView2 browser process. Both processes get the same `--remote-debugging-port` value, so both listen on port 9222. The app process listens on `127.0.0.1`, and the canvas process listens on `[::1]`. For this reason:
+
+- The default app URL is `http://127.0.0.1:9222`. With `localhost`, Node.js can connect to the canvas process instead of the app.
+- The fixture finds the canvas process on the other loopback address. To set a different URL, use `COPILOT_APP_CANVAS_CDP_URL`.
+
+This behavior is not documented, and an app or WebView2 update can change it.
 
 ## Accessibility dump
 
@@ -72,14 +92,16 @@ The script writes `output/a11y-dump.json`. It does not change the app.
 
 ## Files
 
-| Path                     | Purpose                                                                                    |
-|--------------------------|--------------------------------------------------------------------------------------------|
-| `scripts/launch-app.ps1` | Starts the app with the CDP port open and waits for the endpoint.                          |
-| `fixtures/cdp.ts`        | Validates the CDP URL, checks the endpoint, selects the main app page, counts test IDs.    |
-| `fixtures/app.ts`        | Playwright fixture. Connects over CDP, gives `appPage`, and disconnects. It does not quit. |
-| `tests/smoke.spec.ts`    | Read-only smoke tests against the running app.                                             |
-| `tests/cdp.spec.ts`      | Unit tests for `fixtures/cdp.ts`. No app needed.                                           |
-| `scripts/dump-a11y.ts`   | Saves the ARIA snapshot and the `data-test*` counts.                                       |
+| Path                          | Purpose                                                                                                         |
+|-------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| `scripts/launch-app.ps1`      | Starts the app with the CDP port open and waits for the endpoint.                                               |
+| `fixtures/cdp.ts`             | Validates the CDP URLs, checks the endpoint, selects the main app page, finds the canvas page, counts test IDs. |
+| `fixtures/app.ts`             | Playwright fixture. Connects over CDP, gives `appPage`, and disconnects. It does not quit.                      |
+| `tests/smoke.spec.ts`         | Read-only smoke tests against the running app.                                                                  |
+| `fixtures/radius-canvas.ts`   | Opens or selects the Radius canvas tab, finds the canvas page, and closes the tab it opened.                    |
+| `tests/radius-canvas.spec.ts` | Opens the Radius canvas and checks its page.                                                                    |
+| `tests/cdp.spec.ts`           | Unit tests for `fixtures/cdp.ts`. No app needed.                                                                |
+| `scripts/dump-a11y.ts`        | Saves the ARIA snapshot and the `data-test*` counts.                                                            |
 
 ## Notes
 

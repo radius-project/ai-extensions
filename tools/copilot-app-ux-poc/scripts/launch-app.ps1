@@ -5,7 +5,7 @@
 .DESCRIPTION
   Fails if the app is already running. Sets
   WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS only for the child process, starts
-  github.exe, and waits until http://localhost:<Port>/json/version answers.
+  github.exe, and waits until http://127.0.0.1:<Port>/json/version answers.
 
   WARNING: while the port is open, any local process can fully control the
   app and the signed-in account. Quit the app after the test run.
@@ -45,18 +45,22 @@ if ($running) {
     'Note: quitting the app ends all running agent sessions.')
 }
 
-$versionUrl = "http://localhost:$Port/json/version"
+$versionUrl = "http://127.0.0.1:$Port/json/version"
 
-function Test-CdpEndpoint {
+function Test-CdpEndpoint([string]$Url = $versionUrl) {
   try {
-    return Invoke-RestMethod -Uri $versionUrl -TimeoutSec 2 -UseBasicParsing
+    return Invoke-RestMethod -Uri $Url -TimeoutSec 2 -UseBasicParsing
   } catch {
     return $null
   }
 }
 
-if (Test-CdpEndpoint) {
-  throw "Port $Port already answers CDP requests from another process. Close it or use -Port."
+# Use loopback literals, not "localhost": a canvas opens a second WebView2
+# browser process that also listens on this port, on the IPv6 loopback.
+foreach ($url in @($versionUrl, "http://[::1]:$Port/json/version")) {
+  if (Test-CdpEndpoint $url) {
+    throw "Port $Port already answers CDP requests at $url. Close that process or use -Port."
+  }
 }
 
 $debugArg = "--remote-debugging-port=$Port"
