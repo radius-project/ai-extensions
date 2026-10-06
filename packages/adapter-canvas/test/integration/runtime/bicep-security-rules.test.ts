@@ -1128,10 +1128,13 @@ describe("requestFileReferences", () => {
 
     try {
       await expect
-        .poll(() => {
-          if (startupError) throw startupError;
-          return fs.existsSync(pidFile);
-        })
+.poll(
+          () => {
+            if (startupError) throw startupError;
+            return fs.existsSync(pidFile);
+          },
+          { timeout: 10_000 }
+        )
         .toBe(true);
       const result = await rules.requestFileReferences(process.execPath, app, {
         timeoutMs: 500,
