@@ -1560,33 +1560,42 @@ export async function createCloudFixture(
           const applicationUrl =
             `https://graph.microsoft.com/v1.0/applications/` +
             encodeURIComponent(app.objectId);
+          // Once Graph accepts a DELETE, only poll. Under
+          // Application.ReadWrite.OwnedBy, a repeat DELETE that reaches the
+          // soft-deleted object answers 403 Authorization_RequestDenied,
+          // because ownership can no longer be proven (#974).
+          let deletionAccepted = false;
           await pollForValue({
             ports,
             timeoutMs: entraAppDeletionTimeoutMs,
             intervalMs: assertionPollIntervalMs,
             probe: async (remainingMs) => {
               const deadline = ports.now().getTime() + remainingMs;
-              const deletion = await commands.runAz(
-                [
-                  "rest",
-                  "--method",
-                  "DELETE",
-                  "--url",
-                  applicationUrl,
-                  "--output",
-                  "none"
-                ],
-                remainingCommandTimeout(
-                  deadline,
-                  ports.now,
-                  `DELETE application ${app.objectId}`
-                )
-              );
-              if (!isAzureResourceNotFound(deletion))
-                expectSuccess(
-                  deletion,
-                  `az rest DELETE application ${app.objectId}`
+              if (!deletionAccepted) {
+                const deletion = await commands.runAz(
+                  [
+                    "rest",
+                    "--method",
+                    "DELETE",
+                    "--url",
+                    applicationUrl,
+                    "--output",
+                    "none"
+                  ],
+                  remainingCommandTimeout(
+                    deadline,
+                    ports.now,
+                    `DELETE application ${app.objectId}`
+                  )
                 );
+                if (!isAzureResourceNotFound(deletion)) {
+                  expectSuccess(
+                    deletion,
+                    `az rest DELETE application ${app.objectId}`
+                  );
+                  deletionAccepted = true;
+                }
+              }
 
               const lookup = await commands.runAz(
                 [

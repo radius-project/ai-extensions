@@ -635,6 +635,10 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toMatch(/az rest \\\n\s+--method DELETE/);
     expect(script).toMatch(/az rest \\\n\s+--method GET/);
     expect(script).toContain("Request_ResourceNotFound");
+    // A repeat DELETE of the soft-deleted object answers 403 under
+    // Application.ReadWrite.OwnedBy (#974), so only poll once one succeeds.
+    expect(script).toContain("if (( delete_accepted == 0 )); then");
+    expect(script).toMatch(/2>"\$delete_error"; then\n\s+delete_accepted=1\n/);
     expect(script).toContain(
       "application $id (appId $app_id) remained directly queryable through Microsoft Graph after deletion retries"
     );
