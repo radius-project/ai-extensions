@@ -97,6 +97,10 @@ pnpm test:watch        # run every workspace test project in watch mode
 pnpm coverage          # run every project with unified V8 coverage
 ```
 
+Before running the workspace tests or coverage, install the pinned Chromium test browser with `pnpm exec playwright install chromium`. The graph component project uses this browser even when running the root coverage command.
+
+POSIX permission and native signal checks run only on platforms that support those semantics; portable filesystem fixtures and injected process boundaries exercise the corresponding failure handling on every platform.
+
 Run a single test file:
 
 ```bash
