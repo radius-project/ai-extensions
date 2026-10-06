@@ -1122,13 +1122,19 @@ describe("requestFileReferences", () => {
     child.once("error", (error) => {
       startupError = error;
     });
+    // Registered before requestFileReferences adds its own listener, so this
+    // flag is set before the request can resolve on the same event.
+    let exited = false;
     const closed = new Promise<void>((resolve) => {
-      child.once("close", () => resolve());
+      child.once("close", () => {
+        exited = true;
+        resolve();
+      });
     });
 
     try {
       await expect
-.poll(
+        .poll(
           () => {
             if (startupError) throw startupError;
             return fs.existsSync(pidFile);
@@ -1141,12 +1147,11 @@ describe("requestFileReferences", () => {
         spawnProcess: () => child
       });
 
+      expect(exited).toBe(true);
       expect(result).toEqual({
         error: "Bicep did not list the files the compile reads within 500 ms"
       });
-      await expect
-        .poll(() => isRunning(Number(fs.readFileSync(pidFile, "utf8"))))
-        .toBe(false);
+      expect(isRunning(Number(fs.readFileSync(pidFile, "utf8")))).toBe(false);
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGKILL");
