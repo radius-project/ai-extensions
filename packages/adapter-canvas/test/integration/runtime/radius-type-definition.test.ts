@@ -836,6 +836,42 @@ describe("network and cache behavior", () => {
     expect(contract.resources[0].recipe.status).toBe("available");
   });
 
+  it("resolves definitions when an unreadable cache entry cannot be removed", async () => {
+    const cacheRoot = temporaryDirectory();
+    seedCache(cacheRoot);
+    const indexPath = cacheFile(cacheRoot, "index.json");
+    fs.rmSync(indexPath);
+    fs.mkdirSync(indexPath);
+    const sentinel = path.join(indexPath, "keep.txt");
+    fs.writeFileSync(sentinel, "keep");
+    const calls: string[] = [];
+    const warnings: string[] = [];
+
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Core/applications"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot,
+        fetchImpl: fixtureFetch(calls),
+        warn: (warning: string) => warnings.push(warning)
+      }
+    );
+
+    expect(contract.resources[0].type).toBe("Radius.Core/applications");
+    expect(calls).toEqual([
+      `${generatedRoot}/${commit}/hack/bicep-types-radius/generated/index.json`
+    ]);
+    expect(warnings).toEqual([
+      expect.stringContaining("could not cache Radius definitions")
+    ]);
+    expect(fs.readFileSync(sentinel, "utf8")).toBe("keep");
+    expect(
+      fs
+        .readdirSync(path.dirname(indexPath))
+        .filter((name) => name.endsWith(".tmp"))
+    ).toEqual([]);
+  });
+
   it("replaces a malformed Azure Recipe-pack cache entry", async () => {
     const cacheRoot = temporaryDirectory();
     seedCache(cacheRoot);
@@ -1536,6 +1572,64 @@ describe("network and cache behavior", () => {
 });
 
 describe("command boundary", () => {
+  it.each([
+    { platform: "win32", mode: 0o644, executable: true },
+    { platform: "linux", mode: 0o755, executable: true },
+    { platform: "linux", mode: 0o644, executable: false }
+  ])(
+    "checks executable permissions for $platform with mode $mode",
+    async ({ platform, mode, executable }) => {
+      const cacheRoot = temporaryDirectory();
+      seedCache(cacheRoot);
+      const options = managedIdentityOptions();
+      const binary = path.join(options.home, "custom-rad");
+      const resolve = resolver.resolveRadiusTypes(
+        ["Radius.Core/applications"],
+        {
+          ...options,
+          env: { RADIUS_RAD_BINARY: binary },
+          platform,
+          statSyncImpl: (file: string) => {
+            if (file !== binary) {
+              throw Object.assign(new Error("missing executable"), {
+                code: "ENOENT"
+              });
+            }
+            return { isFile: () => true, mode };
+          },
+          cacheRoot,
+          fetchImpl: async () => {
+            throw new Error("network should not be used");
+          }
+        }
+      );
+
+      if (!executable) {
+        await expect(resolve).rejects.toThrow("binary not found");
+        expect(options.runRadImpl).not.toHaveBeenCalled();
+        return;
+      }
+      await expect(resolve).resolves.toMatchObject({
+        extension: identity.extension
+      });
+      expect(options.runRadImpl).toHaveBeenCalledExactlyOnceWith(
+        binary,
+        ["version", "--cli", "--output", "json"],
+        expect.objectContaining({
+          env: expect.objectContaining({
+            BICEP: path.join(
+              options.home,
+              ".radius",
+              "ai-extensions",
+              "bin",
+              platform === "win32" ? "bicep.exe" : "bicep"
+            )
+          })
+        })
+      );
+    }
+  );
+
   it("queries managed identity through the injected process boundary", async () => {
     const cacheRoot = temporaryDirectory();
     seedCache(cacheRoot);
