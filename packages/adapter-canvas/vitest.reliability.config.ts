@@ -10,6 +10,7 @@ export default defineConfig({
       "../adapter-shared/src/workflow-read*.test.ts",
       "../adapter-shared/src/workflow-run-response.test.ts",
       "../adapter-shared/src/workflow-observation.test.ts",
+      "src/deploy.test.ts",
       "src/gh*.test.ts",
       "src/workspace.test.ts",
       "src/server/create-canvas-server.test.ts",

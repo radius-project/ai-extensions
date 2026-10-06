@@ -9,7 +9,12 @@ import {
 } from "./deploy-monitor.js";
 import { createDeployDispatchService } from "./deploy-dispatch.js";
 import { createDeployOutcomeService } from "./deploy-outcome.js";
-import { observeWorkflowRun, WORKFLOW_READ_LIMITS } from "@radius-project/core";
+import {
+  observeWorkflowRun,
+  parseWorkflowProtection,
+  WORKFLOW_READ_LIMITS
+} from "@radius-project/core";
+import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
 import {
   readWorkflowRun,
@@ -140,6 +145,210 @@ function settleRecorder() {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe("protection observation narration", () => {
+  const waiting: DeployRunDetail = {
+    status: "waiting",
+    conclusion: null,
+    steps: [],
+    protection: parseWorkflowProtection([pendingEnvironment])
+  };
+  it.each(["queued", "in_progress"])(
+    "narrates leaving protection wait for %s once without implying approval or lost evidence",
+    async (status) => {
+      const f = request();
+      const settled = settleRecorder();
+      const details: DeployRunDetail[] = [
+        waiting,
+        waiting,
+        { status, steps: [] },
+        { status, steps: [] },
+        completedRun()
+      ];
+      await createDeployMonitorService(
+        dependencies({
+          plannedGraph: { recover: async () => null },
+          ...settled,
+          getRunDetail: async () => {
+            expect(settled.calls).toHaveLength(0);
+            const detail = details.shift();
+            if (!detail) throw new Error("Unexpected poll");
+            return detail;
+          }
+        })
+      ).run(f.request);
+      expect(
+        f.logs.filter((line) => line.includes("is waiting on protection rules"))
+      ).toHaveLength(1);
+      expect(
+        f.logs.filter((line) => line.includes("run left the protection wait"))
+      ).toEqual([
+        "Observation: run left the protection wait; continuing to monitor."
+      ]);
+      expect(f.logs.join("\n")).not.toMatch(
+        /approved|approval status is unknown/
+      );
+      expect(settled.calls).toHaveLength(1);
+      expect(settled.calls[0].conclusion).toBe("success");
+    }
+  );
+
+  it("deduplicates lost protection detail while still waiting without claiming the run resumed", async () => {
+    const f = request();
+    const settled = settleRecorder();
+    const details: DeployRunDetail[] = [
+      waiting,
+      { status: "waiting", steps: [] },
+      { status: "waiting", steps: [] },
+      waiting,
+      completedRun()
+    ];
+    await createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: async () => null },
+        ...settled,
+        getRunDetail: async () => {
+          const detail = details.shift();
+          if (!detail) throw new Error("Unexpected poll");
+          return detail;
+        }
+      })
+    ).run(f.request);
+    expect(
+      f.logs.filter((line) => line.includes("protection was not rechecked"))
+    ).toEqual([
+      "Observation: current environment protection was not rechecked; approval status is unknown."
+    ]);
+    expect(f.logs.join("\n")).not.toContain("run left the protection wait");
+    expect(f.logs.join("\n")).toContain(
+      "workflow completed; earlier protection observations are historical"
+    );
+    expect(settled.calls).toHaveLength(1);
+  });
+  it("supersedes waiting narration before an unsupported completed conclusion stops observation", async () => {
+    const f = request();
+    const getRunDetail = vi
+      .fn<DeployMonitorDependencies["getRunDetail"]>()
+      .mockResolvedValueOnce(waiting)
+      .mockResolvedValueOnce({
+        status: "completed",
+        conclusion: "future_conclusion",
+        steps: []
+      });
+    await createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: async () => null },
+        getRunDetail
+      })
+    ).run(f.request);
+    expect(f.logs.join("\n")).toContain(
+      "earlier protection observations are historical"
+    );
+    expect(f.state.deployErrorKind).toBe("run-unconfirmed");
+    expect(f.state.deployError).toContain(explanation);
+  });
+  it.each(["success", "failure", "cancelled"])(
+    "deduplicates historical waiting evidence and settles only confirmed %s",
+    async (conclusion) => {
+      const f = request();
+      const settled = settleRecorder();
+      const details: Array<DeployRunDetail | null> = [
+        waiting,
+        waiting,
+        { ...waiting, protection: parseWorkflowProtection([]) },
+        {
+          ...waiting,
+          protection: { state: "unavailable", reason: "authorization" }
+        },
+        null,
+        waiting,
+        { status: "in_progress", steps: [] },
+        waiting,
+        { status: "completed", conclusion, steps: [] }
+      ];
+      const monitor = createDeployMonitorService(
+        dependencies({
+          plannedGraph: { recover: async () => null },
+          ...settled,
+          getRunDetail: async () => {
+            expect(settled.calls).toHaveLength(0);
+            expect(f.state.deployErrorKind).not.toBe("run-unconfirmed");
+            const detail = details.shift();
+            if (detail === undefined) throw new Error("Unexpected poll");
+            return detail;
+          }
+        })
+      );
+      await monitor.run(f.request);
+      expect(
+        f.logs.filter((line) => line.includes("is waiting on protection rules"))
+      ).toHaveLength(3);
+      expect(f.logs.join("\n")).toContain("Required reviewers are configured.");
+      expect(f.logs.join("\n")).toContain("does not establish approval");
+      expect(f.logs.join("\n")).toContain("unavailable (authorization)");
+      expect(f.logs.join("\n")).toContain("workflow detail is unavailable");
+      expect(f.logs.join("\n")).toContain("run left the protection wait");
+      expect(f.logs.join("\n")).toContain(
+        "earlier protection observations are historical"
+      );
+      expect(settled.calls).toHaveLength(1);
+      expect(settled.calls[0].conclusion).toBe(conclusion);
+    }
+  );
+
+  it.each(["stopped", "superseded"] as const)(
+    "does not narrate late protection after %s",
+    async (fence) => {
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("No artifact read");
+      });
+      let current = true;
+      const started = createDeferred<void>();
+      const detail = createDeferred<DeployRunDetail>();
+      const f = request({ isCurrent: () => current });
+      f.request.entry.observation = scope;
+      const monitor = createDeployMonitorService(
+        dependencies({
+          plannedGraph: { recover: async () => null },
+          getRunDetail: () => {
+            started.resolve();
+            return detail.promise;
+          }
+        })
+      );
+      const operation = monitor.run(f.request);
+      await started.promise;
+      if (fence === "stopped") scope.stop();
+      else current = false;
+      detail.resolve(waiting);
+      await expect(operation).rejects.toMatchObject({ reason: "cancelled" });
+      expect(f.logs.join("\n")).not.toContain("protection rules");
+      expect(f.state.deployError).toBeUndefined();
+      scope.stop();
+    }
+  );
+
+  it("expires a protection wait as unconfirmed without asserting workflow failure or starting repair", async () => {
+    const f = request();
+    const settled = settleRecorder();
+    const getRunDetail = vi.fn(async () => waiting);
+    await createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: async () => null },
+        ...settled,
+        getRunDetail
+      })
+    ).run(f.request);
+    expect(getRunDetail).toHaveBeenCalledTimes(240);
+    expect(
+      f.logs.filter((line) => line.includes("is waiting on protection rules"))
+    ).toHaveLength(1);
+    expect(f.state.deployStatus).toBe("failed");
+    expect(f.state.deployErrorKind).toBe("run-unconfirmed");
+    expect(f.state.deployError).not.toContain("approval");
+    expect(settled.calls).toHaveLength(0);
+  });
+});
 
 describe("bounded monitor observation lifetime", () => {
   it.each([

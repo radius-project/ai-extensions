@@ -62,6 +62,7 @@ import { createDeferred } from "../../support/browser/fakes.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 import { createFakeServerEntry } from "../../support/runtime/fakes.js";
+import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 
 let container: CanvasServerContainer | undefined;
 
@@ -536,14 +537,228 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     }
   );
 
-  it.each(["primary", "unavailable"] as const)(
+  it.each(["completed", "queued", "in_progress"])(
+    "streams real pending-protection evidence through %s without terminal failure or repair",
+    async (nextStatus) => {
+      const harness = start();
+      harness.state.deployStatus = "in_progress";
+      harness.state.deployLogs = [];
+      const waiting = createDeferred<void>();
+      const resume = createDeferred<void>();
+      const transitioned = createDeferred<void>();
+      const finish = createDeferred<void>();
+      const calls: string[][] = [];
+      let runStatus = "waiting";
+      const monitor = createDeployMonitorService({
+        plannedGraph: { recover: async () => null },
+        dispatch: {
+          prepareAndDispatch: async () => ({
+            dispatched: true,
+            workflowFile: "run-rad-commands.yml",
+            dispatchedAt: 1,
+            environment: "dev",
+            baselineRunId: null
+          })
+        },
+        outcome: {
+          settle: async () => {
+            harness.state.deployStatus = "complete";
+          }
+        },
+        deployRadCommandsStep: "Run rad commands",
+        unconfirmedRunKind: "run-unconfirmed",
+        findWorkflowRun: async () => 42,
+        getRunDetail: (repo, runId, request) =>
+          observeWorkflowRun(
+            { repo, runId },
+            {
+              readRun: (targetRepo, targetRun) =>
+                readWorkflowRun(
+                  {
+                    mode: "ambient",
+                    run: async (args) => {
+                      calls.push(args);
+                      const value =
+                        args[1].endsWith("pending_deployments") ?
+                          [pendingEnvironment]
+                        : args[1].includes("/jobs") ?
+                          { jobs: [], total_count: 0 }
+                        : {
+                            status: runStatus,
+                            conclusion:
+                              runStatus === "completed" ? "success" : null
+                          };
+                      return {
+                        code: 0,
+                        stderr: "",
+                        stdout: "HTTP/2 200\n\n" + JSON.stringify(value)
+                      };
+                    }
+                  },
+                  targetRepo,
+                  targetRun,
+                  request,
+                  { includeProtection: true }
+                )
+            }
+          ),
+        createStatusReader: async () => ({
+          progress: async () => null,
+          graph: async () => ({ graph: null, status: "missing" }),
+          controlPlaneLog: async () => null
+        }),
+        buildDeployStatusMap: () => new Map(),
+        buildDeployMessageMap: () => new Map(),
+        applyDeployMessages: () => {},
+        applyDeployStatusToResources: () => [],
+        settleDeployStatuses,
+        generatePortalUrl: () => "",
+        optionalString: () => "",
+        errorMessage: String,
+        now: () => 1700000000000,
+        sleep: async () => {
+          if (runStatus === "waiting") {
+            waiting.resolve();
+            await resume.promise;
+          } else {
+            transitioned.resolve();
+            await finish.promise;
+          }
+        }
+      });
+      // No observation scope on this fixture: the injected sleep holds the real
+      // monitor while the HTTP consumer reads its in-progress state.
+      const operation = monitor.run({
+        entry: { state: harness.state },
+        repo: "org/app",
+        branch: "feature",
+        provider: "azure",
+        requestedEnvironment: "dev",
+        resources: [],
+        log: (message) => harness.state.deployLogs?.push(message)
+      });
+      try {
+        await waiting.promise;
+        const entry = await container!.getOrCreate("panel-a");
+        const response = await fetch(
+          `${entry.baseUrl}/api/deploy-status?since=0`
+        );
+        expect(await response.json()).toMatchObject({
+          status: "in_progress",
+          active: true,
+          repairing: false,
+          error: null,
+          logsNew: expect.arrayContaining([
+            expect.stringContaining(
+              'environment "production <review>" is waiting on protection rules'
+            )
+          ])
+        });
+        runStatus = nextStatus;
+        resume.resolve();
+        if (nextStatus !== "completed") {
+          await transitioned.promise;
+          const transition = await fetch(
+            `${entry.baseUrl}/api/deploy-status?since=0`
+          );
+          const body = await transition.json();
+          expect(body).toMatchObject({
+            status: "in_progress",
+            active: true,
+            repairing: false,
+            error: null,
+            logsNew: expect.arrayContaining([
+              "Observation: run left the protection wait; continuing to monitor."
+            ])
+          });
+          expect(JSON.stringify(body)).not.toContain(
+            "approval status is unknown"
+          );
+          runStatus = "completed";
+          finish.resolve();
+        }
+        await operation;
+        const terminal = await fetch(
+          `${entry.baseUrl}/api/deploy-status?since=0`
+        );
+        expect(await terminal.json()).toMatchObject({
+          status: "complete",
+          error: null,
+          repairing: false,
+          logsNew: expect.arrayContaining([
+            expect.stringContaining(
+              nextStatus === "completed" ?
+                "earlier protection observations are historical"
+              : "run left the protection wait"
+            )
+          ])
+        });
+        const expectedCalls = [
+          [
+            "api",
+            "repos/org/app/actions/runs/42",
+            "--include",
+            "--method",
+            "GET"
+          ],
+          [
+            "api",
+            "repos/org/app/actions/runs/42/jobs?per_page=100&page=1",
+            "--include",
+            "--method",
+            "GET"
+          ],
+          [
+            "api",
+            "repos/org/app/actions/runs/42/pending_deployments",
+            "--include",
+            "--method",
+            "GET"
+          ],
+          [
+            "api",
+            "repos/org/app/actions/runs/42",
+            "--include",
+            "--method",
+            "GET"
+          ],
+          [
+            "api",
+            "repos/org/app/actions/runs/42/jobs?per_page=100&page=1",
+            "--include",
+            "--method",
+            "GET"
+          ]
+        ];
+        if (nextStatus !== "completed")
+          expectedCalls.push(...expectedCalls.slice(-2));
+        expect(calls).toEqual(expectedCalls);
+        expect(harness.dispatches).toEqual([]);
+      } finally {
+        runStatus = "completed";
+        resume.resolve();
+        finish.resolve();
+        await operation;
+      }
+    }
+  );
+
+  it.each([
+    "primary",
+    "unavailable",
+    "teardown",
+    "teardown-unattributed"
+  ] as const)(
     "exposes real %s failure evidence to repair polling but keeps notifications passive",
     async (mode) => {
       const calls: string[] = [];
+      const teardown = mode === "teardown" || mode === "teardown-unattributed";
       const harness = start({
         triggerDeployRepairHandoff: (entry) => {
           expect(entry?.state.deployError).toContain(
-            "Failed step: Run rad commands"
+            teardown ?
+              "Review the Teardown logs and verify saved state before retrying."
+            : "Failed step: Run rad commands"
           );
           expect(entry?.state.deployingResources?.[0].deployStatus).toBe(
             "failed"
@@ -566,7 +781,27 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
               stderr: "",
               stdout:
                 args[1].includes("/jobs") ?
-                  'HTTP/2 200\n\n{"total_count":1,"jobs":[{"name":"deploy","steps":[{"name":"Run rad commands","conclusion":"failure"},{"name":"Persist Radius state (rad shutdown)","conclusion":"failure"}]}]}'
+                  "HTTP/2 200\n\n" +
+                  JSON.stringify({
+                    total_count: 1,
+                    jobs: [
+                      {
+                        name: "deploy",
+                        steps: [
+                          {
+                            name: "Run rad commands",
+                            status: "completed",
+                            conclusion: teardown ? "success" : "failure"
+                          },
+                          {
+                            name: "Teardown",
+                            status: "completed",
+                            conclusion: "failure"
+                          }
+                        ]
+                      }
+                    ]
+                  })
                 : 'HTTP/2 200\n\n{"status":"completed","conclusion":"failure"}'
             };
           }
@@ -577,8 +812,11 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
               code: 0,
               stderr: "",
               stdout:
-                "deploy\tRun rad commands\t2026-01-01 Error: recipe quota exceeded\n" +
-                "deploy\tPersist Radius state (rad shutdown)\t2026-01-01 Error: { secondary shutdown }"
+                (teardown ? "" : (
+                  "deploy\tRun rad commands\t2026-01-01 Error: recipe quota exceeded\n"
+                )) +
+                (mode === "teardown-unattributed" ? "other-job" : "deploy") +
+                "\tTeardown\t2026-01-01 Error: { teardown failed }"
             };
           }
           throw new Error("Unexpected workflow read");
@@ -655,7 +893,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           })
         ],
         error: expect.stringContaining(
-          "Failed step: Run rad commands, Persist Radius state (rad shutdown)."
+          teardown ?
+            "Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed. Resources may have changed. Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources. Review the Teardown logs and verify saved state before retrying."
+          : "Failed step: Run rad commands, Teardown."
         ),
         errorKind: null
       });
@@ -666,6 +906,11 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         JSON.stringify(body).includes("The workflow log could not be read.")
       ).toBe(mode === "unavailable");
       expect(JSON.stringify(body)).not.toContain("fixture-private");
+      if (teardown) {
+        expect(JSON.stringify(body).includes("teardown failed")).toBe(
+          mode === "teardown"
+        );
+      }
       expect(calls).toEqual([
         "api repos/org/app/actions/runs/42 --include --method GET",
         "api repos/org/app/actions/runs/42/jobs?per_page=100&page=1 --include --method GET",
