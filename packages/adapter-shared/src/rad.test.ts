@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  afterAll,
+  vi
+} from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -34,6 +42,44 @@ import {
 } from "./rad.js";
 import { radSpawnOptions } from "./rad-process.mjs";
 import { RADIUS_RELEASE_TAG } from "./radius-release.js";
+
+// rad.js derives its managed bin directory from os.homedir() at import time.
+// Point HOME and USERPROFILE at a throwaway directory before that import so the
+// suite never replaces, locks, or deletes the developer's real managed rad and
+// Bicep binaries.
+const isolatedHome = vi.hoisted(() => {
+  const nodeFs = process.getBuiltinModule("node:fs");
+  const nodeOs = process.getBuiltinModule("node:os");
+  const nodePath = process.getBuiltinModule("node:path");
+  const home = nodeFs.mkdtempSync(
+    nodePath.join(nodeOs.tmpdir(), "rad-test-home-")
+  );
+  const previous = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE
+  };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  return { home, previous };
+});
+
+afterAll(() => {
+  for (const [key, value] of Object.entries(isolatedHome.previous)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  fs.rmSync(isolatedHome.home, { recursive: true, force: true });
+});
+
+function resetManagedBin(): void {
+  fs.rmSync(path.dirname(MANAGED_RAD_PATH), { recursive: true, force: true });
+}
+
+function writeManagedBicepStub(): void {
+  fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
+  fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
+  if (process.platform !== "win32") fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+}
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
 const BICEP = `bicep${process.platform === "win32" ? ".exe" : ""}`;
@@ -87,6 +133,16 @@ function mockHttpsGet(
 }
 
 describe("managed rad platform paths", () => {
+  it("keeps the suite's managed binaries inside the isolated test home", () => {
+    expect(os.homedir()).toBe(isolatedHome.home);
+    expect(MANAGED_RAD_PATH.startsWith(isolatedHome.home + path.sep)).toBe(
+      true
+    );
+    expect(MANAGED_BICEP_PATH.startsWith(isolatedHome.home + path.sep)).toBe(
+      true
+    );
+  });
+
   it("uses the platform executable suffix at the stable managed location", () => {
     expect(MANAGED_RAD_PATH).toBe(
       path.join(os.homedir(), ".radius", "ai-extensions", "bin", RAD)
@@ -746,10 +802,6 @@ it("rejects a managed edge binary before honoring a repository extension or invo
 describe("resolveRadForGraph", () => {
   const RELEASES_API = `https://api.github.com/repos/radius-project/radius/releases/tags/${RADIUS_RELEASE_TAG}`;
   const savedEnv: Record<string, string | undefined> = {};
-  let managedBackup: Buffer | null = null;
-  let managedMode: number | null = null;
-  let bicepBackup: Buffer | null = null;
-  let bicepMode: number | null = null;
 
   async function primeCachedRadViaEnsure(calls: string[]) {
     vi.resetModules();
@@ -779,24 +831,8 @@ describe("resolveRadForGraph", () => {
     savedEnv.RADIUS_RAD_BINARY = process.env.RADIUS_RAD_BINARY;
     savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK =
       process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
-    if (fs.existsSync(MANAGED_RAD_PATH)) {
-      managedBackup = fs.readFileSync(MANAGED_RAD_PATH);
-      managedMode = fs.statSync(MANAGED_RAD_PATH).mode;
-    } else {
-      managedBackup = null;
-      managedMode = null;
-    }
-    if (fs.existsSync(MANAGED_BICEP_PATH)) {
-      bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
-      bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
-    } else {
-      bicepBackup = null;
-      bicepMode = null;
-    }
-    fs.rmSync(MANAGED_RAD_PATH, { force: true });
-    fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
-    fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
-    if (process.platform !== "win32") fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+    resetManagedBin();
+    writeManagedBicepStub();
   });
 
   afterEach(() => {
@@ -808,18 +844,7 @@ describe("resolveRadForGraph", () => {
     else
       process.env.RADIUS_RAD_SKIP_VERSION_CHECK =
         savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK;
-    fs.rmSync(MANAGED_RAD_PATH, { force: true });
-    if (managedBackup) {
-      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
-      fs.writeFileSync(MANAGED_RAD_PATH, managedBackup);
-      if (managedMode !== null) fs.chmodSync(MANAGED_RAD_PATH, managedMode);
-    }
-    fs.rmSync(MANAGED_BICEP_PATH, { force: true });
-    if (bicepBackup) {
-      fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
-      fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
-      if (bicepMode !== null) fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
-    }
+    resetManagedBin();
     vi.restoreAllMocks();
   });
 
@@ -1204,8 +1229,6 @@ describe("runRadAppGraph artifact completion", () => {
   let prevNodeOptions: string | undefined;
   let prevScenario: string | undefined;
   let prevGraph: string | undefined;
-  let bicepBackup: Buffer | null;
-  let bicepMode: number | null;
   let prevBinary: string | undefined;
 
   beforeEach(() => {
@@ -1242,18 +1265,7 @@ describe("runRadAppGraph artifact completion", () => {
     delete process.env.FAKE_RAD_SCENARIO;
     prevGraph = process.env.FAKE_RAD_GRAPH;
     delete process.env.FAKE_RAD_GRAPH;
-    if (fs.existsSync(MANAGED_BICEP_PATH)) {
-      bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
-      bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
-    } else {
-      bicepBackup = null;
-      bicepMode = null;
-    }
-    fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
-    fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
-    if (process.platform !== "win32") {
-      fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
-    }
+    writeManagedBicepStub();
     prevBinary = process.env.RADIUS_RAD_BINARY;
     process.env.RADIUS_RAD_BINARY = bin;
   });
@@ -1268,14 +1280,7 @@ describe("runRadAppGraph artifact completion", () => {
     if (prevGraph === undefined) delete process.env.FAKE_RAD_GRAPH;
     else process.env.FAKE_RAD_GRAPH = prevGraph;
     fs.rmSync(binDir, { recursive: true, force: true });
-    fs.rmSync(MANAGED_BICEP_PATH, { force: true });
-    if (bicepBackup) {
-      fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
-      fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
-      if (bicepMode !== null && process.platform !== "win32") {
-        fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
-      }
-    }
+    resetManagedBin();
   });
 
   it("accepts a valid graph after a successful exit without waiting for a lingering pipe", async () => {
@@ -2230,10 +2235,6 @@ const describeReconcile =
 describeReconcile("ensureRadBinary version reconciliation", () => {
   const RELEASES_API = `https://api.github.com/repos/radius-project/radius/releases/tags/${RADIUS_RELEASE_TAG}`;
   const savedEnv: Record<string, string | undefined> = {};
-  let managedBackup: Buffer | null = null;
-  let managedMode: number | null = null;
-  let bicepBackup: Buffer | null = null;
-  let bicepMode: number | null = null;
 
   // ensureRadBinary caches its resolved path per module, so each test loads a
   // fresh module to exercise the reconcile path.
@@ -2263,24 +2264,8 @@ if (process.argv.includes("version")) {
     savedEnv.RADIUS_RAD_BINARY = process.env.RADIUS_RAD_BINARY;
     savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK =
       process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
-    if (fs.existsSync(MANAGED_RAD_PATH)) {
-      managedBackup = fs.readFileSync(MANAGED_RAD_PATH);
-      managedMode = fs.statSync(MANAGED_RAD_PATH).mode;
-    } else {
-      managedBackup = null;
-      managedMode = null;
-    }
-    if (fs.existsSync(MANAGED_BICEP_PATH)) {
-      bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
-      bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
-    } else {
-      bicepBackup = null;
-      bicepMode = null;
-    }
-    fs.rmSync(MANAGED_RAD_PATH, { force: true });
-    fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
-    fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
-    if (process.platform !== "win32") fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+    resetManagedBin();
+    writeManagedBicepStub();
   });
 
   afterEach(() => {
@@ -2292,18 +2277,7 @@ if (process.argv.includes("version")) {
     else
       process.env.RADIUS_RAD_SKIP_VERSION_CHECK =
         savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK;
-    fs.rmSync(MANAGED_RAD_PATH, { force: true });
-    if (managedBackup) {
-      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
-      fs.writeFileSync(MANAGED_RAD_PATH, managedBackup);
-      if (managedMode !== null) fs.chmodSync(MANAGED_RAD_PATH, managedMode);
-    }
-    fs.rmSync(MANAGED_BICEP_PATH, { force: true });
-    if (bicepBackup) {
-      fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
-      fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
-      if (bicepMode !== null) fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
-    }
+    resetManagedBin();
     vi.restoreAllMocks();
   });
 
