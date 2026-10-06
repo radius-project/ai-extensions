@@ -1,9 +1,16 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { promisify } from "node:util";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { parse } from "yaml";
+
+const execFileAsync = promisify(execFile);
+// A nested Vitest process loads every project config. On a loaded machine that
+// regularly takes longer than the 15-second default, so this subprocess check
+// uses the 30-second subprocess smoke budget instead of its own shorter timer.
+const NESTED_VITEST_TIMEOUT_MS = 30_000;
 
 const repoRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -24,47 +31,57 @@ describe("shared graph test discovery", () => {
       cwd: adapterRoot,
       config: "vitest.reliability.config.ts"
     }
-  ])("keeps migrated suites executable in $gate", ({ cwd, config }) => {
-    const specifications = JSON.parse(
-      execFileSync(
+  ])(
+    "keeps migrated suites executable in $gate",
+    async ({ cwd, config }) => {
+      const controller = new AbortController();
+      onTestFinished(() => controller.abort());
+      const { stdout } = await execFileAsync(
         process.execPath,
         [runner, "list", "--filesOnly", "--json", "--config", config],
-        { cwd, encoding: "utf8", timeout: 10_000 }
-      )
-    );
-    const files = specifications.map(({ file }) =>
-      relative(repoRoot, file).replaceAll("\\", "/")
-    );
-    expect(files).toEqual(
-      expect.arrayContaining([
-        ...[
-          "build",
-          "details",
-          "external-url",
-          "html",
-          "layout",
-          "legend",
-          "model",
-          "node"
-        ].map((name) => `packages/graph-react/src/${name}.test.ts`),
-        "packages/graph-react/src/graph.browser.test.ts",
-        "packages/adapter-canvas/src/browser/graph/surface.test.ts",
-        "packages/adapter-canvas/src/browser/graph/navigation.test.ts",
-        "packages/adapter-canvas/src/browser/graph/progress.test.ts",
-        "packages/adapter-canvas/test/integration/http/liveness-source.test.ts",
-        "packages/adapter-canvas/test/integration/http/graphs-planning.test.ts",
-        "packages/adapter-canvas/test/e2e-cloud/support/cloud-command-port.test.ts",
-        "packages/adapter-canvas/test/e2e-cloud/support/cloud-fixture.test.ts"
-      ])
-    );
-    expect(
-      specifications.find(({ file }) =>
-        file
-          .replaceAll("\\", "/")
-          .endsWith("/graph-react/src/graph.browser.test.ts")
-      )
-    ).toMatchObject({ projectName: "graph-react-component (chromium)" });
-  });
+        {
+          cwd,
+          encoding: "utf8",
+          maxBuffer: 16 * 1024 * 1024,
+          signal: controller.signal
+        }
+      );
+      const specifications = JSON.parse(stdout);
+      const files = specifications.map(({ file }) =>
+        relative(repoRoot, file).replaceAll("\\", "/")
+      );
+      expect(files).toEqual(
+        expect.arrayContaining([
+          ...[
+            "build",
+            "details",
+            "external-url",
+            "html",
+            "layout",
+            "legend",
+            "model",
+            "node"
+          ].map((name) => `packages/graph-react/src/${name}.test.ts`),
+          "packages/graph-react/src/graph.browser.test.ts",
+          "packages/adapter-canvas/src/browser/graph/surface.test.ts",
+          "packages/adapter-canvas/src/browser/graph/navigation.test.ts",
+          "packages/adapter-canvas/src/browser/graph/progress.test.ts",
+          "packages/adapter-canvas/test/integration/http/liveness-source.test.ts",
+          "packages/adapter-canvas/test/integration/http/graphs-planning.test.ts",
+          "packages/adapter-canvas/test/e2e-cloud/support/cloud-command-port.test.ts",
+          "packages/adapter-canvas/test/e2e-cloud/support/cloud-fixture.test.ts"
+        ])
+      );
+      expect(
+        specifications.find(({ file }) =>
+          file
+            .replaceAll("\\", "/")
+            .endsWith("/graph-react/src/graph.browser.test.ts")
+        )
+      ).toMatchObject({ projectName: "graph-react-component (chromium)" });
+    },
+    NESTED_VITEST_TIMEOUT_MS
+  );
 
   it("provisions Chromium before the cross-platform reliability command", () => {
     const workflow = parse(
