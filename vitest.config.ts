@@ -3,6 +3,7 @@ import coverageBaseline from "./coverage-baseline.json" with { type: "json" };
 
 export default defineConfig({
   test: {
+    maxWorkers: process.platform === "win32" ? 2 : undefined,
     projects: [
       "packages/*/vitest.config.ts",
       "packages/graph-react/vitest.component.config.ts"

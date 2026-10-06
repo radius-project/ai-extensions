@@ -391,22 +391,17 @@ export async function writeStagedResolvedTypes(stagingInput, resources) {
   );
 }
 
-function isExecutable(file) {
+function isExecutable(file, platform, statSyncImpl) {
   try {
-    const stat = fs.statSync(file);
-    return (
-      stat.isFile() &&
-      (process.platform === "win32" || (stat.mode & 0o111) !== 0)
-    );
+    const stat = statSyncImpl(file);
+    return stat.isFile() && (platform === "win32" || (stat.mode & 0o111) !== 0);
   } catch {
     return false;
   }
 }
 
-function managedBinaries(home = os.homedir()) {
-  // A single coverage run cannot execute both operating-system branches.
-  /* v8 ignore next */
-  const suffix = process.platform === "win32" ? ".exe" : "";
+function managedBinaries(home, platform) {
+  const suffix = platform === "win32" ? ".exe" : "";
   const directory = path.join(home, ".radius", "ai-extensions", "bin");
   return {
     rad: path.join(directory, `rad${suffix}`),
@@ -417,15 +412,21 @@ function managedBinaries(home = os.homedir()) {
 async function queryManagedRadiusIdentity({
   env = process.env,
   home = os.homedir(),
+  platform = process.platform,
+  statSyncImpl = fs.statSync,
   processTimeoutMs = 10_000,
   runRadImpl = spawnRad,
   warn = console.error
 } = {}) {
-  const binaries = managedBinaries(home);
-  const usesExecutableOverride = isExecutable(env.RADIUS_RAD_BINARY);
+  const binaries = managedBinaries(home, platform);
+  const usesExecutableOverride = isExecutable(
+    env.RADIUS_RAD_BINARY,
+    platform,
+    statSyncImpl
+  );
   const rad =
     usesExecutableOverride ? path.resolve(env.RADIUS_RAD_BINARY) : binaries.rad;
-  if (!isExecutable(rad)) {
+  if (!isExecutable(rad, platform, statSyncImpl)) {
     throw new Error(`Extension-managed Radius binary not found at "${rad}".`);
   }
   try {

@@ -1,9 +1,11 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough, type Readable, type Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 interface Suppression {
   line: number;
@@ -18,6 +20,39 @@ interface Inspection {
 
 type FileReferences = { filePaths: string[] } | { error: string };
 
+interface FileReferencesProcess {
+  stdin: Writable;
+  stdout: Readable;
+  stderr: Readable;
+  kill(signal?: NodeJS.Signals): boolean;
+  on: EventEmitter["on"];
+}
+
+class FakeFileReferencesProcess
+  extends EventEmitter
+  implements FileReferencesProcess
+{
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly signals: (NodeJS.Signals | undefined)[] = [];
+
+  kill(signal?: NodeJS.Signals): boolean {
+    this.signals.push(signal);
+    if (signal === "SIGKILL") {
+      queueMicrotask(() => this.emit("close", null, signal));
+    }
+    return true;
+  }
+
+  dispose(): void {
+    this.emit("close", 0, null);
+    this.stdin.destroy();
+    this.stdout.destroy();
+    this.stderr.destroy();
+  }
+}
+
 interface SecurityRulesModule {
   BICEP_CONFIG_FILE: string;
   SECURITY_RULES: readonly string[];
@@ -30,7 +65,19 @@ interface SecurityRulesModule {
   requestFileReferences(
     bicep: string,
     app: string,
-    options?: { timeoutMs?: number; killGraceMs?: number }
+    options?: {
+      timeoutMs?: number;
+      killGraceMs?: number;
+      spawnProcess?: (
+        command: string,
+        args: string[],
+        options: {
+          cwd: string;
+          stdio: ["pipe", "pipe", "pipe"];
+          windowsHide: boolean;
+        }
+      ) => FileReferencesProcess;
+    }
   ): Promise<FileReferences>;
   readFileIfPresent(file: string): Buffer | null;
   inspectSecurityRules(
@@ -977,6 +1024,75 @@ describe("requestFileReferences", () => {
     });
   });
 
+  it("reports an abnormal exit from the process boundary on every platform", async () => {
+    const app = path.join(temporaryDirectory(), "app.bicep");
+    const child = new FakeFileReferencesProcess();
+    child.stdin.once("data", () => child.emit("close", null, "SIGTERM"));
+    try {
+      await expect(
+        rules.requestFileReferences("fixture-bicep", app, {
+          spawnProcess: () => child
+        })
+      ).resolves.toEqual({
+        error:
+          "Bicep exited with status null after receiving signal SIGTERM without listing the files the compile reads"
+      });
+      expect(child.signals).toEqual([]);
+    } finally {
+      child.dispose();
+    }
+  });
+
+  it.each([false, true])(
+    "escalates after the grace period and preserves a complete answer: %s",
+    async (answers) => {
+      vi.useFakeTimers();
+      const app = path.join(temporaryDirectory(), "app.bicep");
+      const child = new FakeFileReferencesProcess();
+      if (answers) {
+        child.stdin.once("data", () => {
+          child.stdout.write(
+            frame({
+              jsonrpc: "2.0",
+              id: 1,
+              result: { filePaths: [app] }
+            })
+          );
+        });
+      }
+      try {
+        const result = rules.requestFileReferences("fixture-bicep", app, {
+          timeoutMs: 500,
+          killGraceMs: 200,
+          spawnProcess: () => child
+        });
+
+        await vi.advanceTimersByTimeAsync(500);
+        expect(child.signals).toEqual([undefined]);
+        expect(child.stdout.destroyed).toBe(false);
+        await vi.advanceTimersByTimeAsync(199);
+        expect(child.signals).toEqual([undefined]);
+        await vi.advanceTimersByTimeAsync(1);
+
+        await expect(result).resolves.toEqual(
+          answers ?
+            { filePaths: [app] }
+          : {
+              error:
+                "Bicep did not list the files the compile reads within 500 ms"
+            }
+        );
+        expect(child.signals).toEqual([undefined, "SIGKILL"]);
+        expect(child.stdin.destroyed).toBe(true);
+        expect(child.stdout.destroyed).toBe(true);
+        expect(child.stderr.destroyed).toBe(true);
+      } finally {
+        child.dispose();
+        vi.useRealTimers();
+      }
+    }
+  );
+
   it.runIf(process.platform !== "win32")(
     "reports the signal that ended the server",
     async () => {
@@ -997,15 +1113,43 @@ describe("requestFileReferences", () => {
   it("stops a server that never answers, and waits for it to exit", async () => {
     const app = server({ hang: true, startedFile: "server.pid" });
     const pidFile = path.join(path.dirname(app), "server.pid");
-
-    const result = await rules.requestFileReferences(process.execPath, app, {
-      timeoutMs: 500
+    const child = spawn(process.execPath, ["jsonrpc", "--stdio"], {
+      cwd: path.dirname(app),
+      stdio: "pipe",
+      windowsHide: true
+    });
+    let startupError: Error | undefined;
+    child.once("error", (error) => {
+      startupError = error;
+    });
+    const closed = new Promise<void>((resolve) => {
+      child.once("close", () => resolve());
     });
 
-    expect(result).toEqual({
-      error: "Bicep did not list the files the compile reads within 500 ms"
-    });
-    expect(isRunning(Number(fs.readFileSync(pidFile, "utf8")))).toBe(false);
+    try {
+      await expect
+        .poll(() => {
+          if (startupError) throw startupError;
+          return fs.existsSync(pidFile);
+        })
+        .toBe(true);
+      const result = await rules.requestFileReferences(process.execPath, app, {
+        timeoutMs: 500,
+        spawnProcess: () => child
+      });
+
+      expect(result).toEqual({
+        error: "Bicep did not list the files the compile reads within 500 ms"
+      });
+      await expect
+        .poll(() => isRunning(Number(fs.readFileSync(pidFile, "utf8"))))
+        .toBe(false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+      await closed;
+    }
   });
 
   // Windows has no signal a process can ignore, so this only runs elsewhere.
@@ -1145,6 +1289,14 @@ describe("readFileIfPresent", () => {
     expect(
       rules.readFileIfPresent(path.join(file, "bicepconfig.json"))
     ).toBeNull();
+  });
+
+  it("rejects invalid paths rather than treating them as absent files", () => {
+    expect(() =>
+      rules.readFileIfPresent(
+        path.join(temporaryDirectory(), "bicepconfig.json\0")
+      )
+    ).toThrow(/null bytes/u);
   });
 
   it.runIf(process.platform !== "win32")(
