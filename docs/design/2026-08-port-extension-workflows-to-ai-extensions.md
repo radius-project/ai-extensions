@@ -133,7 +133,7 @@ Change `load-contrib-catalog` to `curl` the single catalog file from `radius-pro
 ##### Disadvantages
 
 - Adds a runtime network dependency on `raw.githubusercontent.com/radius-project/radius`. Mitigated by `curl --retry` and a pinnable `catalog-ref`.
-- The catalog ref and the action ref are conceptually distinct (radius ref vs. `ai-extensions` ref); `catalog-ref` is empty by default and derives from `RADIUS_INSTALL_COMMIT` (the commit of `RADIUS_INSTALL_REF`) in `setup-control-plane`, so the catalog, the control plane, and the modeling CLI (`RADIUS_RELEASE_TAG` in `adapter-shared`) share one Radius release. `verify-contrib-consumers.sh` fails when they differ.
+- The catalog ref and the action ref are conceptually distinct (radius ref vs. `ai-extensions` ref); `catalog-ref` is empty by default and derives from `RADIUS_INSTALL_COMMIT` (the commit of `RADIUS_INSTALL_REF`) in `setup-control-plane`, so the catalog, the control plane, and the modeling CLI (`radius-release.json` in `adapter-shared`, the authoritative pin) share one Radius release. `verify-contrib-consumers.sh` fails when they differ.
 
 #### Proposed option
 

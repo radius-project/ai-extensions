@@ -76,17 +76,17 @@ rm "${TEST_ROOT}/policy/bad.yml"
 # must name one Radius release.
 mkdir -p "${TEST_ROOT}/pins/actions/setup-control-plane" "${TEST_ROOT}/pins/actions/load-contrib-catalog"
 write_pin_fixture() {
-    local install_ref="$1" release_tag="$2" catalog_default="$3" install_commit="${4:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
+    local install_ref="$1" release_tag="$2" catalog_default="$3" install_commit="${4:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" release_commit="${5:-${4:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}}"
     printf '%s\n' '---' 'name: cp' 'runs:' '  using: composite' '  steps:' \
         '    - shell: bash' '      env:' "        RADIUS_INSTALL_REF: ${install_ref}" "        RADIUS_INSTALL_COMMIT: ${install_commit}" \
         '      run: echo ok' >"${TEST_ROOT}/pins/actions/setup-control-plane/action.yml"
     printf '%s\n' '---' 'name: catalog' 'inputs:' '  catalog-ref:' '    required: false' \
         "    default: \"${catalog_default}\"" 'runs:' '  using: composite' '  steps:' \
         '    - shell: bash' '      run: echo ok' >"${TEST_ROOT}/pins/actions/load-contrib-catalog/action.yml"
-    printf 'export const RADIUS_RELEASE_TAG = "%s";\n' "${release_tag}" >"${TEST_ROOT}/pins/release.ts"
+    printf '{"tag":"%s","commit":"%s"}\n' "${release_tag}" "${release_commit}" >"${TEST_ROOT}/pins/release.json"
 }
 run_pin_check() {
-    EXTENSION_DIR="${TEST_ROOT}/pins" RELEASE_FILE="${TEST_ROOT}/pins/release.ts" \
+    EXTENSION_DIR="${TEST_ROOT}/pins" RELEASE_FILE="${TEST_ROOT}/pins/release.json" \
         bash "${VERIFIER}" --source-of-truth-only >/dev/null
 }
 
@@ -106,6 +106,11 @@ fi
 write_pin_fixture v1.2.3 v1.2.3 "" "v1.2.3"
 if run_pin_check 2>/dev/null; then
     fail "pin check accepted a non-SHA release commit"
+fi
+
+write_pin_fixture v1.2.3 v1.2.3 "" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccc
+if run_pin_check 2>/dev/null; then
+    fail "pin check accepted a release commit that differs from the control plane"
 fi
 
 write_pin_fixture main v1.2.3 ""
@@ -265,7 +270,7 @@ write_pin_fixture v1.2.3 v1.2.3 ""
 PATH="${TEST_ROOT}/bin:${PATH}" \
     CATALOG_HELPER="${HELPER_PATH}" \
     EXTENSION_DIR="${TEST_ROOT}/pins" \
-    RELEASE_FILE="${TEST_ROOT}/pins/release.ts" \
+    RELEASE_FILE="${TEST_ROOT}/pins/release.json" \
     bash "${VERIFIER}" >/dev/null 2>&1 || true
 grep -Fq "radius-project/radius/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/deploy/manifest/defaults.yaml" "${CURL_LOG}" ||
     fail "verifier did not default the catalog ref to the control-plane release commit"

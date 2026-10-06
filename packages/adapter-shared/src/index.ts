@@ -12,11 +12,10 @@ export {
   WorkflowArtifactReadError
 } from "./workflow-artifacts.js";
 export type { WorkflowArtifactReaderOptions } from "./workflow-artifacts.js";
-export { RADIUS_RELEASE_TAG } from "./radius-release.js";
+export { RADIUS_RELEASE_TAG, RADIUS_RELEASE_COMMIT } from "./radius-release.js";
 export {
   RADIUS_EXTENSION_REGISTRY,
   RADIUS_BICEP_EXPERIMENTAL_FEATURES,
-  radiusExtensionRefForVersion,
   resolveRadiusExtensionRef,
   MANAGED_RAD_BIN,
   MANAGED_RAD_PATH,

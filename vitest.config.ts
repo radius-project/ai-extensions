@@ -5,6 +5,7 @@ export default defineConfig({
   test: {
     projects: [
       "packages/*/vitest.config.ts",
+      "packages/adapter-canvas/vitest.toolchain.config.ts",
       "packages/graph-react/vitest.component.config.ts"
     ],
     coverage: {
