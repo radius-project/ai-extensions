@@ -30,6 +30,7 @@ const EXPECTED_FUNCTIONS = [
   "describeWorkflowProtection",
   "confirmedWorkflowConclusion",
   "collectWorkflowFailure",
+  "redactCredentials",
   "extractErrorLines",
   "extractGitHubActionsStepLog",
   "explainOidcEnterpriseClaim",
