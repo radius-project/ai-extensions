@@ -56,6 +56,237 @@ describe("redactCredentials", () => {
     expect(redactCredentials(value)).toBe(value);
   });
 
+  describe.each([0, 1, 2, 3, 4, 6])(
+    "with %i enclosing serialization rounds",
+    (rounds) => {
+      const serialize = (input: string) => {
+        for (let round = 0; round < rounds; round++)
+          input = JSON.stringify(input);
+        return input;
+      };
+
+      it.each(["\n", "\t", "\r", " \r\n\t "])(
+        "masks a value after legal JSON whitespace %j",
+        (whitespace) => {
+          const input = `{"client_secret":${whitespace}"fixture-secret","message":"ordinary"}`;
+          const expected = serialize(
+            input.replace("fixture-secret", "[REDACTED]")
+          );
+
+          const result = redactCredentials(serialize(input));
+          expect(result).toBe(expected);
+          expect(redactCredentials(result)).toBe(expected);
+        }
+      );
+
+      it.each([
+        [
+          String.raw`password='fixture\'suffix' message=ordinary`,
+          "password='[REDACTED]' message=ordinary"
+        ],
+        [
+          String.raw`password='fixture\\' message=ordinary`,
+          "password='[REDACTED]' message=ordinary"
+        ],
+        [String.raw`password='fixture\'suffix`, "password='[REDACTED]"],
+        [
+          String.raw`password='fixture\'suffix'&client_secret='fixture-next'&message=ordinary`,
+          "password='[REDACTED]'&client_secret='[REDACTED]'&message=ordinary"
+        ],
+        [
+          String.raw`{"password": 'fixture\'suffix', "message": "ordinary"}`,
+          `{"password": '[REDACTED]', "message": "ordinary"}`
+        ],
+        [
+          String.raw`password=fixture\nliteral message=ordinary`,
+          "password=[REDACTED] message=ordinary"
+        ],
+        [
+          "ordinary text with 'apostrophes' and \\n",
+          "ordinary text with 'apostrophes' and \\n"
+        ]
+      ])("preserves safe boundaries in %j", (input, expected) => {
+        // An unterminated credential consumes the enclosing string terminator.
+        const serializedExpected = serialize(expected);
+        const result = redactCredentials(serialize(input));
+        expect(result).toBe(
+          input === String.raw`password='fixture\'suffix` ?
+            serializedExpected.slice(
+              0,
+              serializedExpected.indexOf("[REDACTED]") + "[REDACTED]".length
+            )
+          : serializedExpected
+        );
+        expect(redactCredentials(result)).toBe(result);
+      });
+    }
+  );
+
+  describe.each([0, 1, 2, 3, 4, 6])(
+    "with %i serialization rounds inside framed diagnostics",
+    (rounds) => {
+      const serialize = (input: string) => {
+        for (let round = 0; round < rounds; round++)
+          input = JSON.stringify(input);
+        return input;
+      };
+      const secret = String.raw`fixture\'suffix`;
+      const raw = `password='${secret}' message=ordinary url=https://example.invalid/status`;
+      const safe = raw.replace(secret, "[REDACTED]");
+
+      it.each(["Error: ", "build\tstep\t2026-10-07T12:00:00Z Error: "])(
+        "masks the complete apostrophe-delimited value after %j",
+        (prefix) => {
+          const expected = prefix + serialize(safe);
+          const result = redactCredentials(prefix + serialize(raw));
+          expect(result).toBe(expected);
+          expect(redactCredentials(result)).toBe(expected);
+        }
+      );
+
+      it.each(["message", "password"])(
+        "handles a %s JSON field containing apostrophe-delimited text",
+        (key) => {
+          const input = JSON.stringify({ [key]: raw, note: "ordinary" });
+          const expected = serialize(
+            JSON.stringify({
+              [key]: key === "password" ? "[REDACTED]" : safe,
+              note: "ordinary"
+            })
+          );
+          const result = redactCredentials("##[error] " + serialize(input));
+          expect(result).toBe("##[error] " + expected);
+          expect(redactCredentials(result)).toBe(result);
+        }
+      );
+
+      it.each(["\n", "\t", "\r", " \r\n\t "])(
+        "skips encoded whitespace %j only before an actual quoted value",
+        (whitespace) => {
+          const input = `password=${whitespace}'fixturesecretvalue' ok`;
+          const expected =
+            "Error: " +
+            serialize(input.replace("fixturesecretvalue", "[REDACTED]"));
+          expect(redactCredentials("Error: " + serialize(input))).toBe(
+            expected
+          );
+        }
+      );
+
+      it("keeps separate quote contexts for adjacent serialization depths", () => {
+        const input =
+          serialize(raw) +
+          " next: " +
+          JSON.stringify(JSON.stringify(raw)) +
+          " " +
+          String.raw`"note" password=\nfixturesecret url=https://example.invalid/status`;
+        const expected =
+          serialize(safe) +
+          " next: " +
+          JSON.stringify(JSON.stringify(safe)) +
+          ' "note" password=[REDACTED] url=https://example.invalid/status';
+        expect(redactCredentials(input)).toBe(expected);
+      });
+
+      it("conservatively masks an unterminated credential in a framed string", () => {
+        const input = "Error: " + serialize(`password='${secret}`);
+        const expected = "Error: " + serialize("password='[REDACTED]");
+        const result = redactCredentials(input);
+        expect(result).toBe(
+          expected.slice(
+            0,
+            expected.indexOf("[REDACTED]") + "[REDACTED]".length
+          )
+        );
+        expect(redactCredentials(result)).toBe(result);
+      });
+
+      it("includes encoded whitespace in an unquoted credential rather than treating it as a delimiter", () => {
+        const input = "Error: " + serialize("password=\nfixturesecretvalue ok");
+        const expected =
+          "Error: " +
+          serialize(
+            rounds === 0 ? "password=\n[REDACTED] ok" : "password=[REDACTED] ok"
+          );
+        expect(redactCredentials(input)).toBe(expected);
+      });
+    }
+  );
+
+  it("ends an incomplete inner quote context at the enclosing terminator", () => {
+    const prefix = "Error: " + JSON.stringify('ordinary "unterminated') + " ";
+    const input = prefix + String.raw`password='fixture\'suffix' ok`;
+    const expected = prefix + "password='[REDACTED]' ok";
+    expect(redactCredentials(input)).toBe(expected);
+    expect(redactCredentials(expected)).toBe(expected);
+  });
+
+  describe.each(["\n", "\r\n", "\r"])(
+    "with independent log lines separated by %j",
+    (newline) => {
+      it.each([0, 1, 2, 3, 4, 6])(
+        "does not carry an earlier unbalanced quote into %i serialization rounds",
+        (rounds) => {
+          const serialize = (text: string): string => {
+            for (let round = 0; round < rounds; round++)
+              text = JSON.stringify(text);
+            return text;
+          };
+          for (const earlier of [
+            `Deploy\tRun\tError: unexpected token '"'`,
+            `Deploy\tRun\tError: unexpected token '""'`
+          ]) {
+            const prefix = earlier + newline + "Deploy\tRun\tError: ";
+            const diagnostic = String.raw`password='fixture\'suffixsecret' message=ordinary`;
+            const whitespace =
+              "password=\n\t'fixturesecretvalue' message=ordinary";
+            const input =
+              prefix +
+              serialize(diagnostic) +
+              newline +
+              "Deploy\tRun\tError: " +
+              serialize(whitespace) +
+              newline +
+              "Deploy\tRun\tError: " +
+              serialize(diagnostic);
+            const expected =
+              prefix +
+              serialize("password='[REDACTED]' message=ordinary") +
+              newline +
+              "Deploy\tRun\tError: " +
+              serialize("password=\n\t'[REDACTED]' message=ordinary") +
+              newline +
+              "Deploy\tRun\tError: " +
+              serialize("password='[REDACTED]' message=ordinary");
+            const result = redactCredentials(input);
+            expect(result).toBe(expected);
+            expect(redactCredentials(result)).toBe(result);
+          }
+        }
+      );
+
+      it("clears enclosing context when a masked opaque value crosses a raw line boundary", () => {
+        const prefix = "Error: \"password='fixture" + newline + "suffix' ";
+        const diagnostic = JSON.stringify(
+          String.raw`password='fixture\'suffixsecret' message=ordinary`
+        );
+        expect(redactCredentials(prefix + diagnostic)).toBe(
+          "Error: \"password='[REDACTED]' " +
+            JSON.stringify("password='[REDACTED]' message=ordinary")
+        );
+      });
+    }
+  );
+
+  it.each(["", '"', '"ordinary"', String.raw`"note" password=\nfixturesecret`])(
+    "does not confuse closed or incomplete ordinary quotes with serialization in %j",
+    (input) => {
+      expect(redactCredentials(input)).toBe(
+        input.includes("password=") ? '"note" password=[REDACTED]' : input
+      );
+    }
+  );
+
   describe.each([0, 1, 2, 3])("with %i JSON escaping rounds", (rounds) => {
     it.each([
       "",
