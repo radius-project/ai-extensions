@@ -557,7 +557,21 @@ test.describe("Radius Canvas in Chromium", () => {
         `HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(value)}`
       );
     const dispatchPrefix = ["workflow", "run", "run-rad-commands.yml"];
+    const repositoryArtifactArgs = [
+      "api",
+      `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`,
+      "--include",
+      "--method",
+      "GET"
+    ];
     const additions: FakeCliCommand[] = [
+      {
+        tool: "gh",
+        args: repositoryArtifactArgs,
+        exitCode: 1,
+        stdout:
+          'HTTP/2.0 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{"message":"Resource not accessible by integration"}'
+      },
       {
         tool: "gh",
         args: [
@@ -864,7 +878,13 @@ test.describe("Radius Canvas in Chromium", () => {
       deployRunUrl: runUrl
     });
     expect(deliveries[0].error).toContain("opaque-witness=[REDACTED]");
-    await gotoCanvas(page, canvas, "deployed");
+    const [deployedGraphResponse] = await Promise.all([
+      page.waitForResponse((response) =>
+        response.url().startsWith(`${canvas.baseUrl}/api/deployed-graph?`)
+      ),
+      gotoCanvas(page, canvas, "deployed")
+    ]);
+    expect(deployedGraphResponse.status()).toBe(200);
     await expect(page.locator("body")).toContainText(
       "opaque-witness=[REDACTED]"
     );
@@ -879,6 +899,11 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(deliveries).toHaveLength(1);
     const calls = await canvas.cliCalls();
     expect(calls.filter((call) => !call.matched)).toEqual([]);
+    expect(
+      calls.filter(
+        (call) => call.args.join(" ") === repositoryArtifactArgs.join(" ")
+      )
+    ).toMatchObject([{ matched: true, exitCode: 1 }]);
     expect(
       calls.filter((call) =>
         call.args.includes(
