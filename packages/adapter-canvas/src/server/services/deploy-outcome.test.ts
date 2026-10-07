@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkflowReadInterruptedError } from "@radius-project/core";
+import {
+  redactCredentials,
+  WorkflowReadInterruptedError
+} from "@radius-project/core";
 import {
   createDeployOutcomeService,
   type DeployOutcomeDependencies,
@@ -28,6 +31,7 @@ function dependencies(
       Array.isArray(graph) ? (graph as CanvasGraphResource[]) : [],
     settleDeployStatuses: () => {},
     fetchRunLog: () => Promise.resolve(null),
+    redactDiagnostic: redactCredentials,
     cloudAuthDriftKind: "cloud-auth-drift",
     sleep: () => Promise.resolve(),
     now: () => 1_700_000_060_000,
@@ -255,6 +259,7 @@ describe("deploy outcome construction", () => {
     "projectSafeGraphResources",
     "settleDeployStatuses",
     "fetchRunLog",
+    "redactDiagnostic",
     "sleep",
     "now"
   ] as const)("refuses to construct without %s", (name) => {
@@ -263,6 +268,61 @@ describe("deploy outcome construction", () => {
     expect(() => createDeployOutcomeService(incomplete)).toThrow(
       `createDeployOutcomeService is missing required dependencies: ${name}`
     );
+  });
+
+  describe("diagnostic publication redaction", () => {
+    it("publishes only sanitized workflow and control-plane details to errors, resources, and logs", async () => {
+      const credential = "opaque-outcome-fixture";
+      const namedCredential = "unregistered-outcome-fixture";
+      const nested = JSON.stringify(
+        JSON.stringify({ client_secret: namedCredential })
+      );
+      const expected = `Error: { quota [REDACTED] ${JSON.stringify(
+        JSON.stringify({ client_secret: "[REDACTED]" })
+      )} }`;
+      const f = outcomeRequest({
+        conclusion: "failure",
+        steps: [{ name: "Run rad commands", conclusion: "failure" }],
+        jobs: [
+          {
+            name: "deploy",
+            steps: [{ name: "Run rad commands", conclusion: "failure" }]
+          }
+        ],
+        resources: [{ name: "db", deployStatus: "pending" }],
+        statusReader: statusReader(
+          [{ graph: null, status: "malformed" }],
+          `provisioning password=${credential}`
+        )
+      });
+      await createDeployOutcomeService(
+        dependencies({
+          settleDeployStatuses,
+          fetchRunLog: async () =>
+            `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} ${nested} }`,
+          redactDiagnostic: (value) => redactCredentials(value, [credential])
+        })
+      ).settle(f.request);
+      expect(f.state.deployStatus).toBe("failed");
+      expect(f.state.deployError).toContain(expected);
+      expect(f.state.deployError).toContain("password=[REDACTED]");
+      expect(f.request.resources[0].deployMessage).toBe(expected);
+      expect(
+        JSON.stringify({
+          state: f.state,
+          logs: f.logs,
+          resources: f.request.resources
+        })
+      ).not.toContain(credential);
+      for (const publication of [
+        f.state.deployError,
+        f.request.resources[0].deployMessage,
+        f.logs.join("\n")
+      ]) {
+        expect(publication).toContain(expected);
+        expect(publication).not.toContain(namedCredential);
+      }
+    });
   });
 
   it.each(["", "   ", undefined])(
