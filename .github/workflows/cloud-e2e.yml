@@ -67,19 +67,19 @@ jobs:
     # this guard a fork would spend the Radius test subscription's quota and
     # contend for the same fixture repository.
     if: github.repository == 'radius-project/ai-extensions'
-    # A plain runner rather than the `mcr.microsoft.com/playwright` container
-    # build.yml uses for the Chromium tier. That container ships browsers but
-    # not `az`, `gh`, or `kubectl`, and cloud mode runs the real ones - the
-    # whole point of the tier. Browsers are installed explicitly below instead.
-    runs-on: ubuntu-24.04
+    # The journey drives the real GitHub Copilot desktop app through its UI. The
+    # app attaches over CDP only on Windows (WebView2), so the job runs on a
+    # Windows runner. The runner image already has `az`, `gh`, `kubectl`,
+    # `jq`, and Git Bash; the app is installed explicitly below.
+    runs-on: windows-2025
     # Strictly greater than Playwright's aggregate serial-stage timeout in
     # packages/adapter-canvas/playwright.cloud.config.ts. The
     # ordering is the requirement: Playwright must be the thing that gives up
     # first, because it writes the trace on the way out. If GitHub cancelled the
     # job first, the single most useful diagnostic for a run nobody can reproduce
     # locally is exactly what would be lost. The remaining headroom covers
-    # dependency install, browser download, teardown, and artifact upload.
-    timeout-minutes: 235
+    # dependency install, app install, teardown, and artifact upload.
+    timeout-minutes: 290
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
@@ -167,9 +167,15 @@ jobs:
         if: steps.fixture.outputs.configured == 'true'
         run: pnpm install --frozen-lockfile
 
-      - name: Install the Chromium browser
+      # The suite installs this checkout's Radius extension into an isolated
+      # Copilot home, so the app needs no plugin or account state from the image.
+      - name: Install the GitHub Copilot app
         if: steps.fixture.outputs.configured == 'true'
-        run: pnpm exec playwright install --with-deps chromium
+        shell: pwsh
+        run: |
+          winget install --exact --id GitHub.CopilotApp --scope user --accept-package-agreements --accept-source-agreements --disable-interactivity
+          $app = Join-Path $env:LOCALAPPDATA "Programs\GitHub Copilot\github.exe"
+          if (-not (Test-Path $app)) { throw "The GitHub Copilot app is not at $app after install." }
 
       # No stored Azure secret exists. The runner's OIDC token is exchanged for
       # an Azure token scoped to the dedicated bootstrap identity, which holds
@@ -220,7 +226,9 @@ jobs:
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment
-          # before starting Canvas or any CLI child command.
+          # before it starts the Copilot app or any CLI child command. The bot
+          # PAT also signs in to the Copilot app, because the app cannot renew
+          # the one-hour installation token.
           GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
           GH_PACKAGES_USER: ${{ secrets.CLOUD_E2E_PACKAGES_USER }}
           CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}

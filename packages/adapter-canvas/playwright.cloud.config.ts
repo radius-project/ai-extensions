@@ -13,6 +13,12 @@ const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 // matters: this one talks to real Azure and GitHub, takes tens of minutes, and
 // must never retry.
 //
+// The suite drives the real GitHub Copilot desktop app, not a test server. The
+// worker fixture in `support/copilot-app-test.ts` installs this checkout's
+// Radius extension, starts the app with a CDP port, and attaches to it. So this
+// config has no browser project and no global setup: the product does not run
+// in the Playwright process, and the app is the only browser.
+//
 // `retries: 0` is a correctness rule, not a preference. Later stages of this
 // journey are destructive, and a retry would re-run a half-completed
 // create-or-delete against infrastructure the first attempt already changed —
@@ -26,11 +32,6 @@ const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   testDir: "./test/e2e-cloud",
   testMatch: "**/*.cloud.spec.ts",
-  // Shared with the Chromium tier on purpose: both need the credential-store
-  // isolation installed before the first production import, and cloud mode
-  // still relies on the same server warm-up and Windows shim.
-  globalSetup: "./test/e2e/global-setup.ts",
-  globalTeardown: "./test/e2e/global-teardown.ts",
   // No single stage may consume the freshly renewed installation token's full
   // lifetime. The serial suite receives the sum of every declared stage budget.
   timeout: DELETE_TEST_TIMEOUT_MS,
@@ -55,11 +56,8 @@ export default defineConfig({
     ]
   ],
   use: {
-    browserName: "chromium",
-    serviceWorkers: "block",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
-    video: "off",
-    headless: true
+    video: "off"
   }
 });

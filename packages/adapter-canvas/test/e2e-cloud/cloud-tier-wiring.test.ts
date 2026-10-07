@@ -17,6 +17,7 @@ import {
   CLOUD_INSTALLATION_TOKEN_LIFETIME_MS,
   CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS,
   CLOUD_SUITE_TIMEOUT_MS,
+  COPILOT_APP_SETUP_TIMEOUT_MS,
   CREATE_OPERATION_TIMEOUT_MS,
   CREATE_TEST_TIMEOUT_MS,
   DELETE_REFUSAL_TEST_TIMEOUT_MS,
@@ -25,6 +26,8 @@ import {
   DELETE_TEST_TIMEOUT_MS,
   DEPLOYMENT_OPERATION_TIMEOUT_MS,
   DEPLOYMENT_TEST_TIMEOUT_MS,
+  MODEL_GENERATION_TIMEOUT_MS,
+  MODELING_TEST_TIMEOUT_MS,
   SERIAL_TEST_TIMEOUT_BUDGET_MS
 } from "./support/cloud-timeout-budget.js";
 
@@ -65,6 +68,9 @@ describe("the cloud Playwright config", () => {
     const globalTimeout = cloudConfig.globalTimeout ?? 0;
 
     expect(CREATE_TEST_TIMEOUT_MS).toBeGreaterThan(CREATE_OPERATION_TIMEOUT_MS);
+    expect(MODELING_TEST_TIMEOUT_MS).toBeGreaterThan(
+      MODEL_GENERATION_TIMEOUT_MS
+    );
     expect(DELETE_TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(
       DELETE_OPERATION_TIMEOUT_MS + 2 * DELETE_POSTCONDITION_TIMEOUT_MS
     );
@@ -77,6 +83,8 @@ describe("the cloud Playwright config", () => {
     );
     expect(
       Math.max(
+        COPILOT_APP_SETUP_TIMEOUT_MS,
+        MODELING_TEST_TIMEOUT_MS,
         CREATE_TEST_TIMEOUT_MS,
         DEPLOYMENT_TEST_TIMEOUT_MS,
         DELETE_REFUSAL_TEST_TIMEOUT_MS,
@@ -100,15 +108,16 @@ describe("the cloud Playwright config", () => {
     });
   });
 
-  it("installs the same credential-store isolation the Chromium tier needs", () => {
-    expect(cloudConfig.globalSetup).toBe(chromiumConfig.globalSetup);
-    expect(cloudConfig.globalTeardown).toBe(chromiumConfig.globalTeardown);
+  it("runs no product code in the Playwright process, which only drives the Copilot app", () => {
+    expect(cloudConfig.globalSetup).toBeUndefined();
+    expect(cloudConfig.globalTeardown).toBeUndefined();
+    expect(cloudConfig.projects).toBeUndefined();
+    expect(cloudConfig.use?.browserName).toBeUndefined();
   });
 
   it("retains a trace and a screenshot for a run nobody can reproduce locally", () => {
     expect(cloudConfig.use?.trace).toBe("retain-on-failure");
     expect(cloudConfig.use?.screenshot).toBe("only-on-failure");
-    expect(cloudConfig.use?.headless).toBe(true);
   });
 });
 

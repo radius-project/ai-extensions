@@ -13,6 +13,8 @@ This design adds a twelfth test layer, **Cloud E2E**, that runs the existing bro
 
 No production code changes. The work is a mode switch in the test harness, a fixture that owns per-run cloud resources, a spec directory, and a scheduled workflow.
 
+> **Update:** The suite now drives the real GitHub Copilot desktop app instead of `CanvasHarness` and Chromium. The job runs on a Windows runner. A worker fixture installs the Radius extension from the checkout, starts the app with a CDP port, and attaches Playwright to it. A new first stage asks the agent to generate the application model with the radius-app-bicep skill, because the production fixture has no `.radius/` folder. The spec publishes that model to the default branch, and cleanup resets the branch to the pinned baseline. The later stages drive the Radius canvas in the same app session. The sections below keep the original design for the record.
+
 ## Terms and definitions
 
 | Term                       | Definition                                                                                                                                                                                   |
@@ -117,9 +119,8 @@ A `CloudFixture` sits beside the harness and owns the run's external world: a pr
 graph TD
   subgraph runner["GitHub Actions runner"]
     PW["Playwright"] --> CF["CloudFixture<br/>shared AKS target, per-run clone"]
-    CF --> CH["CanvasHarness<br/>mode: cloud"]
-    CH --> SRV["Canvas server<br/>real routes, unmocked"]
-    BR["Chromium"] --> SRV
+    PW --> APP["GitHub Copilot app<br/>attached over CDP"]
+    APP --> SRV["Radius canvas<br/>real extension, unmocked"]
   end
 
   subgraph azure["Azure (shared Radius test subscription)"]
