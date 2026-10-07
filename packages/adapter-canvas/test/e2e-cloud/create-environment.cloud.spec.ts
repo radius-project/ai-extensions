@@ -31,16 +31,23 @@
 // Environment would satisfy it just as readily — so the fixture refuses to make
 // an absence assertion until this run has observed the artifact present.
 //
-// Every stage runs through the real GitHub Copilot desktop app, not a test
-// server. The worker fixture installs this checkout's Radius extension into an
-// isolated Copilot home, starts the app with a CDP port, and attaches to it.
-// The production fixture has no application model, so the first stage asks
-// the agent to delete any `.radius/` folder and generate a new model with the
-// radius-app-bicep skill. The spec publishes that model to the default branch
-// (cleanup resets the branch to the baseline) and opens the Radius canvas in
-// the same session. The later stages drive that canvas.
+// `RADIUS_CLOUD_E2E_CANVAS_HOST` selects where the canvas runs. The default,
+// "harness", serves this checkout's canvas in headless Chromium and uses the
+// fixture's committed model. "copilot-app" starts the GitHub Copilot desktop
+// app on Windows and adds a first stage: the Radius agent replaces any
+// `.radius/` model in the clean fixture, the spec publishes the new model to
+// the default branch (cleanup resets it to the baseline), and the later stages
+// drive the Radius canvas inside the app.
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createFileCredentialProvenanceStore } from "../../src/credential-provenance-store.js";
+import { configureCredentialProvenanceStore } from "../../src/credential-provenance.js";
+import {
+  cloudCanvasHost,
+  expect,
+  test,
+  type CloudCanvasSession
+} from "./support/cloud-canvas-test.js";
 import {
   createNodeCloudFixturePorts,
   expectSuccess,
@@ -75,18 +82,12 @@ import {
   type ModelFileTimes,
   type ModelReadiness
 } from "./support/copilot-app-modeling.js";
-import { expect, test } from "./support/copilot-app-test.js";
 import {
-  attachAppState,
-  attachRadiusCanvas,
   ensureFixtureProject,
-  gotoCanvasPage,
   pageOf,
   readCurrentSessionStatus,
   readSessionInfo,
   startSessionFromNewPage,
-  testInfoSink,
-  type AttachedRadiusCanvas,
   type CanvasTarget
 } from "./support/copilot-app-ui.js";
 import {
@@ -312,24 +313,25 @@ async function discoverNewWorkflowRunId(
  * change that stops the verification path working against a real tenant.
  */
 async function createCredentialProfile(
-  target: CanvasTarget,
+  canvas: CloudCanvasSession,
   account: { tenantId: string; subscriptionId: string }
 ): Promise<void> {
-  await gotoCanvasPage(target, "credentials");
-  await target.getByRole("button", { name: "New Credential Profile" }).click();
-  await target.getByLabel("Profile Name").fill(PROFILE_NAME);
-  await target.getByLabel("Tenant ID").fill(account.tenantId);
-  await target.getByLabel("Subscription ID").fill(account.subscriptionId);
-  await target.getByRole("button", { name: "Verify Credentials" }).click();
+  const page = canvas.target;
+  await canvas.goto("credentials");
+  await page.getByRole("button", { name: "New Credential Profile" }).click();
+  await page.getByLabel("Profile Name").fill(PROFILE_NAME);
+  await page.getByLabel("Tenant ID").fill(account.tenantId);
+  await page.getByLabel("Subscription ID").fill(account.subscriptionId);
+  await page.getByRole("button", { name: "Verify Credentials" }).click();
 
   // The verified line is the product's own report that the real CLI answered.
-  await expect(target.locator("#cred-verify-status")).toBeVisible({
+  await expect(page.locator("#cred-verify-status")).toBeVisible({
     timeout: 120_000
   });
-  const save = target.locator("#save-cred-btn:not([disabled])");
+  const save = page.locator("#save-cred-btn:not([disabled])");
   await expect(save).toBeVisible({ timeout: 120_000 });
   await save.click();
-  await expect(target.locator("#cred-landing")).toBeVisible();
+  await expect(page.locator("#cred-landing")).toBeVisible();
 }
 
 async function readModelFileTimes(
@@ -374,15 +376,6 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let deployedNamespace = "";
   const ownedWorkflowRunIds = new Set<string>();
   let untrackedWorkflowDispatch = false;
-  let canvas: AttachedRadiusCanvas | undefined;
-
-  const requireCanvas = (): CanvasTarget => {
-    if (!canvas)
-      throw new Error(
-        "The Radius canvas is not open. The modeling stage must pass first."
-      );
-    return canvas.target;
-  };
 
   const refreshGitHubToken = async (): Promise<void> => {
     if (!githubAppTokenConfig)
@@ -423,6 +416,20 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     fixture.registerNamespaceCleanupTarget(
       FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE
     );
+    // CanvasHarness loads the server directly rather than the extension
+    // composition root. Install one durable store inside the disposable clone's
+    // git directory so every serial harness sees the same ownership records
+    // without touching the developer's user-global store.
+    await configureCredentialProvenanceStore(
+      createFileCredentialProvenanceStore({
+        directory: path.join(
+          fixture.workspacePath,
+          ".git",
+          "radius-cloud-e2e",
+          "credential-provenance"
+        )
+      })
+    );
     await refreshGitHubToken();
     // Turns every assertion below from an observation into a proof: none of the
     // artifacts asserted on existed before the product ran.
@@ -431,23 +438,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
   test.beforeEach(refreshGitHubToken);
 
-  test.afterEach(async ({ copilotApp }, testInfo) => {
-    if (testInfo.status === testInfo.expectedStatus) return;
-    try {
-      await attachAppState(
-        copilotApp.appPage,
-        "copilot-app",
-        testInfoSink(testInfo)
-      );
-    } catch (error) {
-      console.warn(`Could not attach the Copilot app state: ${String(error)}`);
-    }
-  });
-
   test.afterAll(async () => {
-    const attached = canvas;
-    canvas = undefined;
-    await attached?.dispose((message) => console.warn(message));
     const current = fixture;
     fixture = undefined;
     if (!current) return;
@@ -481,115 +472,126 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     ]);
   });
 
-  test("models the clean fixture through the Copilot app agent", async ({
-    copilotApp
-  }, testInfo) => {
-    testInfo.setTimeout(MODELING_TEST_TIMEOUT_MS);
-    const cloud = fixture;
-    if (!cloud) throw new Error("The cloud fixture was not created.");
-    const { appPage, browser, cdpUrl } = copilotApp;
+  // Runs only with the Copilot app host. The harness host uses the model that
+  // the fixture already commits.
+  if (cloudCanvasHost === "copilot-app")
+    test("models the clean fixture through the Copilot app agent", async ({
+      cloudCanvas
+    }, testInfo) => {
+      testInfo.setTimeout(MODELING_TEST_TIMEOUT_MS);
+      if (cloudCanvas.host !== "copilot-app")
+        throw new Error("The modeling stage needs the Copilot app host.");
+      const cloud = fixture;
+      if (!cloud) throw new Error("The cloud fixture was not created.");
+      const { appPage } = cloudCanvas.app;
 
-    await ensureFixtureProject(appPage, cloud.repository, FIXTURE_REPO_NAME);
-    const startedAtMs = Date.now();
-    await startSessionFromNewPage(appPage, {
-      projectName: FIXTURE_REPO_NAME,
-      prompt: cloudModelingPrompt(FIXTURE_APPLICATION_NAME)
-    });
-    const session = await readSessionInfo(appPage);
-    expect(session.baseBranch).toBe(cloud.defaultBranch);
-
-    let previousTimes: ModelFileTimes | undefined;
-    let readiness: ModelReadiness | undefined;
-    await expect
-      .poll(
-        async () => {
-          const times = await readModelFileTimes(session.path);
-          readiness = classifyModelReadiness({
-            times,
-            startedAtMs,
-            previousTimes,
-            sessionStatus: await readCurrentSessionStatus(appPage)
-          });
-          previousTimes = times;
-          return readiness.ready;
-        },
-        {
-          message: "The agent did not finish the Radius application model",
-          timeout: MODEL_GENERATION_TIMEOUT_MS,
-          intervals: [15_000]
-        }
-      )
-      .toBe(true)
-      .catch((error: unknown) => {
-        throw new Error(
-          `${readiness ? describeModelReadiness(readiness) : "The model was never read."} ${String(error)}`
-        );
+      await ensureFixtureProject(appPage, cloud.repository, FIXTURE_REPO_NAME);
+      const startedAtMs = Date.now();
+      await startSessionFromNewPage(appPage, {
+        projectName: FIXTURE_REPO_NAME,
+        prompt: cloudModelingPrompt(FIXTURE_APPLICATION_NAME)
       });
-    await testInfo.attach("app.bicep", {
-      path: path.join(session.path, ".radius", "app.bicep"),
-      contentType: "text/plain"
-    });
+      const session = await readSessionInfo(appPage);
+      expect(session.baseBranch).toBe(cloud.defaultBranch);
 
-    const git = async (args: readonly string[]): Promise<string> =>
-      expectSuccess(
-        await ports.commands.runGit(args, session.path),
-        `git ${args.join(" ")}`
-      ).stdout;
-    const head = await git(["rev-parse", "HEAD"]);
-    await git(["add", "-A", "--", ".radius"]);
-    const staged = await ports.commands.runGit(
-      ["diff", "--cached", "--quiet"],
-      session.path
-    );
-    if (staged.code > 1)
-      throw new Error(`git diff --cached failed: ${staged.stderr}`);
-    const plan = planModelPublication({
-      head,
-      baselineSha: cloud.baselineSha,
-      hasStagedChanges: staged.code === 1
-    });
-    if (plan.action === "commit-and-push") {
-      await git([
-        "-c",
-        "user.name=radius-cloud-e2e",
-        "-c",
-        "user.email=radius-cloud-e2e@users.noreply.github.com",
-        "commit",
-        "--no-verify",
-        "-m",
-        MODEL_COMMIT_MESSAGE
-      ]);
-      // From here the default branch can differ from the baseline, so the
-      // cleanup must reset it even when a later stage never starts.
-      productOperationStarted = true;
-      await git([
-        "-c",
-        "credential.helper=",
-        "-c",
-        "credential.helper=!gh auth git-credential",
-        "push",
-        "origin",
-        `HEAD:refs/heads/${cloud.defaultBranch}`
-      ]);
-    }
+      let previousTimes: ModelFileTimes | undefined;
+      let readiness: ModelReadiness | undefined;
+      await expect
+        .poll(
+          async () => {
+            const times = await readModelFileTimes(session.path);
+            readiness = classifyModelReadiness({
+              times,
+              startedAtMs,
+              previousTimes,
+              sessionStatus: await readCurrentSessionStatus(appPage)
+            });
+            previousTimes = times;
+            return readiness.ready;
+          },
+          {
+            message: "The agent did not finish the Radius application model",
+            timeout: MODEL_GENERATION_TIMEOUT_MS,
+            intervals: [15_000]
+          }
+        )
+        .toBe(true)
+        .catch((error: unknown) => {
+          throw new Error(
+            `${readiness ? describeModelReadiness(readiness) : "The model was never read."} ${String(error)}`,
+            { cause: error }
+          );
+        });
+      await testInfo.attach("app.bicep", {
+        path: path.join(session.path, ".radius", "app.bicep"),
+        contentType: "text/plain"
+      });
 
-    canvas = await attachRadiusCanvas(browser, appPage, cdpUrl);
-    const page = canvas.target;
-    await gotoCanvasPage(page, "graph");
-    await expect(page.locator(".react-flow__node").first()).toBeVisible({
-      timeout: 120_000
+      const git = async (args: readonly string[]): Promise<string> =>
+        expectSuccess(
+          await ports.commands.runGit(args, session.path),
+          `git ${args.join(" ")}`
+        ).stdout;
+      const head = await git(["rev-parse", "HEAD"]);
+      await git(["add", "-A", "--", ".radius"]);
+      const staged = await ports.commands.runGit(
+        ["diff", "--cached", "--quiet"],
+        session.path
+      );
+      if (staged.code > 1)
+        throw new Error(`git diff --cached failed: ${staged.stderr}`);
+      const plan = planModelPublication({
+        head,
+        baselineSha: cloud.baselineSha,
+        hasStagedChanges: staged.code === 1
+      });
+      if (plan.action === "commit-and-push") {
+        await git([
+          "-c",
+          "user.name=radius-cloud-e2e",
+          "-c",
+          "user.email=radius-cloud-e2e@users.noreply.github.com",
+          "commit",
+          "--no-verify",
+          "-m",
+          MODEL_COMMIT_MESSAGE
+        ]);
+        // From here the default branch can differ from the baseline, so the
+        // cleanup must reset it even when a later stage never starts.
+        productOperationStarted = true;
+        await git([
+          "-c",
+          "credential.helper=",
+          "-c",
+          "credential.helper=!gh auth git-credential",
+          "push",
+          "origin",
+          `HEAD:refs/heads/${cloud.defaultBranch}`
+        ]);
+      }
+
+      const target = await cloudCanvas.attach();
+      const canvas = await cloudCanvas.open({
+        title: "cloud-model-application",
+        initialPage: "graph",
+        repository: cloud.repository,
+        branch: cloud.defaultBranch,
+        workspacePath: session.path
+      });
+      await expect(
+        canvas.target.locator(".react-flow__node").first()
+      ).toBeVisible({ timeout: 120_000 });
+      const applications = readApplicationNames(
+        await readCanvasJson(
+          target,
+          repositoryListingPath("/api/list-applications", cloud.repository)
+        )
+      );
+      expect(applications).toEqual([FIXTURE_APPLICATION_NAME]);
     });
-    const applications = readApplicationNames(
-      await readCanvasJson(
-        page,
-        repositoryListingPath("/api/list-applications", cloud.repository)
-      )
-    );
-    expect(applications).toEqual([FIXTURE_APPLICATION_NAME]);
-  });
 
   test("creates the Azure identity, the GitHub Environment, and the workflows", async ({
-    copilotApp: _copilotApp
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(CREATE_TEST_TIMEOUT_MS);
     const cloud = fixture;
@@ -604,390 +606,454 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     );
     expect(account.subscriptionId).toBe(cloud.subscriptionId);
 
-    const page = requireCanvas();
-    await createCredentialProfile(page, account);
-
-    await gotoCanvasPage(page, "environment");
-    await page.locator("#new-env-btn").click();
-    await expect(page.locator("#env-form")).toBeVisible();
-    await page.locator("#env-profile-button").click();
-    await page
-      .locator("#env-profile-menu")
-      .getByRole("option", { name: new RegExp(PROFILE_NAME) })
-      .click();
-    await page.locator("#env-step1-next").click();
-    await expect(page.locator("#env-step-details")).toBeVisible();
-
-    await page.getByLabel("Environment name").fill(cloud.environmentName);
-    // Selecting by value rather than typing a custom name is deliberate: the
-    // option only exists if the product's own `az group list` and `az aks
-    // list` discovery found the group and cluster the fixture created.
-    await page
-      .getByLabel("Resource Group", { exact: true })
-      .selectOption(cloud.resourceGroup);
-    await page
-      .getByLabel("Cluster", { exact: true })
-      .selectOption(cloud.clusterName);
-    await page
-      .locator("#azure-namespace-select")
-      .selectOption(FIXTURE_KUBERNETES_NAMESPACE);
-
-    const operationResponse = pageOf(page).waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === "/api/operations" &&
-        response.request().method() === "POST"
-    );
-    const createEnvironment = page.locator("#deploy-btn:not([disabled])");
-    await expect(createEnvironment).toHaveText("Create Environment");
-    await createEnvironment.click();
-    const createResponse = await operationResponse;
-    const operationId = readOperationId(
-      readOperationHttpResponse({
-        ok: createResponse.ok(),
-        status: createResponse.status(),
-        statusText: createResponse.statusText(),
-        body: await createResponse.text()
-      })
-    );
-    expect(operationId).toMatch(/^op_/);
-    productOperationStarted = true;
-
-    const snapshot = async (): Promise<
-      ReturnType<typeof readOperationSnapshot>
-    > =>
-      readOperationSnapshot(
-        readOperationHttpResponse(
-          await page.evaluate(async (id) => {
-            const response = await fetch(`/api/operations/${id}`);
-            return {
-              ok: response.ok,
-              status: response.status,
-              statusText: response.statusText,
-              body: await response.text()
-            };
-          }, operationId)
-        )
-      );
-
-    await expect
-      .poll(async () => (await snapshot()).terminal, {
-        timeout: CREATE_OPERATION_TIMEOUT_MS,
-        intervals: [5_000]
-      })
-      .toBe(true);
-    const finished = await snapshot();
-    expect(
-      finished.state,
-      `The create-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
-    ).toBe("succeeded");
-
-    const app = await cloud.assertAppRegistrationExists();
-    appRegistration = app;
-
-    const identity = readRepositoryIdentity(
-      await runGh(
-        ports.commands,
-        ["api", `repos/${cloud.repository}`],
-        `gh api repos/${cloud.repository}`
-      )
-    );
-    const customization = readOidcSubjectCustomization(
-      await runGh(
-        ports.commands,
-        ["api", `repos/${cloud.repository}/actions/oidc/customization/sub`],
-        "gh api the repository's OIDC subject customization"
-      )
-    );
-    const subjects = expectedFederatedCredentialSubjects({
-      fullName: cloud.repository,
-      ownerId: identity.ownerId,
-      repoId: identity.repoId,
-      environmentName: cloud.environmentName,
-      customization
+    const canvas = await cloudCanvas.open({
+      title: "cloud-create-environment",
+      initialPage: "credentials",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
-    expect(subjects.supported, subjects.supported ? "" : subjects.reason).toBe(
-      true
-    );
-    if (subjects.supported)
-      for (const subject of (federatedSubjects = subjects.required))
-        await cloud.assertFederatedCredentialExists(subject);
+    const page = canvas.target;
 
-    const principalId = readServicePrincipalObjectId(
-      await runAz(
-        ports.commands,
-        ["ad", "sp", "show", "--id", app.appId, "-o", "json"],
-        `az ad sp show --id ${app.appId}`
-      )
-    );
-    servicePrincipalId = principalId;
-    roleAssignments = await cloud.assertRoleAssignmentExists(principalId);
+    let primaryError: unknown;
+    try {
+      await createCredentialProfile(canvas, account);
 
-    await cloud.assertGitHubEnvironmentExists();
-    const variables = readEnvironmentVariables(
-      await runGh(
-        ports.commands,
-        [
-          "api",
-          "--paginate",
-          "--slurp",
-          environmentVariablesApiPath(cloud.repository, cloud.environmentName)
-        ],
-        "gh api the environment's variables"
-      )
-    );
-    createdVariables = variables;
-    expect(
-      findEnvironmentIdentityProblems({
-        variables,
-        createdAppId: app.appId,
-        bootstrapClientId: process.env.AZURE_CLIENT_ID,
-        expected: {
-          tenantId: account.tenantId,
-          subscriptionId: cloud.subscriptionId,
-          resourceGroup: cloud.resourceGroup,
-          // The fixture creates its AKS cluster in that same resource group.
-          clusterResourceGroup: cloud.resourceGroup,
-          cluster: cloud.clusterName,
-          namespace: FIXTURE_KUBERNETES_NAMESPACE
-        }
-      })
-    ).toEqual([]);
+      await canvas.goto("environment");
+      await page.locator("#new-env-btn").click();
+      await expect(page.locator("#env-form")).toBeVisible();
+      await page.locator("#env-profile-button").click();
+      await page
+        .locator("#env-profile-menu")
+        .getByRole("option", { name: new RegExp(PROFILE_NAME) })
+        .click();
+      await page.locator("#env-step1-next").click();
+      await expect(page.locator("#env-step-details")).toBeVisible();
 
-    const publication = classifyWorkflowPublication({
-      defaultBranchPaths: readWorkflowDirectory(
-        await ports.commands.runGh([
-          "api",
-          `repos/${cloud.repository}/contents/${WORKFLOW_DIRECTORY}?ref=${cloud.defaultBranch}`
-        ]),
-        "gh api the default branch's workflow directory"
-      ),
-      fallbackBranches: selectFallbackBranches(
+      await page.getByLabel("Environment name").fill(cloud.environmentName);
+      // Selecting by value rather than typing a custom name is deliberate: the
+      // option only exists if the product's own `az group list` and `az aks
+      // list` discovery found the group and cluster the fixture created.
+      await page
+        .getByLabel("Resource Group", { exact: true })
+        .selectOption(cloud.resourceGroup);
+      await page
+        .getByLabel("Cluster", { exact: true })
+        .selectOption(cloud.clusterName);
+      await page
+        .locator("#azure-namespace-select")
+        .selectOption(FIXTURE_KUBERNETES_NAMESPACE);
+
+      const operationResponse = pageOf(page).waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/operations" &&
+          response.request().method() === "POST"
+      );
+      const createEnvironment = page.locator("#deploy-btn:not([disabled])");
+      await expect(createEnvironment).toHaveText("Create Environment");
+      await createEnvironment.click();
+      const createResponse = await operationResponse;
+      const operationId = readOperationId(
+        readOperationHttpResponse({
+          ok: createResponse.ok(),
+          status: createResponse.status(),
+          statusText: createResponse.statusText(),
+          body: await createResponse.text()
+        })
+      );
+      expect(operationId).toMatch(/^op_/);
+      productOperationStarted = true;
+
+      const snapshot = async (): Promise<
+        ReturnType<typeof readOperationSnapshot>
+      > =>
+        readOperationSnapshot(
+          readOperationHttpResponse(
+            await page.evaluate(async (id) => {
+              const response = await fetch(`/api/operations/${id}`);
+              return {
+                ok: response.ok,
+                status: response.status,
+                statusText: response.statusText,
+                body: await response.text()
+              };
+            }, operationId)
+          )
+        );
+
+      await expect
+        .poll(async () => (await snapshot()).terminal, {
+          timeout: CREATE_OPERATION_TIMEOUT_MS,
+          intervals: [5_000]
+        })
+        .toBe(true);
+      const finished = await snapshot();
+      expect(
+        finished.state,
+        `The create-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
+      ).toBe("succeeded");
+
+      const app = await cloud.assertAppRegistrationExists();
+      appRegistration = app;
+
+      const identity = readRepositoryIdentity(
         await runGh(
           ports.commands,
-          [
-            "api",
-            `repos/${cloud.repository}/git/matching-refs/heads/${workflowFallbackBranchPrefix(cloud.environmentName)}`
-          ],
-          "gh api this environment's workflow fallback branches"
-        ),
-        cloud.environmentName
-      ),
-      openPullRequests: selectFallbackPullRequests(
+          ["api", `repos/${cloud.repository}`],
+          `gh api repos/${cloud.repository}`
+        )
+      );
+      const customization = readOidcSubjectCustomization(
+        await runGh(
+          ports.commands,
+          ["api", `repos/${cloud.repository}/actions/oidc/customization/sub`],
+          "gh api the repository's OIDC subject customization"
+        )
+      );
+      const subjects = expectedFederatedCredentialSubjects({
+        fullName: cloud.repository,
+        ownerId: identity.ownerId,
+        repoId: identity.repoId,
+        environmentName: cloud.environmentName,
+        customization
+      });
+      expect(
+        subjects.supported,
+        subjects.supported ? "" : subjects.reason
+      ).toBe(true);
+      if (subjects.supported)
+        for (const subject of (federatedSubjects = subjects.required))
+          await cloud.assertFederatedCredentialExists(subject);
+
+      const principalId = readServicePrincipalObjectId(
+        await runAz(
+          ports.commands,
+          ["ad", "sp", "show", "--id", app.appId, "-o", "json"],
+          `az ad sp show --id ${app.appId}`
+        )
+      );
+      servicePrincipalId = principalId;
+      roleAssignments = await cloud.assertRoleAssignmentExists(principalId);
+
+      await cloud.assertGitHubEnvironmentExists();
+      const variables = readEnvironmentVariables(
         await runGh(
           ports.commands,
           [
             "api",
             "--paginate",
             "--slurp",
-            `repos/${cloud.repository}/pulls?state=open&per_page=100`
+            environmentVariablesApiPath(cloud.repository, cloud.environmentName)
           ],
-          "gh api the repository's open pull requests"
+          "gh api the environment's variables"
+        )
+      );
+      createdVariables = variables;
+      expect(
+        findEnvironmentIdentityProblems({
+          variables,
+          createdAppId: app.appId,
+          bootstrapClientId: process.env.AZURE_CLIENT_ID,
+          expected: {
+            tenantId: account.tenantId,
+            subscriptionId: cloud.subscriptionId,
+            resourceGroup: cloud.resourceGroup,
+            // The fixture creates its AKS cluster in that same resource group.
+            clusterResourceGroup: cloud.resourceGroup,
+            cluster: cloud.clusterName,
+            namespace: FIXTURE_KUBERNETES_NAMESPACE
+          }
+        })
+      ).toEqual([]);
+
+      const publication = classifyWorkflowPublication({
+        defaultBranchPaths: readWorkflowDirectory(
+          await ports.commands.runGh([
+            "api",
+            `repos/${cloud.repository}/contents/${WORKFLOW_DIRECTORY}?ref=${cloud.defaultBranch}`
+          ]),
+          "gh api the default branch's workflow directory"
         ),
-        cloud.environmentName
-      ),
-      requiredPaths: REQUIRED_LIFECYCLE_WORKFLOWS
-    });
-    expect(
-      publication.outcome,
-      describeWorkflowPublication(publication, {
-        repository: cloud.repository,
-        defaultBranch: cloud.defaultBranch
-      })
-    ).toBe("committed");
+        fallbackBranches: selectFallbackBranches(
+          await runGh(
+            ports.commands,
+            [
+              "api",
+              `repos/${cloud.repository}/git/matching-refs/heads/${workflowFallbackBranchPrefix(cloud.environmentName)}`
+            ],
+            "gh api this environment's workflow fallback branches"
+          ),
+          cloud.environmentName
+        ),
+        openPullRequests: selectFallbackPullRequests(
+          await runGh(
+            ports.commands,
+            [
+              "api",
+              "--paginate",
+              "--slurp",
+              `repos/${cloud.repository}/pulls?state=open&per_page=100`
+            ],
+            "gh api the repository's open pull requests"
+          ),
+          cloud.environmentName
+        ),
+        requiredPaths: REQUIRED_LIFECYCLE_WORKFLOWS
+      });
+      expect(
+        publication.outcome,
+        describeWorkflowPublication(publication, {
+          repository: cloud.repository,
+          defaultBranch: cloud.defaultBranch
+        })
+      ).toBe("committed");
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
+        primaryError
+      );
+    }
   });
 
   test("deploys the application through Canvas and proves it is running on AKS", async ({
-    copilotApp: _copilotApp
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(DEPLOYMENT_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
-    const page = requireCanvas();
-    await gotoCanvasPage(page, "deploying");
-
-    const applicationListingPath = repositoryListingPath(
-      "/api/list-applications",
-      cloud.repository
-    );
-    const applications = readApplicationNames(
-      await page.evaluate(async (path) => {
-        const response = await fetch(path);
-        return (await response.json()) as unknown;
-      }, applicationListingPath)
-    );
-    deployedApplication = requireSingleApplication(applications);
-    deployedNamespace = deploymentNamespace(FIXTURE_KUBERNETES_NAMESPACE);
-    cloud.registerApplicationCleanupTarget(
-      deployedApplication,
-      deployedNamespace
-    );
-
-    await page.locator("#deploy-app-select").selectOption(deployedApplication);
-    await page
-      .locator("#deploy-env-select")
-      .selectOption(cloud.environmentName);
-    // The session runs on its own worktree branch. Deploy the default branch,
-    // which holds the published model.
-    await page
-      .locator("#deploy-branch-select")
-      .selectOption(cloud.defaultBranch);
-
-    const deployResponse = pageOf(page).waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === "/api/deploy" &&
-        response.request().method() === "POST"
-    );
-    const deployButton = page.locator("#deploy-now-btn:not([disabled])");
-    await expect(deployButton).toHaveText("Deploy");
-    untrackedWorkflowDispatch = true;
-    await deployButton.click();
-    expect((await deployResponse).ok()).toBe(true);
-
-    const snapshot = async (): Promise<
-      ReturnType<typeof readDeployStatusSnapshot>
-    > =>
-      readDeployStatusSnapshot(
-        await page.evaluate(async () => {
-          const response = await fetch("/api/deploy-status");
-          return (await response.json()) as unknown;
-        })
-      );
-    const trackedSnapshot = async (): Promise<
-      ReturnType<typeof readDeployStatusSnapshot>
-    > => {
-      const current = await snapshot();
-      if (current.runUrl) {
-        try {
-          ownedWorkflowRunIds.add(
-            requireWorkflowRunId(current.runUrl, cloud.repository)
-          );
-          untrackedWorkflowDispatch = false;
-        } catch (error) {
-          untrackedWorkflowDispatch = true;
-          throw error;
-        }
-      }
-      return current;
-    };
-
-    await expect
-      .poll(async () => (await trackedSnapshot()).terminal, {
-        timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
-        intervals: [5_000]
-      })
-      .toBe(true);
-    const finished = await trackedSnapshot();
-    try {
-      ownedWorkflowRunIds.add(
-        requireWorkflowRunId(finished.runUrl, cloud.repository)
-      );
-      untrackedWorkflowDispatch = false;
-    } catch (error) {
-      untrackedWorkflowDispatch = true;
-      throw error;
-    }
-    expect(
-      finished.succeeded,
-      describeDeployFailure(finished, finished.logs)
-    ).toBe(true);
-
-    const workloads = await cloud.assertApplicationWorkloadsPresent(
-      deployedApplication,
-      deployedNamespace
-    );
-    const deploymentProblems = findDeployedApplicationProblems({
-      application: deployedApplication,
-      namespace: deployedNamespace,
-      namespaceExists: await cloud.namespaceExists(deployedNamespace),
-      workloads
+    const canvas = await cloudCanvas.open({
+      title: "cloud-deploy-application",
+      initialPage: "deploying",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
-    expect(
-      deploymentProblems,
-      describeDeploymentProblems(
-        "The workflow completed but the application was not running on AKS:",
-        deploymentProblems
-      )
-    ).toEqual([]);
+    const page = canvas.target;
+    let primaryError: unknown;
 
-    const deploymentListingPath = repositoryListingPath(
-      "/api/list-deployments",
-      cloud.repository,
-      true
-    );
-    // Read the same way stage three waits: a listing answered while GitHub
-    // has not yet attached a status to the deploy's own deployment record is
-    // a transient the canvas client absorbs, not a failed deploy.
-    const deployPresence = createTolerantProbe(async () => {
-      const rows = readDeploymentRows(
+    try {
+      await canvas.goto("deploying");
+
+      const applicationListingPath = repositoryListingPath(
+        "/api/list-applications",
+        cloud.repository
+      );
+      const applications = readApplicationNames(
         await page.evaluate(async (path) => {
           const response = await fetch(path);
           return (await response.json()) as unknown;
-        }, deploymentListingPath)
+        }, applicationListingPath)
       );
-      return classifyDeploymentPresence(
-        rows,
+      deployedApplication = requireSingleApplication(applications);
+      deployedNamespace = deploymentNamespace(FIXTURE_KUBERNETES_NAMESPACE);
+      cloud.registerApplicationCleanupTarget(
         deployedApplication,
-        cloud.environmentName
-      ).present;
-    });
-    try {
+        deployedNamespace
+      );
+
+      await page
+        .locator("#deploy-app-select")
+        .selectOption(deployedApplication);
+      await page
+        .locator("#deploy-env-select")
+        .selectOption(cloud.environmentName);
+      // The app session runs on its own worktree branch. Deploy the default
+      // branch, which holds the published model.
+      if (cloudCanvas.host === "copilot-app")
+        await page
+          .locator("#deploy-branch-select")
+          .selectOption(cloud.defaultBranch);
+      await expect(page.locator("#deploy-branch-select")).toHaveValue(
+        cloud.defaultBranch
+      );
+
+      const deployResponse = pageOf(page).waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/deploy" &&
+          response.request().method() === "POST"
+      );
+      const deployButton = page.locator("#deploy-now-btn:not([disabled])");
+      await expect(deployButton).toHaveText("Deploy");
+      untrackedWorkflowDispatch = true;
+      await deployButton.click();
+      expect((await deployResponse).ok()).toBe(true);
+
+      const snapshot = async (): Promise<
+        ReturnType<typeof readDeployStatusSnapshot>
+      > =>
+        readDeployStatusSnapshot(
+          await page.evaluate(async () => {
+            const response = await fetch("/api/deploy-status");
+            return (await response.json()) as unknown;
+          })
+        );
+      const trackedSnapshot = async (): Promise<
+        ReturnType<typeof readDeployStatusSnapshot>
+      > => {
+        const current = await snapshot();
+        if (current.runUrl) {
+          try {
+            ownedWorkflowRunIds.add(
+              requireWorkflowRunId(current.runUrl, cloud.repository)
+            );
+            untrackedWorkflowDispatch = false;
+          } catch (error) {
+            untrackedWorkflowDispatch = true;
+            throw error;
+          }
+        }
+        return current;
+      };
+
       await expect
-        .poll(deployPresence.read, {
+        .poll(async () => (await trackedSnapshot()).terminal, {
           timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
           intervals: [5_000]
         })
         .toBe(true);
+      const finished = await trackedSnapshot();
+      try {
+        ownedWorkflowRunIds.add(
+          requireWorkflowRunId(finished.runUrl, cloud.repository)
+        );
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
+      expect(
+        finished.succeeded,
+        describeDeployFailure(finished, finished.logs)
+      ).toBe(true);
+
+      const workloads = await cloud.assertApplicationWorkloadsPresent(
+        deployedApplication,
+        deployedNamespace
+      );
+      const deploymentProblems = findDeployedApplicationProblems({
+        application: deployedApplication,
+        namespace: deployedNamespace,
+        namespaceExists: await cloud.namespaceExists(deployedNamespace),
+        workloads
+      });
+      expect(
+        deploymentProblems,
+        describeDeploymentProblems(
+          "The workflow completed but the application was not running on AKS:",
+          deploymentProblems
+        )
+      ).toEqual([]);
+
+      const deploymentListingPath = repositoryListingPath(
+        "/api/list-deployments",
+        cloud.repository,
+        true
+      );
+      // Read the same way stage three waits: a listing answered while GitHub
+      // has not yet attached a status to the deploy's own deployment record is
+      // a transient the canvas client absorbs, not a failed deploy.
+      const deployPresence = createTolerantProbe(async () => {
+        const rows = readDeploymentRows(
+          await page.evaluate(async (path) => {
+            const response = await fetch(path);
+            return (await response.json()) as unknown;
+          }, deploymentListingPath)
+        );
+        return classifyDeploymentPresence(
+          rows,
+          deployedApplication,
+          cloud.environmentName
+        ).present;
+      });
+      try {
+        await expect
+          .poll(deployPresence.read, {
+            timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+            intervals: [5_000]
+          })
+          .toBe(true);
+      } catch (error) {
+        throw deployPresence.explain(error);
+      }
     } catch (error) {
-      throw deployPresence.explain(error);
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
+        primaryError
+      );
     }
   });
 
   test("refuses to delete the environment while the deployment is live", async ({
-    copilotApp: _copilotApp
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(DELETE_REFUSAL_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
-    const page = requireCanvas();
-    await gotoCanvasPage(page, "environment");
-
-    const deleteButton = page.locator(
-      `.js-delete-env[data-env="${cloud.environmentName}"]`
-    );
-    await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
-    await deleteButton.click();
-    const deleteResponse = pageOf(page).waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
-        response.request().method() === "POST"
-    );
-    await page.locator("#env-confirm-ok").click();
-    const response = await deleteResponse;
-    await cloud.assertGitHubEnvironmentExists();
-    const problems = findDeleteEnvironmentRefusalProblems({
-      status: response.status(),
-      payload: (await response.json()) as unknown,
-      application: deployedApplication,
-      environmentName: cloud.environmentName,
-      environmentExists: true
+    const canvas = await cloudCanvas.open({
+      title: "cloud-refuse-live-environment-delete",
+      initialPage: "environment",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
-    expect(
-      problems,
-      describeDeploymentProblems(
-        "The product did not safely refuse the live environment delete:",
-        problems
-      )
-    ).toEqual([]);
-    await cloud.assertApplicationWorkloadsPresent(
-      deployedApplication,
-      deployedNamespace
-    );
+    const page = canvas.target;
+    let primaryError: unknown;
+
+    try {
+      await canvas.goto("environment");
+
+      const deleteButton = page.locator(
+        `.js-delete-env[data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
+      await deleteButton.click();
+      const deleteResponse = pageOf(page).waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
+          response.request().method() === "POST"
+      );
+      await page.locator("#env-confirm-ok").click();
+      const response = await deleteResponse;
+      await cloud.assertGitHubEnvironmentExists();
+      const problems = findDeleteEnvironmentRefusalProblems({
+        status: response.status(),
+        payload: (await response.json()) as unknown,
+        application: deployedApplication,
+        environmentName: cloud.environmentName,
+        environmentExists: true
+      });
+      expect(
+        problems,
+        describeDeploymentProblems(
+          "The product did not safely refuse the live environment delete:",
+          problems
+        )
+      ).toEqual([]);
+      await cloud.assertApplicationWorkloadsPresent(
+        deployedApplication,
+        deployedNamespace
+      );
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
+        primaryError
+      );
+    }
   });
 
   test("deletes the deployment while preserving its environment and identity", async ({
-    copilotApp: _copilotApp
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(DEPLOYMENT_TEST_TIMEOUT_MS);
     const cloud = fixture;
@@ -996,151 +1062,174 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     if (!appBefore)
       throw new Error("The product-created application was not observed.");
 
-    const page = requireCanvas();
-    await gotoCanvasPage(page, "deploying");
+    const canvas = await cloudCanvas.open({
+      title: "cloud-delete-deployment",
+      initialPage: "deploying",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
+    });
+    const page = canvas.target;
+    let primaryError: unknown;
 
-    const deleteButton = page.locator(
-      `.js-del-dep[data-app="${deployedApplication}"][data-env="${cloud.environmentName}"]`
-    );
-    await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
-    await deleteButton.click();
-    await page
-      .getByRole("button", { name: "I want to delete this deployment" })
-      .click();
-    await page
-      .getByRole("button", { name: /have read and understand/i })
-      .click();
-    await page
-      .locator("#del-confirm-input")
-      .fill(`${deployedApplication}/${cloud.environmentName}`);
-    const runsBefore = await listWorkflowRunIds(
-      ports.commands,
-      cloud.repository,
-      DELETE_DEPLOYMENT_WORKFLOW
-    );
-
-    const deleteResponse = pageOf(page).waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === "/api/delete-deployment" &&
-        response.request().method() === "POST"
-    );
-    untrackedWorkflowDispatch = true;
-    await page.locator("#del-confirm-btn").click();
-    const response = await deleteResponse;
-    const payload = (await response.json()) as unknown;
-    expect(response.ok()).toBe(true);
     try {
-      const reportedRunId = readOptionalDispatchedWorkflowRunId(
-        payload,
-        cloud.repository
-      );
-      ownedWorkflowRunIds.add(
-        reportedRunId ??
-          (await discoverNewWorkflowRunId(
-            ports.commands,
-            cloud.repository,
-            DELETE_DEPLOYMENT_WORKFLOW,
-            runsBefore
-          ))
-      );
-      untrackedWorkflowDispatch = false;
-    } catch (error) {
-      untrackedWorkflowDispatch = true;
-      throw error;
-    }
+      await canvas.goto("deploying");
 
-    const deletionPresence = createTolerantProbe(async () => {
-      const rows = readDeploymentRows(
-        await page.evaluate(
-          async (path) => {
-            const response = await fetch(path);
-            return (await response.json()) as unknown;
-          },
-          repositoryListingPath("/api/list-deployments", cloud.repository, true)
+      const deleteButton = page.locator(
+        `.js-del-dep[data-app="${deployedApplication}"][data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
+      await deleteButton.click();
+      await page
+        .getByRole("button", { name: "I want to delete this deployment" })
+        .click();
+      await page
+        .getByRole("button", { name: /have read and understand/i })
+        .click();
+      await page
+        .locator("#del-confirm-input")
+        .fill(`${deployedApplication}/${cloud.environmentName}`);
+      const runsBefore = await listWorkflowRunIds(
+        ports.commands,
+        cloud.repository,
+        DELETE_DEPLOYMENT_WORKFLOW
+      );
+
+      const deleteResponse = pageOf(page).waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/delete-deployment" &&
+          response.request().method() === "POST"
+      );
+      untrackedWorkflowDispatch = true;
+      await page.locator("#del-confirm-btn").click();
+      const response = await deleteResponse;
+      const payload = (await response.json()) as unknown;
+      expect(response.ok()).toBe(true);
+      try {
+        const reportedRunId = readOptionalDispatchedWorkflowRunId(
+          payload,
+          cloud.repository
+        );
+        ownedWorkflowRunIds.add(
+          reportedRunId ??
+            (await discoverNewWorkflowRunId(
+              ports.commands,
+              cloud.repository,
+              DELETE_DEPLOYMENT_WORKFLOW,
+              runsBefore
+            ))
+        );
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
+
+      const deletionPresence = createTolerantProbe(async () => {
+        const rows = readDeploymentRows(
+          await page.evaluate(
+            async (path) => {
+              const response = await fetch(path);
+              return (await response.json()) as unknown;
+            },
+            repositoryListingPath(
+              "/api/list-deployments",
+              cloud.repository,
+              true
+            )
+          )
+        );
+        return classifyDeploymentPresence(
+          rows,
+          deployedApplication,
+          cloud.environmentName
+        ).present;
+      });
+      try {
+        await expect
+          .poll(deletionPresence.read, {
+            timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+            intervals: [5_000]
+          })
+          .toBe(false);
+      } catch (error) {
+        throw deletionPresence.explain(error);
+      }
+
+      cloud.recordApplicationDeletionSucceeded(
+        deployedApplication,
+        deployedNamespace
+      );
+      await cloud.assertApplicationWorkloadsAbsent(
+        deployedApplication,
+        deployedNamespace
+      );
+      await cloud.assertGitHubEnvironmentExists();
+      for (const subject of federatedSubjects)
+        await cloud.assertFederatedCredentialExists(subject);
+      if (!servicePrincipalId)
+        throw new Error(
+          "The product-created service principal was not observed."
+        );
+      await cloud.assertRoleAssignmentsExist(roleAssignments);
+      const principalAfter = readServicePrincipalObjectId(
+        await runAz(
+          ports.commands,
+          ["ad", "sp", "show", "--id", appBefore.appId, "-o", "json"],
+          `az ad sp show --id ${appBefore.appId} after deployment deletion`
         )
       );
-      return classifyDeploymentPresence(
-        rows,
-        deployedApplication,
-        cloud.environmentName
-      ).present;
-    });
-    try {
-      await expect
-        .poll(deletionPresence.read, {
-          timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
-          intervals: [5_000]
-        })
-        .toBe(false);
-    } catch (error) {
-      throw deletionPresence.explain(error);
-    }
-
-    cloud.recordApplicationDeletionSucceeded(
-      deployedApplication,
-      deployedNamespace
-    );
-    await cloud.assertApplicationWorkloadsAbsent(
-      deployedApplication,
-      deployedNamespace
-    );
-    await cloud.assertGitHubEnvironmentExists();
-    for (const subject of federatedSubjects)
-      await cloud.assertFederatedCredentialExists(subject);
-    if (!servicePrincipalId)
-      throw new Error(
-        "The product-created service principal was not observed."
+      expect(principalAfter).toBe(servicePrincipalId);
+      const appAfter = await cloud.assertAppRegistrationExists();
+      const variables = readEnvironmentVariables(
+        await runGh(
+          ports.commands,
+          [
+            "api",
+            "--paginate",
+            "--slurp",
+            environmentVariablesApiPath(cloud.repository, cloud.environmentName)
+          ],
+          "gh api the surviving environment's variables"
+        )
       );
-    await cloud.assertRoleAssignmentsExist(roleAssignments);
-    const principalAfter = readServicePrincipalObjectId(
-      await runAz(
-        ports.commands,
-        ["ad", "sp", "show", "--id", appBefore.appId, "-o", "json"],
-        `az ad sp show --id ${appBefore.appId} after deployment deletion`
-      )
-    );
-    expect(principalAfter).toBe(servicePrincipalId);
-    const appAfter = await cloud.assertAppRegistrationExists();
-    const variables = readEnvironmentVariables(
-      await runGh(
-        ports.commands,
-        [
-          "api",
-          "--paginate",
-          "--slurp",
-          environmentVariablesApiPath(cloud.repository, cloud.environmentName)
-        ],
-        "gh api the surviving environment's variables"
-      )
-    );
-    const remainingWorkloads = await cloud.readApplicationWorkloads(
-      deployedApplication,
-      deployedNamespace
-    );
-    const survivalProblems = findSurvivingArtifactProblems({
-      environmentName: cloud.environmentName,
-      environmentExists: true,
-      expectedVariables: createdVariables,
-      variables,
-      appIdBefore: appBefore.appId,
-      appIdAfter: appAfter.appId,
-      federatedSubjects,
-      expectedFederatedSubjects: federatedSubjects,
-      remainingWorkloads
-    });
-    expect(
-      survivalProblems,
-      describeDeploymentProblems(
-        "Deleting the deployment damaged state owned by the environment:",
-        survivalProblems
-      )
-    ).toEqual([]);
-    await gotoCanvasPage(page, "deploying");
-    await expect(deleteButton).toHaveCount(0);
+      const remainingWorkloads = await cloud.readApplicationWorkloads(
+        deployedApplication,
+        deployedNamespace
+      );
+      const survivalProblems = findSurvivingArtifactProblems({
+        environmentName: cloud.environmentName,
+        environmentExists: true,
+        expectedVariables: createdVariables,
+        variables,
+        appIdBefore: appBefore.appId,
+        appIdAfter: appAfter.appId,
+        federatedSubjects,
+        expectedFederatedSubjects: federatedSubjects,
+        remainingWorkloads
+      });
+      expect(
+        survivalProblems,
+        describeDeploymentProblems(
+          "Deleting the deployment damaged state owned by the environment:",
+          survivalProblems
+        )
+      ).toEqual([]);
+      await canvas.reload();
+      await expect(deleteButton).toHaveCount(0);
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
+        primaryError
+      );
+    }
   });
 
   test("deletes the GitHub Environment it created", async ({
-    copilotApp: _copilotApp
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(DELETE_TEST_TIMEOUT_MS);
     const cloud = fixture;
@@ -1154,145 +1243,165 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         "The product-created service principal was not observed."
       );
 
-    const page = requireCanvas();
-    await gotoCanvasPage(page, "environment");
-
-    // The row has to come from the product's own `/api/list-environments`.
-    // Posting the delete directly would prove the route works while leaving
-    // an environment the page cannot even see undeleted.
-    const deleteButton = page.locator(
-      `.js-delete-env[data-env="${cloud.environmentName}"]`
-    );
-    await expect(deleteButton).toBeVisible({
-      timeout: DELETE_POSTCONDITION_TIMEOUT_MS
+    const canvas = await cloudCanvas.open({
+      title: "cloud-delete-environment",
+      initialPage: "environment",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
-    await deleteButton.click();
+    const page = canvas.target;
 
-    await expect(page.locator("#env-confirm-title")).toHaveText(
-      "Delete environment?"
-    );
-    await expect(page.locator("#env-confirm-message")).toContainText(
-      cloud.environmentName
-    );
+    let primaryError: unknown;
+    try {
+      await canvas.goto("environment");
 
-    const deleteResponse = pageOf(page).waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
-        response.request().method() === "POST"
-    );
-    const runsBefore = await listWorkflowRunIds(
-      ports.commands,
-      cloud.repository,
-      DELETE_ENVIRONMENT_WORKFLOW
-    );
-    untrackedWorkflowDispatch = true;
-    await page.locator("#env-confirm-ok").click();
-    const response = await deleteResponse;
-    const payload = (await response.json()) as unknown;
-    const problems = findDeleteEnvironmentSuccessProblems({
-      status: response.status(),
-      payload,
-      environmentName: cloud.environmentName
-    });
-    expect(
-      problems,
-      describeProblems(
-        problems,
-        "The product refused to delete a free environment:"
-      )
-    ).toEqual([]);
+      // The row has to come from the product's own `/api/list-environments`.
+      // Posting the delete directly would prove the route works while leaving
+      // an environment the page cannot even see undeleted.
+      const deleteButton = page.locator(
+        `.js-delete-env[data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({
+        timeout: DELETE_POSTCONDITION_TIMEOUT_MS
+      });
+      await deleteButton.click();
 
-    const operationId = readOperationId(payload);
-    const snapshot = async (): Promise<
-      ReturnType<typeof readOperationSnapshot>
-    > =>
-      readOperationSnapshot(
-        readOperationHttpResponse(
-          await page.evaluate(async (id) => {
-            const operationResponse = await fetch(`/api/operations/${id}`);
-            return {
-              ok: operationResponse.ok,
-              status: operationResponse.status,
-              statusText: operationResponse.statusText,
-              body: await operationResponse.text()
-            };
-          }, operationId)
-        )
+      await expect(page.locator("#env-confirm-title")).toHaveText(
+        "Delete environment?"
+      );
+      await expect(page.locator("#env-confirm-message")).toContainText(
+        cloud.environmentName
       );
 
-    await expect
-      .poll(async () => (await snapshot()).terminal, {
-        timeout: DELETE_OPERATION_TIMEOUT_MS,
-        intervals: [5_000]
-      })
-      .toBe(true);
-    const finished = await snapshot();
-    try {
-      const runId =
-        finished.state === "succeeded" ?
-          await discoverNewWorkflowRunId(
-            ports.commands,
-            cloud.repository,
-            DELETE_ENVIRONMENT_WORKFLOW,
-            runsBefore
-          )
-        : findNewWorkflowRunId(
-            runsBefore,
-            await listWorkflowRunIds(
-              ports.commands,
-              cloud.repository,
-              DELETE_ENVIRONMENT_WORKFLOW
-            )
-          );
-      if (runId) ownedWorkflowRunIds.add(runId);
-      untrackedWorkflowDispatch = false;
-    } catch (error) {
+      const deleteResponse = pageOf(page).waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
+          response.request().method() === "POST"
+      );
+      const runsBefore = await listWorkflowRunIds(
+        ports.commands,
+        cloud.repository,
+        DELETE_ENVIRONMENT_WORKFLOW
+      );
       untrackedWorkflowDispatch = true;
-      throw error;
-    }
-    expect(
-      finished.state,
-      `The delete-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
-    ).toBe("succeeded");
+      await page.locator("#env-confirm-ok").click();
+      const response = await deleteResponse;
+      const payload = (await response.json()) as unknown;
+      const problems = findDeleteEnvironmentSuccessProblems({
+        status: response.status(),
+        payload,
+        environmentName: cloud.environmentName
+      });
+      expect(
+        problems,
+        describeProblems(
+          problems,
+          "The product refused to delete a free environment:"
+        )
+      ).toEqual([]);
 
-    // The browser must also observe the terminal operation and complete the
-    // user-visible lifecycle rather than merely accepting the request.
-    await expect(page.locator("#env-confirm-title")).toHaveText(
-      "Environment deleted",
-      { timeout: DELETE_POSTCONDITION_TIMEOUT_MS }
-    );
-    await expect(page.locator("#env-confirm-message")).toContainText(
-      `The environment "${cloud.environmentName}" was deleted.`
-    );
-    const environmentTable = page.locator("#env-table-body");
-    await expect(environmentTable).not.toContainText("Loading environments…", {
-      timeout: DELETE_POSTCONDITION_TIMEOUT_MS
-    });
-    await expect(environmentTable).not.toContainText(
-      "Could not load environments."
-    );
-    await expect(deleteButton).toHaveCount(0, {
-      timeout: DELETE_POSTCONDITION_TIMEOUT_MS
-    });
-
-    // The proof. GitHub is asked directly, and the fixture refuses to answer
-    // unless stage one observed this same Environment present first.
-    await cloud.assertGitHubEnvironmentAbsent();
-    await assertEnvironmentDeletionIdentityOutcome({
-      assertions: cloud,
-      assertServicePrincipalExists: async () => {
-        const retainedServicePrincipalId = readServicePrincipalObjectId(
-          await runAz(
-            ports.commands,
-            ["ad", "sp", "show", "--id", appBefore.appId, "-o", "json"],
-            `az ad sp show --id ${appBefore.appId}`
+      const operationId = readOperationId(payload);
+      const snapshot = async (): Promise<
+        ReturnType<typeof readOperationSnapshot>
+      > =>
+        readOperationSnapshot(
+          readOperationHttpResponse(
+            await page.evaluate(async (id) => {
+              const operationResponse = await fetch(`/api/operations/${id}`);
+              return {
+                ok: operationResponse.ok,
+                status: operationResponse.status,
+                statusText: operationResponse.statusText,
+                body: await operationResponse.text()
+              };
+            }, operationId)
           )
         );
-        expect(retainedServicePrincipalId).toBe(principalId);
-      },
-      expectedAppRegistration: appBefore,
-      expectedRoleAssignments: roleAssignments,
-      federatedSubjects
-    });
+
+      await expect
+        .poll(async () => (await snapshot()).terminal, {
+          timeout: DELETE_OPERATION_TIMEOUT_MS,
+          intervals: [5_000]
+        })
+        .toBe(true);
+      const finished = await snapshot();
+      try {
+        const runId =
+          finished.state === "succeeded" ?
+            await discoverNewWorkflowRunId(
+              ports.commands,
+              cloud.repository,
+              DELETE_ENVIRONMENT_WORKFLOW,
+              runsBefore
+            )
+          : findNewWorkflowRunId(
+              runsBefore,
+              await listWorkflowRunIds(
+                ports.commands,
+                cloud.repository,
+                DELETE_ENVIRONMENT_WORKFLOW
+              )
+            );
+        if (runId) ownedWorkflowRunIds.add(runId);
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
+      expect(
+        finished.state,
+        `The delete-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
+      ).toBe("succeeded");
+
+      // The browser must also observe the terminal operation and complete the
+      // user-visible lifecycle rather than merely accepting the request.
+      await expect(page.locator("#env-confirm-title")).toHaveText(
+        "Environment deleted",
+        { timeout: DELETE_POSTCONDITION_TIMEOUT_MS }
+      );
+      await expect(page.locator("#env-confirm-message")).toContainText(
+        `The environment "${cloud.environmentName}" was deleted.`
+      );
+      const environmentTable = page.locator("#env-table-body");
+      await expect(environmentTable).not.toContainText(
+        "Loading environments…",
+        { timeout: DELETE_POSTCONDITION_TIMEOUT_MS }
+      );
+      await expect(environmentTable).not.toContainText(
+        "Could not load environments."
+      );
+      await expect(deleteButton).toHaveCount(0, {
+        timeout: DELETE_POSTCONDITION_TIMEOUT_MS
+      });
+
+      // The proof. GitHub is asked directly, and the fixture refuses to answer
+      // unless stage one observed this same Environment present first.
+      await cloud.assertGitHubEnvironmentAbsent();
+      await assertEnvironmentDeletionIdentityOutcome({
+        assertions: cloud,
+        assertServicePrincipalExists: async () => {
+          const retainedServicePrincipalId = readServicePrincipalObjectId(
+            await runAz(
+              ports.commands,
+              ["ad", "sp", "show", "--id", appBefore.appId, "-o", "json"],
+              `az ad sp show --id ${appBefore.appId}`
+            )
+          );
+          expect(retainedServicePrincipalId).toBe(principalId);
+        },
+        expectedAppRegistration: appBefore,
+        expectedRoleAssignments: roleAssignments,
+        federatedSubjects
+      });
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
+        primaryError
+      );
+    }
   });
 });

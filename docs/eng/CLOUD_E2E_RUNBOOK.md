@@ -65,15 +65,13 @@ The last of these is the failure mode with the most expensive false negative. Mi
 
 The product is not implicated. Establish that, then decide whether to re-run or wait.
 
-| Symptom                                          | Cause                                                                          | What to do                                                                                                                                                                                                          |
-|--------------------------------------------------|--------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| The configured AKS cluster cannot be read        | The cluster was removed, renamed, stopped, or the runner lost access           | Verify `AIEXT_CLOUD_E2E_RESOURCE_GROUP` and `AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME`, then run `az aks show` with the workflow identity                                                                                   |
-| The configured AKS location does not match       | `AIEXT_CLOUD_E2E_AZURE_LOCATION` disagrees with the live cluster               | Set the variable to the cluster's canonical Azure location, such as `centralus`, not its display name                                                                                                               |
-| A Graph read finds nothing that was just written | Entra propagation delay                                                        | Nothing. The product retries and the fixture polls. If it fails anyway, the bound is too tight - widen it, do not add a sleep                                                                                       |
-| The Copilot app does not start or sign in        | The app install, WebView2, the desktop session, or the bot account failed      | Read `copilot-app-signin-*` in `test-results/cloud/`. Check that the bot PAT is valid and that the bot has a Copilot seat                                                                                           |
-| The modeling stage times out                     | The agent did not write the three `.radius/` files, or the session stayed busy | Read the `copilot-app` attachments for the session state. The agent is not deterministic; re-run once before you investigate                                                                                        |
-| `azure/login` fails                              | The federated credential does not match, or the identity was changed upstream  | Compare `az-account.json` against the identity `radius-project/wellknown` publishes. The credential is federated on the default branch only                                                                         |
-| The job is cancelled at 290 minutes              | The run genuinely hung                                                         | This should not happen: Playwright caps each test at 55 minutes and the whole suite at 275, writing the trace first. If GitHub cancelled first, the ordering is broken - see the timeout comment in `cloud-e2e.yml` |
+| Symptom                                          | Cause                                                                         | What to do                                                                                                                                                                                                          |
+|--------------------------------------------------|-------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| The configured AKS cluster cannot be read        | The cluster was removed, renamed, stopped, or the runner lost access          | Verify `AIEXT_CLOUD_E2E_RESOURCE_GROUP` and `AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME`, then run `az aks show` with the workflow identity                                                                                   |
+| The configured AKS location does not match       | `AIEXT_CLOUD_E2E_AZURE_LOCATION` disagrees with the live cluster              | Set the variable to the cluster's canonical Azure location, such as `centralus`, not its display name                                                                                                               |
+| A Graph read finds nothing that was just written | Entra propagation delay                                                       | Nothing. The product retries and the fixture polls. If it fails anyway, the bound is too tight - widen it, do not add a sleep                                                                                       |
+| `azure/login` fails                              | The federated credential does not match, or the identity was changed upstream | Compare `az-account.json` against the identity `radius-project/wellknown` publishes. The credential is federated on the default branch only                                                                         |
+| The job is cancelled at 235 minutes              | The run genuinely hung                                                        | This should not happen: Playwright caps each test at 55 minutes and the whole suite at 220, writing the trace first. If GitHub cancelled first, the ordering is broken - see the timeout comment in `cloud-e2e.yml` |
 
 **Re-run rather than investigate** when the error is clearly Azure's and the same run passed yesterday. **Do not re-run repeatedly** to make a red run green: the shared cluster may retain evidence from the failed deployment, and a run that only passes sometimes is telling you something.
 
@@ -115,6 +113,24 @@ Two boundaries worth knowing before you go looking for a gap:
 ## When a run is cancelled
 
 Do not cancel a Cloud E2E run. Cancelling mid-flight can strand a deployment, an Entra application, and GitHub state, converting one slow run into a failure on the next one. The workflow is configured never to cancel itself for this reason. If a CI run must be stopped, dispatch the cleanup workflow after cancellation completes. If cleanup reports that Radius deletion failed, do not remove its retained identity or GitHub state manually; those are the recovery inputs needed to retry deletion. Cleanup always preserves the shared resource group and AKS cluster.
+
+## Run the journey in the GitHub Copilot app
+
+By default, the suite drives this checkout's canvas in headless Chromium on Linux. This is the production path. Scheduled runs use it.
+
+You can also drive the same journey through the GitHub Copilot desktop app. This host is opt-in. It adds one test that runs first. In that test, the Radius agent models the fixture repository from source, and the suite commits and pushes the new `.radius/app.bicep` file. The other tests then use the Radius canvas in the app.
+
+Use one of these methods to select the app host:
+
+| Method                   | How                                                                         |
+|--------------------------|-----------------------------------------------------------------------------|
+| Manual dispatch          | Set the `canvas-host` input to `copilot-app`                                |
+| Scheduled runs           | Set the repository variable `AIEXT_CLOUD_E2E_CANVAS_HOST` to `copilot-app`  |
+| Local run (Windows only) | Set `RADIUS_CLOUD_E2E_CANVAS_HOST=copilot-app` before `pnpm run test:cloud` |
+
+The dispatch input wins over the variable. An unset or blank value selects `harness`. An unknown value stops the suite before any test starts.
+
+With the app host, the job runs on `windows-2025` and installs the app with `winget`. The suite starts the app with a CDP port and signs in with the bot PAT. It uses no new secrets or variables. Quit the app fully before a local run, because the suite will not start while `github.exe` runs. Quitting the app ends all running agent sessions.
 
 ## Required configuration
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TERMINAL_STATES } from "../../../src/operations.js";
 import {
   classifyWorkflowPublication,
+  cloudCanvasState,
   describeWorkflowPublication,
   environmentVariablesApiPath,
   environmentSubjectSuffix,
@@ -1010,6 +1011,30 @@ describe("readWorkflowDirectory", () => {
         "the workflow listing"
       )
     ).toThrow(/failed with exit code 4: <no output>/);
+  });
+});
+
+describe("cloudCanvasState", () => {
+  it("points every repository and branch field at the fixture clone", () => {
+    expect(
+      cloudCanvasState({
+        repository: "octo/app",
+        branch: "main",
+        workspacePath: "/tmp/clone"
+      })
+    ).toEqual({
+      contextRepo: "octo/app",
+      contextBranch: "main",
+      workspacePath: "/tmp/clone",
+      workspaceRepo: "octo/app",
+      workspaceBranch: "main",
+      graphTargetRepo: "octo/app",
+      graphBranch: "main",
+      plannedRepo: "octo/app",
+      plannedBranch: "main",
+      deployingRepo: "octo/app",
+      deployingBranch: "main"
+    });
   });
 });
 

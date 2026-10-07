@@ -7,7 +7,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import cloudConfig from "../../playwright.cloud.config.js";
 import chromiumConfig from "../../playwright.config.js";
 import reliabilityConfig from "../../vitest.reliability.config.js";
@@ -17,7 +17,9 @@ import {
   CLOUD_INSTALLATION_TOKEN_LIFETIME_MS,
   CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS,
   CLOUD_SUITE_TIMEOUT_MS,
+  COPILOT_APP_SERIAL_TEST_TIMEOUT_BUDGET_MS,
   COPILOT_APP_SETUP_TIMEOUT_MS,
+  COPILOT_APP_SUITE_TIMEOUT_MS,
   CREATE_OPERATION_TIMEOUT_MS,
   CREATE_TEST_TIMEOUT_MS,
   DELETE_REFUSAL_TEST_TIMEOUT_MS,
@@ -30,6 +32,7 @@ import {
   MODELING_TEST_TIMEOUT_MS,
   SERIAL_TEST_TIMEOUT_BUDGET_MS
 } from "./support/cloud-timeout-budget.js";
+import { CLOUD_CANVAS_HOST_ENV } from "./support/cloud-canvas-host.js";
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -68,9 +71,6 @@ describe("the cloud Playwright config", () => {
     const globalTimeout = cloudConfig.globalTimeout ?? 0;
 
     expect(CREATE_TEST_TIMEOUT_MS).toBeGreaterThan(CREATE_OPERATION_TIMEOUT_MS);
-    expect(MODELING_TEST_TIMEOUT_MS).toBeGreaterThan(
-      MODEL_GENERATION_TIMEOUT_MS
-    );
     expect(DELETE_TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(
       DELETE_OPERATION_TIMEOUT_MS + 2 * DELETE_POSTCONDITION_TIMEOUT_MS
     );
@@ -83,8 +83,6 @@ describe("the cloud Playwright config", () => {
     );
     expect(
       Math.max(
-        COPILOT_APP_SETUP_TIMEOUT_MS,
-        MODELING_TEST_TIMEOUT_MS,
         CREATE_TEST_TIMEOUT_MS,
         DEPLOYMENT_TEST_TIMEOUT_MS,
         DELETE_REFUSAL_TEST_TIMEOUT_MS,
@@ -108,16 +106,65 @@ describe("the cloud Playwright config", () => {
     });
   });
 
-  it("runs no product code in the Playwright process, which only drives the Copilot app", () => {
-    expect(cloudConfig.globalSetup).toBeUndefined();
-    expect(cloudConfig.globalTeardown).toBeUndefined();
-    expect(cloudConfig.projects).toBeUndefined();
-    expect(cloudConfig.use?.browserName).toBeUndefined();
+  it("installs the same credential-store isolation the Chromium tier needs", () => {
+    expect(cloudConfig.globalSetup).toBe(chromiumConfig.globalSetup);
+    expect(cloudConfig.globalTeardown).toBe(chromiumConfig.globalTeardown);
   });
 
   it("retains a trace and a screenshot for a run nobody can reproduce locally", () => {
     expect(cloudConfig.use?.trace).toBe("retain-on-failure");
     expect(cloudConfig.use?.screenshot).toBe("only-on-failure");
+    expect(cloudConfig.use?.headless).toBe(true);
+  });
+});
+
+describe("the cloud Playwright config with the Copilot app host", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  async function loadConfig(host: string): Promise<typeof cloudConfig> {
+    vi.stubEnv(CLOUD_CANVAS_HOST_ENV, host);
+    vi.resetModules();
+    return (await import("../../playwright.cloud.config.js")).default;
+  }
+
+  it("skips the in-process server setup, because the product runs in the app", async () => {
+    const config = await loadConfig("copilot-app");
+    expect(config.globalSetup).toBeUndefined();
+    expect(config.globalTeardown).toBeUndefined();
+  });
+
+  it("keeps the same safety rules and adds the app stages to the suite budget", async () => {
+    const config = await loadConfig("copilot-app");
+    expect(config.retries).toBe(0);
+    expect(config.workers).toBe(1);
+    expect(config.timeout).toBe(cloudConfig.timeout);
+    expect(config.outputDir).toBe(cloudConfig.outputDir);
+    expect(config.globalTimeout).toBe(COPILOT_APP_SUITE_TIMEOUT_MS);
+    expect(COPILOT_APP_SUITE_TIMEOUT_MS - CLOUD_SUITE_TIMEOUT_MS).toBe(
+      COPILOT_APP_SETUP_TIMEOUT_MS + MODELING_TEST_TIMEOUT_MS
+    );
+    expect(
+      COPILOT_APP_SUITE_TIMEOUT_MS - COPILOT_APP_SERIAL_TEST_TIMEOUT_BUDGET_MS
+    ).toBe(CLOUD_HOOK_TEARDOWN_HEADROOM_MS);
+    expect(MODELING_TEST_TIMEOUT_MS).toBeGreaterThan(
+      MODEL_GENERATION_TIMEOUT_MS
+    );
+    expect(
+      Math.max(COPILOT_APP_SETUP_TIMEOUT_MS, MODELING_TEST_TIMEOUT_MS)
+    ).toBeLessThan(CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS);
+  });
+
+  it("keeps the harness setup when the host is named explicitly", async () => {
+    const config = await loadConfig("harness");
+    expect(config.globalSetup).toBe(chromiumConfig.globalSetup);
+    expect(config.globalTimeout).toBe(CLOUD_SUITE_TIMEOUT_MS);
+  });
+
+  it("fails to load for an unknown host instead of running the wrong journey", async () => {
+    await expect(loadConfig("chromium")).rejects.toThrow(CLOUD_CANVAS_HOST_ENV);
   });
 });
 

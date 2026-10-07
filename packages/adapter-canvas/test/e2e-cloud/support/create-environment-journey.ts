@@ -17,6 +17,7 @@
 //   bootstrap identity rather than to the application the product created.
 //   Those two share a variable name, and confusing them would make every later
 //   stage authenticate as the privileged runner identity and pass.
+import type { CanvasState } from "../../../src/shared.js";
 import { TERMINAL_STATES } from "../../../src/operations.js";
 import { describeError, isGitHubApiNotFound } from "./cloud-command-port.js";
 
@@ -743,6 +744,35 @@ export function readWorkflowDirectory(
     );
   }
   return readDirectoryPaths(parseJsonPayload(result.stdout, context));
+}
+
+export interface CloudCanvasStateInput {
+  readonly repository: string;
+  readonly branch: string;
+  readonly workspacePath: string;
+}
+
+/**
+ * The canvas state a cloud run starts from.
+ *
+ * Deliberately not `baseCanvasState`: that one names the hermetic fixture
+ * repository and worktree branch, and seeding those here would point every real
+ * `gh` call at a repository that does not exist.
+ */
+export function cloudCanvasState(input: CloudCanvasStateInput): CanvasState {
+  return {
+    contextRepo: input.repository,
+    contextBranch: input.branch,
+    workspacePath: input.workspacePath,
+    workspaceRepo: input.repository,
+    workspaceBranch: input.branch,
+    graphTargetRepo: input.repository,
+    graphBranch: input.branch,
+    plannedRepo: input.repository,
+    plannedBranch: input.branch,
+    deployingRepo: input.repository,
+    deployingBranch: input.branch
+  };
 }
 
 export interface CleanupStep {
