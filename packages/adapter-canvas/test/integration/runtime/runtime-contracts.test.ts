@@ -1,3 +1,4 @@
+import { redactCredentials } from "@radius-project/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APP_ORIGIN_REPO_PATH,
@@ -135,6 +136,7 @@ describe("P0-A Radius runtime registration contract", () => {
       {
         readLog: async () =>
           "Error: quota\n----- END DEPLOY ERROR -----\nfixture log text",
+        redactDiagnostic: redactCredentials,
         readControlPlaneLog: () => Promise.reject(new Error("fixture-private"))
       }
     );

@@ -53,6 +53,7 @@ export interface DeployOutcomeDependencies {
     runId: number | string,
     request?: WorkflowReadRequest
   ): Promise<string | null>;
+  redactDiagnostic(value: string): string;
   // The deployErrorKind stamped on an auth-drift failure so the repair guard
   // leaves it for the user to re-verify rather than auto-redeploying it.
   cloudAuthDriftKind: CanvasState["deployErrorKind"];
@@ -92,6 +93,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployOutcomeDependencies)[] = [
   "projectSafeGraphResources",
   "settleDeployStatuses",
   "fetchRunLog",
+  "redactDiagnostic",
   "sleep",
   "now"
 ];
@@ -325,6 +327,7 @@ export function createDeployOutcomeService(
         },
         { provider, resourcesTouched: deployStepStartedAt > 0 },
         {
+          redactDiagnostic: dependencies.redactDiagnostic,
           readLog: (targetRepo, runId) =>
             dependencies.fetchRunLog(targetRepo, runId, request.observation),
           readControlPlaneLog: () =>
