@@ -25,10 +25,157 @@ import {
   replaceSharedCredentials,
   resolveHarnessWorkspace,
   stopHarnessServer,
+  stopAndDrainHarnessDeployment,
+  harnessDeploymentSettled,
   unwindHarnessConstruction,
   type FakeCliCommand,
   type HarnessProcessPlanInput
 } from "./canvas-harness.js";
+
+describe("harness deployment cleanup", () => {
+  function restorationSpies() {
+    return {
+      processEnvironment: vi.fn(),
+      sharedCredentials: vi.fn(),
+      fetchGuard: vi.fn(),
+      fixture: vi.fn()
+    };
+  }
+
+  it("invalidates the server, waits for the monitor, then clears the host port", async () => {
+    const calls: string[] = [];
+    let release: (() => void) | undefined;
+    const idle = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const cleanup = stopAndDrainHarnessDeployment(
+      async () => {
+        calls.push("stop");
+      },
+      async () => {
+        calls.push("drain");
+        await idle;
+      },
+      () => {
+        calls.push("clear");
+      },
+      []
+    );
+    await vi.waitFor(() => expect(calls).toEqual(["stop", "drain"]));
+    release?.();
+    await cleanup;
+    expect(calls).toEqual(["stop", "drain", "clear"]);
+  });
+
+  describe("harnessDeploymentSettled", () => {
+    const lease = {
+      repo: "fixture/radius-app",
+      environment: "fixture-environment",
+      kind: "deploy" as const,
+      expiresAt: 1
+    };
+
+    it("waits for the exact cancelled monitor lease even after its deadline", () => {
+      expect(
+        harnessDeploymentSettled({ deploymentMutation: lease }, lease)
+      ).toBe(false);
+      expect(harnessDeploymentSettled({}, lease)).toBe(true);
+      expect(
+        harnessDeploymentSettled({ deploymentMutation: { ...lease } }, lease)
+      ).toBe(true);
+    });
+
+    it("waits for accepted asynchronous delivery after monitor release", () => {
+      expect(
+        harnessDeploymentSettled({ deployHandoffState: "pending" }, lease)
+      ).toBe(false);
+      expect(
+        harnessDeploymentSettled({ deployHandoffState: "delivered" }, lease)
+      ).toBe(true);
+      expect(
+        harnessDeploymentSettled({ deployHandoffState: "failed" }, lease)
+      ).toBe(true);
+      expect(harnessDeploymentSettled({}, undefined)).toBe(true);
+    });
+  });
+
+  it("drains and clears even when shutdown reports an error", async () => {
+    const failure = new Error("shutdown failed");
+    const errors: unknown[] = [];
+    const drain = vi.fn(async () => {});
+    const clear = vi.fn();
+    const restoration = restorationSpies();
+    await stopAndDrainHarnessDeployment(
+      async () => {
+        throw failure;
+      },
+      drain,
+      clear,
+      errors
+    );
+    for (const restore of Object.values(restoration)) restore();
+    expect(errors).toEqual([failure]);
+    expect(drain).toHaveBeenCalledOnce();
+    expect(clear).toHaveBeenCalledOnce();
+    for (const restore of Object.values(restoration))
+      expect(restore).toHaveBeenCalledOnce();
+  });
+
+  it("propagates an undrained monitor failure without clearing the live port", async () => {
+    const failure = new Error("monitor did not settle");
+    const clear = vi.fn();
+    const errors: unknown[] = [];
+    const restoration = restorationSpies();
+    await expect(
+      stopAndDrainHarnessDeployment(
+        async () => {},
+        async () => {
+          throw failure;
+        },
+        clear,
+        errors
+      ).then(() => {
+        for (const restore of Object.values(restoration)) restore();
+      })
+    ).rejects.toMatchObject({
+      errors: [failure],
+      message: expect.stringContaining("retaining the host port")
+    });
+    expect(clear).not.toHaveBeenCalled();
+    for (const restore of Object.values(restoration))
+      expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("preserves earlier cleanup, shutdown and drain failures without restoring isolation", async () => {
+    const earlier = new Error("page close failed");
+    const shutdown = new Error("shutdown failed");
+    const drain = new Error("monitor did not settle");
+    const errors: unknown[] = [earlier];
+    const clear = vi.fn();
+    const restoration = restorationSpies();
+    await expect(
+      stopAndDrainHarnessDeployment(
+        async () => {
+          throw shutdown;
+        },
+        async () => {
+          throw drain;
+        },
+        clear,
+        errors
+      ).then(() => {
+        for (const restore of Object.values(restoration)) restore();
+      })
+    ).rejects.toMatchObject({
+      errors: [earlier, shutdown, drain],
+      cause: drain,
+      message: expect.stringContaining("fixture isolation")
+    });
+    expect(clear).not.toHaveBeenCalled();
+    for (const restore of Object.values(restoration))
+      expect(restore).not.toHaveBeenCalled();
+  });
+});
 
 describe("fake CLI isolation", () => {
   it("intercepts every cloud command used by environment discovery", () => {
