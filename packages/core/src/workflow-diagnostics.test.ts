@@ -141,6 +141,102 @@ describe("workflow diagnostic redaction", () => {
     }
   );
 
+  describe.each([
+    { host: "core sanitizer", redactDiagnostic: redactCredentials },
+    { host: "identity", redactDiagnostic: (value: string) => value }
+  ])("through the $host host callback", ({ redactDiagnostic }) => {
+    describe.each([
+      { rounds: 1, phase: "primary" },
+      { rounds: 2, phase: "primary" },
+      { rounds: 3, phase: "primary" },
+      { rounds: 1, phase: "fallback" },
+      { rounds: 2, phase: "fallback" },
+      { rounds: 3, phase: "fallback" }
+    ])(
+      "with $rounds serialization rounds in $phase and control-plane publication",
+      ({ rounds, phase }) => {
+        it.each([
+          {
+            shape: "newline before a quoted value",
+            raw: '{"client_secret":\n"fixture-value","message":"ordinary"}',
+            safe: '{"client_secret":\n"[REDACTED]","message":"ordinary"}',
+            secret: "fixture-value"
+          },
+          {
+            shape: "tab before a quoted value",
+            raw: '{"client_secret":\t"fixture-value","message":"ordinary"}',
+            safe: '{"client_secret":\t"[REDACTED]","message":"ordinary"}',
+            secret: "fixture-value"
+          },
+          {
+            shape: "single-quoted value with an escaped apostrophe",
+            raw: String.raw`password='fixture\'suffix' message=ordinary`,
+            safe: "password='[REDACTED]' message=ordinary",
+            secret: "suffix"
+          }
+        ])("masks $shape in every diagnostic publication", async (fixture) => {
+          const serialize = (value: string) => {
+            for (let round = 0; round < rounds; round++)
+              value = JSON.stringify(value);
+            return value;
+          };
+          const raw = serialize(fixture.raw);
+          const safe = serialize(fixture.safe);
+          const failure = await collectWorkflowFailure(
+            target,
+            {
+              status: "completed",
+              conclusion: "failure",
+              steps: [{ name: "Run rad commands", conclusion: "failure" }],
+              jobs:
+                phase === "fallback" ?
+                  []
+                : [
+                    {
+                      name: "deploy",
+                      steps: [
+                        { name: "Run rad commands", conclusion: "failure" }
+                      ]
+                    }
+                  ]
+            },
+            { resourcesTouched: true },
+            {
+              redactDiagnostic,
+              readLog: async () =>
+                `deploy\tRun rad commands\t2026-01-01 Error: { ${raw} }`,
+              readControlPlaneLog: async () => `control-plane evidence ${raw}`
+            }
+          );
+          expect.soft(failure.radiusError).toBe(`Error: { ${safe} }`);
+          expect.soft(failure.message).toContain(`Error: { ${safe} }`);
+          expect
+            .soft(failure.message)
+            .toContain(`control-plane evidence ${safe}`);
+          expect
+            .soft(failure.message)
+            .toContain(
+              "View the full run: https://github.com/org/app/actions/runs/41"
+            );
+          expect.soft(failure.narration).toContain(`  Error: { ${safe} }`);
+          expect
+            .soft(failure.narration)
+            .toContain(`  control-plane evidence ${safe}`);
+          for (const publication of [
+            failure.message,
+            failure.radiusError,
+            failure.narration.join("\n")
+          ]) {
+            expect.soft(publication).toContain("[REDACTED]");
+            expect.soft(publication).toContain("ordinary");
+            expect.soft(publication).not.toContain(fixture.secret);
+            expect.soft(publication).not.toContain("fixture");
+          }
+        });
+      }
+    );
+  });
+
   it("masks an unterminated credential in a failed-step name without discarding later safe publications", async () => {
     const failure = await collectWorkflowFailure(
       target,
