@@ -57,6 +57,11 @@ function failedPostDeploymentTeardown(
 export interface WorkflowFailureReads {
   readLog(repo: string, runId: number | string): Promise<string | null>;
   readControlPlaneLog(): Promise<string | null>;
+  /**
+   * Masks host-known opaque credentials before mandatory core credential rules.
+   * Invoked sanitizer errors propagate; unconfirmed and fixed auth-drift outputs
+   * do not necessarily invoke this callback.
+   */
   redactDiagnostic(value: string): string;
 }
 

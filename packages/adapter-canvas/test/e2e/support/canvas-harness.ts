@@ -21,7 +21,7 @@ export const E2E_TMP_ROOT = path.resolve(
 );
 const WINDOWS_SHIM_ROOT = path.join(E2E_TMP_ROOT, ".windows-shim");
 // packages/adapter-canvas/test/e2e/support -> repository root.
-const REPOSITORY_ROOT = path.resolve(
+export const REPOSITORY_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
   "..",
@@ -55,6 +55,45 @@ type ServerModule = typeof import("../../../src/server.js");
 type GhModule = typeof import("../../../src/gh.js");
 type SharedModule = typeof import("../../../src/shared.js");
 type OperationsModule = typeof import("../../../src/operations.js");
+
+export interface FakeCliCall {
+  tool: string;
+  args: string[];
+  stdin: string;
+  matched: boolean;
+  exitCode?: number;
+  error?: string;
+}
+
+export async function stopAndDrainHarnessDeployment(
+  stop: () => Promise<void>,
+  waitForIdle: () => Promise<void>,
+  clearHandoff: () => void,
+  errors: unknown[]
+): Promise<void> {
+  await captureCleanupError(errors, stop);
+  try {
+    await waitForIdle();
+  } catch (error) {
+    errors.push(error);
+    throw new AggregateError(
+      errors,
+      "Canvas harness deployment did not drain; retaining the host port, fake PATH, GitHub tokens, shared credentials, fetch guard and fixture isolation.",
+      { cause: error }
+    );
+  }
+  await captureCleanupError(errors, clearHandoff);
+}
+
+export function harnessDeploymentSettled(
+  state: Pick<CanvasState, "deploymentMutation" | "deployHandoffState">,
+  lease: CanvasState["deploymentMutation"]
+): boolean {
+  return (
+    (!lease || state.deploymentMutation !== lease) &&
+    state.deployHandoffState !== "pending"
+  );
+}
 
 interface RetryRemovalOptions {
   attempts?: number;
@@ -1237,6 +1276,7 @@ export class CanvasHarness {
   private readonly page: Page;
   private readonly originalEnv: Record<string, string | undefined>;
   private readonly serverModule: ServerModule;
+  private repairHandoffRegistered = false;
   private readonly ghModule: GhModule;
   private readonly originalFetch: typeof fetch;
   private readonly seededOperationIds = new Set<string>();
@@ -1348,7 +1388,7 @@ export class CanvasHarness {
       if (useFakeCli)
         await fs.writeFile(
           scenarioPath,
-          JSON.stringify({ commands: [] }),
+          JSON.stringify(defaultFakeCliScenario()),
           "utf8"
         );
 
@@ -1715,14 +1755,14 @@ export class CanvasHarness {
     ]);
   }
 
-  async cliCalls(): Promise<Array<{ tool: string; args: string[] }>> {
+  async cliCalls(): Promise<FakeCliCall[]> {
     this.assertFakeMode("cliCalls");
     try {
       const text = await fs.readFile(this.cliLogPath, "utf8");
       return text
         .split(/\r?\n/)
         .filter(Boolean)
-        .map((line) => JSON.parse(line) as { tool: string; args: string[] });
+        .map((line) => JSON.parse(line) as FakeCliCall);
     } catch {
       return [];
     }
@@ -1743,6 +1783,14 @@ export class CanvasHarness {
     runner: ((operationId: string) => Promise<void>) | null
   ): void {
     this.serverModule.setEnvironmentOperationTestRunner(runner);
+  }
+
+  setDeployRepairHandoff(
+    receiver: Parameters<ServerModule["setDeployRepairHandoff"]>[0]
+  ): void {
+    this.assertFakeMode("setDeployRepairHandoff");
+    this.serverModule.setDeployRepairHandoff(receiver);
+    this.repairHandoffRegistered = receiver !== null;
   }
 
   // Drives the real delete OperationRecord the route creates to a terminal,
@@ -1824,9 +1872,27 @@ export class CanvasHarness {
       await operationModule.operations.persist();
     });
     await captureCleanupError(errors, () => closePage(this.page));
-    await captureCleanupError(errors, () =>
-      stopHarnessServer(this.entry, this.instanceId, this.serverModule)
-    );
+    const stop = () =>
+      stopHarnessServer(this.entry, this.instanceId, this.serverModule);
+    if (this.repairHandoffRegistered) {
+      const lease = this.entry.state.deploymentMutation;
+      // The detached monitor releases its lease in finally. Shutdown revokes
+      // its scope, but credentials and the host port must outlive that release.
+      await stopAndDrainHarnessDeployment(
+        stop,
+        async () => {
+          await expect
+            .poll(() => harnessDeploymentSettled(this.entry.state, lease), {
+              timeout: 5_000
+            })
+            .toBe(true);
+        },
+        () => this.setDeployRepairHandoff(null),
+        errors
+      );
+    } else {
+      await captureCleanupError(errors, stop);
+    }
     // Drain any identity probe this test started before restoring the
     // environment: a probe that settled after the next test reset the cache
     // would publish this test's identity into that test's page.
