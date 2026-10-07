@@ -1,3 +1,4 @@
+import { redactCredentials } from "@radius-project/core";
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
@@ -4369,7 +4370,8 @@ test.describe("Radius Canvas in Chromium", () => {
     "primary failure with unavailable diagnostics",
     "unconfirmed completion",
     "primary failure with unavailable workflow log",
-    "post-deployment teardown failure"
+    "post-deployment teardown failure",
+    "redacted workflow diagnostics"
   ]) {
     test(`preserves ${evidence} and keyboard dismissal @safety`, async ({
       page,
@@ -4378,6 +4380,8 @@ test.describe("Radius Canvas in Chromium", () => {
       const unconfirmed = evidence === "unconfirmed completion";
       const workflowLogUnavailable =
         evidence === "primary failure with unavailable workflow log";
+      const diagnosticsRedacted = evidence === "redacted workflow diagnostics";
+      const diagnosticCredential = "fixture-known-diagnostic-credential";
       const monitorState: CanvasState = {};
       if (unconfirmed) {
         await createUnconfirmedMonitor("future_conclusion").monitor.run({
@@ -4408,6 +4412,7 @@ test.describe("Radius Canvas in Chromium", () => {
             readLog: async () => {
               throw new Error("fixture-private-log-read-error");
             },
+            redactDiagnostic: redactCredentials,
             readControlPlaneLog: async () => null
           }
         );
@@ -4435,7 +4440,32 @@ test.describe("Radius Canvas in Chromium", () => {
             {
               readLog: async () =>
                 "deploy\tTeardown\t2026-01-01 Error: <teardown>",
+              redactDiagnostic: redactCredentials,
               readControlPlaneLog: async () => null
+            }
+          )
+        ).message;
+      }
+      if (diagnosticsRedacted) {
+        const steps = [{ name: "Run rad commands", conclusion: "failure" }];
+        error = (
+          await collectWorkflowFailure(
+            { repo: REPOSITORY, runId: 77 },
+            {
+              status: "completed",
+              conclusion: "failure",
+              steps,
+              jobs: [{ name: "deploy", steps }]
+            },
+            { provider: "azure", resourcesTouched: true },
+            {
+              readLog: async () =>
+                "deploy\tRun rad commands\t2026-01-01 Error: recipe <img src=x> client_secret=fixture-workflow-secret " +
+                diagnosticCredential,
+              redactDiagnostic: (value) =>
+                redactCredentials(value, [diagnosticCredential]),
+              readControlPlaneLog: async () =>
+                "error password=fixture-control-secret " + diagnosticCredential
             }
           )
         ).message;
@@ -4504,6 +4534,25 @@ test.describe("Radius Canvas in Chromium", () => {
         await expect(
           page.locator("#deploy-progress-subtitle")
         ).not.toContainText("The control-plane log could not be read.");
+      }
+      if (diagnosticsRedacted) {
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "Deployment failed (failure). Failed step: Run rad commands."
+        );
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "client_secret=[REDACTED]"
+        );
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "password=[REDACTED]"
+        );
+        for (const credential of [
+          diagnosticCredential,
+          "fixture-workflow-secret",
+          "fixture-control-secret"
+        ]) {
+          await expect(page.locator("body")).not.toContainText(credential);
+          expect(await page.content()).not.toContain(credential);
+        }
       }
       await expectNoWcagViolations(page);
       if (unconfirmed || workflowLogUnavailable) {

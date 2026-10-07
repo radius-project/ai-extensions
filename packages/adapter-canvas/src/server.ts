@@ -3246,6 +3246,7 @@ const deployOutcomeService = createDeployOutcomeService({
   settleDeployStatuses,
   fetchRunLog: (repo, runId, request) =>
     fetchRunLog(repo, runId, undefined, request),
+  redactDiagnostic: redactGhCredentials,
   cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
