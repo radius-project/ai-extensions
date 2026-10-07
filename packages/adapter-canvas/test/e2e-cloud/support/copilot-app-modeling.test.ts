@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { hashAppBicep } from "../../../src/app-bicep-hash.js";
 
 import {
   classifyModelReadiness,
@@ -13,6 +14,19 @@ import {
 } from "./copilot-app-modeling.js";
 
 const BASELINE = "cc6a688a0000000000000000000000000000beef";
+const MODEL =
+  "resource app 'Applications.Core/applications@2023-10-01-preview' = { name: 'cloud-e2e' }";
+const ORIGIN = {
+  generatedAt: new Date(1_000).toISOString(),
+  sourceCommit: BASELINE,
+  skillVersion: "0.2.1",
+  appBicepHash: hashAppBicep(MODEL)
+};
+const CONTENT = {
+  model: MODEL,
+  originText: JSON.stringify(ORIGIN),
+  baselineSha: BASELINE
+};
 
 function times(
   app: number | undefined,
@@ -29,7 +43,7 @@ function times(
 describe("cloudModelingPrompt", () => {
   it("asks for a fresh model with the fixed name and no publication", () => {
     const prompt = cloudModelingPrompt("cloud-e2e");
-    expect(prompt).toContain("Delete the .radius folder");
+    expect(prompt).toContain("Do not restore it from Git");
     expect(prompt).toContain("radius-app-bicep skill");
     expect(prompt).toContain('Name the Radius application "cloud-e2e".');
     expect(prompt).toContain("Do not commit, push, or deploy.");
@@ -132,6 +146,7 @@ describe("classifyModelReadiness", () => {
   it("is ready when new files are stable and the session is idle", () => {
     const now = times(200, 201, 202);
     const readiness = classifyModelReadiness({
+      ...CONTENT,
       times: now,
       startedAtMs: 200,
       previousTimes: now,
@@ -142,27 +157,30 @@ describe("classifyModelReadiness", () => {
       missing: [],
       stale: [],
       changing: [],
-      sessionStatus: "Idle"
+      sessionStatus: "Idle",
+      originProblem: undefined
     });
     expect(describeModelReadiness(readiness)).toBe(
       "The model files are ready."
     );
   });
 
-  it("accepts an unknown session status", () => {
+  it("refuses an unknown session status", () => {
     const now = times(300, 300, 300);
     expect(
       classifyModelReadiness({
+        ...CONTENT,
         times: now,
         startedAtMs: 100,
         previousTimes: now,
         sessionStatus: undefined
       }).ready
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("reports missing, stale, changing files, and a busy session", () => {
     const readiness = classifyModelReadiness({
+      ...CONTENT,
       times: times(undefined, 199, 250),
       startedAtMs: 200,
       previousTimes: times(undefined, 199, 240),
@@ -183,6 +201,7 @@ describe("classifyModelReadiness", () => {
 
   it("is not ready on the first poll", () => {
     const readiness = classifyModelReadiness({
+      ...CONTENT,
       times: times(300, 300, 300),
       startedAtMs: 100,
       previousTimes: undefined,
@@ -195,6 +214,7 @@ describe("classifyModelReadiness", () => {
   it("is not ready while the session is busy", () => {
     const now = times(300, 300, 300);
     const readiness = classifyModelReadiness({
+      ...CONTENT,
       times: now,
       startedAtMs: 100,
       previousTimes: now,
@@ -204,6 +224,59 @@ describe("classifyModelReadiness", () => {
     expect(describeModelReadiness(readiness)).toBe(
       "The model is not ready (session status: Working)."
     );
+  });
+
+  it.each([
+    ["absent", undefined, MODEL, "invalid origin"],
+    ["malformed", "{", MODEL, "invalid origin"],
+    [
+      "old checkout",
+      JSON.stringify({ ...ORIGIN, generatedAt: new Date(99).toISOString() }),
+      MODEL,
+      "after model cleanup"
+    ],
+    [
+      "invalid time",
+      JSON.stringify({ ...ORIGIN, generatedAt: "invalid" }),
+      MODEL,
+      "after model cleanup"
+    ],
+    [
+      "wrong commit",
+      JSON.stringify({ ...ORIGIN, sourceCommit: "f".repeat(40) }),
+      MODEL,
+      "different source commit"
+    ],
+    ["edited model", CONTENT.originText, "changed", "does not match"],
+    ["missing model", CONTENT.originText, undefined, "does not match"]
+  ])(
+    "refuses %s despite fresh stable file timestamps",
+    (_name, originText, model, problem) => {
+      const now = times(300, 300, 300);
+      const readiness = classifyModelReadiness({
+        ...CONTENT,
+        model,
+        originText,
+        times: now,
+        previousTimes: now,
+        startedAtMs: 100,
+        sessionStatus: "Idle"
+      });
+      expect(readiness.ready).toBe(false);
+      expect(describeModelReadiness(readiness)).toContain(problem);
+    }
+  );
+
+  it("names an unrecognized status instead of claiming completion", () => {
+    const now = times(300, 300, 300);
+    const result = classifyModelReadiness({
+      ...CONTENT,
+      times: now,
+      previousTimes: now,
+      startedAtMs: 100,
+      sessionStatus: undefined
+    });
+    expect(describeModelReadiness(result)).toContain("session status: unknown");
   });
 });
 

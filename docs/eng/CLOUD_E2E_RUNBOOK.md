@@ -116,21 +116,24 @@ Do not cancel a Cloud E2E run. Cancelling mid-flight can strand a deployment, an
 
 ## Run the journey in the GitHub Copilot app
 
-By default, the suite drives this checkout's canvas in headless Chromium on Linux. This is the production path. Scheduled runs use it.
+By default, the suite drives this checkout's canvas in headless Chromium on Linux. This is the production path. Scheduled runs use it unless the optional host variable selects the app. The workflow gives both hosts 290 minutes; the harness keeps its existing Playwright test and suite limits.
 
-You can also drive the same journey through the GitHub Copilot desktop app. This host is opt-in. It adds one test that runs first. In that test, the Radius agent models the fixture repository from source, and the suite commits and pushes the new `.radius/app.bicep` file. The other tests then use the Radius canvas in the app.
+You can also drive the same journey through the GitHub Copilot desktop app on a disposable GitHub-hosted Windows runner. This host is opt-in. It adds one test that runs first. The test opens a preparation session and waits for an explicit Idle status. It verifies that the session belongs to the disposable profile, points to the fixture repository and baseline, and has no edits. It then removes the old `.radius` directory before sending the modeling prompt. The Radius agent generates a new model from source. The test requires stable files, an explicit Idle status, and a fresh origin record with the correct source commit and model hash. The suite publishes that model, then runs the five lifecycle tests in the app's Radius canvas.
 
 Use one of these methods to select the app host:
 
-| Method                   | How                                                                         |
-|--------------------------|-----------------------------------------------------------------------------|
-| Manual dispatch          | Set the `canvas-host` input to `copilot-app`                                |
-| Scheduled runs           | Set the repository variable `AIEXT_CLOUD_E2E_CANVAS_HOST` to `copilot-app`  |
-| Local run (Windows only) | Set `RADIUS_CLOUD_E2E_CANVAS_HOST=copilot-app` before `pnpm run test:cloud` |
+| Method          | How                                                                        |
+|-----------------|----------------------------------------------------------------------------|
+| Manual dispatch | Set the `canvas-host` input to `copilot-app`                               |
+| Scheduled runs  | Set the repository variable `AIEXT_CLOUD_E2E_CANVAS_HOST` to `copilot-app` |
 
 The dispatch input wins over the variable. An unset or blank value selects `harness`. An unknown value stops the suite before any test starts.
 
-With the app host, the job runs on `windows-2025` and installs the app with `winget`. The suite starts the app with a CDP port and signs in with the bot PAT. It uses no new secrets or variables. Quit the app fully before a local run, because the suite will not start while `github.exe` runs. Quitting the app ends all running agent sessions.
+With the app host, the job runs on `windows-2025` and installs the app with `winget`. The test builds this checkout with `build.mjs --install` and installs its extension, skills, manifest, and workflow assets under a temporary profile's `.copilot/extensions/radius` directory. It sets `USERPROFILE`, `HOME`, `APPDATA`, `LOCALAPPDATA`, `COPILOT_HOME`, the WebView2 data folder, and the Radius credential file to paths in that profile. The Azure CLI deliberately retains the disposable runner's `azure/login` configuration. Teardown stops the app before it removes the profile; a failed stop retains the profile for diagnosis.
+
+**Local and self-hosted app runs are refused before cloud setup.** The desktop can use Windows native storage paths that ignore environment overrides. `COPILOT_HOME` alone does not prove full desktop isolation. Until that boundary is qualified, use the existing harness locally and use a disposable GitHub-hosted Windows runner for app mode. The guard uses GitHub's built-in `GITHUB_ACTIONS` and `RUNNER_ENVIRONMENT` values; do not set these by hand to bypass it. The test also refuses to start if `github.exe` is already running.
+
+The optional `AIEXT_CLOUD_E2E_CANVAS_HOST` variable is new; no new secret is required. App sign-in, extension discovery, loaded-bundle identity, and the project-add UI still need qualification on the runner. The suite uses UI controls for mutations, direct canvas navigation and API reads for assertions, and Git for model publication. A passing unit test or test-list command does not prove that desktop journey.
 
 ## Required configuration
 
@@ -147,6 +150,8 @@ The fixture repository is pinned by [`FIXTURE_BASELINE_SHA`](../../packages/adap
 
 The dedicated Cloud E2E GitHub App must remain installed only on the fixture repository with `actions: write`, `actions_variables: write`, `administration: write`, `contents: write`, `deployments: write`, `environments: write`, `pull_requests: write`, `secrets: write`, and `workflows: write`. Two of those are easy to get wrong. `administration: write` is what GitHub requires to create a deployment environment, so `read` is not enough. The API name for environment variable management is `actions_variables`, not `variables`. Grant no Packages permission: scheduled cleanup reaches GHCR through `GH_RAD_CI_BOT_PAT` instead, because the journey mints its token without permission inputs and would otherwise inherit package write. Store its client ID and private key as `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
 
-The organization-level `GH_RAD_CI_BOT_PAT` secret is already visible to all organization repositories. It belongs to `rad-ci-bot` and needs `read:packages`, `write:packages`, and `delete:packages`. `CLOUD_E2E_PACKAGES_USER` stores only the account login. Repository and workflow APIs continue to use the short-lived fixture-scoped GitHub App token.
+The organization-level `GH_RAD_CI_BOT_PAT` secret is already visible to all organization repositories. It belongs to `rad-ci-bot` and needs `read:packages`, `write:packages`, and `delete:packages`. `CLOUD_E2E_PACKAGES_USER` stores only the account login. In harness mode, repository and workflow APIs use the short-lived fixture-scoped GitHub App token.
+
+In app mode, that existing PAT also supplies `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_TOKEN` to the desktop and its extension. The account therefore also needs a Copilot entitlement and access to the fixture repository, environment management, and workflow publication and dispatch. Package scopes alone are not sufficient. The test runner still uses its renewable installation token for fixture setup, assertions, model publication, and cleanup. This is a different product authentication path from the harness; do not infer the PAT's permissions from its secret name.
 
 The first dispatched run reached Azure login and GitHub App token creation, then exposed a Playwright worker handoff defect before any lifecycle stage ran. That defect was corrected in #812. **Create, deploy, deployment deletion, and environment deletion still require a successful real-cloud run.**

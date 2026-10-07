@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
+import path from "node:path";
+import os from "node:os";
+import fs from "node:fs/promises";
 
 import type { CdpProbeResult } from "./copilot-app-cdp.js";
 import {
   buildCopilotAppEnvironment,
+  assertCopilotAppRunner,
+  createNodeCopilotAppHostPorts,
+  cleanupCopilotApp,
   launchCopilotApp,
   resolveCopilotAppExecutable,
   tasklistHasImage,
@@ -12,8 +18,8 @@ import {
 
 const OPTIONS = {
   cdpPort: 9222,
-  copilotHome: "C:\\tmp\\copilot-home",
-  ghConfigDir: "C:\\tmp\\gh-config",
+  profileDir: "C:\\tmp\\profile",
+  azureConfigDir: "C:\\runner\\.azure",
   signInToken: "test-sign-in",
   packagesToken: "test-packages",
   packagesUser: "radius-bot"
@@ -50,11 +56,23 @@ describe("resolveCopilotAppExecutable", () => {
 describe("buildCopilotAppEnvironment", () => {
   it("sets the debugging port, isolation folders, and tokens", () => {
     const env = buildCopilotAppEnvironment({ PATH: "C:\\bin" }, OPTIONS);
-    expect(env).toEqual({
+    expect(env).toMatchObject({
       PATH: "C:\\bin",
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9222",
-      COPILOT_HOME: OPTIONS.copilotHome,
-      GH_CONFIG_DIR: OPTIONS.ghConfigDir,
+      COPILOT_HOME: "C:\\tmp\\profile\\.copilot",
+      GH_CONFIG_DIR: "C:\\tmp\\profile\\gh-config",
+      USERPROFILE: OPTIONS.profileDir,
+      HOME: OPTIONS.profileDir,
+      APPDATA: "C:\\tmp\\profile\\AppData\\Roaming",
+      LOCALAPPDATA: "C:\\tmp\\profile\\AppData\\Local",
+      WEBVIEW2_USER_DATA_FOLDER: "C:\\tmp\\profile\\webview2",
+      RADIUS_CREDENTIALS_FILE:
+        "C:\\tmp\\profile\\.copilot\\radius\\credentials.json",
+      AZURE_CONFIG_DIR: OPTIONS.azureConfigDir,
+      HOMEDRIVE: "C:",
+      HOMEPATH: "\\tmp\\profile",
+      TEMP: "C:\\tmp\\profile\\temp",
+      TMP: "C:\\tmp\\profile\\temp",
       COPILOT_GITHUB_TOKEN: "test-sign-in",
       GH_TOKEN: "test-sign-in",
       GITHUB_TOKEN: "test-sign-in",
@@ -66,11 +84,22 @@ describe("buildCopilotAppEnvironment", () => {
   it("removes the GitHub App private key and overrides inherited values", () => {
     const base = {
       CLOUD_E2E_BOT_PRIVATE_KEY: "key",
+      USERPROFILE: "C:\\personal",
+      HOME: "C:\\personal",
+      LOCALAPPDATA: "C:\\personal\\AppData",
+      RADIUS_CREDENTIALS_FILE: "C:\\personal\\credentials.json",
+      SESSION_ID: "old-session",
+      COPILOT_AGENT_SESSION_ID: "old-agent",
       GH_TOKEN: "app-token",
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--other"
     };
     const env = buildCopilotAppEnvironment(base, OPTIONS);
     expect(env.CLOUD_E2E_BOT_PRIVATE_KEY).toBeUndefined();
+    expect(env.SESSION_ID).toBeUndefined();
+    expect(env.COPILOT_AGENT_SESSION_ID).toBeUndefined();
+    expect(env.USERPROFILE).toBe(OPTIONS.profileDir);
+    expect(env.RADIUS_CREDENTIALS_FILE).not.toBe(base.RADIUS_CREDENTIALS_FILE);
+    expect(base.USERPROFILE).toBe("C:\\personal");
     expect(env.GH_TOKEN).toBe("test-sign-in");
     expect(env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS).toBe(
       "--remote-debugging-port=9222"
@@ -79,8 +108,8 @@ describe("buildCopilotAppEnvironment", () => {
   });
 
   it.each([
-    "copilotHome",
-    "ghConfigDir",
+    "profileDir",
+    "azureConfigDir",
     "signInToken",
     "packagesToken",
     "packagesUser"
@@ -94,6 +123,30 @@ describe("buildCopilotAppEnvironment", () => {
     expect(() =>
       buildCopilotAppEnvironment({}, { ...OPTIONS, cdpPort: 0 })
     ).toThrow(/integer from 1 to 65535/);
+  });
+
+  it.each(["profile", "C:profile", "\\profile", "\\\\server\\share\\profile"])(
+    "refuses a profile without an absolute drive path: %s",
+    (profileDir) => {
+      expect(() =>
+        buildCopilotAppEnvironment({}, { ...OPTIONS, profileDir })
+      ).toThrow(/absolute drive path/);
+    }
+  );
+
+  it("does not retain case variants of Windows profile or token variables", () => {
+    const env = buildCopilotAppEnvironment(
+      {
+        UserProfile: "C:\\personal",
+        Cloud_E2E_Bot_Private_Key: "key",
+        LocalAppData: "C:\\personal\\local"
+      },
+      OPTIONS
+    );
+    expect(env.UserProfile).toBeUndefined();
+    expect(env.LocalAppData).toBeUndefined();
+    expect(env.CLOUD_E2E_BOT_PRIVATE_KEY).toBeUndefined();
+    expect(env.USERPROFILE).toBe(OPTIONS.profileDir);
   });
 });
 
@@ -133,7 +186,7 @@ function fakeHost(options: {
   const probes = [...options.probes];
   const ports: CopilotAppHostPorts = {
     isAppRunning: () => Promise.resolve(options.running ?? false),
-    spawn(executable, env) {
+    async spawn(executable, env) {
       calls.push(`spawn ${executable} ${env.COPILOT_HOME ?? ""}`);
       const exited = new Promise<number | null>((resolve) => {
         resolveExit = resolve;
@@ -247,5 +300,140 @@ describe("launchCopilotApp", () => {
     const host = fakeHost({ probes: [DOWN, UP], killFails: true });
     const app = await launchCopilotApp(CONFIG, host.ports, TIMING);
     await expect(app.stop()).rejects.toThrow("taskkill failed");
+    host.ports.kill = async (pid) => {
+      host.calls.push(`recovered kill ${pid}`);
+    };
+    await app.stop();
+    expect(host.calls.at(-1)).toBe("recovered kill 42");
+  });
+
+  it("retains both startup and shutdown errors", async () => {
+    const host = fakeHost({
+      probes: [DOWN, DOWN, DOWN, DOWN],
+      killFails: true
+    });
+    await expect(
+      launchCopilotApp(CONFIG, host.ports, TIMING)
+    ).rejects.toMatchObject({
+      errors: [
+        expect.objectContaining({
+          message: expect.stringContaining("did not answer")
+        }),
+        expect.objectContaining({ message: "taskkill failed" })
+      ]
+    });
+  });
+
+  it("coalesces concurrent stop calls", async () => {
+    const host = fakeHost({ probes: [DOWN, UP] });
+    const app = await launchCopilotApp(CONFIG, host.ports, TIMING);
+    await Promise.all([app.stop(), app.stop()]);
+    expect(host.calls.filter((call) => call.startsWith("kill"))).toEqual([
+      "kill 42"
+    ]);
+  });
+});
+
+describe("assertCopilotAppRunner", () => {
+  it("accepts a disposable hosted Windows runner", () => {
+    expect(() =>
+      assertCopilotAppRunner(
+        { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" },
+        "win32"
+      )
+    ).not.toThrow();
+  });
+  it.each([
+    [{}, "win32"],
+    [{ GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, "win32"],
+    [{ GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" }, "linux"]
+  ] as const)(
+    "refuses non-disposable or unsupported hosts %#",
+    (env, platform) => {
+      expect(() => assertCopilotAppRunner(env, platform)).toThrow(
+        /disposable GitHub-hosted Windows/
+      );
+    }
+  );
+});
+
+describe("native spawn boundary", () => {
+  it("rejects a missing executable without an uncaught child error", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "radius-app-spawn-"));
+    try {
+      await expect(
+        createNodeCopilotAppHostPorts().spawn(
+          path.join(root, "missing.exe"),
+          {}
+        )
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  describe("cleanupCopilotApp", () => {
+    it("disconnects and stops before removing the profile", async () => {
+      const calls: string[] = [];
+      await cleanupCopilotApp(
+        async () => {
+          calls.push("disconnect");
+        },
+        async () => {
+          calls.push("stop");
+        },
+        async () => {
+          calls.push("remove");
+        }
+      );
+      expect(calls).toEqual(["disconnect", "stop", "remove"]);
+    });
+
+    it("still stops after disconnect fails, but retains the profile when stop fails", async () => {
+      let removed = false;
+      await expect(
+        cleanupCopilotApp(
+          async () => {
+            throw new Error("disconnect");
+          },
+          async () => {
+            throw new Error("stop");
+          },
+          async () => {
+            removed = true;
+          }
+        )
+      ).rejects.toMatchObject({
+        errors: [
+          expect.objectContaining({ message: "disconnect" }),
+          expect.objectContaining({ message: "stop" })
+        ]
+      });
+      expect(removed).toBe(false);
+    });
+
+    it("reports a profile removal failure", async () => {
+      await expect(
+        cleanupCopilotApp(
+          async () => {},
+          async () => {},
+          async () => {
+            throw new Error("remove");
+          }
+        )
+      ).rejects.toMatchObject({
+        errors: [expect.objectContaining({ message: "remove" })]
+      });
+    });
+  });
+
+  it("reports a real child's successful spawn and exit", async () => {
+    const app = await createNodeCopilotAppHostPorts().spawn(process.execPath, {
+      NODE_OPTIONS: "--version"
+    });
+    expect(app.pid).toBeGreaterThan(0);
+    // Node refuses --version in NODE_OPTIONS and exits without reading stdin.
+    expect(await app.exited).not.toBe(0);
   });
 });

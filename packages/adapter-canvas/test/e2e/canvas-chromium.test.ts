@@ -60,6 +60,100 @@ import {
   STATE_ATTEMPT_ID,
   STATE_RESOURCE
 } from "../support/pages/page-state-cases.js";
+import {
+  ensureFixtureProject,
+  sendSessionPrompt,
+  waitForIdleSession
+} from "../e2e-cloud/support/copilot-app-ui.js";
+
+test("Copilot project selection waits for an asynchronous result @safety", async ({
+  page
+}) => {
+  let release: (() => void) | undefined;
+  let arrived: (() => void) | undefined;
+  const searchArrived = new Promise<void>((resolve) => {
+    arrived = resolve;
+  });
+  await page.route("http://127.0.0.1:43123/repositories", async (route) => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+      arrived?.();
+    });
+    await route.fulfill({ json: ["example/fixture"] });
+  });
+  await page.route("http://127.0.0.1:43123/", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `
+      <section aria-label="Projects">
+        <button>New project or session</button>
+        <button role="menuitem">Add project</button>
+        <div id="ready"></div>
+      </section>
+      <div role="dialog">
+        <input role="combobox">
+        <div id="options"></div>
+        <button id="clone" disabled>Clone</button>
+      </div>
+      <script>
+        document.querySelector('input').oninput = async () => {
+          const repositories = await (await fetch('/repositories')).json();
+          const option = document.createElement('button');
+          option.setAttribute('role', 'option');
+          option.textContent = repositories[0];
+          option.onclick = () => document.querySelector('#clone').disabled = false;
+          document.querySelector('#options').append(option);
+        };
+        document.querySelector('#clone').onclick = () => {
+          document.querySelector('[role=dialog]').remove();
+          document.querySelector('#ready').innerHTML = '<button>New session in fixture</button>';
+        };
+      </script>`
+    })
+  );
+  try {
+    await page.goto("http://127.0.0.1:43123/");
+    await Promise.all([
+      ensureFixtureProject(page, "example/fixture", "fixture"),
+      (async () => {
+        await searchArrived;
+        await expect(
+          page.getByRole("button", { name: "Clone", exact: true })
+        ).toBeDisabled();
+        release?.();
+      })()
+    ]);
+    await expect(
+      page.getByRole("button", { name: "New session in fixture" })
+    ).toBeVisible();
+  } finally {
+    release?.();
+  }
+});
+
+test("Copilot session waits for explicit idle before another prompt @safety", async ({
+  page
+}) => {
+  await page.setContent(`
+    <button aria-label="Prepare · branch, session information">Info</button>
+    <section aria-label="Projects">
+      <div role="tree" aria-label="Projects">
+        <div id="status" aria-label="Prepare. Status: Working. now"></div>
+      </div>
+    </section>
+    <main><textarea aria-label="Message"></textarea><button id="send">Send message</button></main>
+    <script>
+      document.querySelector('#send').onclick = () => document.querySelector('#status')
+        .setAttribute('aria-label', 'Prepare. Status: Idle. now');
+    </script>`);
+  await Promise.all([
+    waitForIdleSession(page),
+    sendSessionPrompt(page, "Model the clean fixture.")
+  ]);
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(
+    "Model the clean fixture."
+  );
+});
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";

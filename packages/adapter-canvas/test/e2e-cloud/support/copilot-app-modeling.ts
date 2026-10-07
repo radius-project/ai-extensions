@@ -1,6 +1,9 @@
 // Pure rules for the modeling stage: the agent prompt, the session dialog
 // parser, the ready signal for the generated model, and the publication plan.
 
+import { parseAppOrigin } from "@radius-project/core";
+import { hashAppBicep } from "../../../src/app-bicep-hash.js";
+
 export const MODEL_FILES = [
   ".radius/app.bicep",
   ".radius/bicepconfig.json",
@@ -13,9 +16,8 @@ const APPLICATION_NAME_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 
 /**
  * The prompt that the suite sends to the agent. The production fixture has no
- * model, so the agent first deletes any `.radius/` folder that the baseline
- * still has, and then generates a new one. The application name is fixed
- * because the cleanup code owns that name.
+ * model. The suite removes the old model before sending this prompt.
+ * The application name is fixed because the cleanup code owns that name.
  */
 export function cloudModelingPrompt(applicationName: string): string {
   if (!APPLICATION_NAME_PATTERN.test(applicationName))
@@ -23,8 +25,8 @@ export function cloudModelingPrompt(applicationName: string): string {
       `The application name is not a valid Radius name: "${applicationName}".`
     );
   return [
-    "Delete the .radius folder in this repository if it exists, and do not read its old content.",
-    "Then use the radius-app-bicep skill to generate a new Radius application model in .radius/app.bicep.",
+    "The test has removed the old .radius folder. Do not restore it from Git.",
+    "Use the radius-app-bicep skill to generate a new Radius application model in .radius/app.bicep.",
     `Name the Radius application "${applicationName}".`,
     "Do not commit, push, or deploy. Stop when the model files are written."
   ].join(" ");
@@ -105,8 +107,11 @@ export function sessionTitleFromInfoLabel(label: string): string {
 export type ModelFileTimes = Readonly<Record<ModelFile, number | undefined>>;
 
 export interface ModelReadinessInput {
+  readonly model: string | undefined;
+  readonly originText: string | undefined;
+  readonly baselineSha: string;
   readonly times: ModelFileTimes;
-  /** Time the prompt was sent. Older files are from the baseline. */
+  /** Time baseline removal completed, before the modeling prompt. */
   readonly startedAtMs: number;
   /** Times from the previous poll, used to see that the agent stopped writing. */
   readonly previousTimes: ModelFileTimes | undefined;
@@ -120,13 +125,14 @@ export interface ModelReadiness {
   readonly stale: readonly ModelFile[];
   readonly changing: readonly ModelFile[];
   readonly sessionStatus: string | undefined;
+  readonly originProblem: string | undefined;
 }
 
 /**
  * The model is ready when every model file exists, every file was written
- * after the prompt, no file changed since the previous poll, and the session
- * is idle when the app shows a status. A new write proves the agent made the
- * file, because the baseline can hold an old model with the same content.
+ * after baseline removal, no file changed since the previous poll, and the session
+ * explicitly reports idle. The origin must record this generation, source
+ * commit, and normalized model hash; checkout timestamps alone are not evidence.
  */
 export function classifyModelReadiness(
   input: ModelReadinessInput
@@ -140,19 +146,32 @@ export function classifyModelReadiness(
     else if (time < input.startedAtMs) stale.push(file);
     if (time !== input.previousTimes?.[file]) changing.push(file);
   }
-  const idle =
-    input.sessionStatus === undefined ||
-    input.sessionStatus.toLowerCase() === "idle";
+  const idle = input.sessionStatus?.toLowerCase() === "idle";
+  const origin = parseAppOrigin(input.originText);
+  const generatedAt = origin ? Date.parse(origin.generatedAt) : Number.NaN;
+  const originProblem =
+    !origin ? "missing or invalid origin record"
+    : !Number.isFinite(generatedAt) || generatedAt < input.startedAtMs ?
+      "origin was not generated after model cleanup"
+    : origin.sourceCommit !== input.baselineSha ?
+      "origin names a different source commit"
+    : (
+      !input.model?.trim() || origin.appBicepHash !== hashAppBicep(input.model)
+    ) ?
+      "origin does not match the model"
+    : undefined;
   return {
     ready:
       missing.length === 0 &&
       stale.length === 0 &&
       changing.length === 0 &&
-      idle,
+      idle &&
+      originProblem === undefined,
     missing,
     stale,
     changing,
-    sessionStatus: input.sessionStatus
+    sessionStatus: input.sessionStatus,
+    originProblem
   };
 }
 
@@ -165,11 +184,9 @@ export function describeModelReadiness(readiness: ModelReadiness): string {
     parts.push(`not rewritten yet: ${readiness.stale.join(", ")}`);
   if (readiness.changing.length > 0)
     parts.push(`still changing: ${readiness.changing.join(", ")}`);
-  if (
-    readiness.sessionStatus !== undefined &&
-    readiness.sessionStatus.toLowerCase() !== "idle"
-  )
-    parts.push(`session status: ${readiness.sessionStatus}`);
+  if (readiness.originProblem) parts.push(readiness.originProblem);
+  if (readiness.sessionStatus?.toLowerCase() !== "idle")
+    parts.push(`session status: ${readiness.sessionStatus ?? "unknown"}`);
   return `The model is not ready (${parts.join("; ")}).`;
 }
 

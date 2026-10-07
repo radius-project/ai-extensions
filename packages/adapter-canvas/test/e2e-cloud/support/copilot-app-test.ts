@@ -1,8 +1,8 @@
 // The Playwright worker fixture that starts the real GitHub Copilot desktop
 // app for the cloud journey. It installs the Radius extension that this
-// checkout builds into an isolated Copilot home, starts the app with a CDP
-// port, and attaches Playwright to the app window. Teardown stops the app and
-// removes the isolated folders.
+// checkout builds into a temporary profile on a disposable hosted runner,
+// starts the app with a CDP port, and attaches Playwright to the app window.
+// Teardown stops the app before it removes the temporary profile.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -18,17 +18,22 @@ import {
   selectMainPage
 } from "./copilot-app-cdp.js";
 import {
+  assertCopilotAppRunner,
   buildCopilotAppEnvironment,
+  copilotAppProfilePaths,
+  cleanupCopilotApp,
   createNodeCopilotAppHostPorts,
   launchCopilotApp,
   resolveCopilotAppExecutable
 } from "./copilot-app-host.js";
 import { attachAppState, waitForSignedInShell } from "./copilot-app-ui.js";
+import { runCleanupSteps } from "./create-environment-journey.js";
 
 export interface CopilotAppSession {
   readonly browser: Browser;
   readonly appPage: Page;
   readonly cdpUrl: string;
+  readonly profileDir: string;
 }
 
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -46,6 +51,7 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
     // `playwright` is requested so the first argument is a real destructuring
     // pattern, as Playwright requires; it also supplies `connectOverCDP`.
     async ({ playwright }, use, workerInfo) => {
+      assertCopilotAppRunner(process.env, process.platform);
       const executable = resolveCopilotAppExecutable(
         process.env,
         process.platform
@@ -53,18 +59,27 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
       const root = await fs.mkdtemp(
         path.join(os.tmpdir(), "radius-copilot-app-")
       );
-      const copilotHome = path.join(root, "copilot-home");
-      const ghConfigDir = path.join(root, "gh-config");
+      const profileDir = path.join(root, "profile");
+      const profile = copilotAppProfilePaths(profileDir);
       let stopApp: (() => Promise<void>) | undefined;
       let browser: Browser | undefined;
+      let launching = false;
+      let primaryError: unknown;
       try {
-        await fs.mkdir(ghConfigDir, { recursive: true });
+        const azureConfigDir =
+          process.env.AZURE_CONFIG_DIR?.trim() ||
+          path.join(requireEnv("USERPROFILE"), ".azure");
+        await Promise.all(
+          Object.values(profile).map((directory) =>
+            fs.mkdir(directory, { recursive: true })
+          )
+        );
         await execFileAsync(process.execPath, ["build.mjs", "--install"], {
           cwd: packageRoot,
           env: {
             ...process.env,
             RADIUS_CANVAS_INSTALL_PATH: path.join(
-              copilotHome,
+              profile.copilotHome,
               "extensions",
               "radius",
               "extension.mjs"
@@ -75,14 +90,15 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
         // The bot PAT signs in to the app. The GitHub App installation token
         // expires after one hour and the app cannot receive a refreshed one.
         const packagesToken = requireEnv("GH_PACKAGES_TOKEN");
+        launching = true;
         const app = await launchCopilotApp(
           {
             executable,
             cdpPort: COPILOT_APP_DEFAULT_CDP_PORT,
             env: buildCopilotAppEnvironment(process.env, {
               cdpPort: COPILOT_APP_DEFAULT_CDP_PORT,
-              copilotHome,
-              ghConfigDir,
+              profileDir,
+              azureConfigDir,
               signInToken: packagesToken,
               packagesToken,
               packagesUser: requireEnv("GH_PACKAGES_USER")
@@ -92,6 +108,7 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
           { timeoutMs: APP_LAUNCH_TIMEOUT_MS, intervalMs: 1_000 }
         );
         stopApp = app.stop;
+        launching = false;
         browser = await playwright.chromium.connectOverCDP(app.cdpUrl, {
           timeout: 30_000
         });
@@ -108,17 +125,36 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
           );
           throw error;
         }
-        await use({ browser, appPage, cdpUrl: app.cdpUrl });
+        await use({ browser, appPage, cdpUrl: app.cdpUrl, profileDir });
+      } catch (error) {
+        primaryError = error;
+        throw error;
       } finally {
-        try {
-          await browser?.close();
-        } finally {
-          try {
-            await stopApp?.();
-          } finally {
-            await fs.rm(root, { recursive: true, force: true });
-          }
-        }
+        await runCleanupSteps(
+          [
+            {
+              label: "clean up Copilot app",
+              run: () =>
+                cleanupCopilotApp(
+                  async () => {
+                    await browser?.close();
+                  },
+                  async () => {
+                    await stopApp?.();
+                  },
+                  async () => {
+                    if (!launching)
+                      await fs.rm(root, { recursive: true, force: true });
+                    else
+                      console.warn(
+                        `App startup failed; retaining its profile until the disposable runner exits: ${root}`
+                      );
+                  }
+                )
+            }
+          ],
+          primaryError
+        );
       }
     },
     { scope: "worker", timeout: COPILOT_APP_SETUP_TIMEOUT_MS }

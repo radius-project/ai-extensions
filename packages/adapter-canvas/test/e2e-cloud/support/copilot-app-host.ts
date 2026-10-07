@@ -15,6 +15,22 @@ import {
 
 export const COPILOT_APP_IMAGE_NAME = "github.exe";
 
+export function assertCopilotAppRunner(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform
+): void {
+  if (
+    platform !== "win32" ||
+    env.GITHUB_ACTIONS !== "true" ||
+    env.RUNNER_ENVIRONMENT !== "github-hosted"
+  )
+    throw new Error(
+      "The Copilot app cloud host requires a disposable GitHub-hosted Windows " +
+        "runner. Local and self-hosted runs are refused before cloud setup: " +
+        "desktop profile isolation is not qualified there. Use the harness locally."
+    );
+}
+
 /** The per-user install path that the winget and web installers use. */
 export function resolveCopilotAppExecutable(
   env: NodeJS.ProcessEnv,
@@ -40,10 +56,9 @@ export function resolveCopilotAppExecutable(
 
 export interface CopilotAppEnvironmentOptions {
   readonly cdpPort: number;
-  /** Isolated Copilot home, so the run never reads the runner's own state. */
-  readonly copilotHome: string;
-  /** Isolated gh config, so the app's bundled gh uses only the env token. */
-  readonly ghConfigDir: string;
+  readonly profileDir: string;
+  /** The disposable runner's existing azure/login session, deliberately shared. */
+  readonly azureConfigDir: string;
   /** Token of the account that signs in to the app and runs the agent. */
   readonly signInToken: string;
   readonly packagesToken: string;
@@ -52,8 +67,25 @@ export interface CopilotAppEnvironmentOptions {
 
 const STRIPPED_VARIABLES = [
   "CLOUD_E2E_BOT_PRIVATE_KEY",
-  "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+  "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+  "COPILOT_AGENT_SESSION_ID",
+  "SESSION_ID"
 ];
+
+export function copilotAppProfilePaths(profileDir: string) {
+  if (!/^[a-z]:[\\/]/i.test(profileDir))
+    throw new Error("The Copilot app profile must use an absolute drive path.");
+  const copilotHome = path.win32.join(profileDir, ".copilot");
+  return {
+    copilotHome,
+    ghConfigDir: path.win32.join(profileDir, "gh-config"),
+    appData: path.win32.join(profileDir, "AppData", "Roaming"),
+    localAppData: path.win32.join(profileDir, "AppData", "Local"),
+    webViewData: path.win32.join(profileDir, "webview2"),
+    temp: path.win32.join(profileDir, "temp"),
+    radiusState: path.win32.join(copilotHome, "radius")
+  };
+}
 
 /**
  * The environment for the app process only. The test runner keeps its own
@@ -65,8 +97,8 @@ export function buildCopilotAppEnvironment(
 ): NodeJS.ProcessEnv {
   const cdpUrl = cdpUrlForPort(options.cdpPort);
   const required: Record<string, string> = {
-    copilotHome: options.copilotHome,
-    ghConfigDir: options.ghConfigDir,
+    profileDir: options.profileDir,
+    azureConfigDir: options.azureConfigDir,
     signInToken: options.signInToken,
     packagesToken: options.packagesToken,
     packagesUser: options.packagesUser
@@ -74,13 +106,30 @@ export function buildCopilotAppEnvironment(
   for (const [name, value] of Object.entries(required))
     if (!value.trim())
       throw new Error(`The Copilot app option ${name} must not be empty.`);
-  const env: NodeJS.ProcessEnv = { ...base };
+  const env: NodeJS.ProcessEnv = Object.fromEntries(
+    Object.entries(base).map(([key, value]) => [key.toUpperCase(), value])
+  );
   for (const name of STRIPPED_VARIABLES) delete env[name];
+  const paths = copilotAppProfilePaths(options.profileDir);
   return {
     ...env,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${new URL(cdpUrl).port}`,
-    COPILOT_HOME: options.copilotHome,
-    GH_CONFIG_DIR: options.ghConfigDir,
+    WEBVIEW2_USER_DATA_FOLDER: paths.webViewData,
+    USERPROFILE: options.profileDir,
+    HOME: options.profileDir,
+    HOMEDRIVE: path.win32.parse(options.profileDir).root.slice(0, 2),
+    HOMEPATH: options.profileDir.slice(2),
+    APPDATA: paths.appData,
+    LOCALAPPDATA: paths.localAppData,
+    TEMP: paths.temp,
+    TMP: paths.temp,
+    COPILOT_HOME: paths.copilotHome,
+    GH_CONFIG_DIR: paths.ghConfigDir,
+    AZURE_CONFIG_DIR: options.azureConfigDir,
+    RADIUS_CREDENTIALS_FILE: path.win32.join(
+      paths.radiusState,
+      "credentials.json"
+    ),
     COPILOT_GITHUB_TOKEN: options.signInToken,
     GH_TOKEN: options.signInToken,
     GITHUB_TOKEN: options.signInToken,
@@ -107,7 +156,7 @@ export interface SpawnedApp {
 
 export interface CopilotAppHostPorts {
   isAppRunning(): Promise<boolean>;
-  spawn(executable: string, env: NodeJS.ProcessEnv): SpawnedApp;
+  spawn(executable: string, env: NodeJS.ProcessEnv): Promise<SpawnedApp>;
   probe(cdpUrl: string): Promise<CdpProbeResult>;
   kill(pid: number): Promise<void>;
   now(): number;
@@ -130,6 +179,27 @@ export interface LaunchedCopilotApp {
 export interface LaunchTiming {
   readonly timeoutMs: number;
   readonly intervalMs: number;
+}
+
+export async function cleanupCopilotApp(
+  disconnect: () => Promise<void>,
+  stop: () => Promise<void>,
+  removeProfile: () => Promise<void>
+): Promise<void> {
+  const errors: unknown[] = [];
+  try {
+    await disconnect();
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    await stop();
+    await removeProfile();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length > 0)
+    throw new AggregateError(errors, "Copilot app cleanup failed.");
 }
 
 /**
@@ -156,16 +226,25 @@ export async function launchCopilotApp(
         "Free the port before the suite starts the Copilot app."
     );
 
-  const app = ports.spawn(config.executable, config.env);
+  const app = await ports.spawn(config.executable, config.env);
   let exitCode: number | null | undefined;
   void app.exited.then((code) => {
     exitCode = code;
   });
   let stopped = false;
+  let stopping: Promise<void> | undefined;
   const stop = async (): Promise<void> => {
     if (stopped) return;
-    stopped = true;
-    if (exitCode === undefined) await ports.kill(app.pid);
+    if (stopping) return stopping;
+    stopping = (async () => {
+      if (exitCode === undefined) await ports.kill(app.pid);
+      stopped = true;
+    })();
+    try {
+      await stopping;
+    } finally {
+      stopping = undefined;
+    }
   };
 
   const deadline = ports.now() + timing.timeoutMs;
@@ -188,7 +267,15 @@ export async function launchCopilotApp(
       await ports.wait(timing.intervalMs);
     }
   } catch (error) {
-    await stop();
+    try {
+      await stop();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "App launch and cleanup failed.",
+        { cause: cleanupError }
+      );
+    }
     throw error;
   }
 }
@@ -208,18 +295,27 @@ export function createNodeCopilotAppHostPorts(): CopilotAppHostPorts {
       return tasklistHasImage(stdout, COPILOT_APP_IMAGE_NAME);
     },
     spawn(executable, env) {
-      const child = spawnProcess(executable, [], {
-        env,
-        stdio: "ignore",
-        windowsHide: false
+      return new Promise<SpawnedApp>((resolve, reject) => {
+        const child = spawnProcess(executable, [], {
+          env,
+          stdio: "ignore",
+          windowsHide: false
+        });
+        const exited = new Promise<number | null>((resolveExit) => {
+          child.once("error", (error) => {
+            resolveExit(null);
+            reject(error);
+          });
+          child.once("exit", (code) => resolveExit(code));
+        });
+        child.once("spawn", () => {
+          if (child.pid === undefined) {
+            reject(new Error(`Could not start ${executable}: no process id.`));
+            return;
+          }
+          resolve({ pid: child.pid, exited });
+        });
       });
-      if (child.pid === undefined)
-        throw new Error(`Could not start ${executable}.`);
-      const exited = new Promise<number | null>((resolve) => {
-        child.once("exit", (code) => resolve(code));
-        child.once("error", () => resolve(null));
-      });
-      return { pid: child.pid, exited };
     },
     probe: (cdpUrl) => probeCdpEndpoint(cdpUrl, fetch, 2_000),
     async kill(pid) {

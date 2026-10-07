@@ -38,7 +38,6 @@
 // `.radius/` model in the clean fixture, the spec publishes the new model to
 // the default branch (cleanup resets it to the baseline), and the later stages
 // drive the Radius canvas inside the app.
-import fs from "node:fs/promises";
 import path from "node:path";
 import { createFileCredentialProvenanceStore } from "../../src/credential-provenance-store.js";
 import { configureCredentialProvenanceStore } from "../../src/credential-provenance.js";
@@ -77,17 +76,23 @@ import {
   cloudModelingPrompt,
   describeModelReadiness,
   MODEL_COMMIT_MESSAGE,
-  MODEL_FILES,
   planModelPublication,
   type ModelFileTimes,
   type ModelReadiness
 } from "./support/copilot-app-modeling.js";
+import { assertCopilotAppRunner } from "./support/copilot-app-host.js";
+import {
+  prepareModelWorkspace,
+  readModelSnapshot
+} from "./support/copilot-app-workspace.js";
 import {
   ensureFixtureProject,
   pageOf,
   readCurrentSessionStatus,
   readSessionInfo,
+  sendSessionPrompt,
   startSessionFromNewPage,
+  waitForIdleSession,
   type CanvasTarget
 } from "./support/copilot-app-ui.js";
 import {
@@ -334,23 +339,6 @@ async function createCredentialProfile(
   await expect(page.locator("#cred-landing")).toBeVisible();
 }
 
-async function readModelFileTimes(
-  workspacePath: string
-): Promise<ModelFileTimes> {
-  const entries = await Promise.all(
-    MODEL_FILES.map(async (file) => {
-      try {
-        return [file, (await fs.stat(path.join(workspacePath, file))).mtimeMs];
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT")
-          return [file, undefined];
-        throw error;
-      }
-    })
-  );
-  return Object.fromEntries(entries) as ModelFileTimes;
-}
-
 async function readCanvasJson(
   target: CanvasTarget,
   requestPath: string
@@ -386,6 +374,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   };
 
   test.beforeAll(async () => {
+    if (cloudCanvasHost === "copilot-app")
+      assertCopilotAppRunner(process.env, process.platform);
     if (!gate.enabled) throw new Error(gate.reason);
     if (!githubPackagesToken)
       throw new Error(
@@ -486,27 +476,48 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       const { appPage } = cloudCanvas.app;
 
       await ensureFixtureProject(appPage, cloud.repository, FIXTURE_REPO_NAME);
-      const startedAtMs = Date.now();
-      await startSessionFromNewPage(appPage, {
+      const sessionId = await startSessionFromNewPage(appPage, {
         projectName: FIXTURE_REPO_NAME,
-        prompt: cloudModelingPrompt(FIXTURE_APPLICATION_NAME)
+        prompt:
+          "Reply Ready and stop. Do not read, change, commit, push, model, or deploy anything. The test will prepare this workspace first."
       });
+      await waitForIdleSession(appPage);
       const session = await readSessionInfo(appPage);
+      expect(session.sessionId).toBe(sessionId);
       expect(session.baseBranch).toBe(cloud.defaultBranch);
+      const git = async (args: readonly string[]): Promise<string> =>
+        expectSuccess(
+          await ports.commands.runGit(args, session.path),
+          `git ${args.join(" ")}`
+        ).stdout;
+      const startedAtMs = await prepareModelWorkspace(
+        {
+          workspacePath: session.path,
+          profileDir: cloudCanvas.app.profileDir,
+          repository: cloud.repository,
+          baselineSha: cloud.baselineSha
+        },
+        git
+      );
+      await sendSessionPrompt(
+        appPage,
+        cloudModelingPrompt(FIXTURE_APPLICATION_NAME)
+      );
 
       let previousTimes: ModelFileTimes | undefined;
       let readiness: ModelReadiness | undefined;
       await expect
         .poll(
           async () => {
-            const times = await readModelFileTimes(session.path);
+            const snapshot = await readModelSnapshot(session.path);
             readiness = classifyModelReadiness({
-              times,
+              ...snapshot,
+              baselineSha: cloud.baselineSha,
               startedAtMs,
               previousTimes,
               sessionStatus: await readCurrentSessionStatus(appPage)
             });
-            previousTimes = times;
+            previousTimes = snapshot.times;
             return readiness.ready;
           },
           {
@@ -527,11 +538,6 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         contentType: "text/plain"
       });
 
-      const git = async (args: readonly string[]): Promise<string> =>
-        expectSuccess(
-          await ports.commands.runGit(args, session.path),
-          `git ${args.join(" ")}`
-        ).stdout;
       const head = await git(["rev-parse", "HEAD"]);
       await git(["add", "-A", "--", ".radius"]);
       const staged = await ports.commands.runGit(

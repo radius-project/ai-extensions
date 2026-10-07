@@ -52,19 +52,41 @@ export type AppStateSink = (
   body: Buffer | string
 ) => Promise<void>;
 
+export async function captureAppState(
+  source: {
+    screenshot(): Promise<Buffer>;
+    ariaSnapshot(): Promise<string>;
+  },
+  name: string,
+  sink: AppStateSink,
+  onWarning: (message: string) => void
+): Promise<void> {
+  const results = await Promise.allSettled([
+    source.screenshot().then((body) => sink(`${name}.png`, body)),
+    source.ariaSnapshot().then((body) => sink(`${name}.aria.yml`, body))
+  ]);
+  for (const [index, result] of results.entries())
+    if (result.status === "rejected")
+      onWarning(
+        `Could not capture ${name} ${index === 0 ? "screenshot" : "accessibility tree"}: ${describeError(result.reason)}`
+      );
+}
+
 /** Saves a screenshot and the accessibility tree for diagnosis. */
 export async function attachAppState(
   appPage: Page,
   name: string,
   sink: AppStateSink
 ): Promise<void> {
-  await Promise.allSettled([
-    appPage.screenshot().then((body) => sink(`${name}.png`, body)),
-    appPage
-      .locator("body")
-      .ariaSnapshot()
-      .then((body) => sink(`${name}.aria.yml`, body))
-  ]);
+  await captureAppState(
+    {
+      screenshot: () => appPage.screenshot(),
+      ariaSnapshot: () => appPage.locator("body").ariaSnapshot()
+    },
+    name,
+    sink,
+    (message) => console.warn(message)
+  );
 }
 
 /** A sink that attaches the files to the current test report. */
@@ -144,13 +166,11 @@ export async function ensureFixtureProject(
         name: new RegExp(`^${escapeRegExp(repository)}$`, "i")
       })
     );
-  if (
-    await option
-      .first()
-      .isVisible({ timeout: 30_000 })
-      .catch(() => false)
-  )
-    await option.first().click();
+  await expect(
+    option.first(),
+    `No project search result for ${repository}`
+  ).toBeVisible({ timeout: 30_000 });
+  await option.first().click();
   const confirm = dialog.getByRole("button", {
     name: /^(clone|add|create|open)\b/i
   });
@@ -193,10 +213,13 @@ export async function startSessionFromNewPage(
     name: options.projectName,
     exact: true
   });
-  if ((await option.count()) === 0) {
+  try {
+    await expect(option).toBeVisible({ timeout: 30_000 });
+  } catch (error) {
     await appPage.keyboard.press("Escape");
     throw new Error(
-      `Project "${options.projectName}" is not in the app project picker.`
+      `Project "${options.projectName}" is not in the app project picker.`,
+      { cause: error }
     );
   }
   await option.click();
@@ -221,6 +244,25 @@ export async function startSessionFromNewPage(
   if (!sessionId)
     throw new Error(`The app did not open a session page: ${appPage.url()}`);
   return sessionId;
+}
+
+export async function sendSessionPrompt(
+  appPage: Page,
+  prompt: string
+): Promise<void> {
+  const main = appPage.getByRole("main");
+  await main.getByRole("textbox", { name: "Message" }).fill(prompt);
+  await main.getByRole("button", { name: "Send message" }).click();
+}
+
+export async function waitForIdleSession(appPage: Page): Promise<void> {
+  await expect
+    .poll(() => readCurrentSessionStatus(appPage), {
+      message:
+        "The Copilot session did not report Idle. Refusing to modify its workspace.",
+      timeout: SESSION_START_TIMEOUT_MS
+    })
+    .toMatch(/^idle$/i);
 }
 
 function sessionInfoButton(appPage: Page): Locator {
