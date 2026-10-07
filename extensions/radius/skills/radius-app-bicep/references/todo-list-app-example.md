@@ -33,7 +33,7 @@ The requested profile runs the application with MySQL instead of its default SQL
 4. Pass the developer-supplied password to the schema's sensitive resource property from a `@secure()` parameter, and store that same parameter in an authored `Radius.Security/secrets` named `mysql-client-credentials`, distinct from the Recipe-owned `mysql-credentials` Kubernetes Secret. Bind its `password` key to the workload's native `MYSQL_PASSWORD` through `secretKeyRef` with `secretName: mysqlClientCredentials.name`. This preserves the source contract without reclassifying the input as Recipe-owned or requiring secret-backed connection projection.
 5. Referencing the image and Recipe-mapped MySQL host creates dependency ordering. Omit a generic connection unless the request explicitly requires Radius relationship metadata or the source consumes its exact projection.
 6. Pin `build.source` to the modeled commit, validate tag omission against the exact current Recipe, set `build.platforms: ['linux/amd64']` because the single unpinned stage cannot execute its arm64 `RUN` without emulation, and consume the build through verified `properties.imageReference`.
-7. Verify that the target Environment registers Recipes for every emitted extensible type.
+7. Leave Recipe registration to deployment readiness. This example names no target Environment, so the model uses the managed-default Recipe profile, and the deploy workflow registers the provider Recipe pack on the selected Environment.
 8. Match `containerPort` to the inspected process listener. The loopback-only Compose mapping is not external-client ingress evidence.
 
 ## Credential wiring excerpt
@@ -78,7 +78,7 @@ This excerpt shows only the developer-owned credential path. The same `mysqlPass
 - The selected MySQL type and source-built workload are both emitted.
 - Every required native variable appears with exact spelling and format.
 - The workload password remains an explicit `MYSQL_PASSWORD`, sourced by `secretKeyRef` from the distinct authored `mysql-client-credentials` Secret that holds the same `@secure()` parameter supplied to the backing resource; no optional Secret connection migration is performed.
-- The exact target Recipe maps every consumed output and is registered for every emitted type.
+- The selected Recipe maps every consumed output. Environment registration was not required, because no target Environment was named.
 - The source build uses the pinned commit and Recipe-validated tag/platform behavior, without unsupported package-manager or architecture assumptions.
 - The process listener, image entrypoint, and database name/version agree with the pinned source.
 - The definition compiles against an extension compatible with the exact target contract and has no unresolved runtime caveat.

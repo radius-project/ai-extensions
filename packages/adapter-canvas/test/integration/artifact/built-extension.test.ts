@@ -572,6 +572,55 @@ describe("P0-C built Radius extension artifact", () => {
     expect(notices).not.toContain("===== @reactflow/");
   });
 
+  it("packages environment-independent authoring so a missing deploy Environment cannot block modeling", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const skillGuidance = readGuidance("SKILL.md");
+    const runtimeGuidance = readGuidance("references/runtime-contract.md");
+
+    // Regression guard for #962: #637 made target-Environment registration a
+    // pre-authoring stop, which blocked every graph opened before deployment.
+    for (const guidance of filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .map((path) => readFileSync(path, "utf8"))) {
+      expect(guidance).not.toContain(
+        "target-Environment registration required by the model is unavailable"
+      );
+      expect(guidance).not.toContain(
+        "Also prove that the target Environment registers every emitted type"
+      );
+    }
+    expect(skillGuidance).toContain(
+      "### Authoring evidence and deployment readiness"
+    );
+    expect(skillGuidance).toContain(
+      "When no Environment is named and no contract is supplied, a missing, unselected, or unprovisioned deployment Environment is not a permanent modeling failure."
+    );
+    expect(skillGuidance).toContain(
+      "Only when no deployment Environment is named and no Environment contract is supplied, missing Environment-registration evidence is not a failure of either kind."
+    );
+    expect(runtimeGuidance).toContain(
+      "Only when no Environment is named and no contract is supplied, a missing or unselected deployment Environment is not a reason to reject the model."
+    );
+    expect(skillGuidance).toContain(
+      "Missing evidence for that named target remains an authoring blocker"
+    );
+    expect(skillGuidance).toContain(
+      "it does not establish AWS Recipe behavior"
+    );
+    expect(skillGuidance).toContain("do not substitute Azure evidence");
+    expect(skillGuidance).toContain(
+      "For generated custom types, inspect the authored Recipe and its pack"
+    );
+    expect(runtimeGuidance).toContain(
+      "registration of a required Recipe in a named target Environment cannot be proved"
+    );
+    expect(runtimeGuidance).toContain(
+      "an explicit target profile still requires its own exact Recipe behavior"
+    );
+  });
+
   it("packages the managed-secret modeling contract in executable examples and platform rules", () => {
     assertCurrentArtifact();
     const readGuidance = (relativePath: string): string =>
