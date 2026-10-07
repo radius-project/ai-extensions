@@ -19,7 +19,8 @@
 // derived - the Playwright timeout from the config module, the job timeout from
 // the parsed YAML - so the invariant holds if either number changes, which is
 // the point of asserting it at all.
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -299,7 +300,8 @@ describe("cloud-e2e.yml", () => {
     );
     expect(collect?.run).toContain('out="$RUNNER_TEMP/cloud-e2e-artifact"');
     expect(collect?.run).toContain("redactCredentials");
-    expect(collect?.run).toContain("2>&1 | redact_azure");
+    expect(collect?.run).toContain('2>&1 | redact_azure >"$out/$file"');
+    expect(collect?.["continue-on-error"]).toBe(true);
     expect(stage?.if).toContain("always()");
     expect(stage?.run).toContain("packages/adapter-canvas/test-results/cloud");
     expect(stage?.run).toContain(
@@ -316,6 +318,115 @@ describe("cloud-e2e.yml", () => {
       "az failed: [REDACTED]"
     );
   });
+
+  it("loads the exact Azure diagnostics sanitizer in a native Node process", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const collect = steps(workflow.jobs?.["cloud-e2e"]).find(
+      (step) => step.name === "Collect az and gh diagnostics"
+    );
+    const program = collect?.run?.match(
+      /node --input-type=module -e '([\s\S]*?)'\s*\n\s*\}/
+    )?.[1];
+    expect(program).toBeDefined();
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", program ?? ""],
+      {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8",
+        input:
+          '{"client_secret":\n"fixture-secret","tenantId":"synthetic-tenant"}',
+        env: {}
+      }
+    );
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(
+      '{"client_secret":\n"[REDACTED]","tenantId":"synthetic-tenant"}'
+    );
+  });
+
+  it.each(["success", "az failure", "sanitizer failure"] as const)(
+    "runs the diagnostic capture shell with explicit %s reporting",
+    async (scenario) => {
+      const workflow = await parseWorkflow(RUN_WORKFLOW);
+      const collect = steps(workflow.jobs?.["cloud-e2e"]).find(
+        (step) => step.name === "Collect az and gh diagnostics"
+      );
+      expect(collect?.run).toBeDefined();
+      const directory = await mkdtemp(
+        path.join(tmpdir(), "azure-diagnostics-")
+      );
+      try {
+        const shell =
+          process.platform === "win32" ?
+            path.join(
+              process.env.ProgramFiles ?? "C:\\Program Files",
+              "Git",
+              "bin",
+              "bash.exe"
+            )
+          : "bash";
+        const node = process.execPath
+          .replaceAll("\\", "/")
+          .replaceAll("'", "'\\''");
+        const result = spawnSync(shell, ["--noprofile", "--norc", "-s"], {
+          cwd: REPOSITORY_ROOT,
+          encoding: "utf8",
+          env: {
+            PATH: process.env.PATH,
+            SystemRoot: process.env.SystemRoot,
+            RUNNER_TEMP: directory.replaceAll("\\", "/"),
+            RESOURCE_GROUP_PREFIX: "synthetic-prefix"
+          },
+          input: `
+            node() { ${scenario === "sanitizer failure" ? "return 23" : `'${node}' "$@"`}; }
+            az() {
+              printf '%s\\n' '{"client_secret":"fixture-secret","tenantId":"synthetic-tenant"}'
+              printf '%s\\n' 'message=ordinary' >&2
+              return ${scenario === "az failure" ? "17" : "0"}
+            }
+            gh() { printf '%s\\n' '{}'; }
+            ${collect?.run}
+          `
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(scenario === "success" ? 0 : 1);
+        expect(result.stdout.match(/::error::/g) ?? []).toHaveLength(
+          scenario === "success" ? 0 : 4
+        );
+        for (const file of [
+          "az-version.json",
+          "az-account.json",
+          "az-leftover-resource-groups.json",
+          "az-leftover-applications.json"
+        ]) {
+          const text = await readFile(
+            path.join(directory, "cloud-e2e-artifact", file),
+            "utf8"
+          );
+          expect(text).not.toContain("fixture-secret");
+          if (scenario !== "sanitizer failure") {
+            expect(text).toContain('"client_secret":"[REDACTED]"');
+            expect(text).toContain("synthetic-tenant");
+            expect(text).toContain("message=ordinary");
+          }
+          if (scenario !== "success")
+            expect(text).toContain("Azure diagnostic capture failed");
+        }
+        // Diagnostic failures stay visible without replacing the journey result.
+        expect(collect?.["continue-on-error"]).toBe(true);
+        const journey = steps(workflow.jobs?.["cloud-e2e"]).find(
+          (step) => step.name === "Run the cloud create-environment journey"
+        );
+        expect(journey?.run).toBe("pnpm run test:cloud");
+        expect(journey?.["continue-on-error"]).toBeUndefined();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
 
   it("collects the fixture repository's own failing workflow logs", async () => {
     // Anything the product commits and dispatches runs in the fixture

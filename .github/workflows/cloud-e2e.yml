@@ -243,12 +243,11 @@ jobs:
           permission-contents: read
           permission-pull-requests: read
 
-      # Collected on success as well as failure, and never allowed to fail the
-      # job: a diagnostics step that breaks the run it is diagnosing is worse
-      # than no diagnostics. `az` output here is deliberately identifier-level
-      # only - no credentials, no secret values.
+      # Preserve the journey's result while surfacing diagnostic capture errors
+      # as a failed, non-blocking step. Azure output remains identifier-level.
       - name: Collect az and gh diagnostics
         if: always() && steps.fixture.outputs.configured == 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.diagnostics-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
@@ -258,10 +257,11 @@ jobs:
           set -uo pipefail
           out="$RUNNER_TEMP/cloud-e2e-artifact"
           mkdir -p "$out"
+          capture_failed=0
 
           redact_azure() {
             node --input-type=module -e '
-              import { redactCredentials } from "./packages/adapter-canvas/src/credential-redaction.ts";
+              import { redactCredentials } from "./packages/core/src/credential-redaction.ts";
               let input = "";
               for await (const chunk of process.stdin) input += chunk;
               process.stdout.write(redactCredentials(input, [
@@ -277,14 +277,22 @@ jobs:
             '
           }
 
-          az version 2>&1 | redact_azure >"$out/az-version.json" || true
-          az account show --query '{tenantId:tenantId,subscriptionId:id,type:user.type}' \
-            2>&1 | redact_azure >"$out/az-account.json" || true
-          az group list --query "[?starts_with(name, '$RESOURCE_GROUP_PREFIX')].{name:name,location:location,tags:tags}" \
-            2>&1 | redact_azure >"$out/az-leftover-resource-groups.json" || true
-          az ad app list --filter "startswith(displayName, 'radius-deploy-')" \
-            --query '[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}' \
-            2>&1 | redact_azure >"$out/az-leftover-applications.json" || true
+          capture_azure() {
+            local file="$1"
+            shift
+            if ! "$@" 2>&1 | redact_azure >"$out/$file"; then
+              echo "::error::Azure diagnostic capture failed: $file"
+              printf '\nAzure diagnostic capture failed; output may be incomplete.\n' >>"$out/$file"
+              capture_failed=1
+            fi
+          }
+
+          capture_azure az-version.json az version
+          capture_azure az-account.json az account show --query '{tenantId:tenantId,subscriptionId:id,type:user.type}'
+          capture_azure az-leftover-resource-groups.json az group list \
+            --query "[?starts_with(name, '$RESOURCE_GROUP_PREFIX')].{name:name,location:location,tags:tags}"
+          capture_azure az-leftover-applications.json az ad app list --filter "startswith(displayName, 'radius-deploy-')" \
+            --query '[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}'
 
           gh --version >"$out/gh-version.txt" 2>&1 || true
           if [[ -n "${FIXTURE_REPOSITORY:-}" ]]; then
@@ -307,6 +315,7 @@ jobs:
             echo "AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is unset; no fixture repository to inspect." \
               >"$out/gh-fixture-repository.txt"
           fi
+          exit "$capture_failed"
 
       - name: Stage Playwright traces and report
         if: always() && steps.fixture.outputs.configured == 'true'
