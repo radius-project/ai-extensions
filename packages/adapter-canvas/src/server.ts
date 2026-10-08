@@ -5370,7 +5370,8 @@ async function ensureDeployWorkflowsOnBranch(
   repo: string,
   branch: string,
   envName: string,
-  log: (message: string) => void = () => {}
+  log: (message: string) => void,
+  onWorkflowWritten: (file: string) => void
 ): Promise<void> {
   if (!repo || !branch) return;
   // Only the dispatcher + the Azure provider workflow are published to target
@@ -5406,7 +5407,7 @@ async function ensureDeployWorkflowsOnBranch(
   for (const file of missing) {
     const content = generated && generated[file];
     if (!content) continue;
-    await commitFileToRepo(
+    const written = await commitFileToRepo(
       repo,
       ".github/workflows/" + file,
       content,
@@ -5417,6 +5418,7 @@ async function ensureDeployWorkflowsOnBranch(
         branch +
         " for worktree-consistent deploy"
     );
+    if (written) onWorkflowWritten(file);
   }
 }
 

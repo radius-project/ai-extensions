@@ -1911,6 +1911,102 @@ describe("deploy dispatch workflow publication and dispatch", () => {
       };
     }
 
+    it.each([false, true])(
+      "retries a dispatcher published before synchronization, including a later publication failure (%s)",
+      async (laterFailure) => {
+        const { input, logs } = request();
+        const gh = recordingGh([
+          { code: 1, stderr: "HTTP 404: workflow not found", stdout: "" },
+          OK
+        ]);
+        const recorder = sleepRecorder();
+        const service = createDeployDispatchService(
+          dependencies({
+            ...gh,
+            ensureDeployWorkflowsOnBranch: async (
+              _repo,
+              _branch,
+              _environment,
+              _log,
+              onWorkflowWritten
+            ) => {
+              onWorkflowWritten("run-rad-commands.yml");
+              if (laterFailure) throw new Error("provider publication failed");
+            },
+            sleep: recorder.sleep
+          })
+        );
+
+        expect(await service.prepareAndDispatch(input)).toMatchObject({
+          dispatched: true
+        });
+        expect(gh.calls).toHaveLength(2);
+        expect(gh.calls[1].args).toEqual(gh.calls[0].args);
+        expect(recorder.calls).toEqual([3000, 2000]);
+        if (laterFailure) {
+          expect(
+            logs.some((log) => log.includes("provider publication failed"))
+          ).toBe(true);
+        }
+      }
+    );
+
+    it("does not wait when only the provider workflow was published", async () => {
+      const { input } = request();
+      const gh = recordingGh();
+      const recorder = sleepRecorder();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ensureDeployWorkflowsOnBranch: async (
+            _repo,
+            _branch,
+            _environment,
+            _log,
+            onWorkflowWritten
+          ) => {
+            onWorkflowWritten("run-rad-commands-azure.yml");
+          },
+          sleep: recorder.sleep
+        })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toMatchObject({
+        dispatched: true
+      });
+      expect(gh.calls).toHaveLength(1);
+      expect(recorder.calls).toEqual([]);
+    });
+
+    it("does not retry or claim retries after a timed-out dispatch", async () => {
+      const { input, state } = request();
+      const gh = recordingGh([
+        {
+          code: 1,
+          stderr: "HTTP 404: workflow not found",
+          stdout: "",
+          timedOut: true
+        }
+      ]);
+      const recorder = sleepRecorder();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ensureWorkflowsCurrent: async () => ({
+            created: [".github/workflows/run-rad-commands.yml"]
+          }),
+          sleep: recorder.sleep
+        })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(gh.calls).toHaveLength(1);
+      expect(recorder.calls).toEqual([3000]);
+      expect(state.deployError).not.toContain("already waited and retried");
+    });
+
     it("waits for a just-authored dispatcher to register, then retries a not-found dispatch", async () => {
       const { input } = request();
       const gh = recordingGh([
@@ -1965,8 +2061,10 @@ describe("deploy dispatch workflow publication and dispatch", () => {
       expect(gh.calls).toHaveLength(1);
       expect(recorder.calls).toEqual([]);
       expect(state.deployError).toContain(
-        "has not finished registering it yet"
+        'Ensure run-rad-commands.yml exists on branch "feat"'
       );
+      expect(state.deployError).not.toContain("has not finished registering");
+      expect(state.deployError).not.toContain("already waited and retried");
     });
 
     it("explains the registration delay once the not-found retries are exhausted", async () => {
@@ -1997,7 +2095,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
       expect(gh.calls).toHaveLength(3);
       expect(recorder.calls).toEqual([3000, 2000, 5000]);
       expect(state.deployError).toContain(
-        "run-rad-commands.yml was committed to acme/widgets but GitHub has not finished registering it yet"
+        "run-rad-commands.yml was committed to acme/widgets and GitHub may still be registering it"
       );
       expect(state.deployError).toContain("Radius already waited and retried");
     });

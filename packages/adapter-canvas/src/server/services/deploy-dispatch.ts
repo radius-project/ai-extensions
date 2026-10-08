@@ -105,7 +105,8 @@ export interface DeployDispatchDependencies {
     repo: string,
     branch: string,
     environment: string,
-    log: (message: string) => void
+    log: (message: string) => void,
+    onWorkflowWritten: (file: string) => void
   ): Promise<void>;
   ensureWorkflowsCurrent(
     repo: string,
@@ -916,12 +917,16 @@ export function createDeployDispatchService(
       // Make sure the workflow files exist on the branch we are about to
       // dispatch on. The env-creation flow only commits them to the default
       // branch, so a feature/worktree branch usually needs them published.
+      let publishedDispatcher = false;
       try {
         await dependencies.ensureDeployWorkflowsOnBranch(
           repo,
           deployRef,
           envForDeploy,
-          log
+          log,
+          (file) => {
+            if (file === deployWorkflowFile) publishedDispatcher = true;
+          }
         );
       } catch (e) {
         log(
@@ -944,15 +949,13 @@ export function createDeployDispatchService(
         [...dependencies.deployWorkflowFiles],
         deployRef
       );
-      // GitHub does not register a newly authored or rewritten workflow file
-      // synchronously (#767), so `gh workflow run` can 404 even though the
-      // file is genuinely on the branch it dispatches from. When this sync
-      // just wrote the dispatcher, give GitHub a moment to index it and
-      // retry the not-found race a few times instead of failing the deploy
-      // on a race the next click would not hit.
-      const justCreatedDispatcher = sync.created.some(
-        (path) => path.split("/").pop() === deployWorkflowFile
-      );
+      // Either publisher can write the dispatcher before GitHub registers it
+      // (#767). Keep successful writes even if a later provider write fails.
+      const justCreatedDispatcher =
+        publishedDispatcher ||
+        sync.created.some(
+          (path) => path.split("/").pop() === deployWorkflowFile
+        );
 
       const deployDispatchedAt = dependencies.now();
       // Capture the newest existing run id right before dispatching, so the
@@ -1057,17 +1060,16 @@ export function createDeployDispatchService(
             refreshCommand ?
               ` Your stored GitHub CLI credential is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`
             : ` Your stored GitHub CLI credential is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`
-            // The 404 self-resolves once GitHub finishes indexing the file, and
-            // Radius already waited and retried for that (#767) — so after
-            // exhausting those retries, name the registration delay instead of
-            // sending the user to re-check the file, branch, and Actions
-            // settings that were never the problem.
-          : /not found|HTTP 404/i.test(de) ?
+          : (
+            justCreatedDispatcher &&
+            !dispatchDeployRes.timedOut &&
+            /not found|HTTP 404/i.test(de)
+          ) ?
             " " +
             deployWorkflowFile +
             " was committed to " +
             repo +
-            " but GitHub has not finished registering it yet — this can take a few minutes after the file first appears or changes. Radius already waited and retried; wait a little longer and redeploy. If this persists well beyond that, confirm " +
+            " and GitHub may still be registering it. Radius already waited and retried; wait a little longer and redeploy. If the error persists, confirm " +
             deployWorkflowFile +
             ' exists on branch "' +
             deployRef +
