@@ -23,6 +23,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path $env:LOCALAPPDATA 'Programs\GitHub Copilot\github.exe'
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          New-Item -Path $policy -Force | Out-Null
+          New-ItemProperty -Path $policy -Name 'github.exe' -Value '--remote-debugging-port=9222' -PropertyType String | Out-Null
           foreach ($location in @("${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application", "$env:LOCALAPPDATA\Microsoft\EdgeWebView\Application")) {
             Write-Output "Runtime location: $location"
             if (Test-Path $location) { Get-ChildItem $location | Select-Object Name }
@@ -59,11 +62,13 @@ jobs:
             $stdout = $app.StandardOutput.ReadToEndAsync()
             $stderr = $app.StandardError.ReadToEndAsync()
             try {
+              $ready = $false
               $deadline = [DateTime]::UtcNow.AddSeconds(30)
               do {
                 try {
                   $version = Invoke-RestMethod http://127.0.0.1:9222/json/version -TimeoutSec 2
                   Write-Output "$mode CDP ready: $($version.Browser)"
+                  $ready = $true
                   break
                 } catch {
                   Write-Output "$mode CDP not ready: $($_.Exception.Message)"
@@ -91,6 +96,7 @@ jobs:
                     ForEach-Object { $_.Current.Name } | Select-Object -First 30
                 }
               }
+              if (-not $ready) { throw "$mode CDP did not become ready." }
             } finally {
               if (-not $app.HasExited) { taskkill /PID $app.Id /T /F }
               $app.WaitForExit()
@@ -99,3 +105,4 @@ jobs:
               Write-Output $stderr.GetAwaiter().GetResult()
             }
           }
+          Remove-ItemProperty -LiteralPath $policy -Name 'github.exe'
