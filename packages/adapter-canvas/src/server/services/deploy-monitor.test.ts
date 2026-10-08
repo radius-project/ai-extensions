@@ -2090,6 +2090,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         record("sync-workflows");
         return Promise.resolve({ created: [], failed: [] });
       },
+      sleep: () => Promise.resolve(),
       latestWorkflowRunId: () => {
         record("latest-run-id");
         return Promise.resolve(76);

@@ -52,6 +52,7 @@ function dependencies(
     buildAppGraphRadCommand: () => "rad app graph",
     ensureDeployWorkflowsOnBranch: () => Promise.resolve(),
     ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
+    sleep: () => Promise.resolve(),
     latestWorkflowRunId: () => Promise.resolve(null),
     classifyDeployDispatchFailure: () => "run-unconfirmed",
     uncommittedGeneratedPaths: () => Promise.resolve([]),
@@ -236,6 +237,7 @@ describe("deploy dispatch construction", () => {
     "buildAppGraphRadCommand",
     "ensureDeployWorkflowsOnBranch",
     "ensureWorkflowsCurrent",
+    "sleep",
     "latestWorkflowRunId",
     "classifyDeployDispatchFailure",
     "uncommittedGeneratedPaths",
@@ -1892,5 +1894,140 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     expect(state.deployError).toContain(
       "GitHub Actions are enabled for acme/widgets"
     );
+  });
+
+  // #767: GitHub does not register a just-authored/updated workflow file
+  // synchronously, so an immediate `gh workflow run` 404s even though the
+  // file is genuinely on the branch it dispatches from.
+  describe("workflow registration delay (#767)", () => {
+    function sleepRecorder() {
+      const calls: number[] = [];
+      return {
+        calls,
+        sleep: (ms: number) => {
+          calls.push(ms);
+          return Promise.resolve();
+        }
+      };
+    }
+
+    it("waits for a just-authored dispatcher to register, then retries a not-found dispatch", async () => {
+      const { input } = request();
+      const gh = recordingGh([
+        {
+          code: 1,
+          stderr:
+            "HTTP 404: workflow run-rad-commands.yml not found on the default branch",
+          stdout: ""
+        },
+        OK
+      ]);
+      const recorder = sleepRecorder();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [".github/workflows/run-rad-commands.yml"],
+              failed: []
+            }),
+          sleep: recorder.sleep
+        })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toMatchObject({
+        dispatched: true
+      });
+      expect(gh.calls).toHaveLength(2);
+      // The initial 3s registration wait, then the first retry delay; the
+      // second attempt succeeded so the 5s delay was never reached.
+      expect(recorder.calls).toEqual([3000, 2000]);
+    });
+
+    it("does not wait or retry a not-found dispatch when the dispatcher was not just authored", async () => {
+      const { input, state } = request();
+      const gh = recordingGh([
+        {
+          code: 1,
+          stderr:
+            "HTTP 404: workflow run-rad-commands.yml not found on the default branch",
+          stdout: ""
+        }
+      ]);
+      const recorder = sleepRecorder();
+      const service = createDeployDispatchService(
+        dependencies({ ...gh, sleep: recorder.sleep })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(gh.calls).toHaveLength(1);
+      expect(recorder.calls).toEqual([]);
+      expect(state.deployError).toContain(
+        "has not finished registering it yet"
+      );
+    });
+
+    it("explains the registration delay once the not-found retries are exhausted", async () => {
+      const { input, state } = request();
+      const notFound = {
+        code: 1,
+        stderr:
+          "HTTP 404: workflow run-rad-commands.yml not found on the default branch",
+        stdout: ""
+      };
+      const gh = recordingGh([notFound, notFound, notFound]);
+      const recorder = sleepRecorder();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [".github/workflows/run-rad-commands.yml"],
+              failed: []
+            }),
+          sleep: recorder.sleep
+        })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(gh.calls).toHaveLength(3);
+      expect(recorder.calls).toEqual([3000, 2000, 5000]);
+      expect(state.deployError).toContain(
+        "run-rad-commands.yml was committed to acme/widgets but GitHub has not finished registering it yet"
+      );
+      expect(state.deployError).toContain("Radius already waited and retried");
+    });
+
+    it("stops retrying immediately on a dispatch failure the registration wait cannot fix", async () => {
+      const { input, state } = request();
+      const gh = recordingGh([
+        { code: 1, stderr: "HTTP 403: Actions are disabled", stdout: "" }
+      ]);
+      const recorder = sleepRecorder();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ensureWorkflowsCurrent: () =>
+            Promise.resolve({
+              created: [".github/workflows/run-rad-commands.yml"],
+              failed: []
+            }),
+          sleep: recorder.sleep
+        })
+      );
+
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(gh.calls).toHaveLength(1);
+      // Only the initial registration wait runs; no per-retry delay follows a
+      // failure that is not the not-found race.
+      expect(recorder.calls).toEqual([3000]);
+      expect(state.deployError).toContain("Actions are disabled");
+    });
   });
 });

@@ -3227,6 +3227,7 @@ const deployDispatchService = createDeployDispatchService({
   buildAppGraphRadCommand,
   ensureDeployWorkflowsOnBranch,
   ensureWorkflowsCurrent,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   latestWorkflowRunId,
   classifyDeployDispatchFailure,
   uncommittedGeneratedPaths: (entry) =>

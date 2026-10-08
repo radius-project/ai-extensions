@@ -113,7 +113,12 @@ export interface DeployDispatchDependencies {
     provider: string,
     only: string[],
     workingBranch: string
-  ): Promise<unknown>;
+  ): Promise<{ created: readonly string[] }>;
+  // Suspends for `ms` so a dispatch can wait out GitHub's workflow
+  // registration delay (#767: a just-authored/updated workflow file 404s on
+  // `gh workflow run` for a short window after it is committed, because
+  // GitHub has not finished indexing it).
+  sleep(ms: number): Promise<void>;
   // Reads the newest existing run id for the deploy workflow so a baseline can
   // be captured immediately before dispatch. Resolves to null on any read
   // failure, in which case run discovery falls back to its time window.
@@ -184,6 +189,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
   "buildAppGraphRadCommand",
   "ensureDeployWorkflowsOnBranch",
   "ensureWorkflowsCurrent",
+  "sleep",
   "latestWorkflowRunId",
   "classifyDeployDispatchFailure",
   "uncommittedGeneratedPaths",
@@ -931,12 +937,21 @@ export function createDeployDispatchService(
       // upstream Radius templates before running them, so the deploy never
       // executes a drifted copy. Syncs the deploy files on both the default
       // branch and the branch being deployed, which a --ref dispatch checks out.
-      await dependencies.ensureWorkflowsCurrent(
+      const sync = await dependencies.ensureWorkflowsCurrent(
         repo,
         envForDeploy,
         provider,
         [...dependencies.deployWorkflowFiles],
         deployRef
+      );
+      // GitHub does not register a newly authored or rewritten workflow file
+      // synchronously (#767), so `gh workflow run` can 404 even though the
+      // file is genuinely on the branch it dispatches from. When this sync
+      // just wrote the dispatcher, give GitHub a moment to index it and
+      // retry the not-found race a few times instead of failing the deploy
+      // on a race the next click would not hit.
+      const justCreatedDispatcher = sync.created.some(
+        (path) => path.split("/").pop() === deployWorkflowFile
       );
 
       const deployDispatchedAt = dependencies.now();
@@ -965,14 +980,43 @@ export function createDeployDispatchService(
           envForDeploy +
           '"...'
       );
-      let dispatchDeployRes = await dependencies.runGh(dispatchArgs);
-      let dispatchCredentialSource = dependencies.ghCredentialSource();
-      if (dispatchDeployRes.code !== 0) {
-        const attempt = await withStrippedToken(dispatchDeployRes, (env) =>
-          dependencies.runGh(dispatchArgs, { env })
-        );
+      const dispatchOnce = async (): Promise<{
+        result: DeployCommandResult;
+        credentialSource: "injected" | "keyring";
+      }> => {
+        let result = await dependencies.runGh(dispatchArgs);
+        let credentialSource = dependencies.ghCredentialSource();
+        if (result.code !== 0) {
+          const attempt = await withStrippedToken(result, (env) =>
+            dependencies.runGh(dispatchArgs, { env })
+          );
+          result = attempt.result;
+          credentialSource = attempt.credentialSource;
+        }
+        return { result, credentialSource };
+      };
+      // Only a just-authored/updated dispatcher gets the extra wait and
+      // retries — an already-registered workflow keeps the common path fast
+      // at a single immediate attempt.
+      const dispatchDelaysMs = justCreatedDispatcher ? [0, 2000, 5000] : [0];
+      if (justCreatedDispatcher) await dependencies.sleep(3000);
+      let dispatchDeployRes: DeployCommandResult = {
+        code: 1,
+        stdout: "",
+        stderr: ""
+      };
+      let dispatchCredentialSource: "injected" | "keyring" =
+        dependencies.ghCredentialSource();
+      for (const delay of dispatchDelaysMs) {
+        if (delay > 0) await dependencies.sleep(delay);
+        const attempt = await dispatchOnce();
         dispatchDeployRes = attempt.result;
         dispatchCredentialSource = attempt.credentialSource;
+        if (dispatchDeployRes.code === 0 || dispatchDeployRes.timedOut) break;
+        // Only the not-yet-registered race self-resolves; any other failure
+        // (missing scope, Actions disabled, branch unresolved, …) will not, so
+        // stop retrying and report it immediately.
+        if (!/not found|HTTP 404/i.test(dispatchDeployRes.stderr || "")) break;
       }
       if (dispatchDeployRes.code !== 0) {
         const de = (dispatchDeployRes.stderr || "").trim();
@@ -1013,6 +1057,23 @@ export function createDeployDispatchService(
             refreshCommand ?
               ` Your stored GitHub CLI credential is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`
             : ` Your stored GitHub CLI credential is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`
+            // The 404 self-resolves once GitHub finishes indexing the file, and
+            // Radius already waited and retried for that (#767) — so after
+            // exhausting those retries, name the registration delay instead of
+            // sending the user to re-check the file, branch, and Actions
+            // settings that were never the problem.
+          : /not found|HTTP 404/i.test(de) ?
+            " " +
+            deployWorkflowFile +
+            " was committed to " +
+            repo +
+            " but GitHub has not finished registering it yet — this can take a few minutes after the file first appears or changes. Radius already waited and retried; wait a little longer and redeploy. If this persists well beyond that, confirm " +
+            deployWorkflowFile +
+            ' exists on branch "' +
+            deployRef +
+            '" and that GitHub Actions are enabled for ' +
+            repo +
+            "."
           : " Ensure " +
             deployWorkflowFile +
             ' exists on branch "' +

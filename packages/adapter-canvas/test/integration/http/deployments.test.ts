@@ -2172,6 +2172,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
           "OIDC refusal must happen before workflow synchronization"
         );
       },
+      sleep: () => Promise.resolve(),
       classifyDeployDispatchFailure: () => "run-unconfirmed",
       uncommittedGeneratedPaths: () => Promise.resolve([]),
       latestWorkflowRunId: () => {
