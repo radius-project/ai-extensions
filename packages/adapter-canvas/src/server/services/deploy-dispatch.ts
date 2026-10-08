@@ -114,7 +114,7 @@ export interface DeployDispatchDependencies {
     provider: string,
     only: string[],
     workingBranch: string
-  ): Promise<{ created: readonly string[] }>;
+  ): Promise<{ created: readonly string[]; updated: readonly string[] }>;
   // Suspends for `ms` so a dispatch can wait out GitHub's workflow
   // registration delay (#767: a just-authored/updated workflow file 404s on
   // `gh workflow run` for a short window after it is committed, because
@@ -953,7 +953,7 @@ export function createDeployDispatchService(
       // (#767). Keep successful writes even if a later provider write fails.
       const justCreatedDispatcher =
         publishedDispatcher ||
-        sync.created.some(
+        [...sync.created, ...sync.updated].some(
           (path) => path.split("/").pop() === deployWorkflowFile
         );
 

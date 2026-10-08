@@ -2247,9 +2247,13 @@ async function ensureWorkflowsCurrent(
   provider: string,
   only: string[],
   workingBranch = ""
-): Promise<{ created: string[]; failed: WorkflowCommitFailure[] }> {
+): Promise<{
+  created: string[];
+  updated: string[];
+  failed: WorkflowCommitFailure[];
+}> {
   if (!repo || !environment || !only || only.length === 0)
-    return { created: [], failed: [] };
+    return { created: [], updated: [], failed: [] };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -2280,11 +2284,12 @@ async function ensureWorkflowsCurrent(
       created: [
         ...new Set([...(r.created || []), ...(r.registrationPending || [])])
       ],
+      updated: r.updated || [],
       failed: r.failed || []
     };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
-    return { created: [], failed: [] };
+    return { created: [], updated: [], failed: [] };
   }
 }
 

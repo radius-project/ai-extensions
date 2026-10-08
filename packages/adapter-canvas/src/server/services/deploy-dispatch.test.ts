@@ -51,7 +51,8 @@ function dependencies(
     buildDeployRadCommand: () => "rad deploy",
     buildAppGraphRadCommand: () => "rad app graph",
     ensureDeployWorkflowsOnBranch: () => Promise.resolve(),
-    ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
+    ensureWorkflowsCurrent: () =>
+      Promise.resolve({ created: [], updated: [], failed: [] }),
     sleep: () => Promise.resolve(),
     latestWorkflowRunId: () => Promise.resolve(null),
     classifyDeployDispatchFailure: () => "run-unconfirmed",
@@ -1493,7 +1494,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
           order.push(
             `sync:${repo}:${environment}:${provider}:${only.join("+")}:${workingBranch}`
           );
-          return Promise.resolve({ created: [], failed: [] });
+          return Promise.resolve({ created: [], updated: [], failed: [] });
         }
       })
     );
@@ -1993,7 +1994,8 @@ describe("deploy dispatch workflow publication and dispatch", () => {
         dependencies({
           ...gh,
           ensureWorkflowsCurrent: async () => ({
-            created: [".github/workflows/run-rad-commands.yml"]
+            created: [".github/workflows/run-rad-commands.yml"],
+            updated: []
           }),
           sleep: recorder.sleep
         })
@@ -2007,38 +2009,48 @@ describe("deploy dispatch workflow publication and dispatch", () => {
       expect(state.deployError).not.toContain("already waited and retried");
     });
 
-    it("waits for a just-authored dispatcher to register, then retries a not-found dispatch", async () => {
-      const { input } = request();
-      const gh = recordingGh([
-        {
-          code: 1,
-          stderr:
-            "HTTP 404: workflow run-rad-commands.yml not found on the default branch",
-          stdout: ""
-        },
-        OK
-      ]);
-      const recorder = sleepRecorder();
-      const service = createDeployDispatchService(
-        dependencies({
-          ...gh,
-          ensureWorkflowsCurrent: () =>
-            Promise.resolve({
-              created: [".github/workflows/run-rad-commands.yml"],
-              failed: []
-            }),
-          sleep: recorder.sleep
-        })
-      );
+    it.each(["created", "updated"] as const)(
+      "waits for a dispatcher %s by synchronization, then retries a not-found dispatch",
+      async (change) => {
+        const { input } = request();
+        const gh = recordingGh([
+          {
+            code: 1,
+            stderr:
+              "HTTP 404: workflow run-rad-commands.yml not found on the default branch",
+            stdout: ""
+          },
+          OK
+        ]);
+        const recorder = sleepRecorder();
+        const service = createDeployDispatchService(
+          dependencies({
+            ...gh,
+            ensureWorkflowsCurrent: () =>
+              Promise.resolve({
+                created:
+                  change === "created" ?
+                    [".github/workflows/run-rad-commands.yml"]
+                  : [],
+                updated:
+                  change === "updated" ?
+                    [".github/workflows/run-rad-commands.yml"]
+                  : [],
+                failed: []
+              }),
+            sleep: recorder.sleep
+          })
+        );
 
-      expect(await service.prepareAndDispatch(input)).toMatchObject({
-        dispatched: true
-      });
-      expect(gh.calls).toHaveLength(2);
-      // The initial 3s registration wait, then the first retry delay; the
-      // second attempt succeeded so the 5s delay was never reached.
-      expect(recorder.calls).toEqual([3000, 2000]);
-    });
+        expect(await service.prepareAndDispatch(input)).toMatchObject({
+          dispatched: true
+        });
+        expect(gh.calls).toHaveLength(2);
+        // The initial 3s registration wait, then the first retry delay; the
+        // second attempt succeeded so the 5s delay was never reached.
+        expect(recorder.calls).toEqual([3000, 2000]);
+      }
+    );
 
     it("does not wait or retry a not-found dispatch when the dispatcher was not just authored", async () => {
       const { input, state } = request();
@@ -2083,6 +2095,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
           ensureWorkflowsCurrent: () =>
             Promise.resolve({
               created: [".github/workflows/run-rad-commands.yml"],
+              updated: [],
               failed: []
             }),
           sleep: recorder.sleep
@@ -2112,6 +2125,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
           ensureWorkflowsCurrent: () =>
             Promise.resolve({
               created: [".github/workflows/run-rad-commands.yml"],
+              updated: [],
               failed: []
             }),
           sleep: recorder.sleep
