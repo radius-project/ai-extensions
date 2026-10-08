@@ -19,7 +19,8 @@
 // derived - the Playwright timeout from the config module, the job timeout from
 // the parsed YAML - so the invariant holds if either number changes, which is
 // the point of asserting it at all.
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,7 @@ import cloudConfig from "../../playwright.cloud.config.js";
 import { redactCredentials } from "../../src/credential-redaction.js";
 import { CLOUD_CANVAS_HOSTS } from "../e2e-cloud/support/cloud-canvas-host.js";
 import { COPILOT_APP_SUITE_TIMEOUT_MS } from "../e2e-cloud/support/cloud-timeout-budget.js";
+import { COPILOT_APP_DEFAULT_CDP_PORT } from "../e2e-cloud/support/copilot-app-cdp.js";
 import {
   ENVIRONMENT_NAME_PREFIX,
   RESOURCE_GROUP_PREFIX
@@ -276,6 +278,170 @@ describe("cloud-e2e.yml", () => {
       CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}"
     });
   });
+
+  it("scopes elevated WebView2 debugging to the app and removes only its owned policy", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const all = steps(workflow.jobs?.["cloud-e2e"]);
+    const enableIndex = all.findIndex((step) => step.id === "copilot-cdp");
+    const runIndex = all.findIndex((step) => step.run?.includes("test:cloud"));
+    const removeIndex = all.findIndex(
+      (step) => step.name === "Remove Copilot app browser debugging policy"
+    );
+    const enable = all[enableIndex];
+    const remove = all[removeIndex];
+    const policy =
+      "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
+
+    expect(enableIndex).toBeGreaterThan(0);
+    expect(enableIndex).toBeLessThan(runIndex);
+    expect(removeIndex).toBeGreaterThan(runIndex);
+    expect(enable?.if).toBe(
+      "steps.fixture.outputs.configured == 'true' && env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'copilot-app'"
+    );
+    expect(enable?.shell).toBe("pwsh");
+    expect(enable?.run).toContain(`$policy = '${policy}'`);
+    expect(enable?.run).toContain(
+      `New-ItemProperty -LiteralPath $policy -Name 'github.exe' -Value '--remote-debugging-port=${COPILOT_APP_DEFAULT_CDP_PORT}' -PropertyType String`
+    );
+    expect(enable?.run).toContain(
+      "(Get-Item -LiteralPath $policy).GetValueNames().Contains('github.exe')"
+    );
+    expect(enable?.run).toContain(
+      "$env:RUNNER_ENVIRONMENT -ne 'github-hosted'"
+    );
+    expect(enable?.run).toContain("'configured=true' >> $env:GITHUB_OUTPUT");
+    expect(remove?.if).toBe(
+      "always() && steps.fixture.outputs.configured == 'true' && steps.copilot-cdp.outputs.configured == 'true'"
+    );
+    expect(remove?.shell).toBe("pwsh");
+    expect(remove?.run).toBe(
+      "$ErrorActionPreference = 'Stop'\n" +
+        `$policy = '${policy}'\n` +
+        "Remove-ItemProperty -LiteralPath $policy -Name 'github.exe'\n"
+    );
+    expect(enable?.["continue-on-error"]).toBeUndefined();
+    expect(remove?.["continue-on-error"]).toBeUndefined();
+  });
+
+  it.skipIf(process.platform !== "win32").each([
+    { state: "missing", runner: "github-hosted", fails: false, success: true },
+    {
+      state: "other-app",
+      runner: "github-hosted",
+      fails: false,
+      success: true
+    },
+    {
+      state: "existing",
+      runner: "github-hosted",
+      fails: false,
+      success: false
+    },
+    { state: "missing", runner: "self-hosted", fails: false, success: false },
+    { state: "missing", runner: "github-hosted", fails: true, success: false }
+  ])(
+    "executes the policy setup without replacing existing state: $state, $runner, write failure=$fails",
+    async ({ state, runner, fails, success }) => {
+      const workflow = await parseWorkflow(RUN_WORKFLOW);
+      const all = steps(workflow.jobs?.["cloud-e2e"]);
+      const enable = all.find((step) => step.id === "copilot-cdp")?.run;
+      const remove = all.find(
+        (step) => step.name === "Remove Copilot app browser debugging policy"
+      )?.run;
+      expect(enable).toBeDefined();
+      expect(remove).toBeDefined();
+      const root = await mkdtemp(path.join(tmpdir(), "radius-cdp-policy-"));
+      try {
+        const script = `
+$ErrorActionPreference = 'Stop'
+$calls = [System.Collections.Generic.List[string]]::new()
+function Test-Path { param($LiteralPath) return $env:TEST_STATE -ne 'missing' }
+function Get-Item {
+  param($LiteralPath)
+  $key = [pscustomobject]@{}
+  $key | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value {
+    if ($env:TEST_STATE -eq 'existing') { return @('github.exe', 'other.exe') }
+    return @('other.exe')
+  }
+  return $key
+}
+function New-Item { param($Path, [switch]$Force) $calls.Add('create-key') }
+function New-ItemProperty {
+  param($LiteralPath, $Name, $Value, $PropertyType)
+  $calls.Add("set:$LiteralPath|$Name|$Value|$PropertyType")
+  if ($env:TEST_WRITE_FAIL -eq 'true') { throw 'Policy write denied' }
+}
+function Remove-ItemProperty {
+  param($LiteralPath, $Name)
+  $calls.Add("remove:$LiteralPath|$Name")
+}
+try {
+  & {
+${enable}
+  }
+  & {
+${remove}
+  }
+} finally {
+  Write-Output ($calls -join ';')
+}
+`;
+        const result = spawnSync(
+          "pwsh",
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            Buffer.from(script, "utf16le").toString("base64")
+          ],
+          {
+            encoding: "utf8",
+            timeout: 4_000,
+            env: {
+              PATH: process.env.PATH,
+              SystemRoot: process.env.SystemRoot,
+              TEMP: root,
+              TMP: root,
+              GITHUB_ACTIONS: "true",
+              RUNNER_ENVIRONMENT: runner,
+              GITHUB_OUTPUT: path.join(root, "output"),
+              TEST_STATE: state,
+              TEST_WRITE_FAIL: String(fails)
+            }
+          }
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(success ? 0 : 1);
+        const policy =
+          "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
+        const write = `set:${policy}|github.exe|--remote-debugging-port=${COPILOT_APP_DEFAULT_CDP_PORT}|String`;
+        const calls =
+          runner === "self-hosted" || state === "existing" ?
+            []
+          : [
+              ...(state === "missing" ? ["create-key"] : []),
+              write,
+              ...(success ? [`remove:${policy}|github.exe`] : [])
+            ];
+        expect(result.stdout.trim()).toBe(calls.join(";"));
+        if (success) {
+          expect(await readFile(path.join(root, "output"), "utf8")).toMatch(
+            /^configured=true\r?\n$/
+          );
+        } else {
+          expect(await readdir(root)).not.toContain("output");
+          expect(result.stderr).toContain(
+            runner === "self-hosted" ? "only allowed on disposable"
+            : state === "existing" ? "Refusing to replace it"
+            : "Policy write denied"
+          );
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  );
 
   it("isolates package credentials while using OIDC and an installation token", async () => {
     // Azure and repository access credentials are minted per run and expire
