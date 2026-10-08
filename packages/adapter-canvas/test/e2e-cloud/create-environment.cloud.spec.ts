@@ -30,11 +30,23 @@
 // Absence on its own would prove nothing — a product that never created the
 // Environment would satisfy it just as readily — so the fixture refuses to make
 // an absence assertion until this run has observed the artifact present.
+//
+// `RADIUS_CLOUD_E2E_CANVAS_HOST` selects where the canvas runs. The default,
+// "harness", serves this checkout's canvas in headless Chromium and uses the
+// fixture's committed model. "copilot-app" starts the GitHub Copilot desktop
+// app on Windows and adds a first stage: the Radius agent replaces any
+// `.radius/` model in the clean fixture, the spec publishes the new model to
+// the default branch (cleanup resets it to the baseline), and the later stages
+// drive the Radius canvas inside the app.
 import path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
 import { createFileCredentialProvenanceStore } from "../../src/credential-provenance-store.js";
 import { configureCredentialProvenanceStore } from "../../src/credential-provenance.js";
-import { CanvasHarness } from "../e2e/support/canvas-harness.js";
+import {
+  cloudCanvasHost,
+  expect,
+  test,
+  type CloudCanvasSession
+} from "./support/cloud-canvas-test.js";
 import {
   createNodeCloudFixturePorts,
   expectSuccess,
@@ -55,15 +67,40 @@ import {
   DELETE_POSTCONDITION_TIMEOUT_MS,
   DELETE_TEST_TIMEOUT_MS,
   DEPLOYMENT_OPERATION_TIMEOUT_MS,
-  DEPLOYMENT_TEST_TIMEOUT_MS
+  DEPLOYMENT_TEST_TIMEOUT_MS,
+  MODEL_GENERATION_TIMEOUT_MS,
+  MODELING_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
+import {
+  classifyModelReadiness,
+  cloudModelingPrompt,
+  describeModelReadiness,
+  MODEL_COMMIT_MESSAGE,
+  planModelPublication,
+  type ModelFileTimes,
+  type ModelReadiness
+} from "./support/copilot-app-modeling.js";
+import { assertCopilotAppRunner } from "./support/copilot-app-host.js";
+import {
+  prepareModelWorkspace,
+  readModelSnapshot
+} from "./support/copilot-app-workspace.js";
+import {
+  ensureFixtureProject,
+  pageOf,
+  readCurrentSessionStatus,
+  readSessionInfo,
+  sendSessionPrompt,
+  startSessionFromNewPage,
+  waitForIdleSession,
+  type CanvasTarget
+} from "./support/copilot-app-ui.js";
 import {
   readPlaywrightGitHubAppTokenConfig,
   refreshProcessGitHubToken
 } from "./support/github-app-token.js";
 import {
   classifyWorkflowPublication,
-  cloudCanvasState,
   describeWorkflowPublication,
   environmentVariablesApiPath,
   evaluateCreateEnvironmentGate,
@@ -114,8 +151,10 @@ import {
 } from "./support/deploy-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
+  FIXTURE_APPLICATION_NAME,
   FIXTURE_KUBERNETES_NAMESPACE,
   FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
+  FIXTURE_REPO_NAME,
   isFixtureRepositoryProvisioned,
   resolveFixtureClusterTarget,
   resolveFixtureLocation
@@ -279,12 +318,11 @@ async function discoverNewWorkflowRunId(
  * change that stops the verification path working against a real tenant.
  */
 async function createCredentialProfile(
-  page: Page,
-  baseUrl: string,
+  canvas: CloudCanvasSession,
   account: { tenantId: string; subscriptionId: string }
 ): Promise<void> {
-  await page.goto(`${baseUrl}/?page=credentials`);
-  await page.waitForLoadState("domcontentloaded");
+  const page = canvas.target;
+  await canvas.goto("credentials");
   await page.getByRole("button", { name: "New Credential Profile" }).click();
   await page.getByLabel("Profile Name").fill(PROFILE_NAME);
   await page.getByLabel("Tenant ID").fill(account.tenantId);
@@ -299,6 +337,16 @@ async function createCredentialProfile(
   await expect(save).toBeVisible({ timeout: 120_000 });
   await save.click();
   await expect(page.locator("#cred-landing")).toBeVisible();
+}
+
+async function readCanvasJson(
+  target: CanvasTarget,
+  requestPath: string
+): Promise<unknown> {
+  return target.evaluate(async (path) => {
+    const response = await fetch(path);
+    return (await response.json()) as unknown;
+  }, requestPath);
 }
 
 test.describe("Radius Canvas manages an environment's lifecycle against real cloud", () => {
@@ -326,6 +374,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   };
 
   test.beforeAll(async () => {
+    if (cloudCanvasHost === "copilot-app")
+      assertCopilotAppRunner(process.env, process.platform);
     if (!gate.enabled) throw new Error(gate.reason);
     if (!githubPackagesToken)
       throw new Error(
@@ -412,8 +462,142 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     ]);
   });
 
+  // Runs only with the Copilot app host. The harness host uses the model that
+  // the fixture already commits.
+  if (cloudCanvasHost === "copilot-app")
+    test("models the clean fixture through the Copilot app agent", async ({
+      cloudCanvas
+    }, testInfo) => {
+      testInfo.setTimeout(MODELING_TEST_TIMEOUT_MS);
+      if (cloudCanvas.host !== "copilot-app")
+        throw new Error("The modeling stage needs the Copilot app host.");
+      const cloud = fixture;
+      if (!cloud) throw new Error("The cloud fixture was not created.");
+      const { appPage } = cloudCanvas.app;
+
+      await ensureFixtureProject(appPage, cloud.repository, FIXTURE_REPO_NAME);
+      const sessionId = await startSessionFromNewPage(appPage, {
+        projectName: FIXTURE_REPO_NAME,
+        prompt:
+          "Reply Ready and stop. Do not read, change, commit, push, model, or deploy anything. The test will prepare this workspace first."
+      });
+      await waitForIdleSession(appPage);
+      const session = await readSessionInfo(appPage);
+      expect(session.sessionId).toBe(sessionId);
+      expect(session.baseBranch).toBe(cloud.defaultBranch);
+      const git = async (args: readonly string[]): Promise<string> =>
+        expectSuccess(
+          await ports.commands.runGit(args, session.path),
+          `git ${args.join(" ")}`
+        ).stdout;
+      const startedAtMs = await prepareModelWorkspace(
+        {
+          workspacePath: session.path,
+          profileDir: cloudCanvas.app.profileDir,
+          repository: cloud.repository,
+          baselineSha: cloud.baselineSha
+        },
+        git
+      );
+      await sendSessionPrompt(
+        appPage,
+        cloudModelingPrompt(FIXTURE_APPLICATION_NAME)
+      );
+
+      let previousTimes: ModelFileTimes | undefined;
+      let readiness: ModelReadiness | undefined;
+      await expect
+        .poll(
+          async () => {
+            const snapshot = await readModelSnapshot(session.path);
+            readiness = classifyModelReadiness({
+              ...snapshot,
+              baselineSha: cloud.baselineSha,
+              startedAtMs,
+              previousTimes,
+              sessionStatus: await readCurrentSessionStatus(appPage)
+            });
+            previousTimes = snapshot.times;
+            return readiness.ready;
+          },
+          {
+            message: "The agent did not finish the Radius application model",
+            timeout: MODEL_GENERATION_TIMEOUT_MS,
+            intervals: [15_000]
+          }
+        )
+        .toBe(true)
+        .catch((error: unknown) => {
+          throw new Error(
+            `${readiness ? describeModelReadiness(readiness) : "The model was never read."} ${String(error)}`,
+            { cause: error }
+          );
+        });
+      await testInfo.attach("app.bicep", {
+        path: path.join(session.path, ".radius", "app.bicep"),
+        contentType: "text/plain"
+      });
+
+      const head = await git(["rev-parse", "HEAD"]);
+      await git(["add", "-A", "--", ".radius"]);
+      const staged = await ports.commands.runGit(
+        ["diff", "--cached", "--quiet"],
+        session.path
+      );
+      if (staged.code > 1)
+        throw new Error(`git diff --cached failed: ${staged.stderr}`);
+      const plan = planModelPublication({
+        head,
+        baselineSha: cloud.baselineSha,
+        hasStagedChanges: staged.code === 1
+      });
+      if (plan.action === "commit-and-push") {
+        await git([
+          "-c",
+          "user.name=radius-cloud-e2e",
+          "-c",
+          "user.email=radius-cloud-e2e@users.noreply.github.com",
+          "commit",
+          "--no-verify",
+          "-m",
+          MODEL_COMMIT_MESSAGE
+        ]);
+        // From here the default branch can differ from the baseline, so the
+        // cleanup must reset it even when a later stage never starts.
+        productOperationStarted = true;
+        await git([
+          "-c",
+          "credential.helper=",
+          "-c",
+          "credential.helper=!gh auth git-credential",
+          "push",
+          "origin",
+          `HEAD:refs/heads/${cloud.defaultBranch}`
+        ]);
+      }
+
+      const target = await cloudCanvas.attach();
+      const canvas = await cloudCanvas.open({
+        title: "cloud-model-application",
+        initialPage: "graph",
+        repository: cloud.repository,
+        branch: cloud.defaultBranch,
+        workspacePath: session.path
+      });
+      await expect(
+        canvas.target.locator(".react-flow__node").first()
+      ).toBeVisible({ timeout: 120_000 });
+      const applications = readApplicationNames(
+        await readCanvasJson(
+          target,
+          repositoryListingPath("/api/list-applications", cloud.repository)
+        )
+      );
+      expect(applications).toEqual([FIXTURE_APPLICATION_NAME]);
+    });
+
   test("creates the Azure identity, the GitHub Environment, and the workflows", async ({
-    page
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(CREATE_TEST_TIMEOUT_MS);
     const cloud = fixture;
@@ -428,27 +612,20 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     );
     expect(account.subscriptionId).toBe(cloud.subscriptionId);
 
-    const harness = await CanvasHarness.create({
-      page,
+    const canvas = await cloudCanvas.open({
       title: "cloud-create-environment",
-      mode: "cloud",
-      workspacePath: cloud.workspacePath,
-      initialPage: "credentials"
+      initialPage: "credentials",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
+    const page = canvas.target;
 
     let primaryError: unknown;
     try {
-      await harness.seedState(
-        cloudCanvasState({
-          repository: cloud.repository,
-          branch: cloud.defaultBranch,
-          workspacePath: cloud.workspacePath
-        })
-      );
-      await createCredentialProfile(page, harness.baseUrl, account);
+      await createCredentialProfile(canvas, account);
 
-      await page.goto(`${harness.baseUrl}/?page=environment`);
-      await page.waitForLoadState("domcontentloaded");
+      await canvas.goto("environment");
       await page.locator("#new-env-btn").click();
       await expect(page.locator("#env-form")).toBeVisible();
       await page.locator("#env-profile-button").click();
@@ -473,7 +650,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         .locator("#azure-namespace-select")
         .selectOption(FIXTURE_KUBERNETES_NAMESPACE);
 
-      const operationResponse = page.waitForResponse(
+      const operationResponse = pageOf(page).waitForResponse(
         (response) =>
           new URL(response.url()).pathname === "/api/operations" &&
           response.request().method() === "POST"
@@ -641,38 +818,31 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       throw error;
     } finally {
       await runCleanupSteps(
-        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
         primaryError
       );
     }
   });
 
   test("deploys the application through Canvas and proves it is running on AKS", async ({
-    page
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(DEPLOYMENT_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
-    const harness = await CanvasHarness.create({
-      page,
+    const canvas = await cloudCanvas.open({
       title: "cloud-deploy-application",
-      mode: "cloud",
-      workspacePath: cloud.workspacePath,
-      initialPage: "deploying"
+      initialPage: "deploying",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
+    const page = canvas.target;
     let primaryError: unknown;
 
     try {
-      await harness.seedState(
-        cloudCanvasState({
-          repository: cloud.repository,
-          branch: cloud.defaultBranch,
-          workspacePath: cloud.workspacePath
-        })
-      );
-      await page.goto(`${harness.baseUrl}/?page=deploying`);
-      await page.waitForLoadState("domcontentloaded");
+      await canvas.goto("deploying");
 
       const applicationListingPath = repositoryListingPath(
         "/api/list-applications",
@@ -697,11 +867,17 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       await page
         .locator("#deploy-env-select")
         .selectOption(cloud.environmentName);
+      // The app session runs on its own worktree branch. Deploy the default
+      // branch, which holds the published model.
+      if (cloudCanvas.host === "copilot-app")
+        await page
+          .locator("#deploy-branch-select")
+          .selectOption(cloud.defaultBranch);
       await expect(page.locator("#deploy-branch-select")).toHaveValue(
         cloud.defaultBranch
       );
 
-      const deployResponse = page.waitForResponse(
+      const deployResponse = pageOf(page).waitForResponse(
         (response) =>
           new URL(response.url()).pathname === "/api/deploy" &&
           response.request().method() === "POST"
@@ -814,45 +990,38 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       throw error;
     } finally {
       await runCleanupSteps(
-        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
         primaryError
       );
     }
   });
 
   test("refuses to delete the environment while the deployment is live", async ({
-    page
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(DELETE_REFUSAL_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
-    const harness = await CanvasHarness.create({
-      page,
+    const canvas = await cloudCanvas.open({
       title: "cloud-refuse-live-environment-delete",
-      mode: "cloud",
-      workspacePath: cloud.workspacePath,
-      initialPage: "environment"
+      initialPage: "environment",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
+    const page = canvas.target;
     let primaryError: unknown;
 
     try {
-      await harness.seedState(
-        cloudCanvasState({
-          repository: cloud.repository,
-          branch: cloud.defaultBranch,
-          workspacePath: cloud.workspacePath
-        })
-      );
-      await page.goto(`${harness.baseUrl}/?page=environment`);
-      await page.waitForLoadState("domcontentloaded");
+      await canvas.goto("environment");
 
       const deleteButton = page.locator(
         `.js-delete-env[data-env="${cloud.environmentName}"]`
       );
       await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
       await deleteButton.click();
-      const deleteResponse = page.waitForResponse(
+      const deleteResponse = pageOf(page).waitForResponse(
         (response) =>
           new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
           response.request().method() === "POST"
@@ -883,14 +1052,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       throw error;
     } finally {
       await runCleanupSteps(
-        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
         primaryError
       );
     }
   });
 
   test("deletes the deployment while preserving its environment and identity", async ({
-    page
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(DEPLOYMENT_TEST_TIMEOUT_MS);
     const cloud = fixture;
@@ -899,25 +1068,18 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     if (!appBefore)
       throw new Error("The product-created application was not observed.");
 
-    const harness = await CanvasHarness.create({
-      page,
+    const canvas = await cloudCanvas.open({
       title: "cloud-delete-deployment",
-      mode: "cloud",
-      workspacePath: cloud.workspacePath,
-      initialPage: "deploying"
+      initialPage: "deploying",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
+    const page = canvas.target;
     let primaryError: unknown;
 
     try {
-      await harness.seedState(
-        cloudCanvasState({
-          repository: cloud.repository,
-          branch: cloud.defaultBranch,
-          workspacePath: cloud.workspacePath
-        })
-      );
-      await page.goto(`${harness.baseUrl}/?page=deploying`);
-      await page.waitForLoadState("domcontentloaded");
+      await canvas.goto("deploying");
 
       const deleteButton = page.locator(
         `.js-del-dep[data-app="${deployedApplication}"][data-env="${cloud.environmentName}"]`
@@ -939,7 +1101,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         DELETE_DEPLOYMENT_WORKFLOW
       );
 
-      const deleteResponse = page.waitForResponse(
+      const deleteResponse = pageOf(page).waitForResponse(
         (response) =>
           new URL(response.url()).pathname === "/api/delete-deployment" &&
           response.request().method() === "POST"
@@ -1059,22 +1221,21 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           survivalProblems
         )
       ).toEqual([]);
-      await page.reload();
-      await page.waitForLoadState("domcontentloaded");
+      await canvas.reload();
       await expect(deleteButton).toHaveCount(0);
     } catch (error) {
       primaryError = error;
       throw error;
     } finally {
       await runCleanupSteps(
-        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
         primaryError
       );
     }
   });
 
   test("deletes the GitHub Environment it created", async ({
-    page
+    cloudCanvas
   }, testInfo) => {
     testInfo.setTimeout(DELETE_TEST_TIMEOUT_MS);
     const cloud = fixture;
@@ -1088,25 +1249,18 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         "The product-created service principal was not observed."
       );
 
-    const harness = await CanvasHarness.create({
-      page,
+    const canvas = await cloudCanvas.open({
       title: "cloud-delete-environment",
-      mode: "cloud",
-      workspacePath: cloud.workspacePath,
-      initialPage: "environment"
+      initialPage: "environment",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
     });
+    const page = canvas.target;
 
     let primaryError: unknown;
     try {
-      await harness.seedState(
-        cloudCanvasState({
-          repository: cloud.repository,
-          branch: cloud.defaultBranch,
-          workspacePath: cloud.workspacePath
-        })
-      );
-      await page.goto(`${harness.baseUrl}/?page=environment`);
-      await page.waitForLoadState("domcontentloaded");
+      await canvas.goto("environment");
 
       // The row has to come from the product's own `/api/list-environments`.
       // Posting the delete directly would prove the route works while leaving
@@ -1126,7 +1280,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         cloud.environmentName
       );
 
-      const deleteResponse = page.waitForResponse(
+      const deleteResponse = pageOf(page).waitForResponse(
         (response) =>
           new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
           response.request().method() === "POST"
@@ -1251,7 +1405,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       throw error;
     } finally {
       await runCleanupSteps(
-        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
         primaryError
       );
     }

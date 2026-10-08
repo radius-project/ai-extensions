@@ -33,3 +33,17 @@ export const SERIAL_TEST_TIMEOUT_BUDGET_MS =
   DELETE_TEST_TIMEOUT_MS;
 export const CLOUD_SUITE_TIMEOUT_MS =
   SERIAL_TEST_TIMEOUT_BUDGET_MS + CLOUD_HOOK_TEARDOWN_HEADROOM_MS;
+
+// The opt-in Copilot app host adds two stages before the harness stages: the
+// worker fixture that installs the extension and starts the app, and the test
+// that asks the Radius agent to model the clean fixture.
+export const COPILOT_APP_SETUP_TIMEOUT_MS = 15 * MINUTE_MS;
+export const MODEL_GENERATION_TIMEOUT_MS = 30 * MINUTE_MS;
+export const MODELING_TEST_TIMEOUT_MS =
+  MODEL_GENERATION_TIMEOUT_MS + 10 * MINUTE_MS;
+export const COPILOT_APP_SERIAL_TEST_TIMEOUT_BUDGET_MS =
+  COPILOT_APP_SETUP_TIMEOUT_MS +
+  MODELING_TEST_TIMEOUT_MS +
+  SERIAL_TEST_TIMEOUT_BUDGET_MS;
+export const COPILOT_APP_SUITE_TIMEOUT_MS =
+  COPILOT_APP_SERIAL_TEST_TIMEOUT_BUDGET_MS + CLOUD_HOOK_TEARDOWN_HEADROOM_MS;

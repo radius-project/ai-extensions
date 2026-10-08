@@ -27,6 +27,8 @@ import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import cloudConfig from "../../playwright.cloud.config.js";
 import { redactCredentials } from "../../src/credential-redaction.js";
+import { CLOUD_CANVAS_HOSTS } from "../e2e-cloud/support/cloud-canvas-host.js";
+import { COPILOT_APP_SUITE_TIMEOUT_MS } from "../e2e-cloud/support/cloud-timeout-budget.js";
 import {
   ENVIRONMENT_NAME_PREFIX,
   RESOURCE_GROUP_PREFIX
@@ -46,6 +48,7 @@ interface WorkflowStep {
   readonly uses?: string;
   readonly run?: string;
   readonly if?: string;
+  readonly shell?: string;
   readonly "continue-on-error"?: boolean;
   readonly "working-directory"?: string;
   readonly env?: Record<string, string>;
@@ -211,6 +214,51 @@ describe("cloud-e2e.yml", () => {
     expect(playwrightGlobalMinutes).toBeGreaterThan(playwrightMinutes);
     expect(jobMinutes).toBeGreaterThan(playwrightMinutes);
     expect(jobMinutes).toBeGreaterThanOrEqual(playwrightGlobalMinutes + 10);
+    // The opt-in Copilot app host runs under the same job timeout.
+    expect(jobMinutes).toBeGreaterThanOrEqual(
+      COPILOT_APP_SUITE_TIMEOUT_MS / 60_000 + 10
+    );
+  });
+
+  it("uses the harness host unless a run opts in to the Copilot app", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const host =
+      "(inputs.canvas-host || vars.AIEXT_CLOUD_E2E_CANVAS_HOST || 'harness')";
+    const dispatch = workflow.on?.workflow_dispatch as {
+      inputs?: Record<
+        string,
+        { type?: string; options?: string[]; default?: string }
+      >;
+    };
+    expect(dispatch.inputs?.["canvas-host"]).toMatchObject({
+      type: "choice",
+      options: [...CLOUD_CANVAS_HOSTS],
+      default: "harness"
+    });
+
+    const job = workflow.jobs?.["cloud-e2e"];
+    expect(job?.env?.RADIUS_CLOUD_E2E_CANVAS_HOST).toBe("${{ " + host + " }}");
+    expect(job?.["runs-on"]).toBe(
+      "${{ " + host + " == 'copilot-app' && 'windows-2025' || 'ubuntu-24.04' }}"
+    );
+  });
+
+  it("installs only what the selected canvas host drives", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const all = steps(workflow.jobs?.["cloud-e2e"]);
+    const chromium = all.find((step) =>
+      step.run?.includes("playwright install")
+    );
+    const app = all.find((step) => step.run?.includes("GitHub.CopilotApp"));
+    expect(chromium?.if).toContain(
+      "env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'harness'"
+    );
+    expect(app?.if).toContain(
+      "env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'copilot-app'"
+    );
+    expect(app?.shell).toBe("pwsh");
+    expect(app?.run).toContain("--scope user");
+    expect(app?.run).toContain("github.exe");
   });
 
   it("switches the suite on and runs it", async () => {

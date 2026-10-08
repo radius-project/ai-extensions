@@ -13,6 +13,8 @@ This design adds a twelfth test layer, **Cloud E2E**, that runs the existing bro
 
 No production code changes. The work is a mode switch in the test harness, a fixture that owns per-run cloud resources, a spec directory, and a scheduled workflow.
 
+> **Update:** The suite now has an opt-in second canvas host, the GitHub Copilot desktop app on a disposable GitHub-hosted Windows runner. Select `canvas-host=copilot-app` at dispatch, or set the optional repository host variable. Local and self-hosted app runs fail before cloud setup because full desktop storage isolation is not qualified. The test verifies the session checkout, removes the baseline model, and asks the Radius agent to generate `.radius/app.bicep`. It checks the new origin record before publication and then runs the same lifecycle tests in the app. The default remains the harness; the outer workflow timeout covers both hosts. App-mode product operations use the existing bot PAT rather than the fixture installation token. See the [runbook](../eng/CLOUD_E2E_RUNBOOK.md#run-the-journey-in-the-github-copilot-app).
+
 ## Terms and definitions
 
 | Term                       | Definition                                                                                                                                                                                   |

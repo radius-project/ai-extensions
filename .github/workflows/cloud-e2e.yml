@@ -34,6 +34,20 @@ on:
     # do not contend. Runs share one precreated AKS cluster and remain serialized.
     - cron: "23 4 * * *"
   workflow_dispatch:
+    inputs:
+      # Where the journey drives the Radius canvas. "harness" is the production
+      # path: this checkout's canvas in headless Chromium on Linux.
+      # "copilot-app" is opt-in: the GitHub Copilot desktop app on Windows,
+      # where the Radius agent first models the clean fixture. A scheduled run
+      # has no inputs, so it reads the optional repository variable
+      # AIEXT_CLOUD_E2E_CANVAS_HOST and otherwise uses "harness".
+      canvas-host:
+        description: Canvas host for the journey
+        type: choice
+        options:
+          - harness
+          - copilot-app
+        default: harness
 
 permissions: {}
 
@@ -71,7 +85,9 @@ jobs:
     # build.yml uses for the Chromium tier. That container ships browsers but
     # not `az`, `gh`, or `kubectl`, and cloud mode runs the real ones - the
     # whole point of the tier. Browsers are installed explicitly below instead.
-    runs-on: ubuntu-24.04
+    # The opt-in Copilot app host needs Windows: the app is Tauri + WebView2,
+    # and only WebView2 exposes a CDP port.
+    runs-on: ${{ (inputs.canvas-host || vars.AIEXT_CLOUD_E2E_CANVAS_HOST || 'harness') == 'copilot-app' && 'windows-2025' || 'ubuntu-24.04' }}
     # Strictly greater than Playwright's aggregate serial-stage timeout in
     # packages/adapter-canvas/playwright.cloud.config.ts. The
     # ordering is the requirement: Playwright must be the thing that gives up
@@ -79,7 +95,9 @@ jobs:
     # job first, the single most useful diagnostic for a run nobody can reproduce
     # locally is exactly what would be lost. The remaining headroom covers
     # dependency install, browser download, teardown, and artifact upload.
-    timeout-minutes: 235
+    # One value covers both canvas hosts; the Copilot app host has the longer
+    # suite budget, because it adds the app start and modeling stages.
+    timeout-minutes: 290
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
@@ -87,6 +105,8 @@ jobs:
       # Turns the suite on. Without it the journey skips rather than fails, so
       # an ordinary `pnpm test` is never broken by absent credentials.
       RADIUS_CLOUD_E2E: "1"
+      # Read by playwright.cloud.config.ts and the spec. See the input above.
+      RADIUS_CLOUD_E2E_CANVAS_HOST: ${{ (inputs.canvas-host || vars.AIEXT_CLOUD_E2E_CANVAS_HOST || 'harness') }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -168,8 +188,22 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install the Chromium browser
-        if: steps.fixture.outputs.configured == 'true'
+        if: steps.fixture.outputs.configured == 'true' && env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'harness'
         run: pnpm exec playwright install --with-deps chromium
+
+      # The Copilot app host drives the real desktop app, not a browser that
+      # Playwright downloads. A user-scope install puts github.exe where the
+      # suite looks for it.
+      - name: Install the GitHub Copilot app
+        if: steps.fixture.outputs.configured == 'true' && env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'copilot-app'
+        shell: pwsh
+        run: |
+          winget install --exact --id GitHub.CopilotApp --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\GitHub Copilot\github.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Output "::error::The GitHub Copilot app was not installed at $exe."
+            exit 1
+          }
 
       # No stored Azure secret exists. The runner's OIDC token is exchanged for
       # an Azure token scoped to the dedicated bootstrap identity, which holds
@@ -220,7 +254,9 @@ jobs:
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment
-          # before starting Canvas or any CLI child command.
+          # before starting Canvas or any CLI child command. With the Copilot
+          # app host, the bot PAT also signs in to the app, because the app
+          # cannot renew the one-hour installation token.
           GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
           GH_PACKAGES_USER: ${{ secrets.CLOUD_E2E_PACKAGES_USER }}
           CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
