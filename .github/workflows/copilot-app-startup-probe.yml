@@ -72,6 +72,15 @@ jobs:
                 Start-Sleep -Seconds 2
               } while ([DateTime]::UtcNow -lt $deadline)
               Get-Process | Where-Object { $_.ProcessName -match 'github|msedgewebview' } | Select-Object Id, ProcessName, MainWindowTitle
+              Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" |
+                Select-Object ProcessId, ParentProcessId, CommandLine | Format-List
+              Get-NetTCPConnection -State Listen |
+                Where-Object { $_.LocalPort -eq 9222 } |
+                Select-Object LocalAddress, LocalPort, OwningProcess | Format-List
+              foreach ($url in @('http://[::1]:9222/json/version', 'http://localhost:9222/json/version')) {
+                try { Invoke-RestMethod $url -TimeoutSec 2 | ConvertTo-Json }
+                catch { Write-Output "$url failed: $($_.Exception.Message)" }
+              }
               $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
                 [System.Windows.Automation.TreeScope]::Children,
                 [System.Windows.Automation.Condition]::TrueCondition)
