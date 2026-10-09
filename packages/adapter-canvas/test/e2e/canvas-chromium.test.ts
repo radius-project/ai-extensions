@@ -63,8 +63,47 @@ import {
 import {
   ensureFixtureProject,
   sendSessionPrompt,
-  waitForIdleSession
+  waitForIdleSession,
+  waitForSignedInShell
 } from "../e2e-cloud/support/copilot-app-ui.js";
+
+test("Copilot sign-in starts from the welcome screen @safety", async ({
+  page
+}) => {
+  await page.setContent(`
+    <button aria-label="Sign in to GitHub, Control + Enter">Sign in</button>
+    <button>Sign in to GitHub Enterprise Cloud (*.ghe.com)</button>
+    <div id="shell"></div>
+    <script>
+      document.querySelector('button').onclick = () => {
+        document.querySelector('button').remove();
+        document.querySelector('#shell').innerHTML =
+          '<nav aria-label="Quick links"><button>New</button></nav>' +
+          '<section aria-label="Projects"><button>New project or session</button></section>';
+      };
+    </script>
+  `);
+  await waitForSignedInShell(page);
+  await expect(
+    page.getByRole("button", { name: "New", exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Sign in to GitHub,/ })
+  ).toHaveCount(0);
+});
+
+test("Copilot sign-in preserves an existing signed-in shell @safety", async ({
+  page
+}) => {
+  await page.setContent(`
+    <nav aria-label="Quick links"><button>New</button></nav>
+    <section aria-label="Projects"><button>New project or session</button></section>
+  `);
+  await waitForSignedInShell(page);
+  await expect(
+    page.getByRole("button", { name: "New", exact: true })
+  ).toBeVisible();
+});
 
 test("Copilot project selection waits for an asynchronous result @safety", async ({
   page

@@ -103,11 +103,18 @@ export function testInfoSink(testInfo: TestInfo): AppStateSink {
  */
 export async function waitForSignedInShell(appPage: Page): Promise<void> {
   try {
-    await expect(
-      appPage
-        .getByRole("navigation", { name: "Quick links" })
-        .getByRole("button", { name: "New", exact: true })
-    ).toBeVisible({ timeout: SHELL_TIMEOUT_MS });
+    const ready = appPage
+      .getByRole("navigation", { name: "Quick links" })
+      .getByRole("button", { name: "New", exact: true });
+    const signIn = appPage.getByRole("button", {
+      name: /^Sign in to GitHub(?:,|$)/
+    });
+    await expect(ready.or(signIn).first()).toBeVisible({
+      timeout: SHELL_TIMEOUT_MS
+    });
+    if (!(await ready.isVisible()) && (await signIn.isVisible()))
+      await signIn.click();
+    await expect(ready).toBeVisible({ timeout: SHELL_TIMEOUT_MS });
     await expect(
       projectsRegion(appPage).getByRole("button", {
         name: "New project or session"

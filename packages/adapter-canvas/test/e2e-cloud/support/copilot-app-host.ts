@@ -273,7 +273,14 @@ export async function cleanupCopilotApp(
     errors.push(error);
   }
   if (errors.length > 0)
-    throw new AggregateError(errors, "Copilot app cleanup failed.");
+    throw new AggregateError(
+      errors,
+      `Copilot app cleanup failed: ${errors
+        .map((error) =>
+          error instanceof Error ? error.message : String(error)
+        )
+        .join("; ")}`
+    );
 }
 
 /**

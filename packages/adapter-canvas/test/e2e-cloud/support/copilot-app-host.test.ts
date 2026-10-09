@@ -531,6 +531,7 @@ describe("native spawn boundary", () => {
           }
         )
       ).rejects.toMatchObject({
+        message: "Copilot app cleanup failed: disconnect; stop",
         errors: [
           expect.objectContaining({ message: "disconnect" }),
           expect.objectContaining({ message: "stop" })
@@ -549,8 +550,19 @@ describe("native spawn boundary", () => {
           }
         )
       ).rejects.toMatchObject({
+        message: "Copilot app cleanup failed: remove",
         errors: [expect.objectContaining({ message: "remove" })]
       });
+    });
+
+    it("includes non-Error failures in the cleanup message", async () => {
+      await expect(
+        cleanupCopilotApp(
+          () => Promise.reject("disconnect failed"),
+          async () => {},
+          async () => {}
+        )
+      ).rejects.toThrow("Copilot app cleanup failed: disconnect failed");
     });
   });
 
