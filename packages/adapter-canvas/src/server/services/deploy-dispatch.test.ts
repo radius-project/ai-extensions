@@ -1901,6 +1901,69 @@ describe("deploy dispatch workflow publication and dispatch", () => {
   // synchronously, so an immediate `gh workflow run` 404s even though the
   // file is genuinely on the branch it dispatches from.
   describe("workflow registration delay (#767)", () => {
+    it.each([false, true])(
+      "refreshes discovery bounds after every wait when other runs start (last read fails: %s)",
+      async (lastReadFails) => {
+        const { input, logs } = request();
+        const notFound = {
+          code: 1,
+          stderr: "HTTP 404: workflow not found",
+          stdout: ""
+        };
+        const gh = recordingGh([notFound, notFound, OK]);
+        const order: string[] = [];
+        let latestRun = 41;
+        let now = 1_700_000_000_000;
+        const service = createDeployDispatchService(
+          dependencies({
+            ...gh,
+            ensureWorkflowsCurrent: async () => ({
+              created: [".github/workflows/run-rad-commands.yml"],
+              updated: []
+            }),
+            sleep: async (ms) => {
+              order.push(`wait:${ms}`);
+              latestRun++;
+              now += ms;
+            },
+            latestWorkflowRunId: async () => {
+              order.push(`baseline:${latestRun}`);
+              if (lastReadFails && latestRun === 44)
+                throw new Error("run list unavailable");
+              return latestRun;
+            },
+            runGh: (args, options) => {
+              order.push("dispatch");
+              return gh.runGh(args, options);
+            },
+            now: () => now
+          })
+        );
+
+        expect(await service.prepareAndDispatch(input)).toMatchObject({
+          dispatched: true,
+          baselineRunId: lastReadFails ? null : 44,
+          dispatchedAt: 1_700_000_010_000
+        });
+        expect(order).toEqual([
+          "wait:3000",
+          "baseline:42",
+          "dispatch",
+          "wait:2000",
+          "baseline:43",
+          "dispatch",
+          "wait:5000",
+          "baseline:44",
+          "dispatch"
+        ]);
+        if (lastReadFails) {
+          expect(logs).toContain(
+            "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will fall back to a time window."
+          );
+        }
+      }
+    );
+
     function sleepRecorder() {
       const calls: number[] = [];
       return {

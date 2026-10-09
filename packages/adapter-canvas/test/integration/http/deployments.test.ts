@@ -1971,6 +1971,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       const delays: number[] = [];
       let discoveries = 0;
       let settlements = 0;
+      let latestRunId = 41;
       const unexpected = () => {
         throw new Error(
           "unexpected external operation in registration retry test"
@@ -2027,8 +2028,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         }),
         sleep: async (ms) => {
           delays.push(ms);
+          latestRunId++;
         },
-        latestWorkflowRunId: () => Promise.resolve(41),
+        latestWorkflowRunId: () => Promise.resolve(latestRunId),
         classifyDeployDispatchFailure: () => "run-unconfirmed",
         uncommittedGeneratedPaths: () => Promise.resolve([]),
         invalidateDeployListCache: () => {},
@@ -2049,9 +2051,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         deployRadCommandsStep: "Run rad commands",
         unconfirmedRunKind: "run-unconfirmed",
         findWorkflowRun: async (_repo, _workflow, _time, _branch, baseline) => {
-          expect(baseline).toBe(41);
+          expect(baseline).toBe(43);
           discoveries++;
-          return 42;
+          return 44;
         },
         getRunDetail: async () => ({
           status: "completed",
@@ -2114,7 +2116,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       } else {
         expect(body).toMatchObject({
           status: "success",
-          deployRunUrl: "https://github.com/acme/widgets/actions/runs/42"
+          deployRunUrl: "https://github.com/acme/widgets/actions/runs/44"
         });
       }
     }

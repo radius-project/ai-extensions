@@ -957,23 +957,8 @@ export function createDeployDispatchService(
           (path) => path.split("/").pop() === deployWorkflowFile
         );
 
-      const deployDispatchedAt = dependencies.now();
-      // Capture the newest existing run id right before dispatching, so the
-      // monitor can pick out the run this dispatch creates (the first with a
-      // greater id) instead of matching a prior run by its creation time.
+      let deployDispatchedAt = dependencies.now();
       let baselineRunId: number | string | null = null;
-      try {
-        baselineRunId = await dependencies.latestWorkflowRunId(
-          repo,
-          deployWorkflowFile
-        );
-      } catch (e) {
-        log(
-          "⚠ Could not read the latest run id before dispatch (" +
-            dependencies.errorMessage(e) +
-            "); run discovery will fall back to a time window."
-        );
-      }
       log(
         "🚀 Dispatching run rad commands workflow (" +
           deployWorkflowFile +
@@ -1012,6 +997,22 @@ export function createDeployDispatchService(
         dependencies.ghCredentialSource();
       for (const delay of dispatchDelaysMs) {
         if (delay > 0) await dependencies.sleep(delay);
+        // Other runs can start during registration waits. Refresh both discovery
+        // bounds for this attempt, and discard an earlier baseline if this read fails.
+        baselineRunId = null;
+        try {
+          baselineRunId = await dependencies.latestWorkflowRunId(
+            repo,
+            deployWorkflowFile
+          );
+        } catch (e) {
+          log(
+            "⚠ Could not read the latest run id before dispatch (" +
+              dependencies.errorMessage(e) +
+              "); run discovery will fall back to a time window."
+          );
+        }
+        deployDispatchedAt = dependencies.now();
         const attempt = await dispatchOnce();
         dispatchDeployRes = attempt.result;
         dispatchCredentialSource = attempt.credentialSource;
