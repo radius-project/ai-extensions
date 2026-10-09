@@ -41,13 +41,24 @@ describe("createFileCredentialProvenanceStore", () => {
     );
     const names = await fs.readdir(directory);
     expect(names).toHaveLength(2);
-    expect((await fs.stat(path.join(directory, names[0]))).mode & 0o777).toBe(
-      0o600
-    );
     await store.remove(["one"]);
     expect(await store.read("one")).toBeNull();
     expect(await store.load()).toEqual([{ id: 2 }]);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "restricts persisted records to their owner on POSIX systems",
+    async () => {
+      const directory = await tempDirectory();
+      const store = createFileCredentialProvenanceStore({ directory });
+      await store.write("one", { id: 1 });
+      const [name] = await fs.readdir(directory);
+
+      expect((await fs.stat(path.join(directory, name))).mode & 0o777).toBe(
+        0o600
+      );
+    }
+  );
 
   it("makes records visible to another store instance", async () => {
     const directory = await tempDirectory();
@@ -134,7 +145,7 @@ describe("createFileCredentialProvenanceStore", () => {
     expect(diagnostics[0].message).toContain("broken.json");
   });
 
-  it("reports an unreadable directory and record", async () => {
+  it("reports a storage path that is not a directory", async () => {
     const file = path.join(await tempDirectory(), "file");
     await fs.writeFile(file, "x");
     const diagnostics: CredentialProvenanceStoreDiagnostic[] = [];
@@ -145,9 +156,26 @@ describe("createFileCredentialProvenanceStore", () => {
     await expect(store.load()).rejects.toThrow(
       "Credential provenance could not be listed"
     );
+    expect(diagnostics.map((entry) => entry.code)).toEqual([
+      "credential-provenance-unavailable"
+    ]);
+  });
+
+  it("reports a record that is a directory instead of a file", async () => {
+    const directory = await tempDirectory();
+    const diagnostics: CredentialProvenanceStoreDiagnostic[] = [];
+    const store = createFileCredentialProvenanceStore({
+      directory,
+      report: (diagnostic) => diagnostics.push(diagnostic)
+    });
+    await store.write("key", { id: 1 });
+    const [name] = await fs.readdir(directory);
+    const record = path.join(directory, name);
+    await fs.rm(record);
+    await fs.mkdir(record);
+
     await expect(store.read("key")).rejects.toThrow("could not be read");
     expect(diagnostics.map((entry) => entry.code)).toEqual([
-      "credential-provenance-unavailable",
       "credential-provenance-unavailable"
     ]);
   });

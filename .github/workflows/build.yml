@@ -125,6 +125,18 @@ jobs:
       - name: Run Windows process integration tests
         run: pnpm run test:integration:windows-process
 
+      - name: Run Windows managed executable tests
+        run: pnpm --filter @radius-project/adapter-shared exec vitest run src/rad.test.ts src/rad-process.test.ts
+
+      - name: Run Windows filesystem, executable and resolver tests
+        run: pnpm --filter @radius-project/adapter-canvas exec vitest run src/credential-provenance-store.test.ts src/operation-store.test.ts src/node-executable.test.ts src/publish-targets.test.ts src/promote-app-model.test.ts src/server/temporary-kubeconfig.test.ts test/integration/runtime/radius-type-definition.test.ts
+
+      - name: Build Radius artifact on Windows
+        run: pnpm run build
+
+      - name: Run Windows artifact integration tests
+        run: pnpm run test:integration:artifact
+
   canvas-chromium:
     name: Canvas Chromium (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest

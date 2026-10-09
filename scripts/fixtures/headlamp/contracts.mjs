@@ -11,7 +11,7 @@ export const TOOL_VERSIONS = {
   "react-dom": "18.3.1",
   "@types/react": "18.3.28",
   "@types/react-dom": "18.3.7",
-  "@xyflow/react": "12.11.6",
+  "@xyflow/react": "12.12.0",
   typescript: "5.6.2"
 };
 

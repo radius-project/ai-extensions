@@ -19,11 +19,12 @@
 //   - The binaries live in the extension-owned ~/.radius/ai-extensions/bin
 //     directory, never relative to import.meta (adapters bundle this file).
 //   - Windows: `.exe` suffix, no chmod.
-//   - The first resolution per process verifies the installed rad is at least
-//     as new as the latest published release and upgrades it if it is older.
-//     This is best-effort: any failure (offline, unreadable version) keeps the
-//     existing binary. It is skipped entirely via RADIUS_RAD_SKIP_VERSION_CHECK,
-//     and a RADIUS_RAD_BINARY override is never replaced.
+//   - The first resolution per process verifies the installed rad is the
+//     release this plugin pins (RADIUS_RELEASE_TAG) and replaces it with that
+//     release when it differs. This is best-effort: any failure (offline,
+//     unreadable version) keeps the existing binary. It is skipped entirely via
+//     RADIUS_RAD_SKIP_VERSION_CHECK. A RADIUS_RAD_BINARY override is never
+//     replaced; a differing version only produces a warning.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import https from "node:https";
@@ -53,6 +54,7 @@ import {
   radiusCliIdentity,
   radiusExtensionRefForRelease
 } from "./rad-release.js";
+import { RADIUS_RELEASE_TAG } from "./radius-release.js";
 
 export { killChildTree, RadProcessError, spawnRad };
 export type { ProcessResult, SpawnRadOptions };
@@ -104,7 +106,7 @@ export interface RadReleaseAsset {
   digest?: string;
 }
 
-/** The latest-release metadata `ensureRadBinary`/`downloadRad` act on. */
+/** The pinned-release metadata `ensureRadBinary`/`downloadRad` act on. */
 export interface RadReleaseInfo {
   tag: string;
   assets: RadReleaseAsset[];
@@ -215,8 +217,7 @@ function radErrorDetail(err: unknown): string {
 
 const IS_WIN = process.platform === "win32";
 const EXE = IS_WIN ? ".exe" : "";
-const RELEASES_API =
-  "https://api.github.com/repos/radius-project/radius/releases/latest";
+const PINNED_RELEASE_API = `https://api.github.com/repos/radius-project/radius/releases/tags/${RADIUS_RELEASE_TAG}`;
 // Stable extension-owned location. This intentionally does not use PATH or the
 // official ~/.rad/bin install, so automatic updates never replace a user's CLI.
 export const MANAGED_RAD_BIN = path.join(
@@ -419,22 +420,6 @@ function isSelectedExecutableRadOverride(radPath: string): boolean {
   }
 }
 
-export function parseRadVersionOutput(stdout: string): string | null {
-  try {
-    const parsed: unknown = JSON.parse(stdout);
-    const version =
-      isPlainObject(parsed) ?
-        (parsed.version ??
-        (isPlainObject(parsed.cli) ? parsed.cli.version : undefined))
-      : undefined;
-    return typeof version === "string" && version.trim() ?
-        version.trim()
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 function parseRadReleaseOutput(stdout: string): string | null {
   try {
     return radiusCliIdentity(JSON.parse(stdout)).release;
@@ -485,76 +470,15 @@ function readRadBinaryIdentity(
 }
 
 /**
- * radBinaryVersion - best-effort read of a rad binary's own CLI version by
- * running `rad version --cli --output json` and returning its `version` string
- * (e.g. "v0.44.0", or an edge build like "v0.60.0-rc1-1-gdeadbee"), or null when
- * it can't be determined. `rad version --cli` skips the control-plane check but
- * still shells out to Bicep (getCliVersionInfo -> bicep.Version() ->
- * `bicep --version`), so BICEP is pinned to the managed path even during version
- * checks. A timeout plus process-tree kill is a hard backstop so a
- * wedged rad can never stall binary resolution beyond `timeout`. (If bicep isn't
- * installed, rad returns fast with a "bicep not installed" note and still emits
- * `version`.) Never throws — a null result means "version unknown", which callers
- * treat as "leave the existing binary in place".
+ * radBinaryRelease - best-effort read of the Radius release a rad binary was
+ * stamped with (the same release field modeling uses). Returns null when it
+ * cannot be determined; never throws.
  */
-export function radBinaryVersion(
+export function radBinaryRelease(
   radPath: string,
   options: { timeout?: number } = {}
 ): Promise<string | null> {
-  return readRadBinaryIdentity(radPath, parseRadVersionOutput, options);
-}
-
-// Parses the numeric major.minor.patch core out of a version string
-// ("v1.2.3", "1.2.3-rc1-1-gdeadbee", "1.2.3+build") into [major, minor, patch].
-// Any prerelease/build suffix is intentionally ignored — only the core drives
-// precedence here. Returns null when the string has no numeric major.minor.patch.
-export function parseVersion(
-  value: string | null | undefined
-): [number, number, number] | null {
-  const m =
-    /^v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(
-      (value || "").trim()
-    );
-  if (!m) return null;
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
-}
-
-/**
- * compareVersions - compare the major.minor.patch core of two rad versions.
- * Returns -1 when a < b, 1 when a > b, and 0 when equal. When either string is
- * unparseable it returns 0, so callers fall back to leaving the current binary
- * in place rather than churning on an unexpected format. Prerelease and build
- * suffixes are intentionally ignored: a developer build with the same core
- * version as the latest release must not be replaced.
- */
-export function compareVersions(
-  a: string | null | undefined,
-  b: string | null | undefined
-): -1 | 0 | 1 {
-  const pa = parseVersion(a);
-  const pb = parseVersion(b);
-  if (!pa || !pb) return 0;
-  for (let i = 0; i < 3; i++) {
-    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
-  }
-  return 0;
-}
-
-/**
- * radiusExtensionRefForVersion - compatibility entry point for mapping a
- * Git-derived rad CLI version to its stable Radius Bicep release channel.
- *
- * Prerelease, Git-describe, and build suffixes are intentionally ignored. The
- * canonical stamped release path uses {@link radiusExtensionRefForRelease}
- * directly so exact published prerelease tags and edge retain their own policy.
- */
-export function radiusExtensionRefForVersion(
-  version: string | null | undefined
-): string | null {
-  const parsed = parseVersion(version);
-  return parsed ?
-      `${RADIUS_EXTENSION_REGISTRY}:${parsed[0]}.${parsed[1]}`
-    : null;
+  return readRadBinaryIdentity(radPath, parseRadReleaseOutput, options);
 }
 
 /**
@@ -669,14 +593,14 @@ function httpGet(
   });
 }
 
-async function latestRelease(): Promise<RadReleaseInfo> {
-  const body = await httpGet(RELEASES_API, {
+async function pinnedRelease(): Promise<RadReleaseInfo> {
+  const body = await httpGet(PINNED_RELEASE_API, {
     Accept: "application/vnd.github+json",
     ...githubAuthHeaders()
   });
   const parsed: unknown = JSON.parse(body.toString("utf8"));
   if (!isPlainObject(parsed) || typeof parsed.tag_name !== "string") {
-    throw new Error("Could not determine latest rad release tag");
+    throw new Error(`Could not read rad release ${RADIUS_RELEASE_TAG}`);
   }
   const assets: RadReleaseAsset[] =
     Array.isArray(parsed.assets) ?
@@ -741,23 +665,32 @@ function verifyChecksum(
   }
 }
 
+// The stamped release is the identity modeling uses to pick Bicep types, so the
+// pin matches it exactly (only an optional "v" prefix is ignored). Prerelease,
+// build and developer suffixes are therefore not the pinned release.
+function isPinnedRelease(release: string | null, tag: string): boolean {
+  return (
+    release != null &&
+    release.trim().replace(/^v/u, "") === tag.trim().replace(/^v/u, "")
+  );
+}
 async function downloadRad(
   log: Logger,
   { releaseInfo = null }: { releaseInfo?: RadReleaseInfo | null } = {}
 ): Promise<string> {
-  const { tag, assets } = releaseInfo || (await latestRelease());
+  const { tag, assets } = releaseInfo || (await pinnedRelease());
   const asset = releaseAsset();
   const url = `https://github.com/radius-project/radius/releases/download/${tag}/${asset}`;
   const dest = MANAGED_RAD_PATH;
   const expected = expectedDigest(assets, asset, tag);
   fs.mkdirSync(MANAGED_RAD_BIN, { recursive: true });
 
-  // True when the managed binary already exists and its core version is at least
-  // the target release — the signal that no (further) download is needed.
+  // True when the managed binary is stamped with exactly the pinned release —
+  // the signal that no (further) download is needed. Any other release (newer,
+  // older, prerelease or developer build) is replaced.
   const upToDate = async (): Promise<boolean> => {
     if (!isExecutableFile(dest)) return false;
-    const current = await radBinaryVersion(dest);
-    return current != null && compareVersions(current, tag) >= 0;
+    return isPinnedRelease(await radBinaryRelease(dest), tag);
   };
   if (await upToDate()) return dest;
 
@@ -817,62 +750,53 @@ async function downloadRad(
 }
 
 /**
- * reconcileWithLatest - given an already-installed rad, make sure it is at least
- * as new as the latest published release. Returns the path to use: the existing
- * binary when it is up to date (or when the check can't run), or a freshly
- * downloaded latest binary when the existing one is older.
+ * reconcileWithPinned - given an already-installed rad, make sure it is the
+ * release this plugin pins. Returns the path to use: the existing binary when it
+ * already matches (or when the check can't run), or a freshly downloaded pinned
+ * binary when the managed one differs.
  *
- * Best-effort by design — any failure to reach the releases API or read the
- * local version leaves the existing binary in place, so offline/air-gapped use
+ * Best-effort by design — a failure to read the local release or download the
+ * pinned release leaves the existing binary in place, so offline/air-gapped use
  * keeps working. Set RADIUS_RAD_SKIP_VERSION_CHECK to skip the check entirely.
+ * An explicit RADIUS_RAD_BINARY override is developer-owned: any version is
+ * accepted, a mismatch only warns, and no network call is made.
  */
-async function reconcileWithLatest(
+async function reconcileWithPinned(
   existing: string,
   log: Logger
 ): Promise<string> {
   if (process.env.RADIUS_RAD_SKIP_VERSION_CHECK) return existing;
 
-  let latest: RadReleaseInfo;
-  try {
-    latest = await latestRelease();
-  } catch (err) {
+  const localVersion = await radBinaryRelease(existing);
+  if (!localVersion) {
     log(
-      `Could not check the latest rad release (${errorMessage(err)}); using the installed binary.`
+      `Could not determine the Radius release of ${existing}; using it as-is.`
     );
     return existing;
   }
-
-  const localVersion = await radBinaryVersion(existing);
-  if (!localVersion) {
-    log(`Could not determine the version of ${existing}; using it as-is.`);
+  if (isPinnedRelease(localVersion, RADIUS_RELEASE_TAG)) {
     return existing;
   }
-  if (compareVersions(localVersion, latest.tag) >= 0) {
-    return existing; // already equal to or newer than the latest release
-  }
 
-  // An explicit override is developer-owned and is never updated in place.
-  const overridden = isSelectedExecutableRadOverride(existing);
-  if (overridden) {
+  if (isSelectedExecutableRadOverride(existing)) {
     log(
-      `Warning: RADIUS_RAD_BINARY rad ${localVersion} is older than the latest release ${latest.tag}; using it anyway. Unset RADIUS_RAD_BINARY to auto-upgrade.`
+      `Warning: RADIUS_RAD_BINARY rad ${localVersion} differs from the pinned release ${RADIUS_RELEASE_TAG}; using it anyway. Unset RADIUS_RAD_BINARY to use the pinned release.`
     );
     return existing;
   }
 
   log(
-    `Installed rad ${localVersion} is older than the latest release ${latest.tag}; upgrading...`
+    `Installed rad ${localVersion} differs from the pinned release ${RADIUS_RELEASE_TAG}; installing the pinned release...`
   );
   try {
-    return await downloadRad(log, { releaseInfo: latest });
+    return await downloadRad(log);
   } catch (err) {
     log(
-      `Could not upgrade rad to ${latest.tag} (${errorMessage(err)}); using ${localVersion}.`
+      `Could not install rad ${RADIUS_RELEASE_TAG} (${errorMessage(err)}); using ${localVersion}.`
     );
     return existing;
   }
 }
-
 /**
  * ensureRadBinary - return a path to a runnable `rad`, downloading it and its
  * paired Bicep CLI into the extension-owned bin directory when needed.
@@ -902,9 +826,9 @@ export function ensureRadBinary({
           /* best-effort */
         }
       }
-      // Use the installed rad only if it is at least as new as the latest
-      // release; otherwise reconcileWithLatest upgrades it (best-effort).
-      cachedRadPath = await reconcileWithLatest(existing, log);
+      // Use the installed rad only if it is the pinned release; otherwise
+      // reconcileWithPinned replaces it (best-effort).
+      cachedRadPath = await reconcileWithPinned(existing, log);
       await ensureManagedBicep(cachedRadPath, { log });
       return cachedRadPath;
     }

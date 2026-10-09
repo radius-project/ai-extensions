@@ -97,6 +97,10 @@ pnpm test:watch        # run every workspace test project in watch mode
 pnpm coverage          # run every project with unified V8 coverage
 ```
 
+Before running the workspace tests or coverage, install the pinned Chromium test browser with `pnpm exec playwright install chromium`. The graph component project uses this browser even when running the root coverage command.
+
+POSIX permission and native signal checks run only on platforms that support those semantics; portable filesystem fixtures and injected process boundaries exercise the corresponding failure handling on every platform.
+
 Run a single test file:
 
 ```bash
@@ -137,6 +141,10 @@ your PR. Do not hand-edit any version: Changesets bumps `extensions/radius/packa
 release flow.
 
 Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr:no-changeset`, which replaces the reminder with a note that it was waived.
+
+## Dependency updates
+
+Dependabot opens grouped dependency pull requests weekly. Some pinned dependencies, such as React Flow, need manual steps before their update can merge. See the [dependency updates runbook](./docs/eng/DEPENDENCY_UPDATES.md) for how to triage a failing update.
 
 ## Developer Certificate of Origin
 

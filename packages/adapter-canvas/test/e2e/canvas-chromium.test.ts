@@ -19,7 +19,12 @@ import {
   type FakeCliCommand
 } from "./support/canvas-harness.js";
 import type { Locator, Page, TestInfo } from "@playwright/test";
-import { collectWorkflowFailure } from "@radius-project/core";
+import {
+  collectWorkflowFailure,
+  describeWorkflowProtection,
+  parseWorkflowProtection
+} from "@radius-project/core";
+import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
@@ -55,6 +60,100 @@ import {
   STATE_ATTEMPT_ID,
   STATE_RESOURCE
 } from "../support/pages/page-state-cases.js";
+import {
+  ensureFixtureProject,
+  sendSessionPrompt,
+  waitForIdleSession
+} from "../e2e-cloud/support/copilot-app-ui.js";
+
+test("Copilot project selection waits for an asynchronous result @safety", async ({
+  page
+}) => {
+  let release: (() => void) | undefined;
+  let arrived: (() => void) | undefined;
+  const searchArrived = new Promise<void>((resolve) => {
+    arrived = resolve;
+  });
+  await page.route("http://127.0.0.1:43123/repositories", async (route) => {
+    await new Promise<void>((resolve) => {
+      release = resolve;
+      arrived?.();
+    });
+    await route.fulfill({ json: ["example/fixture"] });
+  });
+  await page.route("http://127.0.0.1:43123/", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `
+      <section aria-label="Projects">
+        <button>New project or session</button>
+        <button role="menuitem">Add project</button>
+        <div id="ready"></div>
+      </section>
+      <div role="dialog">
+        <input role="combobox">
+        <div id="options"></div>
+        <button id="clone" disabled>Clone</button>
+      </div>
+      <script>
+        document.querySelector('input').oninput = async () => {
+          const repositories = await (await fetch('/repositories')).json();
+          const option = document.createElement('button');
+          option.setAttribute('role', 'option');
+          option.textContent = repositories[0];
+          option.onclick = () => document.querySelector('#clone').disabled = false;
+          document.querySelector('#options').append(option);
+        };
+        document.querySelector('#clone').onclick = () => {
+          document.querySelector('[role=dialog]').remove();
+          document.querySelector('#ready').innerHTML = '<button>New session in fixture</button>';
+        };
+      </script>`
+    })
+  );
+  try {
+    await page.goto("http://127.0.0.1:43123/");
+    await Promise.all([
+      ensureFixtureProject(page, "example/fixture", "fixture"),
+      (async () => {
+        await searchArrived;
+        await expect(
+          page.getByRole("button", { name: "Clone", exact: true })
+        ).toBeDisabled();
+        release?.();
+      })()
+    ]);
+    await expect(
+      page.getByRole("button", { name: "New session in fixture" })
+    ).toBeVisible();
+  } finally {
+    release?.();
+  }
+});
+
+test("Copilot session waits for explicit idle before another prompt @safety", async ({
+  page
+}) => {
+  await page.setContent(`
+    <button aria-label="Prepare · branch, session information">Info</button>
+    <section aria-label="Projects">
+      <div role="tree" aria-label="Projects">
+        <div id="status" aria-label="Prepare. Status: Working. now"></div>
+      </div>
+    </section>
+    <main><textarea aria-label="Message"></textarea><button id="send">Send message</button></main>
+    <script>
+      document.querySelector('#send').onclick = () => document.querySelector('#status')
+        .setAttribute('aria-label', 'Prepare. Status: Idle. now');
+    </script>`);
+  await Promise.all([
+    waitForIdleSession(page),
+    sendSessionPrompt(page, "Model the clean fixture.")
+  ]);
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(
+    "Model the clean fixture."
+  );
+});
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";
@@ -350,7 +449,27 @@ const GRAPH_STYLE_SAMPLE = `(() => {
   }));
 })()`;
 
+// Buttons such as #plan-btn animate background-color (and opacity) over a
+// 0.15s CSS transition when they go from disabled to enabled, while their
+// text color switches instantly. Running axe mid-transition can sample any
+// background between the disabled gray and the final enabled color, so its
+// reported contrast ratio is not representative of the steady-state UI.
+// Callers must first wait for the page state they want to scan: pending
+// requests can start new transitions after this snapshot. Then wait for
+// running transitions without waiting for infinite loading animations.
+async function waitForTransitionsToSettle(page: Page): Promise<void> {
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((animation) => animation instanceof CSSTransition)
+        .map((animation) => animation.finished.catch(() => undefined))
+    )
+  );
+}
+
 async function expectNoWcagViolations(page: Page): Promise<void> {
+  await waitForTransitionsToSettle(page);
   const results = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
@@ -910,26 +1029,56 @@ test.describe("Radius Canvas in Chromium", () => {
         body: JSON.stringify({ refreshed: true })
       });
     });
+    let releaseDeployments = (): void => {
+      throw new Error("Deployment response gate is not initialized.");
+    };
+    const deploymentsGate = new Promise<void>((resolve) => {
+      releaseDeployments = resolve;
+    });
+    // Keep the cached graph usable while the deployment listing is pending.
+    // Releasing it must not race the enabled-state accessibility scan.
+    await page.route("**/api/list-deployments?**", async (route) => {
+      await deploymentsGate;
+      await route.continue();
+    });
 
-    await gotoCanvas(page, canvas, "planned");
+    try {
+      await gotoCanvas(page, canvas, "planned");
 
-    const web = page.locator(".rad-node").filter({ hasText: "web" });
-    const type = web.locator(".rad-node__type");
-    await expect(type).toHaveText("Azure Kubernetes Service");
-    await expect(type).toHaveAttribute(
-      "title",
-      "Microsoft.ContainerService/managedClusters@2024-01-01"
-    );
-    const details = web.getByRole("button", { name: "Show details" });
-    await details.focus();
-    await page.keyboard.press("Enter");
+      const web = page.locator(".rad-node").filter({ hasText: "web" });
+      const type = web.locator(".rad-node__type");
+      await expect(type).toHaveText("Azure Kubernetes Service");
+      await expect(type).toHaveAttribute(
+        "title",
+        "Microsoft.ContainerService/managedClusters@2024-01-01"
+      );
+      const details = web.getByRole("button", { name: "Show details" });
+      await details.focus();
+      await page.keyboard.press("Enter");
 
-    const panel = page.locator("[data-radius-details]");
-    await expect(panel).toContainText("Concrete type");
-    await expect(panel).toContainText(
-      "Microsoft.ContainerService/managedClusters@2024-01-01"
-    );
-    await expectNoWcagViolations(page);
+      const panel = page.locator("[data-radius-details]");
+      await expect(panel).toContainText("Concrete type");
+      await expect(panel).toContainText(
+        "Microsoft.ContainerService/managedClusters@2024-01-01"
+      );
+      const deploy = page.locator("#plan-btn");
+      await expect(deploy).toBeDisabled();
+      await expect(deploy).toHaveAttribute(
+        "title",
+        "Deployment states are still loading. Deployment is available once they arrive."
+      );
+      await expectNoWcagViolations(page);
+
+      releaseDeployments();
+      await expect(page.locator("#plan-status")).toHaveText(
+        "The planned deployment is current."
+      );
+      await expect(deploy).toBeEnabled();
+      await expectNoWcagViolations(page);
+    } finally {
+      releaseDeployments();
+      await page.unrouteAll({ behavior: "wait" });
+    }
   });
 
   test("shows friendly deployed service names with the concrete type in details", async ({
@@ -2907,8 +3056,8 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBeLessThanOrEqual(4);
   });
 
-  for (const jobsUnavailable of [false, true]) {
-    test(`retries verification through the selected account and returned run URL (jobs unavailable: ${jobsUnavailable}) @safety`, async ({
+  for (const jobsRead of ["available", "rate-limited", "recovers"] as const) {
+    test(`retries verification through the selected account and returned run URL (jobs: ${jobsRead}) @safety`, async ({
       page,
       canvas
     }) => {
@@ -3011,12 +3160,34 @@ test.describe("Radius Canvas in Chromium", () => {
           ],
           env: { GH_TOKEN: "fixture-repo-token" },
           stdout:
-            jobsUnavailable ?
+            jobsRead === "rate-limited" ?
               'HTTP/2.0 429 Too Many Requests\nRetry-After: 120\r\n\r\n{"message":"secondary rate limit"}'
+            : jobsRead === "recovers" ? "HTTP/2 503\n\n{}"
             : 'HTTP/2 200\n\n{"jobs":[],"total_count":0}',
-          exitCode: jobsUnavailable ? 1 : 0
+          exitCode: jobsRead === "available" ? 0 : 1
         }
       );
+      if (jobsRead === "recovers") {
+        const jobsCommand = scenario.commands.at(-1);
+        if (!jobsCommand) throw new Error("Missing jobs fixture");
+        const recovered = {
+          commands: scenario.commands.map((command) =>
+            command === jobsCommand ?
+              {
+                ...command,
+                stdout: 'HTTP/2 200\n\n{"jobs":[],"total_count":0}',
+                exitCode: 0
+              }
+            : command
+          )
+        };
+        jobsCommand.writeFiles = [
+          {
+            path: canvas.scenarioPath,
+            content: JSON.stringify(recovered)
+          }
+        ];
+      }
       await canvas.setScenario(scenario);
       await gotoCanvas(page, canvas, "environment");
 
@@ -3088,7 +3259,7 @@ test.describe("Radius Canvas in Chromium", () => {
             call.args[1] ===
               `repos/${REPOSITORY}/actions/runs/41/jobs?per_page=100&page=1`
         )
-      ).toHaveLength(1);
+      ).toHaveLength(jobsRead === "recovers" ? 2 : 1);
       await page.locator("#env-progress-details > summary").click();
       await expect(
         page.getByRole("button", { name: "Download diagnostic snapshot" })
@@ -3828,6 +3999,54 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeVisible();
   });
 
+  test("renders protection observations as historical text while a deploy waits and completes @safety", async ({
+    page,
+    canvas
+  }) => {
+    await routeDeployedPage(page, () => "in_progress");
+    const logs = [
+      describeWorkflowProtection(parseWorkflowProtection([pendingEnvironment]))
+    ];
+    let status = "in_progress";
+    await page.route("**/api/deploy-status**", async (route) => {
+      const since = Number(
+        new URL(route.request().url()).searchParams.get("since") ?? 0
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status,
+          active: status === "in_progress",
+          repairing: false,
+          logsNew: logs.slice(since),
+          logTotal: logs.length,
+          attempt: { id: "protection-fixture" }
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    const output = page.locator("#deployed-log-output");
+    await expect(output).toContainText(logs[0]);
+    await expect(output.locator("review")).toHaveCount(0);
+    await expectNoWcagViolations(page);
+    logs.push(
+      "Observation: run left the protection wait; continuing to monitor."
+    );
+    await expect(output).toContainText(logs[1]);
+    await expect(output).not.toContainText("approval status is unknown");
+    logs.push(
+      "Observation: workflow completed; earlier protection observations are historical."
+    );
+    status = "complete";
+    await expect(output).toContainText(logs[2]);
+    await expect(output).toContainText("Required reviewers are configured.");
+    await expect(output).not.toContainText("approved");
+    await page.getByRole("link", { name: "Deployments", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/page=deploying/);
+  });
+
   for (const completed of [false, true]) {
     for (const evidence of ["missing", "malformed", "auth"] as const) {
       test(`shows retained ${completed ? "unconfirmed completion" : "timeout"} details despite ${evidence} artifacts through the real graph route in Chromium @safety`, async ({
@@ -4273,7 +4492,8 @@ test.describe("Radius Canvas in Chromium", () => {
   for (const evidence of [
     "primary failure with unavailable diagnostics",
     "unconfirmed completion",
-    "primary failure with unavailable workflow log"
+    "primary failure with unavailable workflow log",
+    "post-deployment teardown failure"
   ]) {
     test(`preserves ${evidence} and keyboard dismissal @safety`, async ({
       page,
@@ -4317,6 +4537,33 @@ test.describe("Radius Canvas in Chromium", () => {
         );
         error = failure.message;
       }
+      if (evidence === "post-deployment teardown failure") {
+        const steps = [
+          {
+            name: "Run rad commands",
+            status: "completed",
+            conclusion: "success"
+          },
+          { name: "Teardown", status: "completed", conclusion: "failure" }
+        ];
+        error = (
+          await collectWorkflowFailure(
+            { repo: REPOSITORY, runId: 77 },
+            {
+              status: "completed",
+              conclusion: "failure",
+              steps,
+              jobs: [{ name: "deploy", steps }]
+            },
+            { provider: "azure", resourcesTouched: true },
+            {
+              readLog: async () =>
+                "deploy\tTeardown\t2026-01-01 Error: <teardown>",
+              readControlPlaneLog: async () => null
+            }
+          )
+        ).message;
+      }
       if (typeof error !== "string")
         throw new Error("Missing monitor diagnostic");
       await page.route("**/api/deploy-status**", async (route) => {
@@ -4352,6 +4599,14 @@ test.describe("Radius Canvas in Chromium", () => {
       );
       await expect(page.locator("#deploy-fail-repair-note")).toBeHidden();
       await expect(page.locator("#deploy-progress-modal")).toBeVisible();
+      if (evidence === "post-deployment teardown failure") {
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources."
+        );
+        await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+          "Review the Teardown logs and verify saved state before retrying."
+        );
+      }
       if (unconfirmed) {
         await expect(page.locator("#deploy-progress-subtitle")).toContainText(
           DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
@@ -4446,92 +4701,121 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.waitForURL(/\/\?page=environment$/);
   });
 
-  test("offers the verify-bypass recovery and sends the mutation nonce when Create environment anyway is clicked @safety", async ({
-    page,
-    canvas
-  }) => {
-    // Exceptions 4.4/4.5: a verification that fails on a recoverable category
-    // (missing permissions / unreachable endpoint) offers a "Create environment
-    // anyway" bypass. This drives the real restart-recovery path — the tracker
-    // observes a live operation, the server then loses that record, and the
-    // verify-status endpoint reports a bypassable failure — and asserts the
-    // compiled button renders in #env-progress-verify-bypass and POSTs with the
-    // browser mutation nonce the real page was served. Unit tests cover the
-    // render in jsdom; only Chromium proves the built script's real fetch
-    // actually carries the nonce header.
-    const operation = {
-      operationId: "op-bypass-e2e",
-      kind: "create",
-      environment: "fixture-environment",
-      provider: "azure",
-      state: "verifying",
-      currentStage: "verify",
-      startedAt: new Date().toISOString(),
-      verification: { dispatchedAt: Date.now(), runId: "555" }
-    };
-    let opCalls = 0;
-    // The tracker must observe the operation at least once (so it commits to
-    // this environment) before the record disappears; only then does it fall
-    // back to the verify-status endpoint that surfaces the bypass. Serving the
-    // operation for the first two reads (resume + first poll) and nothing after
-    // reproduces that sequence deterministically.
-    await page.route(/\/api\/operations\?repo=/, async (route) => {
-      opCalls += 1;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(opCalls <= 2 ? { operation } : { operation: null })
+  for (const category of ["permissions", "generic"] as const) {
+    test(`handles ${category} verification failure without granting unsupported bypass @safety`, async ({
+      page,
+      canvas
+    }) => {
+      // Only definitive permission evidence may offer bypass. This drives the
+      // real restart-recovery path — the tracker
+      // observes a live operation, the server then loses that record, and the
+      // verify-status endpoint reports a failure. For a bypassable failure the
+      // compiled button renders in #env-progress-verify-bypass and POSTs with the
+      // browser mutation nonce the real page was served. Unit tests cover the
+      // render in jsdom; only Chromium proves the built script's real fetch
+      // actually carries the nonce header.
+      const operation = {
+        operationId: "op-bypass-e2e",
+        kind: "create",
+        environment: "fixture-environment",
+        provider: "azure",
+        state: "verifying",
+        currentStage: "verify",
+        startedAt: new Date().toISOString(),
+        verification: { dispatchedAt: Date.now(), runId: "555" }
+      };
+      let opCalls = 0;
+      // The tracker must observe the operation at least once (so it commits to
+      // this environment) before the record disappears; only then does it fall
+      // back to the verify-status endpoint that surfaces the bypass. Serving the
+      // operation for the first two reads (resume + first poll) and nothing after
+      // reproduces that sequence deterministically.
+      await page.route(/\/api\/operations\?repo=/, async (route) => {
+        opCalls += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(
+            opCalls <= 2 ? { operation } : { operation: null }
+          )
+        });
+      });
+      const unavailableLog =
+        "Credential verification failed (failure). Failed step: Azure Login (OIDC).\nThe verification log could not be read: the read timed out.";
+      await page.route("**/api/verify-status**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            state: "failed",
+            terminal: false,
+            category,
+            ...(category === "permissions" ?
+              { missingPermissions: ["Contributor"] }
+            : { error: unavailableLog }),
+            runId: "555",
+            runUrl: `https://github.com/${REPOSITORY}/actions/runs/555`
+          })
+        });
+      });
+      let bypassNonce: string | null = null;
+      let bypassBody: unknown = null;
+      await page.route("**/api/bypass-verification**", async (route) => {
+        const request = route.request();
+        bypassNonce = request.headers()["x-radius-mutation-nonce"] ?? null;
+        bypassBody = request.postDataJSON();
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ success: true, category: "permissions" })
+        });
+      });
+
+      await page.clock.install();
+      await gotoCanvas(page, canvas, "environment");
+
+      const bypassButton = page.locator("#env-progress-verify-bypass-button");
+      if (category === "generic") {
+        await expect(page.locator("#env-progress-panel")).toHaveClass(
+          /env-progress--failed/
+        );
+        await expect(page.locator("#env-progress-activity")).toContainText(
+          unavailableLog
+        );
+        await expect(page.locator("#env-progress-activity")).toContainText(
+          `https://github.com/${REPOSITORY}/actions/runs/555`
+        );
+        await expect(bypassButton).toBeHidden();
+        await expect(page.locator("#env-progress-panel")).not.toHaveClass(
+          /env-progress--active/
+        );
+        const elapsed = page.locator("#env-progress-elapsed");
+        const settledElapsed = (await elapsed.textContent()) ?? "";
+        await page.clock.fastForward(60000);
+        await expect(elapsed).toHaveText(settledElapsed);
+        await expectNoWcagViolations(page);
+        return;
+      }
+      await expect(bypassButton).toBeVisible();
+      await expect(bypassButton).toHaveText("Create environment anyway");
+
+      await bypassButton.click();
+
+      await expect(page.locator("#env-success-banner")).toBeVisible();
+      await expect(page.locator("#env-success-banner-text")).toContainText(
+        "fixture-environment"
+      );
+      // The security contract: the built button's POST carries the nonce the real
+      // server injected into the page, not an empty string.
+      expect(bypassNonce).toBeTruthy();
+      expect(bypassBody).toMatchObject({
+        repo: REPOSITORY,
+        environment: "fixture-environment",
+        operationId: "op-bypass-e2e",
+        runId: "555"
       });
     });
-    await page.route("**/api/verify-status**", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "failed",
-          terminal: false,
-          category: "permissions",
-          missingPermissions: ["Contributor"],
-          runId: "555",
-          runUrl: `https://github.com/${REPOSITORY}/actions/runs/555`
-        })
-      });
-    });
-    let bypassNonce: string | null = null;
-    let bypassBody: unknown = null;
-    await page.route("**/api/bypass-verification**", async (route) => {
-      const request = route.request();
-      bypassNonce = request.headers()["x-radius-mutation-nonce"] ?? null;
-      bypassBody = request.postDataJSON();
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ success: true, category: "permissions" })
-      });
-    });
-
-    await gotoCanvas(page, canvas, "environment");
-
-    const bypassButton = page.locator("#env-progress-verify-bypass-button");
-    await expect(bypassButton).toBeVisible();
-    await expect(bypassButton).toHaveText("Create environment anyway");
-
-    await bypassButton.click();
-
-    await expect(page.locator("#env-success-banner")).toBeVisible();
-    await expect(page.locator("#env-success-banner-text")).toContainText(
-      "fixture-environment"
-    );
-    // The security contract: the built button's POST carries the nonce the real
-    // server injected into the page, not an empty string.
-    expect(bypassNonce).toBeTruthy();
-    expect(bypassBody).toMatchObject({
-      repo: REPOSITORY,
-      environment: "fixture-environment",
-      operationId: "op-bypass-e2e",
-      runId: "555"
-    });
-  });
+  }
 
   test("does not re-announce an unchanged deploy while it keeps polling", async ({
     page,

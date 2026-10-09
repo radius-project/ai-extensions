@@ -38,21 +38,26 @@ runs:
           --wait
         kubectl wait --for=condition=Ready node --all --timeout=120s
 
+    # install.sh only needs the oras CLI for edge builds. Kept so switching back
+    # to edge stays a one-line change.
     - name: Install oras
       uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
     - name: Install Radius CLI
       shell: bash
       env:
-        # Pin the Radius install script to a stable release and verify its checksum
-        # before running it, rather than piping from main. The CLI channel stays
-        # `edge` so the workflow still exercises the latest control-plane build.
+        # Install the CLI from a pinned stable Radius release; `rad install kubernetes`
+        # then installs the control plane for the CLI's release. Verify the install
+        # script's checksum before running it, rather than piping from main.
         RADIUS_INSTALL_REF: v0.61.1
+        # Immutable commit of RADIUS_INSTALL_REF; load-contrib-catalog fetches the
+        # recipe catalog at this commit so a moved tag cannot change recipes.
+        RADIUS_INSTALL_COMMIT: b913c13618039677b8727a2063cc853142cdb7c9
         RADIUS_INSTALL_SHA256: bf2fdf0248b39ac2a0222326f8458824924872816737a08af3558bddd16c392b
       run: |
         curl -sSL "https://raw.githubusercontent.com/radius-project/radius/${RADIUS_INSTALL_REF}/deploy/install.sh" -o install-rad.sh
         echo "${RADIUS_INSTALL_SHA256}  install-rad.sh" | sha256sum -c -
-        /bin/bash install-rad.sh edge
+        /bin/bash install-rad.sh --version "$RADIUS_INSTALL_REF"
         rm -f install-rad.sh
         rad version
 

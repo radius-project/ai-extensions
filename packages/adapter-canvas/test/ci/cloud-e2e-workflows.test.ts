@@ -21,11 +21,14 @@
 // the point of asserting it at all.
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import cloudConfig from "../../playwright.cloud.config.js";
 import { redactCredentials } from "../../src/credential-redaction.js";
+import { CLOUD_CANVAS_HOSTS } from "../e2e-cloud/support/cloud-canvas-host.js";
+import { COPILOT_APP_SUITE_TIMEOUT_MS } from "../e2e-cloud/support/cloud-timeout-budget.js";
 import {
   ENVIRONMENT_NAME_PREFIX,
   RESOURCE_GROUP_PREFIX
@@ -45,6 +48,7 @@ interface WorkflowStep {
   readonly uses?: string;
   readonly run?: string;
   readonly if?: string;
+  readonly shell?: string;
   readonly "continue-on-error"?: boolean;
   readonly "working-directory"?: string;
   readonly env?: Record<string, string>;
@@ -210,6 +214,51 @@ describe("cloud-e2e.yml", () => {
     expect(playwrightGlobalMinutes).toBeGreaterThan(playwrightMinutes);
     expect(jobMinutes).toBeGreaterThan(playwrightMinutes);
     expect(jobMinutes).toBeGreaterThanOrEqual(playwrightGlobalMinutes + 10);
+    // The opt-in Copilot app host runs under the same job timeout.
+    expect(jobMinutes).toBeGreaterThanOrEqual(
+      COPILOT_APP_SUITE_TIMEOUT_MS / 60_000 + 10
+    );
+  });
+
+  it("uses the harness host unless a run opts in to the Copilot app", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const host =
+      "(inputs.canvas-host || vars.AIEXT_CLOUD_E2E_CANVAS_HOST || 'harness')";
+    const dispatch = workflow.on?.workflow_dispatch as {
+      inputs?: Record<
+        string,
+        { type?: string; options?: string[]; default?: string }
+      >;
+    };
+    expect(dispatch.inputs?.["canvas-host"]).toMatchObject({
+      type: "choice",
+      options: [...CLOUD_CANVAS_HOSTS],
+      default: "harness"
+    });
+
+    const job = workflow.jobs?.["cloud-e2e"];
+    expect(job?.env?.RADIUS_CLOUD_E2E_CANVAS_HOST).toBe("${{ " + host + " }}");
+    expect(job?.["runs-on"]).toBe(
+      "${{ " + host + " == 'copilot-app' && 'windows-2025' || 'ubuntu-24.04' }}"
+    );
+  });
+
+  it("installs only what the selected canvas host drives", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const all = steps(workflow.jobs?.["cloud-e2e"]);
+    const chromium = all.find((step) =>
+      step.run?.includes("playwright install")
+    );
+    const app = all.find((step) => step.run?.includes("GitHub.CopilotApp"));
+    expect(chromium?.if).toContain(
+      "env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'harness'"
+    );
+    expect(app?.if).toContain(
+      "env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'copilot-app'"
+    );
+    expect(app?.shell).toBe("pwsh");
+    expect(app?.run).toContain("--scope user");
+    expect(app?.run).toContain("github.exe");
   });
 
   it("switches the suite on and runs it", async () => {
@@ -470,6 +519,28 @@ describe("cloud-e2e-cleanup.yml", () => {
       "gh workflow run delete-application.yml"
     );
     expect(radiusCleanup?.run).toContain('gh run watch "$run_id"');
+    const supportModule = radiusCleanup?.run?.match(
+      /const \{ findNewWorkflowRunId, readWorkflowRunIds \} = await import\(\s*"([^"]+)"\s*\)/
+    )?.[1];
+    expect(supportModule).toBe(
+      "./packages/adapter-canvas/test/e2e-cloud/support/workflow-run-discovery.ts"
+    );
+    const importResult = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `await import(${JSON.stringify(supportModule)})`
+      ],
+      {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8"
+      }
+    );
+    expect(importResult).toMatchObject({
+      status: 0,
+      stderr: ""
+    });
     expect(fallbackProtectedSteps).toHaveLength(4);
     for (const step of fallbackProtectedSteps) {
       expect(step.if).toContain(
@@ -598,7 +669,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
   });
 
-  it("verifies Entra application deletion and retries a missing object id by client id", async () => {
+  it("retries and verifies Entra application deletion through the exact Graph object", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const identityCleanup = steps(workflow.jobs?.purge).find(
       (step) =>
@@ -606,11 +677,18 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     const script = identityCleanup?.run ?? "";
 
-    expect(script).toContain('az ad app delete --id "$id"');
-    expect(script).toContain('az ad app delete --id "$app_id"');
-    expect(script).toContain("Request_ResourceNotFound");
     expect(script).toContain(
-      "application $id (appId $app_id) remained listed after deletion"
+      'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
+    );
+    expect(script).toMatch(/az rest \\\n\s+--method DELETE/);
+    expect(script).toMatch(/az rest \\\n\s+--method GET/);
+    expect(script).toContain("Request_ResourceNotFound");
+    // A repeat DELETE of the soft-deleted object answers 403 under
+    // Application.ReadWrite.OwnedBy (#974), so only poll once one succeeds.
+    expect(script).toContain("if (( delete_accepted == 0 )); then");
+    expect(script).toMatch(/2>"\$delete_error"; then\n\s+delete_accepted=1\n/);
+    expect(script).toContain(
+      "application $id (appId $app_id) remained directly queryable through Microsoft Graph after deletion retries"
     );
   });
 
@@ -882,7 +960,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     const destructive = steps(workflow.jobs?.purge).filter(
       (step) =>
         step.run?.includes("az group delete") ||
-        step.run?.includes("az ad app delete") ||
+        step.run?.includes(
+          'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
+        ) ||
         step.run?.includes("-X DELETE") ||
         step.run?.includes("-X PATCH")
     );
@@ -907,7 +987,9 @@ describe("cloud-e2e-cleanup.yml", () => {
 
     const ageGatedDestructiveSteps = steps(job).filter(
       (candidate) =>
-        (candidate.run?.includes("az ad app delete") ||
+        (candidate.run?.includes(
+          'application_url="https://graph.microsoft.com/v1.0/applications/$id"'
+        ) ||
           candidate.run?.includes("-X DELETE")) &&
         candidate.name !==
           "Reset the fixture default branch under the shared lease"
@@ -933,7 +1015,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("appId");
     expect(script).toContain("failures+=");
     expect(script.indexOf("az ad sp delete")).toBeLessThan(
-      script.indexOf("az ad app delete")
+      script.indexOf("--method DELETE")
     );
   });
 
