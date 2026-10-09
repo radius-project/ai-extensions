@@ -228,7 +228,7 @@ A data store or broker that Radius provisions is created with the username you g
 
 ### Choosing the value
 
-**When refreshing a model, keep the username it already has.** If the existing `.radius/app.bicep` sets `username` on the same resource (same type and `name`), keep that value instead of choosing one with the rules below. Azure and AWS do not allow renaming a database's administrator login, so a changed username fails the next deploy against the existing server. If the user asks to change it, keep the existing value, tell them the change may require replacing the service, and change it only after they confirm. Still trace every consumer: re-bind each one to the kept value as [One username, one source](#one-username-one-source) requires, and if rule 3 below finds a consumer that fixes a different literal, stop and report the conflict instead of changing either one.
+**When a model already exists, keep the username it already has.** This applies to every run that writes over an existing `.radius/app.bicep`, whether the canvas asked for a refresh or the user asked to regenerate. If that model sets `username` on the same resource (same type and `name`), keep that value instead of choosing one with the rules below. Azure and AWS do not allow renaming a database's administrator login, so a changed username fails the next deploy against the existing server. If the user asks to change it, keep the existing value, tell them the change may require replacing the service, and change it only after they confirm. Still trace every consumer: re-bind each one to the kept value as [One username, one source](#one-username-one-source) requires, and if rule 3 below finds a consumer that fixes a different literal, stop and report the conflict instead of changing either one.
 
 For a new resource, use `myadmin` unless the user asks for a username or the application fixes one. To decide, trace every consumer: find the username its authentication call receives (or the user part of its URI) and follow it back through the checked-in source. Then apply these rules to the resource as a whole:
 
@@ -306,7 +306,7 @@ If the exact contract cannot deliver a required secret by reference, report the 
 Applications often require one URL or config value that embeds a secret. Bicep interpolation would materialize the combined value before the container starts, so prefer runtime composition:
 
 1. Bind the secret into a helper environment variable: through an authored-secret connection for a developer-supplied credential, through a producer connection for a Recipe-generated standard `CONNECTION_*` variable, or through `secretKeyRef` from `<producer>.properties.secrets.name` for an explicit custom Kubernetes environment name.
-2. Bind nonsecret host, port, database, and username values from verified outputs or literals.
+2. Bind nonsecret host, port, and database values from verified outputs or literals. Bind a username the way [One username, one source](#one-username-one-source) requires, never as a separate literal.
 3. Make sure the helper actually reaches the container's environment before the value that reads it. Authoring order does not decide this — see below.
 4. Compose the final app-native value in the container runtime or let the application construct it. The final key and syntax must exactly match the selected pinned-source contract.
 

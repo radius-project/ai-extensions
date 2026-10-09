@@ -310,6 +310,8 @@ Rules:
 
 ## Radius.Security/secrets structure
 
+This example puts a username in a Secret, which applies only when the consuming schema reads the username from that Secret. When the resource takes the username as a plain property, follow [One username, one source](secrets-handling.md#one-username-one-source) instead.
+
 ```bicep
 @secure()
 param username string

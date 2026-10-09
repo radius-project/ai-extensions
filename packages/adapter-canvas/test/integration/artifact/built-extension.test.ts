@@ -908,10 +908,13 @@ describe("P0-C built Radius extension artifact", () => {
     expect(secretsGuidance).toMatch(
       /\|\s*`process\.env\.ORDER_QUEUE_USERNAME`, which Compose sets to `username`\s*\|\s*2\s*\|\s*`myadmin`; set `ORDER_QUEUE_USERNAME`\s*\|/u
     );
-    // A cloud database admin login can't be renamed, so a refresh must keep
-    // the username the existing model set.
+    // A cloud database admin login can't be renamed, so any run that writes
+    // over an existing model, refresh or regenerate, must keep its username.
     expect(secretsGuidance).toContain(
-      "**When refreshing a model, keep the username it already has.**"
+      "This applies to every run that writes over an existing `.radius/app.bicep`, whether the canvas asked for a refresh or the user asked to regenerate."
+    );
+    expect(skillGuidance).toContain(
+      "When an existing `.radius/app.bicep` already sets it on the same resource, keep that value, whether the run is a refresh or a regenerate."
     );
     expect(secretsGuidance).toContain(
       "If the user asks to change it, keep the existing value, tell them the change may require replacing the service, and change it only after they confirm."
@@ -936,7 +939,18 @@ describe("P0-C built Radius extension artifact", () => {
       "Keep every provisioned service username the existing model sets, unless the user confirms a change after being told it may require replacing the service."
     );
     expect(skillGuidance).toContain(
-      "A refreshed model keeps the username the existing model set, unless the user confirmed a change."
+      "A model generated over an existing one keeps the username the existing model set, unless the user confirmed a change."
+    );
+    // Neither the generic Secret example nor runtime composition may read as
+    // permission for a second username copy.
+    expect(structureGuidance).toContain(
+      "This example puts a username in a Secret, which applies only when the consuming schema reads the username from that Secret."
+    );
+    expect(secretsGuidance).toContain(
+      "Bind a username the way [One username, one source](#one-username-one-source) requires, never as a separate literal."
+    );
+    expect(secretsGuidance).not.toContain(
+      "Bind nonsecret host, port, database, and username values from verified outputs or literals."
     );
     expect(secretsGuidance).toContain(
       "if the profile sets none either, stop and report that the username source could not be found"
