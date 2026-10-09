@@ -52,7 +52,7 @@ const adminLoginTypes = new Set<string>([
   "Radius.Data/sqlServerDatabases"
 ]);
 const ADMIN_LOGIN_MAPPING =
-  /^\s*administratorLogin:\s*'\{\{context\.resource\.properties\.username\}\}'\s*$/mu;
+  /^\s*administratorLogin:\s*'\{\{context\.resource\.properties\.username\}\}'\s*(?:\/\/.*)?$/mu;
 
 interface ResolvedResource {
   type: string;
