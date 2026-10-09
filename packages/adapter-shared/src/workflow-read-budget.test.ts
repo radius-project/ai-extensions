@@ -2,12 +2,152 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowCommandResult } from "./workflow-reads.js";
 import {
   createWorkflowReadBudget,
+  createWorkflowReadSession,
   isWorkflowReadLimitError
 } from "./workflow-read-budget.js";
 
 afterEach(() => vi.useRealTimers());
 
 describe("one logical workflow read budget", () => {
+  it.each(["context", "caller", "deadline"] as const)(
+    "preserves %s interruption over a concurrent command rejection",
+    async (source) => {
+      vi.useFakeTimers();
+      let now = 0;
+      const controller = new AbortController();
+      const context = createWorkflowReadSession({
+        monotonic: () => now,
+        wall: () => 0,
+        sleep: async () => {
+          throw new Error("Unexpected retry");
+        },
+        jitter: () => 0
+      }).observe(100, source === "context" ? controller.signal : undefined);
+      const run = createWorkflowReadBudget(
+        async () => {
+          if (source === "deadline") now = 100;
+          else controller.abort();
+          throw new Error("HTTP 403");
+        },
+        100,
+        10,
+        context
+      );
+      await expect(
+        run([], {
+          timeout: 100,
+          ...(source === "caller" ? { signal: controller.signal } : {})
+        })
+      ).rejects.toMatchObject({
+        reason: source === "deadline" ? "timeout" : "cancelled"
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
+  it("cleans up a sleep cancelled synchronously while its listener is registered", async () => {
+    vi.useFakeTimers();
+    const { clock } = createWorkflowReadSession().observe(100);
+    const detach = vi.fn();
+    await clock.sleep(50, {
+      stopped: () => true,
+      onStop: (listener) => {
+        listener();
+        return detach;
+      }
+    });
+    expect(detach).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("supports ordinary and already-cancelled injected sleep callers without leaking timers", async () => {
+    vi.useFakeTimers();
+    const { clock } = createWorkflowReadSession().observe(100);
+    const ordinary = clock.sleep(10);
+    await vi.advanceTimersByTimeAsync(10);
+    await ordinary;
+    await clock.sleep(10, { stopped: () => true });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("preserves the smaller nested page/output and command/time limits", async () => {
+    vi.useFakeTimers();
+    const supplied: unknown[] = [];
+    const context = createWorkflowReadSession().observe(100);
+    const outer = createWorkflowReadBudget(
+      async (_args, options) => {
+        supplied.push(options);
+        return { code: 0, stdout: "12", stderr: "" };
+      },
+      1000,
+      30,
+      context
+    );
+    const inner = createWorkflowReadBudget(outer, 500, 10, context);
+    await inner([], { timeout: 50, maxBuffer: 5 });
+    await vi.advanceTimersByTimeAsync(20);
+    await inner([], { timeout: 500 });
+    expect(supplied).toEqual([
+      { timeout: 50, maxBuffer: 5, signal: expect.any(AbortSignal) },
+      { timeout: 80, maxBuffer: 8, signal: expect.any(AbortSignal) }
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["context", "caller"] as const)(
+    "cancels through the %s signal before and during a read",
+    async (source) => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      const context = createWorkflowReadSession().observe(
+        100,
+        source === "context" ? controller.signal : undefined
+      );
+      let signal: AbortSignal | undefined;
+      let complete: (() => void) | undefined;
+      const run = vi.fn(
+        async (_args: string[], options: { signal?: AbortSignal }) => {
+          signal = options.signal;
+          await new Promise<void>((resolve) => {
+            complete = resolve;
+          });
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      );
+      const bounded = createWorkflowReadBudget(run, 100, 10, context);
+      const options = {
+        timeout: 100,
+        ...(source === "caller" ? { signal: controller.signal } : {})
+      };
+      const pending = bounded([], options).catch((error: unknown) => error);
+      controller.abort();
+      expect(await pending).toMatchObject({ reason: "cancelled" });
+      expect(signal?.aborted).toBe(true);
+      await expect(bounded([], options)).rejects.toMatchObject({
+        reason: "cancelled"
+      });
+      expect(run).toHaveBeenCalledTimes(1);
+      if (!complete) throw new Error("Command did not start");
+      complete();
+      await vi.runAllTimersAsync();
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
+  it("rejects synchronous cancellation even when the command fulfills first", async () => {
+    const controller = new AbortController();
+    const context = createWorkflowReadSession().observe(100, controller.signal);
+    const run = createWorkflowReadBudget(
+      async () => {
+        controller.abort();
+        return { code: 0, stdout: "", stderr: "" };
+      },
+      100,
+      10,
+      context
+    );
+    await expect(run([], { timeout: 100 })).rejects.toMatchObject({
+      reason: "cancelled"
+    });
+  });
   it.each([
     { code: 1, stdout: "123", stderr: "" },
     { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", stdout: "12", stderr: "" }

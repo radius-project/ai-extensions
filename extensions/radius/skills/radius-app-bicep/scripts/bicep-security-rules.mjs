@@ -541,7 +541,8 @@ function queryFileReferences(
   app,
   {
     timeoutMs = FILE_REFERENCES_TIMEOUT_MS,
-    killGraceMs = FILE_REFERENCES_KILL_GRACE_MS
+    killGraceMs = FILE_REFERENCES_KILL_GRACE_MS,
+    spawnProcess = spawn
   } = {}
 ) {
   return new Promise((resolve) => {
@@ -571,7 +572,7 @@ function queryFileReferences(
             stderr.trim() ||
             `Bicep exited with status ${code === null ? "null" : code}${signal ? ` after receiving signal ${signal}` : ""} without listing the files the compile reads`
         });
-    const child = spawn(bicep, ["jsonrpc", "--stdio"], {
+    const child = spawnProcess(bicep, ["jsonrpc", "--stdio"], {
       cwd: path.dirname(app),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true

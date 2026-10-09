@@ -13,6 +13,7 @@ import {
   type Dirent
 } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -104,6 +105,36 @@ function expectMatchingFile(source: string, destination: string): void {
   expect(actual.equals(expected), destination).toBe(true);
 }
 
+// Resolves a dependency the way the bundler does from `fromRoot` and returns
+// the installed package root, so notice expectations follow the lockfile.
+function installedPackageRoot(fromRoot: string, name: string): string {
+  let directory = dirname(
+    createRequire(join(fromRoot, "package.json")).resolve(name)
+  );
+  for (;;) {
+    const manifestPath = join(directory, "package.json");
+    if (
+      existsSync(manifestPath) &&
+      (JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: unknown })
+        .name === name
+    ) {
+      return directory;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) {
+      throw new Error(`Unable to locate the installed ${name} package.`);
+    }
+    directory = parent;
+  }
+}
+
+function bundledNoticeMarker(root: string): string {
+  const { name, version } = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8")
+  ) as { name: string; version: string };
+  return `===== ${name}@${version} =====`;
+}
+
 function prepareBuildWorkspace(
   workspaceRoot: string,
   missingAsset: readonly string[] = []
@@ -131,7 +162,7 @@ function prepareBuildWorkspace(
     join(workspaceAdapter, "node_modules"),
     "junction"
   );
-  for (const packageName of ["adapter-shared", "core"]) {
+  for (const packageName of ["adapter-shared", "core", "graph-react"]) {
     symlinkSync(
       join(REPO_ROOT, "packages", packageName),
       join(workspaceRoot, "packages", packageName),
@@ -520,20 +551,74 @@ describe("P0-C built Radius extension artifact", () => {
     );
     expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
-    for (const marker of [
-      "===== react@19.3.0 =====",
-      "===== react-dom@19.3.0 =====",
-      "===== @xyflow/react@12.11.6 =====",
-      "===== @xyflow/system@0.0.82 =====",
-      "===== dagre@0.8.5 =====",
-      "===== graphlib@2.1.8 =====",
-      "===== lodash@4.18.1 =====",
-      "===== yaml@2.9.1 ====="
+    const canvasRoot = join(REPO_ROOT, "packages", "adapter-canvas");
+    const graphRoot = join(REPO_ROOT, "packages", "graph-react");
+    const flow = installedPackageRoot(graphRoot, "@xyflow/react");
+    const dagre = installedPackageRoot(graphRoot, "dagre");
+    const graphlib = installedPackageRoot(dagre, "graphlib");
+    for (const root of [
+      installedPackageRoot(canvasRoot, "react"),
+      installedPackageRoot(canvasRoot, "react-dom"),
+      flow,
+      installedPackageRoot(flow, "@xyflow/system"),
+      dagre,
+      graphlib,
+      installedPackageRoot(graphlib, "lodash"),
+      installedPackageRoot(canvasRoot, "yaml")
     ]) {
-      expect(notices).toContain(marker);
+      expect(notices).toContain(bundledNoticeMarker(root));
     }
     expect(notices).not.toContain("===== reactflow@");
     expect(notices).not.toContain("===== @reactflow/");
+  });
+
+  it("packages environment-independent authoring so a missing deploy Environment cannot block modeling", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const skillGuidance = readGuidance("SKILL.md");
+    const runtimeGuidance = readGuidance("references/runtime-contract.md");
+
+    // Regression guard for #962: #637 made target-Environment registration a
+    // pre-authoring stop, which blocked every graph opened before deployment.
+    for (const guidance of filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .map((path) => readFileSync(path, "utf8"))) {
+      expect(guidance).not.toContain(
+        "target-Environment registration required by the model is unavailable"
+      );
+      expect(guidance).not.toContain(
+        "Also prove that the target Environment registers every emitted type"
+      );
+    }
+    expect(skillGuidance).toContain(
+      "### Authoring evidence and deployment readiness"
+    );
+    expect(skillGuidance).toContain(
+      "When no Environment is named and no contract is supplied, a missing, unselected, or unprovisioned deployment Environment is not a permanent modeling failure."
+    );
+    expect(skillGuidance).toContain(
+      "Only when no deployment Environment is named and no Environment contract is supplied, missing Environment-registration evidence is not a failure of either kind."
+    );
+    expect(runtimeGuidance).toContain(
+      "Only when no Environment is named and no contract is supplied, a missing or unselected deployment Environment is not a reason to reject the model."
+    );
+    expect(skillGuidance).toContain(
+      "Missing evidence for that named target remains an authoring blocker"
+    );
+    expect(skillGuidance).toContain(
+      "it does not establish AWS Recipe behavior"
+    );
+    expect(skillGuidance).toContain("do not substitute Azure evidence");
+    expect(skillGuidance).toContain(
+      "For generated custom types, inspect the authored Recipe and its pack"
+    );
+    expect(runtimeGuidance).toContain(
+      "registration of a required Recipe in a named target Environment cannot be proved"
+    );
+    expect(runtimeGuidance).toContain(
+      "an explicit target profile still requires its own exact Recipe behavior"
+    );
   });
 
   it("packages the managed-secret modeling contract in executable examples and platform rules", () => {
@@ -1422,6 +1507,47 @@ describe("P0-C built Radius extension artifact", () => {
       expect(existsSync(staleSkill)).toBe(false);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it("builds and installs from an isolated workspace with all required assets", () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-complete-install-assets-")
+    );
+    const installDir = join(workspaceRoot, "installed");
+    const installPath = join(installDir, "extension.mjs");
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      const result = spawnSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          RADIUS_SOURCE_REF: SOURCE_REF,
+          RADIUS_CANVAS_INSTALL_PATH: installPath
+        }
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("[canvas] installed");
+      expect(existsSync(installPath)).toBe(true);
+      expectMatchingFile(
+        SOURCE_CODE_REFERENCE,
+        join(
+          installDir,
+          "skills",
+          "radius-app-bicep",
+          "references",
+          "source-code-references.md"
+        )
+      );
+      expect(existsSync(join(workspaceRoot, ".artifacts", "radius"))).toBe(
+        true
+      );
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
     }
   });
 

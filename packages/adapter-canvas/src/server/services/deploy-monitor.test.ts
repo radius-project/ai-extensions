@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDeployMonitorService,
   type DeployMonitorDependencies,
@@ -9,7 +9,13 @@ import {
 } from "./deploy-monitor.js";
 import { createDeployDispatchService } from "./deploy-dispatch.js";
 import { createDeployOutcomeService } from "./deploy-outcome.js";
-import { observeWorkflowRun } from "@radius-project/core";
+import {
+  observeWorkflowRun,
+  parseWorkflowProtection,
+  WORKFLOW_READ_LIMITS
+} from "@radius-project/core";
+import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
+import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
 import {
   readWorkflowRun,
   readWorkflowLog,
@@ -18,6 +24,7 @@ import {
 import { createPlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import type { DeployOutcomeRequest } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import { createDeferred } from "../../../test/support/browser/fakes.js";
 import {
   DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE as explanation,
   DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
@@ -136,6 +143,467 @@ function settleRecorder() {
     }
   };
 }
+
+afterEach(() => vi.useRealTimers());
+
+describe("protection observation narration", () => {
+  const waiting: DeployRunDetail = {
+    status: "waiting",
+    conclusion: null,
+    steps: [],
+    protection: parseWorkflowProtection([pendingEnvironment])
+  };
+  it.each(["queued", "in_progress"])(
+    "narrates leaving protection wait for %s once without implying approval or lost evidence",
+    async (status) => {
+      const f = request();
+      const settled = settleRecorder();
+      const details: DeployRunDetail[] = [
+        waiting,
+        waiting,
+        { status, steps: [] },
+        { status, steps: [] },
+        completedRun()
+      ];
+      await createDeployMonitorService(
+        dependencies({
+          plannedGraph: { recover: async () => null },
+          ...settled,
+          getRunDetail: async () => {
+            expect(settled.calls).toHaveLength(0);
+            const detail = details.shift();
+            if (!detail) throw new Error("Unexpected poll");
+            return detail;
+          }
+        })
+      ).run(f.request);
+      expect(
+        f.logs.filter((line) => line.includes("is waiting on protection rules"))
+      ).toHaveLength(1);
+      expect(
+        f.logs.filter((line) => line.includes("run left the protection wait"))
+      ).toEqual([
+        "Observation: run left the protection wait; continuing to monitor."
+      ]);
+      expect(f.logs.join("\n")).not.toMatch(
+        /approved|approval status is unknown/
+      );
+      expect(settled.calls).toHaveLength(1);
+      expect(settled.calls[0].conclusion).toBe("success");
+    }
+  );
+
+  it("deduplicates lost protection detail while still waiting without claiming the run resumed", async () => {
+    const f = request();
+    const settled = settleRecorder();
+    const details: DeployRunDetail[] = [
+      waiting,
+      { status: "waiting", steps: [] },
+      { status: "waiting", steps: [] },
+      waiting,
+      completedRun()
+    ];
+    await createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: async () => null },
+        ...settled,
+        getRunDetail: async () => {
+          const detail = details.shift();
+          if (!detail) throw new Error("Unexpected poll");
+          return detail;
+        }
+      })
+    ).run(f.request);
+    expect(
+      f.logs.filter((line) => line.includes("protection was not rechecked"))
+    ).toEqual([
+      "Observation: current environment protection was not rechecked; approval status is unknown."
+    ]);
+    expect(f.logs.join("\n")).not.toContain("run left the protection wait");
+    expect(f.logs.join("\n")).toContain(
+      "workflow completed; earlier protection observations are historical"
+    );
+    expect(settled.calls).toHaveLength(1);
+  });
+  it("supersedes waiting narration before an unsupported completed conclusion stops observation", async () => {
+    const f = request();
+    const getRunDetail = vi
+      .fn<DeployMonitorDependencies["getRunDetail"]>()
+      .mockResolvedValueOnce(waiting)
+      .mockResolvedValueOnce({
+        status: "completed",
+        conclusion: "future_conclusion",
+        steps: []
+      });
+    await createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: async () => null },
+        getRunDetail
+      })
+    ).run(f.request);
+    expect(f.logs.join("\n")).toContain(
+      "earlier protection observations are historical"
+    );
+    expect(f.state.deployErrorKind).toBe("run-unconfirmed");
+    expect(f.state.deployError).toContain(explanation);
+  });
+  it.each(["success", "failure", "cancelled"])(
+    "deduplicates historical waiting evidence and settles only confirmed %s",
+    async (conclusion) => {
+      const f = request();
+      const settled = settleRecorder();
+      const details: Array<DeployRunDetail | null> = [
+        waiting,
+        waiting,
+        { ...waiting, protection: parseWorkflowProtection([]) },
+        {
+          ...waiting,
+          protection: { state: "unavailable", reason: "authorization" }
+        },
+        null,
+        waiting,
+        { status: "in_progress", steps: [] },
+        waiting,
+        { status: "completed", conclusion, steps: [] }
+      ];
+      const monitor = createDeployMonitorService(
+        dependencies({
+          plannedGraph: { recover: async () => null },
+          ...settled,
+          getRunDetail: async () => {
+            expect(settled.calls).toHaveLength(0);
+            expect(f.state.deployErrorKind).not.toBe("run-unconfirmed");
+            const detail = details.shift();
+            if (detail === undefined) throw new Error("Unexpected poll");
+            return detail;
+          }
+        })
+      );
+      await monitor.run(f.request);
+      expect(
+        f.logs.filter((line) => line.includes("is waiting on protection rules"))
+      ).toHaveLength(3);
+      expect(f.logs.join("\n")).toContain("Required reviewers are configured.");
+      expect(f.logs.join("\n")).toContain("does not establish approval");
+      expect(f.logs.join("\n")).toContain("unavailable (authorization)");
+      expect(f.logs.join("\n")).toContain("workflow detail is unavailable");
+      expect(f.logs.join("\n")).toContain("run left the protection wait");
+      expect(f.logs.join("\n")).toContain(
+        "earlier protection observations are historical"
+      );
+      expect(settled.calls).toHaveLength(1);
+      expect(settled.calls[0].conclusion).toBe(conclusion);
+    }
+  );
+
+  it.each(["stopped", "superseded"] as const)(
+    "does not narrate late protection after %s",
+    async (fence) => {
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("No artifact read");
+      });
+      let current = true;
+      const started = createDeferred<void>();
+      const detail = createDeferred<DeployRunDetail>();
+      const f = request({ isCurrent: () => current });
+      f.request.entry.observation = scope;
+      const monitor = createDeployMonitorService(
+        dependencies({
+          plannedGraph: { recover: async () => null },
+          getRunDetail: () => {
+            started.resolve();
+            return detail.promise;
+          }
+        })
+      );
+      const operation = monitor.run(f.request);
+      await started.promise;
+      if (fence === "stopped") scope.stop();
+      else current = false;
+      detail.resolve(waiting);
+      await expect(operation).rejects.toMatchObject({ reason: "cancelled" });
+      expect(f.logs.join("\n")).not.toContain("protection rules");
+      expect(f.state.deployError).toBeUndefined();
+      scope.stop();
+    }
+  );
+
+  it("expires a protection wait as unconfirmed without asserting workflow failure or starting repair", async () => {
+    const f = request();
+    const settled = settleRecorder();
+    const getRunDetail = vi.fn(async () => waiting);
+    await createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: async () => null },
+        ...settled,
+        getRunDetail
+      })
+    ).run(f.request);
+    expect(getRunDetail).toHaveBeenCalledTimes(240);
+    expect(
+      f.logs.filter((line) => line.includes("is waiting on protection rules"))
+    ).toHaveLength(1);
+    expect(f.state.deployStatus).toBe("failed");
+    expect(f.state.deployErrorKind).toBe("run-unconfirmed");
+    expect(f.state.deployError).not.toContain("approval");
+    expect(settled.calls).toHaveLength(0);
+  });
+});
+
+describe("bounded monitor observation lifetime", () => {
+  it.each([
+    { fence: "superseded", conclusion: "future_conclusion" },
+    { fence: "superseded", conclusion: "success" },
+    { fence: "stopped", conclusion: "future_conclusion" },
+    { fence: "stopped", conclusion: "success" }
+  ])(
+    "rejects late completed+$conclusion detail when $fence before publishing",
+    async ({ fence, conclusion }) => {
+      const scope =
+        fence === "stopped" ?
+          createWorkflowObservationScope(() => {
+            throw new Error("No artifact read");
+          })
+        : undefined;
+      const detail = createDeferred<DeployRunDetail>();
+      const started = createDeferred<void>();
+      let current = true;
+      const state: CanvasState = { deployStatus: "deploying" };
+      const resources: CanvasGraphResource[] = [
+        {
+          name: "api",
+          deployStatus: "pending",
+          outputResources: [{ name: "container", deployStatus: "pending" }]
+        }
+      ];
+      const f = request({
+        entry: { state, observation: scope },
+        resources,
+        isCurrent: () => current
+      });
+      const progress = vi.fn(async () => null);
+      const settle = vi.fn(async () => {});
+      const settleResources = vi.fn(settleDeployStatuses);
+      const pending = createDeployMonitorService(
+        dependencies({
+          getRunDetail: () => {
+            started.resolve();
+            return detail.promise;
+          },
+          createStatusReader: async () => ({ ...reader(), progress }),
+          outcome: { settle },
+          settleDeployStatuses: settleResources
+        })
+      )
+        .run(f.request)
+        .catch((error: unknown) => error);
+
+      await started.promise;
+      const stateBefore = structuredClone(state);
+      const resourcesBefore = structuredClone(resources);
+      const logsBefore = [...f.logs];
+      if (scope) scope.stop();
+      else current = false;
+      detail.resolve({
+        status: "completed",
+        conclusion,
+        steps: [{ name: "Run rad commands", status: "in_progress" }]
+      });
+
+      try {
+        expect(await pending).toMatchObject({ reason: "cancelled" });
+        expect(state).toEqual(stateBefore);
+        expect(resources).toEqual(resourcesBefore);
+        expect(f.logs).toEqual(logsBefore);
+        expect(progress).not.toHaveBeenCalled();
+        expect(settle).not.toHaveBeenCalled();
+        expect(settleResources).not.toHaveBeenCalled();
+      } finally {
+        scope?.stop();
+      }
+    }
+  );
+
+  it("retains elapsed run/progress work and retry credits when promoting to terminal evidence", async () => {
+    let time = 0;
+    const scope = createWorkflowObservationScope(
+      () => {
+        throw new Error("Reader supplied by monitor port");
+      },
+      {
+        monotonic: () => time,
+        wall: () => 1700000000000 + time,
+        jitter: () => 0,
+        sleep: async (milliseconds) => {
+          time += milliseconds;
+        }
+      }
+    );
+    const resources: CanvasGraphResource[] = [
+      { name: "api", deployStatus: "pending" }
+    ];
+    const f = request({
+      entry: { state: {}, observation: scope },
+      resources,
+      isCurrent: () => true
+    });
+    const detail: DeployRunDetail = {
+      status: "completed",
+      conclusion: "failure",
+      steps: [{ name: "Run rad commands", status: "in_progress" }],
+      jobs: [{ name: "deploy" }]
+    };
+    let runGets = 0;
+    let artifactGets = 0;
+    const response = (status: number) => ({
+      ok: status === 200,
+      metadata: {
+        source: "gh-api-include" as const,
+        status,
+        classification: "other" as const,
+        receivedAtEpochMilliseconds: 1700000000000 + time,
+        retryAfter: { state: "absent" as const },
+        rateLimitReset: { state: "absent" as const },
+        serverDate: { state: "absent" as const },
+        rateLimitRemaining: null
+      }
+    });
+    await createDeployMonitorService(
+      dependencies({
+        getRunDetail: async (_repo, _run, observation) => {
+          if (!observation) throw new Error("Missing production observation");
+          observation.onDecision?.({ state: "ready" });
+          observation.onDecision?.({
+            state: "exhausted",
+            reason: "ineligible"
+          });
+          observation.onDecision?.({
+            state: "deferred",
+            reason: "missing-deadline"
+          });
+          observation.onDecision?.({
+            state: "deferred",
+            reason: "missing-deadline"
+          });
+          expect(observation.context.deadline).toBe(
+            WORKFLOW_READ_LIMITS.observationMs
+          );
+          await observation.context.read("run", 15000, async () =>
+            response(++runGets === 3 ? 200 : 503)
+          );
+          time += 12500;
+          return detail;
+        },
+        createStatusReader: async () => ({
+          ...reader(),
+          progress: async (context) => {
+            expect(context?.deadline).toBe(WORKFLOW_READ_LIMITS.monitorMs);
+            expect(context?.remaining()).toBe(561000);
+            time += 500000;
+            return null;
+          }
+        }),
+        now: () => 1700000000000 + time,
+        outcome: {
+          settle: async (call) => {
+            const { observation } = call;
+            expect(call.status).toBe(detail.status);
+            expect(call.steps).toBe(detail.steps);
+            expect(call.jobs).toBe(detail.jobs);
+            expect(call.isCurrent).toBe(f.request.isCurrent);
+            if (!observation) throw new Error("Terminal observation was lost");
+            expect(observation.context.deadline).toBe(2855000);
+            expect(observation.context.remaining()).toBe(2341000);
+            const result = await observation.context.read(
+              "artifacts",
+              observation.context.deadline,
+              async () => (++artifactGets, response(503))
+            );
+            expect(result.decision).toEqual({
+              state: "exhausted",
+              reason: "attempts"
+            });
+          }
+        }
+      })
+    ).run(f.request);
+    expect(runGets).toBe(3);
+    expect(artifactGets).toBe(1);
+    expect(time).toBe(514000);
+    expect(f.logs.filter((line) => line.includes("Workflow evidence"))).toEqual(
+      ["    Workflow evidence deferred: missing-deadline."]
+    );
+    scope.stop();
+  });
+
+  it("stops the five-second polling wait without remotely cancelling a workflow", async () => {
+    vi.useFakeTimers();
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("No artifact read");
+    });
+    const find = vi.fn(async () => null);
+    const f = request({
+      entry: { state: {}, observation: scope },
+      resources: [{ name: "api" }]
+    });
+    const pending = createDeployMonitorService(
+      dependencies({ findWorkflowRun: find })
+    )
+      .run(f.request)
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(find).toHaveBeenCalledTimes(1);
+    scope.stop();
+    expect(await pending).toMatchObject({ reason: "cancelled" });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(f.request.entry.state.deployStatus).toBeUndefined();
+  });
+
+  it("does not finish observation ownership early while dispatch is still pending", async () => {
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("No artifact read");
+    });
+    let dispatch: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      dispatch = resolve;
+    });
+    const find = vi.fn(async () => 42);
+    const f = request({
+      entry: { state: {}, observation: scope },
+      resources: [{ name: "api" }]
+    });
+    let settled = false;
+    const pending = createDeployMonitorService(
+      dependencies({
+        dispatch: {
+          prepareAndDispatch: async () => {
+            await started;
+            return {
+              dispatched: true,
+              workflowFile: "run.yml",
+              dispatchedAt: 1,
+              baselineRunId: null,
+              environment: "dev"
+            };
+          }
+        },
+        findWorkflowRun: find
+      })
+    )
+      .run(f.request)
+      .catch((error: unknown) => {
+        settled = true;
+        return error;
+      });
+    scope.stop();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    if (!dispatch) throw new Error("Dispatch was not initialized");
+    dispatch();
+    expect(await pending).toMatchObject({ reason: "cancelled" });
+    expect(find).not.toHaveBeenCalled();
+  });
+});
 
 describe("workflow evidence uncertainty", () => {
   it.each([null, undefined, "", "   "])(
@@ -1620,8 +2088,9 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       },
       ensureWorkflowsCurrent: () => {
         record("sync-workflows");
-        return Promise.resolve({ created: [], failed: [] });
+        return Promise.resolve({ created: [], updated: [], failed: [] });
       },
+      sleep: () => Promise.resolve(),
       latestWorkflowRunId: () => {
         record("latest-run-id");
         return Promise.resolve(76);
@@ -1674,9 +2143,13 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
         ) {
           record("read-run-log");
           expect(options).toEqual({
-            timeout: 30000,
-            maxBuffer: 20 * 1024 * 1024
+            timeout: expect.any(Number),
+            maxBuffer: 20 * 1024 * 1024,
+            signal: expect.any(AbortSignal)
           });
+          expect(options.timeout).toBeGreaterThan(0);
+          expect(options.timeout).toBeLessThanOrEqual(30000);
+          expect(options.signal?.aborted).toBe(false);
           return { code: 0, stderr: "", stdout: "Error: login denied" };
         }
         throw new Error("Unexpected workflow command: " + args.join(" "));

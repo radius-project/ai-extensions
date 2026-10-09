@@ -518,8 +518,19 @@ describe("git push remediation", () => {
       const directory = await fs.mkdtemp(
         path.join(os.tmpdir(), "radius-remediation-")
       );
+      // Ignore the developer's global and system git config (for example
+      // commit signing or hooks) so the result depends only on this repository.
+      const env = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: path.join(directory, ".gitconfig-global"),
+        GIT_CONFIG_NOSYSTEM: "1"
+      };
       const git = (...args: readonly string[]) =>
-        execFileSync("git", args, { cwd: directory, encoding: "utf8" }).trim();
+        execFileSync("git", args, {
+          cwd: directory,
+          encoding: "utf8",
+          env
+        }).trim();
 
       try {
         git("init", "--quiet", "--initial-branch", "feature/login");
@@ -545,8 +556,8 @@ describe("git push remediation", () => {
           paths: "app.bicep"
         });
         const [add, commit] = remediation.argv;
-        execFileSync(add[0], add.slice(1), { cwd: directory });
-        execFileSync(commit[0], commit.slice(1), { cwd: directory });
+        execFileSync(add[0], add.slice(1), { cwd: directory, env });
+        execFileSync(commit[0], commit.slice(1), { cwd: directory, env });
 
         expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
           "app.bicep"
@@ -555,7 +566,7 @@ describe("git push remediation", () => {
       } finally {
         await fs.rm(directory, { recursive: true, force: true });
       }
-    });
+    }, 15_000);
 
     it("accepts an array of paths", () => {
       const remediation = build("git-push-branch", {

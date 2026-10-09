@@ -1,4 +1,5 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
+import { TOOLCHAIN_CHECKS } from "./vitest.toolchain.config.js";
 
 export default defineConfig({
   test: {
@@ -12,6 +13,7 @@ export default defineConfig({
       "test/integration/runtime/**/*.test.ts",
       "test/integration/http/**/*.test.ts"
     ],
+    exclude: [...configDefaults.exclude, ...TOOLCHAIN_CHECKS],
     environment: "node",
     testTimeout: 15_000
   }

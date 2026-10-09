@@ -20,6 +20,266 @@ const MS_ERROR =
   "identities registered in this tenant must contain the enterprise claim with " +
   "value 'microsoft', 'github' or 'microsoftopensource' but actual value is ''.";
 
+describe("post-deployment teardown evidence", () => {
+  function run(): WorkflowRunDetail {
+    const steps = [
+      { name: "Run rad commands", status: "completed", conclusion: "success" },
+      { name: "Teardown", status: "completed", conclusion: "failure" }
+    ];
+    return {
+      status: "completed",
+      conclusion: "failure",
+      steps,
+      jobs: [{ name: "deploy", steps: steps.map((step) => ({ ...step })) }]
+    };
+  }
+  async function diagnose(
+    observed: WorkflowRunDetail,
+    log: string | null = null
+  ) {
+    return collectWorkflowFailure(
+      { repo: "org/app", runId: 41 },
+      observed,
+      { resourcesTouched: true },
+      { readLog: async () => log, readControlPlaneLog: async () => null }
+    );
+  }
+
+  it.each([null, "deploy\tTeardown\t2026-01-01 Error: { teardown failed }"])(
+    "explains command success followed by failed teardown without claiming persistence failure (%s)",
+    async (log) => {
+      const result = await diagnose(run(), log);
+      expect(result.message).toMatch(
+        /^Deployment commands completed successfully, but post-deployment teardown, which saves Radius state, failed\. Resources may have changed\./
+      );
+      expect(result.message).toContain("Failed step: Teardown.");
+      expect(result.message).toContain(
+        "Radius state may not have been saved. The next deployment could restore older state that no longer matches the cloud resources. Review the Teardown logs and verify saved state before retrying."
+      );
+      expect(result.message).not.toContain("saving Radius state failed");
+      expect(result.radiusError).toBe(log ? "Error: { teardown failed }" : "");
+    }
+  );
+
+  it.each([
+    {
+      name: "no jobs",
+      change: (value: WorkflowRunDetail) => {
+        value.jobs = [];
+      }
+    },
+    {
+      name: "another failed post-deployment step",
+      change: (value: WorkflowRunDetail) => {
+        const step = {
+          name: "Publish deployed graph and status",
+          status: "completed",
+          conclusion: "failure"
+        };
+        value.steps.push(step);
+        value.jobs[0].steps?.push(step);
+      }
+    },
+    {
+      name: "job-only additional failure",
+      change: (value: WorkflowRunDetail) => {
+        value.jobs[0].steps?.push({
+          name: "Publish deployed graph and status",
+          status: "completed",
+          conclusion: "failure"
+        });
+      }
+    },
+    {
+      name: "incomplete flattened step",
+      change: (value: WorkflowRunDetail) => {
+        value.steps[0].status = "in_progress";
+      }
+    },
+    {
+      name: "unknown deployment conclusion",
+      change: (value: WorkflowRunDetail) => {
+        value.steps[0].conclusion = null;
+      }
+    },
+    {
+      name: "skipped deployment",
+      change: (value: WorkflowRunDetail) => {
+        value.steps[0].conclusion = "skipped";
+      }
+    },
+    {
+      name: "primary failure",
+      change: (value: WorkflowRunDetail) => {
+        value.steps[0].conclusion = "failure";
+        value.jobs[0].steps = value.steps;
+      }
+    },
+    {
+      name: "duplicate flattened step",
+      change: (value: WorkflowRunDetail) => {
+        value.steps.push(value.steps[0]);
+      }
+    },
+    {
+      name: "duplicate job steps",
+      change: (value: WorkflowRunDetail) => {
+        value.jobs[0].steps?.push(value.steps[0]);
+      }
+    },
+    {
+      name: "missing job steps",
+      change: (value: WorkflowRunDetail) => {
+        delete value.jobs[0].steps;
+      }
+    },
+    {
+      name: "missing job name",
+      change: (value: WorkflowRunDetail) => {
+        delete value.jobs[0].name;
+      }
+    },
+    {
+      name: "duplicate job name",
+      change: (value: WorkflowRunDetail) => {
+        value.jobs.push({ name: "deploy" });
+      }
+    },
+    {
+      name: "duplicate deployment jobs",
+      change: (value: WorkflowRunDetail) => {
+        value.jobs.push({ name: "other", steps: [value.steps[0]] });
+      }
+    },
+    {
+      name: "cross-job match",
+      change: (value: WorkflowRunDetail) => {
+        value.jobs = [
+          { name: "first", steps: [value.steps[0]] },
+          { name: "second", steps: [value.steps[1]] }
+        ];
+      }
+    },
+    {
+      name: "conflicting job conclusion",
+      change: (value: WorkflowRunDetail) => {
+        value.jobs[0].steps = [
+          { ...value.steps[0], conclusion: "failure" },
+          value.steps[1]
+        ];
+      }
+    },
+    {
+      name: "successful teardown",
+      change: (value: WorkflowRunDetail) => {
+        value.steps[1].conclusion = "success";
+      }
+    },
+    {
+      name: "cancellation",
+      change: (value: WorkflowRunDetail) => {
+        value.conclusion = "cancelled";
+      }
+    }
+  ])("does not claim command success with $name", async ({ change }) => {
+    const observed = run();
+    change(observed);
+    const result = await diagnose(observed);
+    expect(result.message).toMatch(/^Deployment failed/);
+  });
+
+  it("requires job evidence even when omitted by a legacy caller", async () => {
+    const { jobs: _jobs, ...observed } = run();
+    const result = await collectWorkflowFailure(
+      { repo: "org/app", runId: 41 },
+      observed,
+      { resourcesTouched: true },
+      { readLog: async () => null, readControlPlaneLog: async () => null }
+    );
+    expect(result.message).toMatch(/^Deployment failed/);
+  });
+
+  it("permits successful and skipped unrelated steps", async () => {
+    const observed = run();
+    const steps = [
+      {
+        name: "Publish deployed graph and status",
+        status: "completed",
+        conclusion: "success"
+      },
+      { name: "Unneeded step", status: "completed", conclusion: "skipped" }
+    ];
+    observed.steps.push(...steps);
+    observed.jobs[0].steps?.push(...steps);
+    expect((await diagnose(observed)).message).toMatch(
+      /^Deployment commands completed successfully/
+    );
+  });
+
+  it.each([
+    {
+      name: "attributed teardown followed by another job's error",
+      log: "deploy\tTeardown\t2026-01-01 Error: { teardown }\nother\tOther\t2026-01-01 Error: { unrelated }",
+      expected: "Error: { teardown }"
+    },
+    {
+      name: "unmatched teardown job",
+      log: "other\tTeardown\t2026-01-01 Error: { other job }",
+      expected: ""
+    },
+    {
+      name: "ambiguous teardown jobs",
+      log: "deploy\tTeardown\t2026-01-01 Error: { first }\nother\tTeardown\t2026-01-01 Error: { second }",
+      expected: ""
+    },
+    {
+      name: "no teardown log and an unrelated error",
+      log: "other\tOther\t2026-01-01 Error: { unrelated }",
+      expected: ""
+    },
+    {
+      name: "attributed teardown without an error followed by an unrelated error",
+      log: "deploy\tTeardown\t2026-01-01 Finishing teardown\nother\tOther\t2026-01-01 Error: { unrelated }",
+      expected: ""
+    },
+    {
+      name: "unstructured error without job attribution",
+      log: "Error: { unattributed }",
+      expected: ""
+    }
+  ])(
+    "keeps only supported excerpt attribution for $name",
+    async ({ log, expected }) => {
+      const result = await diagnose(run(), log);
+      expect(result.radiusError).toBe(expected);
+      expect(result.message).toMatch(
+        /^Deployment commands completed successfully/
+      );
+      expect(result.message).not.toContain("unrelated");
+      expect(result.narration.join("\n")).not.toContain("unrelated");
+      if (expected) {
+        expect(result.message).toContain(expected);
+        expect(result.narration.join("\n")).toContain(expected);
+      } else {
+        expect(result.message).not.toContain("Error: {");
+        expect(result.narration).toEqual([]);
+      }
+    }
+  );
+
+  it("preserves whole-log fallback when teardown failure cannot be established", async () => {
+    const observed = run();
+    observed.jobs = [];
+    const result = await diagnose(
+      observed,
+      "other\tOther\t2026-01-01 Error: { generic failure }"
+    );
+    expect(result.message).toMatch(/^Deployment failed/);
+    expect(result.radiusError).toBe("Error: { generic failure }");
+    expect(result.narration.join("\n")).toContain("Error: { generic failure }");
+  });
+});
+
 it("exports the deployment step name used by workflow evidence consumers", () => {
   expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
 });

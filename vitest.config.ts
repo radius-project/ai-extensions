@@ -5,6 +5,7 @@ export default defineConfig({
   test: {
     projects: [
       "packages/*/vitest.config.ts",
+      "packages/adapter-canvas/vitest.toolchain.config.ts",
       "packages/graph-react/vitest.component.config.ts"
     ],
     coverage: {
@@ -35,6 +36,12 @@ export default defineConfig({
           lines: 100
         },
         "packages/core/src/workflow-observation.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/core/src/workflow-protection.ts": {
           statements: 100,
           branches: 100,
           functions: 100,

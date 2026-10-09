@@ -9,11 +9,16 @@ import {
   validateStylesheetBoundary
 } from "../../../../scripts/library-artifacts.mjs";
 import {
+  assertInstalledFlowVersion,
   expectedScopedFlowStyles,
+  hasFlowHook,
   hoistKeyframes,
+  pinnedFlowVersion,
   renameKeyframes,
   scopeFlowStyles,
-  scopedFlowStylesPath
+  scopedFlowStylesPath,
+  staleFlowStylesMessage,
+  supportedFlowHooks
 } from "../../../../scripts/graph-vendor-styles.mjs";
 
 function manifest() {
@@ -46,7 +51,7 @@ function manifest() {
     },
     dependencies: {
       "@radius-project/core": "0.1.0",
-      "@xyflow/react": "12.11.6"
+      "@xyflow/react": pinnedFlowVersion()
     },
     peerDependencies: {
       react: "^18.3.1 || ^19.2.8",
@@ -59,7 +64,8 @@ function manifest() {
 describe("packed library contracts", () => {
   it("retains the exact pinned vendor rules and license inside the graph scope", () => {
     const css = readFileSync(scopedFlowStylesPath, "utf8");
-    expect(css).toBe(expectedScopedFlowStyles());
+    expect(css, staleFlowStylesMessage).toBe(expectedScopedFlowStyles());
+    expect(css).toContain(`@xyflow/react@${pinnedFlowVersion()}`);
     expect(css).toContain("MIT License");
     expect(css).toContain("Copyright (c) 2019-2025 webkid GmbH");
     expect(css).toContain("@scope (.radius-graph)");
@@ -124,10 +130,73 @@ describe("packed library contracts", () => {
     ).toThrow(message);
   });
 
+  it.each([["^12.11.6"], ["12.x"], ["latest"], [undefined]])(
+    "requires graph-react to pin @xyflow/react exactly, not %s",
+    (version) => {
+      expect(() =>
+        pinnedFlowVersion({ dependencies: { "@xyflow/react": version } })
+      ).toThrow(/must pin @xyflow\/react to an exact version/);
+    }
+  );
+
+  it("reads the exact @xyflow/react pin from a graph-react manifest", () => {
+    expect(
+      pinnedFlowVersion({ dependencies: { "@xyflow/react": "12.12.0" } })
+    ).toBe("12.12.0");
+  });
+
+  it("points to the runbook when the installed @xyflow/react differs from the pin", () => {
+    expect(() => assertInstalledFlowVersion("12.12.0", "12.11.6")).toThrow(
+      /Installed @xyflow\/react 12\.12\.0 does not match the 12\.11\.6 pin.*docs\/eng\/DEPENDENCY_UPDATES\.md/
+    );
+    expect(() =>
+      assertInstalledFlowVersion("12.11.6", "12.11.6")
+    ).not.toThrow();
+  });
+
+  it.each(supportedFlowHooks)(
+    "keeps the supported styling hook %s in the vendored stylesheet",
+    (hook) => {
+      expect(
+        hasFlowHook(readFileSync(scopedFlowStylesPath, "utf8"), hook),
+        `React Flow no longer ships ${hook}, which hosts may style. Removing it is a graph-react major release; see docs/eng/DEPENDENCY_UPDATES.md.`
+      ).toBe(true);
+    }
+  );
+
+  it("detects a renamed controls container even when the button class remains", () => {
+    const css = readFileSync(scopedFlowStylesPath, "utf8").replace(
+      /\.react-flow__controls(?![\w-])/g,
+      ".vendor-controls"
+    );
+    expect(hasFlowHook(css, ".react-flow__controls-button")).toBe(true);
+    expect(hasFlowHook(css, ".react-flow__controls")).toBe(false);
+  });
+
+  it.each([
+    [".react-flow__background-pattern", ".react-flow__background"],
+    ["--xy-background-pattern-color-default", "--xy-background-pattern-color"],
+    ["--xy-background-pattern-color-x", "--xy-background-pattern-color"]
+  ])("does not accept %s as the hook %s", (css, hook) => {
+    expect(hasFlowHook(`${css} {}`, hook)).toBe(false);
+  });
+
+  it.each([
+    [".react-flow__controls { }", ".react-flow__controls"],
+    [".react-flow__controls:hover { }", ".react-flow__controls"],
+    [".a .react-flow__edge-path, .b {}", ".react-flow__edge-path"],
+    [
+      "color: var(--xy-background-pattern-color);",
+      "--xy-background-pattern-color"
+    ]
+  ])("finds the hook in %s", (css, hook) => {
+    expect(hasFlowHook(css, hook)).toBe(true);
+  });
+
   it.each(['@import "external.css";', "@font-face { font-family: other; }"])(
     "rejects unreviewed global vendor inputs: %s",
     (css) => {
-      expect(() => scopeFlowStyles(css, "MIT")).toThrow();
+      expect(() => scopeFlowStyles(css, "MIT", "0.0.0")).toThrow();
     }
   );
 
@@ -308,6 +377,14 @@ describe("packed library contracts", () => {
     const value = manifest();
     delete value.exports["./package.json"];
     expect(() => validateLibraryManifest(value, value.name, "0.1.0")).toThrow();
+  });
+
+  it("points to the runbook when the packed @xyflow/react differs from the pin", () => {
+    const value = manifest();
+    value.dependencies["@xyflow/react"] = "0.0.0";
+    expect(() => validateLibraryManifest(value, value.name, "0.1.0")).toThrow(
+      /exact @xyflow\/react pinned in packages\/graph-react\/package\.json; see .*docs\/eng\/DEPENDENCY_UPDATES\.md/
+    );
   });
 
   it("rejects unrecognized library manifests", () => {

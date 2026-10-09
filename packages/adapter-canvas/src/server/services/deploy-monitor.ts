@@ -2,6 +2,10 @@ import type { DeployProgress } from "../../deploy-artifacts.js";
 import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../deploy-artifacts.js";
 import {
   confirmedWorkflowConclusion,
+  describeWorkflowProtection,
+  WORKFLOW_READ_LIMITS,
+  WorkflowReadInterruptedError,
+  type WorkflowReadContext,
   type WorkflowRunDetail
 } from "@radius-project/core";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
@@ -12,6 +16,8 @@ import type {
 } from "./deploy-outcome.js";
 import type { PlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import type { WorkflowReadRequest } from "@radius-project/adapter-shared";
+import type { WorkflowObservationScope } from "./workflow-observation-scope.js";
 
 // The background half of a deploy: recover the planned graph if the request
 // started without one, dispatch the workflow, find the run it created, and
@@ -26,16 +32,17 @@ import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 
 export interface DeployMonitorInstanceEntry {
   state: CanvasState;
+  observation?: WorkflowObservationScope;
 }
 
 export type DeployRunDetail = Pick<
   WorkflowRunDetail,
   "status" | "conclusion" | "steps"
 > &
-  Partial<Pick<WorkflowRunDetail, "jobs">>;
+  Partial<Pick<WorkflowRunDetail, "jobs" | "protection">>;
 
 export interface DeployMonitorStatusReader extends DeployOutcomeStatusReader {
-  progress(): Promise<DeployProgress | null>;
+  progress(context?: WorkflowReadContext): Promise<DeployProgress | null>;
 }
 
 export type DeployResourceStatus = NonNullable<
@@ -66,7 +73,8 @@ export interface DeployMonitorDependencies {
   ): Promise<number | string | null>;
   getRunDetail(
     repo: string,
-    runId: number | string
+    runId: number | string,
+    request?: WorkflowReadRequest
   ): Promise<DeployRunDetail | null>;
   createStatusReader(
     state: CanvasState,
@@ -107,6 +115,7 @@ export interface DeployMonitorRequest {
   requestedEnvironment: unknown;
   resources: CanvasGraphResource[];
   log(message: string): void;
+  isCurrent?(): boolean;
 }
 
 export interface DeployMonitorService {
@@ -182,6 +191,19 @@ export function createDeployMonitorService(
     async run(request) {
       const { entry, repo, branch, provider, log } = request;
       let resources = request.resources;
+      let observation: WorkflowReadRequest | undefined;
+      let progressContext: WorkflowReadContext | undefined;
+      const readNotices = new Set<string>();
+      const assertCurrent = () => {
+        if (entry.observation?.stopped || request.isCurrent?.() === false)
+          throw new WorkflowReadInterruptedError("cancelled");
+      };
+      const sleep = async (milliseconds: number) => {
+        if (entry.observation) await entry.observation.delay(milliseconds);
+        else await dependencies.sleep(milliseconds);
+        assertCurrent();
+      };
+      assertCurrent();
 
       if (!repo) {
         log("❌ No target repository specified.");
@@ -224,6 +246,7 @@ export function createDeployMonitorService(
           provider,
           log
         });
+        assertCurrent();
         if (planned) resources = planned;
       }
 
@@ -235,6 +258,7 @@ export function createDeployMonitorService(
         requestedEnvironment: request.requestedEnvironment,
         log
       });
+      assertCurrent();
       if (!dispatched.dispatched) return;
       const { workflowFile, dispatchedAt, baselineRunId } = dispatched;
 
@@ -252,7 +276,8 @@ export function createDeployMonitorService(
           null,
           baselineRunId
         );
-        if (!dRunId) await dependencies.sleep(POLL_INTERVAL_MS);
+        assertCurrent();
+        if (!dRunId) await sleep(POLL_INTERVAL_MS);
       }
       if (!dRunId) {
         log("⚠ No deploy run found for " + workflowFile + ".");
@@ -301,9 +326,11 @@ export function createDeployMonitorService(
         branch,
         dRunId
       );
+      assertCurrent();
       let lastStatusPollAt = 0;
       // Announce only new transitions, not the same status every tick.
       const statusAnnounced = new Set<string>();
+      let protectionNotice = "";
 
       // Fold the newest published status map into the graph. Merging is
       // conservative: a resource missing from the payload keeps its current
@@ -316,10 +343,12 @@ export function createDeployMonitorService(
         let statusMap;
         let messageMap;
         try {
-          const progress = await statusReader.progress();
+          const progress = await statusReader.progress(progressContext);
+          assertCurrent();
           statusMap = dependencies.buildDeployStatusMap(progress);
           messageMap = dependencies.buildDeployMessageMap(progress);
         } catch (e) {
+          assertCurrent();
           log(
             "    ⚠ Could not read deploy status: " +
               dependencies.errorMessage(e)
@@ -385,11 +414,54 @@ export function createDeployMonitorService(
       };
 
       for (let p = 0; p < RUN_POLL_ATTEMPTS; p++) {
-        const detail = await dependencies.getRunDetail(repo, dRunId);
+        assertCurrent();
+        observation = entry.observation?.observe();
+        if (observation)
+          observation.onDecision = (decision) => {
+            assertCurrent();
+            if (decision.state === "ready" || decision.reason === "ineligible")
+              return;
+            const notice = `Workflow evidence ${decision.state}: ${decision.reason}.`;
+            if (!readNotices.has(notice)) {
+              readNotices.add(notice);
+              log("    " + notice);
+            }
+          };
+        progressContext = observation?.context.limit(
+          WORKFLOW_READ_LIMITS.monitorMs
+        );
+        const detail = await dependencies.getRunDetail(
+          repo,
+          dRunId,
+          observation
+        );
+        assertCurrent();
         if (!detail) {
-          await dependencies.sleep(POLL_INTERVAL_MS);
+          if (protectionNotice) {
+            log(
+              "Observation: workflow detail is unavailable; current protection status is unknown."
+            );
+            protectionNotice = "";
+          }
+          await sleep(POLL_INTERVAL_MS);
           continue;
         }
+        const nextProtectionNotice =
+          detail.status === "waiting" && detail.protection ?
+            describeWorkflowProtection(detail.protection)
+          : "";
+        if (nextProtectionNotice && nextProtectionNotice !== protectionNotice)
+          log(nextProtectionNotice);
+        else if (!nextProtectionNotice && protectionNotice)
+          log(
+            detail.status === "completed" ?
+              "Observation: workflow completed; earlier protection observations are historical."
+            : detail.status === "queued" || detail.status === "in_progress" ?
+              "Observation: run left the protection wait; continuing to monitor."
+            : "Observation: current environment protection was not rechecked; approval status is unknown."
+          );
+        protectionNotice = nextProtectionNotice;
+
         if (detail.status === "completed") {
           completionObserved = true;
           if (
@@ -471,6 +543,7 @@ export function createDeployMonitorService(
           // sequence for this run, so artifact list order cannot roll status
           // backwards.
           await pollDeployStatus();
+          assertCurrent();
           // Run this only when the producer has published no progress. This
           // cannot use setStatus because advanced output nodes must be kept.
           if (
@@ -484,6 +557,14 @@ export function createDeployMonitorService(
         }
 
         if (confirmedWorkflowConclusion(detail)) {
+          if (observation)
+            observation = {
+              ...observation,
+              context: observation.context.limit(
+                WORKFLOW_READ_LIMITS.terminalMs
+              )
+            };
+          progressContext = observation?.context;
           await dependencies.outcome.settle({
             entry,
             repo,
@@ -498,11 +579,13 @@ export function createDeployMonitorService(
             deployStepStartedAt,
             log,
             setStatus,
-            pollDeployStatus
+            pollDeployStatus,
+            observation,
+            isCurrent: request.isCurrent
           });
           return;
         }
-        await dependencies.sleep(POLL_INTERVAL_MS);
+        await sleep(POLL_INTERVAL_MS);
       }
       stopUnconfirmed(completionObserved);
     }

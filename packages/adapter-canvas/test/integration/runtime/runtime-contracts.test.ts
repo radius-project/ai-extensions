@@ -21,6 +21,11 @@ import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
 import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monitor.js";
 import { deployFailureNoticePrompt } from "../../../src/runtime/hooks.js";
 import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../../src/deploy-artifacts.js";
+import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
+import {
+  createWorkflowArtifactReader,
+  type WorkflowRunner
+} from "@radius-project/adapter-shared";
 
 const ACTION_NAMES = ["get_graph_resources", "update_source_refs"];
 
@@ -501,6 +506,101 @@ describe("P0-A Radius runtime registration contract", () => {
 });
 
 describe("P0-A Radius SDK routing and lifecycle", () => {
+  it("disposes the SDK session after a physical stop rejects without skipping another instance", async () => {
+    vi.useFakeTimers();
+    const harness = await createRuntimeSdkHarness();
+    const close = vi.fn();
+    harness.session.close = close;
+    const scope = createWorkflowObservationScope(() => {
+      throw new Error("No artifact read expected");
+    });
+    try {
+      await harness.host.open("failed-stop", { page: "deployed" });
+      const entry = harness.servers.get("failed-stop");
+      if (!entry) throw new Error("Missing opened instance");
+      entry.observation = scope;
+      const sibling = createFakeServerEntry("sibling", "deployed");
+      harness.servers.set("sibling", sibling);
+      const stop = harness.deps.stopServer;
+      vi.mocked(stop).mockImplementationOnce(async (id, force) => {
+        scope.stop();
+        harness.servers.delete(id);
+        if (force) entry.server.closeAllConnections?.();
+        throw new Error("controlled physical stop failure");
+      });
+
+      const stopping = harness.extension.shutdown("test");
+      expect(harness.extension.shutdown("test")).toBe(stopping);
+      await stopping;
+
+      expect(scope.stopped).toBe(true);
+      expect(harness.deps.logError).toHaveBeenCalledExactlyOnceWith(
+        "Could not stop Radius canvas failed-stop: controlled physical stop failure"
+      );
+      expect(stop).toHaveBeenCalledWith("sibling", true);
+      expect(sibling.server.close).toHaveBeenCalledTimes(1);
+      expect(harness.servers.size).toBe(0);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      scope.stop();
+      await harness.extension.shutdown("test");
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["close", "shutdown"] as const)(
+    "routes %s through instance observation cancellation and fences late command results",
+    async (action) => {
+      const harness = await createRuntimeSdkHarness();
+      let finish:
+        ((value: Awaited<ReturnType<WorkflowRunner>>) => void) | undefined;
+      let commandSignal: AbortSignal | undefined;
+      let started: (() => void) | undefined;
+      const commandStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const scope = createWorkflowObservationScope((options) =>
+        createWorkflowArtifactReader(options, (_args, supplied) => {
+          commandSignal = supplied.signal;
+          started?.();
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        })
+      );
+      try {
+        await harness.host.open("observing-panel", { page: "deployed" });
+        const entry = harness.servers.get("observing-panel");
+        if (!entry) throw new Error("Runtime did not create its instance");
+        entry.observation = scope;
+        const reader = scope.reader({ repo: "fixture/app", runId: 41 });
+        const pending = reader
+          .read(scope.observe().context)
+          .catch((error: unknown) => error);
+        await commandStarted;
+        if (action === "close") await harness.host.close("observing-panel");
+        else await harness.extension.shutdown("test");
+        expect(await pending).toMatchObject({ reason: "cancelled" });
+        expect(scope.stopped).toBe(true);
+        expect(commandSignal?.aborted).toBe(true);
+        expect(harness.servers.has("observing-panel")).toBe(false);
+        expect(harness.deps.stopServer).toHaveBeenCalledTimes(1);
+        if (!finish) throw new Error("Host command was not started");
+        finish({
+          code: 0,
+          stdout: 'HTTP/2 200\n\n{"artifacts":[]}',
+          stderr: ""
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(reader.sequence).toBe(-1);
+      } finally {
+        scope.stop();
+        await harness.extension.shutdown("test");
+      }
+    }
+  );
+
   it("rehydrates and reuses an arbitrary existing instance until it closes", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceContext: {
