@@ -324,24 +324,58 @@ describe("cloud-e2e.yml", () => {
   });
 
   it.skipIf(process.platform !== "win32").each([
-    { state: "missing", runner: "github-hosted", fails: false, success: true },
+    {
+      state: "missing",
+      runner: "github-hosted",
+      githubActions: "true",
+      fails: false,
+      success: true
+    },
     {
       state: "other-app",
       runner: "github-hosted",
+      githubActions: "true",
       fails: false,
       success: true
     },
     {
       state: "existing",
       runner: "github-hosted",
+      githubActions: "true",
       fails: false,
       success: false
     },
-    { state: "missing", runner: "self-hosted", fails: false, success: false },
-    { state: "missing", runner: "github-hosted", fails: true, success: false }
+    {
+      state: "missing",
+      runner: "self-hosted",
+      githubActions: "true",
+      fails: false,
+      success: false
+    },
+    {
+      state: "missing",
+      runner: "github-hosted",
+      githubActions: "false",
+      fails: false,
+      success: false
+    },
+    {
+      state: "missing",
+      runner: "github-hosted",
+      githubActions: "",
+      fails: false,
+      success: false
+    },
+    {
+      state: "missing",
+      runner: "github-hosted",
+      githubActions: "true",
+      fails: true,
+      success: false
+    }
   ])(
-    "executes the policy setup without replacing existing state: $state, $runner, write failure=$fails",
-    async ({ state, runner, fails, success }) => {
+    "executes the policy setup without replacing existing state: $state, $runner, Actions=$githubActions, write failure=$fails",
+    async ({ state, runner, githubActions, fails, success }) => {
       const workflow = await parseWorkflow(RUN_WORKFLOW);
       const all = steps(workflow.jobs?.["cloud-e2e"]);
       const enable = all.find((step) => step.id === "copilot-cdp")?.run;
@@ -403,7 +437,7 @@ ${remove}
               SystemRoot: process.env.SystemRoot,
               TEMP: root,
               TMP: root,
-              GITHUB_ACTIONS: "true",
+              GITHUB_ACTIONS: githubActions,
               RUNNER_ENVIRONMENT: runner,
               GITHUB_OUTPUT: path.join(root, "output"),
               TEST_STATE: state,
@@ -416,8 +450,10 @@ ${remove}
         const policy =
           "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
         const write = `set:${policy}|github.exe|--remote-debugging-port=${COPILOT_APP_DEFAULT_CDP_PORT}|String`;
+        const unsupportedRunner =
+          runner !== "github-hosted" || githubActions !== "true";
         const calls =
-          runner === "self-hosted" || state === "existing" ?
+          unsupportedRunner || state === "existing" ?
             []
           : [
               ...(state === "missing" ? ["create-key"] : []),
@@ -432,7 +468,7 @@ ${remove}
         } else {
           expect(await readdir(root)).not.toContain("output");
           expect(result.stderr).toContain(
-            runner === "self-hosted" ? "only allowed on disposable"
+            unsupportedRunner ? "only allowed on disposable"
             : state === "existing" ? "Refusing to replace it"
             : "Policy write denied"
           );
