@@ -67,30 +67,40 @@ import {
   waitForSignedInShell
 } from "../e2e-cloud/support/copilot-app-ui.js";
 
-test("Copilot sign-in starts from the welcome screen @safety", async ({
-  page
-}) => {
-  await page.setContent(`
-    <button aria-label="Sign in to GitHub, Control + Enter">Sign in</button>
-    <button>Sign in to GitHub Enterprise Cloud (*.ghe.com)</button>
-    <div id="shell"></div>
-    <script>
-      document.querySelector('button').onclick = () => {
-        document.querySelector('button').remove();
-        document.querySelector('#shell').innerHTML =
-          '<nav aria-label="Quick links"><button>New</button></nav>' +
-          '<section aria-label="Projects"><button>New project or session</button></section>';
-      };
-    </script>
-  `);
-  await waitForSignedInShell(page);
-  await expect(
-    page.getByRole("button", { name: "New", exact: true })
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /^Sign in to GitHub,/ })
-  ).toHaveCount(0);
-});
+for (const { name, markup } of [
+  {
+    name: "welcome",
+    markup:
+      '<button aria-label="Sign in to GitHub, Control + Enter">Sign in</button>'
+  },
+  {
+    name: "device authorization",
+    markup:
+      "<h1>Authorize the app using this code.</h1><button>Copy code</button>"
+  },
+  {
+    name: "repository onboarding",
+    markup: "<h1>Connect your repositories</h1><button>Continue</button>"
+  }
+]) {
+  test(`Copilot sign-in refuses ${name} without user interaction @safety`, async ({
+    page
+  }) => {
+    await page.setContent(`
+      ${markup}
+      <output id="clicks">0</output>
+      <script>
+        document.querySelector('button').onclick = () => {
+          document.querySelector('#clicks').textContent = '1';
+        };
+      </script>
+    `);
+    await expect(waitForSignedInShell(page)).rejects.toThrow(
+      "Cloud E2E requires an upstream unattended authentication interface; human approval is not supported."
+    );
+    await expect(page.locator("#clicks")).toHaveText("0");
+  });
+}
 
 test("Copilot sign-in preserves an existing signed-in shell @safety", async ({
   page
@@ -103,45 +113,6 @@ test("Copilot sign-in preserves an existing signed-in shell @safety", async ({
   await expect(
     page.getByRole("button", { name: "New", exact: true })
   ).toBeVisible();
-});
-
-test("Copilot sign-in waits for device approval and completes onboarding @safety", async ({
-  page
-}) => {
-  await page.setContent(
-    '<button aria-label="ABCD-1234. Copy device code to clipboard">Code</button>'
-  );
-  let deviceCode = "";
-  const signedIn = waitForSignedInShell(page, (code) => {
-    deviceCode = code;
-  });
-  await expect.poll(() => deviceCode).toBe("ABCD-1234");
-  await page.setContent(`
-    <h1>Connect your repositories</h1>
-    <button>Continue</button>
-    <script>
-      document.querySelector('button').onclick = () => {
-        document.body.innerHTML =
-          '<nav aria-label="Quick links"><button>New</button></nav>' +
-          '<section aria-label="Projects"><button>New project or session</button></section>';
-      };
-    </script>
-  `);
-  await signedIn;
-  await expect(
-    page.getByRole("button", { name: "New", exact: true })
-  ).toBeVisible();
-});
-
-test("Copilot sign-in fails explicitly when device approval is not enabled @safety", async ({
-  page
-}) => {
-  await page.setContent(
-    '<button aria-label="ABCD-1234. Copy device code to clipboard">Code</button>'
-  );
-  await expect(waitForSignedInShell(page)).rejects.toThrow(
-    "Dispatch with manual-app-sign-in enabled and authorize the bot account."
-  );
 });
 
 test("Copilot project selection waits for an asynchronous result @safety", async ({

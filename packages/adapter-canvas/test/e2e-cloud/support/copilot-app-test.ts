@@ -135,15 +135,7 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
           { timeoutMs: APP_LAUNCH_TIMEOUT_MS, intervalMs: 250 }
         );
         try {
-          await waitForSignedInShell(
-            appPage,
-            process.env.RADIUS_CLOUD_E2E_MANUAL_APP_SIGN_IN === "true" ?
-              (code) =>
-                console.log(
-                  `::notice title=Copilot app device authorization::Sign in as ${requireEnv("GH_PACKAGES_USER")} at https://github.com/login/device and enter ${code}. Waiting up to ten minutes.`
-                )
-            : undefined
-          );
+          await waitForSignedInShell(appPage);
         } catch (error) {
           const outputDir = workerInfo.project.outputDir;
           await fs.mkdir(outputDir, { recursive: true });
