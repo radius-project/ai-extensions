@@ -229,7 +229,7 @@ describe("cloud-e2e.yml", () => {
     const dispatch = workflow.on?.workflow_dispatch as {
       inputs?: Record<
         string,
-        { type?: string; options?: string[]; default?: string }
+        { type?: string; options?: string[]; default?: string | boolean }
       >;
     };
     expect(dispatch.inputs?.["canvas-host"]).toMatchObject({
@@ -237,8 +237,16 @@ describe("cloud-e2e.yml", () => {
       options: [...CLOUD_CANVAS_HOSTS],
       default: "harness"
     });
+    expect(dispatch.inputs?.["manual-app-sign-in"]).toMatchObject({
+      type: "boolean",
+      default: false
+    });
 
     const job = workflow.jobs?.["cloud-e2e"];
+    expect(
+      steps(job).find((step) => step.run === "pnpm run test:cloud")?.env
+        ?.RADIUS_CLOUD_E2E_MANUAL_APP_SIGN_IN
+    ).toBe("${{ inputs.manual-app-sign-in == true && 'true' || 'false' }}");
     expect(job?.env?.RADIUS_CLOUD_E2E_CANVAS_HOST).toBe("${{ " + host + " }}");
     expect(job?.["runs-on"]).toBe(
       "${{ " + host + " == 'copilot-app' && 'windows-2025' || 'ubuntu-24.04' }}"

@@ -101,7 +101,10 @@ export function testInfoSink(testInfo: TestInfo): AppStateSink {
  * in, the shell never shows, and the error says so instead of a later locator
  * timeout.
  */
-export async function waitForSignedInShell(appPage: Page): Promise<void> {
+export async function waitForSignedInShell(
+  appPage: Page,
+  onDeviceCode?: (code: string) => void
+): Promise<void> {
   try {
     const ready = appPage
       .getByRole("navigation", { name: "Quick links" })
@@ -109,11 +112,39 @@ export async function waitForSignedInShell(appPage: Page): Promise<void> {
     const signIn = appPage.getByRole("button", {
       name: /^Sign in to GitHub(?:,|$)/
     });
-    await expect(ready.or(signIn).first()).toBeVisible({
+    const deviceCode = appPage.getByRole("button", {
+      name: /^[A-Z0-9]{4}-[A-Z0-9]{4}\. Copy device code to clipboard$/
+    });
+    const repositories = appPage.getByRole("heading", {
+      name: /^Connect your repositories/
+    });
+    await expect(
+      ready.or(signIn).or(deviceCode).or(repositories).first()
+    ).toBeVisible({
       timeout: SHELL_TIMEOUT_MS
     });
     if (!(await ready.isVisible()) && (await signIn.isVisible()))
       await signIn.click();
+    await expect(ready.or(deviceCode).or(repositories).first()).toBeVisible({
+      timeout: SHELL_TIMEOUT_MS
+    });
+    if (await deviceCode.isVisible()) {
+      if (!onDeviceCode)
+        throw new Error(
+          "The Copilot app requires device authorization. Dispatch with manual-app-sign-in enabled and authorize the bot account."
+        );
+      const snapshot = await deviceCode.ariaSnapshot();
+      const code = snapshot.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/)?.[0];
+      if (!code) throw new Error("The app did not expose its device code.");
+      onDeviceCode(code);
+      await expect(ready.or(repositories).first()).toBeVisible({
+        timeout: 10 * 60_000
+      });
+    }
+    if (await repositories.isVisible())
+      await appPage
+        .getByRole("button", { name: "Continue", exact: true })
+        .click();
     await expect(ready).toBeVisible({ timeout: SHELL_TIMEOUT_MS });
     await expect(
       projectsRegion(appPage).getByRole("button", {

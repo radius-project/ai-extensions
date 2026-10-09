@@ -48,6 +48,10 @@ on:
           - harness
           - copilot-app
         default: harness
+      manual-app-sign-in:
+        description: Wait for a person to authorize the bot account in the Copilot app
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -261,6 +265,7 @@ jobs:
         if: steps.fixture.outputs.configured == 'true'
         working-directory: packages/adapter-canvas
         env:
+          RADIUS_CLOUD_E2E_MANUAL_APP_SIGN_IN: ${{ inputs.manual-app-sign-in == true && 'true' || 'false' }}
           # azure/login does not export these to later steps, and the journey
           # reads them directly: the subscription containing the precreated
           # cluster, and the bootstrap client id that the journey asserts never

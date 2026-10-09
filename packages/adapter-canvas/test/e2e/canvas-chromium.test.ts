@@ -105,6 +105,45 @@ test("Copilot sign-in preserves an existing signed-in shell @safety", async ({
   ).toBeVisible();
 });
 
+test("Copilot sign-in waits for device approval and completes onboarding @safety", async ({
+  page
+}) => {
+  await page.setContent(
+    '<button aria-label="ABCD-1234. Copy device code to clipboard">Code</button>'
+  );
+  let deviceCode = "";
+  const signedIn = waitForSignedInShell(page, (code) => {
+    deviceCode = code;
+  });
+  await expect.poll(() => deviceCode).toBe("ABCD-1234");
+  await page.setContent(`
+    <h1>Connect your repositories</h1>
+    <button>Continue</button>
+    <script>
+      document.querySelector('button').onclick = () => {
+        document.body.innerHTML =
+          '<nav aria-label="Quick links"><button>New</button></nav>' +
+          '<section aria-label="Projects"><button>New project or session</button></section>';
+      };
+    </script>
+  `);
+  await signedIn;
+  await expect(
+    page.getByRole("button", { name: "New", exact: true })
+  ).toBeVisible();
+});
+
+test("Copilot sign-in fails explicitly when device approval is not enabled @safety", async ({
+  page
+}) => {
+  await page.setContent(
+    '<button aria-label="ABCD-1234. Copy device code to clipboard">Code</button>'
+  );
+  await expect(waitForSignedInShell(page)).rejects.toThrow(
+    "Dispatch with manual-app-sign-in enabled and authorize the bot account."
+  );
+});
+
 test("Copilot project selection waits for an asynchronous result @safety", async ({
   page
 }) => {
