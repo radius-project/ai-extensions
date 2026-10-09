@@ -2247,9 +2247,13 @@ async function ensureWorkflowsCurrent(
   provider: string,
   only: string[],
   workingBranch = ""
-): Promise<{ created: string[]; failed: WorkflowCommitFailure[] }> {
+): Promise<{
+  created: string[];
+  updated: string[];
+  failed: WorkflowCommitFailure[];
+}> {
   if (!repo || !environment || !only || only.length === 0)
-    return { created: [], failed: [] };
+    return { created: [], updated: [], failed: [] };
   try {
     const r = await syncRepoWorkflows(
       repo,
@@ -2280,11 +2284,12 @@ async function ensureWorkflowsCurrent(
       created: [
         ...new Set([...(r.created || []), ...(r.registrationPending || [])])
       ],
+      updated: r.updated || [],
       failed: r.failed || []
     };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
-    return { created: [], failed: [] };
+    return { created: [], updated: [], failed: [] };
   }
 }
 
@@ -3227,6 +3232,7 @@ const deployDispatchService = createDeployDispatchService({
   buildAppGraphRadCommand,
   ensureDeployWorkflowsOnBranch,
   ensureWorkflowsCurrent,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   latestWorkflowRunId,
   classifyDeployDispatchFailure,
   uncommittedGeneratedPaths: (entry) =>
@@ -5369,7 +5375,8 @@ async function ensureDeployWorkflowsOnBranch(
   repo: string,
   branch: string,
   envName: string,
-  log: (message: string) => void = () => {}
+  log: (message: string) => void,
+  onWorkflowWritten: (file: string) => void
 ): Promise<void> {
   if (!repo || !branch) return;
   // Only the dispatcher + the Azure provider workflow are published to target
@@ -5405,7 +5412,7 @@ async function ensureDeployWorkflowsOnBranch(
   for (const file of missing) {
     const content = generated && generated[file];
     if (!content) continue;
-    await commitFileToRepo(
+    const written = await commitFileToRepo(
       repo,
       ".github/workflows/" + file,
       content,
@@ -5416,6 +5423,7 @@ async function ensureDeployWorkflowsOnBranch(
         branch +
         " for worktree-consistent deploy"
     );
+    if (written) onWorkflowWritten(file);
   }
 }
 

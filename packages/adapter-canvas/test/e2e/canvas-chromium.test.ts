@@ -503,9 +503,9 @@ const GRAPH_STYLE_SAMPLE = `(() => {
 // text color switches instantly. Running axe mid-transition can sample any
 // background between the disabled gray and the final enabled color, so its
 // reported contrast ratio is not representative of the steady-state UI.
-// Waiting for the running CSS transitions before analyze() ensures axe
-// always reads the final, stable colors without hanging on unrelated
-// infinite keyframe animations such as loading spinners.
+// Callers must first wait for the page state they want to scan: pending
+// requests can start new transitions after this snapshot. Then wait for
+// running transitions without waiting for infinite loading animations.
 async function waitForTransitionsToSettle(page: Page): Promise<void> {
   await page.evaluate(() =>
     Promise.all(
@@ -1078,26 +1078,56 @@ test.describe("Radius Canvas in Chromium", () => {
         body: JSON.stringify({ refreshed: true })
       });
     });
+    let releaseDeployments = (): void => {
+      throw new Error("Deployment response gate is not initialized.");
+    };
+    const deploymentsGate = new Promise<void>((resolve) => {
+      releaseDeployments = resolve;
+    });
+    // Keep the cached graph usable while the deployment listing is pending.
+    // Releasing it must not race the enabled-state accessibility scan.
+    await page.route("**/api/list-deployments?**", async (route) => {
+      await deploymentsGate;
+      await route.continue();
+    });
 
-    await gotoCanvas(page, canvas, "planned");
+    try {
+      await gotoCanvas(page, canvas, "planned");
 
-    const web = page.locator(".rad-node").filter({ hasText: "web" });
-    const type = web.locator(".rad-node__type");
-    await expect(type).toHaveText("Azure Kubernetes Service");
-    await expect(type).toHaveAttribute(
-      "title",
-      "Microsoft.ContainerService/managedClusters@2024-01-01"
-    );
-    const details = web.getByRole("button", { name: "Show details" });
-    await details.focus();
-    await page.keyboard.press("Enter");
+      const web = page.locator(".rad-node").filter({ hasText: "web" });
+      const type = web.locator(".rad-node__type");
+      await expect(type).toHaveText("Azure Kubernetes Service");
+      await expect(type).toHaveAttribute(
+        "title",
+        "Microsoft.ContainerService/managedClusters@2024-01-01"
+      );
+      const details = web.getByRole("button", { name: "Show details" });
+      await details.focus();
+      await page.keyboard.press("Enter");
 
-    const panel = page.locator("[data-radius-details]");
-    await expect(panel).toContainText("Concrete type");
-    await expect(panel).toContainText(
-      "Microsoft.ContainerService/managedClusters@2024-01-01"
-    );
-    await expectNoWcagViolations(page);
+      const panel = page.locator("[data-radius-details]");
+      await expect(panel).toContainText("Concrete type");
+      await expect(panel).toContainText(
+        "Microsoft.ContainerService/managedClusters@2024-01-01"
+      );
+      const deploy = page.locator("#plan-btn");
+      await expect(deploy).toBeDisabled();
+      await expect(deploy).toHaveAttribute(
+        "title",
+        "Deployment states are still loading. Deployment is available once they arrive."
+      );
+      await expectNoWcagViolations(page);
+
+      releaseDeployments();
+      await expect(page.locator("#plan-status")).toHaveText(
+        "The planned deployment is current."
+      );
+      await expect(deploy).toBeEnabled();
+      await expectNoWcagViolations(page);
+    } finally {
+      releaseDeployments();
+      await page.unrouteAll({ behavior: "wait" });
+    }
   });
 
   test("shows friendly deployed service names with the concrete type in details", async ({
