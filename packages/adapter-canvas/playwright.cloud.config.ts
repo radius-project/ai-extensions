@@ -2,11 +2,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
 import {
+  CLOUD_CANVAS_HOST_ENV,
+  resolveCloudCanvasHost
+} from "./test/e2e-cloud/support/cloud-canvas-host.js";
+import {
   CLOUD_SUITE_TIMEOUT_MS,
+  COPILOT_APP_SUITE_TIMEOUT_MS,
   DELETE_TEST_TIMEOUT_MS
 } from "./test/e2e-cloud/support/cloud-timeout-budget.js";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
+const copilotAppHost =
+  resolveCloudCanvasHost(process.env[CLOUD_CANVAS_HOST_ENV]) === "copilot-app";
 
 // The cloud tier, kept as its own config rather than a project inside
 // `playwright.config.ts`, because the two runs disagree about everything that
@@ -23,18 +30,28 @@ const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 // spec named `*.test.ts` here would be collected by Vitest and fail on an
 // unknown `test.describe.configure`. The `.cloud.spec.ts` suffix is what keeps
 // the two runners' file sets disjoint.
+//
+// `RADIUS_CLOUD_E2E_CANVAS_HOST=copilot-app` opts in to the GitHub Copilot app
+// host. The product then runs inside the app, not in this process, so that
+// host skips the in-process server setup and gets the longer suite budget for
+// its app start and modeling stages. The default host keeps this config as is.
 export default defineConfig({
   testDir: "./test/e2e-cloud",
   testMatch: "**/*.cloud.spec.ts",
   // Shared with the Chromium tier on purpose: both need the credential-store
   // isolation installed before the first production import, and cloud mode
   // still relies on the same server warm-up and Windows shim.
-  globalSetup: "./test/e2e/global-setup.ts",
-  globalTeardown: "./test/e2e/global-teardown.ts",
+  ...(copilotAppHost ?
+    {}
+  : {
+      globalSetup: "./test/e2e/global-setup.ts",
+      globalTeardown: "./test/e2e/global-teardown.ts"
+    }),
   // No single stage may consume the freshly renewed installation token's full
   // lifetime. The serial suite receives the sum of every declared stage budget.
   timeout: DELETE_TEST_TIMEOUT_MS,
-  globalTimeout: CLOUD_SUITE_TIMEOUT_MS,
+  globalTimeout:
+    copilotAppHost ? COPILOT_APP_SUITE_TIMEOUT_MS : CLOUD_SUITE_TIMEOUT_MS,
   expect: { timeout: 60_000 },
   // Serializes tests inside one process. Cross-process/cloud-run serialization
   // is enforced by the repository-scoped lease acquired by the cloud fixture.
