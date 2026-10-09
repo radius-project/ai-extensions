@@ -122,9 +122,9 @@ function isTauriAppUrl(value: string): boolean {
  * browser-internal, and loopback canvas pages are skipped. A Tauri origin is
  * preferred; otherwise the first remaining page is used.
  */
-export function selectMainPage<T extends { url(): string }>(
+function findMainPage<T extends { url(): string }>(
   pages: readonly T[]
-): T {
+): T | undefined {
   const candidates = pages.filter((page) => {
     const url = page.url();
     return (
@@ -133,9 +133,16 @@ export function selectMainPage<T extends { url(): string }>(
       !isLoopbackHttpUrl(url)
     );
   });
-  const page =
+  return (
     candidates.find((candidate) => isTauriAppUrl(candidate.url())) ??
-    candidates[0];
+    candidates[0]
+  );
+}
+
+export function selectMainPage<T extends { url(): string }>(
+  pages: readonly T[]
+): T {
+  const page = findMainPage(pages);
   if (!page) {
     const seen = pages.map((p) => p.url() || "<empty>").join(", ");
     throw new Error(
@@ -143,6 +150,32 @@ export function selectMainPage<T extends { url(): string }>(
     );
   }
   return page;
+}
+
+/** CDP can answer before its initial blank target navigates to the app. */
+export async function waitForMainPage<T extends { url(): string }>(
+  ports: {
+    pages(): readonly T[];
+    now(): number;
+    wait(milliseconds: number): Promise<void>;
+  },
+  timing: { timeoutMs: number; intervalMs: number }
+): Promise<T> {
+  const deadline = ports.now() + timing.timeoutMs;
+  for (;;) {
+    const pages = ports.pages();
+    const page = findMainPage(pages);
+    if (page) return page;
+    const remaining = deadline - ports.now();
+    if (remaining <= 0) {
+      const seen = pages.map((target) => target.url() || "<empty>").join(", ");
+      throw new Error(
+        `No Copilot app page found over CDP within ${timing.timeoutMs} ms. ` +
+          `Targets seen: ${seen || "<none>"}`
+      );
+    }
+    await ports.wait(Math.min(timing.intervalMs, remaining));
+  }
 }
 
 /** Every Radius canvas page renders `<title>{page} — Radius</title>`. */

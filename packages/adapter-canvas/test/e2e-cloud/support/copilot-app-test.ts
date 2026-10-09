@@ -15,7 +15,7 @@ import { test as base, type Browser, type Page } from "@playwright/test";
 import { COPILOT_APP_SETUP_TIMEOUT_MS } from "./cloud-timeout-budget.js";
 import {
   COPILOT_APP_DEFAULT_CDP_PORT,
-  selectMainPage
+  waitForMainPage
 } from "./copilot-app-cdp.js";
 import {
   assertCopilotAppRunner,
@@ -90,6 +90,7 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
         // The bot PAT signs in to the app. The GitHub App installation token
         // expires after one hour and the app cannot receive a refreshed one.
         const packagesToken = requireEnv("GH_PACKAGES_TOKEN");
+        const hostPorts = createNodeCopilotAppHostPorts();
         launching = true;
         const app = await launchCopilotApp(
           {
@@ -104,7 +105,7 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
               packagesUser: requireEnv("GH_PACKAGES_USER")
             })
           },
-          createNodeCopilotAppHostPorts(),
+          hostPorts,
           { timeoutMs: APP_LAUNCH_TIMEOUT_MS, intervalMs: 1_000 }
         );
         stopApp = app.stop;
@@ -112,8 +113,22 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
         browser = await playwright.chromium.connectOverCDP(app.cdpUrl, {
           timeout: 30_000
         });
-        const appPage = selectMainPage(
-          browser.contexts().flatMap((context) => context.pages())
+        const connectedBrowser = browser;
+        const appPage = await waitForMainPage(
+          {
+            pages: () => {
+              if (!connectedBrowser.isConnected())
+                throw new Error(
+                  "The Copilot app disconnected before its page was ready."
+                );
+              return connectedBrowser
+                .contexts()
+                .flatMap((context) => context.pages());
+            },
+            now: hostPorts.now,
+            wait: hostPorts.wait
+          },
+          { timeoutMs: APP_LAUNCH_TIMEOUT_MS, intervalMs: 250 }
         );
         try {
           await waitForSignedInShell(appPage);
