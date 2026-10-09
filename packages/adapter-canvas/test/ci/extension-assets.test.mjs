@@ -91,6 +91,24 @@ describe(".github/extension release assets", () => {
     ).toEqual(["--set database.resources.requests.cpu=500m"]);
   });
 
+  it("installs the pinned Radius release instead of edge", () => {
+    const action = parseYaml(
+      readFileSync(
+        join(EXTENSION_ROOT, "actions", "setup-control-plane", "action.yml"),
+        "utf8"
+      )
+    );
+    const installStep = action.runs.steps.find(
+      (step) => step.name === "Install Radius CLI"
+    );
+
+    expect(installStep).toBeDefined();
+    expect(installStep.run).toContain(
+      'install-rad.sh --version "$RADIUS_INSTALL_REF"'
+    );
+    expect(installStep.run).not.toMatch(/install-rad\.sh\s+edge\b/u);
+  });
+
   // A `workflow_dispatch` boolean input arrives as the string "true"/"false"
   // (including its declared default), so handing it straight to a reusable
   // workflow's `type: boolean` input passes a string where a boolean is

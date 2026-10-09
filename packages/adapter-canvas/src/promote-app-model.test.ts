@@ -660,7 +660,9 @@ describe("publish", () => {
   });
 
   // Confinement is not lexical only: a symlink named like a staging directory
-  // must never be followed, written through, or published from.
+  // must never be followed, written through, or published from. The
+  // "junction" type is ignored on POSIX and lets Windows create the directory
+  // link without Developer Mode or administrator rights.
   it("refuses a staging path that is a symlink", () => {
     const target = repo();
     const outside = fs.realpathSync(
@@ -669,7 +671,7 @@ describe("publish", () => {
     temporaryDirectories.add(outside);
     stageCompleteRun(outside);
     const link = path.join(target.radiusDir, `${STAGING_DIR_PREFIX}link`);
-    fs.symlinkSync(outside, link);
+    fs.symlinkSync(outside, link, "junction");
 
     const result = run(target.root, ["--staging", link]);
 
@@ -688,7 +690,8 @@ describe("publish", () => {
     fs.writeFileSync(path.join(outside, "keep.txt"), "keep\n");
     fs.symlinkSync(
       outside,
-      path.join(target.radiusDir, `${STAGING_DIR_PREFIX}link`)
+      path.join(target.radiusDir, `${STAGING_DIR_PREFIX}link`),
+      "junction"
     );
 
     begin(target);

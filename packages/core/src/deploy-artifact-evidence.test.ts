@@ -1,5 +1,11 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { Worker } from "node:worker_threads";
+import { queryObjects } from "node:v8";
+import { setImmediate } from "node:timers/promises";
+import {
+  createWorkflowReadContext,
+  createWorkflowReadCooldowns
+} from "./workflow-read-policy.js";
 import {
   confirmArtifactIdentity,
   createDeployStatusReader,
@@ -19,6 +25,264 @@ import type {
   WorkflowArtifact
 } from "./deploy-artifact-evidence.js";
 
+afterEach(() => vi.useRealTimers());
+
+function observation(signal?: AbortSignal) {
+  return createWorkflowReadContext({
+    timeout: 120000,
+    cooldowns: createWorkflowReadCooldowns(() => performance.now()),
+    clock: {
+      monotonic: () => performance.now(),
+      wall: () => Date.now(),
+      jitter: () => 0,
+      sleep: (milliseconds, cancellation) =>
+        new Promise((resolve) => {
+          const timer = setTimeout(done, milliseconds);
+          let detach = () => {};
+          function done() {
+            clearTimeout(timer);
+            detach();
+            resolve();
+          }
+          detach = cancellation?.onStop?.(done) ?? (() => {});
+          if (cancellation?.stopped()) done();
+        })
+    },
+    stopped: () => signal?.aborted === true,
+    onStop: (listener) => {
+      signal?.addEventListener("abort", listener, { once: true });
+      return () => signal?.removeEventListener("abort", listener);
+    }
+  });
+}
+
+describe("observation retirement", () => {
+  it.each([null, 100])(
+    "releases retired payloads while retaining download receipts (run %s)",
+    async (runId) => {
+      class RetiredFiles {
+        [name: string]: string;
+        [DEPLOY_STATUS_FILES.progress] = progressPayload({
+          runId: 100,
+          sequence: 1
+        });
+      }
+      const context = observation();
+      const joiner = observation();
+      let id = 71;
+      let downloads = 0;
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        runId,
+        ttlMs: 0,
+        listArtifacts: async () => [
+          artifact("radius-deploy-status-dev-app", { id })
+        ],
+        downloadArtifact: async () => {
+          downloads++;
+          return id === 71 ?
+              new RetiredFiles()
+            : {
+                [DEPLOY_STATUS_FILES.progress]: progressPayload({ sequence: 2 })
+              };
+        }
+      });
+      await Promise.all([reader.read(context), reader.read(joiner)]);
+      await setImmediate();
+      expect(queryObjects(RetiredFiles)).toBe(1);
+      id = 72;
+      await Promise.all([reader.read(context), reader.read(joiner)]);
+      expect(reader.sequence).toBe(2);
+      await setImmediate();
+      expect(queryObjects(RetiredFiles)).toBe(0);
+      id = 71;
+      expect(await reader.read(joiner)).toMatchObject({ status: "error" });
+      expect(downloads).toBe(2);
+    }
+  );
+
+  it.each([
+    { settlement: "resolve", replaceBeforeSettlement: true },
+    { settlement: "reject", replaceBeforeSettlement: true },
+    { settlement: "resolve", replaceBeforeSettlement: false },
+    { settlement: "reject", replaceBeforeSettlement: false }
+  ])(
+    "releases an abandoned download's late $settlement payload (replacement first: $replaceBeforeSettlement)",
+    async ({ settlement, replaceBeforeSettlement }) => {
+      class LateFiles {
+        [name: string]: string;
+        [DEPLOY_STATUS_FILES.progress] = progressPayload({ runId: 100 });
+      }
+      const controller = new AbortController();
+      const joinerController = new AbortController();
+      const context = observation(controller.signal);
+      const joiner = observation(joinerController.signal);
+      const gate = deferred<void>();
+      const started = deferred<void>();
+      let id = 71;
+      let downloads = 0;
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        runId: 100,
+        ttlMs: 0,
+        listArtifacts: async () => [
+          artifact("radius-deploy-status-dev-app", { id })
+        ],
+        downloadArtifact: async () => {
+          downloads++;
+          if (id !== 71)
+            return {
+              [DEPLOY_STATUS_FILES.progress]: progressPayload({ sequence: 2 })
+            };
+          started.resolve();
+          await gate.promise;
+          if (settlement === "reject")
+            throw Object.assign(new Error("Download failed"), {
+              files: new LateFiles()
+            });
+          return new LateFiles();
+        }
+      });
+      const pending = reader.read(context);
+      await started.promise;
+      const admitted = reader.read(joiner);
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ reason: "cancelled" });
+      joinerController.abort();
+      await expect(admitted).rejects.toMatchObject({ reason: "cancelled" });
+      const resumed = joiner.withCancellation({ stopped: () => false });
+      id = 72;
+      if (replaceBeforeSettlement)
+        expect(await reader.read(resumed)).toMatchObject({
+          status: "ok",
+          progress: { sequence: 2 }
+        });
+      gate.resolve();
+      await setImmediate();
+      expect(queryObjects(LateFiles)).toBe(0);
+      expect(reader.sequence).toBe(replaceBeforeSettlement ? 2 : -1);
+      if (!replaceBeforeSettlement)
+        expect(await reader.read(resumed)).toMatchObject({
+          status: "ok",
+          progress: { sequence: 2 }
+        });
+      id = 71;
+      expect(await reader.read(resumed)).toMatchObject({ status: "error" });
+      expect(downloads).toBe(2);
+    }
+  );
+
+  it.each([null, 100])(
+    "releases unaccepted payloads when the candidate listing becomes empty (run %s)",
+    async (runId) => {
+      class ForeignFiles {
+        [name: string]: string;
+        [DEPLOY_STATUS_FILES.progress] = progressPayload({
+          environment: "other"
+        });
+      }
+      let listed = true;
+      const context = observation();
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        runId,
+        environment: "dev",
+        ttlMs: 0,
+        listArtifacts: async () =>
+          listed ? [artifact("radius-deploy-status-dev-app")] : [],
+        downloadArtifact: async () => new ForeignFiles()
+      });
+      await reader.read(context);
+      await setImmediate();
+      expect(queryObjects(ForeignFiles)).toBe(1);
+      listed = false;
+      expect(await reader.read(context)).toMatchObject({ status: "missing" });
+      await setImmediate();
+      expect(queryObjects(ForeignFiles)).toBe(0);
+    }
+  );
+
+  it("expires a timed failure even when a pre-deadline read refreshed the TTL", async () => {
+    vi.useFakeTimers();
+    const context = observation();
+    const notBefore = context.clock.monotonic() + 30000;
+    let calls = 0;
+    const reader = createDeployStatusReader({
+      repo: "org/app",
+      ttlMs: 10000,
+      listArtifacts: async () => {
+        if (++calls === 1)
+          throw Object.assign(new Error("Retry later"), {
+            decision: { state: "deferred", reason: "not-before", notBefore }
+          });
+        return [];
+      },
+      downloadArtifact: async () => {
+        throw new Error("Unexpected download");
+      }
+    });
+    expect(await reader.read(context)).toMatchObject({ status: "error" });
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(await reader.read(context)).toMatchObject({ status: "error" });
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await reader.read(context)).toMatchObject({ status: "missing" });
+    expect(calls).toBe(2);
+  });
+
+  it("reuses the currently retained immutable payload after another observation refreshes it", async () => {
+    let downloads = 0;
+    const reader = createDeployStatusReader({
+      repo: "org/app",
+      ttlMs: 0,
+      listArtifacts: async () => [artifact("radius-deploy-status-dev-app")],
+      downloadArtifact: async () => {
+        downloads++;
+        return { [DEPLOY_STATUS_FILES.progress]: progressPayload() };
+      }
+    });
+    const first = observation();
+    expect(await reader.read(first)).toMatchObject({ status: "ok" });
+    expect(await reader.read(observation())).toMatchObject({ status: "stale" });
+    expect(await reader.read(first)).toMatchObject({ status: "stale" });
+    expect(downloads).toBe(2);
+  });
+
+  it.each([
+    undefined,
+    { state: "deferred", reason: "missing-deadline" },
+    { state: "deferred", reason: "invalid-deadline" },
+    { state: "deferred", reason: "not-before" },
+    { state: "deferred", reason: "not-before", notBefore: Infinity },
+    { state: "deferred", reason: "not-before", notBefore: NaN },
+    { state: "exhausted", reason: "attempts" }
+  ])(
+    "retains failures without a usable recovery deadline: %j",
+    async (decision) => {
+      vi.useFakeTimers();
+      const context = observation();
+      const failure = Object.assign(new Error("Artifact listing deferred"), {
+        decision
+      });
+      const listArtifacts = vi.fn(async () => {
+        throw failure;
+      });
+      const reader = createDeployStatusReader({
+        repo: "org/app",
+        ttlMs: 0,
+        listArtifacts,
+        downloadArtifact: async () => {
+          throw new Error("Unexpected download");
+        }
+      });
+      expect(await reader.read(context)).toMatchObject({ error: failure });
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(await reader.read(context)).toMatchObject({ error: failure });
+      expect(listArtifacts).toHaveBeenCalledTimes(1);
+    }
+  );
+});
+
 function deferred<T>() {
   let complete: ((value: T) => void) | undefined;
   const promise = new Promise<T>((resolve) => {
@@ -37,11 +301,24 @@ async function parseGraphInWorker(text: string): Promise<unknown | null> {
   const moduleUrl = new URL("./deploy-artifact-evidence.ts", import.meta.url)
     .href;
   const worker = new Worker(
-    `const { parentPort, workerData } = require("node:worker_threads");
+    `const { registerHooks } = require("node:module");
+     registerHooks({
+       resolve(specifier, context, nextResolve) {
+         const sources = {
+           "./workflow-read-policy.js": "./workflow-read-policy.ts"
+         };
+         return nextResolve(sources[specifier] ?? specifier, context);
+       }
+     });
+     const { parentPort, workerData } = require("node:worker_threads");
      import(workerData.moduleUrl).then(({ parseDeployGraphArtifact }) => {
        parentPort.postMessage(parseDeployGraphArtifact(workerData.text));
      }, (error) => parentPort.postMessage({ error: String(error) }));`,
-    { eval: true, workerData: { moduleUrl, text } }
+    {
+      eval: true,
+      execArgv: [...process.execArgv, "--experimental-transform-types"],
+      workerData: { moduleUrl, text }
+    }
   );
   try {
     return await new Promise<unknown | null>((resolve, reject) => {

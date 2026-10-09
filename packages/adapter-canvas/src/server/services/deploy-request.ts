@@ -21,6 +21,7 @@ import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 
 export interface DeployRequestInstanceEntry {
   state: CanvasState;
+  observation?: import("./workflow-observation-scope.js").WorkflowObservationScope;
 }
 
 export interface DeploymentReservation {
@@ -365,7 +366,13 @@ export function createDeployRequestService(
           attemptId: loop.attemptId
         });
         lease.attemptId = entry.state.deployAttempt?.id;
+        const observedAttempt = entry.state.deployAttempt?.id;
+        const isCurrent = () =>
+          dependencies.readInstanceEntry(instanceId) === entry &&
+          entry.state.deployAttempt?.id === observedAttempt &&
+          entry.observation?.stopped !== true;
         const addLog = (msg: string): void => {
+          if (!isCurrent()) return;
           const dl = entry.state.deployLogs || [];
           entry.state.deployLogs = dl;
           dl.push(msg);
@@ -386,9 +393,11 @@ export function createDeployRequestService(
             provider,
             requestedEnvironment: data.environment,
             resources,
-            log: addLog
+            log: addLog,
+            isCurrent
           })
           .catch((monErr: unknown) => {
+            if (!isCurrent()) return;
             // Never let the background monitor die silently (which would leave
             // the page stuck polling an 'in_progress' that never resolves).
             // Surface the error and settle the status.
@@ -412,11 +421,13 @@ export function createDeployRequestService(
             // firing here makes the repair loop independent of the webview.
             // The /api/deploy-status route keeps its own call as a fallback,
             // and triggerDeployRepairHandoff is idempotent per repair loop.
-            dependencies.triggerDeployRepairHandoff(entry, instanceId);
+            if (isCurrent())
+              dependencies.triggerDeployRepairHandoff(entry, instanceId);
             // Same reasoning for the informational notice: a run-unconfirmed
             // failure is relayed once from here regardless of whether the panel
             // is still polling. Idempotent per attempt, like the handoff.
-            dependencies.triggerDeployFailureNotice(entry, instanceId);
+            if (isCurrent())
+              dependencies.triggerDeployFailureNotice(entry, instanceId);
             // Hold the repo/environment reservation for the whole deploy, not
             // merely until the background monitor starts.
             releaseReservation();

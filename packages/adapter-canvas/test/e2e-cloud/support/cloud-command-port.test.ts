@@ -1232,7 +1232,10 @@ describe("createNodeCloudFixturePorts", () => {
       expect(typeof outcome.stdout).toBe("string");
       expect(typeof outcome.stderr).toBe("string");
     }
-  }, 30_000);
+    // Real `az`/`gh`/`kubectl` launches: Windows runners took 15-29s (median
+    // ~20s) across 40 reliability runs and 9 of them exceeded the former 30s
+    // cap, so allow ~4x the slowest observed pass.
+  }, 120_000);
 
   it("terminates kubectl when its per-probe deadline expires", async () => {
     const directory = await fs.mkdtemp(

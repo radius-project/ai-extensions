@@ -1,4 +1,9 @@
 import type { DeployStatus } from "./graph/index.js";
+import {
+  WorkflowReadInterruptedError,
+  WORKFLOW_READ_LIMITS,
+  type WorkflowReadContext
+} from "./workflow-read-policy.js";
 
 // Files the producer packs into the deploy-status artifact.
 export const DEPLOY_STATUS_FILES = {
@@ -85,12 +90,14 @@ export type ArtifactFiles = Record<string, string>;
 export type ListArtifacts = (
   repo: string,
   runId?: number | string | null,
-  namePrefix?: string
+  namePrefix?: string,
+  context?: WorkflowReadContext
 ) => Promise<WorkflowArtifact[]>;
 
 export type DownloadArtifact = (
   repo: string,
-  artifact: WorkflowArtifact
+  artifact: WorkflowArtifact,
+  context?: WorkflowReadContext
 ) => Promise<ArtifactFiles | null>;
 
 export type ReaderStatus =
@@ -117,6 +124,9 @@ export interface DeployStatusReaderOptions {
   downloadArtifact: DownloadArtifact;
   ttlMs?: number;
   now?: () => number;
+  createReadContext?(): WorkflowReadContext;
+  onStop?(listener: () => void): () => void;
+  stopped?(): boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -486,13 +496,36 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     now = () => Date.now()
   } = options;
 
-  let cache: { at: number; result: ReadResult } | null = null;
-  let inflight: Promise<ReadResult> | null = null;
+  let cache: { at: number; result: ReadResult; usage: object } | null = null;
+  interface DownloadRecord {
+    work: Promise<void>;
+    result?: { files: ArtifactFiles | null } | { error: unknown };
+  }
+  interface ReadLedger {
+    downloads: Map<number, DownloadRecord>;
+    failure?: ReadResult;
+    accepted?: { result: ReadResult; retirement: number };
+    receipts: WeakMap<object, { count: number; admitted: boolean }>;
+  }
+  interface Flight {
+    promise: Promise<ReadResult>;
+    ledger: ReadLedger;
+    usage: { extraGets: number };
+    subscribers: number;
+    stopped(): boolean;
+    stop(): void;
+  }
+  let inflight: Flight | null = null;
+  const ledgers = new WeakMap<object, ReadLedger>();
   let hasAccepted = false;
   let acceptedRunId: number | null = null;
   let acceptedSequence = -1;
   let lastGood: ReadResult | null = null;
+  let lastGoodUsage: object | undefined;
+  let retirement = 0;
   const inspectedArtifacts = new Map<number, ReadResult>();
+  // Keep payload slots bounded by the listing, independently of attempt receipts.
+  const retainedDownloads = new Map<number, DownloadRecord>();
   // A run-scoped read follows one in-flight deployment through its rotating
   // live slots; a repo-wide read looks for the newest terminal artifact and is
   // not tied to any run.
@@ -507,18 +540,53 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     error
   });
 
-  async function fetchOnce(): Promise<ReadResult> {
+  function ensureCurrent(context?: WorkflowReadContext): void {
+    const decision = context?.check();
+    if (decision && decision.state !== "ready")
+      throw new WorkflowReadInterruptedError(
+        decision.state === "stopped" ? "cancelled" : "elapsed"
+      );
+  }
+
+  function canResume(
+    result: ReadResult,
+    context?: WorkflowReadContext
+  ): boolean {
+    const decision = isRecord(result.error) ? result.error.decision : null;
+    return (
+      !!context &&
+      isRecord(decision) &&
+      decision.state === "deferred" &&
+      decision.reason === "not-before" &&
+      typeof decision.notBefore === "number" &&
+      Number.isFinite(decision.notBefore) &&
+      context.clock.monotonic() >= decision.notBefore
+    );
+  }
+
+  async function fetchOnce(
+    context: WorkflowReadContext | undefined,
+    ledger: ReadLedger
+  ): Promise<ReadResult> {
+    ensureCurrent(context);
+    if (ledger.failure && canResume(ledger.failure, context))
+      delete ledger.failure;
+    if (ledger.failure) return ledger.failure;
     if (!repo) return empty("missing");
     let artifacts: WorkflowArtifact[];
     try {
       // Pass the environment-scoped prefix so a paginated repo-wide listing can
       // stop as soon as it reaches the artifact we are looking for.
-      artifacts = await listArtifacts(
+      const args: Parameters<ListArtifacts> = [
         repo,
         runId,
         deployStatusArtifactPrefix(environment)
-      );
+      ];
+      if (context) args.push(context);
+      artifacts = await listArtifacts(...args);
+      ensureCurrent(context);
     } catch (e) {
+      ensureCurrent(context);
       return empty(
         errorCode(e) === "GH_ARTIFACT_AUTH" ? "auth"
         : errorCode(e) === "GH_ARTIFACT_MALFORMED" ? "malformed"
@@ -527,7 +595,6 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       );
     }
     let candidates = selectDeployStatusArtifacts(artifacts, environment);
-    if (candidates.length === 0) return empty("missing");
 
     const expectedRunId = Number(runId);
     // A repo-wide read is not scoped to any run, and `sequence` restarts at 1
@@ -536,18 +603,22 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     // newer completed run's fixed-name terminal artifact.
     if (!isRunScoped) {
       candidates = candidates.filter((a) => !isLiveSlotArtifactName(a.name));
-      if (candidates.length === 0) return empty("missing");
     }
     // Ring slots overwrite by uploading with new artifact IDs, so an ID that
     // dropped out of the listing never comes back. Prune the cache to the
     // current listing so a long-running deploy cannot accumulate payloads that
     // will never be referenced again.
-    if (inspectedArtifacts.size > 0) {
-      const listedIds = new Set(candidates.map((c) => c.id));
-      for (const cachedId of [...inspectedArtifacts.keys()]) {
-        if (!listedIds.has(cachedId)) inspectedArtifacts.delete(cachedId);
+    const listedIds = new Set(candidates.map((c) => c.id));
+    for (const cachedId of inspectedArtifacts.keys()) {
+      if (!listedIds.has(cachedId)) inspectedArtifacts.delete(cachedId);
+    }
+    for (const [id, record] of retainedDownloads) {
+      if (!listedIds.has(id)) {
+        delete record.result;
+        retainedDownloads.delete(id);
       }
     }
+    if (candidates.length === 0) return empty("missing");
 
     let sawMalformed = false;
     // A candidate that could not be read proves nothing about whether this
@@ -561,6 +632,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     let exactMatch: ReadResult | null = null;
     let envOnlyMatch: ReadResult | null = null;
     for (const artifact of candidates) {
+      ensureCurrent(context);
       const artifactRunId = artifact.workflow_run?.id;
       if (
         isRunScoped &&
@@ -573,8 +645,44 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       if (!result) {
         let files: ArtifactFiles | null;
         try {
-          files = await downloadArtifact(repo, artifact);
+          let record = ledger.downloads.get(artifact.id);
+          if (!record) {
+            const pending =
+              context ?
+                downloadArtifact(repo, artifact, context)
+              : downloadArtifact(repo, artifact);
+            const previous = retainedDownloads.get(artifact.id);
+            if (previous) delete previous.result;
+            const download: DownloadRecord = {
+              // Ledger receipts retain completion, never the promise's payload.
+              work: pending.then(
+                (files) => {
+                  if (
+                    retainedDownloads.get(artifact.id) === download &&
+                    (!context || context.check().state === "ready")
+                  )
+                    download.result = { files };
+                },
+                (error: unknown) => {
+                  if (
+                    retainedDownloads.get(artifact.id) === download &&
+                    (!context || context.check().state === "ready")
+                  )
+                    download.result = { error };
+                }
+              )
+            };
+            retainedDownloads.set(artifact.id, download);
+            ledger.downloads.set(artifact.id, download);
+            record = download;
+          }
+          await record.work;
+          ensureCurrent(context);
+          const retained = retainedDownloads.get(artifact.id)?.result;
+          if (retained && "error" in retained) throw retained.error;
+          files = retained?.files ?? null;
         } catch (e) {
+          ensureCurrent(context);
           if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
           // A single unreadable artifact should not hide an older readable one.
           if (errorCode(e) === "GH_ARTIFACT_MALFORMED") sawMalformed = true;
@@ -665,73 +773,200 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   }
 
   // read - fetch (cached, single-flight) and enforce monotonic sequencing.
-  async function read(): Promise<ReadResult> {
-    if (cache && now() - cache.at < ttlMs) return cache.result;
-    if (inflight) return inflight;
-    inflight = (async () => {
-      let result = await fetchOnce();
-      if (result.status === "ok" && result.progress) {
-        const incomingRun =
-          result.progress.runId ?? result.artifact?.workflow_run?.id ?? null;
-        // The sequence guard only applies when both snapshots positively
-        // identify the SAME run. An unknown run id identifies nothing, and
-        // since `sequence` restarts at 1 for every run, treating "unknown" as
-        // a match would make a new deploy's first snapshot look like a stale
-        // replay of the previous one — pinning the graph to an old deployment.
-        // Accepting an out-of-order snapshot is the cheaper mistake: it
-        // self-corrects on the next poll.
-        const sameRun =
-          hasAccepted && incomingRun !== null && incomingRun === acceptedRunId;
+  function accept(ledger: ReadLedger, result: ReadResult): ReadResult {
+    if (result.status === "ok" || result.status === "stale")
+      ledger.accepted = { result, retirement };
+    else if (result.status === "missing" && !isRunScoped)
+      delete ledger.accepted;
+    return result;
+  }
+
+  async function read(
+    suppliedContext?: WorkflowReadContext
+  ): Promise<ReadResult> {
+    const context = suppliedContext ?? options.createReadContext?.();
+    ensureCurrent(context);
+    const ledger: ReadLedger = (context &&
+      ledgers.get(context.observation)) || {
+      downloads: new Map(),
+      receipts: new WeakMap()
+    };
+    if (context) ledgers.set(context.observation, ledger);
+    if (cache && now() - cache.at < ttlMs && !canResume(cache.result, context))
+      return ledger.receipts.get(cache.usage)?.admitted === false ?
+          empty("error", new WorkflowReadInterruptedError("attempts"))
+        : accept(ledger, cache.result);
+    if (inflight?.stopped()) inflight = null;
+    if (!inflight) {
+      let stopped = options.stopped?.() === true;
+      const listeners = new Set<() => void>();
+      const stop = () => {
+        stopped = true;
+        for (const listener of listeners) listener();
+        listeners.clear();
+      };
+      const detach = options.onStop?.(stop);
+      const usage = { extraGets: 0 };
+      const flightContext = context
+        ?.forSharedFlight(
+          isRunScoped ?
+            WORKFLOW_READ_LIMITS.artifactRunMs
+          : WORKFLOW_READ_LIMITS.artifactRepositoryMs,
+          {
+            stopped: () => stopped,
+            onStop: (listener) => {
+              listeners.add(listener);
+              return () => {
+                listeners.delete(listener);
+              };
+            }
+          }
+        )
+        .withRetryMeter(usage);
+      const work = async () => {
+        let result = await fetchOnce(flightContext, ledger);
+        ensureCurrent(flightContext);
         if (
-          sameRun &&
-          lastGood &&
-          result.progress.sequence <= acceptedSequence
-        ) {
-          // Preserve graph sequencing, but distinguish an identical successful
-          // reread from a regression for consumers that require current proof.
-          const progressRevalidated =
-            result.progress.sequence === acceptedSequence &&
-            JSON.stringify(result.progress) ===
-              JSON.stringify(lastGood.progress);
-          result = { ...lastGood, status: "stale", progressRevalidated };
-        } else {
-          hasAccepted = true;
-          acceptedRunId = incomingRun;
-          acceptedSequence = result.progress.sequence;
-          lastGood = result;
+          result.status === "error" ||
+          result.status === "auth" ||
+          result.status === "malformed"
+        )
+          ledger.failure = result;
+        if (result.status === "ok" && result.progress) {
+          const incomingRun =
+            result.progress.runId ?? result.artifact?.workflow_run?.id ?? null;
+          // The sequence guard only applies when both snapshots positively
+          // identify the SAME run. An unknown run id identifies nothing, and
+          // since `sequence` restarts at 1 for every run, treating "unknown" as
+          // a match would make a new deploy's first snapshot look like a stale
+          // replay of the previous one — pinning the graph to an old deployment.
+          // Accepting an out-of-order snapshot is the cheaper mistake: it
+          // self-corrects on the next poll.
+          const sameRun =
+            hasAccepted &&
+            incomingRun !== null &&
+            incomingRun === acceptedRunId;
+          if (
+            sameRun &&
+            lastGood &&
+            result.progress.sequence <= acceptedSequence
+          ) {
+            // Preserve graph sequencing, but distinguish an identical successful
+            // reread from a regression for consumers that require current proof.
+            const progressRevalidated =
+              result.progress.sequence === acceptedSequence &&
+              JSON.stringify(result.progress) ===
+                JSON.stringify(lastGood.progress);
+            result = { ...lastGood, status: "stale", progressRevalidated };
+          } else {
+            hasAccepted = true;
+            acceptedRunId = incomingRun;
+            acceptedSequence = result.progress.sequence;
+            lastGood = result;
+            lastGoodUsage = usage;
+          }
+        } else if (result.status === "missing" && !isRunScoped) {
+          // GitHub answered and this deployment has no artifact. Retire what was
+          // read before instead of serving it from `lastGood`: deleting an
+          // application deletes its deploy-status artifact, and a reader that
+          // keeps falling back would render the deleted deployment for the rest
+          // of the session. Only a repo-wide read is trusted this far — a
+          // run-scoped read can momentarily list nothing while the producer
+          // rotates a live slot, and blanking on that would flicker the graph
+          // mid-deploy.
+          hasAccepted = false;
+          acceptedRunId = null;
+          acceptedSequence = -1;
+          lastGood = null;
+          lastGoodUsage = undefined;
+          retirement++;
         }
-      } else if (result.status === "missing" && !isRunScoped) {
-        // GitHub answered and this deployment has no artifact. Retire what was
-        // read before instead of serving it from `lastGood`: deleting an
-        // application deletes its deploy-status artifact, and a reader that
-        // keeps falling back would render the deleted deployment for the rest
-        // of the session. Only a repo-wide read is trusted this far — a
-        // run-scoped read can momentarily list nothing while the producer
-        // rotates a live slot, and blanking on that would flicker the graph
-        // mid-deploy.
-        hasAccepted = false;
-        acceptedRunId = null;
-        acceptedSequence = -1;
-        lastGood = null;
+        cache = { at: now(), result, usage };
+        return result;
+      };
+      const pending = work();
+      const promise = (
+        flightContext ?
+          flightContext.wait(pending)
+        : pending).finally(() => {
+        detach?.();
+        if (inflight?.promise === promise) inflight = null;
+      });
+      inflight = {
+        promise,
+        ledger,
+        usage,
+        subscribers: 0,
+        stopped: () => stopped,
+        stop
+      };
+    }
+    const flight = inflight;
+    flight.subscribers++;
+    const receive = (): boolean => {
+      if (!context || ledger === flight.ledger) return true;
+      const prior = ledger.receipts.get(flight.usage);
+      const admitted = context.chargeRetries(
+        flight.usage.extraGets - (prior?.count ?? 0)
+      );
+      const receipt = {
+        count: flight.usage.extraGets,
+        admitted: admitted && (prior?.admitted ?? true)
+      };
+      ledger.receipts.set(flight.usage, receipt);
+      for (const [id, work] of flight.ledger.downloads) {
+        if (!ledger.downloads.has(id)) ledger.downloads.set(id, work);
       }
-      cache = { at: now(), result };
-      return result;
-    })().finally(() => {
-      inflight = null;
-    });
-    return inflight;
+      return receipt.admitted;
+    };
+    try {
+      if (!receive())
+        return empty("error", new WorkflowReadInterruptedError("attempts"));
+      const result = await (context ?
+        context.wait(flight.promise)
+      : flight.promise);
+      if (!receive())
+        return empty("error", new WorkflowReadInterruptedError("attempts"));
+      if (
+        result.status === "error" ||
+        result.status === "auth" ||
+        result.status === "malformed"
+      )
+        ledger.failure = result;
+      return accept(ledger, result);
+    } finally {
+      receive();
+      flight.subscribers--;
+      if (!flight.subscribers) flight.stop();
+    }
+  }
+
+  function acceptedFallback(context?: WorkflowReadContext): ReadResult | null {
+    if (
+      context &&
+      lastGoodUsage &&
+      ledgers.get(context.observation)?.receipts.get(lastGoodUsage)
+        ?.admitted === false
+    ) {
+      const accepted = ledgers.get(context.observation)?.accepted;
+      return accepted?.retirement === retirement ? accepted.result : null;
+    }
+    return lastGood;
   }
 
   return {
     read,
-    status: async (): Promise<ReaderStatus> => (await read()).status,
+    status: async (context?: WorkflowReadContext): Promise<ReaderStatus> =>
+      (await read(context)).status,
     get sequence(): number {
       return acceptedSequence;
     },
     /** progress - the latest accepted per-resource payload, or null. */
-    async progress(): Promise<DeployProgress | null> {
-      const result = await read();
-      return result.progress || lastGood?.progress || null;
+    async progress(
+      context?: WorkflowReadContext
+    ): Promise<DeployProgress | null> {
+      const result = await read(context);
+      return result.progress || acceptedFallback(context)?.progress || null;
     },
     /**
      * controlPlaneLog - the deploy-controlplane.log text from the latest
@@ -739,9 +974,11 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
      * payload; it carries the precise recipe/terraform failure cause that the
      * run log only summarizes, so the failure block surfaces its tail.
      */
-    async controlPlaneLog(): Promise<string | null> {
-      const result = await read();
-      const files = result.files ?? lastGood?.files ?? null;
+    async controlPlaneLog(
+      context?: WorkflowReadContext
+    ): Promise<string | null> {
+      const result = await read(context);
+      const files = result.files ?? acceptedFallback(context)?.files ?? null;
       const text = files?.[DEPLOY_STATUS_FILES.controlPlane];
       return typeof text === "string" && text.trim() ? text : null;
     },
@@ -750,17 +987,20 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
      * resolved to. `graph` is null until the producer's final upload, which is
      * the only one that carries deploy-graph.json.
      */
-    async graph(): Promise<{
+    async graph(context?: WorkflowReadContext): Promise<{
       graph: unknown | null;
       status: ReaderStatus;
       artifact: WorkflowArtifact | null;
+      error?: unknown;
     }> {
-      const result = await read();
-      const graph = result.graph ?? lastGood?.graph ?? null;
+      const result = await read(context);
+      const fallback = acceptedFallback(context);
+      const graph = result.graph ?? fallback?.graph ?? null;
       return {
         graph,
         status: result.status,
-        artifact: result.artifact || lastGood?.artifact || null
+        artifact: result.artifact || fallback?.artifact || null,
+        ...(result.error ? { error: result.error } : {})
       };
     }
   };

@@ -50,14 +50,16 @@ import {
   radiusApplicationSelector,
   RADIUS_WORKLOAD_RESOURCES,
   RADIUS_RENDERED_RESOURCES,
-  findNewWorkflowRunId,
-  readWorkflowRunIds,
   readKubernetesWorkloads,
   readKubernetesResourceNames,
   isKubernetesWorkloadReady,
   type KubernetesWorkload
 } from "./deploy-journey.js";
 import { DELETE_OPERATION_TIMEOUT_MS } from "./cloud-timeout-budget.js";
+import {
+  findNewWorkflowRunId,
+  readWorkflowRunIds
+} from "./workflow-run-discovery.js";
 
 /** The Entra application the product creates, as the fixture observed it. */
 export interface AppRegistrationRecord {
@@ -72,6 +74,64 @@ function isAzureResourceNotFound(result: CloudCommandResult): boolean {
   return /Request_ResourceNotFound|Directory_ObjectNotFound|Resource '.*' does not exist|does not exist or one of its queried reference-property objects are not present/i.test(
     result.stderr || result.stdout
   );
+}
+
+/**
+ * Extracts a Microsoft Graph error's `error.code`, `az rest`'s only stable,
+ * machine-readable signal for *why* a call failed. Graph wraps failures as
+ * `ERROR: {"error":{"code":"...","message":"..."}}`; everything after the
+ * last `}` (if anything) is discarded so trailing CLI diagnostics can't break
+ * the parse. Returns `undefined` when no such envelope is present, which
+ * callers must treat as "unclassifiable" rather than "not found".
+ */
+function parseGraphErrorCode(result: CloudCommandResult): string | undefined {
+  for (const text of [result.stderr, result.stdout]) {
+    if (!text) continue;
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end === -1 || end < start) continue;
+    try {
+      const parsed: unknown = JSON.parse(text.slice(start, end + 1));
+      const code =
+        (
+          parsed &&
+          typeof parsed === "object" &&
+          "error" in parsed &&
+          parsed.error &&
+          typeof parsed.error === "object" &&
+          "code" in parsed.error
+        ) ?
+          (parsed.error as { code: unknown }).code
+        : undefined;
+      if (typeof code === "string") return code;
+    } catch {
+      // Not a JSON envelope; try the other stream before giving up.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether a failed `az rest` call against an exact Graph object URL proves
+ * that object is gone.
+ *
+ * Message text such as "does not exist" is not proof: Microsoft documents
+ * `error.code` as the stable contract and explicitly warns that message text
+ * can change, and — worse — that same phrase appears in errors about a
+ * *referenced* object, which is exactly the false "it's gone" this exact-object
+ * GET exists to rule out. So this accepts only a recognized not-found
+ * `error.code`, never prose. `az rest` doesn't surface the HTTP status
+ * separately from the Graph body, so the parsed envelope is the only
+ * structured signal available; a response with no parseable code is kept as
+ * an explicit cleanup error rather than assumed to be a deletion proof.
+ */
+function isExactGraphObjectNotFound(result: CloudCommandResult): boolean {
+  if (result.code === 0) return false;
+  const code = parseGraphErrorCode(result);
+  if (code !== undefined) return code === "Request_ResourceNotFound";
+  // No JSON envelope: accept only a bare, exact error code, never a code or
+  // phrase embedded in surrounding prose.
+  return (result.stderr || result.stdout).trim() === "Request_ResourceNotFound";
 }
 
 export interface RoleAssignmentRecord {
@@ -1497,56 +1557,69 @@ export async function createCloudFixture(
           continue;
         }
         await attempt(`app registration ${app.appId}`, async () => {
-          const objectIdDeletion = await commands.runAz([
-            "ad",
-            "app",
-            "delete",
-            "--id",
-            app.objectId,
-            "--output",
-            "none"
-          ]);
-          const objectIdNotFound = isAzureResourceNotFound(objectIdDeletion);
-          if (!objectIdNotFound)
-            expectSuccess(objectIdDeletion, `az ad app delete ${app.objectId}`);
-          if (objectIdNotFound) {
-            const appIdDeletion = await commands.runAz([
-              "ad",
-              "app",
-              "delete",
-              "--id",
-              app.appId,
-              "--output",
-              "none"
-            ]);
-            if (!isAzureResourceNotFound(appIdDeletion))
-              expectSuccess(appIdDeletion, `az ad app delete ${app.appId}`);
-          }
-          // Neither a zero exit nor a not-found is proof the object is gone.
-          // A run reported this step reclaimed while the app registration was
-          // still live and absent from Entra's deleted items, which wedged the
-          // next run's clean-slate check. Entra also deletes asynchronously,
-          // so confirm absence the same way the workload step does rather than
-          // trusting the command that claimed to have done it.
-          let survivors: readonly string[] = [app.appId];
+          const applicationUrl =
+            `https://graph.microsoft.com/v1.0/applications/` +
+            encodeURIComponent(app.objectId);
+          // Once Graph accepts a DELETE, only poll. Under
+          // Application.ReadWrite.OwnedBy, a repeat DELETE that reaches the
+          // soft-deleted object answers 403 Authorization_RequestDenied,
+          // because ownership can no longer be proven (#974).
+          let deletionAccepted = false;
           await pollForValue({
             ports,
             timeoutMs: entraAppDeletionTimeoutMs,
             intervalMs: assertionPollIntervalMs,
-            probe: async () => {
-              const remaining = await listAppRegistrations(
-                commands,
-                expectedAppName
+            probe: async (remainingMs) => {
+              const deadline = ports.now().getTime() + remainingMs;
+              if (!deletionAccepted) {
+                const deletion = await commands.runAz(
+                  [
+                    "rest",
+                    "--method",
+                    "DELETE",
+                    "--url",
+                    applicationUrl,
+                    "--output",
+                    "none"
+                  ],
+                  remainingCommandTimeout(
+                    deadline,
+                    ports.now,
+                    `DELETE application ${app.objectId}`
+                  )
+                );
+                if (!isAzureResourceNotFound(deletion)) {
+                  expectSuccess(
+                    deletion,
+                    `az rest DELETE application ${app.objectId}`
+                  );
+                  deletionAccepted = true;
+                }
+              }
+
+              const lookup = await commands.runAz(
+                [
+                  "rest",
+                  "--method",
+                  "GET",
+                  "--url",
+                  applicationUrl,
+                  "--output",
+                  "none"
+                ],
+                remainingCommandTimeout(
+                  deadline,
+                  ports.now,
+                  `GET application ${app.objectId}`
+                )
               );
-              survivors = remaining
-                .filter((candidate) => candidate.objectId === app.objectId)
-                .map((candidate) => candidate.appId);
-              return survivors.length === 0 ? true : undefined;
+              if (isExactGraphObjectNotFound(lookup)) return true;
+              expectSuccess(lookup, `az rest GET application ${app.objectId}`);
+              return undefined;
             },
             timeoutMessage: () =>
-              `az ad app delete ${app.objectId} ` +
-              `${objectIdNotFound ? `reported the object id was already absent and the client-id retry did not remove it` : "succeeded"}, ` +
-              `but app registration ${survivors.join(", ")} was still listed after ${entraAppDeletionTimeoutMs}ms.`
+              `App registration ${app.appId} (object ${app.objectId}) remained directly queryable through ` +
+              `Microsoft Graph after ${entraAppDeletionTimeoutMs}ms of exact-object deletion attempts.`
           });
         });
       }
