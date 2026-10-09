@@ -97,17 +97,33 @@ export function testInfoSink(testInfo: TestInfo): AppStateSink {
 }
 
 /**
- * Waits for the signed-in app shell. When the env token did not sign the app
- * in, the shell never shows, and the error says so instead of a later locator
- * timeout.
+ * Waits for the signed-in app shell without starting interactive sign-in.
  */
 export async function waitForSignedInShell(appPage: Page): Promise<void> {
   try {
+    const ready = appPage
+      .getByRole("navigation", { name: "Quick links" })
+      .getByRole("button", { name: "New", exact: true });
+    const signIn = appPage.getByRole("button", {
+      name: /^Sign in to GitHub(?:,|$)/
+    });
+    const deviceAuthorization = appPage.getByRole("heading", {
+      name: "Authorize the app using this code."
+    });
+    const repositories = appPage.getByRole("heading", {
+      name: /^Connect your repositories/
+    });
     await expect(
-      appPage
-        .getByRole("navigation", { name: "Quick links" })
-        .getByRole("button", { name: "New", exact: true })
-    ).toBeVisible({ timeout: SHELL_TIMEOUT_MS });
+      ready.or(signIn).or(deviceAuthorization).or(repositories).first()
+    ).toBeVisible({
+      timeout: SHELL_TIMEOUT_MS
+    });
+    if (!(await ready.isVisible()))
+      throw new Error(
+        "The Copilot app requires interactive sign-in or onboarding. " +
+          "Cloud E2E requires an upstream unattended authentication interface; human approval is not supported."
+      );
+    await expect(ready).toBeVisible({ timeout: SHELL_TIMEOUT_MS });
     await expect(
       projectsRegion(appPage).getByRole("button", {
         name: "New project or session"

@@ -63,8 +63,57 @@ import {
 import {
   ensureFixtureProject,
   sendSessionPrompt,
-  waitForIdleSession
+  waitForIdleSession,
+  waitForSignedInShell
 } from "../e2e-cloud/support/copilot-app-ui.js";
+
+for (const { name, markup } of [
+  {
+    name: "welcome",
+    markup:
+      '<button aria-label="Sign in to GitHub, Control + Enter">Sign in</button>'
+  },
+  {
+    name: "device authorization",
+    markup:
+      "<h1>Authorize the app using this code.</h1><button>Copy code</button>"
+  },
+  {
+    name: "repository onboarding",
+    markup: "<h1>Connect your repositories</h1><button>Continue</button>"
+  }
+]) {
+  test(`Copilot sign-in refuses ${name} without user interaction @safety`, async ({
+    page
+  }) => {
+    await page.setContent(`
+      ${markup}
+      <output id="clicks">0</output>
+      <script>
+        document.querySelector('button').onclick = () => {
+          document.querySelector('#clicks').textContent = '1';
+        };
+      </script>
+    `);
+    await expect(waitForSignedInShell(page)).rejects.toThrow(
+      "Cloud E2E requires an upstream unattended authentication interface; human approval is not supported."
+    );
+    await expect(page.locator("#clicks")).toHaveText("0");
+  });
+}
+
+test("Copilot sign-in preserves an existing signed-in shell @safety", async ({
+  page
+}) => {
+  await page.setContent(`
+    <nav aria-label="Quick links"><button>New</button></nav>
+    <section aria-label="Projects"><button>New project or session</button></section>
+  `);
+  await waitForSignedInShell(page);
+  await expect(
+    page.getByRole("button", { name: "New", exact: true })
+  ).toBeVisible();
+});
 
 test("Copilot project selection waits for an asynchronous result @safety", async ({
   page
