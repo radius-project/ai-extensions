@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test as base, type Browser, type Page } from "@playwright/test";
 
+import { runCommand } from "../../../src/gh.js";
 import { COPILOT_APP_SETUP_TIMEOUT_MS } from "./cloud-timeout-budget.js";
 import {
   COPILOT_APP_DEFAULT_CDP_PORT,
@@ -24,6 +25,7 @@ import {
   cleanupCopilotApp,
   createNodeCopilotAppHostPorts,
   launchCopilotApp,
+  prepareCopilotAppGhAuth,
   resolveCopilotAppExecutable
 } from "./copilot-app-host.js";
 import { attachAppState, waitForSignedInShell } from "./copilot-app-ui.js";
@@ -91,19 +93,21 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
         // expires after one hour and the app cannot receive a refreshed one.
         const packagesToken = requireEnv("GH_PACKAGES_TOKEN");
         const hostPorts = createNodeCopilotAppHostPorts();
+        const appEnv = buildCopilotAppEnvironment(process.env, {
+          cdpPort: COPILOT_APP_DEFAULT_CDP_PORT,
+          profileDir,
+          azureConfigDir,
+          signInToken: packagesToken,
+          packagesToken,
+          packagesUser: requireEnv("GH_PACKAGES_USER")
+        });
+        await prepareCopilotAppGhAuth(appEnv, runCommand);
         launching = true;
         const app = await launchCopilotApp(
           {
             executable,
             cdpPort: COPILOT_APP_DEFAULT_CDP_PORT,
-            env: buildCopilotAppEnvironment(process.env, {
-              cdpPort: COPILOT_APP_DEFAULT_CDP_PORT,
-              profileDir,
-              azureConfigDir,
-              signInToken: packagesToken,
-              packagesToken,
-              packagesUser: requireEnv("GH_PACKAGES_USER")
-            })
+            env: appEnv
           },
           hostPorts,
           { timeoutMs: APP_LAUNCH_TIMEOUT_MS, intervalMs: 1_000 }

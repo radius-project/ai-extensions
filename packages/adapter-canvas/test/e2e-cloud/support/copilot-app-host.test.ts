@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
 
+import type { CommandOptions } from "../../../src/gh.js";
 import type { CdpProbeResult } from "./copilot-app-cdp.js";
 import {
   buildCopilotAppEnvironment,
@@ -10,6 +11,7 @@ import {
   createNodeCopilotAppHostPorts,
   cleanupCopilotApp,
   launchCopilotApp,
+  prepareCopilotAppGhAuth,
   resolveCopilotAppExecutable,
   tasklistHasImage,
   type CopilotAppHostPorts,
@@ -147,6 +149,130 @@ describe("buildCopilotAppEnvironment", () => {
     expect(env.LocalAppData).toBeUndefined();
     expect(env.CLOUD_E2E_BOT_PRIVATE_KEY).toBeUndefined();
     expect(env.USERPROFILE).toBe(OPTIONS.profileDir);
+  });
+});
+
+describe("prepareCopilotAppGhAuth", () => {
+  const token = "fixture-sign-in-value";
+  const env = buildCopilotAppEnvironment(
+    { GH_DEBUG: "api", GH_HOST: "other.example", PATH: "C:\\bin" },
+    { ...OPTIONS, signInToken: token }
+  );
+
+  it("stores the token through stdin and verifies the stored account", async () => {
+    const calls: {
+      command: string;
+      args: string[];
+      options: CommandOptions;
+    }[] = [];
+    await prepareCopilotAppGhAuth(
+      {
+        ...env,
+        Gh_Token: "inherited-token",
+        GITHUB_ENTERPRISE_TOKEN: "enterprise-token",
+        GH_ENTERPRISE_TOKEN: "enterprise-token"
+      },
+      async (command, args, options = {}) => {
+        calls.push({ command, args, options });
+        return args[0] === "api" ? "RADIUS-BOT\n" : "";
+      }
+    );
+    expect(calls.map(({ command, args }) => [command, ...args])).toEqual([
+      [
+        "gh",
+        "auth",
+        "login",
+        "--hostname",
+        "github.com",
+        "--git-protocol",
+        "https",
+        "--with-token"
+      ],
+      ["gh", "auth", "status", "--active", "--hostname", "github.com"],
+      ["gh", "api", "user", "--hostname", "github.com", "--jq", ".login"]
+    ]);
+    expect(calls.map(({ options }) => options.stdin)).toEqual([
+      `${token}\n`,
+      "",
+      ""
+    ]);
+    for (const call of calls) {
+      expect(call.options).toMatchObject({
+        timeout: 60_000,
+        preserveGitHubToken: true,
+        env: {
+          GH_CONFIG_DIR: env.GH_CONFIG_DIR,
+          GH_PROMPT_DISABLED: "1",
+          PATH: "C:\\bin"
+        }
+      });
+      for (const name of [
+        "GH_TOKEN",
+        "Gh_Token",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "COPILOT_GITHUB_TOKEN",
+        "GH_PACKAGES_TOKEN",
+        "GH_HOST",
+        "GH_DEBUG"
+      ])
+        expect(call.options.env?.[name]).toBeUndefined();
+      expect(call.args.join(" ")).not.toContain(token);
+    }
+    expect(env.GH_TOKEN).toBe(token);
+    expect(env.GH_DEBUG).toBe("api");
+  });
+
+  it.each(["GH_TOKEN", "GH_PACKAGES_USER", "GH_CONFIG_DIR"])(
+    "rejects a missing %s before calling gh",
+    async (name) => {
+      let calls = 0;
+      await expect(
+        prepareCopilotAppGhAuth({ ...env, [name]: " " }, async () => {
+          calls++;
+          throw new Error("must not run");
+        })
+      ).rejects.toThrow(/requires a token, an expected account/);
+      expect(calls).toBe(0);
+    }
+  );
+
+  it.each(["different-bot", "", " \n"])(
+    "rejects an unexpected stored identity: %j",
+    async (login) => {
+      await expect(
+        prepareCopilotAppGhAuth(env, async (_command, args) =>
+          args[0] === "api" ? login : ""
+        )
+      ).rejects.toThrow(/Stored GitHub CLI account is .*; expected radius-bot/);
+    }
+  );
+
+  it.each([1, 2, 3])(
+    "stops and redacts a failure at command %i",
+    async (step) => {
+      let calls = 0;
+      await expect(
+        prepareCopilotAppGhAuth(env, async () => {
+          calls++;
+          if (calls === step) throw new Error(`denied ${token}`);
+          return "";
+        })
+      ).rejects.toMatchObject({
+        message: "Copilot app GitHub CLI sign-in failed: denied [REDACTED]",
+        cause: { message: "denied [REDACTED]" }
+      });
+      expect(calls).toBe(step);
+    }
+  );
+
+  it("redacts non-Error failures", async () => {
+    await expect(
+      prepareCopilotAppGhAuth(env, () => Promise.reject(`denied ${token}`))
+    ).rejects.toThrow(
+      "Copilot app GitHub CLI sign-in failed: denied [REDACTED]"
+    );
   });
 });
 
