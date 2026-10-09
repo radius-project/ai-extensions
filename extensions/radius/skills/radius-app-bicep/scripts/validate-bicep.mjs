@@ -1108,6 +1108,132 @@ function checkAggregateSecretAliases(
   return failed;
 }
 
+// A provisioned data store or broker is created with the username its
+// resource sets, and every consumer must log in as that value. A consumer that
+// writes its own copy compiles and deploys, but nothing keeps the copy equal to
+// the resource. This check reports a consumer env value that is not the
+// resource's own binding but resolves to the same literal.
+//
+// It is deliberately narrow: only consumer variables whose name contains
+// `user` or `login`, only string literals and whole `[variables('name')]`
+// references to string literals, and only within one template. Parameters,
+// reference(...), format(...), and values passed into a module resolve to
+// nothing and are never reported.
+const VARIABLE_REFERENCE = /^\[variables\('([^']+)'\)\]$/u;
+const USERNAME_ENV_NAME = /user|login/u;
+
+function isArmExpression(value) {
+  return (
+    value.startsWith("[") && value.endsWith("]") && !value.startsWith("[[")
+  );
+}
+
+function templateLiteral(value) {
+  if (isArmExpression(value)) {
+    return null;
+  }
+  return value.startsWith("[[") ? value.slice(1) : value;
+}
+
+function resolveUsernameLiteral(value, template) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  if (!isArmExpression(value)) {
+    return templateLiteral(value);
+  }
+  const variable = VARIABLE_REFERENCE.exec(value);
+  if (variable === null || !isPlainObject(template.variables)) {
+    return null;
+  }
+  const resolved = template.variables[variable[1]];
+  return typeof resolved === "string" ? templateLiteral(resolved) : null;
+}
+
+function usernameSources(template, parentPath) {
+  const sources = [];
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.") ||
+      resource.type.startsWith("Radius.Compute/containers@")
+    ) {
+      continue;
+    }
+    const raw = resource?.properties?.properties?.username;
+    if (typeof raw !== "string") {
+      continue;
+    }
+    sources.push({
+      path: `${parentPath ? `${parentPath}.` : ""}${symbol}.properties.username`,
+      raw,
+      literal: resolveUsernameLiteral(raw, template)
+    });
+  }
+  return sources;
+}
+
+function checkUsernameCopies(template, app, parentPath = "") {
+  const sources = usernameSources(template, parentPath);
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (
+        isPlainObject(nestedTemplate) &&
+        checkUsernameCopies(nestedTemplate, app, resourcePath)
+      ) {
+        failed = true;
+      }
+      continue;
+    }
+    if (
+      sources.length === 0 ||
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.Compute/containers@")
+    ) {
+      continue;
+    }
+    const containers = resource?.properties?.properties?.containers;
+    if (!isPlainObject(containers)) {
+      continue;
+    }
+    for (const [containerKey, container] of Object.entries(containers)) {
+      if (!isPlainObject(container) || !isPlainObject(container.env)) {
+        continue;
+      }
+      for (const [name, value] of plainEnvironmentValues(container.env)) {
+        if (!USERNAME_ENV_NAME.test(name.toLowerCase())) {
+          continue;
+        }
+        // The same expression as the resource's username is the one source
+        // the guidance asks for, even when another resource has an equal value.
+        if (
+          typeof value === "string" &&
+          isArmExpression(value) &&
+          sources.some((source) => source.raw === value)
+        ) {
+          continue;
+        }
+        const literal = resolveUsernameLiteral(value, template);
+        if (literal === null) {
+          continue;
+        }
+        const matches = sources.filter((source) => source.literal === literal);
+        if (matches.length === 0) {
+          continue;
+        }
+        report(
+          `${app}: error username-copy: ${resourcePath}.properties.containers.${containerKey}.env.${name}: this value repeats the username set at ${matches.map((source) => source.path).join(", ")}, so nothing keeps the two equal. Bind it to <resource>.properties.username where the schema exposes it, or to the one var the resource's username uses. See Provisioned service usernames in references/secrets-handling.md.`
+        );
+        failed = true;
+      }
+    }
+  }
+  return failed;
+}
+
 // Two Radius types can name a property `password` and mean opposite things.
 // `Radius.Data/mySqlDatabases.password` is marked sensitive and takes the
 // credential itself; `Radius.Messaging/rabbitMQ.password` is a plain string that
@@ -1508,6 +1634,7 @@ async function check(app, staged) {
     template,
     app
   );
+  const usernameCopy = checkUsernameCopies(template, app);
   const misplacedSecureParameter = checkSecureParameterTargets(
     template,
     app,
@@ -1521,6 +1648,7 @@ async function check(app, staged) {
         invalidConnectionSource ||
         unresolvedRuntimeVariable ||
         incompatibleAggregateSecretAlias ||
+        usernameCopy ||
         misplacedSecureParameter
     ) ?
       EXIT_MODEL_INVALID

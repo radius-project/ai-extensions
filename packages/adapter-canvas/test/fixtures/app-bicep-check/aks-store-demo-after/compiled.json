@@ -1,0 +1,729 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "13154945494444529405"
+    }
+  },
+  "parameters": {
+    "environment": {
+      "type": "string"
+    },
+    "rabbitmqPassword": {
+      "type": "securestring"
+    },
+    "registryPassword": {
+      "type": "securestring"
+    },
+    "registryUsername": {
+      "type": "securestring"
+    }
+  },
+  "imports": {
+    "radius": {
+      "provider": "Radius",
+      "version": "0.61"
+    }
+  },
+  "resources": {
+    "aksStoreDemoApp": {
+      "import": "radius",
+      "type": "Radius.Core/applications@2025-08-01-preview",
+      "properties": {
+        "name": "aks-store-demo",
+        "properties": {
+          "environment": "[parameters('environment')]"
+        }
+      }
+    },
+    "mongoDb": {
+      "import": "radius",
+      "type": "Radius.Data/mongoDatabases@2025-08-01-preview",
+      "properties": {
+        "name": "mongo",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/makeline-service/mongodb.go#L149",
+          "database": "orderdb"
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp"
+      ]
+    },
+    "rabbitmq": {
+      "import": "radius",
+      "type": "Radius.Messaging/rabbitMQ@2025-08-01-preview",
+      "properties": {
+        "name": "rabbitmq",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/order-service/plugins/messagequeue.js#L26",
+          "password": "[reference('rabbitmqSecret').id]",
+          "queue": "orders",
+          "username": "myadmin"
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "rabbitmqSecret"
+      ]
+    },
+    "rabbitmqSecret": {
+      "import": "radius",
+      "type": "Radius.Security/secrets@2025-08-01-preview",
+      "properties": {
+        "name": "rabbitmq-secret",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/order-service/plugins/messagequeue.js#L29",
+          "data": {
+            "password": {
+              "value": "[parameters('rabbitmqPassword')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp"
+      ]
+    },
+    "registryCreds": {
+      "import": "radius",
+      "type": "Radius.Security/secrets@2025-08-01-preview",
+      "properties": {
+        "name": "radius-ghcr-registry-creds",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": ".radius/app.bicep",
+          "data": {
+            "password": {
+              "value": "[parameters('registryPassword')]"
+            },
+            "username": {
+              "value": "[parameters('registryUsername')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp"
+      ]
+    },
+    "makelineServiceImage": {
+      "import": "radius",
+      "type": "Radius.Compute/containerImages@2025-08-01-preview",
+      "properties": {
+        "name": "makeline-service-image",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/makeline-service/Dockerfile",
+          "build": {
+            "source": "git::https://github.com/kachawla/aks-store-demo.git//src/makeline-service?ref=15755ec3d15344216a9b124a058a9dc677ee6eac",
+            "platforms": [
+              "linux/amd64"
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "registryCreds"
+      ]
+    },
+    "orderServiceImage": {
+      "import": "radius",
+      "type": "Radius.Compute/containerImages@2025-08-01-preview",
+      "properties": {
+        "name": "order-service-image",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/order-service/Dockerfile",
+          "build": {
+            "source": "git::https://github.com/kachawla/aks-store-demo.git//src/order-service?ref=15755ec3d15344216a9b124a058a9dc677ee6eac",
+            "platforms": [
+              "linux/amd64"
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "registryCreds"
+      ]
+    },
+    "productServiceImage": {
+      "import": "radius",
+      "type": "Radius.Compute/containerImages@2025-08-01-preview",
+      "properties": {
+        "name": "product-service-image",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/product-service/Dockerfile",
+          "build": {
+            "source": "git::https://github.com/kachawla/aks-store-demo.git//src/product-service?ref=15755ec3d15344216a9b124a058a9dc677ee6eac",
+            "platforms": [
+              "linux/amd64"
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "registryCreds"
+      ]
+    },
+    "storeAdminImage": {
+      "import": "radius",
+      "type": "Radius.Compute/containerImages@2025-08-01-preview",
+      "properties": {
+        "name": "store-admin-image",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/store-admin/Dockerfile",
+          "build": {
+            "source": "git::https://github.com/kachawla/aks-store-demo.git//src/store-admin?ref=15755ec3d15344216a9b124a058a9dc677ee6eac",
+            "platforms": [
+              "linux/amd64"
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "registryCreds"
+      ]
+    },
+    "storeFrontImage": {
+      "import": "radius",
+      "type": "Radius.Compute/containerImages@2025-08-01-preview",
+      "properties": {
+        "name": "store-front-image",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/store-front/Dockerfile",
+          "build": {
+            "source": "git::https://github.com/kachawla/aks-store-demo.git//src/store-front?ref=15755ec3d15344216a9b124a058a9dc677ee6eac",
+            "platforms": [
+              "linux/amd64"
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "registryCreds"
+      ]
+    },
+    "virtualCustomerImage": {
+      "import": "radius",
+      "type": "Radius.Compute/containerImages@2025-08-01-preview",
+      "properties": {
+        "name": "virtual-customer-image",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/virtual-customer/Dockerfile",
+          "build": {
+            "source": "git::https://github.com/kachawla/aks-store-demo.git//src/virtual-customer?ref=15755ec3d15344216a9b124a058a9dc677ee6eac",
+            "platforms": [
+              "linux/amd64"
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "registryCreds"
+      ]
+    },
+    "virtualWorkerImage": {
+      "import": "radius",
+      "type": "Radius.Compute/containerImages@2025-08-01-preview",
+      "properties": {
+        "name": "virtual-worker-image",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/virtual-worker/Dockerfile",
+          "build": {
+            "source": "git::https://github.com/kachawla/aks-store-demo.git//src/virtual-worker?ref=15755ec3d15344216a9b124a058a9dc677ee6eac",
+            "platforms": [
+              "linux/amd64"
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "registryCreds"
+      ]
+    },
+    "makelineServiceContainer": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "makeline-service",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/makeline-service/main.go#L21",
+          "replicas": 1,
+          "containers": {
+            "makeline-service": {
+              "image": "[reference('makelineServiceImage').properties.imageReference]",
+              "env": {
+                "ORDER_DB_API": {
+                  "value": "mongodb"
+                },
+                "ORDER_DB_COLLECTION_NAME": {
+                  "value": "orders"
+                },
+                "ORDER_DB_NAME": {
+                  "value": "orderdb"
+                },
+                "ORDER_DB_URI": {
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "secretName": "[reference('mongoDb').properties.secrets.name]",
+                      "key": "connectionString"
+                    }
+                  }
+                },
+                "ORDER_QUEUE_NAME": {
+                  "value": "orders"
+                },
+                "ORDER_QUEUE_PASSWORD": {
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "secretName": "[reference('rabbitmqSecret').name]",
+                      "key": "password"
+                    }
+                  }
+                },
+                "ORDER_QUEUE_URI": {
+                  "value": "[format('amqp://{0}:{1}', reference('rabbitmq').properties.host, reference('rabbitmq').properties.port)]"
+                },
+                "ORDER_QUEUE_USERNAME": {
+                  "value": "[reference('rabbitmq').properties.username]"
+                }
+              },
+              "ports": {
+                "web": {
+                  "containerPort": 3001
+                }
+              },
+              "livenessProbe": {
+                "httpGet": {
+                  "path": "/liveness",
+                  "port": 3001
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 3,
+                "failureThreshold": 5
+              },
+              "readinessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 3001
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 5,
+                "failureThreshold": 3
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "makelineServiceImage",
+        "mongoDb",
+        "rabbitmq",
+        "rabbitmqSecret"
+      ]
+    },
+    "orderServiceContainer": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "order-service",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/order-service/app.js#L5",
+          "replicas": 1,
+          "containers": {
+            "order-service": {
+              "image": "[reference('orderServiceImage').properties.imageReference]",
+              "env": {
+                "FASTIFY_ADDRESS": {
+                  "value": "0.0.0.0"
+                },
+                "ORDER_QUEUE_HOSTNAME": {
+                  "value": "[reference('rabbitmq').properties.host]"
+                },
+                "ORDER_QUEUE_NAME": {
+                  "value": "orders"
+                },
+                "ORDER_QUEUE_PASSWORD": {
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "secretName": "[reference('rabbitmqSecret').name]",
+                      "key": "password"
+                    }
+                  }
+                },
+                "ORDER_QUEUE_PORT": {
+                  "value": "[format('{0}', reference('rabbitmq').properties.port)]"
+                },
+                "ORDER_QUEUE_USERNAME": {
+                  "value": "[reference('rabbitmq').properties.username]"
+                }
+              },
+              "ports": {
+                "web": {
+                  "containerPort": 3000
+                }
+              },
+              "livenessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 3000
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 3,
+                "failureThreshold": 5
+              },
+              "readinessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 3000
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 5,
+                "failureThreshold": 3
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "orderServiceImage",
+        "rabbitmq",
+        "rabbitmqSecret"
+      ]
+    },
+    "productServiceContainer": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "product-service",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/product-service/src/main.rs#L5",
+          "replicas": 1,
+          "containers": {
+            "product-service": {
+              "image": "[reference('productServiceImage').properties.imageReference]",
+              "ports": {
+                "web": {
+                  "containerPort": 3002
+                }
+              },
+              "livenessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 3002
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 3,
+                "failureThreshold": 5
+              },
+              "readinessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 3002
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 5,
+                "failureThreshold": 3
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "productServiceImage"
+      ]
+    },
+    "storeAdminContainer": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "store-admin",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/store-admin/nginx.conf#L1",
+          "replicas": 1,
+          "containers": {
+            "store-admin": {
+              "image": "[reference('storeAdminImage').properties.imageReference]",
+              "command": [
+                "/bin/sh",
+                "-c"
+              ],
+              "args": [
+                "sed -i \"s|http://order-service:3000|http://$ORDER_SERVICE_HOST:3000|g; s|http://product-service:3002|http://$PRODUCT_SERVICE_HOST:3002|g; s|http://makeline-service:3001|http://$MAKELINE_SERVICE_HOST:3001|g\" /etc/nginx/conf.d/default.conf && nginx -g \"daemon off;\""
+              ],
+              "env": {
+                "MAKELINE_SERVICE_HOST": {
+                  "value": "[reference('makelineServiceContainer').properties.hosts['makeline-service']]"
+                },
+                "ORDER_SERVICE_HOST": {
+                  "value": "[reference('orderServiceContainer').properties.hosts['order-service']]"
+                },
+                "PRODUCT_SERVICE_HOST": {
+                  "value": "[reference('productServiceContainer').properties.hosts['product-service']]"
+                }
+              },
+              "ports": {
+                "web": {
+                  "containerPort": 8081
+                }
+              },
+              "livenessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 8081
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 3,
+                "failureThreshold": 5
+              },
+              "readinessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 8081
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 5,
+                "failureThreshold": 3
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "makelineServiceContainer",
+        "orderServiceContainer",
+        "productServiceContainer",
+        "storeAdminImage"
+      ]
+    },
+    "storeFrontContainer": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "store-front",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/store-front/nginx.conf#L1",
+          "replicas": 1,
+          "containers": {
+            "store-front": {
+              "image": "[reference('storeFrontImage').properties.imageReference]",
+              "command": [
+                "/bin/sh",
+                "-c"
+              ],
+              "args": [
+                "sed -i \"s|http://order-service:3000|http://$ORDER_SERVICE_HOST:3000|g; s|http://product-service:3002|http://$PRODUCT_SERVICE_HOST:3002|g\" /etc/nginx/conf.d/default.conf && nginx -g \"daemon off;\""
+              ],
+              "env": {
+                "ORDER_SERVICE_HOST": {
+                  "value": "[reference('orderServiceContainer').properties.hosts['order-service']]"
+                },
+                "PRODUCT_SERVICE_HOST": {
+                  "value": "[reference('productServiceContainer').properties.hosts['product-service']]"
+                }
+              },
+              "ports": {
+                "web": {
+                  "containerPort": 8080
+                }
+              },
+              "livenessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 8080
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 3,
+                "failureThreshold": 5
+              },
+              "readinessProbe": {
+                "httpGet": {
+                  "path": "/health",
+                  "port": 8080
+                },
+                "initialDelaySeconds": 3,
+                "periodSeconds": 5,
+                "failureThreshold": 3
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "orderServiceContainer",
+        "productServiceContainer",
+        "storeFrontImage"
+      ]
+    },
+    "virtualCustomerContainer": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "virtual-customer",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/virtual-customer/src/main.rs#L7",
+          "replicas": 1,
+          "containers": {
+            "virtual-customer": {
+              "image": "[reference('virtualCustomerImage').properties.imageReference]",
+              "env": {
+                "ORDERS_PER_HOUR": {
+                  "value": "100"
+                },
+                "ORDER_SERVICE_URL": {
+                  "value": "[format('http://{0}:3000/', reference('orderServiceContainer').properties.hosts['order-service'])]"
+                }
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "orderServiceContainer",
+        "virtualCustomerImage"
+      ]
+    },
+    "virtualWorkerContainer": {
+      "import": "radius",
+      "type": "Radius.Compute/containers@2025-08-01-preview",
+      "properties": {
+        "name": "virtual-worker",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "src/virtual-worker/src/main.rs#L6",
+          "replicas": 1,
+          "containers": {
+            "virtual-worker": {
+              "image": "[reference('virtualWorkerImage').properties.imageReference]",
+              "env": {
+                "MAKELINE_SERVICE_URL": {
+                  "value": "[format('http://{0}:3001', reference('makelineServiceContainer').properties.hosts['makeline-service'])]"
+                },
+                "ORDERS_PER_HOUR": {
+                  "value": "100"
+                }
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "makelineServiceContainer",
+        "virtualWorkerImage"
+      ]
+    },
+    "storeAdminRoute": {
+      "import": "radius",
+      "type": "Radius.Compute/routes@2025-08-01-preview",
+      "properties": {
+        "name": "store-admin-route",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "aks-store-all-in-one.yaml#L508",
+          "kind": "HTTP",
+          "rules": [
+            {
+              "matches": [
+                {
+                  "httpPath": "/"
+                }
+              ],
+              "destinationContainer": {
+                "resourceId": "[reference('storeAdminContainer').id]",
+                "containerName": "store-admin",
+                "containerPort": 8081
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "storeAdminContainer"
+      ]
+    },
+    "storeFrontRoute": {
+      "import": "radius",
+      "type": "Radius.Compute/routes@2025-08-01-preview",
+      "properties": {
+        "name": "store-front-route",
+        "properties": {
+          "environment": "[parameters('environment')]",
+          "application": "[reference('aksStoreDemoApp').id]",
+          "codeReference": "aks-store-all-in-one.yaml#L445",
+          "kind": "HTTP",
+          "rules": [
+            {
+              "matches": [
+                {
+                  "httpPath": "/"
+                }
+              ],
+              "destinationContainer": {
+                "resourceId": "[reference('storeFrontContainer').id]",
+                "containerName": "store-front",
+                "containerPort": 8080
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "aksStoreDemoApp",
+        "storeFrontContainer"
+      ]
+    }
+  }
+}
