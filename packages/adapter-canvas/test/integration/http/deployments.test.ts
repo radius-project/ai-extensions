@@ -1960,6 +1960,169 @@ function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   it.each([
+    { change: "created", exhausted: false },
+    { change: "updated", exhausted: false },
+    { change: "created", exhausted: true },
+    { change: "updated", exhausted: true }
+  ] as const)(
+    "surfaces registration retry results for a $change dispatcher (exhausted: $exhausted)",
+    async ({ change, exhausted }) => {
+      const workflowDispatches: string[][] = [];
+      const delays: number[] = [];
+      let discoveries = 0;
+      let settlements = 0;
+      let latestRunId = 41;
+      const unexpected = () => {
+        throw new Error(
+          "unexpected external operation in registration retry test"
+        );
+      };
+      const dispatch = createDeployDispatchService({
+        deployWorkflowFile: "run-rad-commands.yml",
+        deployWorkflowFiles: [
+          "run-rad-commands.yml",
+          "run-rad-commands-azure.yml"
+        ],
+        branchNotPushedKind: "branch-not-pushed",
+        oidcSubjectMissingKind: "oidc-subject-missing",
+        oidcSubjectCaseMismatchKind: "oidc-subject-case-mismatch",
+        getBranchHeadSha: () => Promise.resolve("sha-1"),
+        getDefaultBranch: unexpected,
+        runGh: async (args) => {
+          expect(args.slice(0, 3)).toEqual([
+            "workflow",
+            "run",
+            "run-rad-commands.yml"
+          ]);
+          workflowDispatches.push(args);
+          return exhausted || workflowDispatches.length === 1 ?
+              {
+                code: 1,
+                stdout: "",
+                stderr: "HTTP 404: workflow not found on the default branch"
+              }
+            : { code: 0, stdout: "", stderr: "" };
+        },
+        runGhWithStdin: unexpected,
+        runAz: unexpected,
+        runGitHubJson: unexpected,
+        readProcessEnv: () => ({}),
+        ghCredentialSource: () => "keyring",
+        fetchFileForSelection: () => Promise.resolve(null),
+        appParams: () => [],
+        resolveDeployParams: () => ({}),
+        partitionParams: () => ({ public: {}, secret: {} }),
+        extractAppName: () => "",
+        buildDeployRadCommand: () => "rad deploy",
+        buildAppGraphRadCommand: () => "rad app graph",
+        ensureDeployWorkflowsOnBranch: () => Promise.resolve(),
+        ensureWorkflowsCurrent: async () => ({
+          created:
+            change === "created" ?
+              [".github/workflows/run-rad-commands.yml"]
+            : [],
+          updated:
+            change === "updated" ?
+              [".github/workflows/run-rad-commands.yml"]
+            : []
+        }),
+        sleep: async (ms) => {
+          delays.push(ms);
+          latestRunId++;
+        },
+        latestWorkflowRunId: () => Promise.resolve(latestRunId),
+        classifyDeployDispatchFailure: () => "run-unconfirmed",
+        uncommittedGeneratedPaths: () => Promise.resolve([]),
+        invalidateDeployListCache: () => {},
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error),
+        now: () => 1_700_000_000_000
+      });
+      const monitor = createDeployMonitorService({
+        plannedGraph: { recover: unexpected },
+        dispatch,
+        outcome: {
+          settle: async ({ entry, conclusion }) => {
+            expect(conclusion).toBe("success");
+            settlements++;
+            entry.state.deployStatus = "success";
+          }
+        },
+        deployRadCommandsStep: "Run rad commands",
+        unconfirmedRunKind: "run-unconfirmed",
+        findWorkflowRun: async (_repo, _workflow, _time, _branch, baseline) => {
+          expect(baseline).toBe(43);
+          discoveries++;
+          return 44;
+        },
+        getRunDetail: async () => ({
+          status: "completed",
+          conclusion: "success",
+          steps: []
+        }),
+        createStatusReader: async () => ({
+          progress: unexpected,
+          graph: unexpected,
+          controlPlaneLog: unexpected
+        }),
+        buildDeployStatusMap: unexpected,
+        buildDeployMessageMap: unexpected,
+        applyDeployMessages: unexpected,
+        applyDeployStatusToResources: unexpected,
+        settleDeployStatuses: unexpected,
+        generatePortalUrl: unexpected,
+        optionalString: (value) => (typeof value === "string" ? value : ""),
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error),
+        sleep: unexpected,
+        now: () => 1_700_000_000_000
+      });
+      const harness = startDeploy(monitor);
+      const entry = await container!.getOrCreate("panel-a");
+      const state = harness.stateOf("panel-a");
+      state.plannedResources = [{ id: "r1", name: "db" }];
+
+      const response = await post(
+        entry.baseUrl,
+        "/api/deploy",
+        deployBody({ provider: "aws" })
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+      await expect
+        .poll(() => state.deployStatus)
+        .toBe(exhausted ? "failed" : "success");
+      await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
+      expect(workflowDispatches).toHaveLength(exhausted ? 3 : 2);
+      expect(
+        workflowDispatches.every(
+          (args) =>
+            JSON.stringify(args) === JSON.stringify(workflowDispatches[0])
+        )
+      ).toBe(true);
+      expect(delays).toEqual(exhausted ? [3000, 2000, 5000] : [3000, 2000]);
+      expect(discoveries).toBe(exhausted ? 0 : 1);
+      expect(settlements).toBe(exhausted ? 0 : 1);
+      const status = await fetch(`${entry.baseUrl}/api/deploy-status`);
+      const body = await status.json();
+      expect(status.status).toBe(200);
+      if (exhausted) {
+        expect(body).toMatchObject({
+          status: "failed",
+          errorKind: "run-unconfirmed",
+          error: expect.stringContaining("Radius already waited and retried")
+        });
+      } else {
+        expect(body).toMatchObject({
+          status: "success",
+          deployRunUrl: "https://github.com/acme/widgets/actions/runs/44"
+        });
+      }
+    }
+  );
+
+  it.each([
     { conclusion: "future_conclusion", reads: 1, sleeps: 0 },
     { conclusion: null, reads: 240, sleeps: 240 }
   ])(
@@ -2172,6 +2335,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
           "OIDC refusal must happen before workflow synchronization"
         );
       },
+      sleep: () => Promise.resolve(),
       classifyDeployDispatchFailure: () => "run-unconfirmed",
       uncommittedGeneratedPaths: () => Promise.resolve([]),
       latestWorkflowRunId: () => {
