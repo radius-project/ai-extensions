@@ -1,3 +1,4 @@
+import { redactCredentials } from "./credential-redaction.js";
 import { describe, expect, it } from "vitest";
 import { DEPLOY_RAD_COMMANDS_STEP } from "./index.js";
 import type { WorkflowRunDetail } from "./workflow-observation.js";
@@ -20,6 +21,399 @@ const MS_ERROR =
   "identities registered in this tenant must contain the enterprise claim with " +
   "value 'microsoft', 'github' or 'microsoftopensource' but actual value is ''.";
 
+describe("workflow diagnostic redaction", () => {
+  const credential = "opaque-diagnostic-fixture";
+  const target = { repo: "org/app", runId: 41 };
+  const run: WorkflowRunDetail = {
+    status: "completed",
+    conclusion: "failure",
+    steps: [{ name: "Run rad commands", conclusion: "failure" }],
+    jobs: [
+      {
+        name: credential,
+        steps: [{ name: "Run rad commands", conclusion: "failure" }]
+      }
+    ]
+  };
+  const redactDiagnostic = (value: string) =>
+    redactCredentials(value, [credential]);
+
+  it.each(["available", "unavailable"])(
+    "retains host-known masking in fixed publication text when control-plane evidence is %s",
+    async (availability) => {
+      const failure = await collectWorkflowFailure(
+        target,
+        run,
+        { resourcesTouched: true },
+        {
+          redactDiagnostic: (value) =>
+            redactCredentials(value, ["control-plane log", "failure details"]),
+          readLog: async () => "Error: { ordinary failure }",
+          readControlPlaneLog: async () => {
+            if (availability === "unavailable")
+              throw new Error("Diagnostic read unavailable");
+            return "ordinary tail";
+          }
+        }
+      );
+      expect(failure.message).toContain("[REDACTED]");
+      expect(failure.narration.join("\n")).toContain("[REDACTED]");
+      expect(JSON.stringify(failure)).not.toContain("control-plane log");
+      expect(JSON.stringify(failure)).not.toContain("failure details");
+      expect(failure.message).toContain(
+        "View the full run: https://github.com/org/app/actions/runs/41"
+      );
+    }
+  );
+
+  it.each(["primary", "fallback", "teardown"])(
+    "sanitizes escaped named values in %s and control-plane publication through a permissive host",
+    async (phase) => {
+      const secret = "unregistered-core-workflow-fixture";
+      const controlSecret = "unregistered-core-control-fixture";
+      const nested = JSON.stringify(JSON.stringify({ client_secret: secret }));
+      const safeNested = JSON.stringify(
+        JSON.stringify({ client_secret: "[REDACTED]" })
+      );
+      const safeControl = JSON.stringify(
+        JSON.stringify({ password: "[REDACTED]" })
+      );
+      const steps = [
+        {
+          name: "Run rad commands",
+          status: "completed",
+          conclusion: phase === "teardown" ? "success" : "failure"
+        },
+        ...(phase === "teardown" ?
+          [{ name: "Teardown", status: "completed", conclusion: "failure" }]
+        : [])
+      ];
+      const failure = await collectWorkflowFailure(
+        target,
+        {
+          status: "completed",
+          conclusion: "failure",
+          steps,
+          jobs: phase === "fallback" ? [] : [{ name: "deploy", steps }]
+        },
+        { resourcesTouched: true },
+        {
+          redactDiagnostic: (value) => value,
+          readLog: async () =>
+            `deploy\t${phase === "teardown" ? "Teardown" : "Run rad commands"}\t2026-01-01 Error: { ${nested} }`,
+          readControlPlaneLog: async () =>
+            JSON.stringify(JSON.stringify({ password: controlSecret }))
+        }
+      );
+      expect(failure.radiusError).toBe(`Error: { ${safeNested} }`);
+      expect(failure.message).toContain(safeNested);
+      expect(failure.message).toContain(safeControl);
+      expect(failure.narration.join("\n")).toContain(safeNested);
+      expect(failure.narration.join("\n")).toContain(safeControl);
+      expect(JSON.stringify(failure)).not.toContain(secret);
+      expect(JSON.stringify(failure)).not.toContain(controlSecret);
+    }
+  );
+
+  it.each([3945, 3965, 3970])(
+    "keeps sanitized quoted-value truncation at padding %i from consuming the run link or control-plane tail",
+    async (padding) => {
+      const prefix = "Error: { " + "x".repeat(padding) + ' client_secret="';
+      const safe = (prefix + '[REDACTED]" }').slice(0, 4000);
+      const failure = await collectWorkflowFailure(
+        target,
+        run,
+        { resourcesTouched: true },
+        {
+          redactDiagnostic: (value) => value,
+          readLog: async () =>
+            `${credential}\tRun rad commands\t2026-01-01 ${prefix}unregistered-${"z".repeat(100)}" }`,
+          readControlPlaneLog: async () => "ordinary control-plane tail"
+        }
+      );
+      expect(failure.radiusError).toBe(safe);
+      expect(failure.message).toContain("ordinary control-plane tail");
+      expect(failure.message).toContain(
+        "View the full run: https://github.com/org/app/actions/runs/41"
+      );
+      expect(failure.narration.join("\n")).toContain(safe);
+      expect(JSON.stringify(failure)).not.toContain("unregistered");
+    }
+  );
+
+  describe.each([
+    { host: "core sanitizer", redactDiagnostic: redactCredentials },
+    { host: "identity", redactDiagnostic: (value: string) => value }
+  ])("through the $host host callback", ({ redactDiagnostic }) => {
+    describe.each([
+      { rounds: 1, phase: "primary" },
+      { rounds: 2, phase: "primary" },
+      { rounds: 3, phase: "primary" },
+      { rounds: 1, phase: "fallback" },
+      { rounds: 2, phase: "fallback" },
+      { rounds: 3, phase: "fallback" }
+    ])(
+      "with $rounds serialization rounds in $phase and control-plane publication",
+      ({ rounds, phase }) => {
+        it.each([
+          {
+            shape: "newline before a quoted value",
+            raw: '{"client_secret":\n"fixture-value","message":"ordinary"}',
+            safe: '{"client_secret":\n"[REDACTED]","message":"ordinary"}',
+            secret: "fixture-value"
+          },
+          {
+            shape: "tab before a quoted value",
+            raw: '{"client_secret":\t"fixture-value","message":"ordinary"}',
+            safe: '{"client_secret":\t"[REDACTED]","message":"ordinary"}',
+            secret: "fixture-value"
+          },
+          {
+            shape: "single-quoted value with an escaped apostrophe",
+            raw: String.raw`password='fixture\'suffix' message=ordinary`,
+            safe: "password='[REDACTED]' message=ordinary",
+            secret: "suffix"
+          }
+        ])("masks $shape in every diagnostic publication", async (fixture) => {
+          const serialize = (value: string) => {
+            for (let round = 0; round < rounds; round++)
+              value = JSON.stringify(value);
+            return value;
+          };
+          const raw = serialize(fixture.raw);
+          const safe = serialize(fixture.safe);
+          const failure = await collectWorkflowFailure(
+            target,
+            {
+              status: "completed",
+              conclusion: "failure",
+              steps: [{ name: "Run rad commands", conclusion: "failure" }],
+              jobs:
+                phase === "fallback" ?
+                  []
+                : [
+                    {
+                      name: "deploy",
+                      steps: [
+                        { name: "Run rad commands", conclusion: "failure" }
+                      ]
+                    }
+                  ]
+            },
+            { resourcesTouched: true },
+            {
+              redactDiagnostic,
+              readLog: async () =>
+                `deploy\tRun rad commands\t2026-01-01 Error: { ${raw} }`,
+              readControlPlaneLog: async () => `control-plane evidence ${raw}`
+            }
+          );
+          expect.soft(failure.radiusError).toBe(`Error: { ${safe} }`);
+          expect.soft(failure.message).toContain(`Error: { ${safe} }`);
+          expect
+            .soft(failure.message)
+            .toContain(`control-plane evidence ${safe}`);
+          expect
+            .soft(failure.message)
+            .toContain(
+              "View the full run: https://github.com/org/app/actions/runs/41"
+            );
+          expect.soft(failure.narration).toContain(`  Error: { ${safe} }`);
+          expect
+            .soft(failure.narration)
+            .toContain(`  control-plane evidence ${safe}`);
+          for (const publication of [
+            failure.message,
+            failure.radiusError,
+            failure.narration.join("\n")
+          ]) {
+            expect.soft(publication).toContain("[REDACTED]");
+            expect.soft(publication).toContain("ordinary");
+            expect.soft(publication).not.toContain(fixture.secret);
+            expect.soft(publication).not.toContain("fixture");
+          }
+        });
+      }
+    );
+  });
+
+  it("masks an unterminated credential in a failed-step name without discarding later safe publications", async () => {
+    const failure = await collectWorkflowFailure(
+      target,
+      {
+        ...run,
+        steps: [
+          {
+            name: 'Cleanup client_secret="unregistered-step',
+            conclusion: "failure"
+          }
+        ]
+      },
+      { resourcesTouched: true },
+      {
+        redactDiagnostic: (value) => value,
+        readLog: async () => null,
+        readControlPlaneLog: async () => "ordinary control-plane tail"
+      }
+    );
+    expect(failure.message).toContain('Cleanup client_secret="[REDACTED]');
+    expect(failure.message).toContain("ordinary control-plane tail");
+    expect(failure.message).toContain(
+      "View the full run: https://github.com/org/app/actions/runs/41"
+    );
+    expect(JSON.stringify(failure)).not.toContain("unregistered-step");
+  });
+
+  it("redacts both log sources and step names without losing primary attribution", async () => {
+    const result = await collectWorkflowFailure(
+      target,
+      {
+        ...run,
+        steps: [
+          ...run.steps,
+          { name: `Cleanup ${credential}`, conclusion: "failure" }
+        ]
+      },
+      { resourcesTouched: true },
+      {
+        redactDiagnostic,
+        readLog: async () =>
+          `${credential}\tRun rad commands\t2026-01-01 Error: { quota ${credential} }\nother\tCleanup\t2026-01-01 Error: { secondary failure }`,
+        readControlPlaneLog: async () =>
+          `provisioning failed: access_token="${credential}"`
+      }
+    );
+    expect(result.radiusError).toBe("Error: { quota [REDACTED] }");
+    expect(result.message).toContain(
+      "Failed step: Run rad commands, Cleanup [REDACTED]."
+    );
+    expect(result.message).toContain('access_token="[REDACTED]"');
+    expect(JSON.stringify(result)).not.toContain(credential);
+    expect(result.message).not.toContain("secondary failure");
+    expect(result.message).toContain(
+      "https://github.com/org/app/actions/runs/41"
+    );
+  });
+
+  it("redacts before the Radius excerpt's character limit can split an opaque credential", async () => {
+    const prefix = "Error: { " + "x".repeat(3985);
+    const result = await collectWorkflowFailure(
+      target,
+      run,
+      { resourcesTouched: true },
+      {
+        redactDiagnostic,
+        readLog: async () =>
+          `${credential}\tRun rad commands\t2026-01-01 ${prefix}${credential} trailing }`,
+        readControlPlaneLog: async () => null
+      }
+    );
+    expect(result.radiusError).toHaveLength(4000);
+    expect(result.radiusError).toBe(
+      (prefix + "[REDACTED] trailing }").slice(0, 4000)
+    );
+    expect(result.radiusError).not.toContain("opaque");
+  });
+
+  it("applies recognizable and named credential rules even with a permissive host port", async () => {
+    const recognizable = ["ghp", "synthetic_fixture"].join("_");
+    const result = await collectWorkflowFailure(
+      target,
+      run,
+      { resourcesTouched: true },
+      {
+        redactDiagnostic: (value) => value,
+        readLog: async () =>
+          `Error: { password=synthetic-value ${recognizable} }`,
+        readControlPlaneLog: async () => "ordinary provisioning detail"
+      }
+    );
+    expect(result.radiusError).toBe(
+      "Error: { password=[REDACTED] [REDACTED] }"
+    );
+    expect(JSON.stringify(result)).not.toContain(recognizable);
+    expect(result.message).toContain("ordinary provisioning detail");
+  });
+
+  it("redacts a multiline credential before retaining the control-plane tail", async () => {
+    const controlPlaneLog = [
+      'client_secret="fixture-secret-opening',
+      ...Array.from({ length: 40 }, (_, index) => `fixture-secret-${index}`),
+      'fixture-secret-closing"',
+      "tail failure"
+    ].join("\n");
+    const result = await collectWorkflowFailure(
+      target,
+      run,
+      { resourcesTouched: true },
+      {
+        redactDiagnostic,
+        readLog: async () => null,
+        readControlPlaneLog: async () => controlPlaneLog
+      }
+    );
+    expect(result.message).toContain(
+      'client_secret="[REDACTED]"\ntail failure'
+    );
+    expect(JSON.stringify(result)).not.toContain("fixture-secret");
+    expect(result.narration).toContain("  tail failure");
+  });
+
+  it("sanitizes attributable teardown diagnostics while preserving the conservative warning", async () => {
+    const steps = [
+      { name: "Run rad commands", status: "completed", conclusion: "success" },
+      { name: "Teardown", status: "completed", conclusion: "failure" }
+    ];
+    const result = await collectWorkflowFailure(
+      target,
+      { ...run, steps, jobs: [{ name: credential, steps }] },
+      { resourcesTouched: true },
+      {
+        redactDiagnostic,
+        readLog: async () =>
+          `${credential}\tTeardown\t2026-01-01 Error: { persistence detail ${credential} }`,
+        readControlPlaneLog: async () => null
+      }
+    );
+    expect(result.radiusError).toBe("Error: { persistence detail [REDACTED] }");
+    expect(result.message).toContain("Radius state may not have been saved.");
+    expect(JSON.stringify(result)).not.toContain(credential);
+  });
+
+  it("fails explicitly without a trusted redaction port before any read", async () => {
+    const reads = {
+      redactDiagnostic,
+      readLog: async () => {
+        throw new Error("Unexpected log read");
+      },
+      readControlPlaneLog: async () => {
+        throw new Error("Unexpected artifact read");
+      }
+    };
+    Reflect.deleteProperty(reads, "redactDiagnostic");
+    await expect(
+      collectWorkflowFailure(target, run, { resourcesTouched: true }, reads)
+    ).rejects.toThrow("Workflow diagnostics require a credential redactor.");
+  });
+
+  it("propagates redaction failure instead of publishing unsanitized detail", async () => {
+    await expect(
+      collectWorkflowFailure(
+        target,
+        run,
+        { resourcesTouched: true },
+        {
+          redactDiagnostic: () => {
+            throw new Error("Redactor unavailable");
+          },
+          readLog: async () => `Error: ${credential}`,
+          readControlPlaneLog: async () => null
+        }
+      )
+    ).rejects.toThrow("Redactor unavailable");
+  });
+});
+
 describe("post-deployment teardown evidence", () => {
   function run(): WorkflowRunDetail {
     const steps = [
@@ -41,7 +435,11 @@ describe("post-deployment teardown evidence", () => {
       { repo: "org/app", runId: 41 },
       observed,
       { resourcesTouched: true },
-      { readLog: async () => log, readControlPlaneLog: async () => null }
+      {
+        readLog: async () => log,
+        redactDiagnostic: redactCredentials,
+        readControlPlaneLog: async () => null
+      }
     );
   }
 
@@ -194,7 +592,11 @@ describe("post-deployment teardown evidence", () => {
       { repo: "org/app", runId: 41 },
       observed,
       { resourcesTouched: true },
-      { readLog: async () => null, readControlPlaneLog: async () => null }
+      {
+        readLog: async () => null,
+        redactDiagnostic: redactCredentials,
+        readControlPlaneLog: async () => null
+      }
     );
     expect(result.message).toMatch(/^Deployment failed/);
   });
@@ -618,6 +1020,7 @@ describe("extractErrorLines", () => {
               reads.push("workflow");
               return "Error: incomplete run";
             },
+            redactDiagnostic: redactCredentials,
             readControlPlaneLog: async () => {
               reads.push("control-plane");
               return "incomplete control-plane evidence";
@@ -657,6 +1060,7 @@ describe("extractErrorLines", () => {
             calls.push("workflow");
             return `deploy\tAzure Login (OIDC)\t2026-01-01 ${MS_ERROR}`;
           },
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: async () => {
             expect(calls).toEqual(["workflow"]);
             calls.push("control-plane");
@@ -703,6 +1107,7 @@ describe("extractErrorLines", () => {
               calls.push(`${repo}:${runId}`);
               return log;
             },
+            redactDiagnostic: redactCredentials,
             readControlPlaneLog: async () => {
               calls.push("control-plane");
               return log;
@@ -734,6 +1139,7 @@ describe("extractErrorLines", () => {
             calls.push("log");
             throw new Error("fixture-private-log-detail");
           },
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: () => {
             calls.push("control-plane");
             throw new Error("fixture-private-artifact-detail");
@@ -761,6 +1167,7 @@ describe("extractErrorLines", () => {
         },
         {
           readLog: async () => "Error: recipe failed",
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: () => {
             throw new Error("artifact expired");
           }
@@ -790,6 +1197,7 @@ describe("extractErrorLines", () => {
         { resourcesTouched: true },
         {
           readLog: async () => "Error: earlier recipe failed",
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: async () => "earlier control-plane evidence"
         }
       );
@@ -805,6 +1213,7 @@ describe("extractErrorLines", () => {
           readLog: async () => {
             throw new Error("fixture-private-log-detail");
           },
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: async () => {
             throw new Error("fixture-private-artifact-detail");
           }
@@ -838,6 +1247,7 @@ describe("extractErrorLines", () => {
             readLog: () => {
               throw new Error("must not read diagnostics without outcome");
             },
+            redactDiagnostic: redactCredentials,
             readControlPlaneLog: () => {
               throw new Error("must not read artifacts without outcome");
             }
@@ -863,6 +1273,7 @@ describe("extractErrorLines", () => {
         { resourcesTouched: true },
         {
           readLog: () => Promise.reject(new Error("fixture-private")),
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: async () => "recipe provisioning failed"
         }
       );
@@ -957,6 +1368,7 @@ describe("extractErrorLines", () => {
           { resourcesTouched: true },
           {
             readLog: async () => logs.join("\n"),
+            redactDiagnostic: redactCredentials,
             readControlPlaneLog: async () => null
           }
         );
@@ -982,6 +1394,7 @@ describe("extractErrorLines", () => {
         },
         {
           readLog: async () => "Error: failure",
+          redactDiagnostic: redactCredentials,
           readControlPlaneLog: async () => lines.join("\n") + "\n\n"
         }
       );
@@ -1051,6 +1464,7 @@ describe("extractErrorLines", () => {
                 "deploy\tRun rad commands\t2026-01-01 Error: { unattributed deploy }",
                 "deploy\tCleanup\t2026-01-01 Error: { available teardown evidence }"
               ].join("\n"),
+            redactDiagnostic: redactCredentials,
             readControlPlaneLog: async () => null
           }
         );

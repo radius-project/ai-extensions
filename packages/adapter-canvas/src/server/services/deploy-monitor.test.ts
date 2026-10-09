@@ -1,3 +1,4 @@
+import { redactCredentials } from "@radius-project/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDeployMonitorService,
@@ -2155,6 +2156,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       }
     };
     const outcome = createDeployOutcomeService({
+      redactDiagnostic: redactCredentials,
       projectSafeGraphResources: (graph) =>
         Array.isArray(graph) ? (graph as CanvasGraphResource[]) : [],
       settleDeployStatuses: (resources, runConclusion, radiusError) => {

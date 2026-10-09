@@ -3,6 +3,7 @@ import type {
   WorkflowTarget
 } from "./workflow-observation.js";
 import { confirmedWorkflowConclusion } from "./workflow-observation.js";
+import { redactCredentials } from "./credential-redaction.js";
 
 // Must match the step in .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
@@ -56,6 +57,12 @@ function failedPostDeploymentTeardown(
 export interface WorkflowFailureReads {
   readLog(repo: string, runId: number | string): Promise<string | null>;
   readControlPlaneLog(): Promise<string | null>;
+  /**
+   * Masks host-known opaque credentials before mandatory core credential rules.
+   * Invoked sanitizer errors propagate; unconfirmed and fixed auth-drift outputs
+   * do not necessarily invoke this callback.
+   */
+  redactDiagnostic(value: string): string;
 }
 
 export interface WorkflowFailure {
@@ -75,6 +82,11 @@ export async function collectWorkflowFailure(
   >,
   reads: WorkflowFailureReads
 ): Promise<WorkflowFailure> {
+  if (typeof reads.redactDiagnostic !== "function") {
+    throw new Error("Workflow diagnostics require a credential redactor.");
+  }
+  const redact = (value: string): string =>
+    redactCredentials(reads.redactDiagnostic(value));
   const { conclusion, steps } = run;
   const url =
     "https://github.com/" + target.repo + "/actions/runs/" + target.runId;
@@ -111,6 +123,10 @@ export async function collectWorkflowFailure(
     message +=
       " Failed step: " + failedSteps.map((step) => step.name).join(", ") + ".";
   }
+  // Sanitize raw fields before composing already-sanitized excerpts. A clipped
+  // quoted value must not consume the following diagnostics on another pass.
+  message = redact(message);
+  const runLink = redact("\n\nView the full run: " + url);
   let log: string | null = null;
   const unavailable: string[] = [];
   try {
@@ -118,11 +134,13 @@ export async function collectWorkflowFailure(
   } catch {
     unavailable.push("The workflow log could not be read.");
   }
-  const claimHelp = explainOidcEnterpriseClaim(
-    extractGitHubActionsStepLog(log, "Azure Login (OIDC)")
+  const claimHelp = redact(
+    explainOidcEnterpriseClaim(
+      redact(extractGitHubActionsStepLog(log, "Azure Login (OIDC)"))
+    )
   );
   if (claimHelp)
-    message = claimHelp + "\n\n\u2014 raw error \u2014\n" + message;
+    message = claimHelp + redact("\n\n\u2014 raw error \u2014\n") + message;
   const deploySteps = steps.filter(
     (step) => step.name === DEPLOY_RAD_COMMANDS_STEP
   );
@@ -145,7 +163,7 @@ export async function collectWorkflowFailure(
           step.conclusion === "failure"
       )
     ) ?
-      extractRadDeployError(deployLog)
+      extractRadDeployError(redact(deployLog))
     : "";
   const teardownLog = extractGitHubActionsStepLog(log, "Teardown");
   const teardownJobs = new Set(
@@ -153,17 +171,19 @@ export async function collectWorkflowFailure(
   );
   const teardownDetail =
     teardownJob && teardownJobs.size === 1 && teardownJobs.has(teardownJob) ?
-      extractRadDeployError(teardownLog)
+      extractRadDeployError(redact(teardownLog))
     : "";
   const detail =
-    teardownJob ? teardownDetail : primary || extractRadDeployError(log);
+    teardownJob ? teardownDetail : (
+      primary || extractRadDeployError(redact(log || ""))
+    );
   if (detail) {
     message += "\n\n" + detail;
     narration.push(
       "",
-      "──────── failure details ────────",
+      redact("──────── failure details ────────"),
       ...detail.split("\n").map((line) => "  " + line),
-      "─────────────────────────────────"
+      redact("─────────────────────────────────")
     );
   }
   let controlPlaneLog: string | null = null;
@@ -173,27 +193,33 @@ export async function collectWorkflowFailure(
     unavailable.push("The control-plane log could not be read.");
   }
   if (controlPlaneLog) {
-    const tail = controlPlaneLog
+    const tail = redact(controlPlaneLog)
       .replace(/\s+$/, "")
       .split("\n")
       .slice(-40)
       .join("\n");
     if (tail.trim()) {
-      message += "\n\n— control-plane log —\n" + tail;
+      message += redact("\n\n— control-plane log —\n") + tail;
       narration.push(
         "",
-        "──────── control-plane log ────────",
+        redact("──────── control-plane log ────────"),
         ...tail.split("\n").map((line) => "  " + line),
-        "───────────────────────────────────"
+        redact("───────────────────────────────────")
       );
     }
   }
   for (const note of unavailable) {
-    message += "\n\n" + note;
-    narration.push(note);
+    const safeNote = redact(note);
+    message += "\n\n" + safeNote;
+    narration.push(safeNote);
   }
-  message += "\n\nView the full run: " + url;
-  return { message, radiusError: detail, authDriftMessage, narration };
+  message += runLink;
+  return {
+    message,
+    radiusError: detail,
+    authDriftMessage,
+    narration
+  };
 }
 
 export function extractErrorLines(logText?: string | null, max = 12): string[] {
