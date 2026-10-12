@@ -9,6 +9,11 @@ import {
   loadNamespaceClaims,
   type NamespaceClaimsPorts
 } from "./create-environment-namespace-claims.js";
+import {
+  admitSetupOperation,
+  type SetupAdmissionIssue,
+  type SetupNamespaceIssue
+} from "@radius-project/core";
 
 // Seam 1 of the `POST /api/create-environment` slice: the refusal ladder.
 //
@@ -142,13 +147,10 @@ async function refuseClaimedNamespace(
   provider: string,
   operationId: string,
   ports: AdmissionPorts
-): Promise<CreateEnvironmentRefusal | null> {
-  const unavailable = (reason: string): CreateEnvironmentRefusal => ({
-    status: 409,
-    body: {
-      error: `Radius created nothing because it could not confirm which namespaces ${targetRepo}'s environments already use: ${reason}`,
-      code: "namespace-claims-unavailable"
-    }
+): Promise<SetupNamespaceIssue | null> {
+  const unavailable = (detail: string): SetupNamespaceIssue => ({
+    code: "namespace-claims-unavailable",
+    detail
   });
   const claimsPorts = ports.namespaceClaimsFor(operationId);
   if (!claimsPorts) {
@@ -173,187 +175,139 @@ async function refuseClaimedNamespace(
   });
   if (!conflict) return null;
   return {
-    status: 409,
-    body: {
-      error: `Namespace "${conflict.namespace}" on cluster "${conflict.cluster}" already belongs to environment "${conflict.environment}". Radius allows one environment per namespace, so choose a different namespace or deploy to "${conflict.environment}".`,
-      code: "namespace-already-claimed",
-      environment: conflict.environment
-    }
+    code: "namespace-already-claimed",
+    namespace: conflict.namespace,
+    cluster: conflict.cluster,
+    environment: conflict.environment
   };
 }
 
-// Rungs 2 through 7. Returns the adopted or freshly started operation on
-// success, with the configure-environment stage already entered.
-export async function admitCreateEnvironmentRequest(
-  data: CreateEnvironmentRequestData,
-  ports: AdmissionPorts
-): Promise<CreateEnvironmentAdmission> {
-  // `||` not `??`: an empty-string repo must fall through to the no-repo rung,
-  // and an empty-string environment/provider must take the default.
-  const targetRepo = data.repo || "";
-  const envName = data.environment || "dev";
-  const provider = data.provider || "azure";
-
-  if (!targetRepo) {
-    return {
-      outcome: "refused",
-      operation: null,
-      refusal: {
+function admissionRefusal(
+  issue: SetupAdmissionIssue,
+  targetRepo: string
+): CreateEnvironmentRefusal {
+  switch (issue.code) {
+    case "target-missing":
+      return {
         status: 400,
         body: { error: "No target repository specified." }
-      }
-    };
-  }
-
-  if (!ports.isValidRepoSlug(targetRepo)) {
-    return {
-      outcome: "refused",
-      operation: null,
-      refusal: {
+      };
+    case "invalid-repo":
+      return {
         status: 400,
         body: {
           error: `Invalid repository "${targetRepo}". Expected "owner/repo".`,
           code: "invalid-repo"
         }
-      }
-    };
-  }
-
-  // Adopt the record /api/azure-auto-setup left running, so the two POSTs read
-  // as one operation. When credentials already exist that route never ran, so
-  // start a record here instead — with the identity stage omitted rather than
-  // shown as skipped, because a stage that cannot happen has no business in the
-  // checklist.
-  const continuationId =
-    typeof data.operationId === "string" ? data.operationId : "";
-  if (continuationId) {
-    const operationEnvironment =
-      typeof data.operationEnvironment === "string" ?
-        data.operationEnvironment
-      : envName;
-    const existing = ports.getOperation(continuationId);
-    if (
-      !existing ||
-      ports.isStale(existing) ||
-      // A record settled by stale reconciliation, a stop, or a failure is
-      // closed, not resumable: continuing it would write new provenance into a
-      // terminal record the customer has already been given a verdict for.
-      ports.isTerminalState(existing.state) ||
-      existing.repo !== targetRepo ||
-      existing.environment !== operationEnvironment ||
-      existing.provider !== provider ||
-      (existing.currentStage !== ports.stageAuthorizeIdentity &&
-        existing.currentStage !== ports.stageConfigureEnvironment) ||
-      existing.inputRequired
-    ) {
+      };
+    case "operation-continuation-mismatch":
       return {
-        outcome: "refused",
-        operation: null,
-        refusal: {
-          status: 409,
-          body: {
-            error:
-              "The environment request does not match the setup operation it is continuing.",
-            code: "operation-continuation-mismatch",
-            operationId: continuationId
-          }
+        status: 409,
+        body: {
+          error:
+            "The environment request does not match the setup operation it is continuing.",
+          code: issue.code,
+          operationId: issue.operationId
         }
       };
-    }
-    // Rung 7, on the continuation path: the operation is proven to match this
-    // request, so its pinned account is the one to read the claims with.
-    const adoptedRefusal = await refuseClaimedNamespace(
-      data,
-      targetRepo,
-      envName,
-      provider,
-      existing.operationId,
-      ports
-    );
-    if (adoptedRefusal) {
-      return { outcome: "refused", operation: null, refusal: adoptedRefusal };
-    }
-    ports.enterStage(existing, ports.stageConfigureEnvironment);
-    return {
-      outcome: "admitted",
-      operation: existing,
-      targetRepo,
-      envName,
-      provider
-    };
-  }
-
-  const operation = ports.createOperation({
-    provider,
-    repo: targetRepo,
-    environment: envName,
-    stages: ports.buildStages({ includeIdentity: false }),
-    journey: {
-      origin: data.origin || null,
-      resumeTarget: data.resumeTarget || null,
-      resumeBranch: data.resumeBranch || data.branch || null,
-      resumeReason: data.resumeReason || null
-    }
-  });
-  const started = ports.startOperation(operation);
-  if (!started.ok) {
-    return {
-      outcome: "refused",
-      operation: null,
-      refusal: {
+    case "operation-start-conflict":
+      return {
         status: 409,
-        body: setupStartConflictResponse(targetRepo, started)
-      }
-    };
-  }
-  try {
-    await ports.persistOperations();
-  } catch (error) {
-    ports.reportOperationDiagnostic({
-      code: "operation-store-write-failed",
-      message: `Could not persist setup operation ${operation.operationId}: ${ports.errorMessage(error)}`
-    });
-    ports.finishFailed(operation, {
-      code: "operation-persistence-failed",
-      stage: operation.currentStage,
-      stepSeq: null,
-      message:
-        "Radius changed no cloud resources because it could not save the setup recovery record.",
-      classification: "unknown"
-    });
-    return {
-      outcome: "refused",
-      operation,
-      refusal: {
+        body: setupStartConflictResponse(targetRepo, issue.conflict)
+      };
+    case "operation-persistence-failed":
+      return {
         status: 500,
         body: {
           error:
             "Radius changed no cloud resources because it could not save the setup recovery record.",
-          code: "operation-persistence-failed",
-          operationId: operation.operationId
+          code: issue.code,
+          operationId: issue.operationId
         }
-      }
+      };
+    case "namespace-claims-unavailable":
+      return {
+        status: 409,
+        body: {
+          error: `Radius created nothing because it could not confirm which namespaces ${targetRepo}'s environments already use: ${issue.detail}`,
+          code: issue.code
+        }
+      };
+    case "namespace-already-claimed":
+      return {
+        status: 409,
+        body: {
+          error: `Namespace "${issue.namespace}" on cluster "${issue.cluster}" already belongs to environment "${issue.environment}". Radius allows one environment per namespace, so choose a different namespace or deploy to "${issue.environment}".`,
+          code: issue.code,
+          environment: issue.environment
+        }
+      };
+  }
+}
+
+// Core owns admission order; this binding retains namespace execution, record
+// projection, diagnostics and the existing HTTP refusal contract.
+export async function admitCreateEnvironmentRequest(
+  data: CreateEnvironmentRequestData,
+  ports: AdmissionPorts
+): Promise<CreateEnvironmentAdmission> {
+  const result = await admitSetupOperation(data, {
+    isValidRepo: ports.isValidRepoSlug,
+    getOperation: ports.getOperation,
+    isStale: ports.isStale,
+    isTerminal: ports.isTerminalState,
+    continuationStages: [
+      ports.stageAuthorizeIdentity,
+      ports.stageConfigureEnvironment
+    ],
+    createOperation: ({ repo, environment, provider, journey }) =>
+      ports.createOperation({
+        repo,
+        environment,
+        provider,
+        journey,
+        stages: ports.buildStages({ includeIdentity: false })
+      }),
+    startOperation: ports.startOperation,
+    persist: ports.persistOperations,
+    recordPersistenceFailure: (operation, error) => {
+      ports.reportOperationDiagnostic({
+        code: "operation-store-write-failed",
+        message: `Could not persist setup operation ${operation.operationId}: ${ports.errorMessage(error)}`
+      });
+      ports.finishFailed(operation, {
+        code: "operation-persistence-failed",
+        stage: operation.currentStage,
+        stepSeq: null,
+        message:
+          "Radius changed no cloud resources because it could not save the setup recovery record.",
+        classification: "unknown"
+      });
+    },
+    checkNamespace: (operation, target) =>
+      refuseClaimedNamespace(
+        data,
+        target.repo,
+        target.environment,
+        target.provider,
+        operation.operationId,
+        ports
+      ),
+    enterConfiguration: (operation) =>
+      ports.enterStage(operation, ports.stageConfigureEnvironment)
+  });
+  if (result.outcome === "refused") {
+    return {
+      outcome: "refused",
+      operation: result.operation,
+      refusal: admissionRefusal(result.issue, result.target.repo)
     };
   }
-  // Rung 7, on the fresh-start path: the record now exists, so the account
-  // pinned to it is the one to read the claims with.
-  const startedRefusal = await refuseClaimedNamespace(
-    data,
-    targetRepo,
-    envName,
-    provider,
-    operation.operationId,
-    ports
-  );
-  if (startedRefusal) {
-    return { outcome: "refused", operation, refusal: startedRefusal };
-  }
-  ports.enterStage(operation, ports.stageConfigureEnvironment);
   return {
     outcome: "admitted",
-    operation,
-    targetRepo,
-    envName,
-    provider
+    operation: result.operation,
+    targetRepo: result.target.repo,
+    envName: result.target.environment,
+    provider: result.target.provider
   };
 }

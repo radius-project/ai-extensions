@@ -1,5 +1,9 @@
 import type { IncomingMessage } from "node:http";
 import type { ProviderMutationRecord } from "../../operations.js";
+import type {
+  SetupOperationSnapshot,
+  SetupStartResult
+} from "@radius-project/core";
 
 // Type surface for the `POST /api/create-environment` slice. Declarations only —
 // erased at compile time — so the four behavioral seams (refusal ladder, gh
@@ -87,22 +91,10 @@ export interface WorkflowCommitOutcome {
 // The operation record as this route reads and writes it. Declared with every
 // field the route touches so a fixture cannot be narrower than production; the
 // real record carries more, which structural typing permits.
-export interface CreateEnvironmentOperation {
-  operationId: string;
-  repo?: string;
-  environment?: string;
-  provider?: string;
-  currentStage?: string;
-  // The terminal verdict, or the running/input state. Read by the continuation
-  // guard so a closed record cannot be adopted, and by the stop boundary.
-  state?: unknown;
+export interface CreateEnvironmentOperation extends SetupOperationSnapshot {
   // Walked by the operation model when a stop or a failure closes the record.
   stages?: unknown;
   steps?: unknown;
-  // The real record stores a prompt object here (or `null`), not a flag; the
-  // refusal only tests it for truthiness, so `unknown` keeps this declaration
-  // from being narrower than what `operations.ts` actually writes.
-  inputRequired?: unknown;
   verification?: unknown;
   recoveryState?: string | null;
   providerRecovery?: {
@@ -126,18 +118,9 @@ export interface CreateEnvironmentOperation {
   stopRequested?: boolean;
 }
 
-export interface OperationStartConflict {
-  ok: false;
-  reason?: "operation-in-progress" | "previous-cleanup-required";
-  conflict: { operationId: string };
-}
-
-export interface OperationStartAccepted {
-  ok: true;
-}
-
-export type OperationStartResult =
-  OperationStartAccepted | OperationStartConflict;
+export type OperationStartConflict = Extract<SetupStartResult, { ok: false }>;
+export type OperationStartAccepted = Extract<SetupStartResult, { ok: true }>;
+export type OperationStartResult = SetupStartResult;
 
 // A refusal is a status plus the exact body the legacy arm serialized. Kept as
 // data rather than a write so the ladder can be asserted rung by rung without a
