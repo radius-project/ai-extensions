@@ -400,7 +400,7 @@ describe("resolveAppModelStatus", () => {
     expect(status.freshness.requiresConfirmation).toBe(false);
   });
 
-  it("fails open when the origin record cannot be read", async () => {
+  it("does not treat an unreadable origin as absent authoring evidence", async () => {
     const { resolveAppModelStatus, deps } = helpers({
       bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
       headCommits: { "workspace:/workspace": COMMIT }
@@ -409,13 +409,9 @@ describe("resolveAppModelStatus", () => {
       throw new Error("worktree unreadable");
     };
 
-    const status = await resolveAppModelStatus(
-      "acme/widgets",
-      "main",
-      WORKSPACE_STATE
-    );
-
-    expect(status.freshness.status).toBe("unrecorded");
+    await expect(
+      resolveAppModelStatus("acme/widgets", "main", WORKSPACE_STATE)
+    ).rejects.toThrow("worktree unreadable");
   });
 
   it("falls back to GitHub when reading the worktree model fails", async () => {

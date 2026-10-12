@@ -73,6 +73,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Check application authoring contract
+        uses: radius-project/ai-extensions/.github/extension/actions/check-model-authoring@{{RADIUS_REF}}
+        with:
+          app-file: '{{APP_FILE}}'
+
       - name: Configure AWS Credentials (OIDC)
         if: ${{ vars.AWS_ROLE_ARN != '' }}
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3

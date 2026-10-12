@@ -725,11 +725,17 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
       { repo: "acme/widgets", branch: "main" }
     );
     entry.state.activeGraphView = "graph";
+    entry.state.graphAuthoringRestriction = "Model-only; deployment unverified";
     const resources = (await harness.host.invoke(
       "radius-panel",
       "get_graph_resources",
       { missingOnly: false }
     )) as { contextToken: string };
+    expect(resources).toMatchObject({
+      ready: true,
+      deploymentReadiness: "unverified",
+      authoringRestriction: "Model-only; deployment unverified"
+    });
     const originalEntry = harness.servers.get("radius-panel");
 
     await expect(

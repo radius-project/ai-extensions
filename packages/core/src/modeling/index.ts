@@ -77,3 +77,4 @@ export type { AppSourceEvaluation, AppSourceStatus } from "./app-source.js";
 
 export { fetchBicepFromRepo } from "./repo.js";
 export { fetchRecipePack, resolveRecipeOutputs } from "./recipe-resolver.js";
+export * from "./model-authoring.js";

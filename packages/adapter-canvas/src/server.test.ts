@@ -4856,20 +4856,23 @@ describe("triggerDeployRepairHandoff", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("does not hand off an OIDC subject case mismatch", () => {
-    const calls: DeployRepairHandoffInput[] = [];
-    setDeployRepairHandoff((payload) => {
-      calls.push(payload);
-    });
-    expect(
-      triggerDeployRepairHandoff(
-        failedEntry({
-          deployErrorKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND
-        })
-      )
-    ).toBe(false);
-    expect(calls).toHaveLength(0);
-  });
+  it.each([DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND, "model-only"] as const)(
+    "does not hand off a %s refusal",
+    (kind) => {
+      const calls: DeployRepairHandoffInput[] = [];
+      setDeployRepairHandoff((payload) => {
+        calls.push(payload);
+      });
+      expect(
+        triggerDeployRepairHandoff(
+          failedEntry({
+            deployErrorKind: kind
+          })
+        )
+      ).toBe(false);
+      expect(calls).toHaveLength(0);
+    }
+  );
 
   it("does not hand off a cloud-auth-drift failure, which only re-verifying can fix", () => {
     const calls: DeployRepairHandoffInput[] = [];

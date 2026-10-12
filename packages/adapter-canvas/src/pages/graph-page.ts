@@ -75,7 +75,10 @@ ${renderPageState(GRAPH_PAGE_STATE_ID, {
   resources,
   loaded,
   localSource,
-  followWorkspaceBranch
+  followWorkspaceBranch,
+  ...(state.graphAuthoringRestriction ?
+    { authoringRestriction: state.graphAuthoringRestriction }
+  : {})
 })}
 ${browserScriptTag("graph-page")}
 ${graphHeaderClose()}`

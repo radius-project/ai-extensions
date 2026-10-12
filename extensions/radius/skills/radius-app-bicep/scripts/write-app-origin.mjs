@@ -23,8 +23,13 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import {
+  modelOnlyRestriction,
+  parseModelOnlyAuthoring,
+  validateModelOnlyArtifacts
+} from "../../../../../packages/core/src/modeling/model-authoring.ts";
 
 function fail(message) {
   console.error(message);
@@ -152,6 +157,18 @@ const origin = {
 
 const target = path.join(path.dirname(app), "app.origin.json");
 try {
+  const runPath = path.join(path.dirname(app), "run.json");
+  const previous = existsSync(target) ? readFileSync(target, "utf8") : null;
+  const run =
+    existsSync(runPath) ? JSON.parse(readFileSync(runPath, "utf8")) : {};
+  if (run.authoring !== undefined) {
+    origin.authoring = parseModelOnlyAuthoring(run.authoring);
+  } else if (modelOnlyRestriction(model, previous)) {
+    origin.authoring = parseModelOnlyAuthoring(
+      JSON.parse(previous || "{}").authoring
+    );
+  }
+  validateModelOnlyArtifacts(model, JSON.stringify(origin), origin.authoring);
   writeFileSync(target, `${JSON.stringify(origin, null, 2)}\n`, "utf8");
 } catch (error) {
   fail(`Cannot write the origin record to ${target}: ${error.message}`);

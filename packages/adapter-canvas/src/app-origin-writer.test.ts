@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { buildSync } from "esbuild";
 import {
   evaluateAppModelFreshness,
   parseAppOrigin,
@@ -98,7 +99,13 @@ function duplicatePlugin(version: string): string {
     path.join(root, "package.json"),
     JSON.stringify({ name: "radius", version })
   );
-  fs.copyFileSync(script, path.join(scripts, "write-app-origin.mjs"));
+  buildSync({
+    entryPoints: [script],
+    outfile: path.join(scripts, "write-app-origin.mjs"),
+    bundle: true,
+    format: "esm",
+    platform: "node"
+  });
   return root;
 }
 

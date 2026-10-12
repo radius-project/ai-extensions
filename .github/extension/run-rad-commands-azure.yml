@@ -73,6 +73,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Check application authoring contract
+        uses: radius-project/ai-extensions/.github/extension/actions/check-model-authoring@{{RADIUS_REF}}
+        with:
+          app-file: '{{APP_FILE}}'
+
       - name: Azure Login (OIDC)
         if: ${{ vars.AZURE_CLIENT_ID != '' }}
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1

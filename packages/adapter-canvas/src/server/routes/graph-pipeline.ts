@@ -36,6 +36,7 @@ export interface GraphInstanceEntry {
 // nullable: a branch with no committed `.radius/app.bicep` is a normal state
 // that each route handles differently, not an error.
 export interface AppBicepSelection {
+  originText?: string | null;
   content: string | null;
   fromWorkspace: boolean;
   branch: string;

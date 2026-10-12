@@ -72,6 +72,7 @@ interface GraphPageState {
   loaded: boolean;
   localSource: boolean;
   followWorkspaceBranch: boolean;
+  authoringRestriction: string;
 }
 
 function parseState(context: BrowserContext): GraphPageState {
@@ -82,7 +83,8 @@ function parseState(context: BrowserContext): GraphPageState {
     resources: parseGraphResources(readArray(state, "resources")),
     loaded: readBoolean(state, "loaded"),
     localSource: readBoolean(state, "localSource"),
-    followWorkspaceBranch: readBoolean(state, "followWorkspaceBranch")
+    followWorkspaceBranch: readBoolean(state, "followWorkspaceBranch"),
+    authoringRestriction: readString(state, "authoringRestriction")
   };
 }
 
@@ -149,6 +151,7 @@ export function initializeGraphPage(
   let modelState: "pending" | "ready" | "failed" = "pending";
   let followWorkspaceBranch = page.followWorkspaceBranch;
   let graphFromWorkspace = page.localSource;
+  let authoringRestriction = page.authoringRestriction;
   let refreshLoadedGraph: (() => void) | null = null;
 
   // Keep the primary button in step with the compile state. The server renders
@@ -158,6 +161,11 @@ export function initializeGraphPage(
   // create-env and unavailable modes own their own enablement.
   const syncPrimaryButton = (): void => {
     if (!button) return;
+    if (authoringRestriction) {
+      button.disabled = true;
+      button.setAttribute("title", authoringRestriction);
+      return;
+    }
     const mode = button.dataset.mode;
     if (mode === "create-env" || mode === "unavailable") return;
     const branch = branchSelect ? branchSelect.value : page.branch;
@@ -390,10 +398,15 @@ export function initializeGraphPage(
           return;
         }
         if (isRecord(payload) && Array.isArray(payload.resources)) {
+          authoringRestriction = readString(payload, "authoringRestriction");
           modelState = "ready";
           syncPrimaryButton();
           stopProgress();
-          showStatus(context, "Application graph ready.", "info");
+          showStatus(
+            context,
+            authoringRestriction || "Application graph ready.",
+            "info"
+          );
           showLoadedGraph();
           renderOrUpdate(parseGraphResources(payload.resources), {
             repoUrl: githubRepositoryUrl(page.repo),
@@ -518,10 +531,15 @@ export function initializeGraphPage(
             return;
           }
           if (isRecord(payload) && Array.isArray(payload.resources)) {
+            authoringRestriction = readString(payload, "authoringRestriction");
             modelState = "ready";
             syncPrimaryButton();
             stopProgress();
-            showStatus(context, "Application graph ready.", "info");
+            showStatus(
+              context,
+              authoringRestriction || "Application graph ready.",
+              "info"
+            );
             renderOrUpdate(parseGraphResources(payload.resources), {
               ...graphOptions,
               localSource: recordSourceProvenance(payload)

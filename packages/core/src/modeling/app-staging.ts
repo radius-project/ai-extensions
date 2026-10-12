@@ -27,6 +27,11 @@
 // Directory holding an in-flight run, relative to `.radius/`. The prefix is
 // matched to find leftovers, so it must stay a prefix no other `.radius/` entry
 // can claim.
+import {
+  validateModelOnlyArtifacts,
+  type ModelOnlyAuthoring
+} from "./model-authoring.js";
+
 export const STAGING_DIR_PREFIX = ".staging-";
 
 // Ignore rule written into `.radius/.gitignore` when a run publishes, so the
@@ -140,6 +145,7 @@ export type ManagedFileHashes = Readonly<Record<string, string | null>>;
 // What `--begin` recorded about the run. Its absence is never treated as "no
 // baseline"; it means the run cannot be published at all.
 export interface StagedRunRecord {
+  authoring?: ModelOnlyAuthoring;
   // Fingerprints of every file in `.radius/` this run may overwrite.
   baseline: ManagedFileHashes;
   // How the authoring repair loop has gone so far, when the Bicep checker has
@@ -237,6 +243,18 @@ export function evaluateStagedRun(input: StagedRunInput): StagedRunEvaluation {
     return evaluation(
       "unverified",
       "The origin record does not describe the application model the run produced, so the published bytes would not be the ones the Bicep checker passed. Nothing was published."
+    );
+  }
+  try {
+    validateModelOnlyArtifacts(
+      model,
+      input.originText || "",
+      input.record.authoring
+    );
+  } catch (error) {
+    return evaluation(
+      "unverified",
+      error instanceof Error ? error.message : String(error)
     );
   }
 

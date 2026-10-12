@@ -1754,6 +1754,38 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(status).toContainText("The graph comparison is current.");
   });
 
+  test("keeps model-only graphs visible and deployment disabled across reopen @safety", async ({
+    page,
+    canvas
+  }) => {
+    const restriction = "Model-only application: deployment is unverified.";
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      graphLoaded: true,
+      graphResources: [{ id: "app/web" }],
+      graphAuthoringRestriction: restriction
+    });
+    await page.route("**/api/load-graph", (route) =>
+      route.fulfill({
+        json: {
+          resources: [{ id: "app/web" }],
+          authoringRestriction: restriction,
+          fromWorkspace: true
+        }
+      })
+    );
+    await gotoCanvas(page, canvas, "graph");
+    await expect(page.locator("#graph-refresh-status")).toHaveText(restriction);
+    await expect(page.locator("#deploy-app-btn")).toBeDisabled();
+    await expect(page.locator("#graph-container")).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#deploy-app-btn")).not.toBeFocused();
+    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+    await page.reload();
+    await expect(page.locator("#graph-refresh-status")).toHaveText(restriction);
+    await expect(page.locator("#deploy-app-btn")).toBeDisabled();
+  });
+
   test("stops the modeled graph after a terminal modeling refusal @safety", async ({
     page,
     canvas

@@ -1926,6 +1926,9 @@ describe("selected GitHub executor", { concurrent: false }, () => {
       error: null,
       status: 200
     });
+    await expect(
+      success.fetchFileFromRepo("octo/app", "app.origin.json", "main", true)
+    ).resolves.toBe("main");
 
     const denied = await loadGh("linux", {
       commandResult: {
@@ -1940,6 +1943,15 @@ describe("selected GitHub executor", { concurrent: false }, () => {
       error: "HTTP 403: Resource not accessible",
       status: 403
     });
+    await expect(
+      denied.fetchFileFromRepo("octo/app", "app.origin.json", "main", true)
+    ).rejects.toThrow("HTTP 403");
+    const absent = await loadGh("linux", {
+      commandResult: { error: "HTTP 404", stderr: "HTTP 404: Not Found" }
+    });
+    await expect(
+      absent.fetchFileFromRepo("octo/app", "app.origin.json", "main", true)
+    ).resolves.toBeNull();
   });
 });
 
