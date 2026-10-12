@@ -388,8 +388,11 @@ function bicepFixture(name: string, file = "compiled.json"): string {
 test.each([
   "aggregate-secret-alias",
   "aggregate-secret-module",
+  "aks-store-demo-after",
+  "aks-store-demo-before",
   "interpolated-ref",
-  "local-module-ref"
+  "local-module-ref",
+  "username-copy"
 ])("keeps captured %s output on the documented Bicep version", (fixture) => {
   const compiled = JSON.parse(bicepFixture(fixture)) as {
     metadata?: { _generator?: { version?: string } };
@@ -433,7 +436,8 @@ function localModule(
 function localModuleResources(
   resources: object,
   parameters: object = {},
-  parameterValues: object = {}
+  parameterValues: object = {},
+  variables?: object
 ) {
   return {
     type: "Microsoft.Resources/deployments",
@@ -441,14 +445,23 @@ function localModuleResources(
       parameters: parameterValues,
       template: {
         resources,
-        parameters
+        parameters,
+        ...(variables === undefined ? {} : { variables })
       }
     }
   };
 }
 
-function template(resources: object, parameters: object = {}): string {
-  return JSON.stringify({ resources, parameters });
+function template(
+  resources: object,
+  parameters: object = {},
+  variables?: object
+): string {
+  return JSON.stringify({
+    resources,
+    parameters,
+    ...(variables === undefined ? {} : { variables })
+  });
 }
 
 test("passes a warning-free Bicep compilation", () => {
@@ -3739,6 +3752,440 @@ function rabbitMqWithRawPassword(): string {
   );
 }
 
+describe("provisioned username copies", () => {
+  function rabbitMq(username: unknown) {
+    return radiusResource(rabbitMqType, { queue: "orders", username });
+  }
+
+  function mySql(username: unknown) {
+    return radiusResource(mySqlType, { database: "orders", username });
+  }
+
+  function check(compiledOutput: string) {
+    const directory = temporaryDirectory();
+    return runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+  }
+
+  function usernameCopies(stderr: string): string[] {
+    return stderr.split("\n").filter((line) => line.includes("username-copy"));
+  }
+
+  it("rejects a consumer that repeats the broker's literal username", () => {
+    const result = check(
+      template({
+        rabbitmq: rabbitMq("myadmin"),
+        web: containerEnv({ ORDER_QUEUE_USERNAME: { value: "myadmin" } })
+      })
+    );
+
+    assert.equal(result.status, 1);
+    assert.equal(usernameCopies(result.stderr).length, 1);
+    assert.match(
+      result.stderr,
+      /error username-copy: web\.properties\.containers\.web\.env\.ORDER_QUEUE_USERNAME: this value repeats the username set at rabbitmq\.properties\.username, so nothing keeps the two equal\./u
+    );
+    assert.match(result.stderr, /<resource>\.properties\.username/u);
+    assert.match(result.stderr, /Provisioned service usernames/u);
+    assert.doesNotMatch(result.stderr, /\u2014/u);
+  });
+
+  it.each([
+    "RabbitMQ__UserName",
+    "SPRING_RABBITMQ_USERNAME",
+    "PGUSER",
+    "MYSQL_USER",
+    "DB_LOGIN"
+  ])("checks the username-shaped variable %s", (name) => {
+    const result = check(
+      template({
+        rabbitmq: rabbitMq("myadmin"),
+        web: containerEnv({ [name]: { value: "myadmin" } })
+      })
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, new RegExp(`env\\.${name}: this value`, "u"));
+  });
+
+  it("rejects a consumer that repeats the value of the var the resource uses", () => {
+    const result = check(
+      template(
+        {
+          rabbitmq: rabbitMq("[variables('rabbitmqUsername')]"),
+          web: containerEnv({ ORDER_QUEUE_USERNAME: { value: "myadmin" } })
+        },
+        {},
+        { rabbitmqUsername: "myadmin" }
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /env\.ORDER_QUEUE_USERNAME: this value repeats the username set at rabbitmq\.properties\.username/u
+    );
+  });
+
+  it("rejects a consumer that uses a different var with the same value", () => {
+    const result = check(
+      template(
+        {
+          rabbitmq: rabbitMq("myadmin"),
+          web: containerEnv({
+            ORDER_QUEUE_USERNAME: { value: "[variables('queueUser')]" }
+          })
+        },
+        {},
+        { queueUser: "myadmin" }
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /env\.ORDER_QUEUE_USERNAME: this value/u);
+  });
+
+  it("names every resource whose username the consumer repeats", () => {
+    const result = check(
+      template({
+        mysql: mySql("myadmin"),
+        rabbitmq: rabbitMq("myadmin"),
+        web: containerEnv({ MYSQL_USER: { value: "myadmin" } })
+      })
+    );
+
+    assert.equal(result.status, 1);
+    assert.equal(usernameCopies(result.stderr).length, 1);
+    assert.match(
+      result.stderr,
+      /set at mysql\.properties\.username, rabbitmq\.properties\.username,/u
+    );
+  });
+
+  it("reports each offending variable in each container", () => {
+    const result = check(
+      template({
+        rabbitmq: rabbitMq("myadmin"),
+        web: radiusResource(containersType, {
+          containers: {
+            api: { env: { ORDER_QUEUE_USERNAME: { value: "myadmin" } } },
+            worker: { env: { RabbitMQ__UserName: { value: "myadmin" } } }
+          }
+        })
+      })
+    );
+
+    assert.equal(result.status, 1);
+    assert.equal(usernameCopies(result.stderr).length, 2);
+    assert.match(result.stderr, /containers\.api\.env\.ORDER_QUEUE_USERNAME/u);
+    assert.match(result.stderr, /containers\.worker\.env\.RabbitMQ__UserName/u);
+  });
+
+  it.each([
+    {
+      name: "a binding to the broker's readable username",
+      resources: {
+        rabbitmq: rabbitMq("myadmin"),
+        web: containerEnv({
+          ORDER_QUEUE_USERNAME: {
+            value: "[reference('rabbitmq').properties.username]"
+          }
+        })
+      },
+      variables: undefined
+    },
+    {
+      name: "one shared var on both sides",
+      resources: {
+        mysql: mySql("[variables('mysqlUsername')]"),
+        web: containerEnv({
+          MYSQL_USER: { value: "[variables('mysqlUsername')]" }
+        })
+      },
+      variables: { mysqlUsername: "myadmin" }
+    },
+    {
+      name: "the right var when another resource has the same username",
+      resources: {
+        mysql: mySql("[variables('mysqlUsername')]"),
+        rabbitmq: rabbitMq("[variables('rabbitmqUsername')]"),
+        web: containerEnv({
+          MYSQL_USER: { value: "[variables('mysqlUsername')]" },
+          ORDER_QUEUE_USERNAME: { value: "[variables('rabbitmqUsername')]" }
+        })
+      },
+      variables: { mysqlUsername: "myadmin", rabbitmqUsername: "myadmin" }
+    },
+    {
+      name: "the resource's var when another resource repeats it as a literal",
+      resources: {
+        mysql: mySql("myadmin"),
+        rabbitmq: rabbitMq("[variables('rabbitmqUsername')]"),
+        web: containerEnv({
+          ORDER_QUEUE_USERNAME: { value: "[variables('rabbitmqUsername')]" }
+        })
+      },
+      variables: { rabbitmqUsername: "myadmin" }
+    },
+    {
+      name: "a variable whose name is not username-shaped",
+      resources: {
+        rabbitmq: rabbitMq("myadmin"),
+        web: containerEnv({ QUEUE_NAME: { value: "myadmin" } })
+      },
+      variables: undefined
+    },
+    {
+      name: "a different username",
+      resources: {
+        rabbitmq: rabbitMq("myadmin"),
+        web: containerEnv({ ORDER_QUEUE_USERNAME: { value: "orders" } })
+      },
+      variables: undefined
+    },
+    {
+      name: "a consumer that reads the generated connection username",
+      resources: {
+        rabbitmq: rabbitMq("myadmin"),
+        web: radiusResource(containersType, {
+          connections: { rabbitmq: { source: "[reference('rabbitmq').id]" } },
+          containers: { web: { image: "example/web:latest" } }
+        })
+      },
+      variables: undefined
+    },
+    {
+      name: "a consumer that has no provisioned username to repeat",
+      resources: {
+        rabbitmq: radiusResource(rabbitMqType, { queue: "orders" }),
+        web: containerEnv({ ORDER_QUEUE_USERNAME: { value: "radius" } })
+      },
+      variables: undefined
+    },
+    {
+      name: "a container's own username field",
+      resources: {
+        web: radiusResource(containersType, {
+          username: "myadmin",
+          containers: {
+            web: { env: { ORDER_QUEUE_USERNAME: { value: "myadmin" } } }
+          }
+        })
+      },
+      variables: undefined
+    },
+    {
+      name: "an expression that is neither a var nor a literal",
+      resources: {
+        rabbitmq: rabbitMq("[variables('rabbitmqUsername')]"),
+        web: containerEnv({
+          ORDER_QUEUE_USERNAME: {
+            value: "[format('{0}', variables('rabbitmqUsername'))]"
+          }
+        })
+      },
+      variables: { rabbitmqUsername: "myadmin" }
+    },
+    {
+      name: "a var whose value is itself an expression",
+      resources: {
+        rabbitmq: rabbitMq("[variables('rabbitmqUsername')]"),
+        web: containerEnv({
+          ORDER_QUEUE_USERNAME: { value: "[variables('queueUser')]" }
+        })
+      },
+      variables: {
+        rabbitmqUsername: "[parameters('user')]",
+        queueUser: "[parameters('user')]"
+      }
+    },
+    {
+      name: "a var the template does not declare",
+      resources: {
+        rabbitmq: rabbitMq("myadmin"),
+        web: containerEnv({
+          ORDER_QUEUE_USERNAME: { value: "[variables('missing')]" }
+        })
+      },
+      variables: undefined
+    },
+    {
+      name: "a non-string var",
+      resources: {
+        rabbitmq: rabbitMq("myadmin"),
+        web: containerEnv({
+          ORDER_QUEUE_USERNAME: { value: "[variables('settings')]" }
+        })
+      },
+      variables: { settings: { user: "myadmin" } }
+    },
+    {
+      name: "malformed resources and environment entries",
+      resources: {
+        rabbitmq: rabbitMq("myadmin"),
+        unknown: { properties: { properties: { username: "myadmin" } } },
+        nothing: null,
+        brokenModule: {
+          type: "Microsoft.Resources/deployments",
+          properties: { template: "not-an-object" }
+        },
+        noContainers: radiusResource(containersType, {}),
+        badContainers: radiusResource(containersType, {
+          containers: {
+            nullContainer: null,
+            noEnv: { image: "example/web:latest" },
+            numericValue: { env: { ORDER_QUEUE_USERNAME: { value: 7 } } },
+            secretValue: {
+              env: {
+                ORDER_QUEUE_USERNAME: {
+                  valueFrom: {
+                    secretKeyRef: { secretName: "app-config", key: "username" }
+                  }
+                }
+              }
+            }
+          }
+        })
+      },
+      variables: undefined
+    }
+  ])("accepts $name", ({ resources, variables }) => {
+    const result = check(template(resources, {}, variables));
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("ignores parameter-valued usernames, even with a matching default", () => {
+    const result = check(
+      template(
+        {
+          mysql: mySql("[parameters('mysqlUsername')]"),
+          rabbitmq: rabbitMq("myadmin"),
+          web: containerEnv({
+            MYSQL_USER: { value: "myadmin" },
+            ORDER_QUEUE_USERNAME: { value: "[parameters('queueUser')]" }
+          })
+        },
+        {
+          mysqlUsername: { type: "string", defaultValue: "myadmin" },
+          queueUser: { type: "string", defaultValue: "myadmin" }
+        }
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.equal(usernameCopies(result.stderr).length, 1);
+    assert.match(
+      result.stderr,
+      /env\.MYSQL_USER: this value repeats the username set at rabbitmq\.properties\.username,/u
+    );
+  });
+
+  it("compares escaped literals by the value they deploy", () => {
+    const result = check(
+      template(
+        {
+          rabbitmq: rabbitMq("[[admin]"),
+          web: containerEnv({
+            ORDER_QUEUE_USERNAME: { value: "[[admin]" },
+            RabbitMQ__UserName: { value: "[variables('queueUser')]" },
+            SPRING_RABBITMQ_USERNAME: { value: "[admin]" }
+          })
+        },
+        {},
+        { queueUser: "[[admin]" }
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.equal(usernameCopies(result.stderr).length, 2);
+    assert.match(result.stderr, /env\.ORDER_QUEUE_USERNAME: this value/u);
+    assert.match(result.stderr, /env\.RabbitMQ__UserName: this value/u);
+  });
+
+  it("checks a local module against its own resources and vars", () => {
+    const result = check(
+      template(
+        {
+          mysql: mySql("myadmin"),
+          service: localModuleResources(
+            {
+              rabbitmq: rabbitMq("[variables('rabbitmqUsername')]"),
+              web: containerEnv({
+                MYSQL_USER: { value: "myadmin" },
+                ORDER_QUEUE_USERNAME: { value: "[variables('queueUser')]" },
+                RabbitMQ__UserName: { value: "[variables('rabbitmqUsername')]" }
+              })
+            },
+            {},
+            {},
+            { queueUser: "orders", rabbitmqUsername: "orders" }
+          )
+        },
+        {},
+        { queueUser: "myadmin" }
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.deepEqual(
+      usernameCopies(result.stderr).map((line) =>
+        line.replace(/^.*error username-copy: /u, "").replace(/: this.*$/u, "")
+      ),
+      ["service.web.properties.containers.web.env.ORDER_QUEUE_USERNAME"]
+    );
+    assert.match(
+      result.stderr,
+      /set at service\.rabbitmq\.properties\.username,/u
+    );
+  });
+
+  function usernameCopyPaths(stderr: string): string[] {
+    return usernameCopies(stderr).map((line) =>
+      line.replace(/^.*error username-copy: /u, "").replace(/: this.*$/u, "")
+    );
+  }
+
+  it("reports a copy of a var's value but not the var in captured Bicep output", () => {
+    const result = check(bicepFixture("username-copy"));
+
+    assert.equal(result.status, 1);
+    assert.deepEqual(
+      result.stderr.trim().split("\n"),
+      usernameCopies(result.stderr)
+    );
+    assert.deepEqual(usernameCopyPaths(result.stderr), [
+      "web.properties.containers.web.env.ORDER_QUEUE_USERNAME"
+    ]);
+    assert.match(result.stderr, /set at rabbitmq\.properties\.username,/u);
+  });
+
+  // Real models generated for aks-store-demo before and after the shared
+  // username guidance. They pass every other check today, but these cases
+  // assert only username-copy findings, not the exit status, so a later
+  // unrelated check does not break them.
+  it("reports both copied consumer usernames in the captured aks-store-demo model", () => {
+    const result = check(bicepFixture("aks-store-demo-before"));
+
+    assert.deepEqual(usernameCopyPaths(result.stderr), [
+      "makelineServiceContainer.properties.containers.service.env.ORDER_QUEUE_USERNAME",
+      "orderServiceContainer.properties.containers.service.env.ORDER_QUEUE_USERNAME"
+    ]);
+    for (const line of usernameCopies(result.stderr)) {
+      assert.match(line, /set at rabbitmqBroker\.properties\.username,/u);
+    }
+  });
+
+  it("accepts consumers bound to the broker in the captured aks-store-demo model", () => {
+    const result = check(bicepFixture("aks-store-demo-after"));
+
+    assert.deepEqual(usernameCopies(result.stderr), []);
+  });
+});
+
 describe("secure parameter targets", () => {
   it("reports compiler warnings and every compiled-output policy failure from one attempt", () => {
     const directory = temporaryDirectory();
@@ -3756,12 +4203,14 @@ describe("secure parameter targets", () => {
           type: rabbitMqType,
           properties: {
             properties: {
-              password: "[parameters('credential')]"
+              password: "[parameters('credential')]",
+              username: "myadmin"
             }
           }
         },
         web: containerEnv({
           A: { value: "$(Z)" },
+          ORDER_QUEUE_USERNAME: { value: "myadmin" },
           Z: { value: "later" }
         })
       },
@@ -3789,6 +4238,7 @@ describe("secure parameter targets", () => {
     assert.match(result.stderr, /container-image-build-source/u);
     assert.match(result.stderr, /source-code-reference/u);
     assert.match(result.stderr, /runtime-variable/u);
+    assert.match(result.stderr, /username-copy/u);
     assert.match(result.stderr, /secure-parameter-target/u);
     assert.deepEqual(readRepair(directory), {
       attempts: 1,

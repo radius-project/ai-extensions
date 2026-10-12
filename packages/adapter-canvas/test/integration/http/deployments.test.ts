@@ -1,3 +1,8 @@
+import {
+  collectWorkflowFailure,
+  redactCredentials
+} from "@radius-project/core";
+import { redactGhCredentials } from "../../../src/gh.js";
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
@@ -298,6 +303,151 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
+  it("returns the same sanitized diagnostics as the direct caller without publishing raw credentials", async () => {
+    const credential = "opaque-http-diagnostic-fixture";
+    const namedCredential = "unregistered-http-workflow-fixture";
+    const controlCredential = "unregistered-http-control-fixture";
+    const nested = JSON.stringify(
+      JSON.stringify({ client_secret: namedCredential })
+    );
+    const safeNested = JSON.stringify(
+      JSON.stringify({ client_secret: "[REDACTED]" })
+    );
+    const safeControl = JSON.stringify(
+      JSON.stringify({ password: "[REDACTED]" })
+    );
+    const redactDiagnostic = (value: string) =>
+      redactGhCredentials(value, { GH_TOKEN: credential });
+    const controlPlane =
+      `provisioning client_secret="${credential}" ` +
+      JSON.stringify(JSON.stringify({ password: controlCredential }));
+    const execution: WorkflowExecution = {
+      mode: "ambient",
+      run: async (args) => {
+        if (args[0] === "api")
+          return {
+            code: 0,
+            stderr: "",
+            stdout:
+              "HTTP/2 200\n\n" +
+              JSON.stringify(
+                args[1].includes("/jobs") ?
+                  {
+                    total_count: 1,
+                    jobs: [
+                      {
+                        name: "deploy",
+                        steps: [
+                          { name: "Run rad commands", conclusion: "failure" }
+                        ]
+                      }
+                    ]
+                  }
+                : { status: "completed", conclusion: "failure" }
+              )
+          };
+        if (args.join(" ") === "run view 42 --log --repo org/app")
+          return {
+            code: 0,
+            stderr: "",
+            stdout: `deploy\tRun rad commands\t2026-01-01 Error: { quota ${credential} ${nested} }`
+          };
+        throw new Error("Unexpected command");
+      }
+    };
+    const target = { repo: "org/app", runId: 42 };
+    const observed = await observeWorkflowRun(target, {
+      readRun: (repo, runId) => readWorkflowRun(execution, repo, runId)
+    });
+    if (!observed) throw new Error("Missing observed run");
+    const direct = await collectWorkflowFailure(
+      target,
+      observed,
+      { provider: "azure", resourcesTouched: false },
+      {
+        redactDiagnostic,
+        readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+        readControlPlaneLog: async () => controlPlane
+      }
+    );
+    const repairSnapshots: {
+      state: string | undefined;
+      error: string | null | undefined;
+    }[] = [];
+    const harness = start({
+      triggerDeployRepairHandoff: (entry) => {
+        repairSnapshots.push({
+          state: JSON.stringify(entry?.state),
+          error: entry?.state.deployError
+        });
+        return false;
+      }
+    });
+    harness.state.deployStatus = "in_progress";
+    harness.state.deployLogs = [];
+    harness.state.deployingResources = [
+      { name: "db", deployStatus: "pending" }
+    ];
+    const outcome = createDeployOutcomeService({
+      projectSafeGraphResources: () => [],
+      settleDeployStatuses,
+      fetchRunLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+      redactDiagnostic,
+      cloudAuthDriftKind: "cloud-auth-drift",
+      sleep: async () => {
+        throw new Error("No graph retry expected");
+      },
+      now: () => 1700000060000
+    });
+    await outcome.settle({
+      entry: { state: harness.state },
+      ...target,
+      provider: "azure",
+      resources: harness.state.deployingResources,
+      status: observed.status,
+      conclusion: observed.conclusion,
+      steps: observed.steps,
+      jobs: observed.jobs,
+      statusReader: {
+        graph: async () => ({ graph: null, status: "malformed" }),
+        controlPlaneLog: async () => controlPlane
+      },
+      deployStepStartedAt: 0,
+      log: (message) => harness.state.deployLogs?.push(message),
+      setStatus: (resource, status) => {
+        resource.deployStatus = status;
+      },
+      pollDeployStatus: async () => {}
+    });
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.error).toBe(direct.message);
+    expect(body.resources[0].deployMessage).toBe(direct.radiusError);
+    expect(body.logs).toEqual(expect.arrayContaining(direct.narration));
+    expect(body.error).toContain('client_secret="[REDACTED]"');
+    expect(JSON.stringify(body)).not.toContain(credential);
+    expect(repairSnapshots).toHaveLength(1);
+    for (const snapshot of repairSnapshots) {
+      for (const value of [credential, namedCredential, controlCredential])
+        expect(snapshot.state).not.toContain(value);
+      expect(snapshot.error).toContain(safeNested);
+      expect(snapshot.error).toContain(safeControl);
+    }
+    expect(body.error).toContain(safeNested);
+    expect(body.error).toContain(safeControl);
+    expect(body.resources[0].deployMessage).toContain(safeNested);
+    expect(body.logs.join("\n")).toContain(safeNested);
+    expect(body.logs.join("\n")).toContain(safeControl);
+    for (const value of [namedCredential, controlCredential]) {
+      expect(body.error).not.toContain(value);
+      expect(body.resources[0].deployMessage).not.toContain(value);
+      expect(body.logs.join("\n")).not.toContain(value);
+      expect(JSON.stringify(body)).not.toContain(value);
+    }
+  });
+
   it.each(["deferred", "exhausted"] as const)(
     "preserves a confirmed failure and %s artifact diagnostics through HTTP and the registered status tool",
     async (mode) => {
@@ -399,6 +549,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       });
       const reader = scope.reader({ repo: "org/app", runId: 42 });
       const outcome = createDeployOutcomeService({
+        redactDiagnostic: redactCredentials,
         projectSafeGraphResources: () => {
           throw new Error("No graph payload");
         },
@@ -834,6 +985,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         { name: "db", deployStatus: "pending" }
       ];
       const outcome = createDeployOutcomeService({
+        redactDiagnostic: redactCredentials,
         projectSafeGraphResources: () => [],
         settleDeployStatuses,
         fetchRunLog: (repo, runId) => readWorkflowLog(execution, repo, runId),

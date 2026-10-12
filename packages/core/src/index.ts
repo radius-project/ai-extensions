@@ -10,6 +10,8 @@
 // imports belong here. Helpers that exist for a sibling core module stay
 // exported from their own module and out of this file.
 
+export { redactCredentials } from "./credential-redaction.js";
+
 export {
   createWorkflowReadContext,
   createWorkflowReadCooldowns,
