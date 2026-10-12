@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import { parseDocument } from "yaml";
+import { automaticBranchVerificationPolicy } from "./verification-plan.js";
 
 interface RecordedCommit {
   path: string;
@@ -269,6 +271,33 @@ describe("generated workflow YAML validation", () => {
     ).rejects.toThrow(
       /deploy workflow "run-rad-commands-azure\.yml".*document root must be a mapping/u
     );
+  });
+
+  it("publishes only explicitly dispatched deployment after environment verification", async () => {
+    h.upstream["run-rad-commands.yml"] = BASE_UPSTREAM[
+      "run-rad-commands.yml"
+    ].replace(
+      "  workflow_dispatch:",
+      '  workflow_run:\n    workflows: ["Radius - Verify Credentials"]\n    types: [completed]\n  workflow_dispatch:'
+    );
+
+    const workflows = await generateDeployWorkflow("prod", ".radius/app.bicep");
+
+    expect(
+      automaticBranchVerificationPolicy({
+        verify: { content: null, error: "Not Found", status: 404 },
+        dispatcher: {
+          content: workflows["run-rad-commands.yml"],
+          error: null,
+          status: 200
+        },
+        legacyDeploy: { content: null, error: "Not Found", status: 404 }
+      })
+    ).toEqual({ state: "enabled" });
+    const dispatcher = parseDocument(workflows["run-rad-commands.yml"]);
+    expect(dispatcher.getIn(["on", "workflow_run"])).toBeUndefined();
+    expect(dispatcher.getIn(["on", "workflow_dispatch"])).toBeDefined();
+    expect(h.commits).toEqual([]);
   });
 
   it("rejects a workflow with no jobs", async () => {
