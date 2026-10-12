@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import {
+  boundedProviderDiagnostic,
   prepareProviderMutation,
   providerMutationId,
   providerMutationRecord,
+  recordProviderMutationDiagnostics,
   requestStop,
   settleProviderMutation,
   shouldStop,
@@ -33,7 +35,12 @@ export type ProviderMutationReconciliation<T> =
 
 export type RecoverableMutationResult<T> =
   | { state: "applied"; value: T; recovered: boolean }
-  | { state: "not_applied"; result?: ProviderMutationCommandResult }
+  | {
+      state: "not_applied";
+      result?: ProviderMutationCommandResult;
+      // An inconclusive command's diagnostic must not become a retryable result.
+      diagnostic?: string;
+    }
   | { state: "cancelled" };
 
 export class ProviderMutationRecoveryError extends Error {
@@ -381,7 +388,16 @@ async function reconcileMutation<T>(
   );
   requireRecoveryRollback(operation, mutation);
   await persistOrThrow(persist, "after reconciliation");
-  return { state: "not_applied" };
+  const recorded = providerMutationRecord(
+    operation,
+    mutation.kind,
+    mutation.target
+  );
+  const diagnostic = recorded?.finalDiagnostic || recorded?.initialDiagnostic;
+  return {
+    state: "not_applied",
+    ...(diagnostic ? { diagnostic } : {})
+  };
 }
 
 export async function recordProviderReconciliationFailure(
@@ -391,7 +407,19 @@ export async function recordProviderReconciliationFailure(
   error: unknown,
   recordAttempts?: (attempts: number) => void
 ): Promise<never> {
-  const detail = error instanceof Error ? error.message : String(error);
+  const detail =
+    boundedProviderDiagnostic(
+      error instanceof Error ? error.message : String(error)
+    ) || "No provider error detail was returned.";
+  const recorded = providerMutationRecord(
+    operation,
+    mutation.kind,
+    mutation.target
+  );
+  const commandDiagnostic =
+    recorded?.finalDiagnostic || recorded?.initialDiagnostic;
+  const diagnosticSuffix =
+    commandDiagnostic ? ` Command diagnostic: ${commandDiagnostic}` : "";
   const attempts = (Number(mutation.reconcileAttempts) || 0) + 1;
   const saveAttempts =
     recordAttempts ??
@@ -408,7 +436,8 @@ export async function recordProviderReconciliationFailure(
   if (attempts >= MAX_RECONCILE_ATTEMPTS) {
     const guidance =
       `Radius could not read provider state for ${mutation.kind} on ${mutation.target} after ${attempts} attempts, most recently: ${detail}. ` +
-      "It will not repeat that request or delete anything on a guess. Review that resource yourself, remove it if it is unwanted, then start a new setup.";
+      "It will not repeat that request or delete anything on a guess. Review that resource yourself, remove it if it is unwanted, then start a new setup." +
+      diagnosticSuffix;
     settleProviderMutation(
       operation,
       mutation.mutationId,
@@ -431,7 +460,7 @@ export async function recordProviderReconciliationFailure(
   saveAttempts(attempts);
   await persistOrThrow(persist, "after reconciliation failed");
   throw new ProviderMutationRecoveryError(
-    `Radius could not confirm the outcome of ${mutation.kind} for ${mutation.target}. It will not retry that mutation until provider state can be read safely.`,
+    `Radius could not confirm the outcome of ${mutation.kind} for ${mutation.target}. It will not retry that mutation until provider state can be read safely. Last provider read: ${detail}.${diagnosticSuffix}`,
     "provider-mutation-outcome-unknown"
   );
 }
@@ -628,7 +657,12 @@ export async function executeRecoverableMutation<T>(
     let result: ProviderMutationCommandResult;
     try {
       result = await input.mutate();
-    } catch {
+    } catch (error) {
+      const diagnostic = `The provider command threw: ${error instanceof Error ? error.message : String(error)}`;
+      recordProviderMutationDiagnostics(input.operation, mutation.mutationId, {
+        initial: diagnostic,
+        final: diagnostic
+      });
       settleProviderMutation(
         input.operation,
         mutation.mutationId,
@@ -651,7 +685,21 @@ export async function executeRecoverableMutation<T>(
     // Ambiguity is read before success. A command that timed out, was killed,
     // or died on a signal can still exit 0 on some runners, and accepting that
     // as an acknowledgement records a mutation nobody saw the provider answer.
-    if (providerMutationOutcomeUnknown(result, input.target)) {
+    const outcomeUnknown = providerMutationOutcomeUnknown(result, input.target);
+    if (outcomeUnknown || (result.code !== 0 && result.code !== "0")) {
+      const diagnostic = [
+        `Provider command exit code: ${result.code}${result.timedOut === true ? " (timed out)" : ""}.`,
+        result.stderr.trim(),
+        result.stdout.trim()
+      ]
+        .filter(Boolean)
+        .join("\n");
+      recordProviderMutationDiagnostics(input.operation, mutation.mutationId, {
+        initial: diagnostic,
+        final: diagnostic
+      });
+    }
+    if (outcomeUnknown) {
       settleProviderMutation(
         input.operation,
         mutation.mutationId,

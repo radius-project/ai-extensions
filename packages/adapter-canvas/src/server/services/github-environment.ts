@@ -330,10 +330,16 @@ export function selectedEnvironmentReader(executor: {
     code: string | number;
     stdout?: string;
     stderr?: string;
+    timedOut?: boolean;
   }>;
 }): (args: string[]) => Promise<GitHubEnvironmentCommandResult> {
   return async (args) => {
     const result = await executor.run(args);
+    if (result.timedOut) {
+      throw new Error(
+        "The selected GitHub account's environment lookup timed out."
+      );
+    }
     const code = Number(result.code);
     return {
       // A code that will not parse is not a success. Anything but an exact 0

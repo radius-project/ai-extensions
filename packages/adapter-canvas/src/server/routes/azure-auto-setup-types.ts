@@ -50,6 +50,11 @@ export interface AzureAutoSetupFailureInput {
   steps?: string[];
   runAz?:
     ((args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>) | null;
+  runGitHubVariable?:
+    ((args: string[]) => Promise<AzureAutoSetupCommandResult>) | null;
+  runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
+  readEnvironment?:
+    ((args: string[]) => Promise<AzureAutoSetupCommandResult>) | null;
 }
 
 export interface AzureAutoSetupOperationLifecyclePort {

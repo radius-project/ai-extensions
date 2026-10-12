@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createOperation,
+  fromPersistedOperation,
   prepareProviderMutation,
+  recordProviderMutationDiagnostics,
   requestStop,
-  settleProviderMutation
+  settleProviderMutation,
+  toPersistedOperation
 } from "../../operations.js";
 import {
   classifyProviderMutationFailure,
@@ -26,6 +29,76 @@ function command(
 }
 
 describe("provider mutation recovery", () => {
+  it.each([0, 11])(
+    "keeps command and bounded read diagnostics safe after %i prior reconciliation failures",
+    async (priorAttempts) => {
+      const operation = createOperation({ operationId: "op_read_diagnostic" });
+      const mutation = prepareProviderMutation(operation, {
+        kind: "azure_service_principal.create",
+        target: "app-1"
+      });
+      mutation.reconcileAttempts = priorAttempts;
+      recordProviderMutationDiagnostics(operation, mutation.mutationId, {
+        initial: "HTTP 503: first failure",
+        final: "HTTP 503: latest failure"
+      });
+      const readError = `HTTP 403: password=fixture-value ${"x".repeat(2500)}`;
+      await expect(
+        executeRecoverableMutation({
+          operation,
+          kind: mutation.kind,
+          target: mutation.target,
+          persist: async () => {},
+          mutate: async () => {
+            throw new Error("No repeated write is allowed.");
+          },
+          accept: () => null,
+          reconcile: async () => {
+            throw new Error(readError);
+          }
+        })
+      ).rejects.toMatchObject({
+        code:
+          priorAttempts === 11 ?
+            "provider-mutation-manual-required"
+          : "provider-mutation-outcome-unknown",
+        message: expect.stringContaining("HTTP 503: latest failure")
+      });
+      const saved = JSON.stringify(toPersistedOperation(operation));
+      expect(saved).toContain("password=[REDACTED]");
+      expect(saved).not.toContain("fixture-value");
+      expect(saved).not.toContain("x".repeat(2001));
+    }
+  );
+
+  it("returns an explicit read failure when a legacy journal and provider give no diagnostic", async () => {
+    const operation = createOperation({
+      operationId: "op_empty_read_diagnostic"
+    });
+    prepareProviderMutation(operation, {
+      kind: "azure_service_principal.create",
+      target: "app-1"
+    });
+    await expect(
+      executeRecoverableMutation({
+        operation,
+        kind: "azure_service_principal.create",
+        target: "app-1",
+        persist: async () => {},
+        mutate: async () => {
+          throw new Error("No repeated write is allowed.");
+        },
+        accept: () => null,
+        reconcile: async () => {
+          throw "";
+        }
+      })
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown",
+      message: expect.stringContaining("No provider error detail was returned.")
+    });
+  });
+
   it("persists intent before mutation and confirmation afterwards", async () => {
     const operation = createOperation({ operationId: "op_test" });
     const events: string[] = [];
@@ -601,6 +674,192 @@ describe("provider mutation recovery", () => {
       status: "not_applied",
       evidence: "BadRequest: scope is invalid"
     });
+  });
+
+  it.each([
+    command({ code: 1, stderr: "HTTP 503: Service Unavailable" }),
+    command({ code: 2, stdout: "The directory did not answer." }),
+    command({ code: 1, stderr: " \n", stdout: "\t" }),
+    command({ code: 0, timedOut: true }),
+    command({
+      code: "SIGTERM",
+      stderr: "Connection closed.",
+      stdout: "Request was sent."
+    })
+  ])(
+    "retains command diagnostics after an absence check: %j",
+    async (failed) => {
+      const operation = createOperation({ operationId: "op_diagnostics" });
+      const mutate = vi.fn(async () => failed);
+      const persisted: ReturnType<typeof toPersistedOperation>[] = [];
+
+      const result = await executeRecoverableMutation({
+        operation,
+        kind: "azure_service_principal.create",
+        target: "app-1",
+        persist: async () => {
+          persisted.push(toPersistedOperation(operation));
+        },
+        mutate,
+        accept: () => "sp-1",
+        reconcile: async () => ({ state: "not_applied" })
+      });
+
+      const diagnostic = [
+        `Provider command exit code: ${failed.code}${failed.timedOut ? " (timed out)" : ""}.`,
+        failed.stderr.trim(),
+        failed.stdout.trim()
+      ]
+        .filter(Boolean)
+        .join("\n");
+      expect(result).toEqual({ state: "not_applied", diagnostic });
+      expect(result).not.toHaveProperty("result");
+      expect(mutate).toHaveBeenCalledOnce();
+      expect(persisted[1].providerRecovery.mutations[0]).toMatchObject({
+        status: "outcome_unknown",
+        initialDiagnostic: diagnostic
+      });
+      expect(
+        fromPersistedOperation(persisted.at(-1)).providerRecovery.mutations[0]
+      ).toMatchObject({
+        status: "not_applied",
+        initialDiagnostic: diagnostic
+      });
+    }
+  );
+
+  it.each([new Error("socket closed"), "socket closed"])(
+    "retains a thrown command error without repeating the mutation",
+    async (error) => {
+      const operation = createOperation({ operationId: "op_thrown" });
+      const mutate = vi.fn(async () => {
+        throw error;
+      });
+
+      const result = await executeRecoverableMutation({
+        operation,
+        kind: "azure_service_principal.create",
+        target: "app-1",
+        persist: async () => {},
+        mutate,
+        accept: () => "sp-1",
+        reconcile: async () => ({ state: "not_applied" })
+      });
+
+      expect(result).toEqual({
+        state: "not_applied",
+        diagnostic: "The provider command threw: socket closed"
+      });
+      expect(mutate).toHaveBeenCalledOnce();
+    }
+  );
+
+  it("redacts and bounds diagnostics before persistence and preserves them on restart", async () => {
+    const operation = createOperation({ operationId: "op_redacted" });
+    const persisted: ReturnType<typeof toPersistedOperation>[] = [];
+    const diagnostic = `HTTP 503: Service Unavailable; password=fixture-value ${"x".repeat(2500)}`;
+    const input = {
+      kind: "azure_service_principal.create",
+      target: "app-1",
+      accept: () => "sp-1"
+    };
+
+    await expect(
+      executeRecoverableMutation({
+        ...input,
+        operation,
+        persist: async () => {
+          persisted.push(toPersistedOperation(operation));
+        },
+        mutate: async () => command({ code: 1, stderr: diagnostic }),
+        reconcile: async () => {
+          throw new Error("Directory temporarily unavailable");
+        }
+      })
+    ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+
+    const restored = fromPersistedOperation(persisted.at(-1));
+    const mutate = vi.fn(async () => command());
+    const result = await executeRecoverableMutation({
+      ...input,
+      operation: restored,
+      persist: async () => {},
+      mutate,
+      reconcile: async () => ({ state: "not_applied" })
+    });
+
+    expect(result).toMatchObject({
+      state: "not_applied",
+      diagnostic: expect.stringContaining("HTTP 503: Service Unavailable")
+    });
+    if (result.state !== "not_applied") throw new Error("Expected absence");
+    expect(result.diagnostic).toContain("[REDACTED]");
+    expect(result.diagnostic?.length).toBeLessThanOrEqual(2003);
+    expect(JSON.stringify(persisted)).not.toContain("fixture-value");
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("reports the latest failed attempt while retaining the first diagnostic", async () => {
+    const operation = createOperation({ operationId: "op_retried" });
+    const input = {
+      operation,
+      kind: "azure_service_principal.create",
+      target: "app-1",
+      persist: async () => {},
+      accept: () => "sp-1",
+      reconcile: async () => ({ state: "not_applied" as const })
+    };
+    await executeRecoverableMutation({
+      ...input,
+      mutate: async () =>
+        command({ code: 1, stderr: "BadRequest: scope is invalid" })
+    });
+
+    const result = await executeRecoverableMutation({
+      ...input,
+      mutate: async () =>
+        command({ code: 1, stderr: "HTTP 503: Service Unavailable" })
+    });
+
+    expect(result).toEqual({
+      state: "not_applied",
+      diagnostic:
+        "Provider command exit code: 1.\nHTTP 503: Service Unavailable"
+    });
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      initialDiagnostic:
+        "Provider command exit code: 1.\nBadRequest: scope is invalid",
+      finalDiagnostic:
+        "Provider command exit code: 1.\nHTTP 503: Service Unavailable"
+    });
+  });
+
+  it("uses the initial diagnostic when an older journal has no final diagnostic", async () => {
+    const operation = createOperation({ operationId: "op_initial_only" });
+    const mutation = prepareProviderMutation(operation, {
+      kind: "azure_service_principal.create",
+      target: "app-1"
+    });
+    recordProviderMutationDiagnostics(operation, mutation.mutationId, {
+      initial: "Connection closed."
+    });
+    const mutate = vi.fn(async () => command());
+
+    const result = await executeRecoverableMutation({
+      operation,
+      kind: mutation.kind,
+      target: mutation.target,
+      persist: async () => {},
+      mutate,
+      accept: () => "sp-1",
+      reconcile: async () => ({ state: "not_applied" })
+    });
+
+    expect(result).toEqual({
+      state: "not_applied",
+      diagnostic: "Connection closed."
+    });
+    expect(mutate).not.toHaveBeenCalled();
   });
 
   it("builds stable provider UUIDs with UUID v5 bits", () => {
