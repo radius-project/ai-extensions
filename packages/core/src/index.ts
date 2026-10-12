@@ -23,6 +23,17 @@ export type {
   SetupStartResult,
   SetupTarget
 } from "./setup-admission.js";
+export {
+  honorSetupStop,
+  saveSetupCheckpoint,
+  saveSetupOperation
+} from "./setup-boundary.js";
+export type {
+  SetupCheckpointOperation,
+  SetupCheckpointResult,
+  SetupPersistenceResult,
+  SetupStopPorts
+} from "./setup-boundary.js";
 
 export {
   createWorkflowReadContext,
