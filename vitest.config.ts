@@ -35,6 +35,13 @@ export default defineConfig({
           functions: 100,
           lines: 100
         },
+        "packages/adapter-canvas/src/server/routes/create-environment-refusals.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
         "packages/core/src/deploy-artifact-evidence.ts": {
           statements: 100,
           branches: 100,
