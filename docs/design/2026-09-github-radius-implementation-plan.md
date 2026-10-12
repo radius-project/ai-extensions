@@ -1,6 +1,6 @@
 # GitHub Radius library: staged implementation plan
 
-- **Scope**: Stage 0 inventory and Stage 1 workflow observation, diagnostics, artifact evidence, response metadata, and bounded read retry policy, followed by Stage 2 preparation. The Stage 1 closure stack is merged; the [acceptance audit](./2026-09-github-radius-migration-inventory.md#stage-1-acceptance-audit) retains revision-specific qualification and human-acceptance limits. Preparation records existing Canvas ownership and contracts without changing runtime behavior. Later stages retain their separate ownership below.
+- **Scope**: Stage 0 inventory and Stage 1 workflow observation, diagnostics, artifact evidence, response metadata, and bounded read retry policy, followed by Stage 2 preparation and admission extraction. The Stage 1 closure stack is merged; the [acceptance audit](./2026-09-github-radius-migration-inventory.md#stage-1-acceptance-audit) retains revision-specific qualification and human-acceptance limits. Preparation records existing Canvas ownership and contracts; Stage 2A extracts admission policy with immediate Canvas adoption and unchanged behavior. Checkpoint and safe-stop extraction remains pending the next layer. Later stages retain their separate ownership below.
 - **Design**: [GitHub Radius: Extracting a Reusable Library from Canvas](./2026-09-github-radius.md), approved and merged in [#845](https://github.com/radius-project/ai-extensions/pull/845).
 - **Planning baseline**: `c1c9e938963bbca923984138c82173ec3f0d8b08`, inspected on September 23, 2026. Recheck the current code and concurrent work before starting each slice.
 - **Implementation basis**: The approved design and current production code only.
@@ -133,6 +133,8 @@ Only classify phase outcomes supported by existing run/job/artifact evidence. Mi
 ## Stage 2: extract environment setup and verification
 
 **Preparation:** The [preparation inventory](./2026-09-github-radius-migration-inventory.md#stage-2-preparation) refreshes internal HTTP dependencies, ownership/lifecycle, record compatibility and verification/deploy behavior at `7cc174cd34b4c216403cf6ceb3fb814c0804a86a`. It adds generated-dispatcher characterization without moving policy or changing runtime behavior. Admission/checkpoint/safe-stop policy, runtime ownership, provider coordination, transport removal, verification and tools remain future slices; preparation does not implement Stage 2A or complete Stage 2.
+
+**Stage 2A admission delivery:** The [admission ownership record](./2026-09-github-radius-migration-inventory.md#stage-2a-admission-policy) documents core admission ordering and immediate Canvas adoption through typed ports, preserving operation identity, selected-account namespace checks and HTTP refusal contracts. Checkpoint and safe-stop policy remains with Canvas, pending extraction in the next layer. Runtime ownership, provider coordination, transport removal, verification and tools remain separate slices; admission does not complete Stage 2.
 
 **Outcome:** Existing Azure and AWS setup flows share one coordinator, including permission checks, workflow publication, verification, and required interactions.
 

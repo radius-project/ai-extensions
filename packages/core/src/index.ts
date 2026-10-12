@@ -12,6 +12,18 @@
 
 export { redactCredentials } from "./credential-redaction.js";
 
+export { admitSetupOperation } from "./setup-admission.js";
+export type {
+  SetupAdmissionInput,
+  SetupAdmissionIssue,
+  SetupAdmissionPorts,
+  SetupAdmissionResult,
+  SetupNamespaceIssue,
+  SetupOperationSnapshot,
+  SetupStartResult,
+  SetupTarget
+} from "./setup-admission.js";
+
 export {
   createWorkflowReadContext,
   createWorkflowReadCooldowns,
