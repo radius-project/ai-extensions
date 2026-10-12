@@ -1780,7 +1780,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#graph-container")).toBeVisible();
     await page.keyboard.press("Tab");
     await expect(page.locator("#deploy-app-btn")).not.toBeFocused();
-    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+    await expectNoWcagViolations(page);
     await page.reload();
     await expect(page.locator("#graph-refresh-status")).toHaveText(restriction);
     await expect(page.locator("#deploy-app-btn")).toBeDisabled();
