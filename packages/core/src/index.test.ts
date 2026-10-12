@@ -14,6 +14,9 @@ import * as core from "./index.js";
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
   "admitSetupOperation",
+  "honorSetupStop",
+  "saveSetupCheckpoint",
+  "saveSetupOperation",
   "createWorkflowReadContext",
   "createWorkflowReadCooldowns",
   "isSecondaryWorkflowRateLimitMessage",
