@@ -1026,6 +1026,46 @@ describe("ensureServicePrincipal", () => {
       expect(sleep).toHaveBeenCalledOnce();
     });
 
+    it("reads a rejection from stdout when stderr is blank", async () => {
+      const { port } = recovery();
+      const sleep = vi.fn(async () => {});
+      let creates = 0;
+
+      const retried = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "show") return absent;
+          creates += 1;
+          return creates === 1 ?
+              {
+                code: 1,
+                stderr: " \n",
+                stdout: "HTTP 429: Too Many Requests\nRetry-After: 1"
+              }
+            : { code: 0, stdout: JSON.stringify({ id: "sp-object-1" }) };
+        },
+        port,
+        async () => true,
+        sleep
+      );
+
+      expect(retried).toMatchObject({ ok: true, state: "created" });
+      expect(creates).toBe(2);
+
+      const denied = await ensureServicePrincipal(
+        "app-2",
+        async (args) =>
+          args[2] === "show" ?
+            absent
+          : { code: 1, stderr: " \n", stdout: "HTTP 403: Forbidden" },
+        recovery().port,
+        async () => true,
+        sleep
+      );
+
+      expect(denied).toEqual({ ok: false, stderr: "HTTP 403: Forbidden" });
+    });
+
     it("bounds definite rejection retries and preserves the final provider error", async () => {
       const { operation, port } = recovery();
       let creates = 0;

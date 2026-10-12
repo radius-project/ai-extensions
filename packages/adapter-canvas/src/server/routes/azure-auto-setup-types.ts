@@ -202,7 +202,8 @@ export interface AzureAutoSetupDependencies {
           persist(): Promise<void>;
         }
       | undefined,
-    beforeCreate: () => Promise<boolean>
+    beforeCreate: () => Promise<boolean>,
+    sleep?: (milliseconds: number) => Promise<void>
   ): Promise<
     | {
         ok: true;

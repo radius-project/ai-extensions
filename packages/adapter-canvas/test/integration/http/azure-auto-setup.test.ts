@@ -578,6 +578,55 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     }
   );
 
+  it("deletes nothing when identity verification fails before cleanup", async () => {
+    const setup = await successfulSetup(false);
+    Object.assign(
+      setup.operation,
+      createOperation({
+        operationId: "op_http_identity_failure",
+        repo: "octo/app",
+        environment: "dev",
+        provider: "azure",
+        currentStage: "authorize_identity"
+      })
+    );
+    recordGitHubEnvironment(setup.operation, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "123"
+    });
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) => {
+        calls.push(args);
+        throw new Error("The selected GitHub account changed.");
+      }
+    });
+    // The real executor verifies identity before every command.
+    executor.verifyIdentity = async () => {
+      throw new Error("The selected GitHub account changed.");
+    };
+    setup.dependencies.external.getSelectedGitHubExecutor = () => executor;
+    setup.dependencies.finalizeSetupFailure = finalizeSetupFailure;
+
+    const response = await fetch(
+      `${setup.running.baseUrl}/api/azure-auto-setup`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Server-Owned": "token-a"
+        },
+        body: JSON.stringify(VALID_BODY)
+      }
+    );
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(calls.some((args) => args.includes("DELETE"))).toBe(false);
+    expect(setup.azCalls.some((call) => call.includes(" delete "))).toBe(false);
+  });
+
   it("keeps an uncertain service-principal write pending and returns its redacted diagnostic", async () => {
     const setup = await successfulSetup(false);
     Object.assign(
@@ -592,8 +641,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     );
     const runAz = setup.dependencies.external.runAz;
     const principalCalls: string[] = [];
-    setup.dependencies.ensureServicePrincipal = (...args) =>
-      ensureServicePrincipal(...args, async () => {});
+    setup.dependencies.ensureServicePrincipal = ensureServicePrincipal;
     setup.dependencies.finalizeSetupFailure = finalizeSetupFailure;
     recordGitHubEnvironment(setup.operation, {
       state: "created",

@@ -3129,7 +3129,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#env-step1-next")).toBeDisabled();
   });
 
-  test("keeps setup retries and cleanup durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
+  test("keeps composed service-principal retry and cleanup results durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
     page,
     canvas
   }) => {

@@ -3866,7 +3866,18 @@ export async function ensureServicePrincipal(
     }
     if (recovered.state === "not_applied") {
       const rejected = recovered.result;
-      const detail = (rejected?.stderr || rejected?.stdout || "").trim();
+      const firstOutput = (
+        value:
+          | {
+              stderr?: string;
+              stdout?: string;
+            }
+          | undefined
+      ) =>
+        [value?.stderr, value?.stdout]
+          .map((text) => (text || "").trim())
+          .find(Boolean) || "";
+      const detail = firstOutput(rejected);
       const permissionFailure =
         /HTTP\s*(?:401|403)|Authorization|Authentication|Insufficient privileges/i.test(
           detail
@@ -3885,7 +3896,7 @@ export async function ensureServicePrincipal(
       return {
         ok: false,
         stderr:
-          (rejected?.stderr || rejected?.stdout || "").trim() ||
+          detail ||
           recovered.diagnostic ||
           "Could not create or find the Service Principal."
       };

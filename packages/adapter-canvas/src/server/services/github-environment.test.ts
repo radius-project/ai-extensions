@@ -1113,10 +1113,10 @@ describe("selectedEnvironmentReader", () => {
   });
 
   it("reads through the executor it was built from, not ambient gh", async () => {
-    const seen: string[][] = [];
+    const seen: Array<[string[], { timeout: number }]> = [];
     const read = selectedEnvironmentReader({
-      run: async (args) => {
-        seen.push(args);
+      run: async (args, options) => {
+        seen.push([args, options]);
         return {
           code: 0,
           stdout: JSON.stringify({ id: 1234567, name: "dev" }),
@@ -1132,7 +1132,9 @@ describe("selectedEnvironmentReader", () => {
       stdout: JSON.stringify({ id: 1234567, name: "dev" }),
       stderr: ""
     });
-    expect(seen).toEqual([["api", "/repos/octo/app/environments/dev"]]);
+    expect(seen).toEqual([
+      [["api", "/repos/octo/app/environments/dev"], { timeout: 20000 }]
+    ]);
   });
 
   it.each([

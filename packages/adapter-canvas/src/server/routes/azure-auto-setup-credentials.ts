@@ -1055,7 +1055,8 @@ export async function configureAzureAutoSetupCredentials({
       operation,
       persist: dependencies.operations.persist
     },
-    () => stopBoundary("before-service-principal-create")
+    () => stopBoundary("before-service-principal-create"),
+    dependencies.sleep
   );
   if (!servicePrincipal.ok) {
     if (servicePrincipal.stopped) return false;

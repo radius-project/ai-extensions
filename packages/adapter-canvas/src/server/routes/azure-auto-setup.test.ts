@@ -424,7 +424,7 @@ describe("POST /api/azure-auto-setup construction (SU-01)", () => {
       ).resolves.toBeUndefined();
       expect(run.mock.calls).toEqual([
         [variable, { timeout: 20000 }],
-        [read],
+        [read, { timeout: 20000 }],
         [deletion, { timeout: 20000 }]
       ]);
 
