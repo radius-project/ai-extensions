@@ -7,6 +7,7 @@ export default defineConfig({
       "../core/src/deploy-artifact-evidence.test.ts",
       "../core/src/workflow-read-policy.test.ts",
       "../core/src/setup-{admission,boundary}.test.ts",
+      "src/server/routes/create-environment-refusals.test.ts",
       "src/server/services/{setup-checkpoint,operation-stop-boundary}.test.ts",
       "../adapter-shared/src/workflow-artifacts*.test.ts",
       "../adapter-shared/src/workflow-read*.test.ts",
