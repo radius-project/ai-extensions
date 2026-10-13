@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { promises as fs } from "node:fs";
@@ -19,6 +19,7 @@ import {
   isWorkspacePath,
   modelingRunLastActivityAtMs,
   workspaceHeadCommit,
+  workspaceSourceRevision,
   uncommittedGeneratedPaths,
   workspaceSourceChangedSince,
   workspaceModelRecoverable,
@@ -923,6 +924,204 @@ describe("workspaceHeadCommit", () => {
 // The freshness check hinges on this: committing a generated model advances HEAD
 // past the commit that model recorded, so a plain commit comparison would mark
 // every committed model stale forever. Only changes OUTSIDE .radius/ count.
+describe("workspaceSourceRevision", () => {
+  async function inCheckout(
+    run: (dir: string, git: (...args: string[]) => void) => Promise<void>
+  ): Promise<void> {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "rad-source-revision-")
+    );
+    const git = (...args: string[]) => {
+      execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+    };
+    try {
+      git("init", "--quiet", "--initial-branch", "main");
+      git("config", "user.email", "radius@example.invalid");
+      git("config", "user.name", "Radius Test");
+      await fs.writeFile(path.join(dir, "app.txt"), "source\n");
+      await fs.writeFile(path.join(dir, ".gitignore"), "ignored.txt\n");
+      git("add", ".");
+      git("commit", "--quiet", "-m", "source");
+      await run(dir, git);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5 });
+    }
+  }
+
+  it.each([
+    "unstaged",
+    "staged",
+    "deleted",
+    "renamed",
+    "untracked",
+    "committed"
+  ])(
+    "detects %s source changes and keeps the new revision stable",
+    async (change) => {
+      await inCheckout(async (dir, git) => {
+        const before = await workspaceSourceRevision(dir);
+        const file = path.join(dir, "app.txt");
+        if (change === "deleted") await fs.unlink(file);
+        else if (change === "renamed") git("mv", "app.txt", "renamed.txt");
+        else if (change === "untracked") {
+          await fs.writeFile(path.join(dir, "a source.txt"), "new file\n");
+        } else {
+          await fs.writeFile(file, "edited\n");
+          if (change !== "unstaged") git("add", ".");
+          if (change === "committed") git("commit", "--quiet", "-m", "edit");
+        }
+        const after = await workspaceSourceRevision(dir);
+        expect(after).toMatch(/^[a-f0-9]{64}$/);
+        expect(after).not.toBe(before);
+        expect(await workspaceSourceRevision(dir)).toBe(after);
+        if (change === "unstaged") {
+          git("add", ".");
+          expect(await workspaceSourceRevision(dir)).toBe(after);
+        }
+      });
+    }
+  );
+
+  it("detects content edits to an already-untracked file without a status change", async () => {
+    await inCheckout(async (dir) => {
+      const file = path.join(dir, "new.txt");
+      await fs.writeFile(file, "one\n");
+      const first = await workspaceSourceRevision(dir);
+      await fs.writeFile(file, "two\n");
+      expect(await workspaceSourceRevision(dir)).not.toBe(first);
+    });
+  });
+
+  it("ignores generated and ignored files and restores a revision when edits are undone", async () => {
+    await inCheckout(async (dir, git) => {
+      const before = await workspaceSourceRevision(dir);
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".radius", "app.bicep"), "model");
+      await fs.writeFile(path.join(dir, "app.bicep"), "legacy model");
+      await fs.writeFile(path.join(dir, "app.origin.json"), "{}");
+      await fs.writeFile(path.join(dir, "ignored.txt"), "ignored");
+      git("add", ".radius", "app.bicep", "app.origin.json");
+      expect(await workspaceSourceRevision(dir)).toBe(before);
+      await fs.writeFile(path.join(dir, "app.txt"), "edit\n");
+      expect(await workspaceSourceRevision(dir)).not.toBe(before);
+      await fs.writeFile(path.join(dir, "app.txt"), "source\n");
+      expect(await workspaceSourceRevision(dir)).toBe(before);
+    });
+  });
+
+  it("does not run an external diff program", async () => {
+    await inCheckout(async (dir, git) => {
+      const before = await workspaceSourceRevision(dir);
+      git("config", "diff.external", "command-that-does-not-exist");
+      await fs.writeFile(path.join(dir, "app.txt"), "edit\n");
+      expect(await workspaceSourceRevision(dir)).not.toBe(before);
+    });
+  });
+
+  it("rejects a failed Git diff instead of inventing a source revision", async () => {
+    await inCheckout(async (dir, git) => {
+      git("config", "diff.algorithm", "invalid-algorithm");
+      await expect(workspaceSourceRevision(dir)).rejects.toThrow(
+        "Saved workspace source changes could not be read"
+      );
+    });
+  });
+
+  it("hashes large saved source files without buffering a Git patch", async () => {
+    await inCheckout(async (dir) => {
+      const first = await workspaceSourceRevision(dir);
+      await fs.writeFile(
+        path.join(dir, "app.txt"),
+        "changed line\n".repeat(100_000)
+      );
+      const edited = await workspaceSourceRevision(dir);
+      expect(edited).not.toBe(first);
+      expect(await workspaceSourceRevision(dir)).toBe(edited);
+    });
+  });
+
+  it("rejects an untracked nested repository rather than hashing a directory", async () => {
+    await inCheckout(async (dir) => {
+      const nested = path.join(dir, "nested");
+      await fs.mkdir(nested);
+      execFileSync("git", ["init", "--quiet"], { cwd: nested });
+      await fs.writeFile(path.join(nested, "file.txt"), "nested source\n");
+      await expect(workspaceSourceRevision(dir)).rejects.toThrow("not a file");
+    });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "hashes an untracked link without reading its external target",
+    async () => {
+      await inCheckout(async (dir) => {
+        const link = path.join(dir, "source-link");
+        await fs.symlink(path.join(dir, "..", "missing-outside-file"), link);
+        const first = await workspaceSourceRevision(dir);
+        await fs.unlink(link);
+        await fs.symlink(path.join(dir, "..", "different-outside-file"), link);
+        expect(await workspaceSourceRevision(dir)).not.toBe(first);
+      });
+    }
+  );
+
+  it("rejects a commit that changes during an untracked file read", async () => {
+    await inCheckout(async (dir, git) => {
+      await fs.writeFile(path.join(dir, "new.txt"), "new\n");
+      const readFile = fs.readFile;
+      const spy = vi
+        .spyOn(fs, "readFile")
+        .mockImplementationOnce(async (...args) => {
+          git("commit", "--quiet", "--allow-empty", "-m", "moved");
+          return await readFile(...args);
+        });
+      try {
+        await expect(workspaceSourceRevision(dir)).rejects.toThrow(
+          "commit changed"
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it("rejects an untracked file that disappears during the read", async () => {
+    await inCheckout(async (dir) => {
+      const file = path.join(dir, "new.txt");
+      await fs.writeFile(file, "new\n");
+      const lstat = fs.lstat;
+      const spy = vi
+        .spyOn(fs, "lstat")
+        .mockImplementationOnce(async (...args) => {
+          await fs.unlink(file);
+          return await lstat(...args);
+        });
+      try {
+        await expect(workspaceSourceRevision(dir)).rejects.toThrow();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it("rejects a checkout with no commit and a non-repository path", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-source-unknown-"));
+    try {
+      await expect(workspaceSourceRevision(dir)).rejects.toThrow(
+        "could not be read"
+      );
+      execFileSync("git", ["init", "--quiet"], { cwd: dir });
+      await expect(workspaceSourceRevision(dir)).rejects.toThrow(
+        "could not be read"
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+    await expect(workspaceSourceRevision(undefined)).rejects.toThrow(
+      "could not be read"
+    );
+  });
+});
+
 describe("workspaceSourceChangedSince", () => {
   async function checkout(): Promise<{ dir: string; first: string }> {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-drift-"));

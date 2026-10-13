@@ -105,7 +105,7 @@ interface PipelineScript {
   // The head commit each branch is at now, keyed by branch. Missing models a
   // commit that cannot be read.
   branchSourceCommits?: Record<string, string>;
-  readBranchSourceCommit?: (branch: string) => Promise<string>;
+  readBranchSourceRevision?: (branch: string) => Promise<string>;
   branchResolution?:
     WorkspaceBranchResolution | (() => Promise<WorkspaceBranchResolution>);
   commitBranchResolution?: boolean;
@@ -311,8 +311,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         Promise.resolve(harnessScript.modelingActivityAtMs ?? null)
       );
     },
-    readBranchSourceCommit: (_entry, _repo, branch) =>
-      harnessScript.readBranchSourceCommit?.(branch) ??
+    readBranchSourceRevision: (_entry, _repo, branch) =>
+      harnessScript.readBranchSourceRevision?.(branch) ??
       Promise.resolve(harnessScript.branchSourceCommits?.[branch] ?? ""),
     prepareSourceRefResources,
     setSourceRefResources,
@@ -527,6 +527,32 @@ describe("graph planning workflows", () => {
       ]);
     });
 
+    it.each(["loadGraph", "planGraph"] as const)(
+      "keeps the %s missing-model handoff fenced after the HTTP response",
+      async (workflow) => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) }
+        });
+        const handoff = vi.spyOn(
+          harness.dependencies,
+          "triggerAppBicepHandoff"
+        );
+        await harness.run(workflow, '{"repo":"octo/app"}');
+        const isCurrent = handoff.mock.calls[0]?.[5];
+        if (!isCurrent) throw new Error("Missing handoff currency predicate");
+        expect(isCurrent()).toBe(true);
+        prepareSourceRefResources(
+          harness.entry,
+          workflow === "loadGraph" ? "graph" : "planned",
+          {
+            repo: "octo/app",
+            branch: "new-selection"
+          }
+        );
+        expect(isCurrent()).toBe(false);
+      }
+    );
+
     it("surfaces a reported permanent authoring failure without requesting modeling again", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) }
@@ -545,7 +571,7 @@ describe("graph planning workflows", () => {
 
       expect(outcome.payload).toEqual({
         error:
-          "Application model generation failed: The configured Recipe rejects the required credential shape. It will not be retried until the branch is updated.",
+          "Application model generation failed: The configured Recipe rejects the required credential shape. The source revision could not be read. Reload to check it again, then change a source file or update the branch to retry.",
         modelingFailed: true,
         appModelAuthoringFailed: true,
         repo: "octo/app",
@@ -595,6 +621,63 @@ describe("graph planning workflows", () => {
       });
     });
 
+    it.each([
+      ["loadGraph", "progress"],
+      ["loadGraph", "request"],
+      ["loadGraph", "source reference"],
+      ["planGraph", "progress"],
+      ["planGraph", "request"],
+      ["planGraph", "source reference"]
+    ] as const)(
+      "rejects %s superseded by %s while a failure's source revision is read",
+      async (workflow, superseded) => {
+        const harness = failedAt("sha-0");
+        const view = workflow === "loadGraph" ? "graph" : "planned";
+        harness.script.readBranchSourceRevision = async () => {
+          if (superseded === "progress") {
+            replaceProgressRecord(harness.state, view, {
+              stage: "checking_model",
+              state: "running",
+              detail: "New request",
+              sequence: 1
+            });
+          } else if (superseded === "source reference") {
+            prepareSourceRefResources(harness.entry, view, {
+              repo: "octo/app",
+              branch: "new-selection"
+            });
+          } else if (workflow === "loadGraph") {
+            harness.state.graphBuildGeneration =
+              (harness.state.graphBuildGeneration ?? 0) + 1;
+          } else {
+            beginPlannedGraphRequest(harness.state);
+          }
+          return "sha-1";
+        };
+        const outcome = await harness.run(workflow, '{"repo":"octo/app"}');
+        expect(outcome.status).toBe(409);
+        expect(outcome.payload).toEqual({ stale: true });
+        expect(harness.state.appModelFailures?.["octo/app::main"]?.commit).toBe(
+          "sha-0"
+        );
+        expect(harness.handoffs).toEqual([]);
+      }
+    );
+
+    it("recovers a missing baseline without retrying unchanged source", async () => {
+      const harness = failedAt();
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(
+        harness.state.appModelFailures?.["octo/app::main"]?.sourceRevision
+      ).toBe("sha-1");
+      await harness.run("loadGraph", '{"repo":"octo/app","restartWait":true}');
+      expect(harness.handoffs).toEqual([]);
+      harness.script.branchSourceCommits = { main: "sha-2" };
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
     it("clears a permanent failure and requests a new attempt once the branch commit changes", async () => {
       const harness = failedAt("sha-0");
 
@@ -625,7 +708,7 @@ describe("graph planning workflows", () => {
 
     it("keeps a permanent failure when reading the branch commit throws", async () => {
       const harness = failedAt("sha-0");
-      harness.script.readBranchSourceCommit = () =>
+      harness.script.readBranchSourceRevision = () =>
         Promise.reject(new Error("offline"));
 
       const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
@@ -636,7 +719,7 @@ describe("graph planning workflows", () => {
 
     it("does not clear a newer failure recorded while the commit was being read", async () => {
       const harness = failedAt("sha-0");
-      harness.script.readBranchSourceCommit = () => {
+      harness.script.readBranchSourceRevision = () => {
         harness.state.appModelFailures = {
           "octo/app::main": {
             attemptToken: "attempt-2",
@@ -2130,7 +2213,7 @@ describe("graph planning workflows", () => {
         expect(outcome.status).toBe(200);
         expect(outcome.payload).toEqual({
           error:
-            "Application model generation failed: The configured Recipe rejects the required credential shape. It will not be retried until the branch is updated.",
+            "Application model generation failed: The configured Recipe rejects the required credential shape. The source revision could not be read. Reload to check it again, then change a source file or update the branch to retry.",
           modelingFailed: true,
           appModelAuthoringFailed: true,
           repo: "octo/app"
@@ -2271,39 +2354,55 @@ describe("graph planning workflows", () => {
       });
     });
 
-    it("leaves fencing state alone when a newer comparison supersedes the request", async () => {
-      let harness!: Harness;
-      harness = start({
-        selections: {
-          main: selectionOf({ branch: "main", content: null }),
-          "feature/x": selectionOf({ branch: "feature/x", content: null })
-        },
-        branchSourceCommits: { main: "sha-9", "feature/x": "sha-9" },
-        afterSelect: () => {
-          prepareSourceRefResources(harness.entry, "diff", {
-            repo: "octo/app",
-            baseBranch: "main",
-            headBranch: "feature/y"
-          });
+    it.each(["selection", "source read"])(
+      "leaves fencing state alone when a newer comparison supersedes the request during %s",
+      async (phase) => {
+        let harness!: Harness;
+        harness = start({
+          selections: {
+            main: selectionOf({ branch: "main", content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          },
+          branchSourceCommits: { main: "sha-9", "feature/x": "sha-9" },
+          afterSelect:
+            phase === "selection" ?
+              () => {
+                prepareSourceRefResources(harness.entry, "diff", {
+                  repo: "octo/app",
+                  baseBranch: "main",
+                  headBranch: "feature/y"
+                });
+              }
+            : undefined
+        });
+        if (phase === "source read") {
+          harness.script.readBranchSourceRevision = async () => {
+            prepareSourceRefResources(harness.entry, "diff", {
+              repo: "octo/app",
+              baseBranch: "main",
+              headBranch: "feature/y"
+            });
+            return "sha-9";
+          };
         }
-      });
-      const failure = {
-        attemptToken: "attempt-1",
-        error: "base failed",
-        commit: "sha-1"
-      };
-      harness.state.appModelFailures = { "octo/app::main": failure };
-      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+        const failure = {
+          attemptToken: "attempt-1",
+          error: "base failed",
+          commit: "sha-1"
+        };
+        harness.state.appModelFailures = { "octo/app::main": failure };
+        harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
 
-      const outcome = await harness.run("diffBranches", diffBody);
+        const outcome = await harness.run("diffBranches", diffBody);
 
-      expect(outcome.status).toBe(409);
-      expect(outcome.payload).toEqual({ stale: true });
-      expect(harness.state.appModelFailures).toEqual({
-        "octo/app::main": failure
-      });
-      expect(harness.handoffs).toEqual([]);
-    });
+        expect(outcome.status).toBe(409);
+        expect(outcome.payload).toEqual({ stale: true });
+        expect(harness.state.appModelFailures).toEqual({
+          "octo/app::main": failure
+        });
+        expect(harness.handoffs).toEqual([]);
+      }
+    );
 
     it.each([
       ["base", "main", "feature/x"],

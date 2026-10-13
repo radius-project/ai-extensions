@@ -3,6 +3,7 @@
 // checkout for generated app model files on the active branch.
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -58,7 +59,8 @@ function runGit(
 // answer can be "nothing". This variant keeps the two apart.
 function runGitResult(
   workspacePath: string | null | undefined,
-  args: readonly string[]
+  args: readonly string[],
+  trimOutput = true
 ): Promise<{ ok: boolean; stdout: string }> {
   return new Promise((resolve) => {
     if (!workspacePath) {
@@ -70,7 +72,13 @@ function runGitResult(
       ["-C", workspacePath, ...args],
       { timeout: 5000, encoding: "utf8" },
       (err, stdout) => {
-        resolve({ ok: !err, stdout: err ? "" : stdout.trim() });
+        resolve({
+          ok: !err,
+          stdout:
+            err ? ""
+            : trimOutput ? stdout.trim()
+            : stdout
+        });
       }
     );
   });
@@ -650,6 +658,96 @@ export async function workspaceHeadCommit(
 // has to commit a generated model before pushing. One list means the paths a
 // push commits can never drift from the paths a freshness check discounts.
 const GENERATED_PATHS: readonly string[] = GENERATED_MODEL_PATHS;
+
+/**
+ * Identifies HEAD and saved source edits, excluding generated model files.
+ * An unreadable or changing checkout throws rather than proving a change.
+ */
+export async function workspaceSourceRevision(
+  workspacePath: string | null | undefined
+): Promise<string> {
+  const head = await workspaceHeadCommit(workspacePath);
+  if (!head || !workspacePath) {
+    throw new Error("The workspace source revision could not be read.");
+  }
+  const sourcePaths = [
+    "--",
+    ".",
+    ...GENERATED_PATHS.map((generated) => `:(exclude)${generated}`)
+  ];
+  const [diff, untracked] = await Promise.all([
+    runGitResult(
+      workspacePath,
+      [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-only",
+        "-z",
+        head,
+        ...sourcePaths
+      ],
+      false
+    ),
+    runGitResult(
+      workspacePath,
+      ["ls-files", "--others", "--exclude-standard", "-z", ...sourcePaths],
+      false
+    )
+  ]);
+  if (!diff.ok || !untracked.ok) {
+    throw new Error("Saved workspace source changes could not be read.");
+  }
+  const hash = createHash("sha256");
+  hash.update(head);
+  const trackedChanges = new Set(diff.stdout.split("\0").filter(Boolean));
+  const files = new Set([
+    ...trackedChanges,
+    ...untracked.stdout.split("\0").filter(Boolean)
+  ]);
+  for (const relative of [...files].sort()) {
+    const file = path.resolve(workspacePath, relative);
+    if (!isWorkspacePath(workspacePath, file)) {
+      throw new Error("A source file is outside the workspace.");
+    }
+    let stat;
+    try {
+      stat = await fs.lstat(file);
+    } catch (error) {
+      if (
+        trackedChanges.has(relative) &&
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        hash.update(JSON.stringify([relative, "deleted"]));
+        continue;
+      }
+      throw error;
+    }
+    // Hash link text, not its target: an untracked link can point outside the checkout.
+    const content =
+      stat.isSymbolicLink() ? Buffer.from(await fs.readlink(file))
+      : stat.isFile() ? await fs.readFile(file)
+      : null;
+    if (content === null) {
+      throw new Error("A source path is not a file.");
+    }
+    hash.update(
+      JSON.stringify([
+        relative,
+        stat.isSymbolicLink(),
+        stat.mode & 0o111,
+        content.length
+      ])
+    );
+    hash.update(content);
+  }
+  if ((await workspaceHeadCommit(workspacePath)) !== head) {
+    throw new Error("The workspace commit changed while source was read.");
+  }
+  return hash.digest("hex");
+}
 
 /**
  * Which generator-owned paths have changes that are not committed yet — staged,

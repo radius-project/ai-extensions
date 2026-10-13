@@ -294,6 +294,9 @@ export interface AppModelDependencies {
   workspaceHeadCommit(
     workspacePath: string | null | undefined
   ): Promise<string>;
+  workspaceSourceRevision(
+    workspacePath: string | null | undefined
+  ): Promise<string>;
   // Whether application source (excluding the model's own directory) changed
   // between a recorded commit and the worktree head. undefined when git cannot
   // answer, so the caller falls back instead of reading silence as "unchanged".

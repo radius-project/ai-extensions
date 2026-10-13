@@ -310,6 +310,7 @@ export interface CanvasState {
       // Branch commit when the failure was reported. The failure ends only
       // when the branch moves to another commit.
       commit?: string;
+      sourceRevision?: string;
     }
   >;
   graphRepairAttempts?: Partial<

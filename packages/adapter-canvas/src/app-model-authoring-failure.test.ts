@@ -65,7 +65,12 @@ describe("app model authoring failures", () => {
           }
         } as Record<
           string,
-          { attemptToken: string; error: string; commit?: string }
+          {
+            attemptToken: string;
+            error: string;
+            commit?: string;
+            sourceRevision?: string;
+          }
         >,
         appModelAttemptTokens: {
           "acme/widgets::main": "attempt-1"
@@ -98,15 +103,59 @@ describe("app model authoring failures", () => {
       expect(state.appModelFailures["acme/widgets::main"]).toBeDefined();
     });
 
-    it("keeps a failure recorded without a commit and never reads one", async () => {
+    it("establishes a missing baseline, keeps reloads fenced, then allows a source edit", async () => {
       const state = failed();
       let reads = 0;
       await reconcile(state, async () => {
         reads += 1;
         return "sha-1";
       });
-      expect(reads).toBe(0);
+      expect(reads).toBe(1);
+      expect(state.appModelFailures["acme/widgets::main"]?.sourceRevision).toBe(
+        "sha-1"
+      );
+      await reconcile(state, async () => "sha-1");
+      expect(state.appModelAttemptTokens["acme/widgets::main"]).toBe(
+        "attempt-1"
+      );
+      await reconcile(state, async () => "sha-2");
+      expect(state.appModelFailures).toEqual({});
+      expect(state.appModelAttemptTokens).toEqual({});
+    });
+
+    it("does not read source when no current failure exists", async () => {
+      const state = failed();
+      state.appModelAttemptTokens["acme/widgets::main"] = "new-attempt";
+      await reconcile(state, async () => {
+        throw new Error("Unexpected source read");
+      });
       expect(state.appModelFailures["acme/widgets::main"]).toBeDefined();
+    });
+
+    it("keeps a failure when its request becomes stale during the read", async () => {
+      const state = failed("sha-0");
+      let current = true;
+      await reconcileAppModelAuthoringFailure(
+        state,
+        "acme/widgets",
+        "main",
+        async () => {
+          current = false;
+          return "sha-1";
+        },
+        () => current
+      );
+      expect(state.appModelFailures["acme/widgets::main"]?.commit).toBe(
+        "sha-0"
+      );
+    });
+
+    it("keeps an unknown baseline when source remains unreadable", async () => {
+      const state = failed();
+      await reconcile(state, async () => "");
+      expect(
+        state.appModelFailures["acme/widgets::main"]?.sourceRevision
+      ).toBeUndefined();
     });
 
     it("keeps a failure that was replaced while the commit was read", async () => {
@@ -119,9 +168,7 @@ describe("app model authoring failures", () => {
         };
         return "sha-1";
       });
-      expect(state.appModelFailures["acme/widgets::main"]?.error).toBe(
-        "Newer"
-      );
+      expect(state.appModelFailures["acme/widgets::main"]?.error).toBe("Newer");
     });
   });
 });

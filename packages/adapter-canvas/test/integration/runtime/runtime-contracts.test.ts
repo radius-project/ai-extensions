@@ -1339,6 +1339,8 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
         "acme/widgets::main": "attempt-1"
       }
     });
+    harness.deps.appModel.workspaceSourceRevision = async () =>
+      "saved-source-1";
     const tool = harness.extension.tools.find(
       (candidate) => candidate.name === "radius_report_modeling_failure"
     );
@@ -1365,6 +1367,9 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
     expect(
       entry.state.appModelFailures?.["acme/widgets::main"]?.error
     ).toContain("configured Recipe");
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::main"]?.sourceRevision
+    ).toBe("saved-source-1");
 
     await harness.extension.shutdown("test");
   });

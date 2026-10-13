@@ -47,6 +47,7 @@ import {
   toSafeRepoRelPath,
   workspaceFileExists,
   workspaceHeadCommit,
+  workspaceSourceRevision,
   workspaceModelRecoverable,
   workspaceSourceChangedSince
 } from "./workspace.js";
@@ -205,6 +206,7 @@ const dependencies: RadiusExtensionDependencies = {
   appModel: {
     generatorVersion: createGeneratorVersionReader(),
     workspaceHeadCommit,
+    workspaceSourceRevision,
     workspaceModelRecoverable,
     workspaceSourceChangedSince,
     branchHeadCommit: (repo, branch) => getBranchHeadSha(repo, branch),

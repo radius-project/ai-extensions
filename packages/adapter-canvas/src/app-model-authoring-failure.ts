@@ -3,7 +3,9 @@ import type { CanvasState } from "./shared.js";
 export interface AppModelAuthoringFailure {
   readonly attemptToken: string;
   readonly error: string;
+  // Retained for an already-recorded commit-only failure.
   readonly commit?: string;
+  readonly sourceRevision?: string;
 }
 
 export function appModelTargetKey(repo: string, branch: string): string {
@@ -27,26 +29,37 @@ export function appModelAuthoringFailure(
 }
 
 /**
- * Ends a recorded failure when the branch is at a new commit. It keeps the
- * failure when the commit is unknown, cannot be read, or is unchanged. It also
- * keeps a failure that was replaced while the commit was being read.
+ * Ends a recorded failure after a source change. If the original revision was
+ * unavailable, establish a baseline first so later edits can release the fence.
  */
 export async function reconcileAppModelAuthoringFailure(
   state: CanvasState,
   repo: string,
   branch: string,
-  readCommit: () => Promise<string>
+  readRevision: () => Promise<string>,
+  isCurrent: () => boolean = () => true
 ): Promise<void> {
   const failure = appModelAuthoringFailure(state, repo, branch);
-  if (!failure?.commit) return;
+  if (!failure) return;
   let current: string;
   try {
-    current = await readCommit();
+    current = await readRevision();
   } catch {
     return;
   }
-  if (!current || current === failure.commit) return;
-  if (appModelAuthoringFailure(state, repo, branch) !== failure) return;
+  if (!current) return;
+  if (!isCurrent() || appModelAuthoringFailure(state, repo, branch) !== failure)
+    return;
+  const recorded = failure.sourceRevision ?? failure.commit;
+  if (!recorded) {
+    state.appModelFailures ??= {};
+    state.appModelFailures[appModelTargetKey(repo, branch)] = {
+      ...failure,
+      sourceRevision: current
+    };
+    return;
+  }
+  if (current === recorded) return;
   clearAppModelAuthoringFailure(state, repo, branch);
 }
 

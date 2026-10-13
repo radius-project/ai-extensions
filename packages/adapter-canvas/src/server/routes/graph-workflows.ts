@@ -33,7 +33,8 @@ import type {
 import {
   appModelAuthoringFailure,
   clearAppModelAuthoringFailure,
-  reconcileAppModelAuthoringFailure
+  reconcileAppModelAuthoringFailure,
+  type AppModelAuthoringFailure
 } from "../../app-model-authoring-failure.js";
 
 // The use-case layer behind the three `graphs-planning` write routes.
@@ -58,11 +59,15 @@ const MISSING_ENTRY_PAYLOAD = {
 const GENERATING_APP_BICEP_MESSAGE =
   "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
 
-// The terminal text every view shows once modeling has permanently failed. The
-// failure ends only when the branch moves to a new commit, so a reload cannot
-// request another attempt.
-function appModelAuthoringFailureDetail(error: string): string {
-  return `Application model generation failed: ${error} It will not be retried until the branch is updated.`;
+// Reloading unchanged source never requests another attempt.
+function appModelAuthoringFailureDetail(
+  failure: AppModelAuthoringFailure
+): string {
+  const recovery =
+    failure.sourceRevision || failure.commit ?
+      "It will not be retried until saved source files change or the branch moves to a new commit."
+    : "The source revision could not be read. Reload to check it again, then change a source file or update the branch to retry.";
+  return `Application model generation failed: ${failure.error} ${recovery}`;
 }
 
 // `bare` responses are written without a `Content-Type` header, exactly as the
@@ -183,9 +188,9 @@ export interface GraphWorkflowDependencies<
     repo: string,
     branches: string[]
   ): Promise<number | null>;
-  // Current head commit of a branch's source (workspace or remote). Returns an
-  // empty string when it cannot be read.
-  readBranchSourceCommit(
+  // Saved workspace source fingerprint or remote branch commit. An unavailable
+  // read throws or returns an empty string; neither proves a source change.
+  readBranchSourceRevision(
     entry: TEntry,
     repo: string,
     branch: string
@@ -549,8 +554,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     isCurrent?: () => boolean
   ): Promise<GraphWorkflowOutcome> {
     if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
-    await reconcileAppModelAuthoringFailure(entry.state, repo, branch, () =>
-      dependencies.readBranchSourceCommit(entry, repo, branch)
+    await reconcileAppModelAuthoringFailure(
+      entry.state,
+      repo,
+      branch,
+      () => dependencies.readBranchSourceRevision(entry, repo, branch),
+      isCurrent
     );
     if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
     const authoringFailure = appModelAuthoringFailure(
@@ -559,7 +568,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       branch
     );
     if (authoringFailure) {
-      const detail = appModelAuthoringFailureDetail(authoringFailure.error);
+      const detail = appModelAuthoringFailureDetail(authoringFailure);
       reportRefusal(detail);
       return json(200, {
         error: detail,
@@ -589,7 +598,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       repo,
       branch,
       "graph",
-      progressView
+      progressView,
+      isCurrent
     );
     return json(200, {
       error: GENERATING_APP_BICEP_MESSAGE,
@@ -729,7 +739,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           repo,
           branch,
           "graph",
-          (detail) => addEvent("creating_model", "failed", detail)
+          (detail) => addEvent("creating_model", "failed", detail),
+          () =>
+            state.graphBuildGeneration === requestGeneration &&
+            isCurrentGraphProgress(state, progressHandle) &&
+            dependencies.isCurrentSourceRefToken(
+              state,
+              "graph",
+              sourceRefContext.token
+            )
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
@@ -1013,7 +1031,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           branch,
           "planned",
           (detail) => addEvent("creating_model", "failed", detail),
-          isCurrentPlan
+          () =>
+            isCurrentPlan() &&
+            isCurrentGraphProgress(state, progressHandle) &&
+            dependencies.isCurrentSourceRefToken(
+              state,
+              "planned",
+              sourceRefContext.token
+            )
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
@@ -1328,15 +1353,23 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // legitimate failure report as stale or promote an abandoned handoff.
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
 
-      // A recorded failure ends only when its branch moves to a new commit.
+      // A recorded failure ends only when its source revision changes.
       // This runs before the both-missing check so a half-modeled comparison
       // still frees the missing side when that branch has moved.
       await Promise.all([
-        reconcileAppModelAuthoringFailure(state, repo, data.base, () =>
-          dependencies.readBranchSourceCommit(entry, repo, data.base)
+        reconcileAppModelAuthoringFailure(
+          state,
+          repo,
+          data.base,
+          () => dependencies.readBranchSourceRevision(entry, repo, data.base),
+          isCurrentRequest
         ),
-        reconcileAppModelAuthoringFailure(state, repo, data.head, () =>
-          dependencies.readBranchSourceCommit(entry, repo, data.head)
+        reconcileAppModelAuthoringFailure(
+          state,
+          repo,
+          data.head,
+          () => dependencies.readBranchSourceRevision(entry, repo, data.head),
+          isCurrentRequest
         )
       ]);
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
@@ -1363,7 +1396,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           appModelAuthoringFailure(state, repo, data.base) ??
           appModelAuthoringFailure(state, repo, data.head);
         if (authoringFailure) {
-          const detail = appModelAuthoringFailureDetail(authoringFailure.error);
+          const detail = appModelAuthoringFailureDetail(authoringFailure);
           addEvent("creating_model", "failed", detail);
           return json(200, {
             error: detail,

@@ -595,7 +595,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
     });
   });
 
-  it("records the workspace head commit with a failure on the workspace branch", async () => {
+  it("records saved workspace source with a failure on the workspace branch", async () => {
     const { tools, entry } = await currentAttempt({
       headCommits: { "workspace:/workspace": "sha-workspace" }
     });
@@ -605,7 +605,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
     expect(entry.state.appModelFailures?.["acme/widgets::main"]).toEqual({
       attemptToken: "attempt-1",
       error: report.error,
-      commit: "sha-workspace"
+      sourceRevision: "sha-workspace"
     });
   });
 
@@ -625,13 +625,13 @@ describe("TL-11: radius_report_modeling_failure", () => {
     expect(entry.state.appModelFailures?.["acme/widgets::release"]).toEqual({
       attemptToken: "attempt-1",
       error: report.error,
-      commit: "sha-remote"
+      sourceRevision: "sha-remote"
     });
   });
 
   it("records the failure without a commit when the head commit cannot be read", async () => {
     const { tools, entry, deps } = await currentAttempt();
-    vi.mocked(deps.appModel.workspaceHeadCommit).mockRejectedValue(
+    vi.mocked(deps.appModel.workspaceSourceRevision).mockRejectedValue(
       new Error("git failed")
     );
 
@@ -645,6 +645,25 @@ describe("TL-11: radius_report_modeling_failure", () => {
       attemptToken: "attempt-1",
       error: report.error
     });
+  });
+
+  it("rejects a report superseded while the saved source revision is read", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    deps.appModel.workspaceSourceRevision = async () => {
+      entry.state.appModelAttemptTokens = {
+        "acme/widgets::main": "attempt-2"
+      };
+      return "saved-source-2";
+    };
+    const result = await findTool(
+      tools,
+      "radius_report_modeling_failure"
+    ).handler(report);
+    expect(result).toMatchObject({ recorded: false });
+    expect(entry.state.appModelFailures).toBeUndefined();
+    expect(entry.state.appModelAttemptTokens?.["acme/widgets::main"]).toBe(
+      "attempt-2"
+    );
   });
 
   it("releases the dead run's handoff claim so the promised retry can be sent", async () => {

@@ -366,6 +366,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         async (workspacePath: string | null | undefined) =>
           headCommits[`workspace:${workspacePath}`] ?? ""
       ),
+      workspaceSourceRevision: vi.fn(
+        async (workspacePath: string | null | undefined) =>
+          headCommits[`workspace:${workspacePath}`] ?? ""
+      ),
       workspaceSourceChangedSince: vi.fn(
         async () => options.sourceChangedSince
       ),

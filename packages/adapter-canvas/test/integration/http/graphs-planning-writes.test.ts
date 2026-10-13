@@ -138,7 +138,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         pipeline,
         triggerAppBicepHandoff: () => {},
         observeModelingRun: () => Promise.resolve(null),
-        readBranchSourceCommit: (_entry, _repo, branch) =>
+        readBranchSourceRevision: (_entry, _repo, branch) =>
           Promise.resolve(active.commits?.[branch] ?? ""),
         triggerGraphRepairHandoff: () => ({
           attempt: 1,
@@ -362,7 +362,9 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       modelingFailed: true,
-      error: expect.stringContaining("will not be retried until the branch")
+      error: expect.stringContaining(
+        "will not be retried until saved source files change"
+      )
     });
     expect(harness.state.appModelFailures).not.toEqual({});
   });
@@ -392,6 +394,43 @@ describe("graphs-planning writes real-loopback HIT", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ needsAppBicep: true });
+    expect(harness.state.appModelFailures).toEqual({});
+  });
+
+  it("recovers an unknown source baseline before permitting a later edit", async () => {
+    const harness = start({
+      selections: { main: selectionOf("main", null) },
+      commits: { main: "" }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "No source profile"
+      }
+    };
+    harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+    const entry = await container!.getOrCreate("panel-a");
+    const load = () =>
+      post(
+        entry.baseUrl,
+        "/api/load-graph",
+        '{"repo":"octo/app","restartWait":true}'
+      );
+    expect(await (await load()).json()).toMatchObject({
+      modelingFailed: true,
+      error: expect.stringContaining("source revision could not be read")
+    });
+    harness.script.commits = { main: "source-1" };
+    expect(await (await load()).json()).toMatchObject({
+      modelingFailed: true,
+      error: expect.stringContaining("saved source files change")
+    });
+    expect(
+      harness.state.appModelFailures?.["octo/app::main"]?.sourceRevision
+    ).toBe("source-1");
+    expect(await (await load()).json()).toMatchObject({ modelingFailed: true });
+    harness.script.commits = { main: "source-2" };
+    expect(await (await load()).json()).toMatchObject({ needsAppBicep: true });
     expect(harness.state.appModelFailures).toEqual({});
   });
 

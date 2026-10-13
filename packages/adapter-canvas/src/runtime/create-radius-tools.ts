@@ -183,11 +183,10 @@ export function createRadiusTools(
               "The application model now exists; the stale failure was not recorded."
           };
         }
-        const commit = await (
+        const sourceRevision = await (
           deps.workspace.isWorkspaceSelection(entry.state, repo, branch) ?
-            deps.appModel.workspaceHeadCommit(entry.state.workspacePath)
-          : deps.appModel.branchHeadCommit(repo, branch)
-        ).catch(() => "");
+            deps.appModel.workspaceSourceRevision(entry.state.workspacePath)
+          : deps.appModel.branchHeadCommit(repo, branch)).catch(() => "");
         if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
           return {
             recorded: false,
@@ -199,16 +198,16 @@ export function createRadiusTools(
         entry.state.appModelFailures[target] = {
           attemptToken,
           error: failure,
-          ...(commit ? { commit } : {})
+          ...(sourceRevision ? { sourceRevision } : {})
         };
         // The run this claim belongs to just ended, so the claim can only
         // suppress the retry the failure message tells the user to make. A diff
         // claim covers both compared branches under one target, while this
         // failure is keyed `repo::branch`, so releasing by branch — not by
         // exact target — is what frees both the single-branch claim and the
-        // diff claim that covers it. Without this the explicit refresh clears
-        // the failure, asks for a handoff, and is dropped by the dead run's
-        // claim until it expires. `missingModelHandoffTarget` owns the target
+        // diff claim that covers it. Without this a source-change retry asks
+        // for a handoff and is dropped by the dead run's claim until it
+        // expires. `missingModelHandoffTarget` owns the target
         // encoding; do not rebuild or parse it here.
         missingModelHandoffs.releaseForBranch(repo, branch);
         modelingActivity.release({ repo, branch });

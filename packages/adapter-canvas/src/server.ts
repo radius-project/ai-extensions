@@ -142,7 +142,7 @@ import {
   toSafeRepoRelPath,
   uncommittedGeneratedPaths,
   workspaceGraphJsonPath,
-  workspaceHeadCommit
+  workspaceSourceRevision
 } from "./workspace.js";
 import {
   DEFAULT_CANVAS_PAGE,
@@ -1369,9 +1369,9 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
   observeModelingRun: observeServerWorkspaceModelingRun,
-  readBranchSourceCommit: (entry, repo, branch) =>
+  readBranchSourceRevision: (entry, repo, branch) =>
     isWorkspaceSelection(entry.state, repo, branch) ?
-      workspaceHeadCommit(entry.state.workspacePath)
+      workspaceSourceRevision(entry.state.workspacePath)
     : getBranchHeadSha(repo, branch),
   record,
   optionalString,
@@ -2308,7 +2308,7 @@ async function ensureWorkflowsCurrent(
 // agent to run the radius-app-bicep skill. This is what makes branch/repo
 // selection (not just canvas open) trigger generation automatically.
 let appBicepHandoff: AppBicepHandoff | null = null;
-export function setAppBicepHandoff(fn: AppBicepHandoff): void {
+export function setAppBicepHandoff(fn: AppBicepHandoff | null): void {
   appBicepHandoff = fn;
 }
 

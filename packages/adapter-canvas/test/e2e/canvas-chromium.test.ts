@@ -54,6 +54,7 @@ import {
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 import { createUnconfirmedMonitor } from "../support/server/unconfirmed-monitor.js";
 import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
+import { workspaceSourceRevision } from "../../src/workspace.js";
 import {
   DEPLOYED_GRAPH_STATE_ID,
   DEPLOYING_PAGE_STATE_ID,
@@ -2059,6 +2060,82 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       page.locator("#graph-status, #graph-refresh-status")
     ).toContainText("Application graph ready");
+  });
+
+  test("keeps a modeling failure on reload and retries once after a saved source edit @safety", async ({
+    page,
+    canvas
+  }, testInfo) => {
+    await fs.unlink(path.join(canvas.workspacePath, ".radius", "app.bicep"));
+    await fs.writeFile(
+      path.join(canvas.workspacePath, "Dockerfile"),
+      "FROM scratch\n"
+    );
+    const target = `${REPOSITORY}::${WORKTREE_BRANCH}`;
+    const revision = await workspaceSourceRevision(canvas.workspacePath);
+    Object.assign(canvas.entry.state, {
+      appModelAttemptTokens: { [target]: "failed-attempt" },
+      appModelFailures: {
+        [target]: {
+          attemptToken: "failed-attempt",
+          error: "The configured Recipe rejects the required credential shape.",
+          sourceRevision: revision
+        }
+      }
+    });
+    let handoffs = 0;
+    canvas.setAppBicepHandoff(async ({ state }) => {
+      if (state !== canvas.entry.state)
+        throw new Error("Unexpected handoff instance");
+      handoffs++;
+      const attemptToken = `retry-${handoffs}`;
+      state.appModelAttemptTokens ??= {};
+      state.appModelFailures ??= {};
+      state.appModelAttemptTokens[target] = attemptToken;
+      state.appModelFailures[target] = {
+        attemptToken,
+        error: "The configured Recipe still rejects the credential shape.",
+        sourceRevision: await workspaceSourceRevision(canvas.workspacePath)
+      };
+    });
+    const status = page.getByRole("alert");
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      await expect(status).toContainText("Application model generation failed");
+      await expect(status).toContainText("saved source files change");
+      await page.screenshot({ path: testInfo.outputPath("after.png") });
+      await testInfo.attach("modeling-failure-warning", {
+        path: testInfo.outputPath("after.png"),
+        contentType: "image/png"
+      });
+      for (let reload = 0; reload < 2; reload++) {
+        await page.reload();
+        await expect(status).toContainText(
+          "Application model generation failed"
+        );
+      }
+      expect(handoffs).toBe(0);
+
+      await fs.appendFile(
+        path.join(canvas.workspacePath, SOURCE_FILE),
+        "// saved edit\n"
+      );
+      await page.reload();
+      await expect.poll(() => handoffs).toBe(1);
+      await expect
+        .poll(
+          () => canvas.entry.state.appModelFailures?.[target]?.sourceRevision
+        )
+        .toBe(await workspaceSourceRevision(canvas.workspacePath));
+      await page.reload();
+      await expect(status).toContainText("still rejects");
+      expect(handoffs).toBe(1);
+      await page.reload();
+      await expect(status).toContainText("still rejects");
+      expect(handoffs).toBe(1);
+    } finally {
+      canvas.setAppBicepHandoff(null);
+    }
   });
 
   test("keeps the modeling status stable while the graph automatically polls", async ({

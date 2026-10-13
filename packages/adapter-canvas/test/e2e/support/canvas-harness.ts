@@ -1793,6 +1793,13 @@ export class CanvasHarness {
     this.repairHandoffRegistered = receiver !== null;
   }
 
+  setAppBicepHandoff(
+    receiver: Parameters<ServerModule["setAppBicepHandoff"]>[0]
+  ): void {
+    this.assertFakeMode("setAppBicepHandoff");
+    this.serverModule.setAppBicepHandoff(receiver);
+  }
+
   // Drives the real delete OperationRecord the route creates to a terminal,
   // exactly as the production runner does (environment-deletion.ts): enter every
   // stage and finish. The completion is gated on the returned `release` so the
@@ -1901,6 +1908,7 @@ export class CanvasHarness {
     });
     this.ghModule.resetGhIdentityCache();
     this.serverModule.resetListingCaches();
+    if (this.mode === "fake") this.setAppBicepHandoff(null);
     const sharedModule = await import("../../../src/shared.js");
     replaceSharedCredentials(sharedModule.sharedCredentials);
     globalThis.fetch = this.originalFetch;
