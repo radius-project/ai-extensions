@@ -6451,6 +6451,9 @@ describe("environment deletion session reporting coordinator", () => {
         deleteRadiusEnvironment: vi.fn(async () => ({
           outcome: "deleted" as const
         })),
+        removeAwsEnvironmentAccess: async () => {
+          throw new Error("unexpected AWS role cleanup");
+        },
         runAz: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
         readAzureIdentity: vi.fn(async () => ({
           tenantId: "tenant-1",

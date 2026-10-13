@@ -45,10 +45,14 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
       "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
     "run-rad-commands-azure.yml":
       "name: deploy-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
+    "run-rad-commands-aws.yml":
+      "name: deploy-aws\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
     "delete-application.yml":
       "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/delete-azure.yml\n  aws:\n    uses: ./.github/workflows/delete-aws.yml\n",
     "delete-azure.yml":
-      "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
+      "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n",
+    "delete-aws.yml":
+      "name: delete-aws\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
   };
   return {
     BASE_UPSTREAM,
@@ -63,7 +67,11 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
   };
 });
 
-for (const file of ["delete-environment.yml", "delete-environment-azure.yml"]) {
+for (const file of [
+  "delete-environment.yml",
+  "delete-environment-azure.yml",
+  "delete-environment-aws.yml"
+]) {
   const body = readFileSync(
     new URL(`../../../.github/extension/${file}`, import.meta.url),
     "utf8"
@@ -422,40 +430,80 @@ describe("generated workflow YAML validation", () => {
     );
   });
 
-  it("rejects dispatcher drift that leaves an AWS job or reference", async () => {
-    h.upstream["delete-application.yml"] = BASE_UPSTREAM[
-      "delete-application.yml"
-    ].replace("  aws:", "  AWS:");
+  it("keeps the dispatcher's AWS job and reference", async () => {
+    const deploy = await generateDeployWorkflow("prod", ".radius/app.bicep");
+    const remove = await generateDeleteWorkflow("prod");
 
-    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
-      /must not contain an AWS job or workflow reference/u
-    );
+    expect(
+      parseDocument(deploy["run-rad-commands.yml"]).getIn([
+        "jobs",
+        "aws",
+        "uses"
+      ])
+    ).toBe("./.github/workflows/run-rad-commands-aws.yml");
+    expect(
+      parseDocument(remove["delete-application.yml"]).getIn([
+        "jobs",
+        "aws",
+        "uses"
+      ])
+    ).toBe("./.github/workflows/delete-aws.yml");
   });
 
-  it("rejects dispatcher drift that hides an AWS reference under another job name", async () => {
+  it("accepts dispatcher drift that renames the AWS job but keeps its reference", async () => {
     h.upstream["delete-application.yml"] = BASE_UPSTREAM[
       "delete-application.yml"
     ].replace("  aws:", "  cloud:");
 
-    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
-      /must not contain an AWS job or workflow reference/u
+    await expect(generateDeleteWorkflow("prod")).resolves.toHaveProperty(
+      "delete-application.yml"
     );
   });
 
-  it("rejects dispatcher drift that removes the Azure provider reference", async () => {
-    h.upstream["run-rad-commands.yml"] = BASE_UPSTREAM[
-      "run-rad-commands.yml"
-    ].replace(
-      "./.github/workflows/run-rad-commands-azure.yml",
-      "./.github/workflows/run-rad-commands-renamed.yml"
-    );
+  it.each([
+    {
+      dispatcher: "run-rad-commands.yml",
+      provider: "run-rad-commands-azure.yml",
+      generate: () => generateDeployWorkflow("prod", ".radius/app.bicep")
+    },
+    {
+      dispatcher: "run-rad-commands.yml",
+      provider: "run-rad-commands-aws.yml",
+      generate: () => generateDeployWorkflow("prod", ".radius/app.bicep")
+    },
+    {
+      dispatcher: "delete-application.yml",
+      provider: "delete-azure.yml",
+      generate: () => generateDeleteWorkflow("prod")
+    },
+    {
+      dispatcher: "delete-application.yml",
+      provider: "delete-aws.yml",
+      generate: () => generateDeleteWorkflow("prod")
+    },
+    {
+      dispatcher: "delete-environment.yml",
+      provider: "delete-environment-azure.yml",
+      generate: () => generateDeleteWorkflow("prod")
+    },
+    {
+      dispatcher: "delete-environment.yml",
+      provider: "delete-environment-aws.yml",
+      generate: () => generateDeleteWorkflow("prod")
+    }
+  ])(
+    "rejects $dispatcher drift that removes the $provider reference",
+    async ({ dispatcher, provider, generate }) => {
+      h.upstream[dispatcher] = BASE_UPSTREAM[dispatcher].replace(
+        `./.github/workflows/${provider}`,
+        "./.github/workflows/renamed.yml"
+      );
 
-    await expect(
-      generateDeployWorkflow("prod", ".radius/app.bicep")
-    ).rejects.toThrow(
-      /dispatcher must invoke `\.\/\.github\/workflows\/run-rad-commands-azure\.yml`/u
-    );
-  });
+      await expect(generate()).rejects.toThrow(
+        `workflow "${dispatcher}" failed trust validation: the dispatcher must invoke \`./.github/workflows/${provider}\`.`
+      );
+    }
+  );
 
   it("accepts dispatchers whose unsafe structures were already removed", async () => {
     h.upstream["run-rad-commands.yml"] = `name: deploy
@@ -469,6 +517,8 @@ jobs:
     run: echo hi
   azure:
     uses: ./.github/workflows/run-rad-commands-azure.yml
+  aws:
+    uses: ./.github/workflows/run-rad-commands-aws.yml
 `;
 
     await expect(
@@ -512,37 +562,50 @@ describe("generateDeleteWorkflow", () => {
     expireTemplateCache();
   });
 
-  it("emits both dispatchers plus the app and environment Azure providers, never AWS", async () => {
+  it("emits both dispatchers plus the app and environment providers for Azure and AWS", async () => {
     const files = await generateDeleteWorkflow("dev");
     expect(Object.keys(files).sort()).toEqual([
       "delete-application.yml",
+      "delete-aws.yml",
       "delete-azure.yml",
+      "delete-environment-aws.yml",
       "delete-environment-azure.yml",
       "delete-environment.yml"
     ]);
-    expect(files["delete-aws.yml"]).toBeUndefined();
   });
 
-  it("strips the aws job from the application dispatcher so GitHub can parse it", async () => {
+  it("keeps every provider job in both dispatchers so GitHub can resolve them", async () => {
     const files = await generateDeleteWorkflow("dev");
-    expect(files["delete-application.yml"]).not.toContain("delete-aws.yml");
-    // The environment dispatcher is authored Azure-only and reuses the static,
-    // ai-extensions-owned environment provider rather than delete-azure.yml.
-    expect(files["delete-environment.yml"]).toContain(
-      "delete-environment-azure.yml"
+    expect(files["delete-application.yml"]).toContain(
+      "./.github/workflows/delete-azure.yml"
     );
-    expect(files["delete-environment.yml"]).not.toContain("delete-aws.yml");
+    expect(files["delete-application.yml"]).toContain(
+      "./.github/workflows/delete-aws.yml"
+    );
+    // The environment dispatcher reuses the static, ai-extensions-owned
+    // environment providers rather than delete-azure.yml / delete-aws.yml.
+    const envDispatcher = parseDocument(files["delete-environment.yml"]);
+    expect(envDispatcher.getIn(["jobs", "azure", "uses"])).toBe(
+      "./.github/workflows/delete-environment-azure.yml"
+    );
+    expect(envDispatcher.getIn(["jobs", "aws", "uses"])).toBe(
+      "./.github/workflows/delete-environment-aws.yml"
+    );
+    expect(files["delete-environment.yml"]).not.toContain(
+      "./.github/workflows/delete-aws.yml"
+    );
   });
 
-  it("keeps the guard step in the environment provider", async () => {
-    const files = await generateDeleteWorkflow("dev");
-    expect(files["delete-environment-azure.yml"]).toContain(
-      "Guard - environment has no deployed applications"
-    );
-    expect(files["delete-environment-azure.yml"]).not.toContain(
-      "{{RADIUS_REF}}"
-    );
-  });
+  it.each(["delete-environment-azure.yml", "delete-environment-aws.yml"])(
+    "keeps the guard step in the %s environment provider",
+    async (file) => {
+      const files = await generateDeleteWorkflow("dev");
+      expect(files[file]).toContain(
+        "Guard - environment has no deployed applications"
+      );
+      expect(files[file]).not.toContain("{{RADIUS_REF}}");
+    }
+  );
 
   it("fetches every workflow template from ai-extensions at its pinned ref", async () => {
     h.fetches = [];
@@ -562,10 +625,13 @@ describe("generateDeleteWorkflow", () => {
       ...[
         "run-rad-commands.yml",
         "run-rad-commands-azure.yml",
+        "run-rad-commands-aws.yml",
         "delete-application.yml",
         "delete-azure.yml",
+        "delete-aws.yml",
         "delete-environment.yml",
-        "delete-environment-azure.yml"
+        "delete-environment-azure.yml",
+        "delete-environment-aws.yml"
       ].map((file) => ({
         repo: "radius-project/ai-extensions",
         path: `.github/extension/${file}`,
@@ -574,14 +640,17 @@ describe("generateDeleteWorkflow", () => {
     ]);
   });
 
-  it("fails when an environment-delete template cannot be fetched from ai-extensions", async () => {
-    expireTemplateCache();
-    delete h.upstream["delete-environment-azure.yml"];
+  it.each(["delete-environment-azure.yml", "delete-environment-aws.yml"])(
+    "fails when the %s environment-delete template cannot be fetched from ai-extensions",
+    async (file) => {
+      expireTemplateCache();
+      delete h.upstream[file];
 
-    await expect(generateDeleteWorkflow("dev")).rejects.toThrow(
-      'Failed to fetch workflow template radius-project/ai-extensions/.github/extension/delete-environment-azure.yml at "main": no template delete-environment-azure.yml'
-    );
-  });
+      await expect(generateDeleteWorkflow("dev")).rejects.toThrow(
+        `Failed to fetch workflow template radius-project/ai-extensions/.github/extension/${file} at "main": no template ${file}`
+      );
+    }
+  );
 
   it("fails closed when the application listing cannot be read", async () => {
     const files = await generateDeleteWorkflow("dev");
@@ -736,27 +805,54 @@ describe("syncRepoWorkflows", () => {
     expect(h.commits).toEqual([]);
   });
 
-  it("authors the missing env-delete provider when its dispatcher is present so a drift-synced dispatcher never dangles", async () => {
-    // The background drift pass can rewrite delete-environment.yml (which
-    // `uses:` ./.github/workflows/delete-environment-azure.yml) while its
-    // companion provider is absent. Even without opts.create, the provider must
-    // be authored so the dispatched workflow can resolve its reusable file.
+  it.each(["delete-environment-azure.yml", "delete-environment-aws.yml"])(
+    "authors the missing %s env-delete provider when its dispatcher is present so a drift-synced dispatcher never dangles",
+    async (file) => {
+      // The background drift pass can rewrite delete-environment.yml (which
+      // `uses:` both environment-delete providers) while a companion provider
+      // is absent. Even without opts.create, the provider must be authored so
+      // the dispatched workflow can resolve its reusable file.
+      const path = `.github/workflows/${file}`;
+      h.committed.main = await expectedFilesFor("dev", "azure");
+      delete h.committed.main[path];
+
+      const res = await syncRepoWorkflows("acme/app", [
+        { name: "dev", provider: "azure" }
+      ]);
+
+      expect(res.created).toEqual([path]);
+      const provider = h.commits.find((c) => c.path === path);
+      expect(provider).toBeDefined();
+      const expected = await generateDeleteWorkflow("dev");
+      expect(provider?.content).toBe(expected[file]);
+    }
+  );
+
+  it("authors both missing env-delete providers when only the dispatcher is committed", async () => {
     h.committed.main = await expectedFilesFor("dev", "azure");
     delete h.committed.main[".github/workflows/delete-environment-azure.yml"];
+    delete h.committed.main[".github/workflows/delete-environment-aws.yml"];
 
     const res = await syncRepoWorkflows("acme/app", [
-      { name: "dev", provider: "azure" }
+      { name: "dev", provider: "aws" }
     ]);
 
-    expect(res.created).toEqual([
+    expect(res.created.sort()).toEqual([
+      ".github/workflows/delete-environment-aws.yml",
       ".github/workflows/delete-environment-azure.yml"
     ]);
-    const provider = h.commits.find(
-      (c) => c.path === ".github/workflows/delete-environment-azure.yml"
-    );
-    expect(provider).toBeDefined();
-    const expected = await generateDeleteWorkflow("dev");
-    expect(provider?.content).toBe(expected["delete-environment-azure.yml"]);
+  });
+
+  it("does not author a missing deploy AWS provider without `create`", async () => {
+    h.committed.main = await expectedFilesFor("dev", "aws");
+    delete h.committed.main[".github/workflows/run-rad-commands-aws.yml"];
+
+    const res = await syncRepoWorkflows("acme/app", [
+      { name: "dev", provider: "aws" }
+    ]);
+
+    expect(res.created).toEqual([]);
+    expect(h.commits).toEqual([]);
   });
 
   it("does not author the env-delete provider when its dispatcher is also missing (no orphan provider)", async () => {
@@ -765,6 +861,7 @@ describe("syncRepoWorkflows", () => {
     h.committed.main = await expectedFilesFor("dev", "azure");
     delete h.committed.main[".github/workflows/delete-environment.yml"];
     delete h.committed.main[".github/workflows/delete-environment-azure.yml"];
+    delete h.committed.main[".github/workflows/delete-environment-aws.yml"];
 
     const res = await syncRepoWorkflows("acme/app", [
       { name: "dev", provider: "azure" }

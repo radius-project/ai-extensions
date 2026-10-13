@@ -101,6 +101,16 @@ export interface EnvironmentOperationWorkflowDependencies {
     executor: SelectedGhExecutor
   ): Promise<void>;
   getOperation(operationId: string): EnvironmentOperationRecord | undefined;
+  // AWS only: prepare the deploy identity under `Authorize deploy identity`
+  // and answer the role ARN the GitHub environment records.
+  setupAwsDeployIdentity(
+    operation: EnvironmentOperationRecord,
+    request: Record<string, unknown>,
+    executor: SelectedGhExecutor
+  ): Promise<
+    | { ok: true; roleArn: string }
+    | { ok: false; status: number; error: string; code: string }
+  >;
   postInternal(
     pathname: string,
     data: unknown
@@ -407,11 +417,39 @@ export async function runEnvironmentOperationWorkflow(
       return { shouldMonitor: false };
     }
   }
+  const environmentRequest = record(request.environment);
+  let awsRoleArn = "";
+  if (operation.provider === "aws" && !reconcilingProviderMutation) {
+    const aws = await dependencies.setupAwsDeployIdentity(
+      operation,
+      {
+        ...environmentRequest,
+        repo: operation.repo,
+        environment: ensured.name
+      },
+      executor
+    );
+    if (!aws.ok) {
+      if (
+        !(await dependencies.guardStopBoundary(
+          operation,
+          "before-setup-failure-cleanup"
+        ))
+      ) {
+        return { shouldMonitor: false };
+      }
+      return failResolution(operation, executor, dependencies, {
+        status: aws.status,
+        message: aws.error,
+        code: aws.code
+      });
+    }
+    awsRoleArn = aws.roleArn;
+  }
   const current = dependencies.getOperation(operation.operationId);
   if (!current || current.state === "input_required" || current.endedAt) {
     return { shouldMonitor: false };
   }
-  const environmentRequest = record(request.environment);
   const environmentResult = await postInternal("/api/create-environment", {
     ...environmentRequest,
     repo: operation.repo,
@@ -419,6 +457,7 @@ export async function runEnvironmentOperationWorkflow(
     operationEnvironment: operation.environment,
     provider: operation.provider,
     operationId: operation.operationId,
+    ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
     clientId:
       (typeof setupResult?.clientId === "string" && setupResult.clientId) ||
       (typeof operation.context?.clientId === "string" &&

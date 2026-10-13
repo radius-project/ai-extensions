@@ -32,18 +32,25 @@ describe("credentialFormMarkup", () => {
       "az-tenant-id",
       "az-sub-id",
       "aws-account-id",
-      "aws-region",
-      "aws-role-arn"
+      "aws-region"
     ]) {
       expect(html).toContain(`id="${id}"`);
     }
   });
 
-  it("keeps AWS implementation markup while disabling its provider option", () => {
+  it("leaves the deploy role out of the AWS profile", () => {
     const html = credentialFormMarkup();
+    expect(html).not.toContain('id="aws-role-arn"');
+    expect(html).not.toContain("Role ARN");
     expect(html).toContain(
-      '<option value="aws" disabled>AWS (coming soon)</option>'
+      "The profile carries no deploy identity; that is set up when you create an environment."
     );
+  });
+
+  it("offers AWS as an enabled provider alongside Azure", () => {
+    const html = credentialFormMarkup();
+    expect(html).toContain('<option value="aws">AWS</option>');
+    expect(html).not.toContain("coming soon");
     expect(html).toContain('<div id="cred-panel-azure" class="rad-section">');
     expect(html).toContain(
       '<div id="cred-panel-aws" class="rad-section" style="display:none;">'

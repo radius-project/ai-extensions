@@ -623,7 +623,8 @@ describe("environments — delete-environment refusal ladder", () => {
       })
     );
     expect(buildDeleteStages).toHaveBeenCalledWith({
-      includeAzureCleanup: true
+      includeAzureCleanup: true,
+      includeAwsCleanup: false
     });
     expect(op.request).toEqual({
       repo: "o/r",
@@ -682,7 +683,8 @@ describe("environments — delete-environment refusal ladder", () => {
       })
     );
     expect(buildDeleteStages).toHaveBeenCalledWith({
-      includeAzureCleanup: true
+      includeAzureCleanup: true,
+      includeAwsCleanup: false
     });
     expect(op.request).toEqual({
       repo: "o/r",
@@ -778,9 +780,83 @@ describe("environments — delete-environment refusal ladder", () => {
     expect(startOperation).not.toHaveBeenCalled();
   });
 
-  it("400s with provider-unsupported guidance for an AWS environment", async () => {
-    const createOperation = vi.fn();
-    const startOperation = vi.fn();
+  it("starts an AWS delete with AWS cleanup stages and the deploy role", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-aws",
+      currentStage: "delete_radius_environment"
+    };
+    const createOperation = vi.fn(() => op);
+    const buildDeleteStages = vi.fn(() => [
+      { id: "delete_radius_environment", state: "pending" },
+      { id: "delete_aws_role_access", state: "pending" },
+      { id: "delete_github_environment", state: "pending" },
+      { id: "delete_state_package", state: "pending" },
+      { id: "review_iam_role", state: "pending" }
+    ]);
+    const startOperation = vi.fn(() => ({ ok: true as const, operation: op }));
+    const scheduleEnvironmentOperation = vi.fn(() => true);
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({
+            provider: "aws",
+            clientId: "",
+            tenantId: "",
+            repoId: 7,
+            roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r"
+          }),
+        createOperation,
+        buildDeleteStages,
+        startOperation,
+        persistOperations: () => Promise.resolve(),
+        toClientView: () => ({ operationId: "op-del-aws" }),
+        scheduleEnvironmentOperation
+      })
+    );
+    expect(buildDeleteStages).toHaveBeenCalledWith({
+      includeAzureCleanup: false,
+      includeAwsCleanup: true
+    });
+    expect(createOperation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "delete",
+        provider: "aws",
+        repo: "o/r",
+        environment: "dev",
+        stages: buildDeleteStages.mock.results[0]?.value
+      })
+    );
+    expect(op.request).toEqual({
+      repo: "o/r",
+      environment: "dev",
+      provider: "aws",
+      clientId: "",
+      tenantId: "",
+      repoId: 7,
+      roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r"
+    });
+    expect(recording.status).toBe(202);
+    expect(JSON.parse(recording.body).operationId).toBe("op-del-aws");
+    expect(scheduleEnvironmentOperation).toHaveBeenCalledWith(
+      ctx.instanceId,
+      op
+    );
+  });
+
+  it("records an empty deploy role when an AWS environment's role could not be read", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-aws-2",
+      currentStage: null
+    };
     const { recording, ctx } = context(
       "POST",
       "/api/delete-environment",
@@ -799,19 +875,56 @@ describe("environments — delete-environment refusal ladder", () => {
             tenantId: "",
             repoId: 7
           }),
-        createOperation,
-        startOperation
+        createOperation: () => op,
+        buildDeleteStages: () => [],
+        startOperation: () => ({ ok: true as const, operation: op }),
+        persistOperations: () => Promise.resolve(),
+        toClientView: () => ({ operationId: "op-del-aws-2" }),
+        scheduleEnvironmentOperation: () => true
       })
     );
-    expect(recording.status).toBe(400);
-    const body = JSON.parse(recording.body);
-    expect(body.code).toBe("provider-unsupported");
-    expect(body.error).toContain("AWS");
-    expect(body.error).toContain('"dev" was not deleted');
-    // Nothing was started: no operation is created for an unsupported provider.
-    expect(createOperation).not.toHaveBeenCalled();
-    expect(startOperation).not.toHaveBeenCalled();
+    expect(recording.status).toBe(202);
+    expect(op.request).toMatchObject({ provider: "aws", roleArn: "" });
   });
+
+  it.each(["gcp", ""])(
+    "400s with provider-unsupported guidance for the %j provider",
+    async (provider) => {
+      const createOperation = vi.fn();
+      const startOperation = vi.fn();
+      const { recording, ctx } = context(
+        "POST",
+        "/api/delete-environment",
+        JSON.stringify({ repo: "o/r", environment: "dev" })
+      );
+      await handleDeleteEnvironment(
+        ctx,
+        deps({
+          readInstanceEntry: () => entryWith(),
+          resolveRepoAppName: () => Promise.resolve("app"),
+          resolveEnvDeployment: () => Promise.resolve(null),
+          discoverEnvironmentTarget: () =>
+            Promise.resolve({
+              provider,
+              clientId: "",
+              tenantId: "",
+              repoId: 7
+            }),
+          createOperation,
+          startOperation
+        })
+      );
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error:
+          'Deleting this environment isn\'t supported: Radius can only delete Azure- and AWS-backed environments today. "dev" was not deleted.',
+        code: "provider-unsupported"
+      });
+      // Nothing was started: no operation is created for an unsupported provider.
+      expect(createOperation).not.toHaveBeenCalled();
+      expect(startOperation).not.toHaveBeenCalled();
+    }
+  );
 
   it("outer catch: 400 when the body is malformed JSON", async () => {
     const { recording, ctx } = context(

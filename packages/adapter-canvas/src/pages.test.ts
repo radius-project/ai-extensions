@@ -212,6 +212,7 @@ describe("compiled page entry API contracts", () => {
         "/api/discover",
         "/api/list-azure-app-registrations",
         "/api/azure-app-serves-repos",
+        "/api/list-aws-roles",
         "/api/operations",
         "/api/verify-status",
         "/api/bypass-verification",

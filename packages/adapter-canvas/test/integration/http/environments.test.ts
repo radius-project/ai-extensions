@@ -627,6 +627,9 @@ describe("the async delete route through its background runner", () => {
         operations.push(op);
         void runEnvironmentDeletion(op as never, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          removeAwsEnvironmentAccess: async () => {
+            throw new Error("unexpected AWS role cleanup");
+          },
           deleteStatePackage: async () => {
             if (packageFailure) {
               throw new Error(
@@ -842,6 +845,9 @@ describe("the async delete route through its background runner", () => {
         capturedOp = op as unknown as typeof capturedOp;
         void runEnvironmentDeletion(op as never, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          removeAwsEnvironmentAccess: async () => {
+            throw new Error("unexpected AWS role cleanup");
+          },
           deleteStatePackage: async () => "deleted",
           reportStatePackageDeletionFailure: async () => {},
           withCredentialProvenanceLock: (work) => work(),

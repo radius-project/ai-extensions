@@ -133,6 +133,8 @@ export interface EnvironmentsDependencies {
     clientId: string;
     tenantId: string;
     repoId: number;
+    // AWS only: the shared deploy role the environment's trust lives on.
+    roleArn?: string;
   }>;
   // Async delete-operation lifecycle (issue #303). Shares the create flow's
   // OperationRecord registry, persistence, and server-owned task scheduler.
@@ -141,7 +143,10 @@ export interface EnvironmentsDependencies {
     environment: string
   ): DeleteOperationRecord | null;
   createOperation(input: unknown): DeleteOperationRecord;
-  buildDeleteStages(options: { includeAzureCleanup: boolean }): unknown;
+  buildDeleteStages(options: {
+    includeAzureCleanup: boolean;
+    includeAwsCleanup?: boolean;
+  }): unknown;
   startOperation(op: DeleteOperationRecord): DeleteStartResult;
   toClientView(op: DeleteOperationRecord): unknown;
   scheduleEnvironmentOperation(

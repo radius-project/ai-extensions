@@ -835,6 +835,15 @@ describe("operations-status routes (SU-16)", () => {
 
 // A recorder response paired with the create handler over a streamed POST body.
 // Async because the handler reads the body with `for await`.
+const VALID_AWS_INPUT = {
+  roleName: "radius-deploy-octo-app",
+  accountId: "123456789012",
+  region: "us-west-2",
+  cluster: "c",
+  vpcId: "vpc-1",
+  subnetIds: "subnet-a,subnet-b"
+};
+
 async function runCreate(
   body: string,
   deps: CreateOperationDependencies,
@@ -1066,24 +1075,79 @@ describe("handleCreateOperation (POST /api/operations)", () => {
   );
 
   it.each([
-    ["roleArn", { roleArn: "", accountId: "a", region: "r", cluster: "c" }],
-    ["accountId", { roleArn: "arn", accountId: "", region: "r", cluster: "c" }],
-    ["region", { roleArn: "arn", accountId: "a", region: "", cluster: "c" }],
-    ["cluster", { roleArn: "arn", accountId: "a", region: "r", cluster: "" }]
-  ])(
-    "rejects aws setup with 400 when %s is missing",
-    async (_label, fields) => {
-      const recording = await runCreate(
-        JSON.stringify({ repo: "octo/app", provider: "aws", ...fields }),
-        createDependencies({ isValidRepoSlug: () => true })
-      );
-      expect(recording.status).toBe(400);
-      expect(JSON.parse(recording.body)).toEqual({
-        error: "AWS setup requires roleArn, accountId, region, and cluster.",
-        code: "invalid-aws-operation-input"
-      });
-    }
-  );
+    ["accountId is missing", { accountId: "" }],
+    ["accountId has 11 digits", { accountId: "12345678901" }],
+    ["accountId has 13 digits", { accountId: "1234567890123" }],
+    ["accountId is not numeric", { accountId: "12345678901a" }],
+    ["region is missing", { region: "" }],
+    ["region is upper case", { region: "US-WEST-2" }],
+    ["region has no zone number", { region: "us-west" }],
+    ["cluster is blank", { cluster: "  " }],
+    ["vpcId is blank", { vpcId: " " }],
+    ["subnetIds is blank", { subnetIds: "" }],
+    ["both role inputs are missing", { roleName: "", existingRoleArn: "" }],
+    ["roleName exceeds 64 characters", { roleName: "r".repeat(65) }],
+    ["roleName has a path separator", { roleName: "team/deploy" }],
+    [
+      "existingRoleArn is malformed and roleName is missing",
+      { roleName: "", existingRoleArn: "arn:aws:iam::123:role/r" }
+    ],
+    [
+      "existingRoleArn is not a role and roleName is missing",
+      {
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:user/r"
+      }
+    ]
+  ])("rejects aws setup with 400 when %s", async (_label, fields) => {
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        ...VALID_AWS_INPUT,
+        ...fields
+      }),
+      createDependencies({ isValidRepoSlug: () => true })
+    );
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        "AWS setup requires a valid accountId, region, cluster, vpcId, subnetIds, and either an IAM role name or an existing role ARN.",
+      code: "invalid-aws-operation-input"
+    });
+  });
+
+  it.each([
+    ["a 64-character role name", { roleName: "r".repeat(64) }],
+    ["a one-character role name", { roleName: "r" }],
+    ["a GovCloud region", { region: "us-gov-west-1" }],
+    [
+      "an existing role ARN instead of a role name",
+      {
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+      }
+    ],
+    [
+      "an existing partitioned role ARN with a path",
+      {
+        roleName: "",
+        existingRoleArn: "arn:aws-us-gov:iam::123456789012:role/team/deploy"
+      }
+    ]
+  ])("admits aws setup with %s", async (_label, fields) => {
+    const recording = await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        ...VALID_AWS_INPUT,
+        ...fields
+      }),
+      happyPathCreate(emptyCapture(), newOperationRecord())
+    );
+
+    expect(recording.status).toBe(202);
+  });
 
   it("registers, persists, answers 202, then schedules — in that order", async () => {
     const capture = emptyCapture();
@@ -1332,20 +1396,49 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, op)
     );
     expect(op.resumeRequest).toBeUndefined();
-    // AWS still needs no azure credentials, and identity stages are only for
-    // azure credential acquisition.
-    expect(capture.built).toEqual([{ includeIdentity: false }]);
-    expect(
-      (op.request as { environment: { provider: string } }).environment.provider
-    ).toBe("aws");
+    // AWS needs no azure credentials, but its deploy role is authorized during
+    // setup, so the identity stage is included.
+    expect(capture.built).toEqual([{ includeIdentity: true }]);
+    expect(op.request).toMatchObject({
+      needsAzureCredentials: false,
+      environment: {
+        provider: "aws",
+        roleName: "radius-deploy-octo-app",
+        existingRoleArn: "",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "c",
+        vpcId: "vpc-1",
+        subnetIds: "subnet-a,subnet-b"
+      }
+    });
+    expect(op.request).not.toHaveProperty("environment.roleArn");
+  });
+
+  it("persists an existing AWS role ARN on the environment request", async () => {
+    const op = newOperationRecord();
+    await runCreate(
+      JSON.stringify({
+        repo: "octo/app",
+        provider: "aws",
+        ...VALID_AWS_INPUT,
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+      }),
+      happyPathCreate(emptyCapture(), op)
+    );
+
+    expect(op.request).toMatchObject({
+      environment: {
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:role/existing"
+      }
+    });
   });
 
   it("answers 409 with the conflicting operation id and never persists or schedules", async () => {
@@ -1354,10 +1447,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, newOperationRecord(), {
         startOperation: () => ({
@@ -1391,10 +1481,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, newOperationRecord(), {
         claimSelectionHandle: claim,
@@ -1429,10 +1516,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, op, {
         persistOperations: () => {
@@ -1487,10 +1571,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, op, {
         persistOperations: () => {
@@ -1540,10 +1621,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
       JSON.stringify({
         repo: "octo/app",
         provider: "aws",
-        roleArn: "arn",
-        accountId: "a",
-        region: "r",
-        cluster: "c"
+        ...VALID_AWS_INPUT
       }),
       happyPathCreate(capture, op, {
         persistOperations: () => {
@@ -1581,10 +1659,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
         JSON.stringify({
           repo: "octo/app",
           provider: "aws",
-          roleArn: "arn",
-          accountId: "a",
-          region: "r",
-          cluster: "c"
+          ...VALID_AWS_INPUT
         }),
         response
       )

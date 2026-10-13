@@ -320,14 +320,14 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(entry.state.activeSubtab).toBe("environments");
   });
 
-  it("serves the AWS credential provider as visible but disabled", async () => {
+  it("serves the AWS credential provider as an enabled option", async () => {
     resetState({ contextRepo: "octo/app" });
 
     const response = await get("/?page=credentials");
 
-    expect(response.body).toContain(
-      '<option value="aws" disabled>AWS (coming soon)</option>'
-    );
+    expect(response.body).toContain('<option value="aws">AWS</option>');
+    expect(response.body).not.toContain("coming soon");
+    expect(response.body).not.toContain('id="aws-role-arn"');
     expect(response.body).toContain(
       '<div id="cred-panel-aws" class="rad-section" style="display:none;">'
     );

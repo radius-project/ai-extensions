@@ -821,10 +821,13 @@ test.describe("Radius Canvas in Chromium", () => {
       ["verify-aws.yml", RADIUS_REF],
       ["run-rad-commands.yml", RADIUS_REF],
       ["run-rad-commands-azure.yml", RADIUS_REF],
+      ["run-rad-commands-aws.yml", RADIUS_REF],
       ["delete-application.yml", DELETE_RADIUS_REF],
       ["delete-azure.yml", DELETE_RADIUS_REF],
+      ["delete-aws.yml", DELETE_RADIUS_REF],
       ["delete-environment.yml", DELETE_RADIUS_REF],
-      ["delete-environment-azure.yml", DELETE_RADIUS_REF]
+      ["delete-environment-azure.yml", DELETE_RADIUS_REF],
+      ["delete-environment-aws.yml", DELETE_RADIUS_REF]
     ]) {
       additions.push(
         command(
@@ -3065,24 +3068,37 @@ test.describe("Radius Canvas in Chromium", () => {
     const awsOption = page
       .getByLabel("Provider")
       .locator('option[value="aws"]');
-    await expect(awsOption).toBeDisabled();
-    await expect(awsOption).toHaveText("AWS (coming soon)");
+    await expect(awsOption).toBeEnabled();
+    await expect(awsOption).toHaveText("AWS");
     await page.getByRole("button", { name: "Verify Credentials" }).click();
 
     await expect(page.locator("#cred-verify-status")).toContainText(
       "Please enter a Profile Name"
     );
     await expectNoWcagViolations(page);
+
+    await page.getByLabel("Provider").selectOption("aws");
+    await page.getByLabel("Profile Name").fill("fixture-aws");
+    await page.getByLabel("Account ID").fill("12345678901");
+    await page.getByLabel("Region", { exact: true }).fill("us-west-2");
+    await page.getByRole("button", { name: "Verify Credentials" }).click();
+
+    await expect(page.locator("#cred-verify-status")).toContainText(
+      'Account ID "12345678901" is not valid. Enter the 12-digit AWS account ID.'
+    );
+    await expect(page.locator("#aws-role-arn")).toHaveCount(0);
+    await expectNoWcagViolations(page);
     expect(
       canvas.requests.some(
         (request) =>
           request.method === "POST" &&
-          request.path === "/api/verify-azure-login"
+          (request.path === "/api/verify-azure-login" ||
+            request.path === "/api/verify-aws-login")
       )
     ).toBe(false);
   });
 
-  test("keeps unsupported credential profiles out of environment creation @safety", async ({
+  test("offers AWS credential profiles and keeps unsupported ones out of environment creation @safety", async ({
     page,
     canvas
   }) => {
@@ -3108,24 +3124,29 @@ test.describe("Radius Canvas in Chromium", () => {
     });
 
     await gotoCanvas(page, canvas, "credentials");
-    for (const name of ["fixture-aws", "fixture-future"]) {
-      const row = page.getByRole("row").filter({ hasText: name });
-      await expect(row).toBeVisible();
-      await expect(
-        row.getByRole("button", { name: "Create Env" })
-      ).toBeDisabled();
-      await expect(row.locator(".js-cred-createenv")).toHaveCount(0);
-    }
+    const awsRow = page.getByRole("row").filter({ hasText: "fixture-aws" });
+    await expect(awsRow).toBeVisible();
+    await expect(
+      awsRow.getByRole("button", { name: "Create Env" })
+    ).toBeEnabled();
+    await expect(awsRow.locator(".js-cred-createenv")).toHaveCount(1);
+    const futureRow = page
+      .getByRole("row")
+      .filter({ hasText: "fixture-future" });
+    await expect(futureRow).toBeVisible();
+    await expect(
+      futureRow.getByRole("button", { name: "Create Env" })
+    ).toBeDisabled();
+    await expect(futureRow.locator(".js-cred-createenv")).toHaveCount(0);
 
     await gotoCanvas(page, canvas, "environment");
     await page.getByRole("button", { name: "New Environment" }).click();
     const profileButton = page.locator("#env-profile-button");
     await profileButton.click();
     await expect(profileButton).toHaveAttribute("aria-expanded", "true");
-    await expect(page.locator("#env-profile-options")).toBeEmpty();
-    await expect(page.locator("#env-profile-empty")).toHaveText(
-      "No supported credential profiles yet."
-    );
+    const options = page.locator("#env-profile-options");
+    await expect(options).toContainText("fixture-aws (AWS)");
+    await expect(options).not.toContainText("fixture-future");
     await expect(page.locator("#env-step1-next")).toBeDisabled();
   });
 

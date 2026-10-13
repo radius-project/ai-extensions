@@ -3,7 +3,10 @@
 // and failure panels the client script drives.
 
 import { escapeHtml } from "../../shared.js";
-import { KUBERNETES_NAMESPACE_PATTERN } from "@radius-project/core/platforms";
+import {
+  KUBERNETES_NAMESPACE_PATTERN,
+  buildAwsDeployRoleName
+} from "@radius-project/core/platforms";
 
 export interface EnvironmentsPaneOptions {
   activeSubtab: string;
@@ -369,7 +372,7 @@ export function environmentsPaneMarkup(
     <!-- 3 · Deploy identity -->
     <div class="rad-section" id="env-identity-section">
       <div class="rad-section__title">3 · Deploy identity</div>
-      <div class="rad-section__desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
+      <div class="rad-section__desc" id="env-identity-desc">The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.</div>
       <div class="rad-field" id="env-identity-azure" style="max-width:560px;">
         <label for="az-app-name-input">Azure app registration</label>
         <input id="az-app-name-input" type="text" autocomplete="off" spellcheck="false" placeholder="radius-deploy-owner-repo" value="radius-deploy-${escapeHtml(
@@ -387,7 +390,22 @@ export function environmentsPaneMarkup(
         <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
         <a href="#" id="az-clear-pin-link" style="display:none; font-size:11px; margin-top:2px;">Use a per-repo identity instead</a>
       </div>
-      <div class="rad-field__help" id="env-identity-aws" style="display:none;">GitHub Actions assumes the IAM role from your credential profile — no extra identity to configure here.</div>
+      <div class="rad-field" id="env-identity-aws" style="display:none; max-width:560px;">
+        <label for="aws-role-name-input">IAM role</label>
+        <input id="aws-role-name-input" type="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="radius-deploy-owner-repo" value="${escapeHtml(
+          buildAwsDeployRoleName(ctxRepo || "")
+        )}" data-default-name="${escapeHtml(
+          buildAwsDeployRoleName(ctxRepo || "")
+        )}" />
+        <input type="hidden" id="aws-selected-role-arn" value="" />
+        <div class="rad-field__help"><span id="aws-role-help">Created in your AWS account, trusted over OIDC by <code>repo:${escapeHtml(
+          ctxRepo
+        )}</code> for this environment, and granted PowerUserAccess limited to resources in the profile's region. Setup also grants the role cluster-admin access on the target EKS cluster.</span> If one already exists, you may
+         <a href="#" id="aws-use-existing-role-link">use an existing role…</a>
+        </div>
+        <div id="aws-selected-role-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
+        <a href="#" id="aws-clear-role-link" style="display:none; font-size:11px; margin-top:2px;">Use a per-repo role instead</a>
+      </div>
     </div>
 
     <!-- 4 · Infrastructure -->
@@ -424,6 +442,7 @@ export function environmentsPaneMarkup(
 
       <!-- AWS infra -->
       <div id="panel-aws" style="display:none;">
+        <div class="rad-field__help">Select the EKS cluster your application runs on and the namespace for this environment. The VPC follows the cluster, and its private subnets are selected. Managed data services need subnets in at least two availability zones.</div>
         <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
           <div id="aws-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="aws-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
@@ -432,7 +451,6 @@ export function environmentsPaneMarkup(
           <div class="rad-field">
             <label for="aws-cluster-select">EKS Cluster</label>
             <select id="aws-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-cluster-custom" type="text" aria-label="EKS Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="aws-namespace-select">Namespace</label>
@@ -444,14 +462,15 @@ export function environmentsPaneMarkup(
           <div class="rad-field">
             <label for="aws-vpc-select">VPC</label>
             <select id="aws-vpc-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-vpc-custom" type="text" aria-label="VPC (custom)" placeholder="vpc-xxxxxxxx" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
-            <label for="aws-subnets-select">Subnets</label>
-            <select id="aws-subnets-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-subnets-custom" type="text" aria-label="Subnets (custom)" placeholder="subnet-xxx,subnet-yyy" style="display:none; margin-top:4px;" />
+            <span id="aws-subnets-label" style="display:block; font-weight:600; font-size:12px; color:var(--rad-text-tertiary); margin:0 0 4px;">Subnets</span>
+            <div id="aws-subnets-list" role="group" aria-labelledby="aws-subnets-label" aria-describedby="aws-subnets-note aws-subnets-error" style="border:1px solid var(--rad-stroke); border-radius:6px; padding:4px 0; max-height:220px; overflow:auto;"></div>
+            <div class="rad-field__help" id="aws-subnets-note">Two availability zones are required. Public subnets are reachable from the internet.</div>
+            <div id="aws-subnets-error" class="status error" role="alert" hidden></div>
           </div>
         </div>
+        <div id="aws-infra-warning" class="status info" role="status" hidden style="margin-top:8px;"></div>
       </div>
     </div>
 

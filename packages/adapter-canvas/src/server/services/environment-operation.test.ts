@@ -40,6 +40,13 @@ function operation(): EnvironmentOperationRecord {
 }
 
 const NOW = Date.parse("2026-08-25T01:06:05.000Z");
+const AWS_ROLE_ARN = "arn:aws:iam::123456789012:role/r";
+
+function awsIdentityReady(): Partial<EnvironmentOperationWorkflowDependencies> {
+  return {
+    setupAwsDeployIdentity: async () => ({ ok: true, roleArn: AWS_ROLE_ARN })
+  };
+}
 
 function dependencies(
   op: EnvironmentOperationRecord,
@@ -68,6 +75,9 @@ function dependencies(
     failures,
     posts,
     dependencies: {
+      setupAwsDeployIdentity: async () => {
+        throw new Error("unexpected AWS deploy identity setup");
+      },
       guardStopBoundary: async (_target, boundary) => {
         events.push(`stop:${boundary}`);
         return true;
@@ -572,7 +582,7 @@ describe("runEnvironmentOperationWorkflow", () => {
           : command({ code: 1, stderr: "HTTP 404" });
       }
     });
-    const test = dependencies(op);
+    const test = dependencies(op, awsIdentityReady());
 
     expect(
       await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
@@ -612,7 +622,7 @@ describe("runEnvironmentOperationWorkflow", () => {
           })
         : command({ code: 1, stderr: "HTTP 404" })
     });
-    const test = dependencies(op);
+    const test = dependencies(op, awsIdentityReady());
 
     expect(
       await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
@@ -957,7 +967,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = null;
     op.resumeRequest = null;
-    const test = dependencies(op);
+    const test = dependencies(op, awsIdentityReady());
     const executor = successfulSelectedGhExecutor({
       run: async () =>
         command({ stdout: JSON.stringify({ name: "Production" }) })
@@ -975,10 +985,150 @@ describe("runEnvironmentOperationWorkflow", () => {
           operationEnvironment: "production",
           provider: "aws",
           operationId: op.operationId,
+          roleArn: AWS_ROLE_ARN,
           clientId: ""
         }
       }
     ]);
+  });
+
+  it("prepares the AWS deploy identity after the GitHub environment and passes its role to create-environment", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: {
+        environment: "production",
+        roleName: "radius-deploy-octo-app",
+        existingRoleArn: "",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "eks-1"
+      }
+    };
+    const identityCalls: Array<Record<string, unknown>> = [];
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    const test = dependencies(op, {
+      setupAwsDeployIdentity: async (target, request, received) => {
+        expect(target).toBe(op);
+        expect(received).toBe(executor);
+        test.events.push("aws-identity");
+        identityCalls.push(request);
+        return { ok: true, roleArn: AWS_ROLE_ARN };
+      }
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: true });
+
+    expect(identityCalls).toEqual([
+      {
+        environment: "Production",
+        roleName: "radius-deploy-octo-app",
+        existingRoleArn: "",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "eks-1",
+        repo: "octo/app"
+      }
+    ]);
+    expect(test.events.indexOf("canonical:Production")).toBeLessThan(
+      test.events.indexOf("aws-identity")
+    );
+    expect(test.events.indexOf("aws-identity")).toBeLessThan(
+      test.events.indexOf("post:/api/create-environment")
+    );
+    expect(test.posts).toEqual([
+      {
+        pathname: "/api/create-environment",
+        data: expect.objectContaining({
+          provider: "aws",
+          environment: "Production",
+          roleArn: AWS_ROLE_ARN
+        })
+      }
+    ]);
+    expect(test.failures).toEqual([]);
+  });
+
+  it("finalizes an AWS deploy identity failure without creating the environment", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: { environment: "production" }
+    };
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    const test = dependencies(op, {
+      setupAwsDeployIdentity: async () => ({
+        ok: false,
+        status: 403,
+        error: "The signed-in AWS identity cannot create IAM roles.",
+        code: "aws-role-create-denied"
+      })
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(test.events).toContain("stop:before-setup-failure-cleanup");
+    expect(test.failures).toEqual([
+      expect.objectContaining({
+        status: 403,
+        error: "The signed-in AWS identity cannot create IAM roles.",
+        code: "aws-role-create-denied"
+      })
+    ]);
+    expect(test.posts).toEqual([]);
+  });
+
+  it("stops before cleanup when an AWS deploy identity failure meets a stop request", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: { environment: "production" }
+    };
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    const base = dependencies(op, {
+      setupAwsDeployIdentity: async () => ({
+        ok: false,
+        status: 400,
+        error: "denied",
+        code: "aws-denied"
+      })
+    });
+    const test = {
+      ...base,
+      dependencies: {
+        ...base.dependencies,
+        guardStopBoundary: async (
+          _target: EnvironmentOperationRecord,
+          boundary: string
+        ) => {
+          base.events.push(`stop:${boundary}`);
+          return boundary !== "before-setup-failure-cleanup";
+        }
+      }
+    };
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(base.failures).toEqual([]);
+    expect(base.posts).toEqual([]);
   });
 });
 

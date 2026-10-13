@@ -20,6 +20,7 @@ import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 } from "@radius-project/core";
@@ -116,12 +117,6 @@ function own(mapping: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(mapping, key);
 }
 
-function containsAwsWorkflowReference(value: unknown): boolean {
-  return [DEPLOY_AWS_FILE, DELETE_AWS_FILE].some((fileName) =>
-    containsWorkflowReference(value, fileName)
-  );
-}
-
 function containsWorkflowReference(value: unknown, fileName: string): boolean {
   if (Array.isArray(value)) {
     return value.some((child) => containsWorkflowReference(child, fileName));
@@ -138,7 +133,7 @@ function assertTrustedGeneratedWorkflow(
   workflow: string,
   artifact: GeneratedWorkflowArtifact,
   context: string,
-  expectedProviderWorkflow?: string
+  expectedProviderWorkflows: readonly string[] = []
 ): void {
   let parsed: unknown;
   try {
@@ -215,19 +210,15 @@ function assertTrustedGeneratedWorkflow(
     if (!own(inputs, "environment") || !isMapping(inputs.environment)) {
       fail("workflow dispatch input `environment` is required.");
     }
-    if (
-      Object.keys(jobs).some((job) => job.toLowerCase() === "aws") ||
-      containsAwsWorkflowReference(jobs)
-    ) {
-      fail("the dispatcher must not contain an AWS job or workflow reference.");
+    if (expectedProviderWorkflows.length === 0) {
+      fail("the dispatcher must invoke `./.github/workflows/<provider>`.");
     }
-    if (
-      !expectedProviderWorkflow ||
-      !containsWorkflowReference(jobs, expectedProviderWorkflow)
-    ) {
-      fail(
-        `the dispatcher must invoke \`./.github/workflows/${expectedProviderWorkflow || "<provider>"}\`.`
-      );
+    for (const providerWorkflow of expectedProviderWorkflows) {
+      if (!containsWorkflowReference(jobs, providerWorkflow)) {
+        fail(
+          `the dispatcher must invoke \`./.github/workflows/${providerWorkflow}\`.`
+        );
+      }
     }
     return;
   }
@@ -306,6 +297,7 @@ export {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 };
@@ -524,27 +516,21 @@ export async function generateDeployWorkflow(
   appFile: string,
   options: DeployWorkflowOptions = {}
 ): Promise<Record<string, string>> {
-  // Only the dispatcher + the Azure provider workflow are fetched and committed;
-  // the AWS provider workflow is intentionally never fetched or committed. The
-  // dispatcher's `aws:` job (which `uses:` the absent AWS provider file) is
-  // stripped below so GitHub can still parse the committed workflow.
-  const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
+  // The dispatcher and both provider workflows are committed: the dispatcher
+  // picks the provider at run time from the environment's variables, and
+  // GitHub rejects it unless every workflow it `uses:` exists.
+  const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE];
   const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
   const templates: Record<string, string> = {};
   files.forEach((f, i) => {
     templates[f] = bodies[i];
   });
-  // Satisfy core's "all files required" contract without a network lookup for
-  // the AWS template; the generated AWS output is dropped below and never
-  // committed.
-  templates[DEPLOY_AWS_FILE] = templates[DEPLOY_AZURE_FILE];
   const generated = coreGenerateDeployWorkflow(
     env,
     appFile,
     templates,
     options
   );
-  delete generated[DEPLOY_AWS_FILE];
   // Creating an environment should ONLY run the verify-credentials workflow.
   // The upstream dispatcher auto-triggers the deploy via a `workflow_run`
   // trigger once verify completes; strip it so `run-rad-commands` runs only on
@@ -553,16 +539,15 @@ export async function generateDeployWorkflow(
     generated[DEPLOY_DISPATCHER_FILE] = stripWorkflowRunTrigger(
       generated[DEPLOY_DISPATCHER_FILE]
     );
-    generated[DEPLOY_DISPATCHER_FILE] = stripAwsDispatcherJob(
-      generated[DEPLOY_DISPATCHER_FILE]
-    );
   }
   for (const [file, workflow] of Object.entries(generated)) {
     assertTrustedGeneratedWorkflow(
       workflow,
       file === DEPLOY_DISPATCHER_FILE ? "dispatcher" : "provider",
       `deploy workflow "${file}"`,
-      file === DEPLOY_DISPATCHER_FILE ? DEPLOY_AZURE_FILE : undefined
+      file === DEPLOY_DISPATCHER_FILE ?
+        [DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE]
+      : []
     );
   }
   return generated;
@@ -571,8 +556,8 @@ export async function generateDeployWorkflow(
 /**
  * Generate the delete workflow files. Returns an object mapping bare workflow
  * filename -> YAML content; the caller commits each under `.github/workflows/`.
- * As with deploy, the AWS provider workflow is never committed and the
- * application dispatcher's `aws:` job is stripped.
+ * As with deploy, every provider workflow is committed so either provider's
+ * dispatcher job resolves.
  *
  * Application and environment delete templates are all fetched from
  * radius-project/ai-extensions at DELETE_RADIUS_REF. This keeps one canonical
@@ -585,8 +570,10 @@ export async function generateDeleteWorkflow(
   const fetched = [
     DELETE_APP_DISPATCHER_FILE,
     DELETE_AZURE_FILE,
+    DELETE_AWS_FILE,
     DELETE_ENV_DISPATCHER_FILE,
-    DELETE_ENV_AZURE_FILE
+    DELETE_ENV_AZURE_FILE,
+    DELETE_ENV_AWS_FILE
   ];
   const fetchedBodies = await Promise.all(
     fetched.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
@@ -595,65 +582,24 @@ export async function generateDeleteWorkflow(
   fetched.forEach((f, i) => {
     templates[f] = fetchedBodies[i];
   });
-  templates[DELETE_AWS_FILE] = templates[DELETE_AZURE_FILE];
   const generated = coreGenerateDeleteWorkflow(env, templates);
-  delete generated[DELETE_AWS_FILE];
-  // The application dispatcher references the never-committed AWS provider file
-  // via its `aws:` job; strip it so GitHub can parse the committed workflow. The
-  // static environment dispatcher is authored Azure-only, so this is a no-op for
-  // it, but running it keeps both dispatchers guarded the same way.
-  for (const dispatcher of [
-    DELETE_APP_DISPATCHER_FILE,
-    DELETE_ENV_DISPATCHER_FILE
-  ]) {
-    if (typeof generated[dispatcher] === "string") {
-      generated[dispatcher] = stripAwsDispatcherJob(generated[dispatcher]);
-    }
-  }
   for (const [file, workflow] of Object.entries(generated)) {
     const isDispatcher =
       file === DELETE_APP_DISPATCHER_FILE ||
       file === DELETE_ENV_DISPATCHER_FILE;
-    const providerWorkflow =
-      file === DELETE_APP_DISPATCHER_FILE ? DELETE_AZURE_FILE
-      : file === DELETE_ENV_DISPATCHER_FILE ? DELETE_ENV_AZURE_FILE
-      : undefined;
+    const providerWorkflows =
+      file === DELETE_APP_DISPATCHER_FILE ? [DELETE_AZURE_FILE, DELETE_AWS_FILE]
+      : file === DELETE_ENV_DISPATCHER_FILE ?
+        [DELETE_ENV_AZURE_FILE, DELETE_ENV_AWS_FILE]
+      : [];
     assertTrustedGeneratedWorkflow(
       workflow,
       isDispatcher ? "dispatcher" : "provider",
       `delete workflow "${file}"`,
-      providerWorkflow
+      providerWorkflows
     );
   }
   return generated;
-}
-
-/**
- * Remove the `aws:` job (and any contiguous comment lines directly above it)
- * from a dispatcher workflow. The extension only commits the Azure provider
- * workflow, so the dispatcher's `aws:` job — which `uses:` the never-committed
- * AWS provider file — would otherwise make GitHub reject the whole workflow with
- * a parse error (HTTP 422). Jobs are indented two spaces; the block runs until
- * the next two-space-indented key, a top-level key, or EOF.
- */
-function stripAwsDispatcherJob(yaml: string): string {
-  const lines = yaml.split("\n");
-  const start = lines.findIndex((l) => /^  aws:\s*$/.test(l));
-  if (start === -1) return yaml;
-  let from = start;
-  while (from > 0 && /^  #/.test(lines[from - 1])) from--;
-  // Drop a single blank separator line above the block, if present.
-  if (from > 0 && lines[from - 1].trim() === "") from--;
-  let to = start + 1;
-  while (
-    to < lines.length &&
-    !/^  \S/.test(lines[to]) &&
-    !/^\S/.test(lines[to])
-  ) {
-    to++;
-  }
-  lines.splice(from, to - from);
-  return lines.join("\n");
 }
 
 /**
@@ -807,8 +753,8 @@ export async function syncRepoWorkflows(
         );
       }
     }
-    // Deploy + delete workflows are provider-agnostic (only the Azure provider
-    // file is committed and the content doesn't vary by env provider), so
+    // Deploy + delete workflows are provider-agnostic (every provider file is
+    // committed and the content doesn't vary by env provider), so
     // generate them once per environment with a null provider tag.
     try {
       const deploy = await generateDeployWorkflow(
@@ -870,7 +816,9 @@ export async function syncRepoWorkflows(
         // `workflow_call`-only provider never triggers a run on push, so
         // authoring it early is safe.
         const forceAuthorEnvDeleteProvider =
-          fileName === DELETE_ENV_AZURE_FILE && envDeleteDispatcherPresent;
+          (fileName === DELETE_ENV_AZURE_FILE ||
+            fileName === DELETE_ENV_AWS_FILE) &&
+          envDeleteDispatcherPresent;
         if (!opts.create && !forceAuthorEnvDeleteProvider) continue;
         if (!(await remoteHasBranch(branch))) {
           log(`skipped creating ${path} on "${branch}" (branch not on remote)`);

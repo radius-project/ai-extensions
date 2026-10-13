@@ -30,7 +30,10 @@ import {
   OCI_STATE_BACKEND,
   remediationSessionMessage,
   remediationView,
-  stateRegistryForEnvironment
+  stateRegistryForEnvironment,
+  buildEnvironmentSuffix,
+  buildOidcSubject,
+  buildAwsDeployRoleName
 } from "@radius-project/core";
 import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
 import type { Remediation, RemediationView } from "@radius-project/core";
@@ -111,8 +114,13 @@ import {
   isValidRepoSlug,
   isAksClusterName,
   isResourceGroupName,
+  resolveOidcSubject,
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
+import {
+  removeAwsEnvironmentFromRole,
+  setupAwsDeployIdentity
+} from "./server/services/aws-deploy-identity.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
@@ -238,8 +246,10 @@ import {
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
+  DEPLOY_AWS_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   LEGACY_DEPLOY_WORKFLOW_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
@@ -525,6 +535,90 @@ function runCliCommand(
 interface ManagedEnvironment {
   name: string;
   provider?: string;
+}
+
+function optionalText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+// The GitHub OIDC subject this repository's workflows present for one
+// environment, the same string Azure's federated credential trusts.
+async function resolveEnvironmentSubject(
+  repo: string,
+  environment: string,
+  executor?: SelectedGhExecutor
+): Promise<string> {
+  const suffix = buildEnvironmentSuffix(environment);
+  const oidc = await resolveOidcSubject(
+    { targetRepo: repo, envName: environment, suffix },
+    (apiPath) => runGitHubJsonRequest(apiPath, executor)
+  );
+  return buildOidcSubject({
+    repoFullName: oidc.fullName,
+    ownerId: oidc.ownerId,
+    repoId: oidc.repoId,
+    suffix,
+    subjectConfig: oidc.subjectConfig
+  });
+}
+
+// `Authorize deploy identity` for an AWS environment. Progress lands on the
+// operation as steps; a failure is answered to the workflow, which finishes
+// the operation with the `Setup didn't finish` card.
+async function runAwsDeployIdentitySetup(
+  operation: any,
+  input: Record<string, unknown>,
+  executor: SelectedGhExecutor
+): Promise<
+  | { ok: true; roleArn: string }
+  | { ok: false; status: number; error: string; code: string }
+> {
+  enterStage(operation, STAGE_AUTHORIZE_IDENTITY);
+  const repo = optionalText(input.repo);
+  const environment = optionalText(input.environment);
+  let subject: string;
+  try {
+    subject = await resolveEnvironmentSubject(repo, environment, executor);
+  } catch (error) {
+    return {
+      ok: false,
+      status: 400,
+      error: errorMessage(error),
+      code: "oidc-subject-unresolved"
+    };
+  }
+  const result = await setupAwsDeployIdentity(
+    {
+      repo,
+      environment,
+      accountId: optionalText(input.accountId),
+      region: optionalText(input.region),
+      cluster: optionalText(input.cluster),
+      roleName: optionalText(input.roleName) || buildAwsDeployRoleName(repo),
+      existingRoleArn: optionalText(input.existingRoleArn),
+      subject
+    },
+    {
+      runAws: (args) => runCliCommand("aws", args, 60000),
+      step: (text) => {
+        addLegacyStep(operation, text, STAGE_AUTHORIZE_IDENTITY);
+      }
+    }
+  );
+  await operations.persist();
+  if (!result.ok) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        result.created.length > 0 ?
+          `${result.message} Created before setup stopped: ${result.created.join(", ")}. Remove them in the AWS console if you will not retry.`
+        : `${result.message} Nothing was created in AWS.`,
+      code: result.code
+    };
+  }
+  setContext(operation, { awsRoleArn: result.roleArn });
+  return { ok: true, roleArn: result.roleArn };
 }
 
 interface CachedPayload {
@@ -1409,6 +1503,7 @@ async function discoverEnvironmentTarget(
   clientId: string;
   tenantId: string;
   repoId: number;
+  roleArn: string;
 }> {
   const out = await runCommand(
     "gh",
@@ -1444,7 +1539,8 @@ async function discoverEnvironmentTarget(
     provider,
     clientId: vars.AZURE_CLIENT_ID || "",
     tenantId: vars.AZURE_TENANT_ID || "",
-    repoId
+    repoId,
+    roleArn: vars.AWS_ROLE_ARN || ""
   };
 }
 
@@ -2930,7 +3026,8 @@ async function deleteRadiusEnvironmentViaWorkflow(
 ): Promise<RadiusEnvDeletionOutcome> {
   const sync = await ensureWorkflowsCurrent(repo, environment, "", [
     DELETE_ENV_DISPATCHER_FILE,
-    DELETE_ENV_AZURE_FILE
+    DELETE_ENV_AZURE_FILE,
+    DELETE_ENV_AWS_FILE
   ]);
   // Committing the workflows is best-effort and can silently no-op (a protected
   // branch, or an exception `ensureWorkflowsCurrent` swallows), and the delete
@@ -2955,7 +3052,11 @@ async function deleteRadiusEnvironmentViaWorkflow(
     };
   }
   const workflowVerification = await verifyWorkflowFilesMatchSource(
-    [DELETE_ENV_DISPATCHER_FILE, DELETE_ENV_AZURE_FILE].map((file) => ({
+    [
+      DELETE_ENV_DISPATCHER_FILE,
+      DELETE_ENV_AZURE_FILE,
+      DELETE_ENV_AWS_FILE
+    ].map((file) => ({
       file,
       path: `.github/workflows/${file}`,
       expected: expectedDeleteWorkflows[file] || ""
@@ -3148,7 +3249,11 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
 const deployDispatchService = createDeployDispatchService({
   ghCommandPresentation: GH_COMMAND_PRESENTATION,
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
-  deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
+  deployWorkflowFiles: [
+    DEPLOY_DISPATCHER_FILE,
+    DEPLOY_AZURE_FILE,
+    DEPLOY_AWS_FILE
+  ],
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
   oidcSubjectMissingKind: DEPLOY_OIDC_SUBJECT_MISSING_KIND,
   oidcSubjectCaseMismatchKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
@@ -5363,10 +5468,9 @@ async function ensureDeployWorkflowsOnBranch(
   onWorkflowWritten: (file: string) => void
 ): Promise<void> {
   if (!repo || !branch) return;
-  // Only the dispatcher + the Azure provider workflow are published to target
-  // repos today (the AWS provider file is intentionally withheld, matching the
-  // env-creation commit step), so those are the two a `--ref` dispatch needs.
-  const wanted = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
+  // The dispatcher `uses:` both provider workflows, so a `--ref` dispatch
+  // needs all three on the branch.
+  const wanted = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE];
   const existsOnBranch = (file: string): Promise<boolean> =>
     new Promise<boolean>((resolve) => {
       cliExec(
@@ -5596,6 +5700,18 @@ function productionEnvironmentDeletionPorts(): EnvironmentDeletionCoordinatorPor
         applicationObjectId: application.stdout.trim()
       };
     },
+    removeAwsEnvironmentAccess: async (input) =>
+      removeAwsEnvironmentFromRole(
+        {
+          roleArn: input.roleArn,
+          environment: input.environment,
+          subject: await resolveEnvironmentSubject(
+            input.repo,
+            input.environment
+          )
+        },
+        { runAws: (args) => runCliCommand("aws", args, 60000) }
+      ),
     deleteGitHubEnvironment: (input) =>
       deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
     deleteStatePackage: createStatePackageDeletion({
@@ -6053,6 +6169,8 @@ export function createInstanceRequestCoordinator(
               });
             },
             getOperation: (id) => operations.get(id),
+            setupAwsDeployIdentity: (operation, input, selectedExecutor) =>
+              runAwsDeployIdentitySetup(operation, input, selectedExecutor),
             postInternal,
             now: () => Date.now()
           });

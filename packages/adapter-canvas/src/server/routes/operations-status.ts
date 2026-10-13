@@ -521,13 +521,19 @@ export async function handleCreateOperation(
       return;
     }
   } else if (
-    !String(data.roleArn || "").trim() ||
-    !String(data.accountId || "").trim() ||
-    !String(data.region || "").trim() ||
-    !String(data.cluster || "").trim()
+    !/^\d{12}$/.test(String(data.accountId || "")) ||
+    !/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(String(data.region || "")) ||
+    !String(data.cluster || "").trim() ||
+    !String(data.vpcId || "").trim() ||
+    !String(data.subnetIds || "").trim() ||
+    (!/^[A-Za-z0-9+=,.@_-]{1,64}$/.test(String(data.roleName || "")) &&
+      !/^arn:aws[a-z-]*:iam::\d{12}:role\/\S+$/.test(
+        String(data.existingRoleArn || "")
+      ))
   ) {
     jsonError(context, 400, {
-      error: "AWS setup requires roleArn, accountId, region, and cluster.",
+      error:
+        "AWS setup requires a valid accountId, region, cluster, vpcId, subnetIds, and either an IAM role name or an existing role ARN.",
       code: "invalid-aws-operation-input"
     });
     return;
@@ -560,7 +566,7 @@ export async function handleCreateOperation(
       repo,
       environment,
       stages: dependencies.buildStages({
-        includeIdentity: needsAzureCredentials
+        includeIdentity: needsAzureCredentials || provider === "aws"
       }),
       journey: {
         origin: data.origin || null,
@@ -590,7 +596,8 @@ export async function handleCreateOperation(
       appId: data.appId || "",
       createNew: data.createNew === true,
       serviceManagementReference: data.serviceManagementReference || "",
-      roleArn: data.roleArn || "",
+      roleName: data.roleName || "",
+      existingRoleArn: data.existingRoleArn || "",
       accountId: data.accountId || "",
       region: data.region || "",
       vpcId: data.vpcId || "",

@@ -11,7 +11,11 @@ import type {
 import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
 import { discardDeployedApplicationState } from "../services/deployed-view-state.js";
 import { DELETE_FAILED_STATUS } from "../services/delete-conflict.js";
-import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
+import {
+  DELETE_APP_DISPATCHER_FILE,
+  DELETE_AWS_FILE,
+  DELETE_AZURE_FILE
+} from "../../infra.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
@@ -673,7 +677,7 @@ export async function handleDeleteDeployment(
       repo,
       environment,
       "",
-      [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE]
+      [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE]
     );
     // If the sync couldn't commit the dispatcher to the default branch (e.g.
     // it's protected, or the token lacks write access), the dispatch below will
