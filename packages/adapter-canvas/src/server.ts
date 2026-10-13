@@ -545,6 +545,7 @@ interface AppBicepHandoffInput {
   // Whether the render that raised this handoff is still on screen, re-checked
   // by the runtime just before it mints attempt tokens and speaks.
   isCurrent?: () => boolean;
+  environmentKey?: string;
 }
 
 export interface DeployRepairHandoffInput {
@@ -1316,7 +1317,9 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readBranchSourceRevision: (entry, repo, branch) =>
     isWorkspaceSelection(entry.state, repo, branch) ?
       workspaceSourceRevision(entry.state.workspacePath)
-    : getBranchHeadSha(repo, branch),
+    : getBranchHeadSha(repo, branch).then((commit) =>
+        commit ? `remote:${commit}` : ""
+      ),
   record,
   optionalString,
   errorMessage,
@@ -2422,7 +2425,8 @@ function triggerAppBicepHandoff(
   branches: string | string[],
   page: string,
   progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph",
-  isCurrent?: () => boolean
+  isCurrent?: () => boolean,
+  environmentKey?: string
 ): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
@@ -2437,7 +2441,8 @@ function triggerAppBicepHandoff(
         page,
         progressView,
         state: entry?.state,
-        isCurrent
+        isCurrent,
+        environmentKey
       })
     ).catch(() => {});
   } catch {

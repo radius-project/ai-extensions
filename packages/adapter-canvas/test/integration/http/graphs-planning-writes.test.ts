@@ -345,7 +345,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
       "octo/app::main": {
         attemptToken: "attempt-1",
         error: "The configured Recipe rejects the required credential shape.",
-        commit: "sha-1"
+        sourceRevision: "sha-1"
       }
     };
     harness.state.appModelAttemptTokens = {
@@ -362,9 +362,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       modelingFailed: true,
-      error: expect.stringContaining(
-        "will not be retried until saved source files change"
-      )
+      error: expect.stringContaining("click Refresh")
     });
     expect(harness.state.appModelFailures).not.toEqual({});
   });
@@ -378,7 +376,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
       "octo/app::main": {
         attemptToken: "attempt-1",
         error: "The configured Recipe rejects the required credential shape.",
-        commit: "sha-1"
+        sourceRevision: "sha-1"
       }
     };
     harness.state.appModelAttemptTokens = {
@@ -395,6 +393,101 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ needsAppBicep: true });
     expect(harness.state.appModelFailures).toEqual({});
+  });
+
+  it.each([
+    ["/api/load-graph", { repo: "octo/app" }],
+    [
+      "/api/plan-graph",
+      { repo: "octo/app", provider: "azure", environment: "dev" }
+    ],
+    [
+      "/api/diff-branches",
+      { repo: "octo/app", base: "main", head: "feature/x" }
+    ]
+  ])(
+    "accepts only a boolean explicit retry over HTTP on %s",
+    async (route, request) => {
+      const harness = start({
+        selections: {
+          main: selectionOf("main", null),
+          "feature/x": selectionOf("feature/x", null)
+        },
+        commits: { main: "sha-1" }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "Recipe unavailable",
+          sourceRevision: "sha-1",
+          environmentKey: '["azure","dev"]'
+        }
+      };
+      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+      const entry = await container!.getOrCreate("panel-a");
+      expect(
+        await (
+          await post(
+            entry.baseUrl,
+            route,
+            JSON.stringify({
+              ...request,
+              restartWait: true,
+              refresh: true,
+              retryModeling: "true"
+            })
+          )
+        ).json()
+      ).toMatchObject({ appModelAuthoringFailed: true });
+      expect(
+        await (
+          await post(
+            entry.baseUrl,
+            route,
+            JSON.stringify({
+              ...request,
+              restartWait: true,
+              retryModeling: true
+            })
+          )
+        ).json()
+      ).toMatchObject({ needsAppBicep: true });
+      expect(harness.state.appModelFailures).toEqual({});
+    }
+  );
+
+  it("allows an environment change but keeps the failed environment fenced over HTTP", async () => {
+    const harness = start({
+      selections: { main: selectionOf("main", null) },
+      commits: { main: "sha-1" }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "Recipe unavailable",
+        sourceRevision: "sha-1",
+        environmentKey: '["azure","dev"]'
+      }
+    };
+    harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+    const entry = await container!.getOrCreate("panel-a");
+    const plan = (environment: string) =>
+      post(
+        entry.baseUrl,
+        "/api/plan-graph",
+        JSON.stringify({
+          repo: "octo/app",
+          provider: "azure",
+          environment,
+          restartWait: true
+        })
+      );
+    expect(await (await plan("dev")).json()).toMatchObject({
+      appModelAuthoringFailed: true
+    });
+    expect(await (await plan("production")).json()).toMatchObject({
+      needsAppBicep: true
+    });
   });
 
   it("recovers an unknown source baseline before permitting a later edit", async () => {
@@ -423,7 +516,7 @@ describe("graphs-planning writes real-loopback HIT", () => {
     harness.script.commits = { main: "source-1" };
     expect(await (await load()).json()).toMatchObject({
       modelingFailed: true,
-      error: expect.stringContaining("saved source files change")
+      error: expect.stringContaining("change saved source files")
     });
     expect(
       harness.state.appModelFailures?.["octo/app::main"]?.sourceRevision
@@ -433,6 +526,47 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(await (await load()).json()).toMatchObject({ needsAppBicep: true });
     expect(harness.state.appModelFailures).toEqual({});
   });
+
+  it.each([
+    ["workspace:source-1", "remote:sha-1"],
+    ["remote:sha-1", "workspace:source-1"]
+  ])(
+    "retains a failure when source evidence changes kind from %s to %s over HTTP",
+    async (recorded, current) => {
+      const harness = start({
+        selections: { main: selectionOf("main", null) },
+        commits: { main: current }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "Recipe unavailable",
+          sourceRevision: recorded
+        }
+      };
+      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+      const entry = await container!.getOrCreate("panel-a");
+      const load = () =>
+        post(
+          entry.baseUrl,
+          "/api/load-graph",
+          '{"repo":"octo/app","restartWait":true}'
+        );
+      expect(await (await load()).json()).toMatchObject({
+        appModelAuthoringFailed: true
+      });
+      expect(
+        harness.state.appModelFailures?.["octo/app::main"]?.sourceRevision
+      ).toBe(current);
+      expect(await (await load()).json()).toMatchObject({
+        appModelAuthoringFailed: true
+      });
+      harness.script.commits = { main: `${current}-changed` };
+      expect(await (await load()).json()).toMatchObject({
+        needsAppBicep: true
+      });
+    }
+  );
 
   it("stops asking the diff to generate once modeling failed permanently on one side", async () => {
     const harness = start({
@@ -478,12 +612,12 @@ describe("graphs-planning writes real-loopback HIT", () => {
       "octo/app::main": {
         attemptToken: "attempt-1",
         error: "base failed",
-        commit: "sha-1"
+        sourceRevision: "sha-1"
       },
       "octo/app::feature/x": {
         attemptToken: "attempt-1",
         error: "head failed",
-        commit: "sha-2"
+        sourceRevision: "sha-2"
       }
     };
     harness.state.appModelAttemptTokens = {

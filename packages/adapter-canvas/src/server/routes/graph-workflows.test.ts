@@ -571,7 +571,7 @@ describe("graph planning workflows", () => {
 
       expect(outcome.payload).toEqual({
         error:
-          "Application model generation failed: The configured Recipe rejects the required credential shape. The source revision could not be read. Reload to check it again, then change a source file or update the branch to retry.",
+          "Application model generation failed: The configured Recipe rejects the required credential shape. The source revision could not be read. Automatic retry is paused. Click Refresh to retry, or reload to check the source again.",
         modelingFailed: true,
         appModelAuthoringFailed: true,
         repo: "octo/app",
@@ -592,7 +592,7 @@ describe("graph planning workflows", () => {
         "octo/app::main": {
           attemptToken: "attempt-1",
           error: "The configured Recipe rejects the required credential shape.",
-          ...(commit === undefined ? {} : { commit })
+          ...(commit === undefined ? {} : { sourceRevision: commit })
         }
       };
       harness.state.appModelAttemptTokens = {
@@ -619,6 +619,75 @@ describe("graph planning workflows", () => {
       expect(harness.state.appModelAttemptTokens).toEqual({
         "octo/app::main": "attempt-1"
       });
+    });
+
+    it.each([
+      ["loadGraph", { repo: "octo/app" }],
+      ["planGraph", { repo: "octo/app" }],
+      ["diffBranches", { repo: "octo/app", base: "main", head: "feature/x" }]
+    ] as const)(
+      "releases a concluded failure only for the explicit %s retry",
+      async (workflow, request) => {
+        const harness = start({
+          selections: {
+            main: selectionOf({ content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          },
+          branchSourceCommits: { main: "sha-1" }
+        });
+        harness.state.appModelFailures = {
+          "octo/app::main": {
+            attemptToken: "attempt-1",
+            error: "Recipe unavailable",
+            sourceRevision: "sha-1"
+          }
+        };
+        harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+        for (const retryModeling of [undefined, false, "true"]) {
+          const automatic = await harness.run(
+            workflow,
+            JSON.stringify({
+              ...request,
+              restartWait: true,
+              refresh: true,
+              retryModeling
+            })
+          );
+          expect(automatic.payload).toMatchObject({
+            appModelAuthoringFailed: true
+          });
+          expect(harness.handoffs).toEqual([]);
+        }
+        const explicit = await harness.run(
+          workflow,
+          JSON.stringify({ ...request, retryModeling: true, restartWait: true })
+        );
+        expect(explicit.payload).toMatchObject({ needsAppBicep: true });
+        expect(harness.state.appModelFailures).toEqual({});
+        expect(harness.handoffs).toHaveLength(1);
+      }
+    );
+
+    it("reports an unreadable revision instead of promising saved-edit recovery", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchSourceCommits: { main: "" }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "Recipe unavailable",
+          sourceRevision: "sha-1"
+        }
+      };
+      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+      const result = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(result.payload).toMatchObject({
+        error: expect.stringContaining(
+          "Automatic retry is paused. Click Refresh"
+        )
+      });
+      expect(harness.handoffs).toEqual([]);
     });
 
     it.each([
@@ -657,9 +726,9 @@ describe("graph planning workflows", () => {
         const outcome = await harness.run(workflow, '{"repo":"octo/app"}');
         expect(outcome.status).toBe(409);
         expect(outcome.payload).toEqual({ stale: true });
-        expect(harness.state.appModelFailures?.["octo/app::main"]?.commit).toBe(
-          "sha-0"
-        );
+        expect(
+          harness.state.appModelFailures?.["octo/app::main"]?.sourceRevision
+        ).toBe("sha-0");
         expect(harness.handoffs).toEqual([]);
       }
     );
@@ -724,7 +793,7 @@ describe("graph planning workflows", () => {
           "octo/app::main": {
             attemptToken: "attempt-2",
             error: "A newer failure.",
-            commit: "sha-0"
+            sourceRevision: "sha-0"
           }
         };
         harness.state.appModelAttemptTokens = {
@@ -1506,6 +1575,50 @@ describe("graph planning workflows", () => {
   });
 
   describe("POST /api/plan-graph", () => {
+    it.each([
+      ["azure", "dev", false],
+      ["azure", "production", true],
+      ["aws", "dev", true]
+    ])(
+      "compares the selected provider %s and environment %s with the failed attempt",
+      async (provider, environment, retries) => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          branchSourceCommits: { main: "sha-1" }
+        });
+        harness.state.appModelFailures = {
+          "octo/app::main": {
+            attemptToken: "attempt-1",
+            error: "Recipe unavailable",
+            sourceRevision: "sha-1",
+            environmentKey: '["azure","dev"]'
+          }
+        };
+        harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+        const handoff = vi.spyOn(
+          harness.dependencies,
+          "triggerAppBicepHandoff"
+        );
+        const result = await harness.run(
+          "planGraph",
+          JSON.stringify({
+            repo: "octo/app",
+            provider,
+            environment,
+            restartWait: true
+          })
+        );
+        expect(result.payload).toMatchObject(
+          retries ? { needsAppBicep: true } : { appModelAuthoringFailed: true }
+        );
+        expect(harness.handoffs).toHaveLength(retries ? 1 : 0);
+        if (retries)
+          expect(handoff.mock.calls[0]?.[6]).toBe(
+            JSON.stringify([provider, environment])
+          );
+      }
+    );
+
     it("answers 400 for a malformed body and 503 without a Content-Type for a missing entry", async () => {
       const malformed = await start().run("planGraph", "nope");
       expect(malformed.status).toBe(400);
@@ -1570,7 +1683,7 @@ describe("graph planning workflows", () => {
         "octo/app::main": {
           attemptToken: "attempt-1",
           error: "Recipe conflict",
-          commit: "sha-0"
+          sourceRevision: "sha-0"
         }
       };
       harness.state.appModelAttemptTokens = {
@@ -1593,7 +1706,7 @@ describe("graph planning workflows", () => {
         "octo/app::main": {
           attemptToken: "attempt-1",
           error: "Recipe conflict",
-          commit: "sha-1"
+          sourceRevision: "sha-1"
         }
       };
       harness.state.appModelAttemptTokens = {
@@ -2213,7 +2326,7 @@ describe("graph planning workflows", () => {
         expect(outcome.status).toBe(200);
         expect(outcome.payload).toEqual({
           error:
-            "Application model generation failed: The configured Recipe rejects the required credential shape. The source revision could not be read. Reload to check it again, then change a source file or update the branch to retry.",
+            "Application model generation failed: The configured Recipe rejects the required credential shape. The source revision could not be read. Automatic retry is paused. Click Refresh to retry, or reload to check the source again.",
           modelingFailed: true,
           appModelAuthoringFailed: true,
           repo: "octo/app"
@@ -2256,12 +2369,12 @@ describe("graph planning workflows", () => {
         "octo/app::main": {
           attemptToken: "attempt-1",
           error: "base failed",
-          commit: "sha-0"
+          sourceRevision: "sha-0"
         },
         "octo/app::feature/x": {
           attemptToken: "attempt-1",
           error: "head failed",
-          commit: "sha-2"
+          sourceRevision: "sha-2"
         }
       };
       harness.state.appModelAttemptTokens = {
@@ -2290,7 +2403,7 @@ describe("graph planning workflows", () => {
         "octo/app::main": {
           attemptToken: "attempt-1",
           error: "base failed",
-          commit: "sha-1"
+          sourceRevision: "sha-1"
         }
       };
       harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
@@ -2318,7 +2431,7 @@ describe("graph planning workflows", () => {
         "octo/app::feature/x": {
           attemptToken: "attempt-1",
           error: "head failed",
-          commit: "sha-2"
+          sourceRevision: "sha-2"
         }
       };
       harness.state.appModelAttemptTokens = {
@@ -2388,7 +2501,7 @@ describe("graph planning workflows", () => {
         const failure = {
           attemptToken: "attempt-1",
           error: "base failed",
-          commit: "sha-1"
+          sourceRevision: "sha-1"
         };
         harness.state.appModelFailures = { "octo/app::main": failure };
         harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };

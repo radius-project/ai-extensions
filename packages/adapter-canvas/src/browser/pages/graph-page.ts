@@ -112,6 +112,7 @@ export function initializeGraphPage(
   const page = parseState(context);
   const branchSelect = context.dom.selectById("graph-branch");
   const button = context.dom.inputById("deploy-app-btn");
+  const modelingRefresh = context.dom.inputById("modeling-refresh");
   const renderGraph = requireBrowserFunction(globalScope, "radiusRenderGraph");
   const setLoading = requireBrowserFunction(
     globalScope,
@@ -121,6 +122,7 @@ export function initializeGraphPage(
   // Report a failure once, on the graph surface. The surface owns the content
   // area, so writing there also clears whatever loading state was showing.
   const showFailure = (message: string): void => {
+    if (modelingRefresh) modelingRefresh.hidden = false;
     showGraphModelingFailure(context, setError, message, {
       containerId: "graph-container",
       statusIds: ["graph-status", "graph-refresh-status"],
@@ -332,7 +334,12 @@ export function initializeGraphPage(
   // page branch is only the starting point.
   const currentBranch = (): string => branchSelect?.value.trim() || page.branch;
 
-  const load = (options: { readonly continuing?: boolean } = {}): void => {
+  const load = (
+    options: {
+      readonly continuing?: boolean;
+      readonly userRetry?: boolean;
+    } = {}
+  ): void => {
     if (requestActive || !entry.active) return;
     const branch = currentBranch();
     if (!page.repo || !branch) {
@@ -344,6 +351,7 @@ export function initializeGraphPage(
       return;
     }
     requestActive = true;
+    if (modelingRefresh) modelingRefresh.disabled = true;
     if (!options.continuing) loadRetryAttempt = 0;
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
@@ -377,7 +385,8 @@ export function initializeGraphPage(
           repo: page.repo,
           branch,
           followWorkspaceBranch,
-          restartWait: options.continuing !== true
+          restartWait: options.continuing !== true,
+          ...(options.userRetry ? { retryModeling: true } : {})
         }),
         signal: requestAbort?.signal
       })
@@ -457,6 +466,10 @@ export function initializeGraphPage(
         if (requestGeneration === generation) {
           requestActive = false;
           requestAbort = null;
+          if (modelingRefresh) {
+            modelingRefresh.disabled = false;
+            if (options.userRetry) modelingRefresh.focus();
+          }
         }
       });
   };
@@ -614,6 +627,12 @@ export function initializeGraphPage(
       load();
     }
   });
+  if (modelingRefresh) {
+    entry.on(modelingRefresh, "click", () => {
+      stopRequest();
+      load({ userRetry: true });
+    });
+  }
   void populateApplications(context, page.repo, "graph-app");
   const branchListingGeneration = branchSelectionGeneration;
   void populateBranches(

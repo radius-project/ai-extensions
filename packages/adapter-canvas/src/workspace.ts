@@ -4,7 +4,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -60,7 +60,8 @@ function runGit(
 function runGitResult(
   workspacePath: string | null | undefined,
   args: readonly string[],
-  trimOutput = true
+  trimOutput = true,
+  maxBuffer = 1024 * 1024
 ): Promise<{ ok: boolean; stdout: string }> {
   return new Promise((resolve) => {
     if (!workspacePath) {
@@ -70,7 +71,7 @@ function runGitResult(
     execFile(
       "git",
       ["-C", workspacePath, ...args],
-      { timeout: 5000, encoding: "utf8" },
+      { timeout: 5000, encoding: "utf8", maxBuffer },
       (err, stdout) => {
         resolve({
           ok: !err,
@@ -682,17 +683,20 @@ export async function workspaceSourceRevision(
         "diff",
         "--no-ext-diff",
         "--no-textconv",
+        "--no-renames",
         "--name-only",
         "-z",
         head,
         ...sourcePaths
       ],
-      false
+      false,
+      16 * 1024 * 1024
     ),
     runGitResult(
       workspacePath,
       ["ls-files", "--others", "--exclude-standard", "-z", ...sourcePaths],
-      false
+      false,
+      16 * 1024 * 1024
     )
   ]);
   if (!diff.ok || !untracked.ok) {
@@ -700,6 +704,7 @@ export async function workspaceSourceRevision(
   }
   const hash = createHash("sha256");
   hash.update(head);
+  const canonicalWorkspace = await fs.realpath(workspacePath);
   const trackedChanges = new Set(diff.stdout.split("\0").filter(Boolean));
   const files = new Set([
     ...trackedChanges,
@@ -712,6 +717,10 @@ export async function workspaceSourceRevision(
     }
     let stat;
     try {
+      const parent = await fs.realpath(path.dirname(file));
+      if (!isWorkspacePath(canonicalWorkspace, parent)) {
+        throw new Error("A source file is outside the workspace.");
+      }
       stat = await fs.lstat(file);
     } catch (error) {
       if (
@@ -725,28 +734,52 @@ export async function workspaceSourceRevision(
       }
       throw error;
     }
-    // Hash link text, not its target: an untracked link can point outside the checkout.
-    const content =
-      stat.isSymbolicLink() ? Buffer.from(await fs.readlink(file))
-      : stat.isFile() ? await fs.readFile(file)
-      : null;
-    if (content === null) {
-      throw new Error("A source path is not a file.");
+    if (stat.isDirectory()) {
+      // Git lists nested repositories and submodules as directories. Their
+      // commits count as source changes; uncommitted nested edits need Refresh.
+      const nestedHead = await runGitResult(file, [
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}"
+      ]);
+      const nestedRevision =
+        nestedHead.ok ? nestedHead : (
+          await runGitResult(file, ["symbolic-ref", "HEAD"])
+        );
+      if (!nestedRevision.ok)
+        throw new Error("A nested source repository could not be read.");
+      hash.update(
+        JSON.stringify([relative, "repository", nestedRevision.stdout])
+      );
+      continue;
     }
     hash.update(
       JSON.stringify([
         relative,
         stat.isSymbolicLink(),
         stat.mode & 0o111,
-        content.length
+        stat.size
       ])
     );
-    hash.update(content);
+    // Read link text, never an external target. Regular files are streamed so
+    // a dataset or binary cannot require one file-sized allocation.
+    if (stat.isSymbolicLink()) {
+      hash.update(await fs.readlink(file));
+    } else if (stat.isFile()) {
+      const stream = createReadStream(file);
+      try {
+        for await (const chunk of stream) hash.update(chunk);
+      } finally {
+        stream.destroy();
+      }
+    } else {
+      throw new Error("A source path is not a file.");
+    }
   }
   if ((await workspaceHeadCommit(workspacePath)) !== head) {
     throw new Error("The workspace commit changed while source was read.");
   }
-  return hash.digest("hex");
+  return `workspace:${hash.digest("hex")}`;
 }
 
 /**

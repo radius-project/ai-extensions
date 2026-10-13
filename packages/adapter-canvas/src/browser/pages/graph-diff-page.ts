@@ -88,6 +88,8 @@ export function initializeGraphDiffPage(
   let appBicepRetry: ScopeTimer | null = null;
   let initialRefresh = state.resources.length > 0;
   let restartWait = true;
+  let userRetry = false;
+  const modelingRefresh = context.dom.inputById("modeling-refresh");
 
   const stopAppBicepRetry = (): void => {
     if (appBicepRetry !== null) entry.cancel(appBicepRetry);
@@ -95,6 +97,7 @@ export function initializeGraphDiffPage(
   };
   let modelingFailureVisible = Boolean(state.modelingError);
   const showModelingFailure = (message: string): void => {
+    if (modelingRefresh) modelingRefresh.hidden = false;
     controller?.destroy();
     controller = null;
     showGraphModelingFailure(context, setError, message, {
@@ -151,7 +154,10 @@ export function initializeGraphDiffPage(
     const repo = repoInput?.value ?? state.repo;
     const restartExpiredWait = restartWait;
     restartWait = false;
+    const retryModeling = userRetry;
+    userRetry = false;
     if (!repo || !base || !head) return;
+    if (modelingRefresh) modelingRefresh.disabled = true;
     if (modelingFailureVisible) {
       const graphContainer = context.dom.byId("graph-container");
       if (graphContainer) graphContainer.innerHTML = "";
@@ -191,7 +197,8 @@ export function initializeGraphDiffPage(
           head,
           repo,
           refresh,
-          restartWait: restartExpiredWait
+          restartWait: restartExpiredWait,
+          ...(retryModeling ? { retryModeling: true } : {})
         }),
         signal: requestAbort?.signal
       })
@@ -221,6 +228,7 @@ export function initializeGraphDiffPage(
             if (readBoolean(payload, "modelingFailed")) {
               showModelingFailure(error);
             } else {
+              if (modelingRefresh) modelingRefresh.hidden = false;
               showStatus(
                 context,
                 `Error computing diff: ${error}. Please ensure both branches exist and contain a valid .radius/app.bicep.`,
@@ -241,6 +249,7 @@ export function initializeGraphDiffPage(
         if (!entry.active || requestGeneration !== generation) return;
         stopProgress();
         context.logger.error("Radius graph diff request failed.", error);
+        if (modelingRefresh) modelingRefresh.hidden = false;
         showStatus(
           context,
           "Failed to compute diff. Please verify network connectivity and that .radius/app.bicep is valid on both branches.",
@@ -248,11 +257,21 @@ export function initializeGraphDiffPage(
         );
       })
       .then(() => {
-        if (requestGeneration === generation) requestAbort = null;
+        if (requestGeneration === generation) {
+          requestAbort = null;
+          if (modelingRefresh) {
+            modelingRefresh.disabled = false;
+            if (retryModeling) modelingRefresh.focus();
+          }
+        }
       });
   };
 
-  const queue = (headElement: DomSelectElement): void => {
+  const queue = (
+    headElement: DomSelectElement,
+    explicitRetry = false
+  ): void => {
+    userRetry = explicitRetry;
     generation++;
     requestAbort?.abort();
     requestAbort = null;
@@ -272,6 +291,11 @@ export function initializeGraphDiffPage(
     if (baseSelect) {
       entry.on(baseSelect, "change", () => {
         if (headSelect.value) queue(headSelect);
+      });
+    }
+    if (modelingRefresh) {
+      entry.on(modelingRefresh, "click", () => {
+        queue(headSelect, true);
       });
     }
   }

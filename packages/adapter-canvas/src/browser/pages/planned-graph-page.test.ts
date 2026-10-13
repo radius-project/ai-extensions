@@ -91,12 +91,14 @@ function fixture(options: FixtureOptions = {}) {
   const environmentSelect = createFakeSelect("planned-env");
   environmentSelect.value = environment;
   const button = createFakeInput("plan-btn");
+  const modelingRefresh = createFakeInput("modeling-refresh");
+  modelingRefresh.hidden = true;
   const hint = createFakeElement("planned-subtitle-hint");
   const status = createFakeElement("plan-status");
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
   const progressHost = createFakeElement("progress-steps");
-  const elements = [state, hint, progressHost];
+  const elements = [state, hint, progressHost, modelingRefresh];
   if (withContainer) elements.push(container);
   if (withApp) elements.push(app);
   if (withBranch) elements.push(branch);
@@ -145,6 +147,7 @@ function fixture(options: FixtureOptions = {}) {
     branch,
     environment: environmentSelect,
     button,
+    modelingRefresh,
     hint,
     status,
     container,
@@ -163,6 +166,84 @@ function globals(overrides: Record<string, unknown> = {}) {
 }
 
 describe("initializePlannedGraphPage", () => {
+  it("sends the explicit Refresh flag once, not on automatic planning or polls", async () => {
+    const { browser, modelingRefresh } = fixture();
+    const bodies: Record<string, unknown>[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse(
+        bodies.length === 1 ?
+          { modelingFailed: true, error: "Recipe unavailable." }
+        : { needsAppBicep: true }
+      );
+    });
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    expect(bodies[0]).not.toHaveProperty("retryModeling");
+    expect(modelingRefresh.hidden).toBe(false);
+    modelingRefresh.dispatch("click");
+    browser.clock.tick(0);
+    await flushPromises();
+    expect(bodies[1]).toMatchObject({ retryModeling: true, restartWait: true });
+    expect(modelingRefresh.focusCount).toBe(1);
+    expect(modelingRefresh.disabled).toBe(false);
+    browser.clock.tick(PLAN_RETRY_MS);
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    expect(bodies[2]).not.toHaveProperty("retryModeling");
+    teardown();
+    expect(modelingRefresh.listenerCount()).toBe(0);
+  });
+
+  it("does not transfer a queued explicit retry to a later automatic branch selection", async () => {
+    const { browser, modelingRefresh, branch } = fixture();
+    const bodies: Record<string, unknown>[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse({
+        modelingFailed: true,
+        error: "Recipe unavailable."
+      });
+    });
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    modelingRefresh.dispatch("click");
+    branch.value = "other";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+    expect(bodies.at(-1)).toMatchObject({ branch: "other" });
+    expect(bodies.at(-1)).not.toHaveProperty("retryModeling");
+    teardown();
+  });
+
+  it("keeps Refresh available after a network failure and supports pages without it", async () => {
+    const { browser, modelingRefresh } = fixture();
+    browser.net.handle("/api/plan-graph", () =>
+      Promise.reject(new Error("offline"))
+    );
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    modelingRefresh.dispatch("click");
+    browser.clock.tick(0);
+    await flushPromises();
+    expect(modelingRefresh.hidden).toBe(false);
+    teardown();
+    browser.document.remove("modeling-refresh");
+    const second = initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    second();
+  });
+
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializePlannedGraphPage(browser.context, globals());
@@ -206,6 +287,30 @@ describe("initializePlannedGraphPage", () => {
     expect(status.style.display).toBe("none");
     expect(button.disabled).toBe(true);
     expect(branch.listenerCount("change")).toBe(1);
+  });
+
+  it("shows model failures without optional retry, wrapper, or deployment controls", async () => {
+    const { browser } = fixture({ withWrapper: false, withButton: false });
+    browser.document.remove("modeling-refresh");
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({
+        modelingFailed: true,
+        error: "Recipe unavailable."
+      })
+    );
+    const setError = vi.fn();
+    const teardown = initializePlannedGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Recipe unavailable."
+    );
+    teardown();
   });
 
   it("renders persisted resources and binds idempotently", async () => {

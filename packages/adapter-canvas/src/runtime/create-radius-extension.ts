@@ -192,8 +192,24 @@ export function createRadiusExtension(
     missingModelHandoffs
   });
   deps.hostCallbacks.setAppBicepHandoff(
-    ({ repo, branches, page, progressView, state }) =>
-      handOffAppModel({ repo, branches, page, progressView, state })
+    ({
+      repo,
+      branches,
+      page,
+      progressView,
+      state,
+      isCurrent,
+      environmentKey
+    }) =>
+      handOffAppModel({
+        repo,
+        branches,
+        page,
+        progressView,
+        state,
+        isCurrent,
+        environmentKey
+      })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
     ({ repo, branch, error, deployRunUrl, attemptId }) =>

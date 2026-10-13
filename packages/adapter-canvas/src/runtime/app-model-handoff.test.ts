@@ -354,12 +354,16 @@ describe("createAppModelHandoff", () => {
       repo: "a/b",
       branches: ["feat"],
       page: "graph",
-      state
+      state,
+      environmentKey: '["azure","dev"]'
     });
 
     const token = state.appModelAttemptTokens?.["a/b::feat"];
     expect(token).toBeTruthy();
     expect(state.appModelAttemptGeneration).toBe(1);
+    expect(state.appModelAttemptEnvironments?.["a/b::feat"]).toBe(
+      '["azure","dev"]'
+    );
     expect(sent[0].prompt).toContain("radius_report_modeling_failure");
     expect(sent[0].prompt).toContain(`attemptToken \`${token}\``);
     expect(sent[0].prompt).toContain("instanceId `radius-app`");
@@ -384,6 +388,10 @@ describe("createAppModelHandoff", () => {
     const token = state.appModelAttemptTokens?.["a/b::main"];
     expect(token).toBeTruthy();
     expect(state.appModelAttemptTokens?.["a/b::feat"]).toBe(token);
+    expect(state.appModelAttemptEnvironments).toEqual({
+      "a/b::main": "",
+      "a/b::feat": ""
+    });
     expect(state.appModelAttemptGeneration).toBe(1);
     expect(sent[0].prompt).toContain("radius_report_modeling_failure");
     expect(sent[0].prompt).toContain(`attemptToken \`${token}\``);
@@ -413,6 +421,7 @@ describe("createAppModelHandoff", () => {
 
     expect(state.appModelAttemptTokens?.["a/b::main"]).toBeUndefined();
     expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeUndefined();
+    expect(state.appModelAttemptEnvironments).toEqual({});
   });
 
   it("leaves a superseding attempt's tokens in place when an older diff send fails", async () => {

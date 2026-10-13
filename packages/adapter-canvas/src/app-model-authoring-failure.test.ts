@@ -44,6 +44,10 @@ describe("app model authoring failures", () => {
       },
       appModelAttemptTokens: {
         "acme/widgets::main": "attempt-1"
+      },
+      appModelAttemptEnvironments: {
+        "acme/widgets::main": '["azure","dev"]',
+        "acme/widgets::other": '["azure","production"]'
       }
     };
 
@@ -52,24 +56,27 @@ describe("app model authoring failures", () => {
 
     expect(state.appModelFailures).toEqual({});
     expect(state.appModelAttemptTokens).toEqual({});
+    expect(state.appModelAttemptEnvironments).toEqual({
+      "acme/widgets::other": '["azure","production"]'
+    });
   });
 
   describe("reconcileAppModelAuthoringFailure", () => {
-    function failed(commit?: string) {
+    function failed(sourceRevision?: string) {
       return {
         appModelFailures: {
           "acme/widgets::main": {
             attemptToken: "attempt-1",
             error: "Recipe conflict",
-            ...(commit === undefined ? {} : { commit })
+            ...(sourceRevision === undefined ? {} : { sourceRevision })
           }
         } as Record<
           string,
           {
             attemptToken: string;
             error: string;
-            commit?: string;
             sourceRevision?: string;
+            environmentKey?: string;
           }
         >,
         appModelAttemptTokens: {
@@ -87,6 +94,83 @@ describe("app model authoring failures", () => {
       await reconcile(state, async () => "sha-1");
       expect(state.appModelFailures).toEqual({});
       expect(state.appModelAttemptTokens).toEqual({});
+    });
+
+    it.each([
+      ["workspace:source-1", "remote:sha-1"],
+      ["remote:sha-1", "workspace:source-1"]
+    ])(
+      "keeps a failure when its source changes kind from %s to %s",
+      async (before, after) => {
+        const state = failed(before);
+        await reconcile(state, async () => after);
+        expect(
+          state.appModelFailures["acme/widgets::main"]?.sourceRevision
+        ).toBe(after);
+        await reconcile(state, async () => after);
+        expect(state.appModelAttemptTokens["acme/widgets::main"]).toBe(
+          "attempt-1"
+        );
+        await reconcile(state, async () => `${after}-changed`);
+        expect(state.appModelFailures).toEqual({});
+      }
+    );
+
+    it.each([
+      [{ userRequested: true }, true],
+      [{ userRequested: false }, false],
+      [{ environmentKey: '["azure","production"]' }, true],
+      [{ environmentKey: '["aws","dev"]' }, true],
+      [{ environmentKey: '["azure","dev"]' }, false]
+    ])(
+      "only clears a current failure for an explicit retry or a changed environment: %j",
+      async (retry, clears) => {
+        const state = failed("remote:sha-1");
+        const failure = state.appModelFailures["acme/widgets::main"];
+        if (!failure) throw new Error("Missing fixture failure");
+        failure.environmentKey = '["azure","dev"]';
+        await reconcileAppModelAuthoringFailure(
+          state,
+          "acme/widgets",
+          "main",
+          async () => "",
+          () => true,
+          retry
+        );
+        expect(Boolean(state.appModelFailures["acme/widgets::main"])).toBe(
+          !clears
+        );
+      }
+    );
+
+    it("does not release a failure for a stale explicit retry", async () => {
+      const state = failed("remote:sha-1");
+      await reconcileAppModelAuthoringFailure(
+        state,
+        "acme/widgets",
+        "main",
+        async () => {
+          throw new Error("A stale request must not read source");
+        },
+        () => false,
+        { userRequested: true }
+      );
+      expect(state.appModelAttemptTokens["acme/widgets::main"]).toBe(
+        "attempt-1"
+      );
+    });
+
+    it("reports an unavailable source read even when a baseline exists", async () => {
+      const state = failed("remote:sha-1");
+      expect(await reconcile(state, async () => "")).toBe("unavailable");
+      expect(
+        await reconcile(state, async () => {
+          throw new Error("offline");
+        })
+      ).toBe("unavailable");
+      expect(state.appModelFailures["acme/widgets::main"]?.sourceRevision).toBe(
+        "remote:sha-1"
+      );
     });
 
     it.each([
@@ -145,7 +229,7 @@ describe("app model authoring failures", () => {
         },
         () => current
       );
-      expect(state.appModelFailures["acme/widgets::main"]?.commit).toBe(
+      expect(state.appModelFailures["acme/widgets::main"]?.sourceRevision).toBe(
         "sha-0"
       );
     });
@@ -164,7 +248,7 @@ describe("app model authoring failures", () => {
         state.appModelFailures["acme/widgets::main"] = {
           attemptToken: "attempt-1",
           error: "Newer",
-          commit: "sha-0"
+          sourceRevision: "sha-0"
         };
         return "sha-1";
       });

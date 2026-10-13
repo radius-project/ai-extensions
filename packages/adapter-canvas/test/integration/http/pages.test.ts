@@ -115,6 +115,27 @@ describe("canvas pages over real loopback HTTP", () => {
     }
   );
 
+  it.each(["graph", "planned", "graph-diff"])(
+    "serves the hidden native retry control and its visibility style on %s",
+    async (page) => {
+      resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
+      const response = await get(`/?page=${page}`);
+      expect(response.body).toContain(
+        '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'
+      );
+      expect(response.body).toContain(
+        "#modeling-refresh[hidden] { display: none; }"
+      );
+      expect(response.body).toContain(
+        browserEntryMarker(
+          page === "graph-diff" ? "graph-diff-page"
+          : page === "planned" ? "planned-graph-page"
+          : "graph-page"
+        )
+      );
+    }
+  );
+
   it.each(pageStateCases())(
     "delivers the existing hidden-state contract for $name",
     async ({ page, id, state, expected, marker }) => {

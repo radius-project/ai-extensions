@@ -95,6 +95,7 @@ export function initializePlannedGraphPage(
   const branch = context.dom.selectById("planned-branch");
   const environment = context.dom.selectById("planned-env");
   const button = context.dom.inputById("plan-btn");
+  const modelingRefresh = context.dom.inputById("modeling-refresh");
   let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
@@ -103,6 +104,7 @@ export function initializePlannedGraphPage(
   let appBicepRetry: ScopeTimer | null = null;
   let nextRequestRefresh = page.resources.length > 0;
   let restartWait = true;
+  let userRetry = false;
   // Re-issues the current selection. Assigned once the scheduler exists, since
   // the retry must go through the same serialization as a user-driven request
   // rather than starting a second overlapping compile.
@@ -113,6 +115,7 @@ export function initializePlannedGraphPage(
     appBicepRetry = null;
   };
   const showModelingFailure = (message: string): void => {
+    if (modelingRefresh) modelingRefresh.hidden = false;
     controller?.destroy();
     controller = null;
     const wrapper = context.dom.byId("graph-container-wrapper");
@@ -153,6 +156,8 @@ export function initializePlannedGraphPage(
     nextRequestRefresh = false;
     const restartExpiredWait = restartWait;
     restartWait = false;
+    const retryModeling = userRetry;
+    userRetry = false;
     const current = (): boolean => entry.active && isCurrent();
 
     if (plan.envsStale && !refresh) {
@@ -184,6 +189,7 @@ export function initializePlannedGraphPage(
       return Promise.resolve();
     }
 
+    if (modelingRefresh) modelingRefresh.disabled = true;
     plan.requestFailed = false;
     // A refresh validates the graph that is already on screen. Destroying the
     // controller and swapping in the loading state would blank exactly the
@@ -252,7 +258,8 @@ export function initializePlannedGraphPage(
           provider: selectedProvider,
           ...(selectedEnvironment ? { environment: selectedEnvironment } : {}),
           refresh,
-          restartWait: restartExpiredWait
+          restartWait: restartExpiredWait,
+          ...(retryModeling ? { retryModeling: true } : {})
         }),
         signal: abort?.signal
       })
@@ -321,10 +328,12 @@ export function initializePlannedGraphPage(
           : "The planned deployment response was incomplete. Try again.",
           "error"
         );
+        if (modelingRefresh) modelingRefresh.hidden = false;
       })
       .catch((error: unknown) => {
         if (!current()) return;
         plan.requestFailed = true;
+        if (modelingRefresh) modelingRefresh.hidden = false;
         context.logger.error("Radius planned graph request failed.", error);
         status(
           context,
@@ -333,7 +342,13 @@ export function initializePlannedGraphPage(
         );
       })
       .then(() => {
-        if (current()) stopProgress();
+        if (current()) {
+          stopProgress();
+          if (modelingRefresh) {
+            modelingRefresh.disabled = false;
+            if (retryModeling) modelingRefresh.focus();
+          }
+        }
         if (requestAbort === abort) requestAbort = null;
       });
   };
@@ -358,7 +373,8 @@ export function initializePlannedGraphPage(
 
   // Hold the deploy action closed while a plan is pending: the preview it would
   // deploy does not exist yet, and the request may still fail.
-  const queue = (immediate = false): void => {
+  const queue = (immediate = false, explicitRetry = false): void => {
+    userRetry = explicitRetry;
     stopAppBicepRetry();
     requestAbort?.abort();
     requestAbort = null;
@@ -380,6 +396,13 @@ export function initializePlannedGraphPage(
       nextRequestRefresh = false;
       restartWait = true;
       queue();
+    });
+  }
+  if (modelingRefresh) {
+    entry.on(modelingRefresh, "click", () => {
+      restartWait = true;
+      nextRequestRefresh = false;
+      queue(true, true);
     });
   }
   if (button) {

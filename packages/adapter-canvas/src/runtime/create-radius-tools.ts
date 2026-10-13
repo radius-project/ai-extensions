@@ -17,6 +17,7 @@ import {
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { ModelingActivity } from "./modeling-activity.js";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
+import { missingModelHandoffIncludesBranch } from "./missing-model-handoff-claims.js";
 import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 import {
@@ -186,7 +187,11 @@ export function createRadiusTools(
         const sourceRevision = await (
           deps.workspace.isWorkspaceSelection(entry.state, repo, branch) ?
             deps.appModel.workspaceSourceRevision(entry.state.workspacePath)
-          : deps.appModel.branchHeadCommit(repo, branch)).catch(() => "");
+          : deps.appModel
+              .branchHeadCommit(repo, branch)
+              .then((commit) => (commit ? `remote:${commit}` : ""))).catch(
+          () => ""
+        );
         if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
           return {
             recorded: false,
@@ -198,7 +203,10 @@ export function createRadiusTools(
         entry.state.appModelFailures[target] = {
           attemptToken,
           error: failure,
-          ...(sourceRevision ? { sourceRevision } : {})
+          ...(sourceRevision ? { sourceRevision } : {}),
+          ...(entry.state.appModelAttemptEnvironments?.[target] !== undefined ?
+            { environmentKey: entry.state.appModelAttemptEnvironments[target] }
+          : {})
         };
         // The run this claim belongs to just ended, so the claim can only
         // suppress the retry the failure message tells the user to make. A diff
@@ -210,6 +218,15 @@ export function createRadiusTools(
         // expires. `missingModelHandoffTarget` owns the target
         // encoding; do not rebuild or parse it here.
         missingModelHandoffs.releaseForBranch(repo, branch);
+        for (const [handoffTarget, key] of Object.entries(
+          entry.state.appBicepHandoffKeys ?? {}
+        )) {
+          if (!missingModelHandoffIncludesBranch(handoffTarget, repo, branch))
+            continue;
+          delete entry.state.appBicepHandoffKeys?.[handoffTarget];
+          if (entry.state.appBicepHandoffKey === key)
+            delete entry.state.appBicepHandoffKey;
+        }
         modelingActivity.release({ repo, branch });
         return { recorded: true };
       }

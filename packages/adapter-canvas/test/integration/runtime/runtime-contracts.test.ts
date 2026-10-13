@@ -1326,8 +1326,74 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 });
 
 describe("TL-11 permanent modeling failure through the assembled runtime", () => {
+  it("delivers a new attempt after a reported failure releases the panel cache and preserves attempted environment identity", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] },
+      headCommits: { "workspace:/workspace": "workspace:source-1" }
+    });
+    try {
+      const entry = await harness.deps.getOrCreateServer(
+        "radius-panel",
+        "graph"
+      );
+      Object.assign(entry.state, {
+        canvasInstanceId: "radius-panel",
+        contextRepo: "acme/widgets",
+        contextBranch: "main",
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: "main",
+        workspacePath: "/workspace"
+      });
+      const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+      const report = harness.extension.tools.find(
+        (candidate) => candidate.name === "radius_report_modeling_failure"
+      );
+      if (!handoff || !report) throw new Error("Missing modeling registration");
+      const request = {
+        repo: "acme/widgets",
+        branches: ["main"],
+        page: "graph",
+        state: entry.state,
+        environmentKey: '["azure","dev"]',
+        isCurrent: () => true
+      };
+      await handoff({ ...request, isCurrent: () => false });
+      expect(harness.session.send).not.toHaveBeenCalled();
+      await handoff(request);
+      expect(harness.session.send).toHaveBeenCalledTimes(1);
+      const firstToken =
+        entry.state.appModelAttemptTokens?.["acme/widgets::main"];
+      entry.state.plannedEnvironment = "production";
+      expect(
+        await report.handler({
+          instanceId: "radius-panel",
+          repo: "acme/widgets",
+          branch: "main",
+          attemptToken: firstToken,
+          error: "Recipe unavailable"
+        })
+      ).toEqual({ recorded: true });
+      expect(
+        entry.state.appModelFailures?.["acme/widgets::main"]?.environmentKey
+      ).toBe('["azure","dev"]');
+      expect(entry.state.appBicepHandoffKeys).toEqual({});
+      await handoff({ ...request, environmentKey: '["azure","production"]' });
+      expect(harness.session.send).toHaveBeenCalledTimes(2);
+      expect(
+        entry.state.appModelAttemptTokens?.["acme/widgets::main"]
+      ).not.toBe(firstToken);
+      expect(
+        entry.state.appModelAttemptEnvironments?.["acme/widgets::main"]
+      ).toBe('["azure","production"]');
+    } finally {
+      await harness.extension.shutdown("test");
+    }
+  });
+
   it("records a current attempt and rejects a stale report", async () => {
-    const harness = await createRuntimeSdkHarness();
+    const harness = await createRuntimeSdkHarness({
+      headCommits: { "workspace:/workspace": "workspace:saved-source-1" }
+    });
     const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
     Object.assign(entry.state, {
       contextRepo: "acme/widgets",
@@ -1339,8 +1405,6 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
         "acme/widgets::main": "attempt-1"
       }
     });
-    harness.deps.appModel.workspaceSourceRevision = async () =>
-      "saved-source-1";
     const tool = harness.extension.tools.find(
       (candidate) => candidate.name === "radius_report_modeling_failure"
     );
@@ -1369,13 +1433,19 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
     ).toContain("configured Recipe");
     expect(
       entry.state.appModelFailures?.["acme/widgets::main"]?.sourceRevision
-    ).toBe("saved-source-1");
+    ).toBe("workspace:saved-source-1");
+    expect(harness.deps.appModel.workspaceSourceRevision).toHaveBeenCalledWith(
+      "/workspace"
+    );
+    expect(harness.deps.appModel.branchHeadCommit).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
 
   it("records a diff attempt per branch so either side can end the comparison's wait", async () => {
-    const harness = await createRuntimeSdkHarness();
+    const harness = await createRuntimeSdkHarness({
+      headCommits: { "acme/widgets@feature/x": "remote-source-1" }
+    });
     const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
     Object.assign(entry.state, {
       contextRepo: "acme/widgets",
@@ -1409,6 +1479,16 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
     expect(
       entry.state.appModelFailures?.["acme/widgets::main"]
     ).toBeUndefined();
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::feature/x"]?.sourceRevision
+    ).toBe("remote:remote-source-1");
+    expect(harness.deps.appModel.branchHeadCommit).toHaveBeenCalledWith(
+      "acme/widgets",
+      "feature/x"
+    );
+    expect(
+      harness.deps.appModel.workspaceSourceRevision
+    ).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });

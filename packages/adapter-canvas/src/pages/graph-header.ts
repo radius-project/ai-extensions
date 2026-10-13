@@ -38,7 +38,8 @@ export function graphHeader(activePage: string): string {
 <nav id="graph-nav" class="rad-subtabs">
   ${navLinks}
 </nav>
-<div id="graph-page-content">`;
+<div id="graph-page-content">
+${activePage === "deployed" ? "" : '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'}`;
 }
 
 export function graphHeaderClose() {

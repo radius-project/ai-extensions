@@ -302,15 +302,14 @@ export interface CanvasState {
   appBicepHandoffKey?: string;
   appModelAttemptGeneration?: number;
   appModelAttemptTokens?: Record<string, string>;
+  appModelAttemptEnvironments?: Record<string, string>;
   appModelFailures?: Record<
     string,
     {
       attemptToken: string;
       error: string;
-      // Branch commit when the failure was reported. The failure ends only
-      // when the branch moves to another commit.
-      commit?: string;
       sourceRevision?: string;
+      environmentKey?: string;
     }
   >;
   graphRepairAttempts?: Partial<

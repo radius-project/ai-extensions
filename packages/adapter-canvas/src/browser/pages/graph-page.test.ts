@@ -72,6 +72,8 @@ function fixture(options: FixtureOptions = {}) {
   const branch = createFakeSelect("graph-branch");
   branch.value = branchValue;
   const button = createFakeInput("deploy-app-btn");
+  const modelingRefresh = createFakeInput("modeling-refresh");
+  modelingRefresh.hidden = true;
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
   // The real loading surface mounts this host; the fake render globals do not,
@@ -79,7 +81,7 @@ function fixture(options: FixtureOptions = {}) {
   const progressHost = createFakeElement("progress-steps");
   const guidance = createFakeElement("graph-guidance");
   guidance.textContent = "Click a node to view source code links.";
-  const elements = [state, app, container, progressHost];
+  const elements = [state, app, container, progressHost, modelingRefresh];
   if (withGuidance) elements.push(guidance);
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
@@ -114,6 +116,7 @@ function fixture(options: FixtureOptions = {}) {
     app,
     branch,
     button,
+    modelingRefresh,
     container,
     wrapper,
     status,
@@ -132,6 +135,50 @@ function globals(overrides: Record<string, unknown> = {}) {
 }
 
 describe("initializeGraphPage", () => {
+  it("authorizes only the explicit Refresh request and keeps later polls automatic", async () => {
+    const { browser, modelingRefresh } = fixture();
+    const bodies: Record<string, unknown>[] = [];
+    browser.net.handle("/api/load-graph", (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse(
+        bodies.length === 1 ?
+          { modelingFailed: true, error: "Recipe unavailable. Click Refresh." }
+        : { needsAppBicep: true }
+      );
+    });
+    const teardown = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(bodies[0]).not.toHaveProperty("retryModeling");
+    expect(modelingRefresh.hidden).toBe(false);
+    modelingRefresh.dispatch("click");
+    await flushPromises();
+    expect(bodies[1]).toMatchObject({ retryModeling: true, restartWait: true });
+    expect(modelingRefresh.focusCount).toBe(1);
+    expect(modelingRefresh.disabled).toBe(false);
+    browser.clock.tick(GRAPH_RETRY_SCHEDULE_MS[0]);
+    await flushPromises();
+    expect(bodies[2]).not.toHaveProperty("retryModeling");
+    teardown();
+    expect(modelingRefresh.listenerCount()).toBe(0);
+  });
+
+  it("retains Refresh when its request fails and handles pages without the control", async () => {
+    const { browser, modelingRefresh } = fixture();
+    browser.net.handle("/api/load-graph", () =>
+      Promise.reject(new Error("offline"))
+    );
+    const teardown = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    modelingRefresh.dispatch("click");
+    await flushPromises();
+    expect(modelingRefresh.hidden).toBe(false);
+    teardown();
+    browser.document.remove("modeling-refresh");
+    const second = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    second();
+  });
+
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializeGraphPage(browser.context, globals());

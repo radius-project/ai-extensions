@@ -45,7 +45,7 @@ import type {
   CanvasServerEntry,
   SessionPromptMessage
 } from "../../../src/server.js";
-import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
+import type { CanvasGraphResource } from "../../../src/shared.js";
 
 export interface FakeServer {
   close: Mock;
@@ -152,12 +152,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   let lastWebviewActivityAt = 0;
 
   const capturedHostCallbacks: {
-    appBicepHandoff?: (input: {
-      repo: string;
-      branches: string[];
-      page: string;
-      state?: CanvasState;
-    }) => Promise<unknown>;
+    appBicepHandoff?: Parameters<
+      RadiusExtensionDependencies["hostCallbacks"]["setAppBicepHandoff"]
+    >[0];
     deployRepairHandoff?:
       | ((input: {
           repo: string;

@@ -971,7 +971,7 @@ describe("workspaceSourceRevision", () => {
           if (change === "committed") git("commit", "--quiet", "-m", "edit");
         }
         const after = await workspaceSourceRevision(dir);
-        expect(after).toMatch(/^[a-f0-9]{64}$/);
+        expect(after).toMatch(/^workspace:[a-f0-9]{64}$/);
         expect(after).not.toBe(before);
         expect(await workspaceSourceRevision(dir)).toBe(after);
         if (change === "unstaged") {
@@ -991,6 +991,22 @@ describe("workspaceSourceRevision", () => {
       expect(await workspaceSourceRevision(dir)).not.toBe(first);
     });
   });
+
+  it.each(["true", "copies"])(
+    "keeps a renamed source revision stable across staging with diff.renames=%s",
+    async (renames) => {
+      await inCheckout(async (dir, git) => {
+        git("config", "diff.renames", renames);
+        await fs.rename(
+          path.join(dir, "app.txt"),
+          path.join(dir, "renamed.txt")
+        );
+        const unstaged = await workspaceSourceRevision(dir);
+        git("add", ".");
+        expect(await workspaceSourceRevision(dir)).toBe(unstaged);
+      });
+    }
+  );
 
   it("ignores generated and ignored files and restores a revision when edits are undone", async () => {
     await inCheckout(async (dir, git) => {
@@ -1027,26 +1043,83 @@ describe("workspaceSourceRevision", () => {
     });
   });
 
-  it("hashes large saved source files without buffering a Git patch", async () => {
+  it("streams large saved source files without reading each file into memory", async () => {
     await inCheckout(async (dir) => {
       const first = await workspaceSourceRevision(dir);
       await fs.writeFile(
         path.join(dir, "app.txt"),
         "changed line\n".repeat(100_000)
       );
-      const edited = await workspaceSourceRevision(dir);
-      expect(edited).not.toBe(first);
-      expect(await workspaceSourceRevision(dir)).toBe(edited);
+      const readFile = vi
+        .spyOn(fs, "readFile")
+        .mockRejectedValue(new Error("Must stream file contents"));
+      try {
+        const edited = await workspaceSourceRevision(dir);
+        expect(edited).not.toBe(first);
+        expect(await workspaceSourceRevision(dir)).toBe(edited);
+      } finally {
+        readFile.mockRestore();
+      }
     });
   });
 
-  it("rejects an untracked nested repository rather than hashing a directory", async () => {
+  it("reads a changed-path listing larger than Git's default output buffer", async () => {
+    await inCheckout(async (dir, git) => {
+      const names = Array.from(
+        { length: 4800 },
+        (_, index) => `${index}-${"x".repeat(220)}.txt`
+      );
+      expect(Buffer.byteLength(names.join("\0"))).toBeGreaterThan(1024 * 1024);
+      const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: dir,
+        input: "",
+        encoding: "utf8"
+      }).trim();
+      execFileSync("git", ["update-index", "--index-info"], {
+        cwd: dir,
+        input: names.map((name) => `100644 ${blob}\t${name}\n`).join("")
+      });
+      git("commit", "--quiet", "-m", "source tree");
+      const deleted = await workspaceSourceRevision(dir);
+      expect(deleted).toMatch(/^workspace:[a-f0-9]{64}$/);
+      expect(await workspaceSourceRevision(dir)).toBe(deleted);
+    });
+  });
+
+  it("keeps an untracked nested repository readable and detects its new commits", async () => {
     await inCheckout(async (dir) => {
       const nested = path.join(dir, "nested");
       await fs.mkdir(nested);
       execFileSync("git", ["init", "--quiet"], { cwd: nested });
+      execFileSync("git", ["config", "user.email", "radius@example.invalid"], {
+        cwd: nested
+      });
+      execFileSync("git", ["config", "user.name", "Radius Test"], {
+        cwd: nested
+      });
       await fs.writeFile(path.join(nested, "file.txt"), "nested source\n");
-      await expect(workspaceSourceRevision(dir)).rejects.toThrow("not a file");
+      const before = await workspaceSourceRevision(dir);
+      expect(await workspaceSourceRevision(dir)).toBe(before);
+      execFileSync("git", ["add", "."], { cwd: nested });
+      execFileSync("git", ["commit", "--quiet", "-m", "nested source"], {
+        cwd: nested
+      });
+      expect(await workspaceSourceRevision(dir)).not.toBe(before);
+    });
+  });
+
+  it("reports an unreadable nested repository rather than inventing its revision", async () => {
+    await inCheckout(async (dir) => {
+      const nested = path.join(dir, "nested");
+      await fs.mkdir(nested);
+      execFileSync("git", ["init", "--quiet"], { cwd: nested });
+      await fs.writeFile(
+        path.join(nested, ".git", "HEAD"),
+        `${"f".repeat(40)}\n`
+      );
+      await expect(workspaceSourceRevision(dir)).rejects.toThrow(
+        "nested source repository could not be read"
+      );
     });
   });
 
@@ -1064,15 +1137,55 @@ describe("workspaceSourceRevision", () => {
     }
   );
 
+  it.skipIf(process.platform === "win32")(
+    "rejects a non-file source entry",
+    async () => {
+      await inCheckout(async (dir) => {
+        await fs.unlink(path.join(dir, "app.txt"));
+        execFileSync("mkfifo", [path.join(dir, "app.txt")]);
+        await expect(workspaceSourceRevision(dir)).rejects.toThrow(
+          "not a file"
+        );
+      });
+    }
+  );
+
+  it("rejects a tracked file reached through an external directory link", async () => {
+    await inCheckout(async (dir, git) => {
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), "rad-source-outside-")
+      );
+      try {
+        const source = path.join(dir, "src");
+        await fs.mkdir(source);
+        await fs.writeFile(path.join(source, "app.txt"), "tracked source\n");
+        git("add", ".");
+        git("commit", "--quiet", "-m", "tracked directory");
+        await fs.writeFile(path.join(outside, "app.txt"), "external source\n");
+        await fs.rm(source, { recursive: true });
+        await fs.symlink(
+          outside,
+          source,
+          process.platform === "win32" ? "junction" : "dir"
+        );
+        await expect(workspaceSourceRevision(dir)).rejects.toThrow(
+          "outside the workspace"
+        );
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("rejects a commit that changes during an untracked file read", async () => {
     await inCheckout(async (dir, git) => {
       await fs.writeFile(path.join(dir, "new.txt"), "new\n");
-      const readFile = fs.readFile;
+      const lstat = fs.lstat;
       const spy = vi
-        .spyOn(fs, "readFile")
+        .spyOn(fs, "lstat")
         .mockImplementationOnce(async (...args) => {
           git("commit", "--quiet", "--allow-empty", "-m", "moved");
-          return await readFile(...args);
+          return await lstat(...args);
         });
       try {
         await expect(workspaceSourceRevision(dir)).rejects.toThrow(
@@ -1100,6 +1213,30 @@ describe("workspaceSourceRevision", () => {
       } finally {
         spy.mockRestore();
       }
+    });
+  });
+
+  it("propagates a stream-open failure and can read again after the file is restored", async () => {
+    await inCheckout(async (dir) => {
+      const file = path.join(dir, "new.txt");
+      await fs.writeFile(file, "source\n");
+      const lstat = fs.lstat;
+      const spy = vi
+        .spyOn(fs, "lstat")
+        .mockImplementationOnce(async (...args) => {
+          const stat = await lstat(...args);
+          await fs.unlink(file);
+          return stat;
+        });
+      try {
+        await expect(workspaceSourceRevision(dir)).rejects.toThrow("ENOENT");
+      } finally {
+        spy.mockRestore();
+      }
+      await fs.writeFile(file, "source\n");
+      expect(await workspaceSourceRevision(dir)).toMatch(
+        /^workspace:[a-f0-9]{64}$/
+      );
     });
   });
 

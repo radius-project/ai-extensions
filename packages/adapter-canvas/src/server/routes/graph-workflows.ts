@@ -61,12 +61,13 @@ const GENERATING_APP_BICEP_MESSAGE =
 
 // Reloading unchanged source never requests another attempt.
 function appModelAuthoringFailureDetail(
-  failure: AppModelAuthoringFailure
+  failure: AppModelAuthoringFailure,
+  sourceUnavailable = false
 ): string {
   const recovery =
-    failure.sourceRevision || failure.commit ?
-      "It will not be retried until saved source files change or the branch moves to a new commit."
-    : "The source revision could not be read. Reload to check it again, then change a source file or update the branch to retry.";
+    failure.sourceRevision && !sourceUnavailable ?
+      "To retry, change saved source files, update the branch or target environment, or click Refresh."
+    : "The source revision could not be read. Automatic retry is paused. Click Refresh to retry, or reload to check the source again.";
   return `Application model generation failed: ${failure.error} ${recovery}`;
 }
 
@@ -121,7 +122,8 @@ export interface GraphWorkflowDependencies<
     progressView: GraphProgressView,
     // Re-checked inside the handoff, immediately before it mints attempt tokens
     // and speaks, because it probes and waits long after this route responded.
-    isCurrent?: () => boolean
+    isCurrent?: () => boolean,
+    environmentKey?: string
   ): void;
   triggerGraphRepairHandoff(
     entry: TEntry,
@@ -551,15 +553,17 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     branch: string,
     progressView: Extract<GraphProgressView, "graph" | "planned">,
     reportRefusal: (detail: string) => void,
-    isCurrent?: () => boolean
+    isCurrent?: () => boolean,
+    retry: { userRequested?: boolean; environmentKey?: string } = {}
   ): Promise<GraphWorkflowOutcome> {
     if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
-    await reconcileAppModelAuthoringFailure(
+    const sourceCheck = await reconcileAppModelAuthoringFailure(
       entry.state,
       repo,
       branch,
       () => dependencies.readBranchSourceRevision(entry, repo, branch),
-      isCurrent
+      isCurrent,
+      retry
     );
     if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
     const authoringFailure = appModelAuthoringFailure(
@@ -568,7 +572,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       branch
     );
     if (authoringFailure) {
-      const detail = appModelAuthoringFailureDetail(authoringFailure);
+      const detail = appModelAuthoringFailureDetail(
+        authoringFailure,
+        sourceCheck === "unavailable"
+      );
       reportRefusal(detail);
       return json(200, {
         error: detail,
@@ -599,7 +606,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       branch,
       "graph",
       progressView,
-      isCurrent
+      isCurrent,
+      retry.environmentKey
     );
     return json(200, {
       error: GENERATING_APP_BICEP_MESSAGE,
@@ -747,7 +755,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
               state,
               "graph",
               sourceRefContext.token
-            )
+            ),
+          { userRequested: data.retryModeling === true }
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
@@ -966,6 +975,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       } else if (data.refresh !== true) {
         state.plannedEnvironment = "";
       }
+      const environmentKey = JSON.stringify([
+        provider,
+        state.plannedEnvironment || ""
+      ]);
       const sourceRefContext = dependencies.prepareSourceRefResources(
         entry,
         "planned",
@@ -1038,7 +1051,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
               state,
               "planned",
               sourceRefContext.token
-            )
+            ),
+          {
+            userRequested: data.retryModeling === true,
+            environmentKey
+          }
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
@@ -1353,23 +1370,25 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // legitimate failure report as stale or promote an abandoned handoff.
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
 
-      // A recorded failure ends only when its source revision changes.
+      // Source changes or an explicit retry can release a concluded failure.
       // This runs before the both-missing check so a half-modeled comparison
       // still frees the missing side when that branch has moved.
-      await Promise.all([
+      const sourceChecks = await Promise.all([
         reconcileAppModelAuthoringFailure(
           state,
           repo,
           data.base,
           () => dependencies.readBranchSourceRevision(entry, repo, data.base),
-          isCurrentRequest
+          isCurrentRequest,
+          { userRequested: data.retryModeling === true }
         ),
         reconcileAppModelAuthoringFailure(
           state,
           repo,
           data.head,
           () => dependencies.readBranchSourceRevision(entry, repo, data.head),
-          isCurrentRequest
+          isCurrentRequest,
+          { userRequested: data.retryModeling === true }
         )
       ]);
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
@@ -1396,7 +1415,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           appModelAuthoringFailure(state, repo, data.base) ??
           appModelAuthoringFailure(state, repo, data.head);
         if (authoringFailure) {
-          const detail = appModelAuthoringFailureDetail(authoringFailure);
+          const detail = appModelAuthoringFailureDetail(
+            authoringFailure,
+            sourceChecks.some((check) => check === "unavailable")
+          );
           addEvent("creating_model", "failed", detail);
           return json(200, {
             error: detail,
