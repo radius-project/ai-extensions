@@ -152,6 +152,18 @@ describe("setup admission without Canvas", () => {
     ]);
   });
 
+  it("normalizes an empty journey origin to null when creating an operation", async () => {
+    const test = setup();
+    const result = await admitSetupOperation(
+      { repo: "octo/app", origin: "" },
+      test.ports
+    );
+
+    expect(result.outcome).toBe("admitted");
+    expect(test.seeds).toHaveLength(1);
+    expect(test.seeds[0]?.journey.origin).toBeNull();
+  });
+
   it.each([
     { environment: "", provider: "", operationId: 7, branch: "feature/work" },
     {
