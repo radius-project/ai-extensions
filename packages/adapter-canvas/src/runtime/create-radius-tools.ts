@@ -183,6 +183,11 @@ export function createRadiusTools(
               "The application model now exists; the stale failure was not recorded."
           };
         }
+        const commit = await (
+          deps.workspace.isWorkspaceSelection(entry.state, repo, branch) ?
+            deps.appModel.workspaceHeadCommit(entry.state.workspacePath)
+          : deps.appModel.branchHeadCommit(repo, branch)
+        ).catch(() => "");
         if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
           return {
             recorded: false,
@@ -193,7 +198,8 @@ export function createRadiusTools(
         entry.state.appModelFailures ??= {};
         entry.state.appModelFailures[target] = {
           attemptToken,
-          error: failure
+          error: failure,
+          ...(commit ? { commit } : {})
         };
         // The run this claim belongs to just ended, so the claim can only
         // suppress the retry the failure message tells the user to make. A diff

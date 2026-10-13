@@ -141,7 +141,8 @@ import {
   resolveSessionId,
   toSafeRepoRelPath,
   uncommittedGeneratedPaths,
-  workspaceGraphJsonPath
+  workspaceGraphJsonPath,
+  workspaceHeadCommit
 } from "./workspace.js";
 import {
   DEFAULT_CANVAS_PAGE,
@@ -1368,6 +1369,10 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
   observeModelingRun: observeServerWorkspaceModelingRun,
+  readBranchSourceCommit: (entry, repo, branch) =>
+    isWorkspaceSelection(entry.state, repo, branch) ?
+      workspaceHeadCommit(entry.state.workspacePath)
+    : getBranchHeadSha(repo, branch),
   record,
   optionalString,
   errorMessage,

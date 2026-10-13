@@ -595,6 +595,58 @@ describe("TL-11: radius_report_modeling_failure", () => {
     });
   });
 
+  it("records the workspace head commit with a failure on the workspace branch", async () => {
+    const { tools, entry } = await currentAttempt({
+      headCommits: { "workspace:/workspace": "sha-workspace" }
+    });
+
+    await findTool(tools, "radius_report_modeling_failure").handler(report);
+
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toEqual({
+      attemptToken: "attempt-1",
+      error: report.error,
+      commit: "sha-workspace"
+    });
+  });
+
+  it("records the remote branch head commit for a branch outside the workspace", async () => {
+    const { tools, entry } = await currentAttempt({
+      headCommits: { "acme/widgets@release": "sha-remote" }
+    });
+    entry.state.appModelAttemptTokens = {
+      "acme/widgets::release": "attempt-1"
+    };
+
+    await findTool(tools, "radius_report_modeling_failure").handler({
+      ...report,
+      branch: "release"
+    });
+
+    expect(entry.state.appModelFailures?.["acme/widgets::release"]).toEqual({
+      attemptToken: "attempt-1",
+      error: report.error,
+      commit: "sha-remote"
+    });
+  });
+
+  it("records the failure without a commit when the head commit cannot be read", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    vi.mocked(deps.appModel.workspaceHeadCommit).mockRejectedValue(
+      new Error("git failed")
+    );
+
+    const result = await findTool(
+      tools,
+      "radius_report_modeling_failure"
+    ).handler(report);
+
+    expect(result).toEqual({ recorded: true });
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toEqual({
+      attemptToken: "attempt-1",
+      error: report.error
+    });
+  });
+
   it("releases the dead run's handoff claim so the promised retry can be sent", async () => {
     const { tools, missingModelHandoffs, modelingActivity } =
       await currentAttempt();

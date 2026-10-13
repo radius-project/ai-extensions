@@ -51,6 +51,7 @@ interface PipelineScript {
   branchPaths?: string[];
   afterCompile?: () => void;
   liveWorkspaceBranch?: string;
+  commits?: Record<string, string>;
 }
 
 interface Harness {
@@ -137,6 +138,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         pipeline,
         triggerAppBicepHandoff: () => {},
         observeModelingRun: () => Promise.resolve(null),
+        readBranchSourceCommit: (_entry, _repo, branch) =>
+          Promise.resolve(active.commits?.[branch] ?? ""),
         triggerGraphRepairHandoff: () => ({
           attempt: 1,
           maxAttempts: 3,
@@ -333,14 +336,16 @@ describe("graphs-planning writes real-loopback HIT", () => {
     });
   });
 
-  it("restarts modeling after an explicit refresh clears a terminal authoring failure", async () => {
+  it("keeps a terminal authoring failure when the page is reloaded", async () => {
     const harness = start({
-      selections: { main: selectionOf("main", null) }
+      selections: { main: selectionOf("main", null) },
+      commits: { main: "sha-1" }
     });
     harness.state.appModelFailures = {
       "octo/app::main": {
         attemptToken: "attempt-1",
-        error: "The configured Recipe rejects the required credential shape."
+        error: "The configured Recipe rejects the required credential shape.",
+        commit: "sha-1"
       }
     };
     harness.state.appModelAttemptTokens = {
@@ -352,6 +357,37 @@ describe("graphs-planning writes real-loopback HIT", () => {
       entry.baseUrl,
       "/api/load-graph",
       '{"repo":"octo/app","restartWait":true}'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      modelingFailed: true,
+      error: expect.stringContaining("will not be retried until the branch")
+    });
+    expect(harness.state.appModelFailures).not.toEqual({});
+  });
+
+  it("restarts modeling once the branch commit changes after a terminal failure", async () => {
+    const harness = start({
+      selections: { main: selectionOf("main", null) },
+      commits: { main: "sha-2" }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "The configured Recipe rejects the required credential shape.",
+        commit: "sha-1"
+      }
+    };
+    harness.state.appModelAttemptTokens = {
+      "octo/app::main": "attempt-1"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app"}'
     );
 
     expect(response.status).toBe(200);
@@ -391,18 +427,24 @@ describe("graphs-planning writes real-loopback HIT", () => {
     expect(payload.needsAppBicep).toBeUndefined();
   });
 
-  it("restarts diff modeling after an explicit refresh clears both sides", async () => {
+  it("restarts diff modeling once both branch commits have changed", async () => {
     const harness = start({
       selections: {
         main: selectionOf("main", null),
         "feature/x": selectionOf("feature/x", null)
-      }
+      },
+      commits: { main: "sha-9", "feature/x": "sha-9" }
     });
     harness.state.appModelFailures = {
-      "octo/app::main": { attemptToken: "attempt-1", error: "base failed" },
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "base failed",
+        commit: "sha-1"
+      },
       "octo/app::feature/x": {
         attemptToken: "attempt-1",
-        error: "head failed"
+        error: "head failed",
+        commit: "sha-2"
       }
     };
     harness.state.appModelAttemptTokens = {

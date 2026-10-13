@@ -307,6 +307,9 @@ export interface CanvasState {
     {
       attemptToken: string;
       error: string;
+      // Branch commit when the failure was reported. The failure ends only
+      // when the branch moves to another commit.
+      commit?: string;
     }
   >;
   graphRepairAttempts?: Partial<

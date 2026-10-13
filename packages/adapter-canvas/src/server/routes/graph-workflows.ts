@@ -32,7 +32,8 @@ import type {
 } from "../../workspace.js";
 import {
   appModelAuthoringFailure,
-  clearAppModelAuthoringFailure
+  clearAppModelAuthoringFailure,
+  reconcileAppModelAuthoringFailure
 } from "../../app-model-authoring-failure.js";
 
 // The use-case layer behind the three `graphs-planning` write routes.
@@ -57,27 +58,11 @@ const MISSING_ENTRY_PAYLOAD = {
 const GENERATING_APP_BICEP_MESSAGE =
   "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
 
-// The terminal text every view shows once modeling has permanently failed. An
-// explicit Canvas refresh is the only retry path, because the failure is fenced
-// by the attempt token that produced it and only a refresh mints a new one.
+// The terminal text every view shows once modeling has permanently failed. The
+// failure ends only when the branch moves to a new commit, so a reload cannot
+// request another attempt.
 function appModelAuthoringFailureDetail(error: string): string {
-  return `Application model generation stopped: ${error} Fix the reported issue, then refresh the Radius Canvas to try modeling again.`;
-}
-
-// The explicit-refresh unfence. `clearAppModelAuthoringFailure` also drops the
-// branch's attempt token, which is only safe once that attempt has reported.
-// Dropping a token no failure is recorded against would strand a modeling run
-// that is still in flight: its eventual report is rejected as stale, so the
-// real error never reaches the view and the wait runs to its timeout instead.
-// A diff makes that reachable from a second view, because it clears both of
-// its branches, either of which another view may already be modeling.
-function retryRecordedAuthoringFailure(
-  state: CanvasState,
-  repo: string,
-  branch: string
-): void {
-  if (!appModelAuthoringFailure(state, repo, branch)) return;
-  clearAppModelAuthoringFailure(state, repo, branch);
+  return `Application model generation failed: ${error} It will not be retried until the branch is updated.`;
 }
 
 // `bare` responses are written without a `Content-Type` header, exactly as the
@@ -198,6 +183,13 @@ export interface GraphWorkflowDependencies<
     repo: string,
     branches: string[]
   ): Promise<number | null>;
+  // Current head commit of a branch's source (workspace or remote). Returns an
+  // empty string when it cannot be read.
+  readBranchSourceCommit(
+    entry: TEntry,
+    repo: string,
+    branch: string
+  ): Promise<string>;
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
@@ -554,13 +546,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     branch: string,
     progressView: Extract<GraphProgressView, "graph" | "planned">,
     reportRefusal: (detail: string) => void,
-    retryAuthoring: boolean,
     isCurrent?: () => boolean
   ): Promise<GraphWorkflowOutcome> {
     if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
-    if (retryAuthoring) {
-      retryRecordedAuthoringFailure(entry.state, repo, branch);
-    }
+    await reconcileAppModelAuthoringFailure(entry.state, repo, branch, () =>
+      dependencies.readBranchSourceCommit(entry, repo, branch)
+    );
+    if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
     const authoringFailure = appModelAuthoringFailure(
       entry.state,
       repo,
@@ -737,8 +729,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           repo,
           branch,
           "graph",
-          (detail) => addEvent("creating_model", "failed", detail),
-          data.restartWait === true
+          (detail) => addEvent("creating_model", "failed", detail)
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
@@ -1022,7 +1013,6 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           branch,
           "planned",
           (detail) => addEvent("creating_model", "failed", detail),
-          data.restartWait === true,
           isCurrentPlan
         );
         return withResolvedBranch(outcome, resolvedBranch);
@@ -1338,15 +1328,18 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // legitimate failure report as stale or promote an abandoned handoff.
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
 
-      // An explicit refresh is the retry path the failure text names, so it
-      // clears BOTH sides: the user is asking for the whole comparison again,
-      // and leaving either side fenced would end the retry immediately. This
-      // runs before the both-missing check so a refresh still unfences the
-      // missing side of a half-modeled comparison.
-      if (data.restartWait === true) {
-        retryRecordedAuthoringFailure(state, repo, data.base);
-        retryRecordedAuthoringFailure(state, repo, data.head);
-      }
+      // A recorded failure ends only when its branch moves to a new commit.
+      // This runs before the both-missing check so a half-modeled comparison
+      // still frees the missing side when that branch has moved.
+      await Promise.all([
+        reconcileAppModelAuthoringFailure(state, repo, data.base, () =>
+          dependencies.readBranchSourceCommit(entry, repo, data.base)
+        ),
+        reconcileAppModelAuthoringFailure(state, repo, data.head, () =>
+          dependencies.readBranchSourceCommit(entry, repo, data.head)
+        )
+      ]);
+      if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
 
       if (!baseSelection.content && !headSelection.content) {
         addEvent(
