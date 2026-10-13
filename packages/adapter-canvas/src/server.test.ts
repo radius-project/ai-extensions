@@ -51,7 +51,6 @@ import {
   resolveDeploymentEnvironment,
   resolveDeployStatus,
   resolveDeployRepairLoop,
-  onEnvironmentTasksSettled,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff,
   setDeployFailureNotice,
@@ -64,6 +63,7 @@ import {
   DEPLOY_RUN_UNCONFIRMED_KIND,
   preflightRepoAdmin
 } from "./server.js";
+import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
@@ -5997,6 +5997,7 @@ describe("environment deletion session reporting coordinator", () => {
       persistedFailures.push(structuredClone(operation.failure));
     });
     const log = vi.fn();
+    const executionOwner = createEnvironmentExecutionOwner();
     const coordinator = createInstanceRequestCoordinator(
       instanceId,
       () => "http://127.0.0.1:0",
@@ -6023,11 +6024,12 @@ describe("environment deletion session reporting coordinator", () => {
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error),
         log
-      }
+      },
+      { executionOwner, servers: new Map() }
     );
     const settled = new Promise<void>((resolve) => {
       let stop = (): void => {};
-      stop = onEnvironmentTasksSettled(instanceId, () => {
+      stop = executionOwner.onEnvironmentTasksSettled(instanceId, () => {
         stop();
         resolve();
       });

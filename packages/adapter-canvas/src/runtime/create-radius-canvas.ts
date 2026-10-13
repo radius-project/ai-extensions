@@ -426,7 +426,7 @@ export function createRadiusCanvas(
     onClose: async (ctx: CanvasContext) => {
       const entry = deps.servers.get(ctx.instanceId);
       if (entry) {
-        if (deps.operations.hasActiveEnvironmentTasks(ctx.instanceId)) {
+        if (deps.executionOwner.hasActiveEnvironmentTasks(ctx.instanceId)) {
           const closeGeneration = closeGenerations.get(ctx.instanceId) || 0;
           let closeTimer: ReturnType<typeof setTimeout> | undefined;
           const closeEntry = () => {
@@ -435,7 +435,9 @@ export function createRadiusCanvas(
             if (closeGenerations.get(ctx.instanceId) !== closeGeneration)
               return;
             if (deps.servers.get(ctx.instanceId) !== entry) return;
-            deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
+            deps.executionOwner.markEnvironmentInstanceShuttingDown(
+              ctx.instanceId
+            );
             closeGenerations.delete(ctx.instanceId);
             canvasInstances.release(ctx.instanceId);
             void deps
@@ -444,7 +446,7 @@ export function createRadiusCanvas(
                 deps.logError(`Could not stop Radius canvas: ${String(error)}`)
               );
           };
-          const stopListening = deps.operations.onEnvironmentTasksSettled(
+          const stopListening = deps.executionOwner.onEnvironmentTasksSettled(
             ctx.instanceId,
             () => {
               closeEntry();
@@ -457,7 +459,7 @@ export function createRadiusCanvas(
           closeTimer.unref?.();
           return;
         }
-        deps.operations.markEnvironmentInstanceShuttingDown(ctx.instanceId);
+        deps.executionOwner.markEnvironmentInstanceShuttingDown(ctx.instanceId);
         closeGenerations.delete(ctx.instanceId);
         canvasInstances.release(ctx.instanceId);
         await deps.stopServer(ctx.instanceId);
