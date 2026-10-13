@@ -22,7 +22,7 @@ import {
   srcLineFromRef,
   srcPathFromRef
 } from "./model.js";
-import { azurePortalUrl } from "./details.js";
+import { cloudConsoleUrl } from "./details.js";
 // Imported from the `graph` subpath rather than the package root: the root
 // barrel also re-exports the workflow modules, and `workflows/delete.ts` reads
 // `process.env` at module scope. Bundling that into a browser entry ships a
@@ -271,7 +271,7 @@ function cloudOutputsOf(resource: GraphResource): ResourceOutput[] {
   const outputs = resource.outputResources || [];
   const cloud: ResourceOutput[] = [];
   for (const output of outputs) {
-    if (output && output.id && output.id.indexOf("/subscriptions/") === 0) {
+    if (output && output.id && cloudConsoleUrl(output.id)) {
       cloud.push({
         name: output.name || "",
         type: output.type || "",
@@ -429,9 +429,7 @@ export function buildGraph(
       portalUrl:
         resource.portalUrl ||
         resolved?.portalUrl ||
-        (resolved?.id?.startsWith("/subscriptions/") ?
-          azurePortalUrl(resolved.id)
-        : ""),
+        cloudConsoleUrl(resolved?.id ?? ""),
       cloudResources: JSON.stringify(cloudOutputsOf(resource)),
       provisioningState: resource.provisioningState
     });
@@ -490,10 +488,7 @@ export function buildGraph(
         diffStatus: "",
         deployStatus: output.deployStatus || "",
         portalUrl: output.portalUrl || "",
-        cloudId:
-          output.id && output.id.indexOf("/subscriptions/") === 0 ?
-            output.id
-          : "",
+        cloudId: output.id && cloudConsoleUrl(output.id) ? output.id : "",
         cloudResources: "[]"
       });
       pushEdge(id, outputId, true);
