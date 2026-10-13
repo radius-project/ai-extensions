@@ -143,6 +143,25 @@ describe("app model authoring failures", () => {
       }
     );
 
+    it("keeps a graph or diff failure when the planned view opens", async () => {
+      const state = failed("workspace:source-1");
+      const failure = state.appModelFailures["acme/widgets::main"];
+      if (!failure) throw new Error("Missing fixture failure");
+      failure.environmentKey = "";
+      await reconcileAppModelAuthoringFailure(
+        state,
+        "acme/widgets",
+        "main",
+        async () => "workspace:source-1",
+        () => true,
+        { environmentKey: '["azure",""]' }
+      );
+      expect(state.appModelFailures["acme/widgets::main"]).toBeDefined();
+      expect(state.appModelAttemptTokens["acme/widgets::main"]).toBe(
+        "attempt-1"
+      );
+    });
+
     it("does not release a failure for a stale explicit retry", async () => {
       const state = failed("remote:sha-1");
       await reconcileAppModelAuthoringFailure(

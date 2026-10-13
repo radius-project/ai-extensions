@@ -42,10 +42,12 @@ export async function reconcileAppModelAuthoringFailure(
   const failure = appModelAuthoringFailure(state, repo, branch);
   if (!failure) return "checked";
   if (!isCurrent()) return "checked";
+  // Graph and diff attempts record an empty key because they plan for no
+  // environment, so opening the planned view is not a new target.
   if (
     retry.userRequested === true ||
     (retry.environmentKey !== undefined &&
-      failure.environmentKey !== undefined &&
+      failure.environmentKey &&
       retry.environmentKey !== failure.environmentKey)
   ) {
     clearAppModelAuthoringFailure(state, repo, branch);

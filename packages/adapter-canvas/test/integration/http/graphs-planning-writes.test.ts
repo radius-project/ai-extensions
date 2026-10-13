@@ -490,6 +490,42 @@ describe("graphs-planning writes real-loopback HIT", () => {
     });
   });
 
+  it("keeps a graph failure fenced when the planned view opens over HTTP", async () => {
+    const harness = start({
+      selections: { main: selectionOf("main", null) },
+      commits: { main: "sha-1" }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "Recipe unavailable",
+        sourceRevision: "sha-1",
+        environmentKey: ""
+      }
+    };
+    harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+    const entry = await container!.getOrCreate("panel-a");
+    for (const environment of ["", "dev"]) {
+      expect(
+        await (
+          await post(
+            entry.baseUrl,
+            "/api/plan-graph",
+            JSON.stringify({
+              repo: "octo/app",
+              provider: "azure",
+              environment,
+              restartWait: true
+            })
+          )
+        ).json()
+      ).toMatchObject({ appModelAuthoringFailed: true });
+    }
+    expect(harness.state.appModelAttemptTokens).toEqual({
+      "octo/app::main": "attempt-1"
+    });
+  });
+
   it("recovers an unknown source baseline before permitting a later edit", async () => {
     const harness = start({
       selections: { main: selectionOf("main", null) },
