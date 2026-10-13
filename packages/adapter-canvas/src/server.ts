@@ -296,6 +296,10 @@ import {
 } from "./server/services/verification-workflow-cancellation.js";
 import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
 import {
+  persistBestEffort,
+  persistMutationCheckpoint
+} from "./server/services/setup-checkpoint.js";
+import {
   CLEANUP_COMMANDS,
   cleanupRemovedGitHubEnvironment
 } from "./server/services/cleanup-commands.js";
@@ -451,70 +455,10 @@ interface CommandResult {
   timedOut?: boolean;
 }
 
-export async function persistMutationCheckpoint({
-  operation,
-  persist,
-  report,
-  fail
-}: {
-  operation: any;
-  persist: () => Promise<void>;
-  report?: (diagnostic: { code: string; message: string }) => void;
-  fail: (status: number, error: string, code: string) => Promise<void>;
-}): Promise<boolean> {
-  try {
-    await persist();
-  } catch (error) {
-    report?.({
-      code: "operation-store-write-failed",
-      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
-    });
-    // Do not retry the same deterministic write or continue making cloud
-    // changes without durable provenance for what already succeeded.
-    await fail(
-      500,
-      "Radius changed no further cloud resources because it could not save the setup recovery record.",
-      "operation-persistence-failed"
-    );
-    return false;
-  }
-  // Every provider write in the setup passes through here on its way to the
-  // next one, which makes this the one place that can guarantee reconciliation's
-  // verdict is honored. Once recovery has decided the interrupted attempt must
-  // be undone, continuing forward would add resources to the set about to be
-  // deleted — and each one added after the decision is one the rollback's
-  // selection never learned about.
-  if (operation?.providerRecovery?.state === "rollback_pending") {
-    await fail(
-      409,
-      "Radius reconciled the interrupted provider request and must delete the setup resources before making any further provider changes.",
-      "provider-rollback-pending"
-    );
-    return false;
-  }
-  return true;
-}
-
-export async function persistBestEffort({
-  operation,
-  persist,
-  report
-}: {
-  operation: any;
-  persist: () => Promise<void>;
-  report?: (diagnostic: { code: string; message: string }) => void;
-}): Promise<boolean> {
-  try {
-    await persist();
-    return true;
-  } catch (error) {
-    report?.({
-      code: "operation-store-write-failed",
-      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
-    });
-    return false;
-  }
-}
+export {
+  persistBestEffort,
+  persistMutationCheckpoint
+} from "./server/services/setup-checkpoint.js";
 
 /**
  * Honor a recorded stop at a named safe boundary between remote mutations.

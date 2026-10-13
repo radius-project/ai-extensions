@@ -4,6 +4,7 @@ import {
   stopAtBoundary,
   unresolvedProviderMutations
 } from "../../operations.js";
+import { honorSetupStop } from "@radius-project/core";
 
 export interface StopBoundaryDiagnostic {
   code: string;
@@ -39,24 +40,22 @@ export async function honorStopBoundary({
   report,
   beforePersist
 }: StopBoundaryInput): Promise<boolean> {
-  if (!shouldStop(operation)) return true;
-  // A Stop may not strand a mutation whose provider outcome is still unknown.
-  // Reconciliation is read-only and must finish (or hand the ambiguity to the
-  // customer) before cancellation can become terminal.
-  if (unresolvedProviderMutations(operation).length > 0) return true;
-
-  beforePersist?.();
-  stopAtBoundary(operation, boundary, { announce: false });
-  try {
-    await persist();
-    announceOperationTerminal(operation);
-  } catch (error) {
-    report?.({
-      code: "operation-store-write-failed",
-      message: `Could not persist setup operation ${
-        operation?.operationId || "unknown"
-      }: ${errorMessage(error)}`
-    });
-  }
-  return false;
+  return honorSetupStop(boundary, {
+    isStopRequested: () => shouldStop(operation),
+    hasUnsettledMutation: () =>
+      unresolvedProviderMutations(operation).length > 0,
+    beforePersist,
+    transitionToStopped: (at) =>
+      stopAtBoundary(operation, at, { announce: false }),
+    persist,
+    publishStopped: () => announceOperationTerminal(operation),
+    reportPersistenceFailure: (error) => {
+      report?.({
+        code: "operation-store-write-failed",
+        message: `Could not persist setup operation ${
+          operation?.operationId || "unknown"
+        }: ${errorMessage(error)}`
+      });
+    }
+  });
 }

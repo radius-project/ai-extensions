@@ -10,6 +10,14 @@ import type {
   CreateEnvironmentOperation,
   OperationStartResult
 } from "./create-environment-types.js";
+import {
+  createOperation as createStoredOperation,
+  fromPersistedOperation,
+  PROVIDER_JOURNAL_SCHEMA_VERSION,
+  reconcileRestoredOperation,
+  SUPPORTED_OPERATION_SCHEMA_VERSIONS,
+  toPersistedOperation
+} from "../../operations.js";
 
 const STAGE_IDENTITY = "authorize-identity";
 const STAGE_CONFIGURE = "configure-environment";
@@ -182,6 +190,84 @@ describe("rung 1 — the server-owned gate", () => {
 });
 
 describe("the create-environment refusal ladder", () => {
+  it.each(SUPPORTED_OPERATION_SCHEMA_VERSIONS)(
+    "applies production recovery and admission to a version %s record without replacing its identity or artifacts",
+    async (schemaVersion) => {
+      const stored: Record<string, unknown> = toPersistedOperation(
+        createStoredOperation({
+          provider: "azure",
+          repo: "octo/app",
+          environment: "dev"
+        })
+      );
+      stored.schemaVersion = schemaVersion;
+      stored.currentStage = STAGE_IDENTITY;
+      const restored: CreateEnvironmentOperation = reconcileRestoredOperation(
+        fromPersistedOperation(stored)
+      );
+      const before = toPersistedOperation(restored);
+      const recorder = ports({ existing: restored });
+
+      const result = await admitCreateEnvironmentRequest(
+        { repo: "octo/app", operationId: restored.operationId },
+        recorder.ports
+      );
+
+      expect(toPersistedOperation(restored)).toEqual(before);
+      expect(recorder.persistCalls).toBe(0);
+      if (schemaVersion < PROVIDER_JOURNAL_SCHEMA_VERSION) {
+        expect(restored.state).toBe("failed_partial");
+      } else {
+        expect(restored.state).toBe("action_required");
+      }
+      expect(result).toMatchObject({
+        outcome: "refused",
+        operation: null,
+        refusal: {
+          status: 409,
+          body: { code: "operation-continuation-mismatch" }
+        }
+      });
+      expect(recorder.claimReads).toEqual([]);
+      expect(recorder.entered).toEqual([]);
+    }
+  );
+
+  it("refuses a legacy record without modern control or provenance after production recovery", async () => {
+    const restored: CreateEnvironmentOperation = reconcileRestoredOperation(
+      fromPersistedOperation({
+        schemaVersion: 1,
+        operationId: "op_legacy",
+        repo: "octo/app",
+        environment: "dev",
+        provider: "azure",
+        state: "running",
+        currentStage: STAGE_IDENTITY,
+        stages: [],
+        steps: []
+      })
+    );
+    const recorder = ports({ existing: restored });
+
+    const result = await admitCreateEnvironmentRequest(
+      { repo: "octo/app", operationId: restored.operationId },
+      recorder.ports
+    );
+
+    expect(result).toMatchObject({
+      outcome: "refused",
+      operation: null,
+      refusal: {
+        status: 409,
+        body: { code: "operation-continuation-mismatch" }
+      }
+    });
+    expect(restored.operationId).toBe("op_legacy");
+    expect(recorder.persistCalls).toBe(0);
+    expect(recorder.claimReads).toEqual([]);
+    expect(recorder.entered).toEqual([]);
+  });
+
   it("rung 2 — refuses 400 when no target repository was supplied", async () => {
     const recorder = ports();
     const result = await admitCreateEnvironmentRequest({}, recorder.ports);
