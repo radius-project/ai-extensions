@@ -18,6 +18,7 @@ export default defineConfig({
       "src/gh*.test.ts",
       "src/workspace.test.ts",
       "src/server/create-canvas-server.test.ts",
+      "src/runtime/environment-execution-owner.test.ts",
       "src/server/services/discovery.test.ts",
       "src/server/services/workflow-observation-scope.test.ts",
       "src/server/services/deploy-{monitor,outcome,request}.test.ts",
