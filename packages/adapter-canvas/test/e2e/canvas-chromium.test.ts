@@ -3129,16 +3129,62 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#env-step1-next")).toBeDisabled();
   });
 
-  test("keeps server-owned setup durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
+  test("keeps composed service-principal retry and cleanup results durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
     page,
     canvas
   }) => {
     const finishOperation: { current: (() => void) | null } = { current: null };
-    canvas.setEnvironmentOperationRunner(async () => {
+    let principalCreates = 0;
+    let environmentDeletes = 0;
+    canvas.setEnvironmentOperationRunner(async (operationId) => {
       await new Promise<void>((resolve) => {
         finishOperation.current = resolve;
       });
-      throw new Error("The controlled setup failed safely.");
+      const ops = await import("../../src/operations.js");
+      const { ensureServicePrincipal, finalizeSetupFailure } =
+        await import("../../src/server.js");
+      const operation = ops.operations.get(operationId);
+      if (!operation) throw new Error("Setup operation was not saved.");
+      ops.enterStage(operation, "authorize_identity");
+      ops.recordGitHubEnvironment(operation, {
+        state: "created",
+        repo: REPOSITORY,
+        name: "fixture-environment",
+        providerId: "123"
+      });
+      const principal = await ensureServicePrincipal(
+        "fixture-app-id",
+        async (args) => {
+          if (args[2] === "create") principalCreates += 1;
+          else if (args[2] !== "show")
+            throw new Error("Unexpected directory command.");
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "Request_ResourceNotFound: directory not ready"
+          };
+        },
+        { operation, persist: () => ops.operations.persist() },
+        async () => true,
+        async () => {}
+      );
+      if (principal.ok || principal.stopped)
+        throw new Error("Expected the bounded create attempts to fail.");
+      await finalizeSetupFailure(operation, {
+        status: 400,
+        code: "sp-failed",
+        error: principal.stderr,
+        stage: "authorize_identity",
+        readEnvironment: async () => ({
+          code: 0,
+          stdout: JSON.stringify({ id: 123 }),
+          stderr: ""
+        }),
+        runDeleteEnvironment: async (args) => {
+          expect(args).toContain("DELETE");
+          environmentDeletes += 1;
+        }
+      });
     });
     const selected = {
       id: "fixture-cluster",
@@ -3215,6 +3261,8 @@ test.describe("Radius Canvas in Chromium", () => {
           }, result.operationId)
       )
       .toBe("failed");
+    expect(principalCreates).toBe(6);
+    expect(environmentDeletes).toBe(1);
     await page.goto(
       `${canvas.baseUrl}/?page=environment&operationId=${result.operationId}`
     );

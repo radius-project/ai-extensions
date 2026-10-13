@@ -361,6 +361,11 @@ import {
   recordProviderReconciliationFailure
 } from "./server/services/provider-mutation-recovery.js";
 import {
+  azureRetryDelayMs,
+  isReplicationLagError,
+  isRetryableAzureReadFailure
+} from "./server/routes/azure-auto-setup-credentials.js";
+import {
   pendingBranchDelete,
   reconcileRecoveredBranchDelete
 } from "./server/services/recovered-branch-delete.js";
@@ -2542,7 +2547,8 @@ export async function ensureServicePrincipal(
     operation: object & { operationId: string };
     persist(): Promise<void>;
   },
-  beforeCreate: () => Promise<boolean> = async () => true
+  beforeCreate: () => Promise<boolean> = async () => true,
+  sleep: (milliseconds: number) => Promise<void> = sleepMs
 ): Promise<
   | {
       ok: true;
@@ -2571,9 +2577,13 @@ export async function ensureServicePrincipal(
   }> => {
     const result = await runAz(showArgs);
     return {
-      ok: result.code === 0 || result.code === "0",
+      ok:
+        result.timedOut !== true && (result.code === 0 || result.code === "0"),
       objectId: String(result.stdout || "").trim(),
-      stderr: String(result.stderr || "").trim()
+      stderr:
+        result.timedOut === true ?
+          `ETIMEDOUT: Service Principal lookup timed out. ${String(result.stderr || "").trim()}`.trim()
+        : String(result.stderr || "").trim()
     };
   };
   const pendingCreate =
@@ -2676,6 +2686,35 @@ export async function ensureServicePrincipal(
       ...(result.timedOut === true ? { timedOut: true } : {})
     };
   };
+  const reconcilePrincipal = async () => {
+    for (let attempt = 0; ; attempt++) {
+      const after = await readObjectId();
+      if (after.ok && after.objectId) {
+        return {
+          state: "applied" as const,
+          value: after.objectId,
+          evidence:
+            "The Service Principal for this operation's exact application client id exists after the interrupted create.",
+          providerId: after.objectId
+        };
+      }
+      if (after.ok) {
+        throw new Error(
+          "The Service Principal lookup returned an empty object id."
+        );
+      }
+      const retryable =
+        isAzResourceNotFound(after.stderr) ||
+        isRetryableAzureReadFailure(after.stderr);
+      const delay = azureRetryDelayMs(after.stderr, 2000 * (attempt + 1));
+      if (!retryable || attempt >= 5 || delay === null) {
+        throw new Error(
+          after.stderr || "The Service Principal state could not be read."
+        );
+      }
+      await sleep(delay);
+    }
+  };
   const mutationKind = "azure_service_principal.create";
   if (
     (!mutationRecovery ||
@@ -2718,78 +2757,78 @@ export async function ensureServicePrincipal(
     };
   }
 
-  const recovered = await executeRecoverableMutation<string>({
-    operation: mutationRecovery.operation,
-    kind: mutationKind,
-    target: clientId,
-    providerIdempotencyKey: clientId,
-    persist: mutationRecovery.persist,
-    beforeMutation: beforeCreate,
-    mutate: runCreate,
-    accept: (result) => createdObjectId(result) || "",
-    // Settled with the confirmed status, so a crash between Entra's answer and
-    // the ledger still leaves a restart able to tell this principal from one
-    // that was already there.
-    providerIdOf: (result) => createdObjectId(result),
-    reconcile: async () => {
-      const after = await readObjectId();
-      if (after.ok && after.objectId) {
-        // `--id` is the App Registration's own client id, so a principal found
-        // this way is the exact principal for the exact application this
-        // operation created. What the read cannot settle is provenance: the
-        // principal was absent before Radius asked for it, and Radius asked
-        // once, but a concurrent creator would look identical. So the object id
-        // is adopted and ownership is not.
-        return {
-          state: "applied",
-          value: after.objectId,
-          evidence:
-            "The Service Principal for this operation's exact application client id exists after the interrupted create.",
-          providerId: after.objectId
-        };
-      }
-      if (after.ok) {
-        throw new Error(
-          "The Service Principal lookup returned an empty object id."
-        );
-      }
-      if (isAzResourceNotFound(after.stderr)) {
-        return {
-          state: "not_applied",
-          evidence:
-            "Microsoft Entra confirmed no Service Principal exists for this application."
-        };
-      }
-      throw new Error(
-        after.stderr || "The Service Principal state could not be read."
-      );
+  for (let attempt = 0; ; attempt++) {
+    const recovered = await executeRecoverableMutation<string>({
+      operation: mutationRecovery.operation,
+      kind: mutationKind,
+      target: clientId,
+      providerIdempotencyKey: clientId,
+      persist: mutationRecovery.persist,
+      beforeMutation: beforeCreate,
+      mutate: runCreate,
+      accept: (result) => createdObjectId(result) || "",
+      // Settled with the confirmed status, so a crash between Entra's answer and
+      // the ledger still leaves a restart able to tell this principal from one
+      // that was already there.
+      providerIdOf: (result) => createdObjectId(result),
+      // A not-found read can lag behind a successful write. It never proves that
+      // an interrupted create was rejected or permits a second create.
+      reconcile: reconcilePrincipal
+    });
+    if (recovered.state === "cancelled") {
+      return { ok: false, stopped: true };
     }
-  });
-  if (recovered.state === "cancelled") {
-    return { ok: false, stopped: true };
-  }
-  if (recovered.state === "not_applied") {
-    const rejected = recovered.result;
-    return {
-      ok: false,
-      stderr:
-        (rejected?.stderr || rejected?.stdout || "").trim() ||
-        "Could not create or find the Service Principal."
-    };
-  }
-  return recovered.recovered ?
-      {
-        ok: true,
-        state: "created_candidate",
-        origin: "unknown",
-        objectId: recovered.value
+    if (recovered.state === "not_applied") {
+      const rejected = recovered.result;
+      const firstOutput = (
+        value:
+          | {
+              stderr?: string;
+              stdout?: string;
+            }
+          | undefined
+      ) =>
+        [value?.stderr, value?.stdout]
+          .map((text) => (text || "").trim())
+          .find(Boolean) || "";
+      const detail = firstOutput(rejected);
+      const permissionFailure =
+        /HTTP\s*(?:401|403)|Authorization|Authentication|Insufficient privileges/i.test(
+          detail
+        );
+      const retryable =
+        rejected &&
+        !permissionFailure &&
+        (isReplicationLagError(detail) || isRetryableAzureReadFailure(detail));
+      const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
+      if (retryable && attempt < 5 && delay !== null) {
+        if (!(await beforeCreate())) return { ok: false, stopped: true };
+        await sleep(delay);
+        if (!(await beforeCreate())) return { ok: false, stopped: true };
+        continue;
       }
-    : {
-        ok: true,
-        state: "created",
-        origin: "this_operation",
-        objectId: recovered.value || null
+      return {
+        ok: false,
+        stderr:
+          detail ||
+          recovered.diagnostic ||
+          "Could not create or find the Service Principal."
       };
+    }
+    return recovered.recovered ?
+        {
+          ok: true,
+          state: "created_candidate",
+          origin: "unknown",
+          objectId: recovered.value
+        }
+      : {
+          ok: true,
+          state: "created",
+          origin: "this_operation",
+          objectId: recovered.value || null
+        };
+  }
 }
 
 /**

@@ -8,6 +8,8 @@ import {
   providerMutationWillWrite
 } from "./provider-mutation-recovery.js";
 
+const ENVIRONMENT_READ_TIMEOUT_MS = 20000;
+
 export interface GitHubEnvironmentCommandResult {
   code: string | number;
   stdout: string;
@@ -326,14 +328,27 @@ export function readEnsuredGitHubEnvironment(
  * never come back as an empty, successful-looking answer that reads as absence.
  */
 export function selectedEnvironmentReader(executor: {
-  run(args: string[]): Promise<{
+  run(
+    args: string[],
+    options: { timeout: number }
+  ): Promise<{
     code: string | number;
     stdout?: string;
     stderr?: string;
+    timedOut?: boolean;
   }>;
 }): (args: string[]) => Promise<GitHubEnvironmentCommandResult> {
   return async (args) => {
-    const result = await executor.run(args);
+    // The production executor has no default deadline, so a stalled read
+    // would block failure cleanup unless every read carries its own.
+    const result = await executor.run(args, {
+      timeout: ENVIRONMENT_READ_TIMEOUT_MS
+    });
+    if (result.timedOut) {
+      throw new Error(
+        "The selected GitHub account's environment lookup timed out."
+      );
+    }
     const code = Number(result.code);
     return {
       // A code that will not parse is not a success. Anything but an exact 0

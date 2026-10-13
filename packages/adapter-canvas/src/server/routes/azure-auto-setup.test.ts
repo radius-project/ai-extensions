@@ -376,6 +376,94 @@ function orchestrationHarness(
 }
 
 describe("POST /api/azure-auto-setup construction (SU-01)", () => {
+  it.each(["rejection", "exception"])(
+    "uses the selected account for all cleanup callbacks after a setup %s",
+    async (failure) => {
+      const run = vi.fn<SelectedGhExecutor["run"]>(async () => ({
+        code: 0,
+        stdout: "selected-account-result",
+        stderr: ""
+      }));
+      const harness = orchestrationHarness({
+        selectedExecutor: successfulSelectedGhExecutor({ run }),
+        ensureServicePrincipal: async () => {
+          if (failure === "exception") throw new Error("setup failed");
+          return { ok: false, stderr: "setup failed" };
+        }
+      });
+      await invoke(
+        JSON.stringify({ ...VALID_SETUP, clientId: APP_ID }),
+        harness.dependencies
+      );
+      expect(harness.failures).toHaveLength(1);
+      const cleanup = harness.failures[0];
+      expect(cleanup.runGitHubVariable).toBeTypeOf("function");
+      expect(cleanup.readEnvironment).toBeTypeOf("function");
+      expect(cleanup.runDeleteEnvironment).toBeTypeOf("function");
+      const variable = [
+        "api",
+        "--method",
+        "PATCH",
+        "/repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID"
+      ];
+      const read = ["api", "/repos/octo/app/environments/dev"];
+      const deletion = [
+        "api",
+        "--method",
+        "DELETE",
+        "/repos/octo/app/environments/dev"
+      ];
+      await expect(
+        cleanup.runGitHubVariable?.(variable)
+      ).resolves.toMatchObject({ stdout: "selected-account-result" });
+      await expect(cleanup.readEnvironment?.(read)).resolves.toMatchObject({
+        stdout: "selected-account-result"
+      });
+      await expect(
+        cleanup.runDeleteEnvironment?.(deletion)
+      ).resolves.toBeUndefined();
+      expect(run.mock.calls).toEqual([
+        [variable, { timeout: 20000 }],
+        [read, { timeout: 20000 }],
+        [deletion, { timeout: 20000 }]
+      ]);
+
+      run.mockResolvedValueOnce({ code: "0", stdout: "", stderr: "" });
+      await expect(
+        cleanup.runDeleteEnvironment?.(deletion)
+      ).resolves.toBeUndefined();
+      for (const response of [
+        { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" },
+        { code: 1, stdout: "delete refused", stderr: "" },
+        { code: 1, stdout: "", stderr: "" },
+        { code: 0, stdout: "", stderr: "", timedOut: true }
+      ]) {
+        run.mockResolvedValueOnce(response);
+        await expect(cleanup.runDeleteEnvironment?.(deletion)).rejects.toThrow(
+          response.timedOut ?
+            "Outcome unknown after provider timeout"
+          : response.stderr ||
+              response.stdout ||
+              "Could not delete the GitHub environment."
+        );
+      }
+    }
+  );
+
+  it("does not fall back to ambient GitHub cleanup when the selected account is missing", async () => {
+    const harness = orchestrationHarness();
+    harness.dependencies.external.getSelectedGitHubExecutor = () => null;
+    await invoke(
+      JSON.stringify({ ...VALID_SETUP, clientId: APP_ID }),
+      harness.dependencies
+    );
+    expect(harness.failures).toHaveLength(1);
+    expect(harness.failures[0].code).toBe("github-selection-unavailable");
+    expect(harness.failures[0].runDeleteEnvironment).toBeUndefined();
+    expect(harness.failures[0].readEnvironment).toBeUndefined();
+    expect(harness.failures[0].runGitHubVariable).toBeUndefined();
+  });
+
   it("declares exactly its one route", () => {
     expect(
       Object.keys(

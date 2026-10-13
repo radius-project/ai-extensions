@@ -32,11 +32,13 @@ import { configureAzureAutoSetupCredentials } from "./azure-auto-setup-credentia
 import type {
   AzureAutoSetupDependencies,
   AzureAutoSetupExternalPort,
+  AzureAutoSetupFailureInput,
   AzureAutoSetupOperation,
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
 import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
 import { setupStartConflictResponse } from "./operation-start-conflict.js";
+import { selectedEnvironmentReader } from "../services/github-environment.js";
 
 interface AzureAccountIdentity {
   subscriptionId: string;
@@ -267,6 +269,10 @@ export async function handleAzureAutoSetup(
   let operation: AzureAutoSetupOperation | null = null;
   let steps: string[] = [];
   let runAzReady = false;
+  const githubCleanup: Pick<
+    AzureAutoSetupFailureInput,
+    "runGitHubVariable" | "runDeleteEnvironment" | "readEnvironment"
+  > = {};
   const stopBoundary = async (boundary: string) => {
     const proceed = await dependencies.honorStopBoundary({
       operation,
@@ -378,6 +384,7 @@ export async function handleAzureAutoSetup(
       }
       if (!(await stopBoundary("before-azure-failure-cleanup"))) return;
       const failure = await dependencies.finalizeSetupFailure(operation, {
+        ...githubCleanup,
         status,
         error,
         code,
@@ -574,6 +581,23 @@ export async function handleAzureAutoSetup(
       );
       return;
     }
+    githubCleanup.runDeleteEnvironment = async (args) => {
+      const result = await selectedExecutor.run(args, { timeout: 20000 });
+      if (result.timedOut) {
+        throw new Error(
+          "Outcome unknown after provider timeout; Radius must confirm whether the GitHub environment was removed."
+        );
+      }
+      if (result.code !== 0 && result.code !== "0") {
+        throw new Error(
+          (result.stderr || result.stdout).trim() ||
+            "Could not delete the GitHub environment."
+        );
+      }
+    };
+    githubCleanup.readEnvironment = selectedEnvironmentReader(selectedExecutor);
+    githubCleanup.runGitHubVariable = (args) =>
+      selectedExecutor.run(args, { timeout: 20000 });
     const savedAppCreateContinuation =
       dependencies.operations.getAzureAppCreateContinuation(operation);
     if (continuationInputRequired || savedAppCreateContinuation) {
@@ -899,6 +923,7 @@ export async function handleAzureAutoSetup(
     }
     if (!(await stopBoundary("before-azure-failure-cleanup"))) return;
     const failure = await dependencies.finalizeSetupFailure(operation, {
+      ...githubCleanup,
       status: 400,
       error: errorMessage(error),
       code: "setup-unhandled",

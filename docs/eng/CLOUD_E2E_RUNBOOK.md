@@ -24,6 +24,10 @@ Open the run, open the failing step, and answer one question: **did the product'
 
 Then download the `cloud-e2e-diagnostics` artifact. It is uploaded on success as well as failure, so a passing run's artifact is the baseline you read the failing one against.
 
+For a service-principal creation failure, read the terminal operation's `failure.message` in the Playwright trace. While the create outcome is unknown, the browser does not receive the diagnostic. The server calls `/api/azure-auto-setup` itself, so the trace has no `202` body. Radius shows the diagnostic in `failure.message` only when reconciliation ends. Radius preserves the command exit code, timeout flag, and available error output, even if later reads find no principal. It redacts credentials and limits each saved diagnostic to 2,000 characters, plus a truncation marker. Diagnostic text alone never authorizes a retry. Runs recorded before this fix can contain only the generic service-principal error; that missing output cannot be recovered from the trace.
+
+After an uncertain service-principal create, Radius makes up to six reads with bounded delays. A not-found response can reflect directory propagation, so it does not prove the create failed. If the outcome stays unknown, Radius neither repeats the create nor starts cleanup. Only a definite temporary rejection, such as throttling or an application-not-found rejection, permits another create, with at most six create attempts. Stop is checked before and after each retry delay. Failure cleanup uses the operation's selected GitHub account for variable rollback, environment identity checks, and deletion. A missing account, an unreadable identity, or a replacement environment cannot authorize deletion.
+
 | File                               | Answers                                                         |
 |------------------------------------|-----------------------------------------------------------------|
 | `test-results/cloud/`              | The Playwright trace. The single most useful file here          |
