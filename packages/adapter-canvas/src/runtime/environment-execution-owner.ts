@@ -1,3 +1,5 @@
+import { errorMessage } from "./util.js";
+
 export interface EnvironmentExecutionClock {
   deferTask(): Promise<void>;
   microtask(callback: () => void): void;
@@ -127,6 +129,11 @@ export function createEnvironmentExecutionOwner(
           instanceId,
           generation: attachmentGeneration,
           promise: running
+        });
+        void running.catch((error: unknown) => {
+          console.error(
+            `[radius] environment task finalization failed: ${errorMessage(error)}`
+          );
         });
       },
       scheduleReconciliation(operationId: string, callback: () => void): void {

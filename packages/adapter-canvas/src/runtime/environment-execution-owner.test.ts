@@ -32,7 +32,10 @@ function settled(owner: EnvironmentExecutionOwner, instanceId: string) {
   });
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("runtime environment execution ownership", () => {
   it("constructs without work and isolates runtime claims and shutdown markers", () => {
@@ -140,6 +143,7 @@ describe("runtime environment execution ownership", () => {
   });
 
   it("reports failures through the bound handler and continues after its rejection", async () => {
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
     const owner = createEnvironmentExecutionOwner();
     const attachment = owner.attach("a");
     const error = new Error("provider unavailable");
@@ -154,6 +158,33 @@ describe("runtime environment execution ownership", () => {
     expect(initial.failed).toHaveBeenCalledWith(error);
     expect(next.settling).toHaveBeenCalledOnce();
     expect(next.settled).toHaveBeenCalledOnce();
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+      "[radius] environment task finalization failed: diagnostic save failed"
+    );
+  });
+
+  it("observes a failure-handler rejection without a successor and releases the task", async () => {
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    const owner = createEnvironmentExecutionOwner();
+    const attachment = owner.attach("a");
+    const error = new Error("provider unavailable");
+    const final = task(async () => {
+      throw error;
+    });
+    final.failed.mockRejectedValue(new Error("diagnostic save failed"));
+
+    attachment.schedule("op", final);
+    await settled(owner, "a");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(final.failed).toHaveBeenCalledExactlyOnceWith(error);
+    expect(final.settling).toHaveBeenCalledOnce();
+    expect(final.settled).toHaveBeenCalledOnce();
+    expect(attachment.hasTask("op")).toBe(false);
+    expect(owner.hasActiveEnvironmentTasks("a")).toBe(false);
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+      "[radius] environment task finalization failed: diagnostic save failed"
+    );
   });
 
   it("unsubscribes idempotently and isolates throwing listeners before finalization", async () => {
