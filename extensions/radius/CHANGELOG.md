@@ -1,5 +1,25 @@
 # radius
 
+## 0.2.2
+
+### Patch Changes
+
+- [#956](https://github.com/radius-project/ai-extensions/pull/956) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** When only post-deployment teardown fails, explain that deployment commands succeeded, resources may have changed, and saved state may be out of date; advise reviewing teardown logs and verifying saved state before retrying.
+
+- [#958](https://github.com/radius-project/ai-extensions/pull/958) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Show environment protection waiting evidence as historical observations, make uncertainty explicit, and avoid implying approval when protection checks become unavailable.
+
+- [#981](https://github.com/radius-project/ai-extensions/pull/981) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Generate the application graph before you select or create a deployment environment. When no environment is named and no contract is supplied, model generation leaves Recipe registration checks to deployment. Named environments still require Recipe behavior and registration evidence.
+
+- [#949](https://github.com/radius-project/ai-extensions/pull/949) [@kachawla](https://github.com/kachawla) - **Fixed:** Generated application definitions now give every consumer of a provisioned database or message broker the same username the service is created with, read from one place instead of repeated as a separate value. The username is `myadmin` unless you ask for a specific one or the application's code or checked-in configuration fixes a login; a username the application reads from an environment variable is not treated as fixed, even when Compose, Helm, or Kubernetes manifests set it. Refreshing an existing model keeps the username it already sets, so an existing database's administrator login is not changed.
+
+- [#988](https://github.com/radius-project/ai-extensions/pull/988) [@nellshamrell](https://github.com/nellshamrell) - **Security:** Mask entire credential strings in escaped JSON diagnostics so embedded quotes and backslashes cannot expose part of a secret.
+
+- [#989](https://github.com/radius-project/ai-extensions/pull/989) [@nellshamrell](https://github.com/nellshamrell) - **Security:** Redact known credentials and recognizable credential fields from workflow and control-plane diagnostics before displaying them or sending them to deployment repair.
+
+- [#1005](https://github.com/radius-project/ai-extensions/pull/1005) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Azure environment setup now retries temporary Microsoft Entra errors when it creates the service principal. It shows Entra's real error instead of a general message, and it removes the GitHub environment that a failed setup created. If Radius cannot tell whether the service principal was created, it checks the directory before it retries or removes anything.
+
+- [#950](https://github.com/radius-project/ai-extensions/pull/950) [@kachawla](https://github.com/kachawla) - **Fixed:** Application model validation now reports a container that repeats a provisioned database's or message broker's username as its own value instead of reading it from the resource or one shared variable, so the two cannot drift apart and break the login.
+
 ## 0.2.1
 
 ### Patch Changes
