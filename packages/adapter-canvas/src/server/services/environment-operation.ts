@@ -188,6 +188,38 @@ async function failResolution(
   return { shouldMonitor: false };
 }
 
+// Why an AWS setup cannot reuse this GitHub environment, or null when it can.
+// Fails closed when the variables cannot be read.
+export async function awsEnvironmentConflict(
+  repo: string,
+  environment: string,
+  executor: SelectedGhExecutor,
+  dependencies: Pick<EnvironmentOperationWorkflowDependencies, "readGitHubJson">
+): Promise<{ status: number; message: string; code: string } | null> {
+  const result = await dependencies.readGitHubJson(
+    `/repos/${repo}/environments/${encodeURIComponent(environment)}/variables?per_page=100`,
+    executor
+  );
+  if (!result.ok) {
+    return {
+      status: 502,
+      message: `Radius could not read the variables of GitHub environment "${environment}" to confirm it is not set up for Azure. Nothing was changed in AWS. Retry setup.`,
+      code: "github-environment-variables-unreadable"
+    };
+  }
+  const variables = record(result.json).variables;
+  const names =
+    Array.isArray(variables) ?
+      variables.map((variable) => record(variable).name)
+    : [];
+  if (!names.includes("AZURE_CLIENT_ID")) return null;
+  return {
+    status: 409,
+    message: `GitHub environment "${environment}" is already set up for Azure. Radius did not change it or anything in AWS. Choose a different environment name, or delete the Azure environment first.`,
+    code: "github-environment-provider-conflict"
+  };
+}
+
 export async function runEnvironmentOperationWorkflow(
   operation: EnvironmentOperationRecord,
   executor: SelectedGhExecutor,
@@ -420,6 +452,29 @@ export async function runEnvironmentOperationWorkflow(
   const environmentRequest = record(request.environment);
   let awsRoleArn = "";
   if (operation.provider === "aws" && !reconcilingProviderMutation) {
+    // A reused GitHub environment may still carry another provider's
+    // variables. The deploy workflow checks Azure first, so an AWS setup on top
+    // of them would keep deploying to Azure. Refuse before touching AWS.
+    const conflict =
+      ensured.state === "reused" ?
+        await awsEnvironmentConflict(
+          operation.repo,
+          ensured.name,
+          executor,
+          dependencies
+        )
+      : null;
+    if (conflict) {
+      if (
+        !(await dependencies.guardStopBoundary(
+          operation,
+          "before-setup-failure-cleanup"
+        ))
+      ) {
+        return { shouldMonitor: false };
+      }
+      return failResolution(operation, executor, dependencies, conflict);
+    }
     const aws = await dependencies.setupAwsDeployIdentity(
       operation,
       {
