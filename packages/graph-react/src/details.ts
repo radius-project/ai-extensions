@@ -10,6 +10,7 @@
 // Rows carry raw text, never markup. Escaping belongs to the renderer, so a
 // resource name from a provider cannot become markup no matter how it is used.
 
+import { awsConsoleUrl, consoleNameForUrl } from "@radius-project/core/domain";
 import { safeExternalUrl } from "./external-url.js";
 import { buildSourceUrl, githubSourceReferenceUrl } from "./model.js";
 import { isLocalSourceNode } from "./build.js";
@@ -100,6 +101,24 @@ export function azurePortalUrl(armId: string): string {
   return `https://portal.azure.com/#@/resource${encodeURI(armId)}/overview`;
 }
 
+/**
+ * The console link for a deployed cloud resource: the Azure portal for an ARM
+ * ID, or the service's AWS console list page for a recognized AWS type. Any
+ * other ID, including an unrecognized AWS type, has no link.
+ */
+export function cloudConsoleUrl(id: string): string {
+  return id.startsWith("/subscriptions/") ?
+      azurePortalUrl(id)
+    : awsConsoleUrl(id);
+}
+
+// "View in AWS console" or "View in Azure portal", named from where the link
+// actually goes; a URL from neither console keeps the generic label.
+function viewInLabel(url: string): string {
+  const name = consoleNameForUrl(url);
+  return name ? `View in ${name}` : "View in portal";
+}
+
 function definitionUrl(settings: GraphSettings, data: GraphNodeData): string {
   return buildSourceUrl(
     settings.repoUrl,
@@ -131,21 +150,18 @@ function cloudRows(data: GraphNodeData): DetailRow[] {
     const name = typeof record.name === "string" ? record.name : "";
     const type = typeof record.type === "string" ? record.type : "";
     const id = typeof record.id === "string" ? record.id : "";
-    if (!id.startsWith("/subscriptions/")) continue;
+    const consoleUrl = cloudConsoleUrl(id);
+    if (!consoleUrl) continue;
     const producerUrl =
       typeof record.portalUrl === "string" ?
         safeExternalUrl(record.portalUrl)
       : "";
+    const href = producerUrl || consoleUrl;
     const label =
       name || (type ? type.split("/").pop() || "" : "") || "resource";
-    rows.push(
-      externalRow(
-        "link",
-        label + " in Azure portal",
-        producerUrl || azurePortalUrl(id),
-        false
-      )
-    );
+    const consoleName =
+      consoleNameForUrl(href) || consoleNameForUrl(consoleUrl);
+    rows.push(externalRow("link", `${label} in ${consoleName}`, href, false));
   }
   return rows;
 }
@@ -225,17 +241,13 @@ export function buildDetailRows(
     });
   }
   if (safeExternalUrl(data.portalUrl)) {
-    rows.push(externalRow("link", "View in portal", data.portalUrl, false));
-  }
-  if (data.cloudId) {
     rows.push(
-      externalRow(
-        "link",
-        "View in Azure portal",
-        azurePortalUrl(data.cloudId),
-        false
-      )
+      externalRow("link", viewInLabel(data.portalUrl), data.portalUrl, false)
     );
+  }
+  const cloudIdUrl = data.cloudId ? cloudConsoleUrl(data.cloudId) : "";
+  if (cloudIdUrl) {
+    rows.push(externalRow("link", viewInLabel(cloudIdUrl), cloudIdUrl, false));
   }
   rows.push(...cloudRows(data));
   if (rows.length === 0) rows.push({ kind: "empty" });

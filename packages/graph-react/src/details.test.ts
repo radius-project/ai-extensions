@@ -480,6 +480,81 @@ describe("detail rows", () => {
     ).toHaveLength(2);
   });
 
+  it("names AWS console links and skips unrecognized AWS resources", () => {
+    const scope =
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers";
+    const rdsUrl =
+      "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2#databases:";
+    const rows = buildDetailRows(
+      settings(),
+      node({
+        portalUrl: rdsUrl,
+        cloudId: `${scope}/AWS.SQS/Queue/jobs`,
+        cloudResources: JSON.stringify([
+          { name: "db", id: `${scope}/AWS.RDS/DBInstance/db` },
+          {
+            name: "bucket",
+            id: `${scope}/AWS.S3/Bucket/bucket`,
+            portalUrl: "https://producer.test/bucket"
+          },
+          { name: "role", id: `${scope}/AWS.IAM/Role/role` }
+        ])
+      })
+    );
+    expect(rows.slice(2)).toEqual([
+      {
+        kind: "external",
+        icon: "link",
+        label: "View in AWS console",
+        href: rdsUrl,
+        showUrl: false
+      },
+      {
+        kind: "external",
+        icon: "link",
+        label: "View in AWS console",
+        href: "https://us-west-2.console.aws.amazon.com/sqs/v3/home?region=us-west-2#/queues",
+        showUrl: false
+      },
+      {
+        kind: "external",
+        icon: "link",
+        label: "db in AWS console",
+        href: rdsUrl,
+        showUrl: false
+      },
+      {
+        kind: "external",
+        icon: "link",
+        label: "bucket in AWS console",
+        href: "https://producer.test/bucket",
+        showUrl: false
+      }
+    ]);
+  });
+
+  it("names an Azure portal URL and gives an unrecognized cloud id no row", () => {
+    const portalUrl = "https://portal.azure.com/#@tenant/resource/exact";
+    expect(
+      buildDetailRows(
+        settings(),
+        node({
+          portalUrl,
+          cloudId:
+            "/planes/aws/aws/accounts/1/regions/us-west-2/providers/AWS.IAM/Role/r"
+        })
+      ).slice(2)
+    ).toEqual([
+      {
+        kind: "external",
+        icon: "link",
+        label: "View in Azure portal",
+        href: portalUrl,
+        showUrl: false
+      }
+    ]);
+  });
+
   it("keeps the other rows when the serialized cloud list is unusable", () => {
     expect(
       buildDetailRows(settings(), node({ cloudResources: "{" }))
