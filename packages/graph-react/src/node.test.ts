@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitTypeLabel } from "./node.js";
+import { fitTypeLabel, portalLinkLabel } from "./node.js";
 import { ResourceNode } from "./node.js";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -56,5 +56,21 @@ describe("type label fitting", () => {
         style: { fontSize: "" }
       })
     ).toBe(13);
+  });
+});
+
+describe("portal link label", () => {
+  it.each([
+    [
+      "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2",
+      "Open db in AWS console"
+    ],
+    [
+      "https://portal.azure.com/#@/resource/x/overview",
+      "Open db in Azure Portal"
+    ],
+    ["https://portal.test/live", "Open db in Azure Portal"]
+  ])("names the link for %s", (url, label) => {
+    expect(portalLinkLabel("db", url)).toBe(label);
   });
 });
