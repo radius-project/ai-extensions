@@ -95,7 +95,7 @@ The first two calls use `postInternal`, which carries the per-instance server-ow
 
 **Test construction and compatibility:** Server consumers now construct explicit real-owner bindings, using [the shared test constructor](../../packages/adapter-canvas/test/support/server/production-runtime.ts) to select loopback OS-assigned ports and controlled identity preparation. The browser harness supplies its runner at construction through a fixture-local dependency; no mutable production test-runner setter remains. Pure helpers and the Stage 2A checkpoint forwarding exports remain unchanged. No lifecycle singleton compatibility exports remain. The new owner is pinned at 100% statements, branches, functions and lines; the admission pin, core/checkpoint gates and reliability registrations are retained, with ownership tests added to the scheduled selection.
 
-**Release and rollback:** This is an internal ownership move without an intended user-visible scheduling, API or persistence change; no Changeset is required. Code/wiring rollback must account for active tasks and account restoration rather than treating shutdown timeout as completed remote cleanup. It must retain the preceding admission, checkpoint and stop safeguards.
+**Release and rollback:** The ownership extraction preserves the intended scheduling, API and persistence behavior. The accompanying task error-reporting fix prevents an unobserved rejection when error reporting itself fails and is covered by a `radius` patch Changeset. Code/wiring rollback must account for active tasks and account restoration rather than treating shutdown timeout as completed remote cleanup. It must retain the preceding admission, checkpoint and stop safeguards.
 
 ## Identity, credentials, and Azure automatic setup
 
