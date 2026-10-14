@@ -138,7 +138,20 @@ function respond(context: CanvasRequestContext, status: number, body: unknown) {
   context.response.end(JSON.stringify(body));
 }
 
+import { runSetupHttpHandler } from "./setup-http-failure.js";
+
 export async function handleAzureAutoSetup(
+  context: CanvasRequestContext,
+  dependencies: AzureAutoSetupDependencies
+): Promise<void> {
+  await runSetupHttpHandler(
+    context,
+    () => runAzureAutoSetupRoute(context, dependencies),
+    (diagnostic) => dependencies.operations.report(diagnostic)
+  );
+}
+
+async function runAzureAutoSetupRoute(
   context: CanvasRequestContext,
   dependencies: AzureAutoSetupDependencies
 ): Promise<void> {
@@ -156,6 +169,7 @@ export async function handleAzureAutoSetup(
 
   const body = await context.readTextBody();
   let operation: AzureAutoSetupOperation | null = null;
+  let finalizationStarted = false;
   let steps: string[] = [];
   let runAzReady = false;
   const githubCleanup: Pick<
@@ -272,6 +286,7 @@ export async function handleAzureAutoSetup(
         return;
       }
       if (!(await stopBoundary("before-azure-failure-cleanup"))) return;
+      finalizationStarted = true;
       const failure = await dependencies.finalizeSetupFailure(operation, {
         ...githubCleanup,
         status,
@@ -639,6 +654,7 @@ export async function handleAzureAutoSetup(
       steps
     });
   } catch (error) {
+    if (finalizationStarted) throw error;
     if (
       error instanceof ProviderMutationRecoveryError &&
       error.code === "provider-mutation-outcome-unknown" &&
