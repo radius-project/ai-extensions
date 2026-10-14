@@ -52,7 +52,25 @@ set -euo pipefail
 [[ "$1" == "build" && "$3" == "--stdout" ]] || { echo "unexpected bicep call: $*" >&2; exit 1; }
 sed -nE 's/^param ([A-Za-z0-9_]+) .*/\1/p' "$2" | jq -R . | jq -s 'map({(.): {}}) | add // {} | {parameters: .}'
 EOF
-chmod +x "${STUB_BIN}/rad" "${STUB_BIN}/bicep"
+# Records each call. For `create secret`, it keeps the values the --from-file
+# paths held at call time, since the script deletes those files afterwards.
+cat > "${STUB_BIN}/kubectl" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${KUBECTL_CALL_LOG}"
+if [[ "$1" == "apply" ]]; then
+    cat > /dev/null
+    exit 0
+fi
+for arg in "$@"; do
+    if [[ "${arg}" == --from-file=* ]]; then
+        spec="${arg#--from-file=}"
+        printf '%s' "$(cat "${spec#*=}")" > "${CAPTURE_DIR}/secret-${spec%%=*}"
+    fi
+done
+echo "kind: placeholder"
+EOF
+chmod +x "${STUB_BIN}/rad" "${STUB_BIN}/bicep" "${STUB_BIN}/kubectl"
 
 cat > "${TEST_ROOT}/catalog-helper.sh" <<'EOF'
 radius_contrib_kube_recipe_source() {
@@ -68,11 +86,13 @@ run_script() {
     mkdir -p "${case_dir}/capture"
     : > "${case_dir}/output"
     : > "${case_dir}/rad.log"
+    : > "${case_dir}/kubectl.log"
     env \
         PATH="${STUB_BIN}:${PATH}" \
         HOME="${case_dir}" \
         RUNNER_TEMP="${case_dir}" \
         RAD_CALL_LOG="${case_dir}/rad.log" \
+        KUBECTL_CALL_LOG="${case_dir}/kubectl.log" \
         CAPTURE_DIR="${case_dir}/capture" \
         GITHUB_OUTPUT="${case_dir}/output" \
         BICEP_BIN="${STUB_BIN}/bicep" \
@@ -150,6 +170,18 @@ test_deploys_aws_recipes_and_kubernetes_primitives() {
     grep -q '^deploy .*/registry.bicep --environment aws-dev ' "${dir}/rad.log" \
         || fail "registry credentials were not deployed to the environment"
 
+    grep -qx "create namespace todo-aws-dev --dry-run=client -o yaml" "${dir}/kubectl.log" \
+        || fail "the control-plane namespace was not ensured"
+    grep -q "^create secret generic radius-recipe-registry --namespace todo-aws-dev " "${dir}/kubectl.log" \
+        || fail "registry credentials were not mirrored into the control-plane cluster"
+    [[ "$(cat "${dir}/capture/secret-username")" == "octo" ]] || fail "mirrored username is wrong"
+    [[ "$(cat "${dir}/capture/secret-password")" == "fake-token" ]] || fail "mirrored password is wrong"
+    if grep -q "fake-token" "${dir}/kubectl.log"; then
+        fail "the registry password must not be passed on the kubectl command line"
+    fi
+    [[ -z "$(find "${dir}" -name 'registry-password' -print -quit)" ]] \
+        || fail "the registry password file was left behind"
+
     grep -q "namespace: 'todo-aws-dev'" "${dir}/capture/environment-0.bicep" \
         || fail "environment must use the requested namespace"
     grep -q "accountId: '123456789012'" "${dir}/capture/environment-0.bicep" \
@@ -177,6 +209,7 @@ test_rejects_invalid_input() {
     grep -qF "${message}" "$(case_dir "${name}")/stderr" \
         || fail "${name}: missing error '${message}': $(cat "$(case_dir "${name}")/stderr")"
     [[ ! -s "$(case_dir "${name}")/rad.log" ]] || fail "${name}: rad ran before input validation"
+    [[ ! -s "$(case_dir "${name}")/kubectl.log" ]] || fail "${name}: kubectl ran before input validation"
 }
 
 # Every parameter a recipe declares without a default must be one the pack
