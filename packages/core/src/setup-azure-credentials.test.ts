@@ -654,7 +654,7 @@ describe("Azure credential policy ports", () => {
     ]);
   });
 
-  it("retains required Contributor failure while optional role failures only warn", async () => {
+  it("stops when the required Contributor assignment fails", async () => {
     const test = azurePorts(existingIdentityAz);
     test.credentials.recovery.execute = async (mutation) => ({
       state: "not_applied",
@@ -673,5 +673,35 @@ describe("Azure credential policy ports", () => {
       kind: "role-assignment-failed",
       evidence: { azError: "AuthorizationFailed" }
     });
+  });
+
+  it.each([
+    ["Azure Kubernetes Service RBAC Cluster Admin", "cluster-admin-warning"],
+    ["Locks Contributor", "locks-contributor-warning"]
+  ])("completes with a warning when optional %s fails", async (role, kind) => {
+    const assignments: string[] = [];
+    const test = azurePorts(existingIdentityAz);
+    test.credentials.recovery.execute = async (mutation) => {
+      assignments.push(mutation.target);
+      return {
+        state: "not_applied",
+        result:
+          mutation.target.split("\0")[2] === role ?
+            command("", 1, "AuthorizationFailed")
+          : command()
+      };
+    };
+    expect(
+      await configureAzureAutoSetupCredentials(input(test.credentials))
+    ).toBe(true);
+    expect(assignments.map((target) => target.split("\0")[2])).toEqual([
+      "Contributor",
+      "Azure Kubernetes Service RBAC Cluster Admin",
+      "Locks Contributor"
+    ]);
+    expect(test.events).toContainEqual(expect.objectContaining({ kind }));
+    expect(test.events).not.toContainEqual(
+      expect.objectContaining({ kind: "role-assignment-failed" })
+    );
   });
 });
