@@ -69,7 +69,6 @@ describe("Azure auto-setup dependency composition", () => {
       write: vi.fn(),
       remove: vi.fn()
     };
-    const isServerOwnedRequest = vi.fn(() => true);
     const ensureServicePrincipal = vi.fn(async () => ({
       ok: true as const,
       state: "reused" as const,
@@ -85,7 +84,6 @@ describe("Azure auto-setup dependency composition", () => {
     const sleep = vi.fn(async () => {});
 
     const composed = composeAzureAutoSetupDependencies({
-      isServerOwnedRequest,
       lifecycle,
       progress,
       artifacts,
@@ -104,7 +102,7 @@ describe("Azure auto-setup dependency composition", () => {
       ...progress,
       ...artifacts
     });
-    expect(composed.isServerOwnedRequest).toBe(isServerOwnedRequest);
+    expect(composed).not.toHaveProperty("isServerOwnedRequest");
     expect(composed.external).toBe(external);
     expect(composed.tempFile).toBe(tempFile);
     expect(composed.ensureServicePrincipal).toBe(ensureServicePrincipal);
