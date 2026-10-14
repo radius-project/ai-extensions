@@ -9,6 +9,8 @@ export default defineConfig({
       "../core/src/setup-{admission,boundary,provider-configuration}.test.ts",
       "../core/src/setup-{coordinator,github-environment*}.test.ts",
       "src/server/services/environment-operation.test.ts",
+      "src/server/services/{azure-setup,configure-environment,setup-outcome}.test.ts",
+      "src/server/routes/{azure-auto-setup,setup-http-failure}.test.ts",
       "../core/src/setup-azure-{application,credentials,service-principal}.test.ts",
       "../core/src/setup-{environment*,github-preflight,workflow*,verification-*}.test.ts",
       "../adapter-shared/src/{ghcr-bootstrap,setup-workflow-content}.test.ts",

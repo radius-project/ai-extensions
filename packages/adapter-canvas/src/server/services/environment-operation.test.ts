@@ -17,6 +17,36 @@ import {
   type EnvironmentOperationWorkflowDependencies
 } from "./environment-operation.js";
 import type { GitHubEnvironmentCommandResult } from "./github-environment.js";
+import type { SetupOutcome, SetupServices } from "./setup-outcome.js";
+
+function stages(
+  invoke: (
+    pathname: string,
+    data: Record<string, unknown>
+  ) => Promise<Record<string, unknown> | null>
+): SetupServices {
+  const call = async (
+    path: string,
+    data: Record<string, unknown>
+  ): Promise<SetupOutcome> => {
+    const body = (await invoke(path, data)) ?? {};
+    return {
+      kind:
+        body.reconciling ? "reconciling"
+        : body.inputRequired ? "input-required"
+        : "completed",
+      status:
+        body.reconciling ? 202
+        : body.inputRequired ? 409
+        : 200,
+      body
+    };
+  };
+  return {
+    authorizeAzure: (data) => call("/api/azure-auto-setup", data),
+    configureEnvironment: (data) => call("/api/create-environment", data)
+  };
+}
 
 function command(
   overrides: Partial<GitHubEnvironmentCommandResult> = {}
@@ -132,13 +162,14 @@ function dependencies(
         failures.push(input);
       },
       getOperation: () => op,
-      postInternal: async (pathname, data) => {
+      instanceId: "coordinator-panel",
+      setupServices: stages(async (pathname, data) => {
         events.push(`post:${pathname}`);
         posts.push({ pathname, data: data as Record<string, unknown> });
         return pathname === "/api/azure-auto-setup" ?
             { clientId: "client-1" }
           : { success: true };
-      },
+      }),
       now: () => NOW,
       ...overrides
     }
@@ -146,6 +177,99 @@ function dependencies(
 }
 
 describe("runEnvironmentOperationWorkflow", () => {
+  it.each([
+    ["azure", "azure_application.create"],
+    ["environment", "github_workflow.put"]
+  ] as const)(
+    "does not reconcile a returned %s reconciliation outcome a second time",
+    async (stage, mutationKind) => {
+      const op = operation();
+      setCanonicalEnvironment(op, "Production");
+      recordGitHubEnvironment(op, {
+        state: "reused",
+        origin: "pre_existing",
+        repo: op.repo,
+        name: "Production",
+        providerId: "environment-1"
+      });
+      prepareProviderMutation(op, {
+        kind: mutationKind,
+        target: "pending-write"
+      });
+      const saved = structuredClone(op);
+      const test = dependencies(op, {
+        setupServices: {
+          authorizeAzure: async () => {
+            expect(stage).toBe("azure");
+            return {
+              kind: "reconciling",
+              status: 202,
+              body: { message: "One recovery attempt." }
+            };
+          },
+          configureEnvironment: async () => {
+            expect(stage).toBe("environment");
+            return {
+              kind: "reconciling",
+              status: 202,
+              body: { message: "One recovery attempt." }
+            };
+          }
+        }
+      });
+      await expect(
+        runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor(),
+          test.dependencies
+        )
+      ).rejects.toMatchObject({
+        code: "provider-mutation-outcome-unknown",
+        message: "One recovery attempt."
+      });
+      expect(op).toEqual(saved);
+      expect(test.events).toEqual([
+        "canonical:Production",
+        "record:reused:Production",
+        'step:✅ GitHub resolved requested environment "production" as "Production".',
+        "persist",
+        "stop:after-github-environment"
+      ]);
+      expect(test.failures).toEqual([]);
+    }
+  );
+
+  it("passes its own projection instance and an isolated JSON snapshot to configuration", async () => {
+    const op = operation();
+    op.provider = "aws";
+    const nested = { value: "saved", omitted: undefined };
+    op.request = { environment: { nested, optional: undefined } };
+    const test = dependencies(op, {
+      instanceId: "own-panel",
+      setupServices: {
+        authorizeAzure: async () => {
+          throw new Error("Unexpected Azure call");
+        },
+        configureEnvironment: async (request, instanceId) => {
+          expect(instanceId).toBe("own-panel");
+          expect(request).not.toHaveProperty("optional");
+          expect(request.nested).toEqual({ value: "saved" });
+          expect(request.nested).not.toBe(nested);
+          Object.assign(request.nested as object, { value: "callback" });
+          return { kind: "stopped", status: 200, body: { cancelled: true } };
+        }
+      }
+    });
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: true });
+    expect(nested).toEqual({ value: "saved", omitted: undefined });
+  });
+
   it("honors a durable stop before any GitHub or GHCR work", async () => {
     const op = operation();
     const test = dependencies(op, {
@@ -370,13 +494,13 @@ describe("runEnvironmentOperationWorkflow", () => {
       readGitHubJson: async () => {
         throw new Error("the durable environment must not be reread");
       },
-      postInternal: async (pathname, data) => {
+      setupServices: stages(async (pathname, data) => {
         test.posts.push({ pathname, data: data as Record<string, unknown> });
         return {
           reconciling: true,
           message: "The application create is still being reconciled."
         };
-      }
+      })
     });
 
     await expect(
@@ -422,13 +546,13 @@ describe("runEnvironmentOperationWorkflow", () => {
       readGitHubJson: async () => {
         throw new Error("the durable environment must not be reread");
       },
-      postInternal: async (pathname, data) => {
+      setupServices: stages(async (pathname, data) => {
         test.posts.push({ pathname, data: data as Record<string, unknown> });
         return {
           reconciling: true,
           message: "The workflow write is still being reconciled."
         };
-      }
+      })
     });
 
     await expect(
@@ -468,9 +592,9 @@ describe("runEnvironmentOperationWorkflow", () => {
       target: "octo/app:production"
     });
     const test = dependencies(op, {
-      postInternal: async () => {
+      setupServices: stages(async () => {
         throw new Error("Azure account state is unavailable");
-      }
+      })
     });
 
     await expect(
@@ -746,10 +870,10 @@ describe("runEnvironmentOperationWorkflow", () => {
   it("stops after persisting an input-required Azure response", async () => {
     const op = operation();
     const test = dependencies(op, {
-      postInternal: async (pathname) => {
+      setupServices: stages(async (pathname) => {
         test.events.push(`post:${pathname}`);
         return { inputRequired: true };
-      }
+      })
     });
     const executor = successfulSelectedGhExecutor({
       run: async () =>
@@ -767,14 +891,14 @@ describe("runEnvironmentOperationWorkflow", () => {
   it("continues to Create Environment when Azure returns a null body", async () => {
     const op = operation();
     const test = dependencies(op, {
-      postInternal: async (pathname, data) => {
+      setupServices: stages(async (pathname, data) => {
         test.events.push(`post:${pathname}`);
         test.posts.push({
           pathname,
           data: data as Record<string, unknown>
         });
         return pathname === "/api/azure-auto-setup" ? null : { success: true };
-      }
+      })
     });
     const executor = successfulSelectedGhExecutor({
       run: async () =>
@@ -937,10 +1061,10 @@ describe("runEnvironmentOperationWorkflow", () => {
   it("does not publish workflows after Azure ends the operation", async () => {
     const op = operation();
     const test = dependencies(op, {
-      postInternal: async () => {
+      setupServices: stages(async () => {
         op.endedAt = "now";
         return { clientId: "client-1" };
-      }
+      })
     });
     const executor = successfulSelectedGhExecutor({
       run: async () =>
