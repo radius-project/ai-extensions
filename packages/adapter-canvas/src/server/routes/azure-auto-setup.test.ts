@@ -119,6 +119,29 @@ const VALID_SETUP = {
   subscriptionId: SUBSCRIPTION
 };
 
+it("reports a failing finalizer without retrying cleanup or hanging HTTP", async () => {
+  const test = finalizingDependencies();
+  let finalizations = 0;
+  const diagnostics: unknown[] = [];
+  test.dependencies.operations.report = (diagnostic) => {
+    diagnostics.push(diagnostic);
+  };
+  test.dependencies.finalizeSetupFailure = async () => {
+    finalizations++;
+    throw new Error("private cleanup detail");
+  };
+  const response = await invoke("{}", test.dependencies);
+  expect(response.status).toBe(500);
+  expect(await response.json()).toMatchObject({ code: "setup-handler-failed" });
+  expect(finalizations).toBe(1);
+  expect(diagnostics).toEqual([
+    {
+      code: "setup-handler-failed",
+      message: "private cleanup detail"
+    }
+  ]);
+});
+
 function orchestrationHarness(
   options: {
     operation?: AzureAutoSetupOperation;
