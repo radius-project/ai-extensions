@@ -159,7 +159,7 @@ describe("runtime environment execution ownership", () => {
     expect(next.settling).toHaveBeenCalledOnce();
     expect(next.settled).toHaveBeenCalledOnce();
     expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
-      "[radius] environment task finalization failed: diagnostic save failed"
+      "[radius] environment task finalization failed (operationId=op, instanceId=a): diagnostic save failed"
     );
   });
 
@@ -183,8 +183,47 @@ describe("runtime environment execution ownership", () => {
     expect(attachment.hasTask("op")).toBe(false);
     expect(owner.hasActiveEnvironmentTasks("a")).toBe(false);
     expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
-      "[radius] environment task finalization failed: diagnostic save failed"
+      "[radius] environment task finalization failed (operationId=op, instanceId=a): diagnostic save failed"
     );
+  });
+
+  it("identifies the operation and instance for concurrent task failures", async () => {
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    const owner = createEnvironmentExecutionOwner();
+    const first = owner.attach("panel-a");
+    const second = owner.attach("panel-b");
+    const blocked = deferred();
+    for (const [attachment, operationId] of [
+      [first, "op-1"],
+      [first, "op-2"],
+      [second, "op-1"]
+    ] as const) {
+      const work = task(async () => {
+        await blocked.promise;
+        throw new Error("provider unavailable");
+      });
+      work.failed.mockRejectedValue(new Error("diagnostic save failed"));
+      attachment.schedule(operationId, work);
+    }
+
+    const completed = Promise.all([
+      settled(owner, "panel-a"),
+      settled(owner, "panel-b")
+    ]);
+    blocked.resolve();
+    await completed;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(diagnostic).toHaveBeenCalledTimes(3);
+    for (const identity of [
+      "operationId=op-1, instanceId=panel-a",
+      "operationId=op-2, instanceId=panel-a",
+      "operationId=op-1, instanceId=panel-b"
+    ]) {
+      expect(diagnostic).toHaveBeenCalledWith(
+        `[radius] environment task finalization failed (${identity}): diagnostic save failed`
+      );
+    }
   });
 
   it("unsubscribes idempotently and isolates throwing listeners before finalization", async () => {

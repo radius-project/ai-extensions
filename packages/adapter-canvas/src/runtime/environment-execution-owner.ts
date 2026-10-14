@@ -132,7 +132,7 @@ export function createEnvironmentExecutionOwner(
         });
         void running.catch((error: unknown) => {
           console.error(
-            `[radius] environment task finalization failed: ${errorMessage(error)}`
+            `[radius] environment task finalization failed (operationId=${operationId}, instanceId=${instanceId}): ${errorMessage(error)}`
           );
         });
       },
