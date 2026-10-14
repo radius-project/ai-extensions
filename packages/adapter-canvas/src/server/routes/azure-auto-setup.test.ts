@@ -142,6 +142,27 @@ it("reports a failing finalizer without retrying cleanup or hanging HTTP", async
   ]);
 });
 
+it("reports a rejected authorization gate without reading input or invoking setup", async () => {
+  const test = finalizingDependencies();
+  const report = vi.fn();
+  test.dependencies.operations.report = report;
+  test.dependencies.isServerOwnedRequest = () => {
+    throw new Error("private authorization failure");
+  };
+  const response = await invoke("not-json", test.dependencies);
+  expect(response.status).toBe(500);
+  expect(await response.json()).toEqual({
+    code: "setup-handler-failed",
+    error:
+      "Setup could not finish reporting its outcome. Inspect the operation before retrying."
+  });
+  expect(report).toHaveBeenCalledExactlyOnceWith({
+    code: "setup-handler-failed",
+    message: "private authorization failure"
+  });
+  expect(test.calls).toEqual([]);
+});
+
 function orchestrationHarness(
   options: {
     operation?: AzureAutoSetupOperation;

@@ -1,9 +1,4 @@
 import {
-  configureSetupEnvironment,
-  runAzureSetup,
-  type SetupCoordinatorPorts
-} from "@radius-project/core";
-import {
   buildRadiusAppProvenanceTags,
   type GitHubJsonResponse
 } from "../../../src/azure-oidc.js";
@@ -17,26 +12,22 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordServicePrincipal,
+  requireInput,
+  resumeAfterInput,
+  hasWarnings,
   setCloudContext,
   setContext
 } from "../../../src/operations.js";
 import { ensureServicePrincipal } from "../../../src/server.js";
 import type { CreateEnvironmentDependencies } from "../../../src/server/routes/create-environment.js";
-import {
-  admitCreateEnvironmentRequest,
-  type CreateEnvironmentRequestData
-} from "../../../src/server/routes/create-environment-refusals.js";
+import type { CreateEnvironmentRequestData } from "../../../src/server/routes/create-environment-refusals.js";
 import type { CreateEnvironmentOperation } from "../../../src/server/routes/create-environment-types.js";
-import type {
-  AzureAutoSetupOperation,
-  AzureAutoSetupWorkflow
-} from "../../../src/server/routes/azure-auto-setup-types.js";
+import type { AzureAutoSetupOperation } from "../../../src/server/routes/azure-auto-setup-types.js";
 import {
-  createAzureApplicationPorts,
-  createAzureCredentialPorts
-} from "../../../src/server/routes/azure-setup-adapter.js";
-import { createAzureIdentityPresentation } from "../../../src/server/routes/azure-setup-identity-presentation.js";
-import { createSetupEnvironmentPorts } from "../../../src/server/routes/setup-environment-adapter.js";
+  createAzureSetupService,
+  type AzureSetupRequest
+} from "../../../src/server/services/azure-setup.js";
+import { createConfigureEnvironmentService } from "../../../src/server/services/configure-environment.js";
 import { createAzureAutoSetupTestDependencies } from "./azure-auto-setup.js";
 
 export const parityAzureRequest = {
@@ -128,9 +119,17 @@ export function createParityAzureFixture(
           throw new Error("Invalid fixture credential provenance.");
       },
       withCredentialProvenanceLock,
-      requireInput: unexpectedParityCall,
-      finish: unexpectedParityCall,
-      report: unexpectedParityCall
+      requireInput: (op, input) => {
+        requireInput(op, input);
+        trace(["input-required", input]);
+      },
+      resumeAfterInput,
+      hasWarnings,
+      finish: (op, state, options) => {
+        environmentOperation(op);
+        environment.finish(registered, state, options);
+      },
+      report: environment.reportOperationDiagnostic
     },
     external: {
       getSelectedGitHubExecutor: () => executor,
@@ -230,14 +229,17 @@ export function createParityAzureFixture(
       environment.guardStopBoundary({
         ...input,
         operation: environmentOperation(input.operation),
-        respond: unexpectedParityCall
+        // Azure's service owns its stopped outcome; the configuration stop
+        // adapter also presents it, which is irrelevant to this binding.
+        respond: () => {}
       }),
     persistMutationCheckpoint: (input) =>
       environment.persistMutationCheckpoint({
         ...input,
         operation: environmentOperation(input.operation)
       }),
-    finalizeSetupFailure: unexpectedParityCall
+    finalizeSetupFailure: (op, input) =>
+      environment.finalizeSetupFailure(environmentOperation(op), { ...input })
   });
 
   return {
@@ -265,168 +267,16 @@ export function createParityAzureFixture(
         }
       });
     },
-    async runDirect(
-      request: Parameters<SetupCoordinatorPorts["authorizeAzure"]>[0]
-    ) {
-      const string = environment.optionalString;
-      const resourceGroup = string(request.resourceGroup);
-      const clusterName = string(request.cluster);
-      const { operations: ops, external } = dependencies;
-      ops.enterStage(operation, dependencies.stageAuthorizeIdentity);
-      await executor.verifyIdentity();
-      ops.setContext(operation, {
-        githubLogin: executor.login,
-        githubCredentialSource: executor.credentialSource
-      });
-      const steps: string[] = [];
-      const push = steps.push.bind(steps);
-      steps.push = (...items) => {
-        for (const text of items) ops.addLegacyStep(operation, text);
-        return push(...items);
-      };
-      steps.push(`Acting on GitHub as @${executor.login}.`);
-      if (await external.preflightRepoAdmin(request.repo, executor))
-        throw new Error("Unexpected repository refusal.");
-      if (!(await external.preflightGhcrPackageWriteAccess(executor)).ok)
-        throw new Error("Unexpected package refusal.");
-      const stopBoundary = (boundary: string) =>
-        dependencies.honorStopBoundary({
-          operation,
-          boundary,
-          persist: ops.persist,
-          report: ops.report
-        });
-      const workflow: AzureAutoSetupWorkflow = {
-        operation,
-        steps,
-        runAz: external.runAz,
-        runGitHubJson: (path) => external.runGitHubJson(path, executor),
-        respond: unexpectedParityCall,
-        fail: unexpectedParityCall,
-        stopBoundary,
-        checkpoint: async (boundary) => {
-          const saved = await dependencies.persistMutationCheckpoint({
-            operation,
-            persist: ops.persist,
-            report: ops.report,
-            fail: unexpectedParityCall
-          });
-          return saved && stopBoundary(boundary);
-        }
-      };
-      const result = await runAzureSetup(
-        {
-          request: {
-            repo: request.repo,
-            environment: request.environment,
-            operationEnvironment: request.operationEnvironment,
-            requestedSubscriptionId: string(request.subscriptionId),
-            requestedTenantId: string(request.tenantId),
-            resourceGroup,
-            clusterResourceGroup: string(request.clusterResourceGroup),
-            clusterName,
-            explicitAppId: string(request.appId),
-            createNewApp: request.createNew === true,
-            appNameProvided: typeof request.appName === "string",
-            requestedAppName: string(request.appName),
-            requestedClientId: string(request.clientId)
-          },
-          serviceManagementReference: string(
-            request.serviceManagementReference
-          ),
-          continuation: null
-        },
-        {
-          application: createAzureApplicationPorts(workflow, dependencies),
-          credentials: createAzureCredentialPorts(workflow, dependencies),
-          ...createAzureIdentityPresentation(workflow),
-          // A successful create does not persist a continuation prompt.
-          prepareContinuation: () => {}
-        }
-      );
-      if (result.kind !== "completed")
-        throw new Error(`Unexpected Azure outcome: ${result.kind}`);
-      ops.setStageState(
-        operation,
-        dependencies.stageAuthorizeIdentity,
-        "succeeded"
-      );
-      ops.setContext(operation, {
-        clientId: result.application.clientId,
-        appName: result.application.appName
-      });
-      ops.setCloudContext(operation, "azure", {
-        subscriptionId: result.subscriptionId,
-        tenantId: result.tenantId,
-        resourceGroup,
-        clusterName
-      });
-      return { result, steps };
+    runDirect(request: AzureSetupRequest) {
+      return createAzureSetupService(dependencies)({ data: request });
     }
   };
 }
 
 export async function runDirectParityConfiguration(
   data: CreateEnvironmentRequestData,
-  operation: CreateEnvironmentOperation,
-  dependencies: CreateEnvironmentDependencies
+  dependencies: CreateEnvironmentDependencies,
+  instanceId = "panel-a"
 ) {
-  // Keep namespace/admission policy in the production admission use case; it
-  // does not require a request, server, instance, or panel.
-  const admission = await admitCreateEnvironmentRequest(data, dependencies);
-  if (admission.outcome !== "admitted")
-    throw new Error(
-      `Unexpected admission refusal: ${JSON.stringify(admission.refusal)}`
-    );
-  const executor = dependencies.getSelectedGitHubExecutor(
-    operation.operationId
-  );
-  if (!executor) throw new Error("Missing fixture executor.");
-  await executor.verifyIdentity();
-  const steps: string[] = [];
-  const push = steps.push.bind(steps);
-  steps.push = (...items) => {
-    for (const text of items) dependencies.addLegacyStep(operation, text);
-    return push(...items);
-  };
-  const stopBoundary = (boundary: string) =>
-    dependencies.guardStopBoundary({
-      operation,
-      boundary,
-      persist: dependencies.persistOperations,
-      report: dependencies.reportOperationDiagnostic,
-      respond: unexpectedParityCall
-    });
-  const result = await configureSetupEnvironment(
-    {
-      operationId: operation.operationId,
-      targetRepo: admission.targetRepo,
-      envName: admission.envName,
-      provider: admission.provider,
-      data
-    },
-    createSetupEnvironmentPorts({
-      dependencies,
-      operation,
-      selectedExecutor: executor,
-      instanceId: "unused-direct-instance",
-      provider: admission.provider,
-      steps,
-      stopBoundary,
-      checkpoint: async (boundary) => {
-        const saved = await dependencies.persistMutationCheckpoint({
-          operation,
-          persist: dependencies.persistOperations,
-          report: dependencies.reportOperationDiagnostic,
-          fail: unexpectedParityCall
-        });
-        return saved && stopBoundary(boundary);
-      },
-      fail: unexpectedParityCall,
-      finalize: unexpectedParityCall
-    })
-  );
-  if (result.kind !== "configured")
-    throw new Error(`Unexpected configuration outcome: ${result.kind}`);
-  return { result, steps };
+  return createConfigureEnvironmentService(dependencies)({ data }, instanceId);
 }

@@ -321,6 +321,12 @@ import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
+import { createAzureSetupService } from "./server/services/azure-setup.js";
+import {
+  createConfigureEnvironmentService,
+  type ConfigureEnvironmentDependencies
+} from "./server/services/configure-environment.js";
+import type { SetupServices } from "./server/services/setup-outcome.js";
 import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dependencies.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
@@ -4198,13 +4204,22 @@ export function createInstanceRequestCoordinator(
   dependencies: {
     executionOwner: EnvironmentExecutionOwner;
     accountContext: EnvironmentAccountContext;
+    setupServices: SetupServices;
     servers: ReadonlyMap<string, CanvasServerEntry>;
     environmentOperationRunner?: EnvironmentOperationRunner;
   }
 ) {
-  const { executionOwner, accountContext, servers } = dependencies;
+  const { executionOwner, accountContext, servers, setupServices } =
+    dependencies;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
+  for (const name of ["authorizeAzure", "configureEnvironment"] as const) {
+    if (typeof setupServices?.[name] !== "function") {
+      throw new Error(
+        `Missing request coordinator dependency: setupServices.${name}`
+      );
+    }
+  }
   const githubAccountCoordinator = accountContext.coordinator;
   const attachment = executionOwner.attach(instanceId);
   const serverOwnedToken = randomUUID();
@@ -4601,7 +4616,22 @@ export function createInstanceRequestCoordinator(
               });
             },
             getOperation: (id) => operations.get(id),
-            postInternal,
+            instanceId,
+            setupServices: {
+              authorizeAzure: (request) => {
+                if (executionOwner.isShuttingDown(instanceId))
+                  throw new Error("Setup execution is shutting down.");
+                return setupServices.authorizeAzure(request);
+              },
+              configureEnvironment: (request, projectionInstanceId) => {
+                if (executionOwner.isShuttingDown(instanceId))
+                  throw new Error("Setup execution is shutting down.");
+                return setupServices.configureEnvironment(
+                  request,
+                  projectionInstanceId
+                );
+              }
+            },
             now: () => Date.now()
           });
         },
@@ -5919,115 +5949,120 @@ export function createProductionCanvasServerRuntime(
     }
   });
 
+  const azureSetupDependencies = composeAzureAutoSetupDependencies({
+    lifecycle: {
+      get: (operationId) => operations.get(operationId),
+      isStale: (operation) => isStale(operation),
+      create: (input) => createOperation(input),
+      buildStages: () => buildStages(),
+      start: (operation) => operations.start(operation),
+      persist: () => operations.persist(),
+      report: (diagnostic) => operations.report?.(diagnostic),
+      finish: (operation, state, options) => {
+        finish(operation, state, options);
+      },
+      getAzureAppCreateContinuation,
+      setAzureAppCreateContinuation
+    },
+    progress: {
+      enterStage: (operation, stage) => {
+        enterStage(operation, stage);
+      },
+      setStageState: (operation, stage, state) => {
+        setStageState(operation, stage, state);
+      },
+      hasWarnings: (operation) => hasWarnings(operation),
+      addLegacyStep: (operation, text) => {
+        addLegacyStep(operation, text);
+      },
+      setContext: (operation, patch) => {
+        setContext(operation, patch);
+      },
+      setCloudContext: (operation, provider, patch) => {
+        setCloudContext(operation, provider, patch);
+      },
+      requireInput: (operation, input) => {
+        requireInput(operation, input);
+      },
+      resumeAfterInput: (operation) => {
+        resumeAfterInput(operation);
+      }
+    },
+    artifacts: {
+      withCredentialProvenanceLock,
+      recordAzureApp: (operation, patch) => {
+        recordAzureApp(operation, patch);
+      },
+      recordServicePrincipal: (operation, patch) => {
+        recordServicePrincipal(operation, patch);
+      },
+      recordCreatedFederatedCredential: (operation, entry) => {
+        recordCreatedFederatedCredential(operation, entry);
+      },
+      recordFederatedCredentialProvenance: async (operation, entry) => {
+        const recorded = await recordCredentialProvenance({
+          ...entry,
+          operationId: String(operation.operationId || "")
+        });
+        if (!recorded) {
+          throw new Error(
+            `Invalid provenance for federated credential ${entry.name}.`
+          );
+        }
+      },
+      recordCreatedRoleAssignment: (operation, entry) => {
+        recordCreatedRoleAssignment(operation, entry);
+      }
+    },
+    external: {
+      getSelectedGitHubExecutor: (operationId) =>
+        accountContext.getExecutor(operationId),
+      getGitHubIdentity,
+      preflightRepoAdmin: (repo, executor) =>
+        preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+      preflightGhcrPackageWriteAccess: (executor) =>
+        preflightGhcrPackageWriteAccess(
+          getGhPackageCredentials,
+          getGitHubIdentity,
+          executor,
+          GH_COMMAND_PRESENTATION
+        ),
+      runGitHubJson: (apiPath, executor) =>
+        runGitHubJsonRequest(apiPath, executor),
+      runAz: (args) => runCliCommand("az", args)
+    },
+    tempFile: {
+      createPath: () =>
+        join(
+          tmpdir(),
+          `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
+        ),
+      write: (path, contents) => {
+        writeFileSync(path, contents, { mode: 0o600 });
+      },
+      remove: (path) => {
+        try {
+          unlinkSync(path);
+        } catch {}
+      }
+    },
+    ensureServicePrincipal,
+    finalizeSetupFailure,
+    persistMutationCheckpoint,
+    honorStopBoundary,
+    sleep: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
+  });
+  const authorizeAzure = createAzureSetupService(azureSetupDependencies);
   const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
-    composeAzureAutoSetupDependencies({
+    {
+      ...azureSetupDependencies,
       isServerOwnedRequest: (instanceId, request) =>
         instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-        false,
-      lifecycle: {
-        get: (operationId) => operations.get(operationId),
-        isStale: (operation) => isStale(operation),
-        create: (input) => createOperation(input),
-        buildStages: () => buildStages(),
-        start: (operation) => operations.start(operation),
-        persist: () => operations.persist(),
-        report: (diagnostic) => operations.report?.(diagnostic),
-        finish: (operation, state, options) => {
-          finish(operation, state, options);
-        },
-        getAzureAppCreateContinuation,
-        setAzureAppCreateContinuation
-      },
-      progress: {
-        enterStage: (operation, stage) => {
-          enterStage(operation, stage);
-        },
-        setStageState: (operation, stage, state) => {
-          setStageState(operation, stage, state);
-        },
-        hasWarnings: (operation) => hasWarnings(operation),
-        addLegacyStep: (operation, text) => {
-          addLegacyStep(operation, text);
-        },
-        setContext: (operation, patch) => {
-          setContext(operation, patch);
-        },
-        setCloudContext: (operation, provider, patch) => {
-          setCloudContext(operation, provider, patch);
-        },
-        requireInput: (operation, input) => {
-          requireInput(operation, input);
-        },
-        resumeAfterInput: (operation) => {
-          resumeAfterInput(operation);
-        }
-      },
-      artifacts: {
-        withCredentialProvenanceLock,
-        recordAzureApp: (operation, patch) => {
-          recordAzureApp(operation, patch);
-        },
-        recordServicePrincipal: (operation, patch) => {
-          recordServicePrincipal(operation, patch);
-        },
-        recordCreatedFederatedCredential: (operation, entry) => {
-          recordCreatedFederatedCredential(operation, entry);
-        },
-        recordFederatedCredentialProvenance: async (operation, entry) => {
-          const recorded = await recordCredentialProvenance({
-            ...entry,
-            operationId: String(operation.operationId || "")
-          });
-          if (!recorded) {
-            throw new Error(
-              `Invalid provenance for federated credential ${entry.name}.`
-            );
-          }
-        },
-        recordCreatedRoleAssignment: (operation, entry) => {
-          recordCreatedRoleAssignment(operation, entry);
-        }
-      },
-      external: {
-        getSelectedGitHubExecutor: (operationId) =>
-          accountContext.getExecutor(operationId),
-        getGitHubIdentity,
-        preflightRepoAdmin: (repo, executor) =>
-          preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
-        preflightGhcrPackageWriteAccess: (executor) =>
-          preflightGhcrPackageWriteAccess(
-            getGhPackageCredentials,
-            getGitHubIdentity,
-            executor,
-            GH_COMMAND_PRESENTATION
-          ),
-        runGitHubJson: (apiPath, executor) =>
-          runGitHubJsonRequest(apiPath, executor),
-        runAz: (args) => runCliCommand("az", args)
-      },
-      tempFile: {
-        createPath: () =>
-          join(
-            tmpdir(),
-            `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
-          ),
-        write: (path, contents) => {
-          writeFileSync(path, contents, { mode: 0o600 });
-        },
-        remove: (path) => {
-          try {
-            unlinkSync(path);
-          } catch {}
-        }
-      },
-      ensureServicePrincipal,
-      finalizeSetupFailure,
-      persistMutationCheckpoint,
-      honorStopBoundary,
-      sleep: (milliseconds) =>
-        new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
-    })
+        false
+    },
+    authorizeAzure
   );
 
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
@@ -6317,12 +6352,9 @@ export function createProductionCanvasServerRuntime(
   // module-level mutable state. `isServerOwnedRequest` is deliberately a
   // per-request function rather than a value: the token is a per-instance
   // `randomUUID()` held by that instance's request coordinator, and this route is
-  // reachable only through the internal loopback POST that carries it.
-  const createEnvironmentRoutes = createCreateEnvironmentRoutes({
+  // used only by the retained HTTP adapter, not by the setup services.
+  const configureEnvironmentDependencies: ConfigureEnvironmentDependencies = {
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
-    isServerOwnedRequest: (instanceId, request) =>
-      instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-      false,
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     getSelectedGitHubExecutor: (operationId) =>
       accountContext.getExecutor(operationId),
@@ -6452,7 +6484,24 @@ export function createProductionCanvasServerRuntime(
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now: () => Date.now()
-  });
+  };
+  const configureEnvironment = createConfigureEnvironmentService(
+    configureEnvironmentDependencies
+  );
+  const setupServices: SetupServices = {
+    authorizeAzure: (data) => authorizeAzure({ data }),
+    configureEnvironment: (data, instanceId) =>
+      configureEnvironment({ data }, instanceId)
+  };
+  const createEnvironmentRoutes = createCreateEnvironmentRoutes(
+    {
+      ...configureEnvironmentDependencies,
+      isServerOwnedRequest: (instanceId, request) =>
+        instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
+        false
+    },
+    configureEnvironment
+  );
 
   // Built once per runtime so validation fails before opening any server.
   const serverRoutes = createServerRouteTable({
@@ -6494,6 +6543,7 @@ export function createProductionCanvasServerRuntime(
             {
               executionOwner,
               accountContext,
+              setupServices,
               servers: instances,
               get environmentOperationRunner() {
                 return options.environmentOperationRunner;

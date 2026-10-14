@@ -1,12 +1,11 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runSetupCoordinator } from "@radius-project/core";
 import {
-  createSetupCoordinatorPorts,
   runEnvironmentOperationWorkflow,
   type EnvironmentOperationWorkflowDependencies
 } from "../../../src/server/services/environment-operation.js";
+import type { SetupOutcome } from "../../../src/server/services/setup-outcome.js";
 import { configureCredentialProvenanceStore } from "../../../src/credential-provenance.js";
 import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
 import type { AzureAutoSetupOperation } from "../../../src/server/routes/azure-auto-setup-types.js";
@@ -19,7 +18,10 @@ import {
 } from "../../support/server/setup-parity.js";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
-import { createCreateEnvironmentRoutes } from "../../../src/server/routes/create-environment.js";
+import {
+  createCreateEnvironmentRoutes,
+  handleCreateEnvironment
+} from "../../../src/server/routes/create-environment.js";
 import { isValidRepoSlug } from "../../../src/azure-oidc.js";
 import { createSelectedNamespaceClaimsPorts } from "../../../src/server/routes/create-environment-namespace-claims.js";
 import {
@@ -85,6 +87,7 @@ interface GhRule {
 interface Script {
   pairedProvider?: "azure" | "aws";
   direct?: boolean;
+  directHandler?: boolean;
   trace?(entry: unknown): void;
   ghCommandPresentation?: GhCommandPresentation;
   onGhCommand?(command: string): void;
@@ -994,7 +997,12 @@ function start(script: Script = {}): Harness {
 
   if (!script.direct) {
     const routes = createTestRouteTable({
-      ...createCreateEnvironmentRoutes(dependencies),
+      ...(script.directHandler ?
+        {
+          "POST /api/create-environment": (context) =>
+            handleCreateEnvironment(context, dependencies)
+        }
+      : createCreateEnvironmentRoutes(dependencies)),
       ...(azure ? createAzureAutoSetupRoutes(azure.dependencies) : {})
     });
     container = createCanvasServer({
@@ -1158,95 +1166,78 @@ describe("matched direct-core and Canvas setup parity", () => {
       getOperation: (id) =>
         id === operation.operationId ? operation : undefined,
       now: d.now,
-      postInternal:
-        transport === "direct-core" ? unexpectedParityCall : (
-          async (path, request) => {
-            if (!container) throw new Error("Loopback server was not created.");
-            const stage =
-              path === "/api/azure-auto-setup" ? "azure" : "environment";
-            trace.push(["stage-request", stage, snapshot(request)]);
-            const entry = await container.getOrCreate("panel-a");
-            const response = await fetch(`${entry.baseUrl}${path}`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "X-Radius-Server-Owned": SERVER_OWNED_TOKEN
-              },
-              body: JSON.stringify(request)
-            });
-            const body = asRecord(await response.json());
-            expect(response.status, JSON.stringify(body)).toBe(200);
-            expect(response.headers.get("content-type")).toBe(
-              "application/json"
-            );
-            expect(body.success).toBe(true);
-            const { success: _success, steps, ...domain } = body;
-            if (stage === "azure") {
-              results.push([
-                stage,
-                {
-                  ...domain,
-                  applicationState: operation.setupArtifacts.azureApp.state
-                },
-                steps
-              ]);
-            } else {
-              // Only the absence of a skip reason has different representations.
-              expect(domain.verifySkipReason).toBe("");
-              results.push([
-                stage,
-                { ...domain, verifySkipReason: null },
-                steps
-              ]);
-            }
-            return body;
-          }
-        )
+      instanceId: "panel-a",
+      setupServices: {
+        authorizeAzure: (request) => invoke("azure", request),
+        configureEnvironment: (request) => invoke("environment", request)
+      }
     };
-    const ports = createSetupCoordinatorPorts(
+    async function invoke(
+      stage: "azure" | "environment",
+      request: Record<string, unknown>
+    ): Promise<SetupOutcome> {
+      trace.push(["stage-request", stage, snapshot(request)]);
+      let outcome: SetupOutcome;
+      if (transport === "direct-core") {
+        if (stage === "azure") {
+          if (!azure) throw new Error("AWS must not authorize Azure.");
+          outcome = await azure.runDirect(request);
+        } else {
+          outcome = await runDirectParityConfiguration(request, d);
+        }
+      } else {
+        if (!container) throw new Error("Loopback server was not created.");
+        const path =
+          stage === "azure" ?
+            "/api/azure-auto-setup"
+          : "/api/create-environment";
+        const entry = await container.getOrCreate("panel-a");
+        const response = await fetch(`${entry.baseUrl}${path}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Server-Owned": SERVER_OWNED_TOKEN
+          },
+          body: JSON.stringify(request)
+        });
+        const body = asRecord(await response.json());
+        expect(response.headers.get("content-type")).toBe("application/json");
+        outcome = {
+          kind:
+            body.reconciling ? "reconciling"
+            : body.inputRequired ? "input-required"
+            : body.cancelled ? "stopped"
+            : response.ok ? "completed"
+            : "failed",
+          status: response.status,
+          body
+        };
+      }
+      expect(outcome.status, JSON.stringify(outcome.body)).toBe(200);
+      const body = outcome.body;
+      expect(body.success).toBe(true);
+      const { success: _success, steps, ...domain } = body;
+      if (stage === "azure") {
+        results.push([
+          stage,
+          {
+            ...domain,
+            applicationState: operation.setupArtifacts.azureApp.state
+          },
+          steps
+        ]);
+      } else {
+        // Only the absence of a skip reason has different representations.
+        expect(domain.verifySkipReason).toBe("");
+        results.push([stage, { ...domain, verifySkipReason: null }, steps]);
+      }
+      return outcome;
+    }
+    const coordinator = await runEnvironmentOperationWorkflow(
       operation,
       executor,
       dependencies
     );
-    const coordinator =
-      transport === "canvas" ?
-        await runEnvironmentOperationWorkflow(operation, executor, dependencies)
-      : await runSetupCoordinator(operation, {
-          ...ports,
-          authorizeAzure: async (request) => {
-            if (!azure) throw new Error("AWS must not authorize Azure.");
-            trace.push(["stage-request", "azure", snapshot(request)]);
-            const { result, steps } = await azure.runDirect(request);
-            results.push([
-              "azure",
-              {
-                operationId: operation.operationId,
-                clientId: result.application.clientId,
-                tenantId: result.tenantId,
-                subscriptionId: result.subscriptionId,
-                resourceGroup: parityAzureRequest.resourceGroup,
-                cluster: parityAzureRequest.cluster,
-                appName: result.application.appName,
-                subjects: result.subjects,
-                applicationState: result.application.state
-              },
-              steps
-            ]);
-            return { kind: "completed", clientId: result.application.clientId };
-          },
-          configureEnvironment: async (request) => {
-            trace.push(["stage-request", "environment", snapshot(request)]);
-            const { result, steps } = await runDirectParityConfiguration(
-              request,
-              operation,
-              d
-            );
-            const { kind: _kind, ...domain } = result;
-            expect(domain.verifySkipReason).toBeNull();
-            results.push(["environment", domain, steps]);
-            return { kind: "completed" };
-          }
-        });
     expect(coordinator).toEqual({ shouldMonitor: true });
     expect(harness.failures).toEqual([]);
     expect(harness.ambientCliCalls).toEqual([]);
@@ -1338,6 +1329,496 @@ describe("matched direct-core and Canvas setup parity", () => {
     }
   );
 
+  it.each([
+    "warning",
+    "input-resume",
+    "unknown-resume",
+    "manual-required",
+    "stop",
+    "checkpoint",
+    "selected-refusal"
+  ] as const)(
+    "matches Azure %s outcomes, exact effects and durable records through the shared service and HTTP",
+    async (scenario) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1700000000000);
+      const run = async (direct: boolean) => {
+        const trace: unknown[] = [];
+        const harness = start({
+          pairedProvider: "azure",
+          direct,
+          trace: (effect) => trace.push(snapshot(effect))
+        });
+        const { azure, operation } = harness;
+        if (!azure) throw new Error("Missing Azure fixture.");
+        await azure.bindProvenance();
+        const original = azure.dependencies.external.runAz;
+        if (scenario === "checkpoint") {
+          const checkpoint = azure.dependencies.persistMutationCheckpoint;
+          azure.dependencies.persistMutationCheckpoint = (input) =>
+            checkpoint({
+              ...input,
+              persist: async () => {
+                throw new Error("Checkpoint store unavailable");
+              }
+            });
+        }
+        let attempted = false;
+        azure.dependencies.external.runAz = async (args) => {
+          const result = await original(args);
+          const verb = args.slice(0, 3).join(" ");
+          if (verb === "ad app create") {
+            attempted = true;
+            if (
+              scenario === "input-resume" &&
+              !args.includes("--service-management-reference")
+            )
+              return {
+                code: 1,
+                stdout: "",
+                stderr:
+                  "ServiceManagementReference is required by directory policy"
+              };
+            if (scenario === "unknown-resume" || scenario === "manual-required")
+              return {
+                code: 1,
+                stdout: "",
+                stderr: "ETIMEDOUT",
+                timedOut: true
+              };
+          }
+          if (
+            verb === "ad app list" &&
+            args.includes(
+              "[].{appId:appId,displayName:displayName,tags:tags}"
+            ) &&
+            attempted &&
+            (scenario === "unknown-resume" || scenario === "manual-required")
+          ) {
+            return scenario === "unknown-resume" ?
+                { code: 1, stdout: "", stderr: "Recovery read unavailable" }
+              : {
+                  code: 0,
+                  stdout:
+                    '[{"appId":"unowned-app","displayName":"radius-deploy-octo-app","tags":[]}]',
+                  stderr: ""
+                };
+          }
+          if (
+            scenario === "warning" &&
+            verb === "role assignment create" &&
+            args.includes("Locks Contributor")
+          )
+            return {
+              code: 1,
+              stdout: "",
+              stderr: "AuthorizationFailed: role assignment denied"
+            };
+          if (
+            scenario === "stop" &&
+            verb === "ad app federated-credential" &&
+            args[3] === "create"
+          )
+            operation.stopRequested = true;
+          return result;
+        };
+        if (scenario === "selected-refusal") {
+          const error = new Error("The selected account changed.");
+          const selected =
+            azure.dependencies.external.getSelectedGitHubExecutor(
+              operation.operationId
+            );
+          if (!selected) throw new Error("Missing selected executor");
+          azure.dependencies.external.getSelectedGitHubExecutor = () => ({
+            ...selected,
+            verifyIdentity: async () => {
+              throw error;
+            }
+          });
+        }
+        const invokeAzure = async (extra: Record<string, unknown> = {}) => {
+          const request = {
+            ...parityAzureRequest,
+            repo: operation.repo,
+            environment: operation.environment,
+            operationId: operation.operationId,
+            ...extra
+          };
+          if (direct) {
+            const outcome = await azure.runDirect(request);
+            return { status: outcome.status, body: outcome.body };
+          }
+          if (!container) throw new Error("Missing HTTP container");
+          const entry = await container.getOrCreate("panel-a");
+          const response = await fetch(
+            `${entry.baseUrl}/api/azure-auto-setup`,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "X-Radius-Server-Owned": SERVER_OWNED_TOKEN
+              },
+              body: JSON.stringify(request)
+            }
+          );
+          expect(response.headers.get("content-type")).toBe("application/json");
+          return {
+            status: response.status,
+            body: asRecord(await response.json())
+          };
+        };
+        const first = await invokeAzure();
+        const results = [first];
+        if (scenario === "input-resume") {
+          expect(first).toMatchObject({
+            status: 400,
+            body: {
+              inputRequired: true,
+              code: "service-management-reference-required"
+            }
+          });
+          expect(operation.azureAppCreateContinuation).toBeDefined();
+          expect(JSON.stringify(first.body)).not.toContain(
+            "appCreateContinuation"
+          );
+          expect(harness.persisted.length).toBeGreaterThan(0);
+          // Resume from JSON-equivalent saved state, not a fixture-only live object.
+          Object.assign(operation, snapshot(operation));
+          results.push(
+            await invokeAzure({
+              serviceManagementReference: "99999999-9999-9999-9999-999999999999"
+            })
+          );
+          expect(results[1]).toMatchObject({
+            status: 200,
+            body: { success: true, clientId: parityClientId }
+          });
+          expect(operation.azureAppCreateContinuation).toBeUndefined();
+          expect(
+            harness.journal.filter((event) => event === "preflightRepoAdmin")
+          ).toHaveLength(1);
+        } else if (scenario === "unknown-resume") {
+          expect(first).toMatchObject({
+            status: 202,
+            body: {
+              reconciling: true,
+              code: "provider-mutation-outcome-unknown"
+            }
+          });
+          Object.assign(operation, snapshot(operation));
+          results.push(await invokeAzure());
+          expect(results[1]).toMatchObject({
+            status: 202,
+            body: { reconciling: true }
+          });
+          expect(
+            trace.filter(
+              (effect) =>
+                Array.isArray(effect) &&
+                effect[0] === "az" &&
+                effect[1].slice(0, 3).join(" ") === "ad app create"
+            )
+          ).toHaveLength(1);
+          expect(
+            providerMutationsByKind(operation, "azure_application.create")[0]
+              ?.reconcileAttempts
+          ).toBe(2);
+          expect(harness.failures).toEqual([]);
+        } else if (scenario === "warning") {
+          expect(first).toMatchObject({ status: 200, body: { success: true } });
+          expect(operation.stages).toContainEqual(
+            expect.objectContaining({ id: STAGE_IDENTITY, state: "warning" })
+          );
+          expect(
+            harness.steps.some(
+              (step) => step.includes("Locks Contributor") && step.includes("⚠")
+            )
+          ).toBe(true);
+        } else if (scenario === "stop") {
+          expect(first).toMatchObject({
+            status: 200,
+            body: { cancelled: true, code: "operation-stopped" }
+          });
+          expect(harness.failures).toEqual([]);
+          expect(
+            trace.filter(
+              (effect) =>
+                Array.isArray(effect) && effect[0] === "credential-file-remove"
+            )
+          ).toHaveLength(1);
+          expect(
+            trace.some(
+              (effect) =>
+                Array.isArray(effect) &&
+                effect[0] === "az" &&
+                effect[1].slice(0, 3).join(" ") === "role assignment create"
+            )
+          ).toBe(false);
+        } else if (scenario === "checkpoint") {
+          expect(first).toMatchObject({
+            status: 500,
+            body: { code: "operation-persistence-failed" }
+          });
+          expect(harness.failures).toHaveLength(1);
+        } else {
+          expect(first.status).toBe(400);
+          expect(harness.failures).toHaveLength(1);
+          expect(first.body.error).toContain(
+            scenario === "selected-refusal" ?
+              "selected account changed"
+            : "will not adopt"
+          );
+        }
+        return snapshot({
+          results,
+          trace,
+          operation,
+          persisted: harness.persisted,
+          provenance: [...azure.provenance],
+          failures: harness.failures
+        });
+      };
+      // Stack locations differ at the call boundary. Keep diagnostic text and
+      // every non-stack value intact, including the exception's first line.
+      const normalize = (value: unknown): unknown =>
+        JSON.parse(
+          JSON.stringify(value, (key, item: unknown) => {
+            if (key !== "evidence" || typeof item !== "string") return item;
+            return item.replace(
+              /(?:\n\s+at [^\n]+)+/g,
+              "\n    at <stack-frames>"
+            );
+          })
+        );
+      expect(
+        normalize({
+          evidence:
+            "Private diagnostic\n    at direct (source.ts:1:2)\nSemantic evidence",
+          error: "at unchanged"
+        })
+      ).toEqual({
+        evidence:
+          "Private diagnostic\n    at <stack-frames>\nSemantic evidence",
+        error: "at unchanged"
+      });
+      const direct = await run(true);
+      expect(container).toBeUndefined();
+      const http = await run(false);
+      expect(normalize(http)).toEqual(normalize(direct));
+    }
+  );
+
+  it.each(["present", "closed", "replaced"] as const)(
+    "projects direct configuration lazily into only its own instance (%s)",
+    async (state) => {
+      const harness = start({ direct: true });
+      const original = { state: {} as CanvasState };
+      const replacement = { state: {} as CanvasState };
+      const other = { state: {} as CanvasState };
+      const entries = new Map([
+        ["own", original],
+        ["other", other]
+      ]);
+      const reads: string[] = [];
+      harness.dependencies.readInstanceEntry = (id) => {
+        reads.push(id);
+        return entries.get(id);
+      };
+      harness.setJournalHook((entry) => {
+        if (entry === "dispatchVerifyWorkflow") {
+          if (state === "closed") entries.delete("own");
+          if (state === "replaced") entries.set("own", replacement);
+        }
+      });
+      const outcome = await runDirectParityConfiguration(
+        { repo: "octo/app" },
+        harness.dependencies,
+        "own"
+      );
+      expect(outcome).toMatchObject({ kind: "completed", status: 200 });
+      expect(reads).toEqual(["own"]);
+      expect(other.state).toEqual({});
+      if (state === "closed") expect(original.state).toEqual({});
+      else
+        expect(
+          (state === "replaced" ? replacement : original).state.verifyRunId
+        ).toBe("4242");
+      if (state === "replaced") expect(original.state).toEqual({});
+      expect(container).toBeUndefined();
+    }
+  );
+
+  it.each([
+    "stop",
+    "checkpoint",
+    "selected-refusal",
+    "unknown-resume",
+    "manual-required"
+  ] as const)(
+    "matches configuration %s effects and durable outcomes without mirrored orchestration",
+    async (scenario) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1700000000000);
+      const run = async (direct: boolean) => {
+        const trace: unknown[] = [];
+        const harness = start({
+          direct,
+          pairedProvider: "aws",
+          ...(scenario === "unknown-resume" ?
+            {
+              gh: [
+                {
+                  match:
+                    /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
+                  result: { code: 1, stderr: "protected branch" }
+                },
+                {
+                  match: /^api \/repos\/octo\/app\/pulls\?/,
+                  result: { code: 1, stderr: "HTTP 500" }
+                },
+                {
+                  match: /^api \/repos\/octo\/app\/git\/ref\/heads\//,
+                  result: {
+                    code: 1,
+                    stderr: "HTTP 500: branch state unavailable"
+                  }
+                }
+              ],
+              headSha: "sha-base",
+              createBranch: { ok: true, stderr: "" },
+              pullRequest: { ok: false, stderr: "ECONNRESET" }
+            }
+          : {}),
+          ...(scenario === "manual-required" ?
+            {
+              dispatchResults: [
+                { code: 1, stderr: "request timed out", timedOut: true }
+              ],
+              runListResults: [
+                { code: 0, stdout: "[]" },
+                { code: 0, stdout: "[]" },
+                { code: 0, stdout: "[]" },
+                { code: 0, stdout: "[]" }
+              ]
+            }
+          : {}),
+          trace: (effect) => trace.push(snapshot(effect))
+        });
+        const { dependencies: d, operation } = harness;
+        if (scenario === "checkpoint") {
+          const checkpoint = d.persistMutationCheckpoint;
+          d.persistMutationCheckpoint = (input) =>
+            checkpoint({
+              ...input,
+              persist: async () => {
+                throw new Error("Checkpoint store unavailable");
+              }
+            });
+        }
+        if (scenario === "selected-refusal")
+          d.getSelectedGitHubExecutor = () => null;
+        if (scenario === "stop")
+          harness.setJournalHook((entry) => {
+            if (entry === "bootstrapGHCRStatePackage")
+              operation.stopRequested = true;
+          });
+        const data = {
+          repo: "octo/app",
+          provider: "aws",
+          environment: "dev",
+          operationId: operation.operationId,
+          roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+          region: "us-west-2",
+          accountId: "123456789012",
+          cluster: "cluster",
+          namespace: "application"
+        };
+        const invoke = async () => {
+          if (direct) {
+            const outcome = await runDirectParityConfiguration(data, d);
+            return { status: outcome.status, body: outcome.body };
+          }
+          const response = await post(data);
+          return {
+            status: response.status,
+            body: asRecord(await response.json())
+          };
+        };
+        const results = [await invoke()];
+        if (scenario === "unknown-resume") {
+          expect(results[0]).toMatchObject({
+            status: 202,
+            body: { reconciling: true }
+          });
+          Object.assign(operation, snapshot(operation));
+          results.push(await invoke());
+          expect(results[1]).toMatchObject({
+            status: 202,
+            body: { reconciling: true }
+          });
+          expect(
+            harness.journal.filter((entry) => entry === "createPullRequestApi")
+          ).toHaveLength(1);
+          expect(results[0].body.message).toContain(
+            "github_pull_request.create"
+          );
+          expect(results[1].body.message).toContain("github_branch.create");
+          expect(
+            providerMutationsByKind(operation, "github_pull_request.create")[0]
+              ?.reconcileAttempts
+          ).toBe(1);
+          expect(
+            providerMutationsByKind(operation, "github_branch.create")[0]
+              ?.reconcileAttempts
+          ).toBe(1);
+          expect(harness.failures).toEqual([]);
+        } else if (scenario === "stop") {
+          expect(results[0]).toMatchObject({
+            status: 200,
+            body: { cancelled: true }
+          });
+          expect(harness.failures).toEqual([]);
+          expect(harness.committedFiles).toEqual([]);
+        } else if (scenario === "checkpoint") {
+          expect(results[0]).toMatchObject({
+            status: 500,
+            body: { code: "operation-persistence-failed" }
+          });
+          expect(harness.failures).toHaveLength(1);
+          expect(harness.committedFiles).toEqual([]);
+        } else {
+          expect(results[0].status).toBe(400);
+          expect(harness.failures).toHaveLength(1);
+          expect(results[0].body.error).toContain(
+            scenario === "selected-refusal" ?
+              "selected GitHub account executor is unavailable"
+            : "No exact verification run appeared"
+          );
+          if (scenario === "manual-required")
+            expect(operation.recoveryState).toBe("manual_required");
+        }
+        return JSON.parse(
+          JSON.stringify(
+            {
+              results,
+              trace,
+              persisted: harness.persisted,
+              operation,
+              failures: harness.failures
+            },
+            (key, item: unknown) =>
+              key === "evidence" && typeof item === "string" ?
+                item.replace(/(?:\n\s+at [^\n]+)+/g, "\n    at <stack-frames>")
+              : item
+          )
+        );
+      };
+      const direct = await run(true);
+      expect(container).toBeUndefined();
+      expect(await run(false)).toEqual(direct);
+    }
+  );
+
   it("rejects unscripted provider calls and creation without a live temporary credential body", async () => {
     const { azure } = start({ pairedProvider: "azure", direct: true });
     if (!azure) throw new Error("Missing Azure fixture.");
@@ -1411,6 +1892,32 @@ it("reports a failing configuration finalizer once without hanging HTTP", async 
   expect(await response.json()).toMatchObject({ code: "setup-handler-failed" });
   expect(finalizations).toBe(1);
   expect(harness.journal).toContain("diagnostic:setup-handler-failed");
+});
+
+it("keeps the Azure cleanup runner available when direct configuration cannot publish", async () => {
+  const harness = start({ direct: true, defaultBranch: null });
+  const runAz = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+  harness.dependencies.runAzCommand = runAz;
+  const finalize = harness.dependencies.finalizeSetupFailure;
+  harness.dependencies.finalizeSetupFailure = async (operation, input) => {
+    const cleanup = input.runAz;
+    if (typeof cleanup !== "function")
+      throw new Error("Missing Azure cleanup runner.");
+    await cleanup(["cleanup"]);
+    return finalize(operation, input);
+  };
+  const result = await runDirectParityConfiguration(
+    { repo: "octo/app" },
+    harness.dependencies
+  );
+  expect(result).toMatchObject({
+    kind: "failed",
+    status: 400,
+    body: { code: "default-branch-unavailable" }
+  });
+  expect(runAz).toHaveBeenCalledExactlyOnceWith(["cleanup"]);
+  expect(harness.failures).toHaveLength(1);
+  expect(container).toBeUndefined();
 });
 
 describe("publication baseline parity", () => {
@@ -1526,6 +2033,39 @@ describe("publication baseline parity", () => {
 });
 
 describe("create-environment real-loopback HIT: the server-owned gate", () => {
+  it("supports the exported handler without a prebuilt service", async () => {
+    const harness = start({ directHandler: true });
+    const response = await post({});
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "No target repository specified."
+    });
+    expect(harness.failures).toEqual([]);
+    expect(harness.ghCalls).toEqual([]);
+  });
+
+  it("settles authorization failures without parsing or finalizing setup", async () => {
+    const harness = start({ directHandler: true });
+    const report = vi.fn();
+    harness.dependencies.reportOperationDiagnostic = report;
+    harness.dependencies.isServerOwnedRequest = () => {
+      throw new Error("private authorization failure");
+    };
+    const response = await post("not-json");
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      code: "setup-handler-failed",
+      error:
+        "Setup could not finish reporting its outcome. Inspect the operation before retrying."
+    });
+    expect(report).toHaveBeenCalledExactlyOnceWith({
+      code: "setup-handler-failed",
+      message: "private authorization failure"
+    });
+    expect(harness.failures).toEqual([]);
+    expect(harness.ghCalls).toEqual([]);
+  });
+
   it("refuses a request that arrives without the server-owned token", async () => {
     const harness = start();
 
