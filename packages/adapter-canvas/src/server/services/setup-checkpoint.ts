@@ -3,6 +3,7 @@ import {
   saveSetupOperation,
   type SetupCheckpointOperation
 } from "@radius-project/core";
+import { errorMessage } from "../../runtime/util.js";
 
 interface SetupSaveInput {
   operation: SetupCheckpointOperation | null;
@@ -11,7 +12,7 @@ interface SetupSaveInput {
 }
 
 function reportSaveFailure(input: SetupSaveInput, error: unknown): void {
-  const detail = error instanceof Error ? error.message : String(error);
+  const detail = errorMessage(error);
   input.report?.({
     code: "operation-store-write-failed",
     message: `Could not persist setup operation ${input.operation?.operationId || "unknown"}: ${detail}`

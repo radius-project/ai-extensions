@@ -61,13 +61,7 @@ import {
   describeDeployStarted
 } from "./deploy-tools.js";
 import {
-  servers,
-  getOrCreateServer,
-  stopServer,
-  hasActiveEnvironmentTasks,
-  markEnvironmentInstanceShuttingDown,
-  onEnvironmentTasksSettled,
-  getLastWebviewActivityAt,
+  createProductionCanvasServerRuntime,
   setAppBicepHandoff,
   setDeployRepairHandoff,
   setDeployFailureNotice,
@@ -108,6 +102,7 @@ import { createSessionHolder } from "./runtime/session.js";
 import type { SessionPort } from "./runtime/session.js";
 import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
+import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -117,11 +112,15 @@ const execFileAsync = promisify(execFile);
 
 // ─── Production dependency wiring ────────────────────────────────────────────
 const sessionHolder = createSessionHolder();
+const executionOwner = createEnvironmentExecutionOwner();
+const { servers, getOrCreateServer, stopServer, getLastWebviewActivityAt } =
+  createProductionCanvasServerRuntime({ executionOwner });
 
 const ghCommandPresentation = resolveGhCommandPresentation();
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
   session: sessionHolder,
+  executionOwner,
   clock: {
     now: () => Date.now(),
     wait: (ms) =>
@@ -198,10 +197,7 @@ const dependencies: RadiusExtensionDependencies = {
     fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
   },
   operations: {
-    setupInFlight,
-    hasActiveEnvironmentTasks,
-    markEnvironmentInstanceShuttingDown,
-    onEnvironmentTasksSettled
+    setupInFlight
   },
   appModel: {
     generatorVersion: createGeneratorVersionReader(),

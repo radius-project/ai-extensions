@@ -87,6 +87,9 @@ export interface RadiusExtension {
 export function createRadiusExtension(
   deps: RadiusExtensionDependencies
 ): RadiusExtension {
+  if (!deps.executionOwner) {
+    throw new Error("Missing Radius runtime dependency: executionOwner");
+  }
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
   const canvasInstances = createRadiusCanvasInstanceRegistry();
@@ -323,7 +326,7 @@ export function createRadiusExtension(
       try {
         const closes = [...deps.servers.keys()].map(async (id) => {
           try {
-            deps.operations.markEnvironmentInstanceShuttingDown(id);
+            deps.executionOwner.markEnvironmentInstanceShuttingDown(id);
             await deps.stopServer(id, true);
           } catch (error) {
             deps.logError(

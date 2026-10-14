@@ -22,6 +22,7 @@ import type {
   DeployStatusSummary
 } from "../deploy-tools.js";
 import type { SessionHolder } from "./session.js";
+import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -338,12 +339,6 @@ export interface AppModelDependencies {
 
 export interface OperationsDependencies {
   setupInFlight(): boolean;
-  hasActiveEnvironmentTasks(instanceId: string): boolean;
-  markEnvironmentInstanceShuttingDown(instanceId: string): void;
-  onEnvironmentTasksSettled(
-    instanceId: string,
-    listener: () => void
-  ): () => void;
 }
 
 // The single dependency object shared by createRadiusCanvas, createRadiusTools,
@@ -353,6 +348,7 @@ export interface OperationsDependencies {
 export interface RadiusExtensionDependencies {
   logError(message: string): void;
   session: SessionHolder;
+  executionOwner: EnvironmentExecutionOwner;
   clock: ClockDependencies;
   servers: Map<string, CanvasServerEntry>;
   getOrCreateServer(

@@ -20,6 +20,13 @@ describe("Canvas setup checkpoint projection", () => {
   it.each([
     [null, new Error("disk full"), "unknown", "disk full"],
     [{ operationId: "" }, "offline", "unknown", "offline"],
+    [null, null, "unknown", "null"],
+    [null, undefined, "unknown", "undefined"],
+    [null, 0, "unknown", "0"],
+    [null, false, "unknown", "false"],
+    [null, Symbol("offline"), "unknown", "Symbol(offline)"],
+    [null, { message: "offline" }, "unknown", "[object Object]"],
+    [null, { toString: () => "offline" }, "unknown", "offline"],
     [
       { operationId: "op_setup" },
       new Error("read only"),

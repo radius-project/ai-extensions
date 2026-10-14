@@ -33,6 +33,7 @@ const LIVE_CREDENTIAL = {
   issuer: "https://token.actions.githubusercontent.com",
   audiences: ["api://AzureADTokenExchange"]
 };
+const APPLICATION_NOT_FOUND = `ERROR: Resource 'Application_${APP_OBJECT_ID}' does not exist or one of its queried reference-property objects are not present.`;
 
 const OIDC: ResolveOidcSubjectResult = {
   federatedCredentials: [{ name: "dev", subject: SUBJECT }],
@@ -463,6 +464,10 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
       code: "federated-credential-failed"
     });
     expect(test.calls).toContain("remove:C:\\temp\\fic.json");
+    expect(
+      test.calls.filter((call) => call.includes("federated-credential create"))
+    ).toHaveLength(1);
+    expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
   });
 
   it("honors Stop after a failed federated credential write before rollback", async () => {
@@ -489,6 +494,304 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
     expect(test.failures).toEqual([]);
   });
+
+  it.each([0, 1, 5])(
+    "creates a credential after %i propagation rejections within the six-attempt budget",
+    async (rejections) => {
+      let creates = 0;
+      const test = harness({
+        runAz: async (args) => {
+          const line = args.join(" ");
+          if (line.includes("federated-credential list"))
+            return result({ stdout: "[]" });
+          if (line.includes("federated-credential create")) {
+            creates++;
+            return creates <= rejections ?
+                result({ code: 1, stderr: APPLICATION_NOT_FOUND })
+              : result({
+                  code: "0",
+                  stdout: JSON.stringify(LIVE_CREDENTIAL)
+                });
+          }
+          if (line.startsWith("role assignment create ")) return result();
+          throw new Error(`unexpected az call: ${line}`);
+        }
+      });
+
+      expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+      expect(creates).toBe(rejections + 1);
+      expect(test.calls.filter((call) => call.startsWith("sleep:"))).toEqual(
+        [2000, 4000, 6000, 8000, 10000]
+          .slice(0, rejections)
+          .map((delay) => `sleep:${delay}`)
+      );
+      expect(test.calls.filter((call) => call === "fic:dev")).toHaveLength(1);
+      expect(
+        test.calls.filter((call) => call === "provenance:created:dev")
+      ).toHaveLength(1);
+      expect(test.ficEntries[0]).toMatchObject({
+        name: "dev",
+        providerId: LIVE_CREDENTIAL.id
+      });
+      expect(test.calls.filter((call) => call.startsWith("remove:"))).toEqual([
+        "remove:C:\\temp\\fic.json"
+      ]);
+      expect(test.failures).toEqual([]);
+    }
+  );
+
+  it("ends after six credential rejections and retains the last Azure diagnostic", async () => {
+    let creates = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list"))
+          return result({ stdout: "[]" });
+        if (line.includes("federated-credential create")) {
+          creates++;
+          return result({
+            code: 1,
+            stdout: `${APPLICATION_NOT_FOUND} Attempt ${creates}`
+          });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(creates).toBe(6);
+    expect(test.calls.filter((call) => call.startsWith("sleep:"))).toEqual([
+      "sleep:2000",
+      "sleep:4000",
+      "sleep:6000",
+      "sleep:8000",
+      "sleep:10000"
+    ]);
+    expect(test.failures[0]).toMatchObject({
+      code: "federated-credential-failed",
+      error: `Failed to create federated credential "dev": ${APPLICATION_NOT_FOUND} Attempt 6`
+    });
+    expect(test.ficEntries).toEqual([]);
+    expect(test.calls).toContain("remove:C:\\temp\\fic.json");
+  });
+
+  it.each([
+    { retryAfter: 0, creates: 2, sleeps: ["sleep:0"] },
+    { retryAfter: 10, creates: 2, sleeps: ["sleep:10000"] },
+    { retryAfter: 11, creates: 1, sleeps: [] }
+  ])(
+    "honors the credential write Retry-After boundary at $retryAfter seconds",
+    async ({ retryAfter, creates, sleeps }) => {
+      let attempts = 0;
+      const test = harness({
+        runAz: async (args) => {
+          const line = args.join(" ");
+          if (line.includes("federated-credential list"))
+            return result({ stdout: "[]" });
+          if (line.includes("federated-credential create")) {
+            attempts++;
+            return attempts === 1 ?
+                result({
+                  code: 1,
+                  stderr: `TooManyRequests (HTTP 429)\nRetry-After: ${retryAfter}`
+                })
+              : result({ stdout: JSON.stringify(LIVE_CREDENTIAL) });
+          }
+          if (line.startsWith("role assignment create ")) return result();
+          throw new Error(`unexpected az call: ${line}`);
+        }
+      });
+
+      expect(await configureAzureAutoSetupCredentials(test.input)).toBe(
+        creates === 2
+      );
+      expect(attempts).toBe(creates);
+      expect(test.calls.filter((call) => call.startsWith("sleep:"))).toEqual(
+        sleeps
+      );
+      expect(test.calls).toContain("remove:C:\\temp\\fic.json");
+    }
+  );
+
+  it.each(["checkpoint", "before-backoff", "during-backoff"])(
+    "honors Stop %s without another credential write",
+    async (boundary) => {
+      let stopped = false;
+      let creates = 0;
+      const sleeps: number[] = [];
+      const test = harness({
+        checkpoint: async (name) =>
+          boundary !== "checkpoint" ||
+          !name.startsWith("after-federated-credential-create-attempt:"),
+        stopBoundary: async (name) => {
+          if (
+            boundary === "before-backoff" &&
+            name.startsWith("before-federated-credential-backoff:")
+          )
+            return false;
+          return !stopped;
+        },
+        sleep: async (delay) => {
+          sleeps.push(delay);
+          if (boundary === "during-backoff") stopped = true;
+        },
+        runAz: async (args) => {
+          const line = args.join(" ");
+          if (line.includes("federated-credential list"))
+            return result({ stdout: "[]" });
+          if (line.includes("federated-credential create")) {
+            creates++;
+            return result({ code: 1, stderr: APPLICATION_NOT_FOUND });
+          }
+          throw new Error(`unexpected az call: ${line}`);
+        }
+      });
+
+      expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+      expect(creates).toBe(1);
+      expect(sleeps).toEqual(boundary === "during-backoff" ? [2000] : []);
+      expect(test.failures).toEqual([]);
+      expect(test.ficEntries).toEqual([]);
+      expect(test.calls).toContain("remove:C:\\temp\\fic.json");
+    }
+  );
+
+  it("does not replay a timed-out credential create after a not-found reconciliation", async () => {
+    let creates = 0;
+    const test = harness({
+      credentialShow: result({ code: 1, stderr: APPLICATION_NOT_FOUND }),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list"))
+          return result({ stdout: "[]" });
+        if (line.includes("federated-credential create")) {
+          creates++;
+          return result({
+            code: 1,
+            timedOut: true,
+            stderr: APPLICATION_NOT_FOUND
+          });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(creates).toBe(1);
+    expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
+    expect(test.ficEntries).toEqual([]);
+    expect(test.failures[0]).toMatchObject({
+      code: "federated-credential-failed"
+    });
+  });
+
+  it("reconciles a lost credential response without creating it again", async () => {
+    let creates = 0;
+    const test = harness({
+      credentialShow: result({
+        stdout: JSON.stringify({
+          ...LIVE_CREDENTIAL,
+          description: "Created by Radius operation op-credentials"
+        })
+      }),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list"))
+          return result({ stdout: "[]" });
+        if (line.includes("federated-credential create")) {
+          creates++;
+          return result({ code: 1, stderr: "ECONNRESET" });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(creates).toBe(1);
+    expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
+    expect(test.calls.filter((call) => call === "fic:dev")).toHaveLength(1);
+    expect(test.failures).toEqual([]);
+  });
+
+  it("honors Stop received while the credential write is being journaled", async () => {
+    let stopped = false;
+    const test = harness({
+      stopBoundary: async () => !stopped,
+      runAz: async (args) => {
+        if (args.join(" ").includes("federated-credential list"))
+          return result({ stdout: "[]" });
+        throw new Error(`unexpected az call: ${args.join(" ")}`);
+      }
+    });
+    test.input.dependencies.operations.persist = async () => {
+      stopped = true;
+      Object.assign(test.workflow.operation, { stopRequested: true });
+    };
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
+    expect(
+      test.calls.some((call) => call.includes("federated-credential create"))
+    ).toBe(false);
+    expect(test.calls).toContain("remove:C:\\temp\\fic.json");
+    expect(test.failures).toEqual([]);
+  });
+
+  it.each([
+    { scenario: "malformed", code: 0, stdout: "{", stderr: "" },
+    {
+      scenario: "wrong subject",
+      code: 0,
+      stdout: JSON.stringify({
+        ...LIVE_CREDENTIAL,
+        subject: "repo:octo/other:environment:dev",
+        description: "Created by Radius operation op-credentials"
+      }),
+      stderr: ""
+    },
+    {
+      scenario: "wrong provenance",
+      code: 0,
+      stdout: JSON.stringify({
+        ...LIVE_CREDENTIAL,
+        description: "Created by another operation"
+      }),
+      stderr: ""
+    },
+    {
+      scenario: "read denied",
+      code: 1,
+      stdout: "",
+      stderr: "Authorization_RequestDenied"
+    }
+  ])(
+    "never replays a lost credential write when reconciliation reports $scenario",
+    async ({ code, stdout, stderr }) => {
+      let creates = 0;
+      const test = harness({
+        credentialShow: result({ code, stdout, stderr }),
+        runAz: async (args) => {
+          const line = args.join(" ");
+          if (line.includes("federated-credential list"))
+            return result({ stdout: "[]" });
+          if (line.includes("federated-credential create")) {
+            creates++;
+            return result({ code: 1, stderr: "ECONNRESET" });
+          }
+          throw new Error(`unexpected az call: ${line}`);
+        }
+      });
+
+      await expect(
+        configureAzureAutoSetupCredentials(test.input)
+      ).rejects.toThrow();
+      expect(creates).toBe(1);
+      expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
+      expect(test.calls).toContain("remove:C:\\temp\\fic.json");
+      expect(test.ficEntries).toEqual([]);
+    }
+  );
 
   it("stops after credential discovery and before federated credential create", async () => {
     const test = harness({

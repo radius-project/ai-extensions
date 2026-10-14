@@ -5,7 +5,8 @@
 //
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { getOrCreateServer, stopServer } from "../../../src/server.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import { deployedGraphPage } from "../../../src/pages/deployed-graph-page.js";
 import { deployingPage } from "../../../src/pages/deploying-page.js";
 import { environmentPage } from "../../../src/pages/environment-page.js";
@@ -23,6 +24,9 @@ import {
 } from "../../support/pages/hostile-state.js";
 
 const INSTANCE_ID = "pages-http-test";
+const { getOrCreateServer, stopServer } = createTestCanvasServerRuntime({
+  executionOwner: createEnvironmentExecutionOwner()
+});
 
 let entry: CanvasServerEntry;
 
