@@ -100,7 +100,7 @@ describe("fetchRecipePack", () => {
     expect(secrets?.concreteResources[0].type).toBe("core/Secret");
   });
 
-  it("reads the kubernetes default pack for aws and kubernetes providers", async () => {
+  it("reads the kubernetes default pack for the kubernetes provider", async () => {
     const KUBE_PACK = `
 resource kubernetesRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   name: 'default'
@@ -114,17 +114,50 @@ resource kubernetesRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   }
 }
 `;
-    // Both providers resolve to recipe-packs/kubernetes/default.bicep.
-    expect(recipePackContentPath("aws")).toBe(
-      recipePackContentPath("kubernetes")
-    );
     const gh = fakeGitHub({
-      content: { [recipePackContentPath("aws")]: KUBE_PACK }
+      content: { [recipePackContentPath("kubernetes")]: KUBE_PACK }
     });
-    const recipes = await fetchRecipePack(gh, "aws");
+    const recipes = await fetchRecipePack(gh, "kubernetes");
     expect(recipes).toHaveLength(1);
     expect(recipes[0].resourceType).toBe("Radius.Data/redisCaches");
     expect(recipes[0].concreteResources[0].type).toBe("apps/Deployment");
+  });
+
+  it("resolves the built-in AWS pack without reading GitHub", async () => {
+    const gh: GitHub = {
+      async getContent(apiPath: string) {
+        throw new Error(`unexpected getContent(${apiPath})`);
+      },
+      async listNames() {
+        throw new Error("unexpected listNames");
+      },
+      async treePaths() {
+        throw new Error("unexpected treePaths");
+      }
+    };
+    const recipes = await fetchRecipePack(gh, "aws");
+    const mysql = recipes.find(
+      (r) => r.resourceType === "Radius.Data/mySqlDatabases"
+    );
+    expect(mysql).toMatchObject({
+      name: "mySqlDatabases",
+      templateKind: "bicep",
+      templatePath: "radius-aws-recipes/mysql",
+      provider: "aws"
+    });
+    expect(mysql?.concreteResources[0].displayType).toBe(
+      "Amazon RDS for MySQL"
+    );
+    const models = recipes.find((r) => r.resourceType === "Radius.AI/models");
+    expect(models?.provider).toBe("aws");
+    expect(models?.concreteResources).toEqual([]);
+    const rabbit = recipes.find(
+      (r) => r.resourceType === "Radius.Messaging/rabbitMQ"
+    );
+    expect(rabbit?.concreteResources[0]).toMatchObject({
+      type: "apps/Deployment",
+      provider: "kubernetes"
+    });
   });
 
   it("yields an entry with no concrete resource when the source is unrecognized", async () => {

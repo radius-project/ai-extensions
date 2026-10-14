@@ -25,6 +25,7 @@ describe("AWS console URL", () => {
     ["AWS.MemoryDB/Cluster", "/memorydb/home?region=us-west-2#/clusters"],
     ["AWS.DocDB/DBCluster", "/docdb/home?region=us-west-2#clusters"],
     ["AWS.DocDB/DBInstance", "/docdb/home?region=us-west-2#clusters"],
+    ["AWS.DocDBElastic/Cluster", "/docdb/home?region=us-west-2#clusters"],
     ["AWS.MSK/Cluster", "/msk/home?region=us-west-2#/clusters"],
     ["AWS.MSK/ServerlessCluster", "/msk/home?region=us-west-2#/clusters"],
     [

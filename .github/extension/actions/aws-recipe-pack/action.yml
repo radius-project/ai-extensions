@@ -1,0 +1,84 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+# Creates the Radius environment for an AWS GitHub environment and deploys the
+# AWS recipe pack: backing services on AWS managed services through the Bicep
+# recipes in ./recipes, core primitives on the cluster through the pinned
+# Kubernetes recipes. Runs after load-contrib-catalog and after cloud
+# credentials are registered. The calling job must be logged in to ghcr.io and
+# hold `packages: write`, because the recipes are published to the repository's
+# GHCR.
+name: Radius - AWS recipe pack
+description: Create the Radius environment for AWS and deploy the AWS recipe pack.
+
+inputs:
+  environment:
+    description: Radius environment name.
+    required: true
+  namespace:
+    description: Kubernetes namespace the environment deploys into.
+    required: true
+  account-id:
+    description: AWS account ID.
+    required: true
+  region:
+    description: AWS region.
+    required: true
+  eks-cluster-name:
+    description: EKS cluster the application runs on.
+    required: true
+  vpc-id:
+    description: VPC for VPC-bound services.
+    required: true
+  subnet-ids:
+    description: Comma-separated subnet IDs (a JSON array is accepted too).
+    required: true
+  build-registry:
+    description: Registry path Radius.Compute/containerImages pushes images to.
+    required: true
+  registry-secret-name:
+    description: Kubernetes Secret holding the image push credentials.
+    required: true
+  routes-gateway-name:
+    description: Kubernetes Gateway that Radius.Compute/routes attach to.
+    required: true
+  routes-gateway-namespace:
+    description: Namespace of that Gateway.
+    required: true
+  registry-username:
+    description: GHCR username for publishing and pulling the recipes.
+    required: true
+  registry-password:
+    description: GHCR token for publishing and pulling the recipes.
+    required: true
+
+outputs:
+  recipe-pack:
+    description: Name of the deployed recipe pack.
+    value: ${{ steps.pack.outputs.recipe-pack }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create environment and deploy AWS recipe pack
+      id: pack
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        NAMESPACE: ${{ inputs.namespace }}
+        AWS_ACCOUNT_ID: ${{ inputs.account-id }}
+        AWS_REGION: ${{ inputs.region }}
+        EKS_CLUSTER_NAME: ${{ inputs.eks-cluster-name }}
+        VPC_ID: ${{ inputs.vpc-id }}
+        SUBNET_IDS: ${{ inputs.subnet-ids }}
+        BUILD_REGISTRY: ${{ inputs.build-registry }}
+        REGISTRY_SECRET_NAME: ${{ inputs.registry-secret-name }}
+        ROUTES_GATEWAY_NAME: ${{ inputs.routes-gateway-name }}
+        ROUTES_GATEWAY_NAMESPACE: ${{ inputs.routes-gateway-namespace }}
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+        REPOSITORY: ${{ github.repository }}
+      run: |
+        RECIPE_REGISTRY="ghcr.io/$(printf '%s' "${REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+        export RECIPE_REGISTRY
+        export ACTION_PATH="${GITHUB_ACTION_PATH}"
+        bash "${GITHUB_ACTION_PATH}/aws-recipe-pack.sh"

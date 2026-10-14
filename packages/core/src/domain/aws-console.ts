@@ -29,6 +29,7 @@ const AWS_CONSOLE_PATHS: Readonly<
   "aws.memorydb/cluster": { path: "/memorydb/home", hash: "#/clusters" },
   "aws.docdb/dbcluster": { path: "/docdb/home", hash: "#clusters" },
   "aws.docdb/dbinstance": { path: "/docdb/home", hash: "#clusters" },
+  "aws.docdbelastic/cluster": { path: "/docdb/home", hash: "#clusters" },
   "aws.msk/cluster": { path: "/msk/home", hash: "#/clusters" },
   "aws.msk/serverlesscluster": { path: "/msk/home", hash: "#/clusters" },
   "aws.opensearchservice/domain": {

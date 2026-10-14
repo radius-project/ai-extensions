@@ -1278,10 +1278,10 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
         fail "${workflow}: explicit Gateway boolean is not preserved"
 done
 
-grep -qF "radius_contrib_kube_recipe_source Radius.Compute/routes routes" \
-    "${AWS_WORKFLOW}" ||
+grep -qF "kube_source Radius.Compute/routes routes" \
+    "${REPO_ROOT}/.github/extension/actions/aws-recipe-pack/aws-recipe-pack.sh" ||
     fail "AWS route recipe must use the Radius default OCI recipe"
-grep -qF "gatewayName: '\${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}'" \
+grep -qF "routes-gateway-name: \${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}" \
     "${AWS_WORKFLOW}" ||
     fail "AWS route recipe is missing the managed Gateway default"
 

@@ -16,11 +16,10 @@ export const RECIPE_PACK_REPO = "radius-project/resource-types-contrib";
 export const RECIPE_PACK_REF = "main";
 
 // Provider → committed recipe-pack file. Azure downloads the `azure-aks` pack;
-// AWS's real pack is generated inline at deploy time, so for modeling it (and any
-// plain Kubernetes environment) uses the committed kubernetes default pack.
+// plain Kubernetes environments use the committed kubernetes default pack. AWS
+// has no committed pack (see AWS_RECIPE_PACK), so it falls back to the default.
 const PROVIDER_PACK_PATH: Record<string, string> = {
   azure: "recipe-packs/azure-aks/azure-aks.bicep",
-  aws: "recipe-packs/kubernetes/default.bicep",
   kubernetes: "recipe-packs/kubernetes/default.bicep"
 };
 
@@ -47,6 +46,41 @@ export interface RecipePackEntry {
   resourceType: string;
   kind: string;
   source: string;
+}
+
+// The AWS pack is assembled at deploy time by the extension's aws-recipe-pack
+// action, which publishes its Bicep recipes to the repository's GHCR as
+// `radius-aws-recipes/<name>`. There is no committed file to read, so its entries
+// are listed here and must match that action's recipe map. Kafka is absent
+// because the pack has no Kafka recipe.
+const AWS_RECIPE_PACK_SOURCES: ReadonlyArray<readonly [string, string]> = [
+  ["Radius.Data/mySqlDatabases", "radius-aws-recipes/mysql"],
+  ["Radius.Data/postgreSqlDatabases", "radius-aws-recipes/postgresql"],
+  ["Radius.Data/sqlServerDatabases", "radius-aws-recipes/sqlserver"],
+  ["Radius.Data/redisCaches", "radius-aws-recipes/redis"],
+  ["Radius.Data/mongoDatabases", "radius-aws-recipes/mongo"],
+  ["Radius.Storage/objectStorage", "radius-aws-recipes/objectstorage"],
+  ["Radius.AI/search", "radius-aws-recipes/search"],
+  ["Radius.AI/models", "radius-aws-recipes/models"],
+  ["Radius.Messaging/rabbitMQ", "kube-recipes/rabbitmq"],
+  ["Radius.Compute/containers", "kube-recipes/containers"],
+  ["Radius.Compute/persistentVolumes", "kube-recipes/persistentvolumes"],
+  ["Radius.Security/secrets", "kube-recipes/secrets"],
+  ["Radius.Compute/routes", "kube-recipes/routes"],
+  ["Radius.Compute/containerImages", "kube-recipes/containerimages"]
+];
+
+/**
+ * The recipe pack a provider defines in this repository rather than in
+ * resource-types-contrib, or null when the provider's pack must be fetched.
+ */
+export function builtInRecipePack(provider: string): RecipePackEntry[] | null {
+  if (provider !== "aws") return null;
+  return AWS_RECIPE_PACK_SOURCES.map(([resourceType, source]) => ({
+    resourceType,
+    kind: "bicep",
+    source
+  }));
 }
 
 // Curated map: normalized recipe source → the primary concrete resource its
@@ -111,6 +145,43 @@ const SOURCE_CONCRETE_MAP: Record<
     displayType: "Azure Storage Account",
     provider: "azure"
   },
+  // AWS recipes (ghcr.io/<owner>/<repo>/radius-aws-recipes/<name>) → AWS types.
+  // The models recipe creates no AWS resource, so it has no entry.
+  "radius-aws-recipes/mysql": {
+    type: "AWS.RDS/DBInstance",
+    displayType: "Amazon RDS for MySQL",
+    provider: "aws"
+  },
+  "radius-aws-recipes/postgresql": {
+    type: "AWS.RDS/DBInstance",
+    displayType: "Amazon RDS for PostgreSQL",
+    provider: "aws"
+  },
+  "radius-aws-recipes/sqlserver": {
+    type: "AWS.RDS/DBInstance",
+    displayType: "Amazon RDS for SQL Server",
+    provider: "aws"
+  },
+  "radius-aws-recipes/redis": {
+    type: "AWS.ElastiCache/ServerlessCache",
+    displayType: "Amazon ElastiCache",
+    provider: "aws"
+  },
+  "radius-aws-recipes/mongo": {
+    type: "AWS.DocDBElastic/Cluster",
+    displayType: "Amazon DocumentDB",
+    provider: "aws"
+  },
+  "radius-aws-recipes/objectstorage": {
+    type: "AWS.S3/Bucket",
+    displayType: "Amazon S3",
+    provider: "aws"
+  },
+  "radius-aws-recipes/search": {
+    type: "AWS.OpenSearchService/Domain",
+    displayType: "Amazon OpenSearch Service",
+    provider: "aws"
+  },
   // Kubernetes recipes (ghcr.io/radius-project/kube-recipes/<name>) → primary K8s object.
   "kube-recipes/containers": {
     type: "apps/Deployment",
@@ -171,6 +242,13 @@ const PROVIDER_SOURCE_OVERRIDE: Record<
       displayType: "Azure Kubernetes Service",
       provider: "azure"
     }
+  },
+  aws: {
+    "kube-recipes/containers": {
+      type: "AWS.EKS/Cluster",
+      displayType: "Amazon EKS",
+      provider: "aws"
+    }
   }
 };
 
@@ -178,6 +256,7 @@ const PROVIDER_SOURCE_OVERRIDE: Record<
 // host, the leading `bicep/` module namespace Azure uses, and the `:version` tag.
 //   mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1 -> avm/res/cache/redis-enterprise
 //   ghcr.io/radius-project/kube-recipes/containers:latest        -> kube-recipes/containers
+//   ghcr.io/octo/app/radius-aws-recipes/mysql:0123456789ab       -> radius-aws-recipes/mysql
 export function normalizeRecipeSource(source: string): string {
   if (!source) return "";
   let s = source.trim();
@@ -192,6 +271,8 @@ export function normalizeRecipeSource(source: string): string {
   if (avmIdx !== -1) return s.slice(avmIdx);
   const kubeIdx = s.indexOf("kube-recipes/");
   if (kubeIdx !== -1) return s.slice(kubeIdx);
+  const awsIdx = s.indexOf("radius-aws-recipes/");
+  if (awsIdx !== -1) return s.slice(awsIdx);
   return s;
 }
 

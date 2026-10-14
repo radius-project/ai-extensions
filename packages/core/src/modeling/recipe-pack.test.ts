@@ -1,7 +1,8 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
+  builtInRecipePack,
   parseRecipePack,
   deriveConcreteResource,
   normalizeRecipeSource,
@@ -21,6 +22,133 @@ const readFixture = (name: string): string =>
     fileURLToPath(new URL(`./testdata/${name}`, import.meta.url)),
     "utf8"
   );
+
+describe("builtInRecipePack", () => {
+  it("lists the AWS pack's recipes, with services on AWS and primitives on the cluster", () => {
+    const pack = builtInRecipePack("aws");
+    expect(pack).not.toBeNull();
+    const byType = Object.fromEntries(
+      (pack ?? []).map((entry) => [entry.resourceType, entry])
+    );
+    expect(byType["Radius.Data/mySqlDatabases"]).toEqual({
+      resourceType: "Radius.Data/mySqlDatabases",
+      kind: "bicep",
+      source: "radius-aws-recipes/mysql"
+    });
+    expect(byType["Radius.Messaging/rabbitMQ"]?.source).toBe(
+      "kube-recipes/rabbitmq"
+    );
+    expect(byType["Radius.Messaging/kafka"]).toBeUndefined();
+    expect((pack ?? []).every((entry) => entry.kind === "bicep")).toBe(true);
+  });
+
+  it("returns a fresh copy so callers cannot change the pack", () => {
+    const first = builtInRecipePack("aws");
+    first?.splice(0);
+    expect(builtInRecipePack("aws")?.length).toBeGreaterThan(0);
+  });
+
+  // The deploy-time pack is assembled by the aws-recipe-pack action; the
+  // planned graph must show the same recipe for every type.
+  it("matches the recipe map of the aws-recipe-pack action", () => {
+    const actionDir = fileURLToPath(
+      new URL(
+        "../../../../.github/extension/actions/aws-recipe-pack/",
+        import.meta.url
+      )
+    );
+    const script = readFileSync(`${actionDir}aws-recipe-pack.sh`, "utf8");
+    const recipeMap = /declare -A RECIPE_TYPES=\(([\s\S]*?)\n\)/.exec(
+      script
+    )?.[1];
+    expect(recipeMap).toBeDefined();
+    const deployed: Record<string, string> = {};
+    for (const [, name, type] of (recipeMap ?? "").matchAll(
+      /\[([a-z]+)\]="([^"]+)"/g
+    )) {
+      if (existsSync(`${actionDir}recipes/${name}.bicep`)) {
+        deployed[type] = `radius-aws-recipes/${name}`;
+      }
+    }
+    for (const [, type, artifact] of script.matchAll(
+      /kube_source (Radius\.[A-Za-z]+\/[A-Za-z]+) ([a-z]+)\)/g
+    )) {
+      deployed[type] = `kube-recipes/${artifact}`;
+    }
+    const planned = Object.fromEntries(
+      (builtInRecipePack("aws") ?? []).map((e) => [e.resourceType, e.source])
+    );
+    expect(Object.keys(deployed).length).toBeGreaterThan(10);
+    expect(planned).toEqual(deployed);
+  });
+
+  it.each(["azure", "kubernetes", "gcp", ""])(
+    "has no built-in pack for %j",
+    (provider) => {
+      expect(builtInRecipePack(provider)).toBeNull();
+    }
+  );
+});
+
+describe("AWS recipe sources", () => {
+  it.each([
+    ["mysql", "AWS.RDS/DBInstance", "Amazon RDS for MySQL", "dbInstance"],
+    [
+      "postgresql",
+      "AWS.RDS/DBInstance",
+      "Amazon RDS for PostgreSQL",
+      "dbInstance"
+    ],
+    [
+      "sqlserver",
+      "AWS.RDS/DBInstance",
+      "Amazon RDS for SQL Server",
+      "dbInstance"
+    ],
+    [
+      "redis",
+      "AWS.ElastiCache/ServerlessCache",
+      "Amazon ElastiCache",
+      "serverlessCache"
+    ],
+    ["mongo", "AWS.DocDBElastic/Cluster", "Amazon DocumentDB", "cluster"],
+    ["objectstorage", "AWS.S3/Bucket", "Amazon S3", "bucket"],
+    [
+      "search",
+      "AWS.OpenSearchService/Domain",
+      "Amazon OpenSearch Service",
+      "domain"
+    ]
+  ])(
+    "maps the published %s recipe to its AWS resource",
+    (recipe, type, displayType, name) => {
+      expect(
+        deriveConcreteResource(
+          `ghcr.io/octo/app/radius-aws-recipes/${recipe}:0123456789ab`,
+          "aws"
+        )
+      ).toEqual({ name, type, displayType, provider: "aws", apiVersion: "" });
+    }
+  );
+
+  it("derives nothing for the models recipe, which creates no AWS resource", () => {
+    expect(
+      deriveConcreteResource("radius-aws-recipes/models", "aws")
+    ).toBeNull();
+  });
+
+  it("shows containers on AWS as the EKS cluster", () => {
+    expect(
+      deriveConcreteResource("kube-recipes/containers", "aws")
+    ).toMatchObject({ type: "AWS.EKS/Cluster", displayType: "Amazon EKS" });
+  });
+
+  it("normalizes a published AWS recipe reference", () => {
+    expect(
+      normalizeRecipeSource("ghcr.io/octo/app/radius-aws-recipes/redis:abc123")
+    ).toBe("radius-aws-recipes/redis");
+  });
+});
 
 describe("normalizeRecipeSource", () => {
   it("strips the registry host and version tag from an AVM source", () => {
@@ -128,10 +256,7 @@ describe("recipePackPathForProvider", () => {
     );
   });
 
-  it("selects the kubernetes default pack for aws and kubernetes", () => {
-    expect(recipePackPathForProvider("aws")).toBe(
-      "recipe-packs/kubernetes/default.bicep"
-    );
+  it("selects the kubernetes default pack for kubernetes", () => {
     expect(recipePackPathForProvider("kubernetes")).toBe(
       "recipe-packs/kubernetes/default.bicep"
     );

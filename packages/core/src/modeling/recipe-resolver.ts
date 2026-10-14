@@ -12,6 +12,7 @@
 import type { GitHub } from "../ports/index.js";
 import { getPlatform } from "../platforms/index.js";
 import {
+  builtInRecipePack,
   parseRecipePack,
   deriveConcreteResource,
   recipePackContentPath
@@ -23,10 +24,12 @@ import {
 // <Category>/<type>/recipes/, we read the single authoritative recipe-pack file
 // (recipe-packs/<provider>/*.bicep) that the deploy skill treats as canonical.
 export async function fetchRecipePack(gh, provider) {
-  const content = await gh.getContent(recipePackContentPath(provider));
-  if (!content) return [];
-
-  const entries = parseRecipePack(content);
+  let entries = builtInRecipePack(provider);
+  if (!entries) {
+    const content = await gh.getContent(recipePackContentPath(provider));
+    if (!content) return [];
+    entries = parseRecipePack(content);
+  }
   const recipes = [];
   for (const entry of entries) {
     const concrete = deriveConcreteResource(entry.source, provider);

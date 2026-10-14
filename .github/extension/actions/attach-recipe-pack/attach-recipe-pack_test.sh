@@ -242,7 +242,17 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
         custom_line < gateway_line &&
         gateway_line < app_line)) ||
         fail "${workflow}: provider recipe-pack lifecycle ordering is incorrect"
+    grep -qF \
+        'actions/attach-recipe-pack@{{RADIUS_REF}}' "${workflow}" ||
+        fail "${workflow}: exact provider pack is not attached"
+    grep -qF 'remove-default-recipe-pack: "true"' "${workflow}" ||
+        fail "${workflow}: auto-injected default pack is not removed"
+done
 
+# Azure deploys its environment and pack inline. AWS delegates both to the
+# aws-recipe-pack action, whose own tests cover the deploy order.
+workflow="${AZURE_WORKFLOW}"
+{
     # shellcheck disable=SC2016
     env_deploy_line="$(grep -nF 'rad deploy "$ENV_BICEP"' "${workflow}" |
         cut -d: -f1)"
@@ -267,14 +277,6 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
     # shellcheck disable=SC2016
     grep -qF -- '--environment "$ENVIRONMENT"' "${workflow}" ||
         fail "${workflow}: pack deploy does not use the existing environment"
-    grep -qF \
-        'actions/attach-recipe-pack@{{RADIUS_REF}}' "${workflow}" ||
-        fail "${workflow}: exact provider pack is not attached"
-    grep -qF 'remove-default-recipe-pack: "true"' "${workflow}" ||
-        fail "${workflow}: auto-injected default pack is not removed"
-done
-
-for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
     # shellcheck disable=SC2016
     grep -qF 'echo "provider-pack=${PACK_NAME}" >> "$GITHUB_OUTPUT"' \
         "${workflow}" ||
@@ -284,7 +286,15 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
         'recipe-pack: ${{ steps.provider-setup.outputs.provider-pack }}' \
         "${workflow}" ||
         fail "${workflow}: attach step does not consume the provider pack output"
-done
+}
+
+grep -qF 'uses: radius-project/ai-extensions/.github/extension/actions/aws-recipe-pack@{{RADIUS_REF}}' \
+    "${AWS_WORKFLOW}" ||
+    fail "AWS workflow does not deploy its pack through the aws-recipe-pack action"
+# shellcheck disable=SC2016
+grep -qF 'recipe-pack: ${{ steps.provider-setup.outputs.recipe-pack }}' \
+    "${AWS_WORKFLOW}" ||
+    fail "AWS attach step does not consume the aws-recipe-pack output"
 # The pack-only recipe pack artifact owns exactly these parameters, so each is
 # passed unconditionally rather than probed for in the downloaded pack. The
 # optional quote tolerates `--parameters "name=value"`.
