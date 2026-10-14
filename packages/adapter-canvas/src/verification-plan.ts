@@ -1,22 +1,15 @@
-import { hasVerificationOperationMarker } from "./verification-run-identity.js";
+import { setupAutomaticBranchVerificationPolicy } from "@radius-project/core";
 import { githubCredentialSourceLabel } from "./github-credential-source.js";
 import { parse as parseYaml } from "yaml";
 
-export interface PullRequestState {
-  branch: string;
-  base?: string;
-}
-
-export interface CredentialVerificationPlan {
-  shouldDispatch: boolean;
-  trigger: "workflow_dispatch" | "push" | "none";
-  ref: string;
-  defaultBranch: string;
-  dispatcherChains?: boolean;
-  pullRequestUrl: string;
-  skipReason: string;
-  supportsOperationMarker: boolean;
-}
+export type {
+  PullRequestState,
+  CredentialVerificationPlan
+} from "@radius-project/core";
+export {
+  hasWorkflowRunTrigger,
+  planCredentialVerification
+} from "@radius-project/core";
 
 export interface WorkflowFileReadResult {
   content: string | null;
@@ -37,72 +30,12 @@ export type AutomaticBranchVerificationPolicy =
         | "legacy-deploy-unreadable";
     };
 
-type FetchFile = (
-  repo: string,
-  path: string,
-  branch: string
-) => Promise<string | null | undefined>;
-
-export function hasWorkflowRunTrigger(workflow: unknown): boolean {
-  if (typeof workflow !== "string") return false;
-  const lines = workflow.split(/\r?\n/);
-  const jobs = lines.findIndex((line) => /^jobs:\s*$/.test(line));
-  const end = jobs < 0 ? lines.length : jobs;
-  return lines.slice(0, end).some((line) => /^\s+workflow_run:\s*$/.test(line));
-}
-
 export function automaticBranchVerificationPolicy(input: {
   verify: WorkflowFileReadResult;
   dispatcher: WorkflowFileReadResult;
   legacyDeploy: WorkflowFileReadResult;
 }): AutomaticBranchVerificationPolicy {
-  const fileState = (
-    result: WorkflowFileReadResult
-  ): "present" | "absent" | "unreadable" => {
-    if (typeof result.content === "string" && result.content.trim())
-      return "present";
-    return result.status === 404 ? "absent" : "unreadable";
-  };
-  const legacyDeployState = fileState(input.legacyDeploy);
-  if (legacyDeployState === "present") {
-    return { state: "disabled", reason: "legacy-deploy-present" };
-  }
-  if (legacyDeployState === "unreadable") {
-    return { state: "disabled", reason: "legacy-deploy-unreadable" };
-  }
-  const verifyState = fileState(input.verify);
-  if (verifyState === "unreadable") {
-    return { state: "disabled", reason: "verify-unreadable" };
-  }
-  const dispatcherState = fileState(input.dispatcher);
-  if (dispatcherState === "unreadable") {
-    return { state: "disabled", reason: "dispatcher-unreadable" };
-  }
-  if (dispatcherState === "present") {
-    try {
-      const parsed: unknown = parseYaml(input.dispatcher.content || "");
-      if (
-        !parsed ||
-        typeof parsed !== "object" ||
-        Array.isArray(parsed) ||
-        !("on" in parsed) ||
-        !parsed.on ||
-        typeof parsed.on !== "object" ||
-        Array.isArray(parsed.on)
-      ) {
-        return { state: "disabled", reason: "dispatcher-unreadable" };
-      }
-      if (Object.prototype.hasOwnProperty.call(parsed.on, "workflow_run")) {
-        return { state: "disabled", reason: "dispatcher-legacy-chain" };
-      }
-    } catch {
-      return { state: "disabled", reason: "dispatcher-unreadable" };
-    }
-  }
-  if (verifyState === "present") {
-    return { state: "disabled", reason: "verify-present" };
-  }
-  return { state: "enabled" };
+  return setupAutomaticBranchVerificationPolicy(input, parseYaml);
 }
 
 export function automaticBranchVerificationPolicyMessage(
@@ -119,104 +52,6 @@ export function automaticBranchVerificationPolicyMessage(
   if (policy.reason === "legacy-deploy-present")
     return "The default branch still contains the legacy deploy workflow, which can auto-run after credential verification.";
   return "Radius could not safely confirm that the default branch's legacy deploy workflow is absent.";
-}
-
-export async function planCredentialVerification({
-  targetRepo,
-  defaultBranch,
-  prState,
-  pullRequestUrl = "",
-  verifyWorkflowPath = ".github/workflows/radius-verify-credentials.yml",
-  dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
-  automaticPushEnabled = false,
-  branchVerificationAllowed = true,
-  fetchFile
-}: {
-  targetRepo: string;
-  defaultBranch: string;
-  prState: PullRequestState | null;
-  pullRequestUrl?: string;
-  verifyWorkflowPath?: string;
-  dispatcherWorkflowPath?: string;
-  automaticPushEnabled?: boolean;
-  branchVerificationAllowed?: boolean;
-  fetchFile: FetchFile;
-}): Promise<CredentialVerificationPlan> {
-  if (!prState) {
-    // The dispatch runs against the default branch here, so the workflow that
-    // will validate the marker input is the copy on that branch. Assuming
-    // support would send `-f radius_operation` to a workflow that may not
-    // declare it, and GitHub answers that with a 422 the journal reads as a
-    // conclusive refusal — failing setup with a message about the dispatch
-    // rather than the template.
-    const directWorkflow = await fetchFile(
-      targetRepo,
-      verifyWorkflowPath,
-      defaultBranch
-    );
-    return {
-      shouldDispatch: true,
-      trigger: "workflow_dispatch",
-      ref: defaultBranch,
-      defaultBranch,
-      pullRequestUrl: "",
-      skipReason: "",
-      supportsOperationMarker: hasVerificationOperationMarker(directWorkflow)
-    };
-  }
-
-  if (automaticPushEnabled) {
-    return {
-      shouldDispatch: false,
-      trigger: "push",
-      ref: prState.branch,
-      defaultBranch,
-      pullRequestUrl: "",
-      skipReason: "",
-      supportsOperationMarker: true
-    };
-  }
-
-  // `verifyExists` and `dispatcherChains` are questions about the default
-  // branch: whether the workflow has landed, and whether merging would chain a
-  // deploy off it. Marker support is a question about the ref the dispatch
-  // actually runs at, because GitHub validates `workflow_dispatch` inputs
-  // there — and that ref is the branch this request just committed to.
-  const [verifyWorkflow, dispatcherWorkflow, dispatchRefWorkflow] =
-    await Promise.all([
-      fetchFile(targetRepo, verifyWorkflowPath, defaultBranch),
-      fetchFile(targetRepo, dispatcherWorkflowPath, defaultBranch),
-      prState.branch && prState.branch !== defaultBranch ?
-        fetchFile(targetRepo, verifyWorkflowPath, prState.branch)
-      : Promise.resolve(null)
-    ]);
-  const verifyExists = verifyWorkflow !== null && verifyWorkflow !== undefined;
-  const dispatcherChains = hasWorkflowRunTrigger(dispatcherWorkflow);
-
-  let skipReason = "";
-  if (!verifyExists) {
-    skipReason = "the verify workflow is not on the default branch yet";
-  } else if (dispatcherChains) {
-    skipReason = `the deploy workflow on "${defaultBranch}" still auto-runs after verification; merge the pull request to remove that deployment trigger before retrying verification`;
-  } else if (!branchVerificationAllowed) {
-    skipReason =
-      "default-branch workflow safety could not be established for setup-branch verification";
-  }
-
-  const shouldDispatch =
-    branchVerificationAllowed && verifyExists && !dispatcherChains;
-  return {
-    shouldDispatch,
-    trigger: shouldDispatch ? "workflow_dispatch" : "none",
-    ref: prState.branch,
-    defaultBranch,
-    dispatcherChains,
-    pullRequestUrl: shouldDispatch ? "" : pullRequestUrl,
-    skipReason,
-    supportsOperationMarker: hasVerificationOperationMarker(
-      dispatchRefWorkflow ?? verifyWorkflow
-    )
-  };
 }
 
 export function buildVerifyWorkflowDispatchArgs({

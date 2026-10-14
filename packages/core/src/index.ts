@@ -11,6 +11,49 @@
 // exported from their own module and out of this file.
 
 export { redactCredentials } from "./credential-redaction.js";
+export { runSetupCoordinator } from "./setup-coordinator.js";
+export type {
+  SetupCoordinatorTarget,
+  SetupCoordinatorOperation,
+  SetupCoordinatorStageResult,
+  SetupCoordinatorFailure,
+  SetupCoordinatorEvent,
+  SetupCoordinatorPorts
+} from "./setup-coordinator.js";
+export {
+  ensureGitHubEnvironment,
+  GitHubEnvironmentEnsureError,
+  GitHubEnvironmentEnsureCancelled,
+  parseEnvironmentProviderId,
+  readEnsuredGitHubEnvironment
+} from "./setup-github-environment.js";
+export type {
+  EnsureGitHubEnvironmentInput,
+  GitHubEnvironmentCommandResult,
+  GitHubEnvironmentReadResult,
+  EnsuredGitHubEnvironment,
+  GitHubEnvironmentCreatedCandidate,
+  GitHubEnvironmentResolutionRecord,
+  GitHubEnvironmentRecoveryPort
+} from "./setup-github-environment.js";
+export {
+  proveGitHubEnvironmentCreated,
+  type GitHubEnvironmentCreationEvidence,
+  type GitHubEnvironmentCreationProof,
+  type GitHubEnvironmentPreflight
+} from "./setup-github-environment-provenance.js";
+
+export {
+  applySetupProviderConfiguration,
+  azureRoleScope,
+  cloudCredentialsComplete,
+  setupProviderCredentialStatus
+} from "./setup-provider-configuration.js";
+export type {
+  SetupProviderConfigurationEvent,
+  SetupProviderCredentialPorts,
+  SetupProviderCredentialStatus
+} from "./setup-provider-configuration.js";
 
 export { admitSetupOperation } from "./setup-admission.js";
 export type {
@@ -226,3 +269,44 @@ export type {
   WorkflowProtectionEvidence,
   WorkflowPendingEnvironment
 } from "./workflow-protection.js";
+
+export * from "./setup-azure-continuation.js";
+
+export * from "./setup-azure-contracts.js";
+export * from "./setup-azure-events.js";
+export * from "./setup-azure-recovery.js";
+export {
+  azureRetryDelayMs,
+  buildRoleAssignmentArgs,
+  federatedCredentialIdFrom,
+  findFederatedCredentialNameCollision,
+  isReplicationLagError,
+  isRetryableAzureReadFailure,
+  pickAksResourceGroup,
+  readFederatedCredentialId
+} from "./setup-azure-reads.js";
+export * from "./setup-azure-service-principal.js";
+export * from "./setup-azure-application.js";
+export * from "./setup-azure-credentials.js";
+export * from "./setup-azure-account.js";
+export * from "./setup-azure.js";
+export * from "./setup-github-preflight.js";
+
+export * from "./setup-workflow-committer.js";
+export * from "./setup-workflow-contracts.js";
+export * from "./setup-workflow-recovery.js";
+export * from "./setup-workflow-scope.js";
+export * from "./setup-recovery-error.js";
+
+export {
+  publishSetupWorkflowFiles,
+  type SetupWorkflowPublicationEvent,
+  type SetupWorkflowCommitRecord
+} from "./setup-workflow-publication.js";
+
+export * from "./setup-environment-variable.js";
+export * from "./setup-environment.js";
+export * from "./setup-environment-contracts.js";
+
+export * from "./setup-verification-policy.js";
+export * from "./setup-verification-plan.js";

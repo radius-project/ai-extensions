@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createEnvironmentAccountContext,
+  type EnvironmentAccountContext
+} from "./runtime/environment-account-context.js";
+import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
+import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
+import {
   createInstanceRequestCoordinator,
   type EnvironmentOperationRunner
 } from "./server.js";
@@ -15,6 +21,7 @@ import {
   addLegacyStep,
   prepareProviderMutation,
   settleProviderMutation,
+  requestStop,
   STAGE_VERIFY
 } from "./operations.js";
 
@@ -33,7 +40,14 @@ async function unavailable(): Promise<never> {
 function coordinator(
   owner: EnvironmentExecutionOwner,
   instanceId: string,
-  runner?: EnvironmentOperationRunner
+  runner?: EnvironmentOperationRunner,
+  accountContext: EnvironmentAccountContext = createEnvironmentAccountContext(
+    "runtime",
+    {
+      createReadOnlyExecutor: unavailable,
+      withSelectedAccount: unavailable
+    }
+  )
 ) {
   return createInstanceRequestCoordinator(
     instanceId,
@@ -58,6 +72,7 @@ function coordinator(
     },
     {
       executionOwner: owner,
+      accountContext,
       servers: new Map(),
       environmentOperationRunner: runner
     }
@@ -91,6 +106,128 @@ afterEach(() => {
 });
 
 describe("production coordinator scheduling scopes", () => {
+  it("requires an explicit shared account context", () => {
+    const dependencies = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: unavailable,
+        withSelectedAccount: unavailable
+      }),
+      servers: new Map()
+    };
+    Reflect.deleteProperty(dependencies, "accountContext");
+    expect(() =>
+      createInstanceRequestCoordinator(
+        "panel",
+        () => "",
+        {
+          deleteRadiusEnvironment: unavailable,
+          runAz: unavailable,
+          readAzureIdentity: unavailable,
+          deleteGitHubEnvironment: unavailable,
+          deleteStatePackage: unavailable,
+          withCredentialProvenanceLock: (work) => work(),
+          readCredentialProvenance: () => [],
+          removeCredentialProvenance: unavailable,
+          clearEnvironmentCredentialProvenance: unavailable,
+          persist: unavailable,
+          errorMessage: String,
+          log: () => {}
+        },
+        dependencies
+      )
+    ).toThrow("Missing request coordinator dependency: accountContext");
+  });
+
+  it("leases setup under the runtime key and saved account before honoring a stop", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const op = operation();
+    op.context.githubLogin = "saved-account";
+    op.request = { github: { login: "new-panel-account" } };
+    requestStop(op);
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      requiresKeyringSwitch: false
+    });
+    const accountCoordinator = createGitHubAccountCoordinator({
+      createExecutor: async (login) => {
+        expect(login).toBe("saved-account");
+        return executor;
+      },
+      getActiveKeyringLogin: async () => "original",
+      switchKeyringAccount: unavailable,
+      resetIdentityCache: () => {}
+    });
+    const lease = vi.spyOn(accountCoordinator, "withSelectedAccount");
+    const context = createEnvironmentAccountContext(
+      "runtime",
+      accountCoordinator
+    );
+    const registered = vi.spyOn(context, "registerExecutor");
+    coordinator(
+      owner,
+      "panel",
+      undefined,
+      context
+    ).scheduleEnvironmentOperation(op);
+    await settled(owner, "panel");
+    expect(lease).toHaveBeenCalledExactlyOnceWith(
+      "saved-account",
+      { ownerKey: "runtime", operationId: op.operationId },
+      expect.any(Function),
+      30000
+    );
+    expect(registered).toHaveBeenCalledExactlyOnceWith(
+      op.operationId,
+      executor
+    );
+    expect(context.getExecutor(op.operationId)).toBeUndefined();
+    expect(op.state).toBe("cancelled");
+  });
+
+  it.each([false, true])(
+    "keeps a recovered verification's shared executor until transport settles (failure=%s)",
+    async (failure) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation();
+      op.currentStage = STAGE_VERIFY;
+      op.recoveryState = "verification_pending";
+      op.context.githubLogin = "saved-account";
+      op.verification = { runId: "17", dispatchedAt: Date.now() };
+      const executor = successfulSelectedGhExecutor({ login: "saved-account" });
+      const createExecutor = vi.fn(async () => executor);
+      const context = createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: createExecutor,
+        withSelectedAccount: unavailable
+      });
+      const gate = deferred();
+      const entered = deferred();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          entered.resolve();
+          await gate.promise;
+          if (failure) throw new Error("verification unavailable");
+          return Response.json({ state: "success" });
+        })
+      );
+      const first = coordinator(owner, "panel", undefined, context);
+      const second = coordinator(owner, "reopened", undefined, context);
+      first.startRecoveredTasks();
+      try {
+        await entered.promise;
+        second.startRecoveredTasks();
+        expect(createExecutor).toHaveBeenCalledExactlyOnceWith("saved-account");
+        expect(context.getExecutor(op.operationId)).toBe(executor);
+      } finally {
+        gate.resolve();
+        await settled(owner, "panel");
+      }
+      expect(context.getExecutor(op.operationId)).toBeUndefined();
+      if (failure) expect(op.failure.message).toBe("verification unavailable");
+    }
+  );
+
   it.each(["missing", "terminal"] as const)(
     "releases a failed task whose operation is %s without overwriting a verdict",
     async (state) => {

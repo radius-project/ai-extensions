@@ -64,6 +64,7 @@ import {
   preflightRepoAdmin
 } from "./server.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
+import { createEnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
@@ -6472,7 +6473,18 @@ describe("environment deletion session reporting coordinator", () => {
           error instanceof Error ? error.message : String(error),
         log
       },
-      { executionOwner, servers: new Map() }
+      {
+        executionOwner,
+        accountContext: createEnvironmentAccountContext("runtime", {
+          createReadOnlyExecutor: async () => {
+            throw new Error("Unexpected account read during deletion");
+          },
+          withSelectedAccount: async () => {
+            throw new Error("Unexpected account lease during deletion");
+          }
+        }),
+        servers: new Map()
+      }
     );
     const settled = new Promise<void>((resolve) => {
       let stop = (): void => {};

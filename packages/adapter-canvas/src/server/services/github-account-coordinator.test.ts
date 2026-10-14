@@ -103,7 +103,7 @@ describe("GitHub account coordinator", () => {
       );
       const result = await coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => "done"
       );
       expect(result).toMatchObject({
@@ -124,7 +124,7 @@ describe("GitHub account coordinator", () => {
 
     const result = await coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "panel", operationId: "operation-1" },
+      { ownerKey: "runtime", operationId: "operation-1" },
       async () => {
         events.push("work");
         return "done";
@@ -177,7 +177,7 @@ describe("GitHub account coordinator", () => {
 
     const result = await coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "panel" },
+      { ownerKey: "runtime" },
       async () => {
         activeLogin = "external";
         return "done";
@@ -205,7 +205,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => {
           throw failure;
         }
@@ -231,7 +231,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => {
           throw new Error("setup failed");
         }
@@ -259,14 +259,14 @@ describe("GitHub account coordinator", () => {
 
     const first = await coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "one" },
+      { ownerKey: "one" },
       async () => "done"
     );
     expect(first.restoration.state).toBe("failed");
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "two" },
+        { ownerKey: "two" },
         async () => "never"
       )
     ).rejects.toThrow("cannot safely change GitHub CLI accounts");
@@ -276,7 +276,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "three" },
+        { ownerKey: "three" },
         async () => "recovered"
       )
     ).resolves.toMatchObject({ value: "recovered" });
@@ -306,7 +306,7 @@ describe("GitHub account coordinator", () => {
     });
     const first = coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "one" },
+      { ownerKey: "one" },
       async () => {
         enteredWork();
         await workGate;
@@ -316,7 +316,7 @@ describe("GitHub account coordinator", () => {
     await workEntered;
     const second = coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "two" },
+      { ownerKey: "two" },
       async () => "second"
     );
 
@@ -339,7 +339,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => "never"
       )
     ).rejects.toThrow("could not determine the original");
@@ -358,7 +358,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => {
           ran = true;
           return "never";
@@ -397,8 +397,8 @@ describe("GitHub account coordinator", () => {
     };
 
     const runs = [
-      coordinator.withSelectedAccount("selected", { instanceId: "one" }, work),
-      coordinator.withSelectedAccount("selected", { instanceId: "two" }, work)
+      coordinator.withSelectedAccount("selected", { ownerKey: "one" }, work),
+      coordinator.withSelectedAccount("selected", { ownerKey: "two" }, work)
     ];
     await entered;
     releaseFirst();
@@ -431,7 +431,7 @@ describe("GitHub account coordinator", () => {
     });
     const first = coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "one" },
+      { ownerKey: "one" },
       async () => {
         firstEntered();
         await firstGate;
@@ -441,7 +441,7 @@ describe("GitHub account coordinator", () => {
     await entered;
     const second = coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "two" },
+      { ownerKey: "two" },
       async () => "never",
       100
     );
