@@ -57,9 +57,11 @@ type Script = Record<string, AwsCommandResult>;
 function fakeAws(script: Script) {
   const calls: string[][] = [];
   const steps: string[] = [];
+  const sleeps: number[] = [];
   return {
     calls,
     steps,
+    sleeps,
     ports: {
       async runAws(args: string[]) {
         calls.push(args);
@@ -70,6 +72,9 @@ function fakeAws(script: Script) {
       },
       step(text: string) {
         steps.push(text);
+      },
+      async sleep(milliseconds: number) {
+        sleeps.push(milliseconds);
       }
     },
     find(command: string) {
@@ -304,6 +309,55 @@ describe("setupAwsDeployIdentity", () => {
         "The signed-in AWS identity is not permitted to create IAM roles."
       )
     });
+  });
+
+  it("retries the access entry while EKS cannot see the new role yet", async () => {
+    const aws = fakeAws(happyPath);
+    let attempts = 0;
+    const runAws = aws.ports.runAws;
+    aws.ports.runAws = async (args: string[]) => {
+      if (args[1] === "create-access-entry" && attempts++ < 2) {
+        return fail(
+          "An error occurred (InvalidParameterException) when calling the CreateAccessEntry operation: The specified principalArn is invalid: invalid principal"
+        );
+      }
+      return runAws(args);
+    };
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({ ok: true, roleCreated: true });
+    expect(aws.sleeps).toEqual([2000, 4000]);
+    expect(aws.steps).toContain(
+      `ℹ️ EKS does not see role ${ROLE} yet. Retrying in 2s.`
+    );
+  });
+
+  it("gives up after the last retry and names what it created", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "eks create-access-entry": fail(
+        "InvalidParameterException: invalid principal"
+      )
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-access-entry-failed",
+      created: [`IAM role ${ROLE}`, `policy radius-deploy-dev on ${ROLE}`]
+    });
+    expect(aws.sleeps).toEqual([2000, 4000, 8000, 15000, 30000]);
+  });
+
+  it("does not retry other access entry failures", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "eks create-access-entry": fail("AccessDeniedException")
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-access-entry-failed"
+    });
+    expect(aws.sleeps).toEqual([]);
   });
 
   it("names what it created when a later step fails", async () => {

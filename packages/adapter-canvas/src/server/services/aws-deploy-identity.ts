@@ -39,7 +39,13 @@ export interface AwsDeployIdentityPorts {
   runAws(args: string[]): Promise<AwsCommandResult>;
   // Report one progress line under `Authorize deploy identity`.
   step(text: string): void;
+  sleep(milliseconds: number): Promise<void>;
 }
+
+// A role IAM just created takes a few seconds to become visible to EKS, which
+// rejects it meanwhile as an invalid principal. Retry that one answer only.
+export const ACCESS_ENTRY_RETRY_DELAYS_MS = [2000, 4000, 8000, 15000, 30000];
+const PRINCIPAL_NOT_YET_VISIBLE = /InvalidParameterException/;
 
 export interface AwsDeployIdentityRequest {
   repo: string;
@@ -393,7 +399,7 @@ export async function setupAwsDeployIdentity(
     `✅ Attached deploy permission policy ${policyName}, limited to ${region}.`
   );
 
-  const createEntry = await ports.runAws([
+  const createEntryArgs = [
     "eks",
     "create-access-entry",
     "--cluster-name",
@@ -403,7 +409,21 @@ export async function setupAwsDeployIdentity(
     "--type",
     "STANDARD",
     ...regionArgs
-  ]);
+  ];
+  let createEntry = await ports.runAws(createEntryArgs);
+  for (const delay of ACCESS_ENTRY_RETRY_DELAYS_MS) {
+    if (
+      succeeded(createEntry) ||
+      !PRINCIPAL_NOT_YET_VISIBLE.test(createEntry.stderr)
+    ) {
+      break;
+    }
+    ports.step(
+      `ℹ️ EKS does not see role ${roleName} yet. Retrying in ${delay / 1000}s.`
+    );
+    await ports.sleep(delay);
+    createEntry = await ports.runAws(createEntryArgs);
+  }
   if (!succeeded(createEntry) && !RESOURCE_IN_USE.test(createEntry.stderr)) {
     return fail(
       "aws-access-entry-failed",

@@ -99,7 +99,7 @@ const VERIFICATION_WORKFLOW_STATES = new Set([
   "cancelling",
   "unknown"
 ]);
-const PROVIDERS = new Set(["azure"]);
+const PROVIDERS = new Set(["azure", "aws"]);
 const OPERATION_ID =
   /^op_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const PRODUCT_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/u;

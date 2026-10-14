@@ -602,7 +602,9 @@ async function runAwsDeployIdentitySetup(
       runAws: (args) => runCliCommand("aws", args, 60000),
       step: (text) => {
         addLegacyStep(operation, text, STAGE_AUTHORIZE_IDENTITY);
-      }
+      },
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds))
     }
   );
   await operations.persist();
