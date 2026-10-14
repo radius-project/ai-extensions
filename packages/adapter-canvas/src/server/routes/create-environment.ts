@@ -263,7 +263,20 @@ export interface CreateEnvironmentDependencies
   now(): number;
 }
 
+import { runSetupHttpHandler } from "./setup-http-failure.js";
+
 export async function handleCreateEnvironment(
+  context: CanvasRequestContext,
+  dependencies: CreateEnvironmentDependencies
+): Promise<void> {
+  await runSetupHttpHandler(
+    context,
+    () => runCreateEnvironmentRoute(context, dependencies),
+    dependencies.reportOperationDiagnostic
+  );
+}
+
+async function runCreateEnvironmentRoute(
   context: CanvasRequestContext,
   dependencies: CreateEnvironmentDependencies
 ): Promise<void> {
@@ -288,6 +301,7 @@ export async function handleCreateEnvironment(
   // Declared out here so the generic catch below can close it rather than
   // discarding everything the route had learned.
   let op: CreateEnvironmentOperation | null = null;
+  let finalizationStarted = false;
   let steps: string[] = [];
   let deleteGitHubEnvironmentRunner:
     ((args: string[]) => Promise<unknown>) | null = null;
@@ -356,6 +370,7 @@ export async function handleCreateEnvironment(
     ): Promise<"failed" | "stopped"> => {
       if (!(await stopBoundary("before-setup-failure-cleanup")))
         return "stopped";
+      finalizationStarted = true;
       const failure = await dependencies.finalizeSetupFailure(operation, {
         ...input,
         steps,
@@ -431,6 +446,7 @@ export async function handleCreateEnvironment(
       steps
     });
   } catch (e) {
+    if (finalizationStarted) throw e;
     // Reconciliation still owns this operation and it is not terminal. A stop
     // recorded now is honored by the reconciling pass at its own boundary;
     // ending the operation here would strand the journal entry unreconciled.
