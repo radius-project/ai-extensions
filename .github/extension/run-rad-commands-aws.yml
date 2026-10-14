@@ -263,7 +263,27 @@ jobs:
 
       - name: Create Radius environment and deploy provider recipe pack
         id: provider-setup
+        env:
+          # Read from the environment rather than interpolated into the shell
+          # source. RADIUS_SUBNET_IDS is a comma-separated list; a JSON array
+          # is accepted too.
+          RADIUS_VPC_ID: ${{ vars.RADIUS_VPC_ID }}
+          RADIUS_SUBNET_IDS: ${{ vars.RADIUS_SUBNET_IDS }}
         run: |
+          # The AWS recipes jsondecode subnetIds, so pass them as a JSON array.
+          if printf '%s' "$RADIUS_SUBNET_IDS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            SUBNET_IDS_JSON=$(printf '%s' "$RADIUS_SUBNET_IDS" | jq -c '[.[] | tostring]')
+          else
+            SUBNET_IDS_JSON=$(printf '%s' "$RADIUS_SUBNET_IDS" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+          fi
+          if ! printf '%s' "$RADIUS_VPC_ID" | grep -Eq '^vpc-[0-9a-f]+$'; then
+            echo "::error::RADIUS_VPC_ID \"$RADIUS_VPC_ID\" is not a VPC ID." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$SUBNET_IDS_JSON" | jq -e 'length > 0 and all(.[]; test("^subnet-[0-9a-f]+$"))' >/dev/null; then
+            echo "::error::RADIUS_SUBNET_IDS must list subnet IDs such as subnet-0abc,subnet-0def." >&2
+            exit 1
+          fi
           # load-contrib-catalog exports the catalog and generic accessors from
           # the same Radius ref as this generated workflow.
           source "$RADIUS_CONTRIB_CATALOG_HELPER"
@@ -300,8 +320,8 @@ jobs:
             kind: 'terraform'
             source: '$MYSQL_SOURCE'
             parameters: {
-              vpcId: '${{ vars.RADIUS_VPC_ID }}'
-              subnetIds: '${{ vars.RADIUS_SUBNET_IDS }}'
+              vpcId: '$RADIUS_VPC_ID'
+              subnetIds: '$SUBNET_IDS_JSON'
             }
           }
           EOF
