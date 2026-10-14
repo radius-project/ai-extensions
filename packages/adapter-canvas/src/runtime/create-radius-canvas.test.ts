@@ -684,8 +684,10 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
       releaseFirst = resolve;
     });
     const { canvas, deps } = setup();
-    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
-    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+    vi.mocked(deps.executionOwner.hasActiveEnvironmentTasks).mockReturnValue(
+      true
+    );
+    vi.mocked(deps.executionOwner.onEnvironmentTasksSettled).mockImplementation(
       (_instanceId, listener) => {
         settled = listener;
         return vi.fn();
@@ -796,8 +798,10 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
   it("defers close until the last server-owned environment task settles", async () => {
     const { canvas, deps } = setup();
     let settled: (() => void) | undefined;
-    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
-    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+    vi.mocked(deps.executionOwner.hasActiveEnvironmentTasks).mockReturnValue(
+      true
+    );
+    vi.mocked(deps.executionOwner.onEnvironmentTasksSettled).mockImplementation(
       (_instanceId, listener) => {
         settled = listener;
         return vi.fn();
@@ -808,10 +812,10 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     const closeSpy = entry.server.close as unknown as ReturnType<typeof vi.fn>;
 
     await canvas.onClose(ctx("radius-panel"));
-    expect(deps.operations.hasActiveEnvironmentTasks).toHaveBeenCalledWith(
+    expect(deps.executionOwner.hasActiveEnvironmentTasks).toHaveBeenCalledWith(
       "radius-panel"
     );
-    expect(deps.operations.onEnvironmentTasksSettled).toHaveBeenCalledWith(
+    expect(deps.executionOwner.onEnvironmentTasksSettled).toHaveBeenCalledWith(
       "radius-panel",
       expect.any(Function)
     );
@@ -826,8 +830,10 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
   it("reports a failed physical stop after deferred environment work settles", async () => {
     const { canvas, deps } = setup();
     let settled: (() => void) | undefined;
-    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
-    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+    vi.mocked(deps.executionOwner.hasActiveEnvironmentTasks).mockReturnValue(
+      true
+    );
+    vi.mocked(deps.executionOwner.onEnvironmentTasksSettled).mockImplementation(
       (_id, listener) => {
         settled = listener;
         return vi.fn();
@@ -851,8 +857,10 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
   it("cancels a deferred close when the same instance reopens", async () => {
     const { canvas, deps } = setup();
     let settled: (() => void) | undefined;
-    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(true);
-    vi.mocked(deps.operations.onEnvironmentTasksSettled).mockImplementation(
+    vi.mocked(deps.executionOwner.hasActiveEnvironmentTasks).mockReturnValue(
+      true
+    );
+    vi.mocked(deps.executionOwner.onEnvironmentTasksSettled).mockImplementation(
       (_instanceId, listener) => {
         settled = listener;
         return vi.fn();
@@ -872,7 +880,7 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
 
   it("does not defer the live instance for stale work attributed to another id", async () => {
     const { canvas, deps } = setup();
-    vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockImplementation(
+    vi.mocked(deps.executionOwner.hasActiveEnvironmentTasks).mockImplementation(
       (instanceId) => instanceId === "panel-b"
     );
     await canvas.open(ctx("panel-a", { page: "environment" }));
@@ -882,7 +890,9 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     await canvas.onClose(ctx("panel-a"));
 
     expect(closeSpy).toHaveBeenCalledTimes(1);
-    expect(deps.operations.onEnvironmentTasksSettled).not.toHaveBeenCalled();
+    expect(
+      deps.executionOwner.onEnvironmentTasksSettled
+    ).not.toHaveBeenCalled();
   });
 
   it("force-closes a deferred server after the supported operation lifetime", async () => {
@@ -890,10 +900,10 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     try {
       const { canvas, deps } = setup();
       const stopListening = vi.fn();
-      vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockReturnValue(
+      vi.mocked(deps.executionOwner.hasActiveEnvironmentTasks).mockReturnValue(
         true
       );
-      vi.mocked(deps.operations.onEnvironmentTasksSettled).mockReturnValue(
+      vi.mocked(deps.executionOwner.onEnvironmentTasksSettled).mockReturnValue(
         stopListening
       );
       await canvas.open(ctx("radius-panel", { page: "environment" }));

@@ -900,7 +900,7 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
         });
       } else {
         vi.mocked(
-          deps.operations.markEnvironmentInstanceShuttingDown
+          deps.executionOwner.markEnvironmentInstanceShuttingDown
         ).mockImplementationOnce(() => {
           throw error;
         });
@@ -941,10 +941,10 @@ describe("RU-18: shutdown is idempotent and closes every server exactly once", (
 
     await ext.shutdown("SIGTERM");
     expect(
-      deps.operations.markEnvironmentInstanceShuttingDown
+      deps.executionOwner.markEnvironmentInstanceShuttingDown
     ).toHaveBeenCalledWith("panel-a");
     expect(
-      deps.operations.markEnvironmentInstanceShuttingDown
+      deps.executionOwner.markEnvironmentInstanceShuttingDown
     ).toHaveBeenCalledWith("panel-b");
     expect(closeA).toHaveBeenCalledTimes(1);
     expect(closeB).toHaveBeenCalledTimes(1);
