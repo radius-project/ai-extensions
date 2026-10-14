@@ -131,22 +131,10 @@ rad deploy "${WORK}/registry.bicep" --environment "${ENVIRONMENT}" \
   --parameters username="${REGISTRY_USERNAME}" \
   --parameters password="${REGISTRY_PASSWORD}"
 
-# Radius v0.61.1 reads the secret's backing Kubernetes Secret with the control
-# plane's own client, but the secrets recipe writes it to the target cluster.
-# Mirror it into the control-plane cluster (kubectl's default context) under the
-# same namespace and name so recipe registry auth can load it.
-echo "Mirroring registry credentials into the control-plane cluster..."
-(
-  umask 077
-  printf '%s' "${REGISTRY_USERNAME}" > "${WORK}/registry-username"
-  printf '%s' "${REGISTRY_PASSWORD}" > "${WORK}/registry-password"
-)
-kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-kubectl create secret generic "${SECRET_NAME}" --namespace "${NAMESPACE}" \
-  --from-file=username="${WORK}/registry-username" \
-  --from-file=password="${WORK}/registry-password" \
-  --dry-run=client -o yaml | kubectl apply -f -
-rm -f "${WORK}/registry-username" "${WORK}/registry-password"
+# Radius reads the registry secret from the control-plane cluster.
+NAMESPACE="${NAMESPACE}" SECRET_NAME="${SECRET_NAME}" \
+  REGISTRY_USERNAME="${REGISTRY_USERNAME}" REGISTRY_PASSWORD="${REGISTRY_PASSWORD}" \
+  bash "${ACTION_PATH}/../aws-recipe-registry-secret/mirror-registry-secret.sh"
 
 cat > "${WORK}/environment.bicep" <<EOF
 extension radius

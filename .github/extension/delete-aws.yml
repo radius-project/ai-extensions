@@ -221,6 +221,13 @@ jobs:
         with:
           namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
 
+      - name: Write recipe registry secret
+        uses: radius-project/ai-extensions/.github/extension/actions/aws-recipe-registry-secret@{{RADIUS_REF}}
+        with:
+          namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Register cloud credentials with Radius
         run: |
           # Register the AWS identity so the recipe deletes can authenticate,

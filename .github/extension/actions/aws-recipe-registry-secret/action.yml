@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+# Writes the AWS recipe registry credentials into the control-plane cluster so
+# Radius can load the radius-recipe-registry bicepSettings secret. Run it after
+# restore-state in any AWS workflow that deletes or deploys recipe resources.
+name: Radius - AWS recipe registry secret
+description: Write the AWS recipe registry credentials into the control-plane cluster.
+
+inputs:
+  namespace:
+    description: Kubernetes namespace of the Radius environment.
+    required: true
+  registry-username:
+    description: GHCR username Radius pulls the recipes with.
+    required: true
+  registry-password:
+    description: GHCR token Radius pulls the recipes with.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Write recipe registry secret
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+      run: bash "${GITHUB_ACTION_PATH}/mirror-registry-secret.sh"

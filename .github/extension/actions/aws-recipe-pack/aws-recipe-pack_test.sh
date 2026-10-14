@@ -179,8 +179,8 @@ test_deploys_aws_recipes_and_kubernetes_primitives() {
     if grep -q "fake-token" "${dir}/kubectl.log"; then
         fail "the registry password must not be passed on the kubectl command line"
     fi
-    [[ -z "$(find "${dir}" -name 'registry-password' -print -quit)" ]] \
-        || fail "the registry password file was left behind"
+    [[ -z "$(find "${dir}" -name 'aws-recipe-registry.*' -print -quit)" ]] \
+        || fail "the registry credential files were left behind"
 
     grep -q "namespace: 'todo-aws-dev'" "${dir}/capture/environment-0.bicep" \
         || fail "environment must use the requested namespace"
@@ -223,6 +223,35 @@ test_recipes_only_require_supplied_parameters() {
     done
 }
 
+# Every AWS workflow that restores state and then deletes recipe resources must
+# write the registry secret first, or Radius cannot load the recipe settings.
+test_delete_workflows_write_registry_secret() {
+    local workflow restore write delete
+    for workflow in delete-aws.yml delete-environment-aws.yml; do
+        workflow="${SCRIPT_DIR}/../../${workflow}"
+        restore=$(grep -n 'name: Restore Radius state' "${workflow}" | cut -d: -f1)
+        write=$(grep -n 'actions/aws-recipe-registry-secret@{{RADIUS_REF}}' "${workflow}" | cut -d: -f1 || true)
+        delete=$(grep -n 'name: Delete Radius resource' "${workflow}" | cut -d: -f1)
+        [[ -n "${restore}" && -n "${write}" && -n "${delete}" ]] \
+            || fail "$(basename "${workflow}"): registry secret step is missing"
+        ((restore < write && write < delete)) \
+            || fail "$(basename "${workflow}"): registry secret must be written after restore and before delete"
+    done
+}
+
+test_mirror_script_requires_inputs() {
+    local name
+    for name in NAMESPACE REGISTRY_USERNAME REGISTRY_PASSWORD; do
+        if env -u "${name}" PATH="${STUB_BIN}:${PATH}" KUBECTL_CALL_LOG="${TEST_ROOT}/unused.log" \
+            NAMESPACE=ns REGISTRY_USERNAME=u REGISTRY_PASSWORD=p "${name}=" \
+            bash "${SCRIPT_DIR}/../aws-recipe-registry-secret/mirror-registry-secret.sh" \
+            >/dev/null 2>&1; then
+            fail "mirror script ran without ${name}"
+        fi
+    done
+    [[ ! -s "${TEST_ROOT}/unused.log" ]] || fail "kubectl ran without required inputs"
+}
+
 test_deploys_aws_recipes_and_kubernetes_primitives
 test_accepts_json_array_subnets
 test_rejects_invalid_input bad-account "AWS_ACCOUNT_ID=12345" "is not a 12-digit account ID"
@@ -233,5 +262,7 @@ test_rejects_invalid_input empty-subnets "SUBNET_IDS=," "RADIUS_SUBNET_IDS must 
 test_rejects_invalid_input injected-subnet "SUBNET_IDS=subnet-0aa,'x'" "RADIUS_SUBNET_IDS must list subnet IDs"
 test_rejects_invalid_input upper-registry "RECIPE_REGISTRY=ghcr.io/Octo/app" "must be a lowercase ghcr.io path"
 test_recipes_only_require_supplied_parameters
+test_delete_workflows_write_registry_secret
+test_mirror_script_requires_inputs
 
 echo "aws-recipe-pack tests passed"
