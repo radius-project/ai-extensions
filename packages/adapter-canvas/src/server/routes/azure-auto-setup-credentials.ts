@@ -552,117 +552,165 @@ async function createFederatedCredentials({
       description: `Created by Radius operation ${workflow.operation.operationId}`
     });
     const path = dependencies.tempFile.createPath();
-    let result: AzureAutoSetupCommandResult;
+    let result: AzureAutoSetupCommandResult = {
+      code: 1,
+      stdout: "",
+      stderr:
+        "Microsoft Entra confirmed the federated credential was not created."
+    };
     try {
       dependencies.tempFile.write(path, contents);
-      const mutation =
-        await executeRecoverableMutation<AzureAutoSetupCommandResult>({
-          operation: workflow.operation,
-          kind: "azure_federated_credential.create",
-          target: credentialTarget,
-          persist: dependencies.operations.persist,
-          beforeMutation: () =>
-            stopBoundary(
-              `before-federated-credential-create:${credential.name}`
-            ),
-          mutate: () =>
-            runAz([
-              "ad",
-              "app",
-              "federated-credential",
-              "create",
-              "--id",
-              clientId,
-              "--parameters",
-              "@" + path,
-              "--query",
-              "{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences,description:description}",
-              "-o",
-              "json"
-            ]),
-          accept: (value) => value,
-          providerIdOf: (result) => federatedCredentialIdFrom(result.stdout),
-          reconcile: async () => {
-            const shown = await runAz([
-              "ad",
-              "app",
-              "federated-credential",
-              "show",
-              "--id",
-              clientId,
-              "--federated-credential-id",
-              credential.name,
-              "--query",
-              "{id:id,subject:subject,description:description}",
-              "-o",
-              "json"
-            ]);
-            if (shown.code !== 0 && shown.code !== "0") {
-              if (
-                /not found|does not exist/i.test(shown.stderr || shown.stdout)
-              ) {
-                return {
-                  state: "not_applied" as const,
-                  evidence:
-                    "Microsoft Entra confirmed the federated credential is absent."
-                };
+      for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
+        if (
+          providerMutationWillWrite(
+            workflow.operation,
+            "azure_federated_credential.create",
+            credentialTarget
+          ) &&
+          !(await stopBoundary(
+            `before-federated-credential-create:${credential.name}`
+          ))
+        )
+          return false;
+        const mutation =
+          await executeRecoverableMutation<AzureAutoSetupCommandResult>({
+            operation: workflow.operation,
+            kind: "azure_federated_credential.create",
+            target: credentialTarget,
+            persist: dependencies.operations.persist,
+            beforeMutation: () =>
+              stopBoundary(
+                `before-federated-credential-create:${credential.name}`
+              ),
+            mutate: () =>
+              runAz([
+                "ad",
+                "app",
+                "federated-credential",
+                "create",
+                "--id",
+                clientId,
+                "--parameters",
+                "@" + path,
+                "--query",
+                "{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences,description:description}",
+                "-o",
+                "json"
+              ]),
+            accept: (value) => value,
+            providerIdOf: (result) => federatedCredentialIdFrom(result.stdout),
+            reconcile: async () => {
+              const shown = await runAz([
+                "ad",
+                "app",
+                "federated-credential",
+                "show",
+                "--id",
+                clientId,
+                "--federated-credential-id",
+                credential.name,
+                "--query",
+                "{id:id,subject:subject,description:description}",
+                "-o",
+                "json"
+              ]);
+              if (shown.code !== 0 && shown.code !== "0") {
+                if (
+                  /not found|does not exist/i.test(shown.stderr || shown.stdout)
+                ) {
+                  return {
+                    state: "not_applied" as const,
+                    evidence:
+                      "Microsoft Entra confirmed the federated credential is absent."
+                  };
+                }
+                throw new Error(
+                  shown.stderr ||
+                    shown.stdout ||
+                    "The federated credential could not be read."
+                );
               }
-              throw new Error(
-                shown.stderr ||
-                  shown.stdout ||
-                  "The federated credential could not be read."
-              );
-            }
-            let actual: {
-              id?: unknown;
-              subject?: unknown;
-              description?: unknown;
-            };
-            try {
-              actual = JSON.parse(shown.stdout) as {
+              let actual: {
                 id?: unknown;
                 subject?: unknown;
                 description?: unknown;
               };
-            } catch {
-              throw new Error(
-                "Microsoft Entra returned unreadable federated credential state."
-              );
-            }
-            if (
-              actual.subject !== credential.subject ||
-              actual.description !==
-                `Created by Radius operation ${workflow.operation.operationId}`
-            ) {
+              try {
+                actual = JSON.parse(shown.stdout) as {
+                  id?: unknown;
+                  subject?: unknown;
+                  description?: unknown;
+                };
+              } catch {
+                throw new Error(
+                  "Microsoft Entra returned unreadable federated credential state."
+                );
+              }
+              if (
+                actual.subject !== credential.subject ||
+                actual.description !==
+                  `Created by Radius operation ${workflow.operation.operationId}`
+              ) {
+                return {
+                  state: "manual_required" as const,
+                  guidance:
+                    `Federated credential "${credential.name}" exists, but its subject or Radius operation provenance does not match. ` +
+                    "Radius will not overwrite or delete it."
+                };
+              }
               return {
-                state: "manual_required" as const,
-                guidance:
-                  `Federated credential "${credential.name}" exists, but its subject or Radius operation provenance does not match. ` +
-                  "Radius will not overwrite or delete it."
+                state: "applied" as const,
+                value: { code: 0, stdout: shown.stdout, stderr: "" },
+                evidence:
+                  "The credential name, subject, and Radius operation provenance matched."
               };
             }
-            return {
-              state: "applied" as const,
-              value: { code: 0, stdout: shown.stdout, stderr: "" },
-              evidence:
-                "The credential name, subject, and Radius operation provenance matched."
+          });
+        if (mutation.state === "cancelled") return false;
+        result =
+          mutation.state === "applied" ?
+            mutation.value
+          : mutation.result || {
+              code: 1,
+              stdout: "",
+              stderr:
+                "Microsoft Entra confirmed the federated credential was not created."
             };
-          }
-        });
-      if (mutation.state === "cancelled") return false;
-      result =
-        mutation.state === "applied" ?
-          mutation.value
-        : mutation.result || {
-            code: 1,
-            stdout: "",
-            stderr:
-              "Microsoft Entra confirmed the federated credential was not created."
-          };
+        const detail = result.stderr || result.stdout;
+        const permissionFailure =
+          /HTTP\s*(?:401|403)|Authorization|Authentication|Insufficient privileges/i.test(
+            detail
+          );
+        // A reconciled absence alone cannot authorize replay of a lost write.
+        if (
+          mutation.state !== "not_applied" ||
+          !mutation.result ||
+          permissionFailure ||
+          (!isReplicationLagError(detail) &&
+            !isRetryableAzureReadFailure(detail)) ||
+          attempt + 1 >= AZURE_PROPAGATION_ATTEMPTS
+        )
+          break;
+        if (
+          !(await checkpoint(
+            `after-federated-credential-create-attempt:${credential.name}`
+          )) ||
+          !(await stopBoundary(
+            `before-federated-credential-backoff:${credential.name}`
+          ))
+        )
+          return false;
+        const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
+        if (delay === null) break;
+        steps.push(
+          `Retrying federated credential "${credential.name}" after Azure propagation or throttling (attempt ${attempt + 2}/${AZURE_PROPAGATION_ATTEMPTS})...`
+        );
+        await dependencies.sleep(delay);
+      }
     } finally {
       dependencies.tempFile.remove(path);
     }
-    const created = result.code === 0;
+    const created = result.code === 0 || result.code === "0";
     if (created) {
       // Record rollback authority before live verification. If verification
       // fails, the operation must still remember the object it just created.
@@ -687,7 +735,7 @@ async function createFederatedCredentials({
       )
         return false;
     }
-    if (result.code !== 0) {
+    if (!created) {
       if (
         !(await checkpoint(
           `after-federated-credential-create-attempt:${credential.name}`
@@ -698,7 +746,7 @@ async function createFederatedCredentials({
         await fail(
           400,
           `Failed to create federated credential "${credential.name}": ` +
-            result.stderr,
+            (result.stderr || result.stdout),
           "federated-credential-failed",
           { steps, clientId, appName, azError: result.stderr }
         );

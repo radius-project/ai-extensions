@@ -23,6 +23,12 @@ export default defineConfig({
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
+        "packages/adapter-canvas/src/runtime/environment-execution-owner.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
         "packages/core/src/setup-*.ts": {
           statements: 100,
           branches: 100,

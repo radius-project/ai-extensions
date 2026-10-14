@@ -131,11 +131,13 @@ async function successfulSetup(
     requireSmrPrompt?: boolean;
     liveDrift?: "caller" | "oidc";
     publicResume?: boolean;
+    credentialCreateResults?: AzureAutoSetupCommandResult[];
   } = {}
 ) {
   const unmatchedCalls: string[] = [];
   const azCalls: string[] = [];
   const githubCalls: string[] = [];
+  const sleeps: number[] = [];
   const ownerObjectId =
     caller.type === "servicePrincipal" ? SP_OBJECT_ID : OBJECT_ID;
   let callerReads = 0;
@@ -271,6 +273,11 @@ async function successfulSetup(
       return { code: 0, stdout: "[]", stderr: "" };
     }
     if (line.includes("federated-credential create")) {
+      if (options.credentialCreateResults) {
+        const next = options.credentialCreateResults.shift();
+        if (!next) throw new Error("unexpected additional credential create");
+        return next;
+      }
       return { code: 0, stdout: "", stderr: "" };
     }
     if (line.includes("federated-credential show")) {
@@ -355,7 +362,9 @@ async function successfulSetup(
     finalizeSetupFailure: async (_setup, input) => {
       throw new Error(`unexpected setup failure: ${String(input.code)}`);
     },
-    sleep: async () => {}
+    sleep: async (delay) => {
+      sleeps.push(delay);
+    }
   });
   const operationRoutes =
     options.publicResume ?
@@ -440,6 +449,7 @@ async function successfulSetup(
     unmatchedCalls,
     azCalls,
     githubCalls,
+    sleeps,
     persistedOperation: () => persistedOperation,
     scheduledPersistedOperation: () => scheduledPersistedOperation,
     restorePersistedOperation: () => {
@@ -886,6 +896,70 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     );
     expect(unmatchedCalls).toEqual([]);
   });
+
+  it.each(["recovers", "exhausts"])(
+    "preserves the HTTP result when credential propagation %s",
+    async (outcome) => {
+      const rejection = {
+        code: 1,
+        stdout: "",
+        stderr:
+          "ERROR: Resource 'Application_app-object' does not exist or one of its queried reference-property objects are not present."
+      };
+      const setup = await successfulSetup(
+        true,
+        { type: "user" },
+        {
+          credentialCreateResults:
+            outcome === "recovers" ?
+              [
+                rejection,
+                { code: 0, stdout: "", stderr: "" },
+                { code: 0, stdout: "", stderr: "" }
+              ]
+            : Array.from({ length: 6 }, () => ({ ...rejection }))
+        }
+      );
+      setup.dependencies.finalizeSetupFailure = finalizer();
+      const response = await fetch(
+        `${setup.running.baseUrl}/api/azure-auto-setup`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Server-Owned": "token-a"
+          },
+          body: JSON.stringify(CREATE_BODY)
+        }
+      );
+
+      expect(response.status).toBe(outcome === "recovers" ? 200 : 400);
+      expect(await response.json()).toMatchObject(
+        outcome === "recovers" ?
+          { success: true, clientId: APP_ID, operationId: "op-http-create" }
+        : {
+            code: "federated-credential-failed",
+            error: expect.stringContaining(rejection.stderr)
+          }
+      );
+      expect(
+        setup.azCalls.filter((line) =>
+          line.includes("federated-credential create")
+        )
+      ).toHaveLength(outcome === "recovers" ? 3 : 6);
+      expect(setup.sleeps).toEqual(
+        outcome === "recovers" ? [2000] : [2000, 4000, 6000, 8000, 10000]
+      );
+      if (outcome === "exhausts") {
+        expect(
+          setup.azCalls.some((line) =>
+            line.startsWith("role assignment create ")
+          )
+        ).toBe(false);
+      }
+      expect(setup.unmatchedCalls).toEqual([]);
+    }
+  );
 
   it("restores the private SMR checkpoint and resumes at app creation", async () => {
     const setup = await successfulSetup(

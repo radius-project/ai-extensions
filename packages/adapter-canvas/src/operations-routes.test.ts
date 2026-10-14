@@ -4,11 +4,8 @@
 // on the record outliving the request that created it, so this exercises the
 // HTTP boundary rather than the module in isolation.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import {
-  getOrCreateServer,
-  onEnvironmentTasksSettled,
-  setEnvironmentOperationTestRunner
-} from "./server.js";
+import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
+import { createTestCanvasServerRuntime } from "../test/support/server/production-runtime.js";
 import {
   addLegacyStep,
   buildStages,
@@ -31,20 +28,27 @@ import {
 
 let baseUrl = "";
 let entry = null;
+let runnerOverride;
+const setEnvironmentOperationTestRunner = (runner) => {
+  runnerOverride = runner;
+};
+const { getOrCreateServer, stopServer, onEnvironmentTasksSettled } =
+  createTestCanvasServerRuntime({
+    executionOwner: createEnvironmentExecutionOwner(),
+    get environmentOperationRunner() {
+      return runnerOverride;
+    }
+  });
 
 beforeAll(async () => {
   entry = await getOrCreateServer("operations-routes-test", "environment");
   baseUrl = entry.baseUrl;
 });
 
-afterAll(() => {
+afterAll(async () => {
   setEnvironmentOperationTestRunner(null);
   operations.clear();
-  try {
-    entry?.server?.close();
-  } catch {
-    /* best-effort */
-  }
+  await stopServer("operations-routes-test", true);
 });
 
 async function postJson(path, body) {
