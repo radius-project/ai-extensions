@@ -677,10 +677,15 @@ async function createFederatedCredentials({
                 "Microsoft Entra confirmed the federated credential was not created."
             };
         const detail = result.stderr || result.stdout;
+        const permissionFailure =
+          /HTTP\s*(?:401|403)|Authorization|Authentication|Insufficient privileges/i.test(
+            detail
+          );
         // A reconciled absence alone cannot authorize replay of a lost write.
         if (
           mutation.state !== "not_applied" ||
           !mutation.result ||
+          permissionFailure ||
           (!isReplicationLagError(detail) &&
             !isRetryableAzureReadFailure(detail)) ||
           attempt + 1 >= AZURE_PROPAGATION_ATTEMPTS
