@@ -245,7 +245,7 @@ app_route_kinds() {
 environment_recipe_pack_ids_json() {
     local environment_json
     environment_json="$(
-        rad env show "${ENVIRONMENT_NAME}" --preview -o json
+        rad env show "${ENVIRONMENT_NAME}" -o json
     )" || fail "failed to inspect Radius environment ${ENVIRONMENT_NAME}"
     jq -sc '
       if length == 0 then

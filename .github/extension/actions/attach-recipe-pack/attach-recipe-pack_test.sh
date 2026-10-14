@@ -96,7 +96,7 @@ run_script success \
     PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
     ENV_JSON="{\"properties\":{\"recipePacks\":[\"${DEFAULT_PACK_ID}\",\"${CUSTOM_PACK_ID}\"]}}"
 assert_call \
-    "rad env update production --recipe-packs ${CUSTOM_PACK_ID},${PACK_ID} --preview"
+    "rad env update production --recipe-packs ${CUSTOM_PACK_ID},${PACK_ID}"
 assert_no_call "--recipe-packs ${DEFAULT_PACK_ID}"
 
 run_script success \
@@ -105,7 +105,7 @@ run_script success \
     PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
     ENV_JSON="{\"properties\":{\"recipePacks\":[\"${DEFAULT_PACK_ID}\"]}}"
 assert_call \
-    "rad env update production --recipe-packs ${DEFAULT_PACK_ID},${PACK_ID} --preview"
+    "rad env update production --recipe-packs ${DEFAULT_PACK_ID},${PACK_ID}"
 
 run_script success \
     ENVIRONMENT=production \
@@ -113,18 +113,18 @@ run_script success \
     PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
     ENV_JSON="{\"properties\":{\"recipePacks\":[\"${CUSTOM_PACK_ID}\"]}}"
 assert_call "rad recipe-pack show azure-avm -o json"
-assert_call "rad env show production --preview -o json"
+assert_call "rad env show production -o json"
 assert_call \
-    "rad env update production --recipe-packs ${CUSTOM_PACK_ID},${PACK_ID} --preview"
+    "rad env update production --recipe-packs ${CUSTOM_PACK_ID},${PACK_ID}"
 
 run_script success \
     ENVIRONMENT=production \
     RECIPE_PACK=azure-avm \
     PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
     ENV_JSON="{\"properties\":{\"recipePacks\":[\"${PACK_ID}\",\"${CUSTOM_PACK_ID}\",\"${PACK_ID}\"]}}"
-assert_call "rad env show production --preview -o json"
+assert_call "rad env show production -o json"
 assert_call \
-    "rad env update production --recipe-packs ${PACK_ID},${CUSTOM_PACK_ID} --preview"
+    "rad env update production --recipe-packs ${PACK_ID},${CUSTOM_PACK_ID}"
 
 run_script success \
     ENVIRONMENT=production \
@@ -132,7 +132,7 @@ run_script success \
     PACK_JSON="{\"id\":\"${PACK_ID}\"}"
 assert_call "rad recipe-pack show azure-avm -o json"
 assert_call "rad recipe-pack show custom -o json"
-assert_call "rad env update production --recipe-packs ${PACK_ID} --preview"
+assert_call "rad env update production --recipe-packs ${PACK_ID}"
 
 for empty_recipe_packs in \
     '{"properties":{}}' \
@@ -143,7 +143,7 @@ for empty_recipe_packs in \
         PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
         ENV_JSON="${empty_recipe_packs}"
     assert_call \
-        "rad env update production --recipe-packs ${PACK_ID} --preview"
+        "rad env update production --recipe-packs ${PACK_ID}"
 done
 
 run_script failure RECIPE_PACK=azure-avm PACK_JSON='{"id":"pack"}'
@@ -196,7 +196,7 @@ run_script failure \
     RECIPE_PACK=azure-avm \
     PACK_JSON='{"id":"pack"}' \
     ENV_SHOW_FAIL=true
-assert_call "rad env show production --preview -o json"
+assert_call "rad env show production -o json"
 assert_no_call "rad env update"
 
 for invalid_env_json in \
@@ -211,7 +211,7 @@ for invalid_env_json in \
         PACK_JSON='{"id":"pack"}' \
         ENV_JSON="${invalid_env_json}"
     assert_output "returned invalid recipe-pack data"
-    assert_call "rad env show production --preview -o json"
+    assert_call "rad env show production -o json"
     assert_no_call "rad env update"
 done
 
@@ -220,8 +220,8 @@ run_script failure \
     RECIPE_PACK=azure-avm \
     PACK_JSON='{"id":"pack"}' \
     UPDATE_FAIL=true
-assert_call "rad env show production --preview -o json"
-assert_call "rad env update production --recipe-packs pack --preview"
+assert_call "rad env show production -o json"
+assert_call "rad env update production --recipe-packs pack"
 
 for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
     create_line="$(

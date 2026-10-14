@@ -655,7 +655,7 @@ jq -nc '{
 }' >"${COMPILED}"
 run_action
 assert_success "nested module routes"
-assert_call "rad env show test --preview -o json"
+assert_call "rad env show test -o json"
 
 reset_case
 jq -nc '{

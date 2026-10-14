@@ -108,9 +108,20 @@ runs:
 
         # Map the resource type to its rad command. Only application and environment
         # are supported; anything else fails fast without touching the control plane.
+        # --yes bypasses the interactive confirmation prompt. `rad app delete` also
+        # needs --preview to select the Radius.Core implementation the deploy
+        # workflow provisions (without it the command dispatches to the legacy
+        # Applications.Core surface). `rad env delete` always targets Radius.Core
+        # and rejects --preview.
         case "$RESOURCE_TYPE" in
-          application) VERB=(app delete) ;;
-          environment) VERB=(env delete) ;;
+          application)
+            VERB=(app delete)
+            RAD_FLAGS=(--yes --preview)
+            ;;
+          environment)
+            VERB=(env delete)
+            RAD_FLAGS=(--yes)
+            ;;
           *)
             echo "Unsupported resource type: '$SAFE_TYPE' (expected 'application' or 'environment')." >&2
             OUTCOME="invalid_input"
@@ -130,29 +141,24 @@ runs:
           OIDC_REFRESH_PID=$!
         fi
 
-        # --yes bypasses the interactive confirmation prompt; --preview selects the
-        # Radius.Core implementation the deploy workflow provisions (without it the
-        # base command dispatches to the legacy, non-Radius.Core surface). --force is
-        # added only when the caller explicitly asked for it: it makes the control
-        # plane delete records stranded in a non-terminal provisioning state, which
-        # is the only escape from the 409 "target resource is in progress state"
-        # loop, at the cost of possibly orphaning the external resources they own.
-        RAD_ARGS=("${VERB[@]}" "$RESOURCE_NAME" --yes --preview)
-        RAD_FLAGS="--yes --preview"
+        # --force is added only when the caller explicitly asked for it: it makes
+        # the control plane delete records stranded in a non-terminal provisioning
+        # state, which is the only escape from the 409 "target resource is in
+        # progress state" loop, at the cost of possibly orphaning the external
+        # resources they own.
         if [ "$FORCED" = "true" ]; then
-          RAD_ARGS+=(--force)
-          RAD_FLAGS="$RAD_FLAGS --force"
+          RAD_FLAGS+=(--force)
           echo "Forcing the delete: resources stuck in a non-terminal state will be removed from Radius, and the external resources they created may be orphaned."
         fi
         # Keep the group label constant: RESOURCE_NAME is untrusted and a newline
         # or workflow-command-like text in it could corrupt log rendering or inject
         # workflow commands. The actual `rad` invocation below still carries the name.
-        echo "::group::rad ${VERB[*]} $RAD_FLAGS"
+        echo "::group::rad ${VERB[*]} ${RAD_FLAGS[*]}"
         # Relax -e only for the pipeline so a non-zero `rad` exit is captured via
         # PIPESTATUS and reported below, rather than aborting the step before we
         # can write the result artifact. -e is restored immediately after.
         set +e
-        rad "${RAD_ARGS[@]}" 2>&1 | tee "$OUTFILE"
+        rad "${VERB[@]}" "$RESOURCE_NAME" "${RAD_FLAGS[@]}" 2>&1 | tee "$OUTFILE"
         EXIT=${PIPESTATUS[0]}
         set -e
         echo "::endgroup::"
