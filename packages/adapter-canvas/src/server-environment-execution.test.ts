@@ -5,6 +5,7 @@ import {
 } from "./runtime/environment-account-context.js";
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
+import type { SetupServices } from "./server/services/setup-outcome.js";
 import {
   createInstanceRequestCoordinator,
   type EnvironmentOperationRunner
@@ -47,7 +48,11 @@ function coordinator(
       createReadOnlyExecutor: unavailable,
       withSelectedAccount: unavailable
     }
-  )
+  ),
+  setupServices: SetupServices = {
+    authorizeAzure: unavailable,
+    configureEnvironment: unavailable
+  }
 ) {
   return createInstanceRequestCoordinator(
     instanceId,
@@ -73,6 +78,7 @@ function coordinator(
     {
       executionOwner: owner,
       accountContext,
+      setupServices,
       servers: new Map(),
       environmentOperationRunner: runner
     }
@@ -106,6 +112,116 @@ afterEach(() => {
 });
 
 describe("production coordinator scheduling scopes", () => {
+  it.each(["authorizeAzure", "configureEnvironment"] as const)(
+    "requires the explicit %s service at construction",
+    (name) => {
+      const services: SetupServices = {
+        authorizeAzure: unavailable,
+        configureEnvironment: unavailable
+      };
+      Reflect.deleteProperty(services, name);
+      expect(() =>
+        coordinator(
+          createEnvironmentExecutionOwner(),
+          "panel",
+          undefined,
+          undefined,
+          services
+        )
+      ).toThrow(
+        `Missing request coordinator dependency: setupServices.${name}`
+      );
+    }
+  );
+
+  it.each(["before", "during"] as const)(
+    "refuses setup after shutdown %s a direct Azure invocation",
+    async (when) => {
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation();
+      op.context.githubLogin = "saved-account";
+      op.request = { needsAzureCredentials: true, azure: {}, environment: {} };
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api user")
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        if (
+          command === "api repos/fixture/app" ||
+          command === "api /repos/fixture/app"
+        )
+          return {
+            code: 0,
+            stdout: '{"full_name":"fixture/app","permissions":{"admin":true}}',
+            stderr: ""
+          };
+        if (command === "api /repos/fixture/app/environments/dev") {
+          if (when === "before")
+            owner.markEnvironmentInstanceShuttingDown("panel");
+          return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const context = createEnvironmentAccountContext(
+        "runtime",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => "original",
+          switchKeyringAccount: unavailable,
+          resetIdentityCache: () => {}
+        })
+      );
+      const entered = deferred();
+      const gate = deferred();
+      const authorizeAzure = vi.fn<SetupServices["authorizeAzure"]>(
+        async () => {
+          entered.resolve();
+          await gate.promise;
+          return {
+            kind: "completed",
+            status: 200,
+            body: { clientId: "completed-group" }
+          };
+        }
+      );
+      const configureEnvironment = vi.fn(unavailable);
+      const unregister = vi.spyOn(context, "unregisterExecutor");
+      const handler = coordinator(owner, "panel", undefined, context, {
+        authorizeAzure,
+        configureEnvironment
+      });
+      const done = settled(owner, "panel");
+      handler.scheduleEnvironmentOperation(op);
+      try {
+        if (when === "during") {
+          await Promise.race([entered.promise, done]);
+          expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
+          expect(authorizeAzure).toHaveBeenCalledOnce();
+          owner.markEnvironmentInstanceShuttingDown("panel");
+          expect(context.getExecutor(op.operationId)).toBe(executor);
+        }
+      } finally {
+        gate.resolve();
+        await done;
+      }
+      expect(authorizeAzure).toHaveBeenCalledTimes(when === "before" ? 0 : 1);
+      expect(configureEnvironment).not.toHaveBeenCalled();
+      expect(op.state).not.toBe("succeeded");
+      expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
+      expect(op.endedAt).toBeNull();
+      expect(context.getExecutor(op.operationId)).toBeUndefined();
+      expect(unregister).toHaveBeenCalledExactlyOnceWith(op.operationId);
+      expect(run.mock.calls.every(([args]) => !args.includes("--method"))).toBe(
+        true
+      );
+    }
+  );
+
   it("requires an explicit shared account context", () => {
     const dependencies = {
       executionOwner: createEnvironmentExecutionOwner(),
@@ -113,7 +229,11 @@ describe("production coordinator scheduling scopes", () => {
         createReadOnlyExecutor: unavailable,
         withSelectedAccount: unavailable
       }),
-      servers: new Map()
+      servers: new Map(),
+      setupServices: {
+        authorizeAzure: unavailable,
+        configureEnvironment: unavailable
+      }
     };
     Reflect.deleteProperty(dependencies, "accountContext");
     expect(() =>

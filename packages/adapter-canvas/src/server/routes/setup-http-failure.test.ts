@@ -18,26 +18,79 @@ afterEach(async () => {
   servers.clear();
 });
 
-async function invoke(work: (context: CanvasRequestContext) => Promise<void>) {
+async function invoke(
+  work: (context: CanvasRequestContext) => Promise<void>,
+  report?: () => void
+) {
   const diagnostics: { code: string; message: string }[] = [];
+  const settlements: Promise<unknown>[] = [];
   const server = createServer((request, response) => {
     const context = createRequestContext(request, response, "test", new Map());
-    void runSetupHttpHandler(
-      context,
-      () => work(context),
-      (value) => {
-        diagnostics.push(value);
-      }
+    settlements.push(
+      runSetupHttpHandler(
+        context,
+        () => work(context),
+        (value) => {
+          diagnostics.push(value);
+          report?.();
+        }
+      ).then(
+        () => "completed",
+        (error: unknown) => error
+      )
     );
   });
   servers.add(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("No test port");
-  return { diagnostics, response: fetch(`http://127.0.0.1:${address.port}`) };
+  return {
+    diagnostics,
+    settlements,
+    response: fetch(`http://127.0.0.1:${address.port}`)
+  };
 }
 
 describe("setup HTTP failure boundary", () => {
+  it.each(["uncommitted", "ended", "headers", "destroyed"])(
+    "settles a %s response even when the diagnostic sink throws",
+    async (phase) => {
+      const test = await invoke(
+        async (context) => {
+          if (phase === "ended") context.json(200, { completed: true });
+          if (phase === "headers") context.response.writeHead(200);
+          if (phase === "destroyed") context.response.destroy();
+          throw new Error("private handler failure");
+        },
+        () => {
+          throw new Error("private diagnostic failure");
+        }
+      );
+      if (phase === "headers" || phase === "destroyed") {
+        await expect(test.response).rejects.toThrow();
+      } else {
+        const response = await test.response;
+        expect(response.status).toBe(phase === "ended" ? 200 : 500);
+        expect(await response.json()).toEqual(
+          phase === "ended" ?
+            { completed: true }
+          : {
+              code: "setup-handler-failed",
+              error:
+                "Setup could not finish reporting its outcome. Inspect the operation before retrying."
+            }
+        );
+      }
+      expect(await Promise.all(test.settlements)).toEqual(["completed"]);
+      expect(test.diagnostics).toEqual([
+        {
+          code: "setup-handler-failed",
+          message: "private handler failure"
+        }
+      ]);
+    }
+  );
+
   it("preserves successful response headers and body without diagnostics", async () => {
     const test = await invoke(async (context) => {
       context.json(202, { reconciling: true });

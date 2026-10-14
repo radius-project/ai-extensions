@@ -1,7 +1,6 @@
 import {
   runSetupCoordinator,
-  type SetupCoordinatorPorts,
-  type SetupCoordinatorStageResult
+  type SetupCoordinatorPorts
 } from "@radius-project/core";
 import type { SelectedGhExecutor } from "../../gh.js";
 import { unresolvedProviderMutations } from "../../operations.js";
@@ -19,6 +18,11 @@ import {
   recordProviderReconciliationFailure
 } from "./provider-mutation-recovery.js";
 import type { GitHubEnvironmentReadResult } from "./github-environment.js";
+import {
+  copySetupRequest,
+  setupStageResult,
+  type SetupServices
+} from "./setup-outcome.js";
 
 export interface EnvironmentOperationRecord {
   operationId: string;
@@ -105,10 +109,8 @@ export interface EnvironmentOperationWorkflowDependencies {
     executor: SelectedGhExecutor
   ): Promise<void>;
   getOperation(operationId: string): EnvironmentOperationRecord | undefined;
-  postInternal(
-    pathname: string,
-    data: unknown
-  ): Promise<Record<string, unknown> | null>;
+  setupServices: SetupServices;
+  instanceId: string;
   now(): number;
 }
 
@@ -170,18 +172,6 @@ async function failResolution(
     executor
   );
   return { shouldMonitor: false };
-}
-
-function stageResult(
-  response: Record<string, unknown> | null
-): SetupCoordinatorStageResult {
-  if (response?.reconciling) {
-    return { kind: "reconciling", message: response.message };
-  }
-  return {
-    kind: response?.inputRequired ? "input-required" : "completed",
-    clientId: response?.clientId
-  };
 }
 
 export function createSetupCoordinatorPorts(
@@ -294,12 +284,17 @@ export function createSetupCoordinatorPorts(
       );
     },
     authorizeAzure: async (request) =>
-      stageResult(
-        await dependencies.postInternal("/api/azure-auto-setup", request)
+      setupStageResult(
+        await dependencies.setupServices.authorizeAzure(
+          copySetupRequest(request)
+        )
       ),
     configureEnvironment: async (request) =>
-      stageResult(
-        await dependencies.postInternal("/api/create-environment", request)
+      setupStageResult(
+        await dependencies.setupServices.configureEnvironment(
+          copySetupRequest(request),
+          dependencies.instanceId
+        )
       ),
     raiseReconciling: (stage, message) => {
       throw new ProviderMutationRecoveryError(

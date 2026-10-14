@@ -6483,6 +6483,14 @@ describe("environment deletion session reporting coordinator", () => {
             throw new Error("Unexpected account lease during deletion");
           }
         }),
+        setupServices: {
+          authorizeAzure: async () => {
+            throw new Error("Unexpected Azure setup during deletion");
+          },
+          configureEnvironment: async () => {
+            throw new Error("Unexpected configuration during deletion");
+          }
+        },
         servers: new Map()
       }
     );
