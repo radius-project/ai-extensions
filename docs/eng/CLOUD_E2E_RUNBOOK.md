@@ -28,6 +28,8 @@ For a service-principal creation failure, read the terminal operation's `failure
 
 After an uncertain service-principal create, Radius makes up to six reads with bounded delays. A not-found response can reflect directory propagation, so it does not prove the create failed. If the outcome stays unknown, Radius neither repeats the create nor starts cleanup. Only a definite temporary rejection, such as throttling or an application-not-found rejection, permits another create, with at most six create attempts. Stop is checked before and after each retry delay. Failure cleanup uses the operation's selected GitHub account for variable rollback, environment identity checks, and deletion. A missing account, an unreadable identity, or a replacement environment cannot authorize deletion.
 
+Federated credential creation uses the same six-attempt Azure budget. After a definite propagation or throttling rejection, Radius uses default delays of 2, 4, 6, 8, then 10 seconds between attempts. It honors `Retry-After` values up to 10 seconds; a longer value ends the retry rather than sending a request too early. Stop is checked before the delay and before the next write. A lost or uncertain response must be reconciled first; a later not-found read alone does not authorize another write. An authorization rejection ends setup without a retry. The terminal operation retains the final Azure error if all attempts fail.
+
 | File                               | Answers                                                         |
 |------------------------------------|-----------------------------------------------------------------|
 | `test-results/cloud/`              | The Playwright trace. The single most useful file here          |
