@@ -16,12 +16,17 @@ describe("setup workflow contents", () => {
       "fff71b97a5a9494941aa5f1ec40300f7e40c4d68b3890ca7a3f27b8f6270763a"
     );
     expect(setupValueDigest("on: push")).toBe(workflowContentDigest(encoded));
-    expect(workflowBlobSha(encodeWorkflowContent(""))).toBe(
-      "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
-    );
     expect(workflowContentDigest(encodeWorkflowContent(""))).toBe(
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     );
+  });
+
+  it.each([
+    ["", "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"],
+    ["on: push", "cafed2e87a7516e3d4276dc88252153ce38726ca"],
+    ["caf\u00e9 \u{1f30d}", "643385e1c717f3bed29d46f34575efdca9a2f272"]
+  ])("preserves Git's UTF-8 blob identity for %j", (content, expected) => {
+    expect(workflowBlobSha(encodeWorkflowContent(content))).toBe(expected);
   });
 
   it("writes exactly one request-local body and makes removal idempotent", () => {
