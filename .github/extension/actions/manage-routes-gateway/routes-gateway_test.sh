@@ -56,6 +56,10 @@ case "${1:-} ${2:-}" in
         fi
         ;;
     "app list")
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
+            exit 64
+        fi
         if [[ "${RAD_DISCOVERY_FAIL}" == "app" ]]; then
             exit 1
         fi

@@ -1104,7 +1104,7 @@ export async function resolveRadForGraph({
  * runRadAppGraph - run
  * `rad app graph <file>.bicep --include-icons` in a throwaway working dir and
  * return the parsed app-graph.json it writes there. The modeled command must not
- * use `--preview`, which switches rad to the deployed-application API path.
+ * pass `--application`, which switches rad to the enriched deployed-graph path.
  *
  * When `saveGraphJsonTo` is an absolute path, a safety-projected app-graph.json
  * replaces any existing artifact (parent directories created as needed) so
