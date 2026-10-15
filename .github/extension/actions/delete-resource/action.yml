@@ -108,15 +108,12 @@ runs:
 
         # Map the resource type to its rad command. Only application and environment
         # are supported; anything else fails fast without touching the control plane.
-        # --yes bypasses the interactive confirmation prompt. `rad app delete` also
-        # needs --preview to select the Radius.Core implementation the deploy
-        # workflow provisions (without it the command dispatches to the legacy
-        # Applications.Core surface). `rad env delete` always targets Radius.Core
-        # and rejects --preview.
+        # --yes bypasses the interactive confirmation prompt. `rad app delete` and
+        # `rad env delete` always target Radius.Core and reject --preview.
         case "$RESOURCE_TYPE" in
           application)
             VERB=(app delete)
-            RAD_FLAGS=(--yes --preview)
+            RAD_FLAGS=(--yes)
             ;;
           environment)
             VERB=(env delete)

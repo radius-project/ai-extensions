@@ -902,7 +902,7 @@ normalize_items_json() {
 
 radius_app_names_json() {
     local apps_json
-    apps_json="$(rad app list --preview -o json)" ||
+    apps_json="$(rad app list -o json)" ||
         fail "failed to list Radius applications"
     apps_json="$(
         normalize_items_json "${apps_json}" "Radius application discovery" true

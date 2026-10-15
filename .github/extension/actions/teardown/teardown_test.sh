@@ -15,8 +15,8 @@
 #   4. teardown runs `rad shutdown` only when state-restored == "true".
 #   5. teardown skips `rad shutdown` (with a ::warning::) when it is not "true"
 #      (a run that failed before startup must not overwrite the state archive).
-#   6. teardown lists applications via the Radius.Core preview API surface
-#      (`rad app list --preview`), and surfaces a warning if that listing fails
+#   6. teardown lists Radius.Core applications with `rad app list` (no
+#      `--preview`), and surfaces a warning if that listing fails
 #      instead of swallowing it silently.
 #   7. Every workflow that uses the teardown action (discovered dynamically)
 #      wires state-restored from a restore-state step (id: restore-state) in the
@@ -228,15 +228,16 @@ for value in ("", "false"):
     if "::warning" not in persist_stdout:
         fail(f"teardown must emit a ::warning:: when skipping persistence (value='{value}')")
 
-# 6. Status listing uses the preview surface and warns (does not swallow) on failure.
+# 6. Status listing runs `rad app list` without --preview and warns (does not
+#    swallow) on failure.
 _, _, status_rad, _ = run_block(status_block)
-if "app list --preview" not in status_rad:
-    fail("teardown status step must run `rad app list --preview`")
-if re.search(r"(?m)^app list\s*$", status_rad):
-    fail("teardown status step must not use the legacy `rad app list` (no --preview)")
+if not re.search(r"(?m)^app list\s*$", status_rad):
+    fail("teardown status step must run `rad app list`")
+if "--preview" in status_rad:
+    fail("teardown status step must not pass --preview (rad app rejects it)")
 status_fail_stdout, _, _, _ = run_block(status_block, rad_fail_on="app list")
 if "::warning" not in status_fail_stdout:
-    fail("teardown status step must warn (not swallow) when `rad app list --preview` fails")
+    fail("teardown status step must warn (not swallow) when `rad app list` fails")
 
 # 7. Every workflow using the teardown action wires state-restored from a
 #    same-job restore-state step. Checked against every workflow discovered

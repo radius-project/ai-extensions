@@ -213,6 +213,10 @@ set -uo pipefail
 
 case "${1:-} ${2:-}" in
     "app graph")
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
+            exit 64
+        fi
         if [[ "${3:-}" != "${APP_FILE:-}" ]]; then
             echo "rad: app graph must receive APP_FILE as its positional argument" >&2
             exit 64
@@ -225,6 +229,10 @@ case "${1:-} ${2:-}" in
             '{"resources":[{"id":"/planes/radius/local/rg/web","name":"web","type":"Radius.Compute/containers","outputResources":[{"id":"/planes/kubernetes/local/providers/apps/Deployment/web","name":"web","type":"apps/Deployment"},{"id":"/planes/kubernetes/local/providers/core/Service/web","name":"web","type":"core/Service"}]},{"id":"/planes/radius/local/rg/db","name":"db","type":"Radius.Data/mySqlDatabases","outputResources":[{"id":"/subscriptions/test/providers/Microsoft.DBforMySQL/flexibleServers/db","name":"db","type":"Microsoft.DBforMySQL/flexibleServers"}]}]}'
         ;;
     "app list")
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
+            exit 64
+        fi
         printf '[{"name":"%s"}]\n' "${RAD_APP_LIST_NAME-fallback-app}"
         ;;
     "resource list")
