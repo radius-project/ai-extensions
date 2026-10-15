@@ -262,6 +262,7 @@ export {
   pickAksResourceGroup,
   readFederatedCredentialId
 } from "./setup-azure-reads.js";
+export type { RoleAssignmentInput } from "./setup-azure-reads.js";
 export * from "./setup-azure-service-principal.js";
 export * from "./setup-azure-application.js";
 export * from "./setup-azure-credentials.js";

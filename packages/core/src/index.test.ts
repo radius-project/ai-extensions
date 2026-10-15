@@ -183,6 +183,36 @@ const MODULE_INTERNAL_NAMES = [
 ] as const;
 
 describe("@radius-project/core package barrel", () => {
+  it("accepts a named role-assignment input through the public barrel", () => {
+    const input: core.RoleAssignmentInput = {
+      assignmentId: "assignment-id",
+      objectId: "principal-id",
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      subscriptionId: "sub"
+    };
+
+    expect(core.buildRoleAssignmentArgs(input)).toEqual([
+      "role",
+      "assignment",
+      "create",
+      "--name",
+      "assignment-id",
+      "--assignee-object-id",
+      "principal-id",
+      "--assignee-principal-type",
+      "ServicePrincipal",
+      "--role",
+      "Contributor",
+      "--scope",
+      "/subscriptions/sub/resourceGroups/rg",
+      "--subscription",
+      "sub",
+      "--output",
+      "none"
+    ]);
+  });
+
   it.each(EXPECTED_FUNCTIONS)("exports %s as a callable", (name) => {
     expect(typeof core[name]).toBe("function");
   });
