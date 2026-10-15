@@ -13,10 +13,24 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "runSetupCoordinator",
+  "planCredentialVerification",
+  "hasVerificationOperationMarker",
+  "hasWorkflowRunTrigger",
+  "configureSetupEnvironment",
   "assessSetupPackageWriteAccess",
   "preflightSetupRepository",
   "selectedSetupPackageIdentity",
+  "createWorkflowFileCommitter",
+  "recordedSetupBranchCreate",
+  "setupWorkflowBranchName",
+  "isProtectedBranchFailure",
+  "readWorkflowCommitProvenance",
+  "needsWorkflowScope",
   "ProviderMutationRecoveryError",
+  "publishSetupWorkflowFiles",
+  "setSetupEnvironmentVariable",
+  "setupAutomaticBranchVerificationPolicy",
   "ensureGitHubEnvironment",
   "GitHubEnvironmentEnsureError",
   "GitHubEnvironmentEnsureCancelled",
@@ -38,6 +52,10 @@ const EXPECTED_FUNCTIONS = [
   "readFederatedCredentialId",
   "resolveAzureAutoSetupApplication",
   "runAzureSetup",
+  "applySetupProviderConfiguration",
+  "azureRoleScope",
+  "cloudCredentialsComplete",
+  "setupProviderCredentialStatus",
   "admitSetupOperation",
   "honorSetupStop",
   "saveSetupCheckpoint",
@@ -108,6 +126,7 @@ const EXPECTED_FUNCTIONS = [
 ] as const;
 
 const EXPECTED_VALUES = [
+  "VERIFY_OPERATION_INPUT",
   "AZURE_APP_CREATE_CONTINUATION_SCHEMA_VERSION",
   "AZURE_SERVICE_MANAGEMENT_REFERENCE_PROMPT",
   "WORKFLOW_READ_LIMITS",
