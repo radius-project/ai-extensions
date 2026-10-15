@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createProductionGitHubAccountContext } from "../../../src/runtime/production-github-account-context.js";
+import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
+import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import { createProductionCanvasServerRuntime } from "../../../src/server.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import {
@@ -8,6 +12,7 @@ import {
   finish,
   operations,
   OPERATION_SCHEMA_VERSION,
+  setVerificationWorkflowState,
   STAGE_DELETE_RADIUS_ENV,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
@@ -24,6 +29,115 @@ afterEach(async () => {
 });
 
 describe("production environment owner HTTP binding", () => {
+  it.each([false, true])(
+    "uses saved operation ownership for workflow controls (account unavailable=%s)",
+    async (unavailable) => {
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] === "run" && args[1] === "view")
+          return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+        if (args[0] === "api" && args[1] === "--method")
+          return { code: 0, stdout: "", stderr: "" };
+        throw new Error(`Unexpected command: ${JSON.stringify(args)}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const accountCoordinator = createGitHubAccountCoordinator({
+        createExecutor: async (login) => {
+          expect(login).toBe("saved-account");
+          if (unavailable) throw new Error("Saved account unavailable");
+          return executor;
+        },
+        getActiveKeyringLogin: async () => "original",
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache: () => {}
+      });
+      const lease = vi.spyOn(accountCoordinator, "withSelectedAccount");
+      const accountContext = createEnvironmentAccountContext(
+        "runtime-account-owner",
+        accountCoordinator
+      );
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: createEnvironmentExecutionOwner(),
+        accountContext
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "control-panel",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: "op_control_account",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "azure"
+        });
+        op.context.githubLogin = "saved-account";
+        op.verification = { runId: "42" };
+        finish(op, "cancelled");
+        setVerificationWorkflowState(op, "unknown");
+        operations.put(op);
+        const post = () =>
+          fetch(
+            `${entry.baseUrl}/api/operations/${op.operationId}/cancel-workflow`,
+            {
+              method: "POST",
+              headers: {
+                origin: entry.baseUrl,
+                "sec-fetch-site": "same-origin",
+                "x-radius-mutation-nonce": String(
+                  entry.state.browserMutationNonce
+                )
+              }
+            }
+          );
+        const inspected = await post();
+        expect(inspected.status).toBe(unavailable ? 502 : 200);
+        if (unavailable) {
+          expect(await inspected.json()).toMatchObject({
+            code: "workflow-status-read-failed",
+            detail: "Saved account unavailable"
+          });
+          expect(run).not.toHaveBeenCalled();
+        } else {
+          expect(await inspected.json()).toMatchObject({
+            code: "workflow-status-checked"
+          });
+          const cancelled = await post();
+          expect(cancelled.status).toBe(202);
+          expect(await cancelled.json()).toMatchObject({
+            code: "workflow-cancellation-pending"
+          });
+          expect(run.mock.calls.map(([args]) => args)).toEqual([
+            ["run", "view", "42", "--json", "status", "--repo", "fixture/app"],
+            ["run", "view", "42", "--json", "status", "--repo", "fixture/app"],
+            [
+              "api",
+              "--method",
+              "POST",
+              "repos/fixture/app/actions/runs/42/cancel"
+            ]
+          ]);
+        }
+        expect(lease).toHaveBeenCalledTimes(unavailable ? 1 : 2);
+        for (const call of lease.mock.calls) {
+          expect(call).toEqual([
+            "saved-account",
+            { ownerKey: "runtime-account-owner", operationId: op.operationId },
+            expect.any(Function),
+            30000
+          ]);
+        }
+      } finally {
+        await runtime.stopServer("control-panel", true);
+      }
+    }
+  );
+
   it("keeps recovery's server-owned transport out of webview activity and surfaces refusal", async () => {
     const op = createOperation({
       operationId: "op_rollback_transport",
@@ -66,10 +180,24 @@ describe("production environment owner HTTP binding", () => {
   });
 
   it("refuses construction without the shared owner", () => {
-    const options = { executionOwner: createEnvironmentExecutionOwner() };
+    const options = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createProductionGitHubAccountContext()
+    };
     Reflect.deleteProperty(options, "executionOwner");
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
       "Missing canvas server dependency: executionOwner"
+    );
+  });
+
+  it("refuses construction without the shared account context", () => {
+    const options = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createProductionGitHubAccountContext()
+    };
+    Reflect.deleteProperty(options, "accountContext");
+    expect(() => createProductionCanvasServerRuntime(options)).toThrow(
+      "Missing canvas server dependency: accountContext"
     );
   });
 
