@@ -6,6 +6,22 @@ import {
 } from "./setup-environment-presentation.js";
 
 describe("Canvas setup failure presentation", () => {
+  it("preserves the pending workflow reconciliation refusal and existing steps", () => {
+    const steps = ["Delete template unavailable."];
+    expect(
+      describeSetupEnvironmentFailure(
+        { kind: "workflow-reconciliation-pending" },
+        { steps, ociStateBackend: "oci", defaultStateArchive: "radius-state" }
+      )
+    ).toEqual({
+      status: 409,
+      error:
+        "Provider reconciliation is still pending for a workflow file Radius wrote. Radius will not complete setup or start another provider mutation.",
+      code: "provider-reconciliation-pending",
+      extra: { steps }
+    });
+  });
+
   it.each([false, true])(
     "distinguishes unavailable and unreadable verification baselines: %s",
     (unreadable) => {
