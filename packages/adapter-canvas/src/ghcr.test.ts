@@ -15,7 +15,7 @@ import {
   json,
   baseOptions,
   type FetchCall
-} from "../../adapter-shared/test/support/ghcr-bootstrap.js";
+} from "@radius-project/adapter-shared/test-support/ghcr-bootstrap";
 
 function createDeletionHarness({
   accountType = "User",

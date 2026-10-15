@@ -10,7 +10,7 @@ export interface GhCredentials {
   scopes?: readonly string[];
 }
 
-interface HttpResponse {
+export interface HttpResponse {
   ok: boolean;
   status: number;
   headers: { get(name: string): string | null };
@@ -19,6 +19,11 @@ interface HttpResponse {
   arrayBuffer(): Promise<ArrayBuffer>;
 }
 
+/**
+ * Resolve HTTP responses, including non-2xx statuses; reject transport failures.
+ * Honor the supplied abort signal. GET/HEAD failures may be retried within the
+ * request context; writes are reconciled by their caller rather than replayed.
+ */
 export type FetchImplementation = (
   input: string | URL,
   init?: {
@@ -37,12 +42,12 @@ interface OciDescriptor {
   annotations?: Record<string, string>;
 }
 
-interface GitHubPackageMetadata {
+export interface GitHubPackageMetadata {
   visibility?: string;
   repository?: { full_name?: string };
 }
 
-interface RegistryCoordinates {
+export interface RegistryCoordinates {
   owner: string;
   packageName: string;
   repositoryPath: string;
@@ -77,6 +82,7 @@ interface BootstrapManifestOptions {
 export interface BootstrapGhcrOptions {
   targetRepository: string;
   registry: string;
+  /** Credential acquisition failures reject unchanged before registry I/O. */
   loadCredentials(): Promise<GhCredentials>;
   fetchImpl?: FetchImplementation;
   registryOrigin?: string;
@@ -148,7 +154,7 @@ export interface RequestContext {
   credentialSource: GhCredentials["source"];
 }
 
-interface RequestOptions {
+export interface RequestOptions {
   method?: string;
   headers?: Record<string, string>;
   body?: Buffer<ArrayBuffer>;
