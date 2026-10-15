@@ -504,16 +504,9 @@ export async function resolveAzureAutoSetupApplication({
           });
           return null;
         }
+        let parsed: unknown;
         try {
-          const parsed: unknown = JSON.parse(listResult.stdout);
-          if (!Array.isArray(parsed)) {
-            await ports.finalizeFailure({
-              kind: "app-lookup-parse",
-              evidence: {}
-            });
-            return null;
-          }
-          matches = parsed;
+          parsed = JSON.parse(listResult.stdout);
         } catch {
           await ports.finalizeFailure({
             kind: "app-lookup-invalid-json",
@@ -521,6 +514,14 @@ export async function resolveAzureAutoSetupApplication({
           });
           return null;
         }
+        if (!Array.isArray(parsed)) {
+          await ports.finalizeFailure({
+            kind: "app-lookup-parse",
+            evidence: {}
+          });
+          return null;
+        }
+        matches = parsed;
       }
 
       const ownedMatches: AppRegistrationMatch[] = [];
