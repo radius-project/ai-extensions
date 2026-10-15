@@ -247,6 +247,83 @@ test("uses the organization package endpoint", async () => {
   );
 });
 
+test.each(
+  (["owner lookup", "deletion confirmation"] as const).flatMap((stage) =>
+    [401, 403].flatMap((status) =>
+      (["keyring", "injected-token"] as const).map((source) => ({
+        stage,
+        status,
+        source
+      }))
+    )
+  )
+)(
+  "fails closed with $source guidance on $stage HTTP $status",
+  async ({ stage, status, source }) => {
+    const ownerUrl = "https://api.test/users/acme";
+    const packageUrl =
+      "https://api.test/users/acme/packages/container/app-radius-state-dev-123456789abc";
+    const expectedCalls =
+      stage === "owner lookup" ?
+        [["GET", ownerUrl]]
+      : [
+          ["GET", ownerUrl],
+          ["GET", packageUrl],
+          ["DELETE", packageUrl],
+          ["GET", packageUrl]
+        ];
+    const calls: string[][] = [];
+    const fetchImpl: FetchImplementation = async (url, options = {}) => {
+      const call = [options.method || "GET", url];
+      assert.deepEqual(call, expectedCalls[calls.length]);
+      calls.push(call);
+      if (calls.length === expectedCalls.length) {
+        return new Response(null, { status });
+      }
+      if (url === ownerUrl) return json({ type: "User" });
+      if (options.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return json({
+        visibility: "private",
+        repository: { full_name: "acme/app" }
+      });
+    };
+
+    await assert.rejects(
+      deleteGHCRStatePackage({
+        ...deleteOptions,
+        credentials: { ...deleteOptions.credentials, source },
+        fetchImpl,
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "posix",
+          executablePath: "/fixture/GitHub CLI/gh",
+          installationNote: "Use the fixture GitHub CLI."
+        }
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, new RegExp(`HTTP ${status}`));
+        assert.match(error.message, /read:packages,delete:packages/);
+        assert.doesNotMatch(error.message, /write:packages|keyring-token/);
+        assert.match(error.message, /Use the fixture GitHub CLI/);
+        if (source === "keyring") {
+          assert.match(
+            error.message,
+            /'\/fixture\/GitHub CLI\/gh' auth refresh --hostname github\.com --scopes read:packages,delete:packages/
+          );
+        } else {
+          assert.match(error.message, /gh auth refresh cannot change it/);
+          assert.match(error.message, /Update that injected token/);
+        }
+        return true;
+      }
+    );
+    assert.deepEqual(calls, expectedCalls);
+  }
+);
+
 test("waits for package deletion to become visible", async () => {
   const harness = createDeletionHarness({ disappearAfterReads: 2 });
   const sleeps: number[] = [];
