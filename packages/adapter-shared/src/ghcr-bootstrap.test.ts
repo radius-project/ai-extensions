@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test, vi } from "vitest";
+import { ghcrBootstrap } from "@radius-project/adapter-shared";
 import {
   bootstrapGHCRStatePackage,
   BOOTSTRAP_ARTIFACT_TYPE,
@@ -17,6 +18,70 @@ const baseOptions = {
   loadCredentials: async () => fixtureOptions.credentials,
   authGuidance: () => "test package guidance"
 };
+
+test("exposes reusable request and metadata types through the package entry", async () => {
+  const coordinates: ghcrBootstrap.RegistryCoordinates =
+    ghcrBootstrap.parseRegistry("ghcr.io/acme/app-radius-state");
+  const metadata: ghcrBootstrap.GitHubPackageMetadata =
+    ghcrBootstrap.parsePackageMetadata({
+      visibility: "private",
+      repository: { full_name: "acme/app" }
+    });
+  assert.equal(coordinates.repositoryPath, "acme/app-radius-state");
+  assert.equal(ghcrBootstrap.validatePackage(metadata, "acme/app"), true);
+
+  const response: ghcrBootstrap.HttpResponse = new Response(null, {
+    status: 403
+  });
+  const options: ghcrBootstrap.RequestOptions = {
+    method: "GET",
+    redirect: "error"
+  };
+  let calls = 0;
+  const context: ghcrBootstrap.RequestContext = {
+    fetchImpl: async (url, init) => {
+      calls++;
+      assert.equal(calls, 1);
+      assert.equal(url, "https://api.test/package");
+      assert.equal(init?.method, options.method);
+      assert.equal(init?.redirect, options.redirect);
+      assert.ok(init?.signal instanceof AbortSignal);
+      return response;
+    },
+    sleep: async () => {
+      assert.fail("Terminal HTTP rejection must not retry.");
+    },
+    now: () => 0,
+    deadline: 1000,
+    requestTimeoutMs: 100,
+    operation: "bootstrap",
+    credentialSource: "keyring"
+  };
+  assert.equal(
+    await ghcrBootstrap.request(context, "https://api.test/package", options),
+    response
+  );
+  assert.equal(calls, 1);
+});
+
+test("propagates credential rejection unchanged without registry I/O", async () => {
+  const failure = new Error("fixture credential store unavailable");
+  let loads = 0;
+  await assert.rejects(
+    ghcrBootstrap.bootstrapGHCRStatePackage({
+      ...baseOptions,
+      loadCredentials: async () => {
+        loads++;
+        throw failure;
+      },
+      fetchImpl: async () => {
+        assert.fail("Credential failure must precede registry I/O.");
+      }
+    }),
+    (error: unknown) => error === failure
+  );
+  assert.equal(loads, 1);
+});
 
 test.each([
   "",
