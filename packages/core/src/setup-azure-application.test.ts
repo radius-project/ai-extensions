@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveAzureAutoSetupApplication } from "./setup-azure-application.js";
 import {
   azurePorts,
@@ -28,6 +28,60 @@ function input(ports: AzureApplicationInput["ports"]): AzureApplicationInput {
 }
 
 describe("Azure application policy ports", () => {
+  it("preserves owned candidates without served repositories when subject lookup returns null", async () => {
+    const candidates = [
+      { appId: clientId, displayName: "First", createdDateTime: "2020-01-01" },
+      {
+        appId: "55555555-5555-5555-5555-555555555555",
+        displayName: "Second",
+        createdDateTime: "2021-01-01"
+      }
+    ];
+    const subjectReads: string[] = [];
+    const test = azurePorts(async (args) => {
+      const call = args.slice(0, 4).join(" ");
+      if (args.slice(0, 3).join(" ") === "ad app list")
+        return command(JSON.stringify(candidates));
+      if (
+        args.slice(0, 3).join(" ") === "ad signed-in-user show" ||
+        call === "ad app owner list"
+      )
+        return command(callerId);
+      if (call === "ad app federated-credential list") {
+        expect(args.slice(6)).toEqual(["--query", "[].subject", "-o", "json"]);
+        subjectReads.push(args[5]);
+        return command("null");
+      }
+      throw new Error(`Unexpected Azure command: ${args.join(" ")}`);
+    });
+    const finalize = vi.spyOn(test.application, "finalizeFailure");
+    const mutate = vi.spyOn(test.application.recovery, "execute");
+
+    expect(
+      await resolveAzureAutoSetupApplication({
+        ...input(test.application),
+        requestedClientId: ""
+      })
+    ).toBeNull();
+
+    expect(subjectReads).toEqual(
+      candidates.map((candidate) => candidate.appId)
+    );
+    expect(finalize).toHaveBeenCalledExactlyOnceWith({
+      kind: "app-selection-required",
+      values: [],
+      evidence: {
+        appName: "radius-deploy-owner-repo",
+        candidates: candidates.map((candidate) => ({
+          ...candidate,
+          servesRepos: []
+        })),
+        defaultAppId: clientId
+      }
+    });
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["HTTP 429", "caller-before-application-create", 6],
     ["AuthorizationFailed", "caller-before-application-create", 1]
