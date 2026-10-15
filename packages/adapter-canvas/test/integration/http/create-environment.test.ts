@@ -1,6 +1,22 @@
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { runSetupCoordinator } from "@radius-project/core";
+import {
+  createSetupCoordinatorPorts,
+  runEnvironmentOperationWorkflow,
+  type EnvironmentOperationWorkflowDependencies
+} from "../../../src/server/services/environment-operation.js";
+import { configureCredentialProvenanceStore } from "../../../src/credential-provenance.js";
+import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
+import type { AzureAutoSetupOperation } from "../../../src/server/routes/azure-auto-setup-types.js";
+import {
+  createParityAzureFixture,
+  parityAzureRequest,
+  parityClientId,
+  runDirectParityConfiguration,
+  unexpectedParityCall
+} from "../../support/server/setup-parity.js";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createCreateEnvironmentRoutes } from "../../../src/server/routes/create-environment.js";
@@ -17,12 +33,16 @@ import {
 } from "../../../src/server.js";
 import {
   createSetupArtifactLedger,
+  addLegacyStep,
+  enterStage,
   prepareProviderMutation,
+  providerMutationsByKind,
   promoteCreatedGitHubEnvironment,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordGitHubEnvironmentVariable,
   setCanonicalEnvironment,
+  setStageState,
   settleProviderMutation
 } from "../../../src/operations.js";
 import type { SetupArtifactLedger } from "../../../src/operations.js";
@@ -47,6 +67,8 @@ let container: CanvasServerContainer | undefined;
 afterEach(async () => {
   await container?.stopAll();
   container = undefined;
+  await configureCredentialProvenanceStore(null);
+  vi.useRealTimers();
 });
 
 const SERVER_OWNED_TOKEN = "loopback-token-for-this-instance";
@@ -60,7 +82,11 @@ interface GhRule {
 }
 
 interface Script {
+  pairedProvider?: "azure" | "aws";
+  direct?: boolean;
+  trace?(entry: unknown): void;
   ghCommandPresentation?: GhCommandPresentation;
+  onGhCommand?(command: string): void;
   gh?: GhRule[];
   runListResults?: Array<Partial<CreateEnvironmentCommandResult>>;
   dispatchResults?: Array<Partial<CreateEnvironmentCommandResult>>;
@@ -95,6 +121,9 @@ interface Script {
 }
 
 interface Harness {
+  dependencies: CreateEnvironmentDependencies;
+  azure: ReturnType<typeof createParityAzureFixture> | undefined;
+  persisted: unknown[];
   baseUrl: string;
   /** Claim reads that travelled the account pinned to the operation. */
   selectedClaimCalls: string[];
@@ -104,9 +133,10 @@ interface Harness {
   setJournalHook(hook: ((entry: string) => void) | null): void;
   ghCalls: string[];
   steps: string[];
-  operation: CreateEnvironmentOperation & {
-    setupArtifacts: SetupArtifactLedger;
-  };
+  operation: CreateEnvironmentOperation &
+    AzureAutoSetupOperation & {
+      setupArtifacts: SetupArtifactLedger;
+    };
   state: CanvasState;
   finished: Array<{ state: string; options: Record<string, unknown> }>;
   commitStates: Record<string, unknown>[];
@@ -272,6 +302,7 @@ const DEFAULT_GH_RULES: GhRule[] = [
 ];
 
 function start(script: Script = {}): Harness {
+  const persisted: unknown[] = [];
   const journal: string[] = [];
   // Lets a test act at an exact point in the run — recording a stop while the
   // request is mid-flight, which is the only way that race happens for real.
@@ -281,6 +312,7 @@ function start(script: Script = {}): Harness {
   Object.defineProperty(journal, "push", {
     value: (...entries: string[]) => {
       const length = appendJournal(...entries);
+      for (const entry of entries) script.trace?.(["journal", entry]);
       for (const entry of entries) journalHook?.(entry);
       return length;
     }
@@ -300,9 +332,7 @@ function start(script: Script = {}): Harness {
 
   // `stages` and `steps` are present because the real stop guard closes the
   // record through the production `finish`, which walks both.
-  const operation: CreateEnvironmentOperation & {
-    setupArtifacts: SetupArtifactLedger;
-  } = {
+  const operation: Harness["operation"] = {
     operationId: "op-http",
     repo: "octo/app",
     environment: "dev",
@@ -313,6 +343,35 @@ function start(script: Script = {}): Harness {
     steps: [],
     setupArtifacts: createSetupArtifactLedger()
   };
+  if (script.pairedProvider) {
+    operation.provider = script.pairedProvider;
+    operation.currentStage = STAGE_IDENTITY;
+    operation.state = "running";
+    operation.stages = [
+      { id: STAGE_IDENTITY, label: "Identity", state: "running" },
+      { id: STAGE_CONFIGURE, label: "Configure", state: "pending" },
+      { id: STAGE_VERIFY, label: "Verify", state: "pending" }
+    ];
+    operation.request = {
+      needsAzureCredentials: script.pairedProvider === "azure",
+      azure: { ...parityAzureRequest },
+      environment:
+        script.pairedProvider === "azure" ?
+          {
+            ...parityAzureRequest,
+            // These deliberately disagree with the eventual live identity.
+            clientId: "stale-request-client",
+            namespace: "application"
+          }
+        : {
+            roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+            region: "us-west-2",
+            accountId: "123456789012",
+            cluster: "cluster",
+            namespace: "application"
+          }
+    };
+  }
   if (script.preparedEnvironment) {
     operation.environment = script.preparedEnvironment.requestedName;
     operation.context = {
@@ -400,6 +459,8 @@ function start(script: Script = {}): Harness {
       .map((arg) => (arg === TEMP_BODY_PATH ? `@${lastBodyBranch}` : arg))
       .join(" ");
     ghCalls.push(key);
+    script.trace?.(["gh", key]);
+    script.onGhCommand?.(key);
     if (key.startsWith("workflow run ")) {
       journal.push("dispatchVerifyWorkflow");
       if (dispatchResults.length > 0) {
@@ -495,9 +556,14 @@ function start(script: Script = {}): Harness {
     // --- request scope: read per request, exactly as server.ts does ---
     isServerOwnedRequest: (_instanceId, request) =>
       request.headers["x-radius-server-owned"] === SERVER_OWNED_TOKEN,
-    readInstanceEntry: () => entry,
-    getSelectedGitHubExecutor: () =>
-      successfulSelectedGhExecutor({ run: async (args) => runGhArgs(args) }),
+    readInstanceEntry: () => (script.direct ? undefined : entry),
+    getSelectedGitHubExecutor: () => ({
+      ...successfulSelectedGhExecutor({ run: async (args) => runGhArgs(args) }),
+      verifyIdentity: async () => {
+        if (script.pairedProvider)
+          script.trace?.(["verify-selected-identity", "octocat"]);
+      }
+    }),
 
     // --- admission ---
     // Wired the way `server.ts` wires it: the real ports over the GitHub account
@@ -515,7 +581,10 @@ function start(script: Script = {}): Harness {
       ),
     isValidRepoSlug,
     getOperation: (operationId) =>
-      script.preparedEnvironment && operationId === operation.operationId ?
+      (
+        (script.preparedEnvironment || script.pairedProvider) &&
+        operationId === operation.operationId
+      ) ?
         operation
       : null,
     isStale: () => false,
@@ -531,6 +600,9 @@ function start(script: Script = {}): Harness {
     persistOperations: async () => {
       persistCalls += 1;
       journal.push(`persist:${persistCalls}`);
+      if (script.pairedProvider)
+        persisted.push(JSON.parse(JSON.stringify(operation)));
+      script.trace?.(["durable"]);
       if (
         script.persistRejectsAfter !== undefined &&
         persistCalls > script.persistRejectsAfter
@@ -546,6 +618,7 @@ function start(script: Script = {}): Harness {
     },
     enterStage: (_operation, stage) => {
       journal.push(`enterStage:${stage}`);
+      if (script.pairedProvider) enterStage(operation, stage);
     },
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
@@ -580,6 +653,8 @@ function start(script: Script = {}): Harness {
     // --- narration + finalization ---
     addLegacyStep: (_operation, text) => {
       steps.push(text);
+      if (script.pairedProvider) addLegacyStep(operation, text);
+      script.trace?.(["step", text]);
     },
     finalizeSetupFailure: async (_operation, input) => {
       failures.push(input);
@@ -685,8 +760,9 @@ function start(script: Script = {}): Harness {
         stderr: result.stderr
       };
     },
-    bootstrapGHCRStatePackage: async () => {
+    bootstrapGHCRStatePackage: async (input) => {
       journal.push("bootstrapGHCRStatePackage");
+      if (script.pairedProvider) script.trace?.(["package-bootstrap", input]);
       if (script.statePackageError) {
         throw new Error(script.statePackageError);
       }
@@ -698,19 +774,30 @@ function start(script: Script = {}): Harness {
     },
 
     // --- committer ports ---
-    getDefaultBranch: async () =>
-      "defaultBranch" in script ? script.defaultBranch : "main",
-    getBranchHeadSha: async () => {
+    getDefaultBranch: async (repo) => {
+      const branch = "defaultBranch" in script ? script.defaultBranch : "main";
+      if (script.pairedProvider)
+        script.trace?.(["default-branch", repo, branch]);
+      return branch;
+    },
+    getBranchHeadSha: async (repo, branch) => {
+      script.trace?.(["branch-head"]);
+      if (script.pairedProvider)
+        script.trace?.(["branch-head-read", repo, branch, script.headSha]);
       if (!("headSha" in script))
         throw new Error("unscripted getBranchHeadSha");
       return script.headSha;
     },
-    createBranchRef: async () => {
+    createBranchRef: async (repo, branch, sha) => {
+      script.trace?.(["branch-create"]);
+      if (script.pairedProvider)
+        script.trace?.(["branch-create-request", repo, branch, sha]);
       if (!script.createBranch) throw new Error("unscripted createBranchRef");
       return script.createBranch;
     },
     tempFile: {
       write: (contents) => {
+        script.trace?.(["contents-body", JSON.parse(contents)]);
         const parsed: unknown = JSON.parse(contents);
         const branch =
           (
@@ -724,12 +811,16 @@ function start(script: Script = {}): Harness {
         lastBodyBranch = branch || "default";
         return TEMP_BODY_PATH;
       },
-      remove: () => undefined
+      remove: () => {
+        script.trace?.(["contents-cleanup"]);
+      }
     },
 
     // --- GitHub environment ---
     setCanonicalEnvironment: (target, environment) => {
       setCanonicalEnvironment(target, environment);
+      if (script.pairedProvider)
+        script.trace?.(["canonical-environment", environment]);
     },
     // The real ledger writers, so the provenance this route records is the
     // provenance a rollback would later read. A hand-written double could only
@@ -757,10 +848,24 @@ function start(script: Script = {}): Harness {
     defaultStateArchive: "radius-state",
 
     // --- credentials ---
-    azureCredential:
-      script.azureCredential ??
-      (() => ({ clientId: "c", tenantId: "t", subscriptionId: "s" })),
-    awsCredential: () => ({}),
+    azureCredential: () => {
+      const credential =
+        script.azureCredential ? script.azureCredential()
+        : script.pairedProvider ?
+          {
+            ...operation.context,
+            tenantId: parityAzureRequest.tenantId,
+            subscriptionId: parityAzureRequest.subscriptionId
+          }
+        : { clientId: "c", tenantId: "t", subscriptionId: "s" };
+      if (script.pairedProvider)
+        script.trace?.(["azure-credential-read", credential]);
+      return credential;
+    },
+    awsCredential: () => {
+      if (script.pairedProvider) script.trace?.(["aws-credential-read", {}]);
+      return {};
+    },
     optionalString: (value) => (typeof value === "string" ? value : ""),
 
     // --- workflow generation and commit ---
@@ -792,6 +897,8 @@ function start(script: Script = {}): Harness {
     recordCommittedWorkflowFile: (target, committed) => {
       committedFiles.push(committed);
       recordCommittedWorkflowFile(target, committed);
+      if (script.pairedProvider)
+        script.trace?.(["committed-workflow", committed]);
     },
     deleteLegacyDeployWorkflow: async (
       _repo,
@@ -807,10 +914,11 @@ function start(script: Script = {}): Harness {
       }
       return script.legacyDeleteResult ?? true;
     },
-    createPullRequestApi: async () => {
+    createPullRequestApi: async (...args) => {
       if (!script.pullRequest)
         throw new Error("unscripted createPullRequestApi");
       journal.push("createPullRequestApi");
+      script.trace?.(["pull-request", args.slice(0, 5)]);
       return {
         ok: script.pullRequest.ok,
         url: script.pullRequest.url,
@@ -825,17 +933,22 @@ function start(script: Script = {}): Harness {
     // to that branch, which is what verification planning reads back. Modelling
     // that here keeps a protected default branch correctly empty while the
     // direct-commit path sees the file it just wrote. Scripts override it.
-    fetchFileFromRepo: async (_repo, path, branch) =>
-      script.files?.[path] ??
-      ((
-        committedFiles.some(
-          (file) =>
-            `.github/workflows/${path.split("/").pop()}` === file.path &&
-            (!branch || file.branch === branch)
-        )
-      ) ?
-        MARKED_VERIFY_WORKFLOW
-      : null),
+    fetchFileFromRepo: async (repo, path, branch) => {
+      const content =
+        script.files?.[path] ??
+        ((
+          committedFiles.some(
+            (file) =>
+              `.github/workflows/${path.split("/").pop()}` === file.path &&
+              (!branch || file.branch === branch)
+          )
+        ) ?
+          MARKED_VERIFY_WORKFLOW
+        : null);
+      if (script.pairedProvider)
+        script.trace?.(["workflow-file-read", repo, path, branch, content]);
+      return content;
+    },
     fetchFileFromRepoResult: async (_repo, path) => {
       journal.push(`fetchFileFromRepoResult:${path}`);
       return (
@@ -859,6 +972,7 @@ function start(script: Script = {}): Harness {
     },
     setStageState: (_operation, stage, stageState) => {
       journal.push(`setStageState:${stage}:${stageState}`);
+      if (script.pairedProvider) setStageState(operation, stage, stageState);
     },
     finish: (_operation, finishState, options) => {
       journal.push(`finish:${finishState}`);
@@ -870,31 +984,43 @@ function start(script: Script = {}): Harness {
     now: () => 1700000000000
   };
 
-  const routes = createTestRouteTable(
-    createCreateEnvironmentRoutes(dependencies)
-  );
+  const azure =
+    script.pairedProvider === "azure" ?
+      createParityAzureFixture(operation, dependencies, (effect) =>
+        script.trace?.(effect)
+      )
+    : undefined;
 
-  container = createCanvasServer({
-    createHttpServer: (handler) => createServer(handler),
-    createRequestHandler: ({ instanceId, instances, markActivity }) =>
-      createRequestHandler({
-        instanceId,
-        instances,
-        routes,
-        markActivity,
-        handleUnmatchedRequest: (_request, response) => {
-          response.writeHead(404);
-          response.end("unmatched");
-        }
-      }),
-    createState: () => state,
-    defaultPage: "graph",
-    now: () => Date.now(),
-    preferredPort: async () => 0,
-    prepareIdentity: () => {}
-  });
+  if (!script.direct) {
+    const routes = createTestRouteTable({
+      ...createCreateEnvironmentRoutes(dependencies),
+      ...(azure ? createAzureAutoSetupRoutes(azure.dependencies) : {})
+    });
+    container = createCanvasServer({
+      createHttpServer: (handler) => createServer(handler),
+      createRequestHandler: ({ instanceId, instances, markActivity }) =>
+        createRequestHandler({
+          instanceId,
+          instances,
+          routes,
+          markActivity,
+          handleUnmatchedRequest: (_request, response) => {
+            response.writeHead(404);
+            response.end("unmatched");
+          }
+        }),
+      createState: () => state,
+      defaultPage: "graph",
+      now: () => Date.now(),
+      preferredPort: async () => 0,
+      prepareIdentity: () => {}
+    });
+  }
 
   return {
+    dependencies,
+    azure,
+    persisted,
     baseUrl: "",
     selectedClaimCalls,
     ambientCliCalls,
@@ -951,6 +1077,438 @@ function ghCallsExcludingNamespaceClaimLookup(
     (call) => !/^api --paginate \/repos\/[^ ]*\/environments/.test(call)
   );
 }
+
+describe("matched direct-core and Canvas setup parity", () => {
+  const snapshot = (value: unknown): unknown =>
+    JSON.parse(JSON.stringify(value));
+  const asRecord = (value: unknown): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("Expected an object response.");
+    return Object.fromEntries(Object.entries(value));
+  };
+
+  async function runFixture(
+    provider: "azure" | "aws",
+    mode: "direct" | "protected",
+    transport: "direct-core" | "canvas"
+  ) {
+    const trace: unknown[] = [];
+    const results: unknown[] = [];
+    const harness = start({
+      pairedProvider: provider,
+      direct: transport === "direct-core",
+      ...(mode === "protected" ?
+        {
+          gh: [
+            {
+              match:
+                /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
+              result: { code: 1, stderr: "protected branch" }
+            }
+          ],
+          headSha: "sha-base",
+          createBranch: { ok: true, stderr: "" },
+          pullRequest: {
+            ok: true,
+            url: "https://github.com/octo/app/pull/7",
+            number: 7
+          }
+        }
+      : {}),
+      trace(effect) {
+        trace.push(snapshot(effect));
+        if (Array.isArray(effect) && effect[0] === "durable")
+          trace.push(["operation-at-save", snapshot(harness.operation)]);
+      }
+    });
+    const { operation, dependencies: d, azure } = harness;
+    await azure?.bindProvenance();
+    const executor = d.getSelectedGitHubExecutor(operation.operationId);
+    if (!executor) throw new Error("Missing selected fixture executor.");
+    const stopBoundary = (boundary: string) =>
+      d.guardStopBoundary({
+        operation,
+        boundary,
+        persist: d.persistOperations,
+        report: d.reportOperationDiagnostic,
+        respond: unexpectedParityCall
+      });
+    const dependencies: EnvironmentOperationWorkflowDependencies = {
+      preflightRepoAdmin: d.preflightRepoAdmin,
+      preflightGhcrPackageWriteAccess: d.preflightGhcrPackageWriteAccess,
+      readGitHubJson: d.readGitHubJson,
+      guardStopBoundary: (_op, boundary) => stopBoundary(boundary),
+      setCanonicalEnvironment: (_op, name) =>
+        d.setCanonicalEnvironment(operation, name),
+      recordGitHubEnvironment: (_op, patch) =>
+        d.recordGitHubEnvironment(operation, patch),
+      promoteCreatedGitHubEnvironment: (_op, identity) =>
+        d.promoteCreatedGitHubEnvironment(operation, identity),
+      addLegacyStep: (_op, text) => d.addLegacyStep(operation, text),
+      persistEnvironmentResolution: () =>
+        d.persistMutationCheckpoint({
+          operation,
+          persist: d.persistOperations,
+          report: d.reportOperationDiagnostic,
+          fail: unexpectedParityCall
+        }),
+      persistProviderMutation: d.persistOperations,
+      finalizeEnvironmentResolutionFailure: unexpectedParityCall,
+      getOperation: (id) =>
+        id === operation.operationId ? operation : undefined,
+      now: d.now,
+      postInternal:
+        transport === "direct-core" ? unexpectedParityCall : (
+          async (path, request) => {
+            if (!container) throw new Error("Loopback server was not created.");
+            const stage =
+              path === "/api/azure-auto-setup" ? "azure" : "environment";
+            trace.push(["stage-request", stage, snapshot(request)]);
+            const entry = await container.getOrCreate("panel-a");
+            const response = await fetch(`${entry.baseUrl}${path}`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Radius-Server-Owned": SERVER_OWNED_TOKEN
+              },
+              body: JSON.stringify(request)
+            });
+            const body = asRecord(await response.json());
+            expect(response.status, JSON.stringify(body)).toBe(200);
+            expect(response.headers.get("content-type")).toBe(
+              "application/json"
+            );
+            expect(body.success).toBe(true);
+            const { success: _success, steps, ...domain } = body;
+            if (stage === "azure") {
+              results.push([
+                stage,
+                {
+                  ...domain,
+                  applicationState: operation.setupArtifacts.azureApp.state
+                },
+                steps
+              ]);
+            } else {
+              // Only the absence of a skip reason has different representations.
+              expect(domain.verifySkipReason).toBe("");
+              results.push([
+                stage,
+                { ...domain, verifySkipReason: null },
+                steps
+              ]);
+            }
+            return body;
+          }
+        )
+    };
+    const ports = createSetupCoordinatorPorts(
+      operation,
+      executor,
+      dependencies
+    );
+    const coordinator =
+      transport === "canvas" ?
+        await runEnvironmentOperationWorkflow(operation, executor, dependencies)
+      : await runSetupCoordinator(operation, {
+          ...ports,
+          authorizeAzure: async (request) => {
+            if (!azure) throw new Error("AWS must not authorize Azure.");
+            trace.push(["stage-request", "azure", snapshot(request)]);
+            const { result, steps } = await azure.runDirect(request);
+            results.push([
+              "azure",
+              {
+                operationId: operation.operationId,
+                clientId: result.application.clientId,
+                tenantId: result.tenantId,
+                subscriptionId: result.subscriptionId,
+                resourceGroup: parityAzureRequest.resourceGroup,
+                cluster: parityAzureRequest.cluster,
+                appName: result.application.appName,
+                subjects: result.subjects,
+                applicationState: result.application.state
+              },
+              steps
+            ]);
+            return { kind: "completed", clientId: result.application.clientId };
+          },
+          configureEnvironment: async (request) => {
+            trace.push(["stage-request", "environment", snapshot(request)]);
+            const { result, steps } = await runDirectParityConfiguration(
+              request,
+              operation,
+              d
+            );
+            const { kind: _kind, ...domain } = result;
+            expect(domain.verifySkipReason).toBeNull();
+            results.push(["environment", domain, steps]);
+            return { kind: "completed" };
+          }
+        });
+    expect(coordinator).toEqual({ shouldMonitor: true });
+    expect(harness.failures).toEqual([]);
+    expect(harness.ambientCliCalls).toEqual([]);
+    const mutations = operation.providerRecovery?.mutations ?? [];
+    expect(mutations.length).toBeGreaterThan(0);
+    expect(
+      mutations.filter((mutation) => mutation.status !== "confirmed")
+    ).toEqual(
+      mode === "direct" ?
+        []
+      : [
+          expect.objectContaining({
+            kind: "github_workflow.put",
+            target:
+              "octo/app:<default>:.github/workflows/radius-verify-credentials.yml",
+            status: "not_applied"
+          })
+        ]
+    );
+    expect(
+      providerMutationsByKind(operation, "github_workflow.put")
+    ).toHaveLength(mode === "direct" ? 3 : 4);
+    expect(harness.committedFiles).toHaveLength(3);
+    if (provider === "azure") {
+      for (const kind of [
+        "azure_application.create",
+        "azure_service_principal.create",
+        "azure_federated_credential.create",
+        "azure_role_assignment.create"
+      ])
+        expect(providerMutationsByKind(operation, kind), kind).not.toHaveLength(
+          0
+        );
+      expect(operation.context?.clientId).toBe(parityClientId);
+      expect(
+        harness.ghCalls.some(
+          (call) =>
+            call.includes(`AZURE_CLIENT_ID`) && call.includes(parityClientId)
+        )
+      ).toBe(true);
+      expect(azure?.provenance.size).toBe(1);
+    } else {
+      expect(
+        providerMutationsByKind(operation, "github_branch.create")
+      ).toHaveLength(1);
+      expect(
+        providerMutationsByKind(operation, "github_pull_request.create")
+      ).toHaveLength(1);
+      // The existing AWS path intentionally does not journal variable writes.
+      expect(
+        providerMutationsByKind(operation, "github_environment_variable.put")
+      ).toHaveLength(0);
+      expect(
+        harness.ghCalls.some(
+          (call) =>
+            call.includes("AWS_ROLE_ARN") &&
+            call.includes("arn:aws:iam::123456789012:role/radius-deploy")
+        )
+      ).toBe(true);
+    }
+    return {
+      results: snapshot({ coordinator, stages: results }),
+      trace,
+      durable: snapshot({
+        saves: harness.persisted,
+        operation,
+        provenance: [...(azure?.provenance ?? [])],
+        committedFiles: harness.committedFiles,
+        commitStates: harness.commitStates,
+        finished: harness.finished
+      })
+    };
+  }
+
+  it.each([
+    { provider: "azure", mode: "direct" },
+    { provider: "aws", mode: "protected" }
+  ] as const)(
+    "matches $provider identity/configuration and $mode publication via direct core orchestration and real routes",
+    async ({ provider, mode }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1700000000000);
+      const direct = await runFixture(provider, mode, "direct-core");
+      expect(container).toBeUndefined();
+      const canvas = await runFixture(provider, mode, "canvas");
+      expect(canvas.results).toEqual(direct.results);
+      expect(canvas.trace).toEqual(direct.trace);
+      expect(canvas.durable).toEqual(direct.durable);
+    }
+  );
+
+  it("rejects unscripted provider calls and creation without a live temporary credential body", async () => {
+    const { azure } = start({ pairedProvider: "azure", direct: true });
+    if (!azure) throw new Error("Missing Azure fixture.");
+    await expect(
+      azure.dependencies.external.runAz(["unexpected"])
+    ).rejects.toThrow("Unexpected parity fixture call");
+    await expect(
+      azure.dependencies.external.runGitHubJson("/unexpected")
+    ).rejects.toThrow("Unexpected parity fixture call");
+    const create = ["ad", "app", "federated-credential", "create"];
+    await expect(azure.dependencies.external.runAz(create)).rejects.toThrow(
+      "requires a written request body"
+    );
+    const path = azure.dependencies.tempFile.createPath();
+    azure.dependencies.tempFile.write(path, '{"name":"temporary-credential"}');
+    azure.dependencies.tempFile.remove(path);
+    await expect(azure.dependencies.external.runAz(create)).rejects.toThrow(
+      "requires a written request body"
+    );
+    expect(azure.provenance.size).toBe(0);
+    expect(container).toBeUndefined();
+  });
+
+  it("releases the fixture provenance lock and preserves the original failure", async () => {
+    const trace: unknown[] = [];
+    const { azure } = start({
+      pairedProvider: "azure",
+      direct: true,
+      trace: (entry) => trace.push(snapshot(entry))
+    });
+    if (!azure) throw new Error("Missing Azure fixture.");
+    await azure.bindProvenance();
+    const failure = new Error("provenance write unavailable");
+    await expect(
+      azure.dependencies.operations.withCredentialProvenanceLock(async () => {
+        throw failure;
+      })
+    ).rejects.toBe(failure);
+    expect(trace).toEqual([["provenance-load"], ["lock"], ["unlock"]]);
+    expect(azure.provenance.size).toBe(0);
+  });
+
+  it("refuses a different live record at the shared fixture boundary", () => {
+    const test = start({ pairedProvider: "azure", direct: true });
+    if (!test.azure) throw new Error("Missing Azure fixture.");
+    const foreign = { ...test.operation, operationId: "different-operation" };
+    expect(() =>
+      createParityAzureFixture(foreign, test.dependencies, () => {})
+    ).toThrow("requires the registered live operation");
+    expect(() =>
+      test.azure?.dependencies.honorStopBoundary({
+        operation: foreign,
+        boundary: "before-provider-write",
+        persist: async () => {},
+        report: () => {}
+      })
+    ).toThrow("Unexpected parity fixture call");
+    expect(test.persisted).toEqual([]);
+  });
+});
+
+describe("publication baseline parity", () => {
+  it.each(["direct", "protected", "merge-required"] as const)(
+    "preserves the %s command, journal, narration, and durable transcript",
+    async (mode) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1700000000000);
+      const trace: unknown[] = [];
+      const saved = new Map<string, string>();
+      const kinds = [
+        "github_environment.ensure",
+        "github_environment_variable.put",
+        "github_branch.create",
+        "github_workflow.put",
+        "github_pull_request.create",
+        "github_workflow.dispatch"
+      ] as const;
+      const harness = start({
+        ...(mode !== "direct" ?
+          {
+            gh: [
+              {
+                match:
+                  /^api --method PUT \/repos\/octo\/app\/contents\/\S+ --input @default$/,
+                result: { code: 1, stderr: "protected branch" }
+              }
+            ],
+            headSha: "sha-base",
+            createBranch: { ok: true, stderr: "" },
+            pullRequest: {
+              ok: true,
+              url: "https://github.com/octo/app/pull/7",
+              number: 7
+            }
+          }
+        : {}),
+        ...(mode === "merge-required" ?
+          {
+            fileReadResults: {
+              ".github/workflows/radius-deploy.yml": {
+                content: "on: push\njobs:",
+                status: 200,
+                error: null
+              }
+            }
+          }
+        : {}),
+        trace(entry) {
+          if (Array.isArray(entry) && entry[0] === "durable") {
+            const changes = kinds
+              .flatMap((kind) =>
+                providerMutationsByKind(harness.operation, kind)
+              )
+              .filter((record) => {
+                const encoded = JSON.stringify(record);
+                if (saved.get(record.mutationId) === encoded) return false;
+                saved.set(record.mutationId, encoded);
+                return true;
+              });
+            trace.push(
+              JSON.parse(
+                JSON.stringify([
+                  "durable",
+                  changes,
+                  harness.operation.verification
+                ])
+              )
+            );
+          } else trace.push(JSON.parse(JSON.stringify(entry)));
+        }
+      });
+      const response = await post({ repo: "octo/app" });
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      expect(body.steps).toEqual(harness.steps);
+      expect(harness.ambientCliCalls).toEqual([]);
+      expect(
+        providerMutationsByKind(harness.operation, "github_workflow.put")
+      ).toHaveLength(mode === "direct" ? 3 : 4);
+      expect(
+        providerMutationsByKind(
+          harness.operation,
+          "github_environment_variable.put"
+        ).length
+      ).toBeGreaterThan(0);
+      if (mode === "direct") {
+        expect(harness.state.verifyRunId).toBe("4242");
+        expect(
+          providerMutationsByKind(harness.operation, "github_workflow.dispatch")
+        ).toHaveLength(1);
+      } else {
+        expect(
+          providerMutationsByKind(harness.operation, "github_branch.create")
+        ).toHaveLength(1);
+        expect(
+          providerMutationsByKind(
+            harness.operation,
+            "github_pull_request.create"
+          )
+        ).toHaveLength(1);
+      }
+      expect({
+        trace,
+        body,
+        ledger: harness.operation.setupArtifacts,
+        verification: harness.operation.verification,
+        panel: harness.state,
+        finished: harness.finished
+      }).toMatchSnapshot();
+    }
+  );
+});
 
 describe("create-environment real-loopback HIT: the server-owned gate", () => {
   it("refuses a request that arrives without the server-owned token", async () => {
@@ -1546,46 +2104,71 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     ).toBe(false);
   });
 
-  it("recomputes incomplete credentials while reconciling a workflow", async () => {
-    const harness = start({
-      preparedEnvironment: {
-        requestedName: "dev",
-        canonicalName: "dev",
-        state: "reused"
-      },
-      azureCredential: () => ({ clientId: "c", tenantId: "t" }),
-      gh: recoveredVerifyWorkflowRules()
-    });
-    prepareVerifyWorkflowRecovery(harness.operation);
+  it.each([
+    {
+      provider: "azure",
+      note: "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
+    },
+    {
+      provider: "aws",
+      note: "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
+    }
+  ])(
+    "recomputes incomplete $provider credentials without replaying configuration during workflow reconciliation",
+    async ({ provider, note }) => {
+      const harness = start({
+        preparedEnvironment: {
+          requestedName: "dev",
+          canonicalName: "dev",
+          state: "reused"
+        },
+        azureCredential: () => {
+          if (provider === "aws")
+            throw new Error("AWS status must not read Azure credentials");
+          return { clientId: "c", tenantId: "t" };
+        },
+        gh: recoveredVerifyWorkflowRules()
+      });
+      harness.operation.provider = provider;
+      prepareVerifyWorkflowRecovery(harness.operation);
 
-    const response = await post({
-      repo: "octo/app",
-      environment: "dev",
-      operationEnvironment: "dev",
-      operationId: "op-http"
-    });
+      const response = await post({
+        repo: "octo/app",
+        environment: "dev",
+        operationEnvironment: "dev",
+        operationId: "op-http",
+        provider
+      });
 
-    expect(response.status).toBe(200);
-    const payload = (await response.json()) as Record<string, unknown>;
-    expect(payload).toMatchObject({
-      success: true,
-      verifySkipped: true,
-      verifyRunUrl: ""
-    });
-    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
-    expect(harness.finished).toEqual([
-      {
-        state: "action_required",
-        options: {
-          terminal: {
-            reason: "credentials-incomplete",
-            pullRequestUrl: null,
-            userMessage: payload.verifySkipReason
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as Record<string, unknown>;
+      expect(payload).toMatchObject({
+        success: true,
+        verifySkipped: true,
+        verifyRunUrl: "",
+        verifySkipReason: note
+      });
+      expect(
+        harness.ghCalls.some((call) => call.startsWith("variable set "))
+      ).toBe(false);
+      expect(harness.steps).not.toContain(
+        "Setting environment variables and secrets..."
+      );
+      expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+      expect(harness.finished).toEqual([
+        {
+          state: "action_required",
+          options: {
+            terminal: {
+              reason: "credentials-incomplete",
+              pullRequestUrl: null,
+              userMessage: payload.verifySkipReason
+            }
           }
         }
-      }
-    ]);
-  });
+      ]);
+    }
+  );
 
   it("deletes the legacy workflow after successful workflow reconciliation", async () => {
     const harness = start({
@@ -2119,6 +2702,43 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       "variable set AWS_ROLE_ARN --body arn:aws:iam::1 --env dev --repo octo/app"
     );
   });
+
+  it.each([
+    {
+      provider: "azure",
+      first: "AZURE_CLIENT_ID",
+      last: "AZURE_SUBSCRIPTION_ID"
+    },
+    { provider: "aws", first: "AWS_ROLE_ARN", last: "AWS_ACCOUNT_ID" }
+  ])(
+    "finishes the coherent $provider credential group when Stop arrives during its first write",
+    async ({ provider, first, last }) => {
+      const harness = start({
+        onGhCommand: (command) => {
+          if (command.startsWith(`variable set ${first} `)) {
+            harness.operation.stopRequested = true;
+          }
+        }
+      });
+      const response = await post({
+        repo: "octo/app",
+        provider,
+        roleArn: "arn:aws:iam::1",
+        accountId: "1"
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        cancelled: true,
+        code: "operation-stopped",
+        boundary: "after-provider-configuration"
+      });
+      expect(
+        harness.ghCalls.some((call) => call.startsWith(`variable set ${last} `))
+      ).toBe(true);
+      expect(harness.committedFiles).toEqual([]);
+      expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+    }
+  );
 
   it("defaults an empty environment name to dev rather than keeping the empty string", async () => {
     // `||`, not `??`: "" is not a usable GitHub environment name.
