@@ -27,6 +27,7 @@ import {
   planCredentialVerification
 } from "../../../src/verification-plan.js";
 import {
+  finalizeSetupFailure,
   guardStopBoundary,
   persistBestEffort,
   persistMutationCheckpoint
@@ -1915,6 +1916,140 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
 });
 
 describe("create-environment real-loopback HIT: the seven-step workflow", () => {
+  it.each([false, true])(
+    "keeps an optional template failure nonfatal only without a pending workflow PUT: pending=%s",
+    async (pending) => {
+      const harness = start({
+        preparedEnvironment: {
+          requestedName: "dev",
+          canonicalName: "dev",
+          state: "reused"
+        },
+        gh: [
+          {
+            match:
+              /^api \/repos\/octo\/app\/contents\/\.github\/workflows\/radius-verify-credentials\.yml --jq \.sha$/,
+            result: { code: 0, stdout: gitBlobShaOf(MARKED_VERIFY_WORKFLOW) }
+          },
+          {
+            match:
+              /^api \/repos\/octo\/app\/contents\/\.github\/workflows\/run-rad-commands\.yml --jq \.sha$/,
+            result: { code: 0, stdout: gitBlobShaOf(DEPLOY_WORKFLOW_BODY) }
+          }
+        ]
+      });
+      harness.operation.state = "running";
+      const path = ".github/workflows/radius-delete.yml";
+      if (pending) {
+        const mutation = prepareProviderMutation(harness.operation, {
+          kind: "github_workflow.put",
+          target: `octo/app:<default>:${path}`,
+          intent: {
+            branch: "<default>",
+            path,
+            previousBlobSha: null,
+            previousBlobKnown: true,
+            contentSha256: WORKFLOW_CONTENT_DIGEST,
+            operationMarker: `radius-operation:op-http:workflow:${path}:${WORKFLOW_CONTENT_DIGEST.slice(0, 16)}`
+          }
+        });
+        settleProviderMutation(
+          harness.operation,
+          mutation.mutationId,
+          "outcome_unknown",
+          "Prior optional workflow PUT timed out."
+        );
+        await harness.dependencies.persistOperations();
+      }
+      const savedMutations = structuredClone(
+        providerMutationsByKind(harness.operation, "github_workflow.put")
+      );
+      let generatorCalls = 0;
+      harness.dependencies.generateDeleteWorkflow = async () => {
+        generatorCalls++;
+        throw new Error("Delete template fetch unavailable.");
+      };
+      let pullRequestCalls = 0;
+      harness.dependencies.createPullRequestApi = async () => {
+        pullRequestCalls++;
+        throw new Error("Unchanged workflows must not open a pull request.");
+      };
+      let cleanupCalls = 0;
+      const unexpectedCleanup = async (): Promise<never> => {
+        cleanupCalls++;
+        throw new Error("Unproven ownership must not reach cleanup.");
+      };
+      let finalizations = 0;
+      harness.dependencies.finalizeSetupFailure = async (operation, input) => {
+        finalizations++;
+        if (
+          typeof input.status !== "number" ||
+          typeof input.error !== "string" ||
+          typeof input.code !== "string"
+        ) {
+          throw new Error("Malformed adapter finalization request.");
+        }
+        return finalizeSetupFailure(operation, {
+          status: input.status,
+          error: input.error,
+          code: input.code,
+          runAz: unexpectedCleanup,
+          runGitHubVariable: unexpectedCleanup,
+          runDeleteEnvironment: unexpectedCleanup,
+          readEnvironment: unexpectedCleanup
+        });
+      };
+
+      const response = await post({
+        operationId: harness.operation.operationId,
+        repo: "octo/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      const body = await response.json();
+
+      expect(generatorCalls).toBe(1);
+      expect(cleanupCalls).toBe(0);
+      expect(pullRequestCalls).toBe(0);
+      expect(harness.selectedClaimCalls.length).toBeGreaterThan(0);
+      expect(harness.steps).toContain(
+        "⚠️ Could not generate/commit delete workflows: Delete template fetch unavailable."
+      );
+      expect(
+        providerMutationsByKind(harness.operation, "github_workflow.put")
+      ).toEqual(savedMutations);
+      expect(
+        harness.ghCalls.filter((call) =>
+          /^api --method (PUT|POST|DELETE) .*\/contents\//.test(call)
+        )
+      ).toEqual([]);
+      if (pending) {
+        expect(response.status).toBe(409);
+        expect(body).toMatchObject({
+          code: "provider-reconciliation-pending",
+          providerRecoveryGuidance: expect.stringContaining(
+            "github_workflow.put"
+          )
+        });
+        expect(harness.operation.state).toBe("failed_partial");
+        expect(finalizations).toBe(1);
+        expect(
+          harness.ghCalls.filter((call) =>
+            /--method (PUT|POST|DELETE)|workflow run|variable set/.test(call)
+          )
+        ).toEqual([]);
+        expect(harness.finished).toEqual([]);
+      } else {
+        expect(response.status).toBe(200);
+        expect(body).toMatchObject({ success: true, actionRequired: false });
+        expect(finalizations).toBe(0);
+        expect(
+          harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+        ).toHaveLength(1);
+      }
+    }
+  );
+
   it("answers a single synchronous 200 describing the whole run", async () => {
     start();
 

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { createWorkflowFileCommitter } from "@radius-project/core";
 import { createSetupEnvironmentPorts } from "./setup-environment-adapter.js";
+import { persistBestEffort } from "../services/setup-checkpoint.js";
 import type {
   CreateEnvironmentDependencies,
   CreateEnvironmentInstanceEntry
@@ -10,7 +12,15 @@ const unexpected = (): never => {
   throw new Error("Unexpected adapter dependency.");
 };
 
-function harness(overrides: Partial<CreateEnvironmentDependencies> = {}) {
+function harness(
+  overrides: Partial<CreateEnvironmentDependencies> = {},
+  bindings: Partial<
+    Pick<
+      Parameters<typeof createSetupEnvironmentPorts>[0],
+      "provider" | "finalize"
+    >
+  > = {}
+) {
   const dependencies: CreateEnvironmentDependencies = {
     isServerOwnedRequest: unexpected,
     getSelectedGitHubExecutor: unexpected,
@@ -92,12 +102,159 @@ function harness(overrides: Partial<CreateEnvironmentDependencies> = {}) {
     finalize: async (input) => {
       finalized.push(input);
       return "stopped";
-    }
+    },
+    ...bindings
   });
   return { ports, finalized, steps };
 }
 
 describe("Canvas setup configuration adapter", () => {
+  it.each(["azure", "aws"])(
+    "preserves repository-refusal cleanup execution for %s",
+    async (provider) => {
+      const calls: string[][] = [];
+      const cleanupResult = { code: 0, stdout: "removed", stderr: "" };
+      const cleanupArgs = ["ad", "app", "delete", "--id", "owned-application"];
+      const finalized: Record<string, unknown>[] = [];
+      const h = harness(
+        {
+          preflightRepoAdmin: async () => "Repository admin access was lost.",
+          runAzCommand: async (args) => {
+            calls.push(args);
+            return cleanupResult;
+          }
+        },
+        {
+          provider,
+          finalize: async (input) => {
+            finalized.push(input);
+            if (provider === "azure") {
+              if (typeof input.runAz !== "function")
+                throw new Error("Azure cleanup runner is missing.");
+              expect(await input.runAz(cleanupArgs)).toEqual(cleanupResult);
+            } else {
+              expect(input.runAz).toBeNull();
+            }
+            return "failed";
+          }
+        }
+      );
+
+      expect(await h.ports.preflightRepository("octo/app")).toBe(false);
+      expect(await h.ports.finalizeFailure({ kind: "repository-access" })).toBe(
+        "failed"
+      );
+      expect(finalized).toEqual([
+        expect.objectContaining({
+          status: 403,
+          code: "repo-admin-required",
+          error: "Repository admin access was lost.",
+          stage: "configure",
+          classification: "needs-someone-else"
+        })
+      ]);
+      expect(calls).toEqual(provider === "azure" ? [cleanupArgs] : []);
+    }
+  );
+
+  it("preserves the protected-branch refusal and adapter-formatted fallback failure", async () => {
+    const formatted: unknown[] = [];
+    const removed: string[] = [];
+    const h = harness({
+      getDefaultBranch: async () => "trunk",
+      getBranchHeadSha: async (_repo, branch) => {
+        expect(branch).toBe("trunk");
+        return null;
+      },
+      errorMessage: (error) => {
+        formatted.push(error);
+        if (!(error instanceof Error)) throw new Error("Expected an Error.");
+        return `Selected account: ${error.message}`;
+      },
+      tempFile: {
+        write: () => "workflow-body.json",
+        remove: (path) => removed.push(path)
+      }
+    });
+    const target = { targetRepo: "octo/app", envName: "dev" };
+    const command = ["api", "--method", "PUT", "/repos/octo/app/contents/p"];
+    const committer = createWorkflowFileCommitter(
+      h.ports.workflowFiles({
+        ...target,
+        runGh: async (args) => {
+          expect(args).toEqual([
+            "api",
+            "/repos/octo/app/contents/p",
+            "--jq",
+            ".sha"
+          ]);
+          return { code: 1, stdout: "", stderr: "HTTP 404" };
+        },
+        runGhWorkflow: async (args) => {
+          expect(args).toEqual([...command, "--input", "workflow-body.json"]);
+          return { code: 1, stdout: "", stderr: "protected branch" };
+        }
+      }),
+      target
+    );
+
+    await expect(
+      committer.commitWorkflowFileSmart(
+        "p",
+        Buffer.from("workflow").toString("base64"),
+        "Add workflow"
+      )
+    ).resolves.toMatchObject({
+      ok: false,
+      viaPr: false,
+      stderr:
+        'protected branch (PR fallback failed: Selected account: could not resolve head of base branch "trunk")'
+    });
+    expect(formatted).toHaveLength(1);
+    expect(removed).toEqual(["workflow-body.json"]);
+    expect(committer.pullRequestState()).toBeUndefined();
+  });
+
+  it("reports a final best-effort save failure after recording incomplete credentials", async () => {
+    const diagnostics: unknown[] = [];
+    const events: string[] = [];
+    let terminal = false;
+    const h = harness({
+      persistBestEffort,
+      persistOperations: async () => {
+        events.push("persist");
+        if (terminal) throw new Error("disk full");
+      },
+      reportOperationDiagnostic: (diagnostic) => {
+        events.push("diagnostic");
+        diagnostics.push(diagnostic);
+      },
+      finish: (_operation, state, options) => {
+        expect(state).toBe("action_required");
+        expect(options).toMatchObject({
+          terminal: { reason: "credentials-incomplete", pullRequestUrl: null }
+        });
+        events.push("terminal");
+        terminal = true;
+      }
+    });
+
+    await h.ports.recovery.persist();
+    h.ports.finishCredentialsIncomplete({
+      provider: "azure",
+      pullRequestUrl: null
+    });
+    await expect(h.ports.persistBestEffort()).resolves.toBe(false);
+
+    expect(events).toEqual(["persist", "terminal", "persist", "diagnostic"]);
+    expect(diagnostics).toEqual([
+      {
+        code: "operation-store-write-failed",
+        message: "Could not persist setup operation setup-adapter: disk full"
+      }
+    ]);
+  });
+
   it("keeps package credentials request-local and refuses another request's opaque handle", async () => {
     const credentials = { username: "selected", credential: "fixture" };
     const requests: unknown[] = [];
