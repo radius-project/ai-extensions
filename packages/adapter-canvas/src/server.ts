@@ -1,3 +1,6 @@
+import { workflowTempFile } from "@radius-project/adapter-shared";
+import { ensureAzureServicePrincipal } from "@radius-project/core";
+import { createAzureRecoveryPort } from "./server/services/azure-setup-recovery.js";
 // Canvas adapter — HTTP server host for the webview.
 //
 // Owns the local loopback server that backs each canvas instance: the declared
@@ -86,8 +89,6 @@ import {
   ghCommandCredentialSource,
   resetGhIdentityCache,
   createSelectedGhExecutor,
-  getActiveKeyringLogin,
-  switchGhKeyringAccount,
   selectedGhApiJson,
   selectedGetDefaultBranch,
   selectedGetBranchHeadSha,
@@ -204,7 +205,6 @@ import {
   setCommandState,
   providerMutationId,
   providerMutationRecord,
-  optionalIdentityString,
   provenOwnedCleanupTargets,
   providerRecoveryManualGuidance,
   settleProviderMutation,
@@ -342,7 +342,7 @@ import {
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
-import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
+import type { EnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import {
   createGitHubAccountReadinessService,
   createGitHubSelectionHandleStore
@@ -355,16 +355,9 @@ import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { shouldRetryWithKeyringCredential } from "./server/services/workflow-credential-fallback.js";
 import { verifyWorkflowFilesMatchSource } from "./server/services/delete-environment-workflow-verification.js";
 import {
-  executeRecoverableMutation,
   ProviderMutationRecoveryError,
-  providerMutationWillWrite,
   recordProviderReconciliationFailure
 } from "./server/services/provider-mutation-recovery.js";
-import {
-  azureRetryDelayMs,
-  isReplicationLagError,
-  isRetryableAzureReadFailure
-} from "./server/routes/azure-auto-setup-credentials.js";
 import {
   pendingBranchDelete,
   reconcileRecoveredBranchDelete
@@ -734,69 +727,6 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });
 
-const githubAccountCoordinator = createGitHubAccountCoordinator(
-  {
-    createExecutor: (login) => createSelectedGhExecutor(login),
-    getActiveKeyringLogin,
-    switchKeyringAccount: switchGhKeyringAccount,
-    resetIdentityCache: resetGhIdentityCache
-  },
-  {
-    ghCommandPresentation: GH_COMMAND_PRESENTATION
-  }
-);
-const githubAccountReadiness = createGitHubAccountReadinessService(
-  githubAccountCoordinator,
-  { ghCommandPresentation: GH_COMMAND_PRESENTATION }
-);
-const githubSelectionHandles = createGitHubSelectionHandleStore();
-const selectedGitHubExecutorsByOperation = new Map<
-  string,
-  SelectedGhExecutor
->();
-
-// Composition root for the credential-profile and GitHub-identity half of the
-// `identity-credentials` family. Ten narrow function seams: the three profile
-// store operations, the four gh identity operations, the advisory repo
-// preflight, the repo-slug guard, and the error formatter. `preflightRepoAdmin`
-// and `errorMessage` stay defined here and are injected rather than moved, so
-// the route module spawns nothing and touches no disk.
-const identityProfilesRoutes = createIdentityProfilesRoutes({
-  listCredentialProfiles,
-  saveCredentialProfile,
-  deleteCredentialProfile,
-  getGitHubIdentity,
-  resetGhIdentityCache,
-  prepareGitHubAccount: async ({ instanceId, repo, environment, login }) => {
-    const generation = githubSelectionHandles.begin(instanceId);
-    const readiness = await githubAccountReadiness.check({
-      instanceId,
-      repo,
-      environment,
-      login
-    });
-    if (!readiness.ready || !readiness.credentialSource) return { readiness };
-    const selection = githubSelectionHandles.mint({
-      instanceId,
-      repo,
-      environment,
-      login: readiness.login,
-      credentialSource: readiness.credentialSource,
-      generation
-    });
-    if (!selection) return { readiness };
-    return {
-      readiness,
-      selectionHandle: selection.handle,
-      expiresAt: selection.expiresAt
-    };
-  },
-  preflightRepoAdmin: (repo) =>
-    preflightRepoAdmin(repo, undefined, GH_COMMAND_PRESENTATION),
-  isValidRepoSlug,
-  errorMessage
-});
-
 // Composition root for the auth/verify half of the `identity-credentials`
 // family. Eight narrow function seams: the CLI runner from `gh.ts`, and the
 // GUID, Azure-message, prompt-builder and error helpers that stay defined here.
@@ -939,8 +869,11 @@ async function discoverEnvironmentTarget(
 // who passed readiness with the selected account is never refused because the
 // ambient `gh` account cannot see the repository. No pinned account means the
 // claims cannot be established, and the rung fails closed on null.
-const namespaceClaimsFor = (operationId: string) => {
-  const executor = selectedGitHubExecutorsByOperation.get(operationId);
+const namespaceClaimsFor = (
+  accountContext: Pick<EnvironmentAccountContext, "getExecutor">,
+  operationId: string
+) => {
+  const executor = accountContext.getExecutor(operationId);
   return executor ? createSelectedNamespaceClaimsPorts(executor) : null;
 };
 
@@ -2549,286 +2482,19 @@ export async function ensureServicePrincipal(
   },
   beforeCreate: () => Promise<boolean> = async () => true,
   sleep: (milliseconds: number) => Promise<void> = sleepMs
-): Promise<
-  | {
-      ok: true;
-      state: "created" | "reused" | "created_candidate";
-      origin: "unknown" | "pre_existing" | "this_operation";
-      objectId: string | null;
-    }
-  | { ok: false; stopped: true }
-  | { ok: false; stopped?: false; stderr: string }
-> {
-  const showArgs = [
-    "ad",
-    "sp",
-    "show",
-    "--id",
+) {
+  return ensureAzureServicePrincipal(
     clientId,
-    "--query",
-    "id",
-    "-o",
-    "tsv"
-  ];
-  const readObjectId = async (): Promise<{
-    ok: boolean;
-    objectId: string;
-    stderr: string;
-  }> => {
-    const result = await runAz(showArgs);
-    return {
-      ok:
-        result.timedOut !== true && (result.code === 0 || result.code === "0"),
-      objectId: String(result.stdout || "").trim(),
-      stderr:
-        result.timedOut === true ?
-          `ETIMEDOUT: Service Principal lookup timed out. ${String(result.stderr || "").trim()}`.trim()
-        : String(result.stderr || "").trim()
-    };
-  };
-  const pendingCreate =
+    runAz,
     mutationRecovery ?
-      providerMutationRecord(
+      createAzureRecoveryPort(
         mutationRecovery.operation,
-        "azure_service_principal.create",
-        clientId
+        mutationRecovery.persist
       )
-    : null;
-  const before = await readObjectId();
-  if (before.ok && before.objectId) {
-    // A principal that is here now is not automatically one that was here
-    // before. This operation may have created it and crashed before the ledger
-    // caught up, and reading that as pre-existing would leave a principal
-    // Radius made behind at rollback. The journal is asked first.
-    if (!pendingCreate) {
-      return {
-        ok: true,
-        state: "reused",
-        origin: "pre_existing",
-        objectId: before.objectId
-      };
-    }
-    if (pendingCreate.status === "manual_required") {
-      return {
-        ok: false,
-        stderr:
-          pendingCreate.evidence ||
-          `Radius cannot prove who created the Service Principal for application ${clientId}.`
-      };
-    }
-    if (pendingCreate.status === "not_applied") {
-      // Entra refused this operation's create, so what answers now predates it.
-      return {
-        ok: true,
-        state: "reused",
-        origin: "pre_existing",
-        objectId: before.objectId
-      };
-    }
-    if (pendingCreate.status === "confirmed") {
-      const recorded = pendingCreate.providerId || null;
-      if (recorded && recorded === before.objectId) {
-        // Entra acknowledged the create and recorded this exact object id, so
-        // the rollback owns it even though the crash beat the ledger.
-        return {
-          ok: true,
-          state: "created",
-          origin: "this_operation",
-          objectId: before.objectId
-        };
-      }
-      // Either the confirmation predates object ids being recorded, or the
-      // principal under this application is a different object than the one
-      // this operation made. Neither proves ownership, so nothing is claimed
-      // and nothing will be deleted.
-      return {
-        ok: true,
-        state: "created_candidate",
-        origin: "unknown",
-        objectId: before.objectId
-      };
-    }
-    // A prepared or outcome-unknown create is settled through the journal below.
-    // Its provider read records the exact object id before any later write runs.
-  }
-  if (before.ok && !before.objectId) {
-    return {
-      ok: false,
-      stderr: "The Service Principal lookup returned an empty object id."
-    };
-  }
-  if (!before.ok && !isAzResourceNotFound(before.stderr)) {
-    return {
-      ok: false,
-      stderr:
-        before.stderr ||
-        "Failed to look up the Service Principal before creation."
-    };
-  }
-
-  const createArgs = ["ad", "sp", "create", "--id", clientId];
-  const createdObjectId = (result: Partial<CommandResult>): string | null => {
-    try {
-      const body = JSON.parse(String(result.stdout || "")) as {
-        id?: unknown;
-      };
-      return optionalIdentityString(body?.id);
-    } catch {
-      return null;
-    }
-  };
-  const runCreate = async (): Promise<CommandResult> => {
-    const result = await runAz(createArgs);
-    return {
-      code: result.code ?? 1,
-      stdout: String(result.stdout || ""),
-      stderr: String(result.stderr || ""),
-      ...(result.timedOut === true ? { timedOut: true } : {})
-    };
-  };
-  const reconcilePrincipal = async () => {
-    for (let attempt = 0; ; attempt++) {
-      const after = await readObjectId();
-      if (after.ok && after.objectId) {
-        return {
-          state: "applied" as const,
-          value: after.objectId,
-          evidence:
-            "The Service Principal for this operation's exact application client id exists after the interrupted create.",
-          providerId: after.objectId
-        };
-      }
-      if (after.ok) {
-        throw new Error(
-          "The Service Principal lookup returned an empty object id."
-        );
-      }
-      const retryable =
-        isAzResourceNotFound(after.stderr) ||
-        isRetryableAzureReadFailure(after.stderr);
-      const delay = azureRetryDelayMs(after.stderr, 2000 * (attempt + 1));
-      if (!retryable || attempt >= 5 || delay === null) {
-        throw new Error(
-          after.stderr || "The Service Principal state could not be read."
-        );
-      }
-      await sleep(delay);
-    }
-  };
-  const mutationKind = "azure_service_principal.create";
-  if (
-    (!mutationRecovery ||
-      providerMutationWillWrite(
-        mutationRecovery.operation,
-        mutationKind,
-        clientId
-      )) &&
-    !(await beforeCreate())
-  ) {
-    return { ok: false, stopped: true };
-  }
-  if (!mutationRecovery) {
-    const create = await runCreate();
-    if (create.code === 0 || create.code === "0") {
-      return {
-        ok: true,
-        state: "created",
-        origin: "this_operation",
-        objectId: createdObjectId(create)
-      };
-    }
-    const after = await readObjectId();
-    if (after.ok && after.objectId) {
-      // Absent before this attempt, present after its own create attempt: this
-      // reconciles a failed create against reality, and it is not a reuse.
-      return {
-        ok: true,
-        state: "created_candidate",
-        origin: "unknown",
-        objectId: after.objectId
-      };
-    }
-    return {
-      ok: false,
-      stderr:
-        create.stderr ||
-        after.stderr ||
-        "Could not create or find the Service Principal."
-    };
-  }
-
-  for (let attempt = 0; ; attempt++) {
-    const recovered = await executeRecoverableMutation<string>({
-      operation: mutationRecovery.operation,
-      kind: mutationKind,
-      target: clientId,
-      providerIdempotencyKey: clientId,
-      persist: mutationRecovery.persist,
-      beforeMutation: beforeCreate,
-      mutate: runCreate,
-      accept: (result) => createdObjectId(result) || "",
-      // Settled with the confirmed status, so a crash between Entra's answer and
-      // the ledger still leaves a restart able to tell this principal from one
-      // that was already there.
-      providerIdOf: (result) => createdObjectId(result),
-      // A not-found read can lag behind a successful write. It never proves that
-      // an interrupted create was rejected or permits a second create.
-      reconcile: reconcilePrincipal
-    });
-    if (recovered.state === "cancelled") {
-      return { ok: false, stopped: true };
-    }
-    if (recovered.state === "not_applied") {
-      const rejected = recovered.result;
-      const firstOutput = (
-        value:
-          | {
-              stderr?: string;
-              stdout?: string;
-            }
-          | undefined
-      ) =>
-        [value?.stderr, value?.stdout]
-          .map((text) => (text || "").trim())
-          .find(Boolean) || "";
-      const detail = firstOutput(rejected);
-      const permissionFailure =
-        /HTTP\s*(?:401|403)|Authorization|Authentication|Insufficient privileges/i.test(
-          detail
-        );
-      const retryable =
-        rejected &&
-        !permissionFailure &&
-        (isReplicationLagError(detail) || isRetryableAzureReadFailure(detail));
-      const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
-      if (retryable && attempt < 5 && delay !== null) {
-        if (!(await beforeCreate())) return { ok: false, stopped: true };
-        await sleep(delay);
-        if (!(await beforeCreate())) return { ok: false, stopped: true };
-        continue;
-      }
-      return {
-        ok: false,
-        stderr:
-          detail ||
-          recovered.diagnostic ||
-          "Could not create or find the Service Principal."
-      };
-    }
-    return recovered.recovered ?
-        {
-          ok: true,
-          state: "created_candidate",
-          origin: "unknown",
-          objectId: recovered.value
-        }
-      : {
-          ok: true,
-          state: "created",
-          origin: "this_operation",
-          objectId: recovered.value || null
-        };
-  }
+    : undefined,
+    beforeCreate,
+    sleep
+  );
 }
 
 /**
@@ -3896,46 +3562,26 @@ export async function preflightRepoAdmin(
   executor?: SelectedGhExecutor,
   ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): Promise<string> {
-  const runJson = (path: string) =>
-    executor ? selectedGhApiJson(executor, path) : ghApiJson(path);
-  const who = await runJson("user");
-  const login =
-    who.ok ? optionalString(record(who.json).login)
-    : executor ? executor.login
-    : (await getGitHubIdentity()).actingLogin;
-  let readFailed = false,
-    permissions = null;
-  const res = await runJson(`repos/${repo}`);
-  if (res.ok) {
-    const value = record(res.json).permissions;
-    permissions = value && typeof value === "object" ? record(value) : null;
-  } else if (res.status === 404) {
-    readFailed = true;
-  } else {
-    return ""; // ambiguous/transient — don't block or mislead; let the real op surface the true error
-  }
-  if (isGitHubAppBotLogin(login)) {
-    // Same reasoning as the readiness service: an installation token's granted
-    // permissions are not readable back, so prove access against the resource
-    // setup is about to mutate instead of trusting the `[bot]` login. Keep the
-    // ambiguity rule above -- only an explicit denial blocks.
-    if (readFailed) return describeMissingGitHubAppAccess(login, repo);
-    for (const probe of GITHUB_APP_ACCESS_PROBES) {
-      const result = await runJson(probe.path(repo));
-      if (result.ok) continue;
-      if (result.status === 403 || result.status === 404)
-        return describeMissingGitHubAppAccess(login, repo, probe.permission);
-      return ""; // ambiguous/transient on this probe — do not block
-    }
-    return "";
+  const result = await preflightSetupRepository(repo, {
+    read: (path) =>
+      executor ? selectedGhApiJson(executor, path) : ghApiJson(path),
+    fallbackLogin: async () =>
+      executor ? executor.login : (await getGitHubIdentity()).actingLogin,
+    isAppLogin: isGitHubAppBotLogin,
+    probes: GITHUB_APP_ACCESS_PROBES,
+    optionalString,
+    record
+  });
+  if (result.kind === "allowed" || result.kind === "ambiguous") return "";
+  if (result.kind === "app-denied") {
+    return describeMissingGitHubAppAccess(
+      result.login,
+      repo,
+      result.permission
+    );
   }
   return explainRepoAccessForEnvSetup(
-    {
-      repo,
-      login,
-      readFailed,
-      permissions
-    },
+    { repo, ...result },
     ghCommandPresentation
   );
 }
@@ -4012,32 +3658,14 @@ export async function preflightGhcrPackageWriteAccess(
   let ghPkgIdentity: GhcrPackageIdentity;
   try {
     if (selectedExecutor) {
-      const packageHasWrite =
-        packageCredentials.scopes?.includes("write:packages") ??
-        (packageCredentials.username === selectedExecutor.login &&
-          selectedExecutor.scopes.includes("write:packages"));
-      ghPkgIdentity = {
-        actingLogin: selectedExecutor.login,
-        displayLogin: selectedExecutor.login,
-        mismatch: false,
-        actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
-        actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
-        packagesLogin: packageCredentials.username,
-        packagesHasWrite: packageHasWrite,
-        packagesCredentialSource: packageCredentials.source,
-        reason: "selected-account-executor",
-        accounts: [
-          {
-            login: packageCredentials.username,
-            hasWorkflow:
-              packageCredentials.username === selectedExecutor.login &&
-              selectedExecutor.scopes.includes("workflow"),
-            hasPackages: packageHasWrite,
-            switchable: packageCredentials.source === "keyring",
-            acting: packageCredentials.username === selectedExecutor.login
-          }
-        ]
-      };
+      ghPkgIdentity = selectedSetupPackageIdentity(
+        {
+          username: packageCredentials.username,
+          source: packageCredentials.source,
+          scopes: packageCredentials.scopes
+        },
+        { login: selectedExecutor.login, scopes: selectedExecutor.scopes }
+      );
     } else {
       ghPkgIdentity = await loadIdentity();
     }
@@ -4052,8 +3680,15 @@ export async function preflightGhcrPackageWriteAccess(
     };
   }
 
-  const ghPkgLogin = (packageCredentials.username || "").trim();
-  if (!ghPkgLogin) {
+  const access = assessSetupPackageWriteAccess(
+    {
+      username: packageCredentials.username,
+      source: packageCredentials.source,
+      scopes: packageCredentials.scopes
+    },
+    ghPkgIdentity
+  );
+  if (access.kind === "identity-missing") {
     return {
       ok: false,
       status: 403,
@@ -4062,21 +3697,8 @@ export async function preflightGhcrPackageWriteAccess(
         "Could not determine which GitHub account the GHCR package credentials belong to. Re-authenticate to GitHub Packages and retry."
     };
   }
-  // The identity reports the scopes of the credential it resolved. Trust it
-  // only when that is the same credential this preflight holds; otherwise fall
-  // back to the account list.
-  const ghPkgAccount =
-    (ghPkgIdentity.accounts || []).find((a) => a.login === ghPkgLogin) || null;
-  const ghPkgHasPackages =
-    (
-      ghPkgIdentity.packagesLogin === ghPkgLogin &&
-      ghPkgIdentity.packagesCredentialSource === packageCredentials.source
-    ) ?
-      ghPkgIdentity.packagesHasWrite
-    : ghPkgAccount ? ghPkgAccount.hasPackages
-    : ghPkgIdentity.actingLogin === ghPkgLogin ? ghPkgIdentity.actingHasPackages
-    : false;
-  if (!ghPkgHasPackages) {
+  const ghPkgLogin = access.login;
+  if (access.kind === "scope-required") {
     const scope = explainMissingPackagesScope(
       ghPkgLogin,
       packageCredentials.source,
@@ -4570,11 +4192,15 @@ export function createInstanceRequestCoordinator(
   environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts,
   dependencies: {
     executionOwner: EnvironmentExecutionOwner;
+    accountContext: EnvironmentAccountContext;
     servers: ReadonlyMap<string, CanvasServerEntry>;
     environmentOperationRunner?: EnvironmentOperationRunner;
   }
 ) {
-  const { executionOwner, servers } = dependencies;
+  const { executionOwner, accountContext, servers } = dependencies;
+  if (!accountContext)
+    throw new Error("Missing request coordinator dependency: accountContext");
+  const githubAccountCoordinator = accountContext.coordinator;
   const attachment = executionOwner.attach(instanceId);
   const serverOwnedToken = randomUUID();
   const browserMutationNonce = randomUUID();
@@ -4784,10 +4410,10 @@ export function createInstanceRequestCoordinator(
       createExecutor: (login) =>
         githubAccountCoordinator.createReadOnlyExecutor(login),
       registerExecutor: (operationId, executor) => {
-        selectedGitHubExecutorsByOperation.set(operationId, executor);
+        accountContext.registerExecutor(operationId, executor);
       },
       unregisterExecutor: (operationId) => {
-        selectedGitHubExecutorsByOperation.delete(operationId);
+        accountContext.unregisterExecutor(operationId);
       },
       beforeMonitor,
       monitor: monitorVerification,
@@ -4881,9 +4507,9 @@ export function createInstanceRequestCoordinator(
     try {
       const setup = await githubAccountCoordinator.withSelectedAccount(
         selectedLogin,
-        { instanceId, operationId },
+        { ownerKey: accountContext.ownerKey, operationId },
         async (executor) => {
-          selectedGitHubExecutorsByOperation.set(operationId, executor);
+          accountContext.registerExecutor(operationId, executor);
           executorRegistered = true;
           return runEnvironmentOperationWorkflow(op, executor, {
             preflightRepoAdmin: (repo, selectedExecutor) =>
@@ -5011,7 +4637,7 @@ export function createInstanceRequestCoordinator(
       throw error;
     } finally {
       if (executorRegistered) {
-        selectedGitHubExecutorsByOperation.delete(operationId);
+        accountContext.unregisterExecutor(operationId);
       }
     }
   }
@@ -5040,10 +4666,10 @@ export function createInstanceRequestCoordinator(
       createExecutor: (login) =>
         githubAccountCoordinator.createReadOnlyExecutor(login),
       registerExecutor: (id, executor) => {
-        selectedGitHubExecutorsByOperation.set(id, executor);
+        accountContext.registerExecutor(id, executor);
       },
       unregisterExecutor: (id) => {
-        selectedGitHubExecutorsByOperation.delete(id);
+        accountContext.unregisterExecutor(id);
       },
       stopBoundary: ({ operation: target, boundary, beforePersist }) =>
         honorStopBoundary({
@@ -5961,6 +5587,7 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
 
 export interface ProductionCanvasServerRuntimeOptions {
   executionOwner: EnvironmentExecutionOwner;
+  accountContext: EnvironmentAccountContext;
   environmentOperationRunner?: EnvironmentOperationRunner;
   environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
   serverDependencies?: Pick<
@@ -5976,10 +5603,60 @@ export interface ProductionCanvasServerRuntimeOptions {
 export function createProductionCanvasServerRuntime(
   options: ProductionCanvasServerRuntimeOptions
 ) {
-  const { executionOwner, environmentDeletionPorts, serverDependencies } =
-    options;
+  const {
+    executionOwner,
+    accountContext,
+    environmentDeletionPorts,
+    serverDependencies
+  } = options;
   if (!executionOwner)
     throw new Error("Missing canvas server dependency: executionOwner");
+  if (!accountContext)
+    throw new Error("Missing canvas server dependency: accountContext");
+  const githubAccountCoordinator = accountContext.coordinator;
+  const githubAccountReadiness = createGitHubAccountReadinessService(
+    githubAccountCoordinator,
+    {
+      ownerKey: accountContext.ownerKey,
+      ghCommandPresentation: GH_COMMAND_PRESENTATION
+    }
+  );
+  const githubSelectionHandles = createGitHubSelectionHandleStore();
+  const identityProfilesRoutes = createIdentityProfilesRoutes({
+    listCredentialProfiles,
+    saveCredentialProfile,
+    deleteCredentialProfile,
+    getGitHubIdentity,
+    resetGhIdentityCache,
+    prepareGitHubAccount: async ({ instanceId, repo, environment, login }) => {
+      const generation = githubSelectionHandles.begin(instanceId);
+      const readiness = await githubAccountReadiness.check({
+        instanceId,
+        repo,
+        environment,
+        login
+      });
+      if (!readiness.ready || !readiness.credentialSource) return { readiness };
+      const selection = githubSelectionHandles.mint({
+        instanceId,
+        repo,
+        environment,
+        login: readiness.login,
+        credentialSource: readiness.credentialSource,
+        generation
+      });
+      if (!selection) return { readiness };
+      return {
+        readiness,
+        selectionHandle: selection.handle,
+        expiresAt: selection.expiresAt
+      };
+    },
+    preflightRepoAdmin: (repo) =>
+      preflightRepoAdmin(repo, undefined, GH_COMMAND_PRESENTATION),
+    isValidRepoSlug,
+    errorMessage
+  });
   // Composition root for the migrated `liveness-source` family. The handlers
   // receive only the three seams they use; the open handler is read through a
   // getter so the SDK entry can still register it after construction.
@@ -6101,7 +5778,7 @@ export function createProductionCanvasServerRuntime(
       const { identity, login } = requiredVerificationWorkflowContext(op);
       const result = await githubAccountCoordinator.withSelectedAccount(
         login,
-        { instanceId: "operations-control", operationId: op.operationId },
+        { ownerKey: accountContext.ownerKey, operationId: op.operationId },
         (executor) =>
           readVerificationWorkflowState(executor, identity, {
             run: (selected, args) => selected.run(args, { timeout: 30000 })
@@ -6117,7 +5794,7 @@ export function createProductionCanvasServerRuntime(
       const { identity, login } = requiredVerificationWorkflowContext(op);
       const result = await githubAccountCoordinator.withSelectedAccount(
         login,
-        { instanceId: "operations-control", operationId: op.operationId },
+        { ownerKey: accountContext.ownerKey, operationId: op.operationId },
         (executor) =>
           cancelVerificationWorkflow(executor, identity, {
             run: (selected, args) => selected.run(args, { timeout: 30000 })
@@ -6308,7 +5985,7 @@ export function createProductionCanvasServerRuntime(
       },
       external: {
         getSelectedGitHubExecutor: (operationId) =>
-          selectedGitHubExecutorsByOperation.get(operationId),
+          accountContext.getExecutor(operationId),
         getGitHubIdentity,
         preflightRepoAdmin: (repo, executor) =>
           preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
@@ -6567,7 +6244,7 @@ export function createProductionCanvasServerRuntime(
     now: () => Date.now(),
     getOperation: (operationId) => operations.get(operationId),
     getSelectedGitHubExecutor: (operationId) =>
-      selectedGitHubExecutorsByOperation.get(operationId),
+      accountContext.getExecutor(operationId),
     isSelectedGitHubAuthorizationError: (error) =>
       isSelectedGhAuthorizationError(error),
     hasCompleteVerificationIdentity,
@@ -6637,7 +6314,7 @@ export function createProductionCanvasServerRuntime(
       false,
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     getSelectedGitHubExecutor: (operationId) =>
-      selectedGitHubExecutorsByOperation.get(operationId),
+      accountContext.getExecutor(operationId),
     cliExec: (command, args, options, callback) =>
       cliExec(command, args, options, callback),
     readProcessEnv: () => process.env,
@@ -6659,7 +6336,8 @@ export function createProductionCanvasServerRuntime(
     errorMessage,
     stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
     stageConfigureEnvironment: STAGE_CONFIGURE_ENVIRONMENT,
-    namespaceClaimsFor,
+    namespaceClaimsFor: (operationId) =>
+      namespaceClaimsFor(accountContext, operationId),
     addLegacyStep: (operation, text) => {
       addLegacyStep(operation, text);
     },
@@ -6700,25 +6378,7 @@ export function createProductionCanvasServerRuntime(
       executor ?
         selectedCreateBranchRef(executor, repo, branch, sha)
       : createBranchRef(repo, branch, sha),
-    tempFile: {
-      write: (contents) => {
-        const path = join(
-          tmpdir(),
-          "radius-wf-commit-" +
-            Date.now() +
-            "-" +
-            Math.random().toString(36).slice(2) +
-            ".json"
-        );
-        writeFileSync(path, contents);
-        return path;
-      },
-      remove: (path) => {
-        try {
-          unlinkSync(path);
-        } catch {}
-      }
-    },
+    tempFile: workflowTempFile,
     setCanonicalEnvironment: (operation, environment) => {
       setCanonicalEnvironment(operation, environment);
     },
@@ -6822,6 +6482,7 @@ export function createProductionCanvasServerRuntime(
             environmentDeletionPorts ?? productionEnvironmentDeletionPorts(),
             {
               executionOwner,
+              accountContext,
               servers: instances,
               get environmentOperationRunner() {
                 return options.environmentOperationRunner;
@@ -7038,3 +6699,8 @@ export function createProductionCanvasServerRuntime(
     onEnvironmentTasksSettled: executionOwner.onEnvironmentTasksSettled
   };
 }
+import {
+  assessSetupPackageWriteAccess,
+  preflightSetupRepository,
+  selectedSetupPackageIdentity
+} from "@radius-project/core";
