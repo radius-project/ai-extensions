@@ -96,29 +96,33 @@ describe("setup coordinator boundary compatibility", () => {
     expect(() => copySetupRequest(cycle)).toThrow(TypeError);
   });
 
-  it.each([new Error("private detail"), "private detail"])(
-    "keeps unexpected failure diagnostics private: %s",
-    (error) => {
-      const report = vi.fn();
-      const outcome = setupHandlerFailure(error, report);
-      expect(report).toHaveBeenCalledExactlyOnceWith({
-        code: "setup-handler-failed",
-        message: "private detail"
-      });
-      expect(outcome).toEqual({
-        kind: "failed",
-        status: 500,
-        body: {
-          error:
-            "Setup could not finish reporting its outcome. Inspect the operation before retrying.",
-          code: "setup-handler-failed"
-        }
-      });
-      expect(() => setupStageResult(outcome)).toThrow(
-        outcome.body.error as string
-      );
-    }
-  );
+  it.each([
+    [new Error("private detail"), "private detail"],
+    ["private detail", "private detail"],
+    [undefined, "undefined"],
+    [null, "null"],
+    [false, "false"],
+    [{ message: "not an Error" }, "[object Object]"]
+  ])("keeps unexpected failure diagnostics private: %s", (error, message) => {
+    const report = vi.fn();
+    const outcome = setupHandlerFailure(error, report);
+    expect(report).toHaveBeenCalledExactlyOnceWith({
+      code: "setup-handler-failed",
+      message
+    });
+    expect(outcome).toEqual({
+      kind: "failed",
+      status: 500,
+      body: {
+        error:
+          "Setup could not finish reporting its outcome. Inspect the operation before retrying.",
+        code: "setup-handler-failed"
+      }
+    });
+    expect(() => setupStageResult(outcome)).toThrow(
+      outcome.body.error as string
+    );
+  });
 
   it("still returns the public failure if the diagnostic sink rejects", () => {
     const outcome = setupHandlerFailure(new Error("private"), () => {

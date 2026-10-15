@@ -1,4 +1,5 @@
 import type { SetupCoordinatorStageResult } from "@radius-project/core";
+import { errorMessage } from "../../runtime/util.js";
 
 export type SetupInput<T> = { data: T } | { error: unknown };
 
@@ -63,7 +64,7 @@ export function setupHandlerFailure(
   try {
     report({
       code,
-      message: error instanceof Error ? error.message : String(error)
+      message: errorMessage(error)
     });
   } catch {
     // The HTTP failure boundary settles its public response even if reporting
