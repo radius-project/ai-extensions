@@ -355,6 +355,35 @@ function orchestrationHarness(
 }
 
 describe("POST /api/azure-auto-setup construction (SU-01)", () => {
+  it("reports a non-array application lookup finalizer rejection once without leaking details", async () => {
+    const harness = orchestrationHarness();
+    const runAz = harness.dependencies.external.runAz;
+    harness.dependencies.external.runAz = async (args) =>
+      args.slice(0, 3).join(" ") === "ad app list" ?
+        { code: 0, stdout: "{}", stderr: "" }
+      : runAz(args);
+    const finalizations: AzureAutoSetupFailureInput[] = [];
+    harness.dependencies.finalizeSetupFailure = async (_operation, input) => {
+      finalizations.push(input);
+      throw new Error("private cleanup detail");
+    };
+    const response = await invoke(
+      JSON.stringify(VALID_SETUP),
+      harness.dependencies
+    );
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      code: "setup-handler-failed",
+      error:
+        "Setup could not finish reporting its outcome. Inspect the operation before retrying."
+    });
+    expect(finalizations).toHaveLength(1);
+    expect(finalizations[0].code).toBe("app-lookup-parse");
+    expect(
+      harness.events.filter((event) => event.startsWith("report:"))
+    ).toEqual(["report:setup-handler-failed"]);
+  });
+
   it.each(["rejection", "exception"])(
     "uses the selected account for all cleanup callbacks after a setup %s",
     async (failure) => {

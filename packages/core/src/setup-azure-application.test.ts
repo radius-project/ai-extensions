@@ -81,6 +81,47 @@ describe("Azure application policy ports", () => {
     expect(mutate).not.toHaveBeenCalled();
   });
 
+  describe.each([
+    ["{}", "app-lookup-parse"],
+    ["{", "app-lookup-invalid-json"]
+  ])("invalid application lookup %s", (stdout, kind) => {
+    function lookup() {
+      return azurePorts(async (args) =>
+        args.slice(0, 3).join(" ") === "ad app list" ?
+          command(stdout)
+        : existingIdentityAz(args)
+      );
+    }
+
+    it("preserves the lookup failure diagnostic", async () => {
+      const test = lookup();
+      expect(
+        await resolveAzureAutoSetupApplication({
+          ...input(test.application),
+          requestedClientId: ""
+        })
+      ).toBeNull();
+      expect(test.events.at(-1)).toEqual({ kind, evidence: {} });
+    });
+
+    it("propagates a rejected finalizer unchanged without retrying cleanup", async () => {
+      const test = lookup();
+      const failure = new Error("private cleanup detail");
+      const finalizations: unknown[] = [];
+      test.application.finalizeFailure = async (event) => {
+        finalizations.push(event);
+        throw failure;
+      };
+      await expect(
+        resolveAzureAutoSetupApplication({
+          ...input(test.application),
+          requestedClientId: ""
+        })
+      ).rejects.toBe(failure);
+      expect(finalizations).toEqual([{ kind, evidence: {} }]);
+    });
+  });
+
   it.each([
     ["HTTP 429", "caller-before-application-create", 6],
     ["AuthorizationFailed", "caller-before-application-create", 1]
