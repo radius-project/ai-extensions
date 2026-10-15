@@ -29,7 +29,17 @@ Edge needs nothing from you. The rest of this page is the stable release.
 - You need write access to the repository to start the workflow.
 - For a release candidate that includes Azure environment creation, complete [Environment creation readiness](./ENVIRONMENT_CREATION_READINESS.md). A record with `BLOCKED` or `NOT RUN` production gates is not release approval.
 
-Each of these is enforced by the workflow, so a mistake here fails fast rather than shipping something wrong.
+The workflow enforces its automated prerequisites; environment readiness and the Radius version check below require maintainer review.
+
+### Verify the Radius release pin
+
+Before starting a stable ai-extensions release, confirm that the Radius plugin pins the latest stable [Radius release](https://github.com/radius-project/radius/releases/latest). The ai-extensions edge/stable channel is independent of the Radius version it installs.
+
+1. Compare the latest stable Radius tag with `tag` in [`radius-release.json`](../../packages/adapter-shared/src/radius-release.json) and `RADIUS_INSTALL_REF` in the shared [`setup-control-plane` action](../../.github/extension/actions/setup-control-plane/action.yml). The JSON pin controls the extension-managed CLI; the action pin controls the deployment CLI and selects a compatible stable control-plane chart.
+2. If the pin is behind, run **Actions → Update Radius installer → Run workflow** from `main`, or find the update PR opened by its daily scheduled run. The updater refreshes both pins, the Radius source commit, and the installer checksum, and verifies the contrib consumers before opening or refreshing the PR. Review its checks and **merge the Radius update PR before starting the ai-extensions release**. An open or approved update PR is not enough.
+3. Before merging the ai-extensions release PR, confirm that its source includes the merged Radius update. If the update landed after release preparation, rerun **Release** from `main` to refresh the release PR, then verify the pin again.
+
+The release builds the exact release-PR merge commit, not whichever commit is on `main` when a job or retry runs. Its managed CLI pin is bundled, and its generated workflows reference setup scripts at that same immutable source commit. A Radius update merged afterward cannot update that published extension. Ship a new ai-extensions release to include it; existing application workflows must also be regenerated and committed to use the newer action revision.
 
 ## Cut the release
 
