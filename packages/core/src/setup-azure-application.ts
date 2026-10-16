@@ -106,7 +106,7 @@ export async function resolveAzureAutoSetupApplication({
       if (!nameCheck.ok) {
         await ports.finalizeFailure({
           kind: "invalid-app-name",
-          values: [String(nameCheck.reason)],
+          reason: String(nameCheck.reason),
           evidence: {}
         });
         return null;
@@ -117,7 +117,7 @@ export async function resolveAzureAutoSetupApplication({
       if (!nameCheck.ok) {
         await ports.finalizeFailure({
           kind: "invalid-derived-app-name",
-          values: [String(nameCheck.reason)],
+          reason: String(nameCheck.reason),
           evidence: {}
         });
         return null;
@@ -357,7 +357,8 @@ export async function resolveAzureAutoSetupApplication({
       if (!ownership.ok) {
         await ports.finalizeFailure({
           kind: "existing-client-owner-lookup",
-          values: [String(existingClientId), String(ownership.stderr)],
+          clientId: String(existingClientId),
+          detail: String(ownership.stderr),
           evidence: { azError: ownership.stderr }
         });
         return null;
@@ -376,11 +377,9 @@ export async function resolveAzureAutoSetupApplication({
     if (decision.action === "fatal") {
       await ports.finalizeFailure({
         kind: "existing-client-verification",
-        values: [
-          String(existingClientId),
-          String(showResult.stderr),
-          decision.code
-        ],
+        clientId: String(existingClientId),
+        detail: String(showResult.stderr),
+        code: decision.code,
         evidence: { azError: showResult.stderr }
       });
       return null;
@@ -388,7 +387,9 @@ export async function resolveAzureAutoSetupApplication({
     if (decision.action === "error") {
       await ports.finalizeFailure({
         kind: "existing-client-ownership",
-        values: [decision.reason, String(existingClientId), decision.code],
+        message: decision.reason,
+        clientId: String(existingClientId),
+        code: decision.code,
         evidence: {}
       });
       return null;
@@ -437,7 +438,6 @@ export async function resolveAzureAutoSetupApplication({
       if (!isUuid(explicitAppId)) {
         await ports.finalizeFailure({
           kind: "invalid-app-id",
-          values: [],
           evidence: {}
         });
         return null;
@@ -446,7 +446,8 @@ export async function resolveAzureAutoSetupApplication({
       if (!ownership.ok) {
         await ports.finalizeFailure({
           kind: "selected-application-owner-lookup",
-          values: [String(explicitAppId), String(ownership.stderr)],
+          appId: String(explicitAppId),
+          detail: String(ownership.stderr),
           evidence: { azError: ownership.stderr }
         });
         return null;
@@ -458,7 +459,8 @@ export async function resolveAzureAutoSetupApplication({
         });
         await ports.finalizeFailure({
           kind: "selected-application-ownership",
-          values: [decision.reason, decision.code],
+          message: decision.reason,
+          code: decision.code,
           evidence: { appName }
         });
         return null;
@@ -497,7 +499,7 @@ export async function resolveAzureAutoSetupApplication({
         if (listResult.code !== 0) {
           await ports.finalizeFailure({
             kind: "app-lookup-failed",
-            values: [String(listResult.stderr)],
+            detail: String(listResult.stderr),
             evidence: { azError: listResult.stderr }
           });
           return null;
@@ -507,7 +509,6 @@ export async function resolveAzureAutoSetupApplication({
           if (!Array.isArray(parsed)) {
             await ports.finalizeFailure({
               kind: "app-lookup-parse",
-              values: [],
               evidence: {}
             });
             return null;
@@ -516,7 +517,6 @@ export async function resolveAzureAutoSetupApplication({
         } catch {
           await ports.finalizeFailure({
             kind: "app-lookup-invalid-json",
-            values: [],
             evidence: {}
           });
           return null;
@@ -548,7 +548,8 @@ export async function resolveAzureAutoSetupApplication({
           if (!ownership.ok) {
             await ports.finalizeFailure({
               kind: "candidate-owner-lookup",
-              values: [String(match.appId), String(ownership.stderr)],
+              appId: String(match.appId),
+              detail: String(ownership.stderr),
               evidence: { azError: ownership.stderr }
             });
             return null;
@@ -576,7 +577,8 @@ export async function resolveAzureAutoSetupApplication({
       if (selection.action === "error") {
         await ports.finalizeFailure({
           kind: "application-selection",
-          values: [selection.reason, selection.code],
+          message: selection.reason,
+          code: selection.code,
           evidence: { appName }
         });
         return null;
@@ -594,7 +596,6 @@ export async function resolveAzureAutoSetupApplication({
         }
         await ports.finalizeFailure({
           kind: "app-selection-required",
-          values: [],
           evidence: {
             appName,
             candidates,
@@ -637,7 +638,7 @@ export async function resolveAzureAutoSetupApplication({
           if (!caller.ok) {
             await ports.finalizeFailure({
               kind: "caller-before-application-create",
-              values: [String(caller.stderr)],
+              detail: String(caller.stderr),
               evidence: { azError: caller.stderr }
             });
             return null;
@@ -783,7 +784,6 @@ export async function resolveAzureAutoSetupApplication({
           ) {
             await ports.finalizeFailure({
               kind: "service-management-reference-required",
-              values: [],
               evidence: {
                 azError: rejected?.stderr,
                 appCreateContinuationAppName: appName,
@@ -795,7 +795,8 @@ export async function resolveAzureAutoSetupApplication({
           }
           await ports.finalizeFailure({
             kind: "app-create-failed",
-            values: [rejected?.stderr || "", rejected?.stdout || ""],
+            stderr: rejected?.stderr || "",
+            stdout: rejected?.stdout || "",
             evidence: { azError: rejected?.stderr || "" }
           });
           return null;
@@ -819,7 +820,7 @@ export async function resolveAzureAutoSetupApplication({
         if (!caller.ok) {
           await ports.finalizeFailure({
             kind: "caller-after-application-create",
-            values: [String(caller.stderr)],
+            detail: String(caller.stderr),
             evidence: { azError: caller.stderr, clientId, appName }
           });
           return null;
@@ -930,7 +931,7 @@ export async function resolveAzureAutoSetupApplication({
         ) {
           await ports.finalizeFailure({
             kind: "app-owner-add-failed",
-            values: [String(ownerAdd.stderr)],
+            detail: String(ownerAdd.stderr),
             evidence: { azError: ownerAdd.stderr, clientId, appName }
           });
           return null;
@@ -941,7 +942,7 @@ export async function resolveAzureAutoSetupApplication({
         if (ownerList.code !== 0 && ownerList.code !== "0") {
           await ports.finalizeFailure({
             kind: "created-application-owner-lookup",
-            values: [String(ownerList.stderr)],
+            detail: String(ownerList.stderr),
             evidence: { azError: ownerList.stderr, clientId, appName }
           });
           return null;
@@ -950,7 +951,6 @@ export async function resolveAzureAutoSetupApplication({
         if (!ownerIds.includes(caller.id.toLowerCase())) {
           await ports.finalizeFailure({
             kind: "app-owner-verify-failed",
-            values: [],
             evidence: { azError: ownerList.stdout, clientId, appName }
           });
           return null;
@@ -1058,7 +1058,7 @@ export async function resolveAzureAutoSetupApplication({
         if (tagPatch.code !== 0 && tagPatch.code !== "0") {
           await ports.finalizeFailure({
             kind: "app-tag-update-failed",
-            values: [String(tagPatch.stderr)],
+            detail: String(tagPatch.stderr),
             evidence: { azError: tagPatch.stderr, clientId, appName }
           });
           return null;
@@ -1068,7 +1068,7 @@ export async function resolveAzureAutoSetupApplication({
         if (tagShow.code !== 0 && tagShow.code !== "0") {
           await ports.finalizeFailure({
             kind: "app-tag-read-failed",
-            values: [String(tagShow.stderr)],
+            detail: String(tagShow.stderr),
             evidence: { azError: tagShow.stderr, clientId, appName }
           });
           return null;
@@ -1077,7 +1077,6 @@ export async function resolveAzureAutoSetupApplication({
         if (!actualTags) {
           await ports.finalizeFailure({
             kind: "app-tag-parse-failed",
-            values: [],
             evidence: { azError: tagShow.stdout, clientId, appName }
           });
           return null;
@@ -1086,7 +1085,7 @@ export async function resolveAzureAutoSetupApplication({
         if (missingTags.length > 0) {
           await ports.finalizeFailure({
             kind: "app-tag-verify-failed",
-            values: [String(missingTags.join(", "))],
+            missingTags: String(missingTags.join(", ")),
             evidence: { azError: JSON.stringify(actualTags), clientId, appName }
           });
           return null;

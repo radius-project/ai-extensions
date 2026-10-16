@@ -1,9 +1,35 @@
-import { describe, expect, it, vi } from "vitest";
-import type { AzureSetupFailure } from "@radius-project/core";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import type {
+  AzureFailureEvidence,
+  AzureSetupFailure
+} from "@radius-project/core";
 import { createAzureSetupPresentation } from "./azure-setup-presentation.js";
 import type { AzureAutoSetupWorkflow } from "./azure-auto-setup-types.js";
 
 describe("Azure setup failure presentation", () => {
+  it("exposes named failure fields through the public discriminated contract", () => {
+    expectTypeOf<
+      Extract<AzureSetupFailure, { kind: "existing-client-ownership" }>
+    >().toEqualTypeOf<{
+      kind: "existing-client-ownership";
+      message: string;
+      clientId: string;
+      code: string;
+      evidence: AzureFailureEvidence;
+    }>();
+    expectTypeOf<
+      Extract<AzureSetupFailure, { kind: "credential-provenance-write-failed" }>
+    >().toEqualTypeOf<{
+      kind: "credential-provenance-write-failed";
+      credentialName: string;
+      created: boolean;
+      evidence: AzureFailureEvidence;
+    }>();
+    expectTypeOf<
+      Extract<AzureSetupFailure, { values: unknown }>
+    >().toEqualTypeOf<never>();
+  });
+
   it("preserves the upstream credential retry narration in request-local steps", () => {
     const steps = ["Existing request-local progress"];
     const fail = vi.fn<AzureAutoSetupWorkflow["fail"]>();
@@ -29,8 +55,75 @@ describe("Azure setup failure presentation", () => {
   }>([
     {
       event: {
+        code: "existing-client-id-not-owned",
+        clientId: "existing-client",
+        message: "The existing identity belongs to another caller.",
+        kind: "existing-client-ownership",
+        evidence: {}
+      },
+      status: 400,
+      code: "existing-client-id-not-owned",
+      message: "The existing identity belongs to another caller."
+    },
+    {
+      event: {
+        kind: "existing-client-verification",
+        code: "client-id-lookup-failed",
+        detail: "Directory access denied",
+        clientId: "existing-client",
+        evidence: {}
+      },
+      status: 400,
+      code: "client-id-lookup-failed",
+      message:
+        "Could not verify the repository's AZURE_CLIENT_ID (existing-client): Directory access denied"
+    },
+    {
+      event: {
+        kind: "application-selection",
+        code: "app-registration-not-owned",
+        message: "Select an application owned by this caller.",
+        evidence: {}
+      },
+      status: 400,
+      code: "app-registration-not-owned",
+      message: "Select an application owned by this caller."
+    },
+    {
+      event: {
+        kind: "federated-credential-name-collision",
+        requiredSubject: "repo:owner/repo:environment:required",
+        credentialName: "dev",
+        existingSubject: "repo:owner/repo:environment:existing",
+        evidence: {}
+      },
+      status: 400,
+      code: "federated-credential-name-collision",
+      message:
+        'Federated credential name "dev" already exists with a different subject ' +
+        '("repo:owner/repo:environment:existing" vs required "repo:owner/repo:environment:required"). Two environment ' +
+        "names normalize to the same credential name — rename this environment to avoid characters " +
+        'that collapse together (for example ":" and "-").'
+    },
+    {
+      event: {
+        kind: "federated-credential-subject-mismatch",
+        requiredSubject: "required-subject",
+        actualSubject: "actual-subject",
+        created: true,
+        credentialName: "dev",
+        evidence: {}
+      },
+      status: 400,
+      code: "federated-credential-subject-mismatch",
+      message:
+        'Federated credential "dev" could not be verified ("actual-subject") does not match the required subject ("required-subject").'
+    },
+    {
+      event: {
         kind: "app-create-failed",
-        values: ["", "stdout denial"],
+        stderr: "",
+        stdout: "stdout denial",
         evidence: {}
       },
       status: 400,
@@ -38,7 +131,12 @@ describe("Azure setup failure presentation", () => {
       message: "Failed to create App Registration: stdout denial"
     },
     {
-      event: { kind: "app-create-failed", values: ["", ""], evidence: {} },
+      event: {
+        kind: "app-create-failed",
+        stderr: "",
+        stdout: "",
+        evidence: {}
+      },
       status: 400,
       code: "app-create-failed",
       message: "Failed to create App Registration: The request was rejected."
@@ -46,7 +144,8 @@ describe("Azure setup failure presentation", () => {
     {
       event: {
         kind: "federated-credential-list-failed",
-        values: ["", ""],
+        stderr: "",
+        stdout: "",
         evidence: {}
       },
       status: 400,
@@ -57,7 +156,7 @@ describe("Azure setup failure presentation", () => {
     {
       event: {
         kind: "app-object-id-failed",
-        values: ["application-id"],
+        clientId: "application-id",
         evidence: {}
       },
       status: 400,
@@ -68,7 +167,7 @@ describe("Azure setup failure presentation", () => {
     {
       event: {
         kind: "app-tag-verify-failed",
-        values: ["radius-managed"],
+        missingTags: "radius-managed",
         evidence: {}
       },
       status: 400,
@@ -79,7 +178,7 @@ describe("Azure setup failure presentation", () => {
     {
       event: {
         kind: "federated-credential-identity-incomplete",
-        values: ["dev"],
+        credentialName: "dev",
         evidence: {}
       },
       status: 400,
@@ -90,7 +189,7 @@ describe("Azure setup failure presentation", () => {
     {
       event: {
         kind: "created-federated-credential-identity-incomplete",
-        values: ["dev"],
+        credentialName: "dev",
         evidence: {}
       },
       status: 400,
@@ -101,7 +200,6 @@ describe("Azure setup failure presentation", () => {
     {
       event: {
         kind: "provider-reconciliation-pending",
-        values: [],
         evidence: {}
       },
       status: 409,
@@ -110,7 +208,7 @@ describe("Azure setup failure presentation", () => {
         "Provider reconciliation is still pending. Radius will not complete setup or start another provider mutation."
     },
     {
-      event: { kind: "rollback-after-cluster-admin", values: [], evidence: {} },
+      event: { kind: "rollback-after-cluster-admin", evidence: {} },
       status: 409,
       code: "provider-rollback-pending",
       message:
@@ -119,7 +217,8 @@ describe("Azure setup failure presentation", () => {
     {
       event: {
         kind: "credential-provenance-write-failed",
-        values: ["dev", false],
+        credentialName: "dev",
+        created: false,
         evidence: {}
       },
       status: 500,
@@ -159,7 +258,6 @@ describe("Azure setup failure presentation", () => {
     await expect(
       presentation.finalizeFailure({
         kind: "provider-reconciliation-pending",
-        values: [],
         evidence: {}
       })
     ).rejects.toBe(original);

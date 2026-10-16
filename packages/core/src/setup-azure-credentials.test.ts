@@ -82,7 +82,8 @@ describe("Azure credential policy ports", () => {
       if (rejections === 6) {
         expect(test.events).toContainEqual({
           kind: "federated-credential-failed",
-          values: ["dev", `${rejection} Attempt 6`],
+          credentialName: "dev",
+          detail: `${rejection} Attempt 6`,
           evidence: {
             clientId,
             appName: "radius-deploy-owner-repo",
@@ -439,7 +440,8 @@ describe("Azure credential policy ports", () => {
     ).toBe(false);
     expect(test.events.at(-2)).toMatchObject({
       kind: "credential-provenance-write-failed",
-      values: ["dev", false]
+      credentialName: "dev",
+      created: false
     });
   });
 
