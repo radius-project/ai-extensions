@@ -6,13 +6,13 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "./gh-command-display.js";
-import { GITHUB_API_VERSION } from "./azure-oidc.js";
 
 import { ghcrBootstrap } from "@radius-project/adapter-shared";
 export type GhCredentials = ghcrBootstrap.GhCredentials;
 export type FetchImplementation = ghcrBootstrap.FetchImplementation;
 type RequestContext = ghcrBootstrap.RequestContext;
 const {
+  GITHUB_API_VERSION,
   parseRegistry,
   packageEndpoint,
   githubJson,
