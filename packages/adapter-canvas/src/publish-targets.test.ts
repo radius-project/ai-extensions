@@ -45,6 +45,23 @@ test("resolveRadiusArtifactTarget uses the fallback when no value is given", () 
   );
 });
 
+test("resolveRadiusArtifactTarget verifies the nearest existing parent for a new nested target", () => {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ws-parent-"));
+  try {
+    fs.mkdirSync(path.join(ws, ".radius", "existing"), { recursive: true });
+    assert.equal(
+      resolveRadiusArtifactTarget(
+        ws,
+        "existing/new/deeper/custom-types.tgz",
+        null
+      ),
+      path.join(ws, ".radius", "existing", "new", "deeper", "custom-types.tgz")
+    );
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+});
+
 test("radius artifact resolvers reject absolute paths", () => {
   assert.throws(
     () => resolveRadiusArtifactTarget(WS, "/etc/passwd", null),

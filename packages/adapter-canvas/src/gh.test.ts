@@ -266,6 +266,10 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
   return gh;
 }
 
+function stubChild(end: (value?: string) => void = vi.fn()) {
+  return { stdin: { end } };
+}
+
 describe("cliExec", { concurrent: false }, () => {
   // Real directories because the adapter resolves a bare Windows command name
   // through the filesystem. Supplying PATH and PATHEXT explicitly keeps the
@@ -1831,6 +1835,24 @@ describe("selected GitHub executor", { concurrent: false }, () => {
     );
   });
 
+  it.each([
+    [new Error("opaque-selected-credential failed"), "[REDACTED] failed"],
+    ["opaque-selected-credential failed", "[REDACTED] failed"]
+  ])(
+    "redacts selected credentials from arbitrary errors",
+    async (error, expected) => {
+      const gh = await loadGh("linux", {
+        token: "selected-injected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        keyring: STATUS.keyringWithWorkflow,
+        userTokens: { keyuser: "opaque-selected-credential" }
+      });
+      const executor = await gh.createSelectedGhExecutor("keyuser");
+
+      expect(executor.errorMessage(error)).toBe(expected);
+    }
+  );
+
   it("preserves bounded timeouts on selected-account repository reads", async () => {
     const gh = await loadGh("linux", {
       token: "selected-injected-token",
@@ -1940,6 +1962,1003 @@ describe("selected GitHub executor", { concurrent: false }, () => {
       error: "HTTP 403: Resource not accessible",
       status: 403
     });
+  });
+});
+
+function fakeSelectedExecutor(
+  result: import("./gh.js").SelectedGhCommandResult
+): import("./gh.js").SelectedGhExecutor {
+  return {
+    login: "octocat",
+    credentialSource: "injected",
+    requiresKeyringSwitch: false,
+    scopes: ["repo", "workflow"],
+    run: vi.fn(async () => result),
+    runOrThrow: vi.fn(async () => result),
+    verifyIdentity: vi.fn(async () => {}),
+    packageCredentials: () => ({
+      token: "fixture-token",
+      username: "octocat",
+      source: "injected-token",
+      scopes: ["repo"]
+    }),
+    redact: (value) => value.replaceAll("fixture-token", "[REDACTED]"),
+    errorMessage: (error) =>
+      String(error instanceof Error ? error.message : error).replaceAll(
+        "fixture-token",
+        "[REDACTED]"
+      )
+  };
+}
+
+describe("selected GitHub API helpers", () => {
+  it.each([
+    [
+      "successful JSON",
+      { code: 0, stdout: '{"default_branch":"main"}', stderr: "" },
+      {
+        ok: true,
+        status: 200,
+        json: { default_branch: "main" },
+        stderr: ""
+      }
+    ],
+    [
+      "empty success",
+      { code: 0, stdout: "  ", stderr: "" },
+      { ok: true, status: 200, json: null, stderr: "" }
+    ],
+    [
+      "HTTP failure",
+      { code: 1, stdout: "", stderr: "gh: denied (HTTP 403)" },
+      {
+        ok: false,
+        status: 403,
+        json: null,
+        stderr: "gh: denied (HTTP 403)"
+      }
+    ],
+    [
+      "transport failure",
+      { code: 1, stdout: "", stderr: "connection reset" },
+      {
+        ok: false,
+        status: null,
+        json: null,
+        stderr: "connection reset"
+      }
+    ],
+    [
+      "malformed JSON",
+      { code: 0, stdout: "{", stderr: "" },
+      {
+        ok: false,
+        status: null,
+        json: null,
+        stderr: "GitHub returned an invalid JSON response."
+      }
+    ]
+  ] as const)("reports %s", async (_name, result, expected) => {
+    const { selectedGhApiJson } = await import("./gh.js");
+    const executor = fakeSelectedExecutor(result);
+
+    await expect(
+      selectedGhApiJson(executor, "/repos/octo/app")
+    ).resolves.toEqual(expected);
+    expect(executor.run).toHaveBeenCalledWith(["api", "/repos/octo/app"], {
+      timeout: 15000
+    });
+  });
+
+  it.each([
+    ["success", { code: 0, stdout: "main\n", stderr: "" }, "main"],
+    ["failure", { code: 1, stdout: "ignored", stderr: "denied" }, ""]
+  ] as const)(
+    "gets the default branch on %s",
+    async (_name, result, expected) => {
+      const { selectedGetDefaultBranch } = await import("./gh.js");
+      const executor = fakeSelectedExecutor(result);
+
+      await expect(
+        selectedGetDefaultBranch(executor, "octo/app")
+      ).resolves.toBe(expected);
+    }
+  );
+
+  it.each([
+    ["success", { code: 0, stdout: "abc123\n", stderr: "" }, "abc123"],
+    ["failure", { code: 1, stdout: "ignored", stderr: "missing" }, ""]
+  ] as const)(
+    "gets an encoded branch head on %s",
+    async (_name, result, expected) => {
+      const { selectedGetBranchHeadSha } = await import("./gh.js");
+      const executor = fakeSelectedExecutor(result);
+
+      await expect(
+        selectedGetBranchHeadSha(executor, "octo/app", "feature/a b")
+      ).resolves.toBe(expected);
+      expect(executor.run).toHaveBeenCalledWith(
+        [
+          "api",
+          "/repos/octo/app/git/ref/heads/feature%2Fa%20b",
+          "--jq",
+          ".object.sha"
+        ],
+        { timeout: 15000 }
+      );
+    }
+  );
+
+  it.each([
+    [
+      "stderr",
+      { code: 1, stdout: "fallback", stderr: "denied", timedOut: true },
+      "denied"
+    ],
+    [
+      "stdout fallback",
+      { code: 1, stdout: "fallback", stderr: "", timedOut: false },
+      "fallback"
+    ],
+    ["empty failure", { code: 1, stdout: "", stderr: "" }, ""],
+    ["success", { code: 0, stdout: "", stderr: "" }, ""]
+  ] as const)(
+    "creates a branch ref with %s reporting",
+    async (_name, result, expectedError) => {
+      const { selectedCreateBranchRef } = await import("./gh.js");
+      const executor = fakeSelectedExecutor(result);
+
+      await expect(
+        selectedCreateBranchRef(executor, "octo/app", "feature/test", "abc123")
+      ).resolves.toEqual({
+        ok: result.code === 0,
+        stderr: expectedError,
+        timedOut: "timedOut" in result ? result.timedOut : undefined
+      });
+      expect(executor.run).toHaveBeenCalledWith(
+        ["api", "--method", "POST", "/repos/octo/app/git/refs", "--input", "-"],
+        {
+          timeout: 20000,
+          stdin: JSON.stringify({
+            ref: "refs/heads/feature/test",
+            sha: "abc123"
+          })
+        }
+      );
+    }
+  );
+
+  it.each([
+    [
+      "complete success",
+      {
+        code: 0,
+        stdout: '{"html_url":"https://example.test/pr/7","number":7}',
+        stderr: ""
+      },
+      { ok: true, url: "https://example.test/pr/7", number: 7 }
+    ],
+    [
+      "partial success",
+      { code: 0, stdout: '{"html_url":7,"number":"7"}', stderr: "" },
+      { ok: true, url: undefined, number: undefined }
+    ],
+    [
+      "stderr failure",
+      { code: 1, stdout: "fallback", stderr: "denied", timedOut: true },
+      { ok: false, stderr: "denied", timedOut: true }
+    ],
+    [
+      "stdout failure",
+      { code: 1, stdout: "fallback", stderr: "" },
+      { ok: false, stderr: "fallback", timedOut: undefined }
+    ]
+  ] as const)(
+    "creates a pull request with %s",
+    async (_name, result, expected) => {
+      const { selectedCreatePullRequest } = await import("./gh.js");
+      const executor = fakeSelectedExecutor(result);
+
+      await expect(
+        selectedCreatePullRequest(
+          executor,
+          "octo/app",
+          "feature/test",
+          "main",
+          "Test PR",
+          ""
+        )
+      ).resolves.toEqual(expected);
+      expect(executor.run).toHaveBeenCalledWith(
+        ["api", "--method", "POST", "/repos/octo/app/pulls", "--input", "-"],
+        {
+          timeout: 20000,
+          stdin: JSON.stringify({
+            title: "Test PR",
+            head: "feature/test",
+            base: "main",
+            body: ""
+          })
+        }
+      );
+    }
+  );
+
+  it("redacts malformed pull request response details", async () => {
+    const { selectedCreatePullRequest } = await import("./gh.js");
+    const executor = fakeSelectedExecutor({
+      code: 0,
+      stdout: "fixture-token",
+      stderr: ""
+    });
+
+    await expect(
+      selectedCreatePullRequest(
+        executor,
+        "octo/app",
+        "feature/test",
+        "main",
+        "Test PR",
+        "body"
+      )
+    ).resolves.toEqual({
+      ok: false,
+      stderr: expect.stringContaining("[REDACTED]")
+    });
+  });
+});
+
+describe("default GitHub process helpers", { concurrent: false }, () => {
+  beforeEach(() => {
+    childProcess.execFile.mockReset();
+    childProcess.execFileSync.mockReset();
+  });
+
+  afterEach(() => {
+    restorePlatform();
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_HOST;
+    delete process.env.COPILOT_AGENT_SESSION_ID;
+  });
+
+  it("runs a command, trims output, writes stdin, and strips the agent session", async () => {
+    process.env.COPILOT_AGENT_SESSION_ID = "agent-session";
+    const { runCommand } = await loadGh("linux");
+    const end = vi.fn();
+    childProcess.execFile.mockImplementation((_file, _args, options, cb) => {
+      expect(options.env.COPILOT_AGENT_SESSION_ID).toBeUndefined();
+      cb(null, " result \n", "");
+      return stubChild(end);
+    });
+
+    await expect(
+      runCommand("az", ["account", "show"], { stdin: "fixture-input" })
+    ).resolves.toBe("result");
+    expect(end).toHaveBeenCalledWith("fixture-input");
+  });
+
+  it.each([
+    ["stderr", "fixture-secret denied", "fallback", "fixture-secret denied"],
+    ["message fallback", "", "fixture-secret failed", "fixture-secret failed"]
+  ])(
+    "rejects a command using redacted %s",
+    async (_name, stderr, message, expected) => {
+      const { runCommand } = await loadGh("linux", {
+        token: "fixture-secret"
+      });
+      childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
+        cb(new Error(message), "", stderr);
+        return stubChild();
+      });
+
+      await expect(runCommand("gh", ["api", "user"])).rejects.toThrow(
+        expected.replace("fixture-secret", "[REDACTED]")
+      );
+    }
+  );
+
+  it("runs keyring-only commands without GitHub host or token overrides", async () => {
+    process.env.GH_TOKEN = "ambient-gh";
+    process.env.GITHUB_TOKEN = "ambient-github";
+    process.env.GH_HOST = "enterprise.example";
+    const { runGhKeyringCommand } = await loadGh("linux");
+    childProcess.execFile.mockImplementation((_file, _args, options, cb) => {
+      cb(null, " keyring-token \n", "");
+      expect(options.env.GH_TOKEN).toBeUndefined();
+      expect(options.env.GITHUB_TOKEN).toBeUndefined();
+      expect(options.env.GH_HOST).toBeUndefined();
+      return stubChild();
+    });
+
+    await expect(
+      runGhKeyringCommand(["auth", "token"], {
+        env: { PATH: "/fixture", GH_TOKEN: "override" }
+      })
+    ).resolves.toBe("keyring-token");
+  });
+
+  it.each([
+    ["success", null, "bWFpbg==\n", "main"],
+    ["command failure", new Error("denied"), "bWFpbg==", null],
+    ["empty response", null, "  ", null]
+  ])(
+    "reads repository text content on %s",
+    async (_name, error, stdout, expected) => {
+      const { ghApiGetContent } = await loadGh("linux");
+      childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+        cb(error, stdout, "");
+        expect(args).toEqual(["api", "/contents/file", "--jq", ".content"]);
+        expect(options.timeout).toBe(15000);
+        return stubChild();
+      });
+
+      await expect(ghApiGetContent("/contents/file")).resolves.toBe(expected);
+    }
+  );
+
+  it.each([
+    [
+      "base64 bytes",
+      null,
+      JSON.stringify({ encoding: "base64", content: "AAEC" }),
+      Buffer.from([0, 1, 2])
+    ],
+    [
+      "oversized response",
+      null,
+      JSON.stringify({ encoding: "none", content: "" }),
+      { tooLarge: true }
+    ],
+    ["malformed response", null, "{", null],
+    ["command failure", new Error("denied"), "{}", null],
+    ["empty response", null, "", null]
+  ])(
+    "reads repository byte content for %s",
+    async (_name, error, stdout, expected) => {
+      const { ghApiGetContentBytes } = await loadGh("linux");
+      childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+        cb(error, stdout, "");
+        expect(args).toEqual([
+          "api",
+          "/contents/archive",
+          "--jq",
+          "{content: .content, encoding: .encoding}"
+        ]);
+        expect(options.timeout).toBe(20000);
+        return stubChild();
+      });
+
+      await expect(ghApiGetContentBytes("/contents/archive")).resolves.toEqual(
+        expected
+      );
+    }
+  );
+
+  it.each([
+    ["success", null, '["a","b"]', ["a", "b"]],
+    ["command failure", new Error("denied"), '["ignored"]', []],
+    ["malformed response", null, "{", []]
+  ])("lists repository names on %s", async (_name, error, stdout, expected) => {
+    const { ghApiListNames } = await loadGh("linux");
+    childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+      cb(error, stdout, "");
+      expect(args).toEqual(["api", "/contents", "--jq", "[.[].name]"]);
+      expect(options.timeout).toBe(15000);
+      return stubChild();
+    });
+
+    await expect(ghApiListNames("/contents")).resolves.toEqual(expected);
+  });
+
+  it("routes repository file and github facade calls through their public behavior", async () => {
+    const gh = await loadGh("linux");
+    const responses = [
+      "ZmlsZQ==",
+      "ZmlsZQ==",
+      JSON.stringify({ encoding: "base64", content: "AAE=" }),
+      '["one"]',
+      JSON.stringify({ truncated: false, paths: ["src/index.ts"] }),
+      "trunk"
+    ];
+    childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
+      cb(null, responses.shift() || "", "");
+      return stubChild();
+    });
+
+    await expect(
+      gh.fetchFileFromRepo("octo/app", "README.md", "trunk")
+    ).resolves.toBe("file");
+    await expect(gh.github.getContent("/contents/readme")).resolves.toBe(
+      "file"
+    );
+    await expect(gh.github.getContentBytes("/contents/bin")).resolves.toEqual(
+      Buffer.from([0, 1])
+    );
+    await expect(gh.github.listNames("/contents")).resolves.toEqual(["one"]);
+    await expect(gh.github.treePaths("octo/app")).resolves.toEqual([
+      "src/index.ts"
+    ]);
+    await expect(gh.github.getDefaultBranch("octo/app")).resolves.toBe("trunk");
+    expect(childProcess.execFile.mock.calls[0]?.[1][1]).toContain("?ref=trunk");
+  });
+
+  it.each([
+    ["default branch success", "default", null, "main\n", "main"],
+    ["default branch failure", "default", new Error("denied"), "main", ""],
+    ["branch head success", "head", null, "abc123\n", "abc123"],
+    ["branch head failure", "head", new Error("missing"), "abc123", ""]
+  ])("reports %s", async (_name, operation, error, stdout, expected) => {
+    const gh = await loadGh("linux");
+    childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+      cb(error, stdout, "");
+      expect(options.timeout).toBe(15000);
+      if (operation === "head") expect(args[1]).toContain("feature%2Fa%20b");
+      return stubChild();
+    });
+
+    const result =
+      operation === "default" ?
+        gh.getDefaultBranch("octo/app")
+      : gh.getBranchHeadSha("octo/app", "feature/a b");
+    await expect(result).resolves.toBe(expected);
+  });
+
+  it.each([
+    ["success", null, "", undefined, { ok: true, stderr: "", timedOut: false }],
+    [
+      "killed timeout",
+      Object.assign(new Error("fixture-secret killed"), { killed: true }),
+      "",
+      true,
+      { ok: false, stderr: "[REDACTED] killed", timedOut: true }
+    ],
+    [
+      "timeout code",
+      Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+      "fixture-secret denied",
+      false,
+      { ok: false, stderr: "[REDACTED] denied", timedOut: true }
+    ],
+    [
+      "ordinary failure",
+      new Error("fixture-secret failed"),
+      "",
+      false,
+      { ok: false, stderr: "[REDACTED] failed", timedOut: false }
+    ]
+  ])(
+    "creates a branch ref on %s",
+    async (_name, error, stderr, throwsOnEnd, expected) => {
+      const { createBranchRef } = await loadGh("linux", {
+        token: "fixture-secret"
+      });
+      const end = vi.fn(() => {
+        if (throwsOnEnd) throw new Error("closed");
+      });
+      childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+        cb(error, "", stderr);
+        expect(args).toEqual([
+          "api",
+          "--method",
+          "POST",
+          "/repos/octo/app/git/refs",
+          "--input",
+          "-"
+        ]);
+        expect(options.timeout).toBe(20000);
+        return stubChild(end);
+      });
+
+      await expect(
+        createBranchRef("octo/app", "feature/test", "abc123")
+      ).resolves.toEqual(expected);
+      expect(end).toHaveBeenCalledWith(
+        JSON.stringify({ ref: "refs/heads/feature/test", sha: "abc123" })
+      );
+    }
+  );
+
+  it.each([
+    [
+      "success",
+      null,
+      '{"html_url":"https://example.test/pr/7","number":7}',
+      "",
+      false,
+      { ok: true, url: "https://example.test/pr/7", number: 7 }
+    ],
+    [
+      "killed timeout",
+      Object.assign(new Error("fixture-secret killed"), { killed: true }),
+      "",
+      "",
+      true,
+      { ok: false, timedOut: true, stderr: "[REDACTED] killed" }
+    ],
+    [
+      "timeout code",
+      Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+      "",
+      "fixture-secret denied",
+      false,
+      { ok: false, timedOut: true, stderr: "[REDACTED] denied" }
+    ],
+    [
+      "ordinary failure",
+      new Error("fixture-secret failed"),
+      "",
+      "",
+      false,
+      { ok: false, timedOut: false, stderr: "[REDACTED] failed" }
+    ]
+  ])(
+    "creates a pull request on %s",
+    async (_name, error, stdout, stderr, throwsOnEnd, expected) => {
+      const { createPullRequestApi } = await loadGh("linux", {
+        token: "fixture-secret"
+      });
+      const end = vi.fn(() => {
+        if (throwsOnEnd) throw new Error("closed");
+      });
+      childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+        cb(error, stdout, stderr);
+        expect(args).toEqual([
+          "api",
+          "--method",
+          "POST",
+          "/repos/octo/app/pulls",
+          "--input",
+          "-"
+        ]);
+        expect(options.timeout).toBe(20000);
+        return stubChild(end);
+      });
+
+      await expect(
+        createPullRequestApi("octo/app", "feature/test", "main", "Test PR", "")
+      ).resolves.toEqual(expected);
+      expect(end).toHaveBeenCalledWith(
+        JSON.stringify({
+          title: "Test PR",
+          head: "feature/test",
+          base: "main",
+          body: ""
+        })
+      );
+    }
+  );
+
+  it("reports a redacted malformed pull request response", async () => {
+    const { createPullRequestApi } = await loadGh("linux", {
+      token: "fixture-secret"
+    });
+    childProcess.execFile.mockImplementation((_file, _args, _options, cb) => {
+      cb(null, "fixture-secret", "");
+      return stubChild();
+    });
+
+    const result = await createPullRequestApi(
+      "octo/app",
+      "feature/test",
+      "main",
+      "Test PR",
+      "body"
+    );
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("[REDACTED]");
+    expect(result.stderr).not.toContain("fixture-secret");
+  });
+});
+
+describe("GitHub account switching", { concurrent: false }, () => {
+  beforeEach(() => {
+    childProcess.execFile.mockReset();
+    childProcess.execFileSync.mockReset();
+  });
+
+  afterEach(() => {
+    restorePlatform();
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_HOST;
+  });
+
+  it.each([
+    [STATUS.keyringWithWorkflow, "keyuser"],
+    [STATUS.empty, ""]
+  ])("reports the active stored login", async (keyring, expected) => {
+    const { getActiveKeyringLogin } = await loadGh("linux", {
+      token: null,
+      keyring
+    });
+
+    await expect(getActiveKeyringLogin()).resolves.toBe(expected);
+  });
+
+  it("rejects an empty account selection without spawning", async () => {
+    const { switchGhKeyringAccount } = await loadGh("linux");
+
+    await expect(switchGhKeyringAccount("  ")).resolves.toEqual({
+      ok: false,
+      error: "A GitHub account login is required."
+    });
+    expect(childProcess.execFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["success", null, "", { ok: true }],
+    [
+      "stderr failure",
+      new Error("fallback"),
+      "fixture-secret denied",
+      { ok: false, error: "[REDACTED] denied" }
+    ],
+    [
+      "message failure",
+      new Error("fixture-secret failed"),
+      "",
+      { ok: false, error: "[REDACTED] failed" }
+    ]
+  ])(
+    "switches the stored account on %s",
+    async (_name, error, stderr, expected) => {
+      process.env.GH_TOKEN = "fixture-secret";
+      process.env.GITHUB_TOKEN = "other-token";
+      process.env.GH_HOST = "enterprise.example";
+      const { switchGhKeyringAccount } = await loadGh("linux", {
+        token: "fixture-secret",
+        githubToken: "other-token"
+      });
+      childProcess.execFile.mockImplementation((_file, args, options, cb) => {
+        cb(error, "", stderr);
+        expect(args).toEqual([
+          "auth",
+          "switch",
+          "--hostname",
+          "github.com",
+          "--user",
+          "octocat"
+        ]);
+        expect(options.env.GH_TOKEN).toBeUndefined();
+        expect(options.env.GITHUB_TOKEN).toBeUndefined();
+        expect(options.env.GH_HOST).toBeUndefined();
+        return stubChild();
+      });
+
+      await expect(switchGhKeyringAccount(" octocat ")).resolves.toEqual(
+        expected
+      );
+    }
+  );
+});
+
+describe("remaining GitHub boundary fallbacks", { concurrent: false }, () => {
+  beforeEach(() => {
+    childProcess.execFile.mockReset();
+    childProcess.execFileSync.mockReset();
+  });
+
+  afterEach(() => {
+    restorePlatform();
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_HOST;
+    delete process.env.GH_PACKAGES_TOKEN;
+    delete process.env.GH_PACKAGES_USER;
+  });
+
+  it("rejects an empty selected-account login before probing GitHub CLI", async () => {
+    const { createSelectedGhExecutor } = await loadGh("linux");
+
+    await expect(createSelectedGhExecutor("  ")).rejects.toThrow(
+      "A GitHub account login is required."
+    );
+    expect(childProcess.execFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "stdout fallback",
+      new Error("command failed"),
+      "stdout denied",
+      "",
+      "GitHub identity verification failed for @tokuser: stdout denied"
+    ],
+    [
+      "empty diagnostic",
+      new Error(""),
+      "",
+      "",
+      "GitHub identity verification failed for @tokuser."
+    ],
+    [
+      "empty successful login",
+      null,
+      "",
+      "",
+      "GitHub identity verification failed: expected @tokuser, received @unknown."
+    ]
+  ])(
+    "fails identity verification with %s",
+    async (_name, error, stdout, stderr, expected) => {
+      const gh = await loadGh("linux", {
+        token: "selected-token",
+        withToken: STATUS.tokenWithWorkflow
+      });
+      const executor = await gh.createSelectedGhExecutor("tokuser");
+      childProcess.execFile.mockImplementation(
+        (_file, _args, _options, callback) => {
+          callback(error, stdout, stderr);
+          return stubChild();
+        }
+      );
+
+      await expect(executor.verifyIdentity()).rejects.toThrow(expected);
+    }
+  );
+
+  it("allows a successful runOrThrow result and preserves an empty failure message", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      apiLogin: "tokuser"
+    });
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+    await executor.verifyIdentity();
+    childProcess.execFile
+      .mockImplementationOnce((_file, _args, _options, callback) => {
+        callback(null, "ok", "");
+        return stubChild();
+      })
+      .mockImplementationOnce((_file, _args, _options, callback) => {
+        callback(new Error(""), "", "");
+        return stubChild();
+      });
+
+    await expect(
+      executor.runOrThrow(["api", "/success"], "Request failed")
+    ).resolves.toMatchObject({ code: 0, stdout: "ok" });
+    await expect(
+      executor.runOrThrow(["api", "/failure"], "Request failed")
+    ).rejects.toThrow("Request failed");
+  });
+
+  it.each([
+    [new Error("selected-token failed"), new Error("selected-token cause")],
+    [new Error("selected-token failed"), "selected-token cause"]
+  ])(
+    "redacts selected credentials from process error metadata",
+    async (commandError, cause) => {
+      commandError.stack = "stack selected-token";
+      commandError.cause = cause;
+      const gh = await loadGh("linux", {
+        token: "selected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        apiLogin: "tokuser"
+      });
+      const executor = await gh.createSelectedGhExecutor("tokuser");
+      await executor.verifyIdentity();
+      childProcess.execFile.mockImplementation(
+        (_file, _args, _options, callback) => {
+          callback(commandError, "", "");
+          return stubChild();
+        }
+      );
+
+      await expect(executor.run(["api", "/failure"])).resolves.toMatchObject({
+        code: 1,
+        stderr: ""
+      });
+    }
+  );
+
+  it("uses the explicit selected-API fallback for an empty command failure", async () => {
+    const { selectedFetchFileFromRepoResult } = await import("./gh.js");
+    const executor = fakeSelectedExecutor({
+      code: 1,
+      stdout: "",
+      stderr: ""
+    });
+
+    await expect(
+      selectedFetchFileFromRepoResult(
+        executor,
+        "octo/app",
+        "missing.yml",
+        "main"
+      )
+    ).resolves.toEqual({
+      content: null,
+      error: "GitHub API failed.",
+      status: null
+    });
+  });
+
+  it.each([
+    [
+      "injected token without a matching status account",
+      {
+        token: "unrecognized-token",
+        withToken: STATUS.keyringWithWorkflow,
+        keyring: STATUS.keyringWithWorkflow
+      },
+      { actingLogin: "keyuser", displayLogin: "keyuser" }
+    ],
+    [
+      "no recognized accounts",
+      {
+        token: "unrecognized-token",
+        withToken: STATUS.empty,
+        keyring: STATUS.empty
+      },
+      { actingLogin: "", displayLogin: "" }
+    ]
+  ])("reports identity fallback for %s", async (_name, options, expected) => {
+    const { getGitHubIdentity } = await loadGh("linux", options);
+
+    await expect(getGitHubIdentity()).resolves.toMatchObject(expected);
+  });
+
+  it("uses the final account-switch fallback when gh supplies no diagnostic", async () => {
+    const { switchGhKeyringAccount } = await loadGh("linux");
+    childProcess.execFile.mockImplementation(
+      (_file, _args, _options, callback) => {
+        callback(new Error(""), "", "");
+        return stubChild();
+      }
+    );
+
+    await expect(switchGhKeyringAccount("octocat")).resolves.toEqual({
+      ok: false,
+      error: "gh auth switch failed"
+    });
+  });
+
+  it.each([
+    [
+      "an error without message text",
+      new Error(""),
+      "",
+      { content: null, error: "Error", status: null }
+    ],
+    [
+      "an empty successful response",
+      null,
+      "",
+      {
+        content: null,
+        error: "empty response from gh api",
+        status: 200
+      }
+    ]
+  ])(
+    "reports repository content fallback for %s",
+    async (_name, error, stdout, expected) => {
+      const { ghApiGetContentResult } = await loadGh("linux");
+      childProcess.execFile.mockImplementation(
+        (_file, _args, _options, callback) => {
+          callback(error, stdout, "");
+          return stubChild();
+        }
+      );
+
+      await expect(
+        ghApiGetContentResult("/repos/octo/app/contents/file")
+      ).resolves.toEqual(expected);
+    }
+  );
+
+  it("rejects a failed repository commit and tolerates a closed stdin", async () => {
+    const { commitFileToRepo } = await loadGh("linux", {
+      token: "fixture-secret"
+    });
+    childProcess.execFile.mockImplementation(
+      (_file, args, _options, callback) => {
+        if (!args?.includes("--method")) {
+          callback(null, "", "");
+          return stubChild();
+        }
+        callback(new Error("fixture-secret failed"), "", "");
+        return stubChild(() => {
+          throw new Error("stdin closed");
+        });
+      }
+    );
+
+    await expect(
+      commitFileToRepo(
+        "octo/app",
+        "workflow.yml",
+        "content",
+        "main",
+        "Update workflow"
+      )
+    ).rejects.toThrow("[REDACTED] failed");
+  });
+
+  it.each([
+    ["default branch", "default", "main"],
+    ["branch head", "head", "abc123"]
+  ])(
+    "treats missing stdout as empty for %s",
+    async (_name, operation, ignored) => {
+      const gh = await loadGh("linux");
+      childProcess.execFile.mockImplementation(
+        (_file, _args, _options, callback) => {
+          callback(null, undefined, "");
+          return stubChild();
+        }
+      );
+
+      const result =
+        operation === "default" ?
+          gh.getDefaultBranch("octo/app")
+        : gh.getBranchHeadSha("octo/app", ignored);
+      await expect(result).resolves.toBe("");
+    }
+  );
+
+  it("completes mutation helpers when the child exposes no stdin stream", async () => {
+    const gh = await loadGh("linux");
+    childProcess.execFile.mockImplementation(
+      (_file, args, _options, callback) => {
+        callback(
+          null,
+          args?.some((arg: string) => arg.endsWith("/pulls")) ?
+            '{"html_url":"https://example.test/pr/1","number":1}'
+          : "",
+          ""
+        );
+        return {};
+      }
+    );
+
+    await expect(
+      gh.createBranchRef("octo/app", "feature/test", "abc123")
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      gh.createPullRequestApi(
+        "octo/app",
+        "feature/test",
+        "main",
+        "Test PR",
+        "body"
+      )
+    ).resolves.toMatchObject({ ok: true, number: 1 });
+  });
+
+  it.each([
+    ["empty success", null, "", "", { ok: true, json: null, status: 200 }],
+    [
+      "error-message fallback",
+      new Error("connection reset"),
+      "",
+      "",
+      {
+        ok: false,
+        json: null,
+        status: null,
+        stderr: "connection reset"
+      }
+    ],
+    [
+      "empty failure",
+      new Error(""),
+      "",
+      "",
+      { ok: false, json: null, status: null, stderr: "" }
+    ]
+  ])("reports JSON API %s", async (_name, error, stdout, stderr, expected) => {
+    const { ghApiJson } = await loadGh("linux");
+    childProcess.execFile.mockImplementation(
+      (_file, _args, _options, callback) => {
+        callback(error, stdout, stderr);
+        return {};
+      }
+    );
+
+    await expect(ghApiJson("/repos/octo/app")).resolves.toMatchObject(expected);
   });
 });
 

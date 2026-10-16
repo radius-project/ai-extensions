@@ -145,6 +145,14 @@ describe("createFileCredentialProvenanceStore", () => {
     expect(diagnostics[0].message).toContain("broken.json");
   });
 
+  it("contains corrupt-record diagnostics when no reporter is supplied", async () => {
+    const directory = await tempDirectory();
+    await fs.writeFile(path.join(directory, "broken.json"), "{oops");
+    const store = createFileCredentialProvenanceStore({ directory });
+
+    await expect(store.load()).rejects.toThrow("is incomplete");
+  });
+
   it("reports a storage path that is not a directory", async () => {
     const file = path.join(await tempDirectory(), "file");
     await fs.writeFile(file, "x");
@@ -194,6 +202,7 @@ describe("createFileCredentialProvenanceStore", () => {
         throw new Error("rename failed");
       }
     });
+
     try {
       await expect(store.write("key", { id: 1 })).rejects.toThrow(
         "rename failed"
@@ -205,5 +214,99 @@ describe("createFileCredentialProvenanceStore", () => {
         value: originalRename
       });
     }
+  });
+
+  it("preserves the write failure when temporary-file cleanup also fails", async () => {
+    const directory = await tempDirectory();
+    const store = createFileCredentialProvenanceStore({ directory });
+    const originalWriteFile = fs.writeFile;
+    const originalRm = fs.rm;
+    Object.defineProperties(fs, {
+      writeFile: {
+        configurable: true,
+        value: async () => {
+          throw new Error("write failed");
+        }
+      },
+      rm: {
+        configurable: true,
+        value: async () => {
+          throw new Error("cleanup failed");
+        }
+      }
+    });
+    try {
+      await expect(store.write("key", { id: 1 })).rejects.toThrow(
+        "write failed"
+      );
+    } finally {
+      Object.defineProperties(fs, {
+        writeFile: { configurable: true, value: originalWriteFile },
+        rm: { configurable: true, value: originalRm }
+      });
+    }
+  });
+
+  it("reclaims a stale lock before running work", async () => {
+    const directory = await tempDirectory();
+    const lockDirectory = path.join(directory, ".lock");
+    await fs.mkdir(lockDirectory);
+    const stale = new Date(Date.now() - 6 * 60_000);
+    await fs.utimes(lockDirectory, stale, stale);
+    const store = createFileCredentialProvenanceStore({ directory });
+
+    await expect(store.withLock(async () => "done")).resolves.toBe("done");
+    await expect(fs.stat(lockDirectory)).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+  });
+
+  it("does not remove a lock whose owner file changed or disappeared", async () => {
+    const directory = await tempDirectory();
+    const lockDirectory = path.join(directory, ".lock");
+    const store = createFileCredentialProvenanceStore({ directory });
+
+    await store.withLock(async () => {
+      await fs.rm(path.join(lockDirectory, "owner"));
+    });
+
+    await expect(fs.stat(lockDirectory)).resolves.toBeDefined();
+  });
+
+  it("times out safely when an existing lock cannot be inspected", async () => {
+    const directory = await tempDirectory();
+    await fs.mkdir(path.join(directory, ".lock"));
+    const store = createFileCredentialProvenanceStore({ directory });
+    const statSpy = vi.spyOn(fs, "stat").mockRejectedValue(new Error("denied"));
+    const nowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(0)
+      .mockReturnValue(120_001);
+    try {
+      await expect(store.withLock(async () => {})).rejects.toThrow(
+        "Timed out waiting"
+      );
+    } finally {
+      statSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("contains heartbeat update failures while work holds the lock", async () => {
+    const directory = await tempDirectory();
+    const store = createFileCredentialProvenanceStore({
+      directory,
+      lockHeartbeatMs: 1
+    });
+    const utimesSpy = vi
+      .spyOn(fs, "utimes")
+      .mockRejectedValue(new Error("heartbeat denied"));
+
+    await store.withLock(
+      () => new Promise<void>((resolve) => setTimeout(resolve, 10))
+    );
+
+    expect(utimesSpy).toHaveBeenCalled();
+    utimesSpy.mockRestore();
   });
 });

@@ -58,6 +58,10 @@ describe("canvas server dependencies (SU-01)", () => {
     expect(composed.defaultPage).toBe("planned");
     expect(composed.createState()).toEqual({});
     expect(composed.now()).toBeGreaterThan(0);
+    const httpServer = composed.createHttpServer((_request, response) => {
+      response.end();
+    });
+    expect(httpServer.listening).toBe(false);
   });
 
   it.each(["now", "preferredPort", "prepareIdentity"] as const)(
