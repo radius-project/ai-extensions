@@ -239,6 +239,19 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # Pull requests only: publish.yml and release.yml reuse this workflow
+      # without the Codecov token. The token is unavailable to fork PRs;
+      # Codecov falls back to tokenless upload.
+      - name: Upload coverage to Codecov
+        if: ${{ always() && github.event_name == 'pull_request' && steps.coverage.outcome != 'skipped' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          codecov_yml_path: ./.codecov.yml
+          files: coverage/lcov.info
+          fail_ci_if_error: false
+          verbose: true
+
       - name: Check progress demo bundle
         run: pnpm --filter @radius-project/adapter-canvas run demo:check
 
