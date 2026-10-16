@@ -9,6 +9,7 @@ import {
   withGhcrDockerConfig
 } from "./ghcr.js";
 import type { FetchImplementation } from "./ghcr.js";
+import { ghcrBootstrap } from "@radius-project/adapter-shared";
 
 import {
   createHarness,
@@ -114,11 +115,13 @@ test("deletes a validated user-owned state package and confirms absence", async 
       ]
     ]
   );
-  assert.ok(
-    harness.calls
-      .filter((call) => new URL(call.url).pathname.includes("/packages/"))
-      .every((call) => call.headers["X-GitHub-Api-Version"] === "2022-11-28")
-  );
+  assert.equal(ghcrBootstrap.GITHUB_API_VERSION, "2022-11-28");
+  for (const call of harness.calls) {
+    assert.equal(
+      call.headers["X-GitHub-Api-Version"],
+      ghcrBootstrap.GITHUB_API_VERSION
+    );
+  }
 });
 
 test("treats initial absence confirmed with read-only package access as idempotent success", async () => {

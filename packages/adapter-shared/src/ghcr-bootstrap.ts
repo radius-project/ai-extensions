@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+
+export const GITHUB_API_VERSION = "2022-11-28";
+
 export type GhcrAuthGuidance = (
   scopes?: string,
   source?: GhCredentials["source"]
@@ -740,7 +743,7 @@ export async function githubJson(
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2022-11-28"
+      "X-GitHub-Api-Version": GITHUB_API_VERSION
     },
     redirect: "error"
   });

@@ -443,6 +443,17 @@ test("pushes one deterministic linked bootstrap artifact across repeated bootstr
     visibility: "private"
   });
   assert.deepEqual(second, first);
+  const githubCalls = harness.calls.filter(
+    (call) => new URL(call.url).origin === baseOptions.apiBaseUrl
+  );
+  assert.ok(githubCalls.length > 0);
+  assert.equal(ghcrBootstrap.GITHUB_API_VERSION, "2022-11-28");
+  for (const call of githubCalls) {
+    assert.equal(
+      call.headers["X-GitHub-Api-Version"],
+      ghcrBootstrap.GITHUB_API_VERSION
+    );
+  }
   assert.equal(harness.blobs.size, 2);
   assert.equal(harness.manifestPushes, 1);
   assert.equal(
