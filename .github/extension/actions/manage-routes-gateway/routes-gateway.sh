@@ -245,7 +245,7 @@ app_route_kinds() {
 environment_recipe_pack_ids_json() {
     local environment_json
     environment_json="$(
-        rad env show "${ENVIRONMENT_NAME}" --preview -o json
+        rad env show "${ENVIRONMENT_NAME}" -o json
     )" || fail "failed to inspect Radius environment ${ENVIRONMENT_NAME}"
     jq -sc '
       if length == 0 then
@@ -902,7 +902,7 @@ normalize_items_json() {
 
 radius_app_names_json() {
     local apps_json
-    apps_json="$(rad app list --preview -o json)" ||
+    apps_json="$(rad app list -o json)" ||
         fail "failed to list Radius applications"
     apps_json="$(
         normalize_items_json "${apps_json}" "Radius application discovery" true
