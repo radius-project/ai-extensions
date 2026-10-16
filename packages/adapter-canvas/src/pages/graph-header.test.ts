@@ -68,18 +68,18 @@ describe("graphHeader page selection", () => {
     expect(graphHeader("graph")).not.toMatch(/\son[a-z]+=/);
   });
 
-  it.each(["graph", "planned", "graph-diff"])(
-    "renders a hidden keyboard-native Refresh button for %s",
+  it("renders a hidden keyboard-native Refresh button for the diff view", () => {
+    expect(graphHeader("graph-diff")).toContain(
+      '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'
+    );
+  });
+
+  it.each(["graph", "planned", "deployed", "nope"])(
+    "renders no separate Refresh button for %s",
     (page) => {
-      expect(graphHeader(page)).toContain(
-        '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'
-      );
+      expect(graphHeader(page)).not.toContain('id="modeling-refresh"');
     }
   );
-
-  it("does not offer modeling retry in the deployed view", () => {
-    expect(graphHeader("deployed")).not.toContain('id="modeling-refresh"');
-  });
 
   it("opens the graph content wrapper that graphHeaderClose closes", () => {
     expect(graphHeader("graph")).toContain('<div id="graph-page-content">');

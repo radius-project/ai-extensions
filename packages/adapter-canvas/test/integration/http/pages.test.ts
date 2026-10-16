@@ -119,24 +119,29 @@ describe("canvas pages over real loopback HTTP", () => {
     }
   );
 
-  it.each(["graph", "planned", "graph-diff"])(
-    "serves the hidden native retry control and its visibility style on %s",
-    async (page) => {
+  it("serves the hidden native retry control and its visibility style on graph-diff", async () => {
+    resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
+    const response = await get("/?page=graph-diff");
+    expect(response.body).toContain(
+      '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'
+    );
+    expect(response.body).toContain(
+      "#modeling-refresh[hidden] { display: none; }"
+    );
+    expect(response.body).toContain(browserEntryMarker("graph-diff-page"));
+  });
+
+  it.each([
+    ["graph", "deploy-app-btn", "graph-page"],
+    ["planned", "plan-btn", "planned-graph-page"]
+  ] as const)(
+    "serves %s with its primary button as the only retry control",
+    async (page, buttonId, entry) => {
       resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
       const response = await get(`/?page=${page}`);
-      expect(response.body).toContain(
-        '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'
-      );
-      expect(response.body).toContain(
-        "#modeling-refresh[hidden] { display: none; }"
-      );
-      expect(response.body).toContain(
-        browserEntryMarker(
-          page === "graph-diff" ? "graph-diff-page"
-          : page === "planned" ? "planned-graph-page"
-          : "graph-page"
-        )
-      );
+      expect(response.body).not.toContain('id="modeling-refresh"');
+      expect(response.body).toContain(`id="${buttonId}"`);
+      expect(response.body).toContain(browserEntryMarker(entry));
     }
   );
 

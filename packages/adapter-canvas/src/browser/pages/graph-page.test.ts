@@ -21,14 +21,16 @@ import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.j
 import { WORKSPACE_MODEL_CHANGED_EVENT } from "../heartbeat.js";
 import {
   GRAPH_PAGE_STATE_ID,
-  GRAPH_PLAN_BLOCKED_TITLE,
   GRAPH_PROGRESS_MS,
+  GRAPH_RETRY_LABEL,
   GRAPH_RETRY_MAX_MS,
   GRAPH_RETRY_SCHEDULE_MS,
+  GRAPH_RETRY_TITLE,
   GRAPH_STALE_RETRY_MS,
   graphRetryDelayMs,
   initializeGraphPage
 } from "./graph-page.js";
+import { MODELED_ENV_UNAVAILABLE_TITLE } from "../repositories.js";
 
 interface FixtureOptions {
   loaded?: boolean;
@@ -72,8 +74,6 @@ function fixture(options: FixtureOptions = {}) {
   const branch = createFakeSelect("graph-branch");
   branch.value = branchValue;
   const button = createFakeInput("deploy-app-btn");
-  const modelingRefresh = createFakeInput("modeling-refresh");
-  modelingRefresh.hidden = true;
   const container = createFakeElement("graph-container");
   const wrapper = createFakeElement("graph-container-wrapper");
   // The real loading surface mounts this host; the fake render globals do not,
@@ -81,7 +81,7 @@ function fixture(options: FixtureOptions = {}) {
   const progressHost = createFakeElement("progress-steps");
   const guidance = createFakeElement("graph-guidance");
   guidance.textContent = "Click a node to view source code links.";
-  const elements = [state, app, container, progressHost, modelingRefresh];
+  const elements = [state, app, container, progressHost];
   if (withGuidance) elements.push(guidance);
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
@@ -116,7 +116,6 @@ function fixture(options: FixtureOptions = {}) {
     app,
     branch,
     button,
-    modelingRefresh,
     container,
     wrapper,
     status,
@@ -135,8 +134,14 @@ function globals(overrides: Record<string, unknown> = {}) {
 }
 
 describe("initializeGraphPage", () => {
+  const withEnvironment = (browser: ReturnType<typeof fixture>["browser"]) =>
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
+    );
+
   it("authorizes only the explicit Refresh request and keeps later polls automatic", async () => {
-    const { browser, modelingRefresh } = fixture();
+    const { browser, button } = fixture();
+    withEnvironment(browser);
     const bodies: Record<string, unknown>[] = [];
     browser.net.handle("/api/load-graph", (init) => {
       bodies.push(JSON.parse(String(init?.body)));
@@ -149,34 +154,164 @@ describe("initializeGraphPage", () => {
     const teardown = initializeGraphPage(browser.context, globals());
     await flushPromises();
     expect(bodies[0]).not.toHaveProperty("retryModeling");
-    expect(modelingRefresh.hidden).toBe(false);
-    modelingRefresh.dispatch("click");
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
+    button.dispatch("click");
     await flushPromises();
     expect(bodies[1]).toMatchObject({ retryModeling: true, restartWait: true });
-    expect(modelingRefresh.focusCount).toBe(1);
-    expect(modelingRefresh.disabled).toBe(false);
+    expect(browser.nav.assigned).toEqual([]);
     browser.clock.tick(GRAPH_RETRY_SCHEDULE_MS[0]);
     await flushPromises();
     expect(bodies[2]).not.toHaveProperty("retryModeling");
     teardown();
-    expect(modelingRefresh.listenerCount()).toBe(0);
+    expect(button.listenerCount()).toBe(0);
   });
 
-  it("retains Refresh when its request fails and handles pages without the control", async () => {
-    const { browser, modelingRefresh } = fixture();
+  it("disables Refresh while its request runs and focuses it again when it fails", async () => {
+    const { browser, button } = fixture();
+    withEnvironment(browser);
+    let pending: ReturnType<typeof createDeferred<HttpResponse>> | null = null;
+    browser.net.handle("/api/load-graph", () => {
+      if (pending) return pending.promise;
+      return Promise.reject(new Error("offline"));
+    });
+    const teardown = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+
+    pending = createDeferred<HttpResponse>();
+    button.dispatch("click");
+    await flushPromises();
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+    expect(button.disabled).toBe(true);
+    const requests = browser.net.calls.filter(
+      (call) => call.url === "/api/load-graph"
+    ).length;
+    button.dispatch("click");
+    await flushPromises();
+    expect(
+      browser.net.calls.filter((call) => call.url === "/api/load-graph")
+    ).toHaveLength(requests);
+
+    pending.reject(new Error("still offline"));
+    await flushPromises();
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
+    expect(button.focusCount).toBe(1);
+    teardown();
+  });
+
+  it("restores Plan Deployment after a successful Refresh", async () => {
+    const { browser, button } = fixture();
+    withEnvironment(browser);
+    let attempts = 0;
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse(
+        ++attempts === 1 ?
+          { modelingFailed: true, error: "Recipe unavailable." }
+        : { resources: [{ id: "app/web" }] }
+      )
+    );
+    const teardown = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+    expect(button.getAttribute("title")).toBe(GRAPH_RETRY_TITLE);
+
+    button.dispatch("click");
+    await flushPromises();
+    expect(button.textContent).toBe("Plan Deployment");
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBeNull();
+    expect(button.focusCount).toBe(1);
+
+    button.dispatch("click");
+    expect(browser.nav.assigned).toEqual(["/?page=planned&app=app"]);
+    teardown();
+  });
+
+  it("offers Refresh while environments are unavailable and restores that state after success", async () => {
+    const { browser, button } = fixture();
+    browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
+      jsonResponse({ error: "listing failed" })
+    );
+    let attempts = 0;
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse(
+        ++attempts === 1 ?
+          { modelingFailed: true, error: "Recipe unavailable." }
+        : { resources: [{ id: "app/web" }] }
+      )
+    );
+    const teardown = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(button.dataset.mode).toBe("unavailable");
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
+
+    button.dispatch("click");
+    await flushPromises();
+    expect(button.textContent).toBe("Plan Deployment");
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toBe(MODELED_ENV_UNAVAILABLE_TITLE);
+    teardown();
+  });
+
+  it("clears Refresh when the user selects another branch", async () => {
+    const { browser, button, branch } = fixture();
+    withEnvironment(browser);
+    const load = createDeferred<HttpResponse>();
+    let attempts = 0;
+    browser.net.handle("/api/load-graph", () =>
+      ++attempts === 1 ?
+        jsonResponse({ modelingFailed: true, error: "Recipe unavailable." })
+      : load.promise
+    );
+    const teardown = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+
+    branch.value = "other";
+    branch.dispatch("change");
+    await flushPromises();
+    expect(button.textContent).toBe("Plan Deployment");
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("title")).toBeNull();
+    teardown();
+  });
+
+  it("offers Refresh when a preloaded graph refresh reports a modeling failure", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    withEnvironment(browser);
+    const bodies: Record<string, unknown>[] = [];
+    browser.net.handle("/api/load-graph", (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse({
+        modelingFailed: true,
+        error: "Recipe unavailable."
+      });
+    });
+    const teardown = initializeGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: vi.fn() })
+    );
+    await flushPromises();
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
+
+    button.dispatch("click");
+    await flushPromises();
+    expect(bodies.at(-1)).toMatchObject({ retryModeling: true });
+    teardown();
+  });
+
+  it("keeps working on pages without a primary button", async () => {
+    const { browser } = fixture({ withButton: false });
     browser.net.handle("/api/load-graph", () =>
       Promise.reject(new Error("offline"))
     );
     const teardown = initializeGraphPage(browser.context, globals());
     await flushPromises();
-    modelingRefresh.dispatch("click");
-    await flushPromises();
-    expect(modelingRefresh.hidden).toBe(false);
     teardown();
-    browser.document.remove("modeling-refresh");
-    const second = initializeGraphPage(browser.context, globals());
-    await flushPromises();
-    second();
   });
 
   it("does nothing when the page state element is absent", () => {
@@ -318,7 +453,7 @@ describe("initializeGraphPage", () => {
     expect(button.getAttribute("title")).toBeNull();
   });
 
-  it("leaves Plan Deployment disabled when the model failed before the environment listing settles", async () => {
+  it("turns Plan Deployment into Refresh when the model failed before the environment listing settles", async () => {
     const { browser, button } = fixture({ loaded: true });
     const environments = createDeferred<HttpResponse>();
     browser.net.handle(
@@ -344,8 +479,33 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(button.dataset.mode).toBe("plan");
-    expect(button.disabled).toBe(true);
-    expect(button.getAttribute("title")).toBe(GRAPH_PLAN_BLOCKED_TITLE);
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBe(GRAPH_RETRY_TITLE);
+  });
+
+  it("hands the button to Create Environment when the listing settles after a failure", async () => {
+    const { browser, button } = fixture({ loaded: true });
+    const environments = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/list-environments?repo=octo%2Fapp",
+      () => environments.promise
+    );
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ modelingFailed: true, error: "Recipe unavailable." })
+    );
+    const teardown = initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+
+    environments.resolve(jsonResponse({ environments: [] }));
+    await flushPromises();
+
+    expect(button.dataset.mode).toBe("create-env");
+    expect(button.textContent).toBe("Create Environment");
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBeNull();
+    teardown();
   });
 
   it("does not re-enable a button owned by the create-environment mode", async () => {
@@ -454,7 +614,7 @@ describe("initializeGraphPage", () => {
     expect(status?.style.display).toBe("none");
   });
 
-  it("disables planning when the selected model does not compile", async () => {
+  it("offers Refresh instead of planning when the selected model does not compile", async () => {
     const setError = vi.fn();
     const { browser, button, branch } = fixture({ loaded: false });
     browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
@@ -473,7 +633,8 @@ describe("initializeGraphPage", () => {
     );
     await flushPromises();
 
-    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe(GRAPH_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
     expect(button.getAttribute("title")).toContain(
       "until the application model"
     );
@@ -498,7 +659,11 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(button.dataset.mode).toBe("create-env");
+    expect(button.textContent).toBe("Create Environment");
     expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBeNull();
+    button.dispatch("click");
+    expect(browser.nav.assigned).toEqual(["/?page=environment&new=1"]);
   });
 
   it("keeps Plan Deployment disabled while a changed branch is compiling", async () => {
@@ -1175,7 +1340,9 @@ describe("initializeGraphPage", () => {
 
   it("delegates deploy button clicks to the shared modeled primary action", async () => {
     const { browser, button, app } = fixture({ loaded: false });
-    browser.net.handle("/api/load-graph", () => jsonResponse({}));
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/web" }] })
+    );
     browser.net.handle("/api/list-environments?repo=octo%2Fapp", () =>
       jsonResponse({ environments: [{ name: "dev", provider: "azure" }] })
     );

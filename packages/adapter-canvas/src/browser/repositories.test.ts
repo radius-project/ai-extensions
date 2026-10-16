@@ -6,6 +6,8 @@ import {
   DEPLOYMENTS_PATH,
   DIFF_BRANCH_TIMEOUT_MS,
   ENVIRONMENTS_PATH,
+  PLAN_RETRY_LABEL,
+  PLAN_RETRY_TITLE,
   REPOS_PATH,
   REPO_RETRY_MS,
   applyDeployedEnvState,
@@ -1381,6 +1383,41 @@ describe("planned primary button state", () => {
 
     expect(button.disabled).toBe(true);
     expect(button.getAttribute("title")).toContain("could not be generated");
+  });
+
+  it.each([
+    [false, false],
+    [true, true]
+  ])(
+    "offers Refresh when a retry is recommended (pending=%s)",
+    (pending, disabled) => {
+      const { browser, button, hint, created } = plannedButtons();
+      created["planned-app"].value = "store";
+      created["planned-branch"].value = "feature";
+      created["planned-env"].value = "dev";
+      const state = readyPlanState();
+      state.requestFailed = true;
+      state.retryRecommended = true;
+      state.planPending = pending;
+
+      applyPlanEnvState(browser.context, state, true, false);
+
+      expect(button.dataset.mode).toBe("retry");
+      expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+      expect(button.disabled).toBe(disabled);
+      expect(button.getAttribute("title")).toBe(PLAN_RETRY_TITLE);
+      expect(hint.textContent).toContain('click "Refresh"');
+    }
+  );
+
+  it("offers environment creation before a recommended retry", () => {
+    const { browser, button } = plannedButtons();
+    const state = readyPlanState();
+    state.retryRecommended = true;
+
+    applyPlanEnvState(browser.context, state, false, false);
+
+    expect(button.dataset.mode).toBe("create-env");
   });
 
   it("clears a stale title when the state becomes deployable", () => {
