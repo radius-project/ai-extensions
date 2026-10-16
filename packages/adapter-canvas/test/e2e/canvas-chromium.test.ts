@@ -2269,6 +2269,11 @@ test.describe("Radius Canvas in Chromium", () => {
           exact: true
         });
         await expect(refresh).toBeVisible();
+        await expect(refresh).toHaveId(
+          view === "graph" ? "deploy-app-btn"
+          : view === "planned" ? "plan-btn"
+          : "modeling-refresh"
+        );
         expect(
           requests.every((request) => request.retryModeling !== true)
         ).toBe(true);
@@ -2439,7 +2444,9 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toHaveAttribute("role", "alert");
     await expect(page.locator("#graph-refresh-status")).toBeHidden();
     await expect(page.locator("#graph-guidance")).toBeHidden();
-    await expect(page.locator("#deploy-app-btn")).toBeDisabled();
+    await expect(page.locator("#deploy-app-btn")).toHaveText("Refresh");
+    await expect(page.locator("#deploy-app-btn")).toBeEnabled();
+    await expect(page.locator("#modeling-refresh")).toHaveCount(0);
     await expect(page.locator("#progress-steps")).toHaveCount(0);
     await page.clock.fastForward(GRAPH_RETRY_MAX_MS * 2);
     expect(requests).toBe(1);
@@ -2593,7 +2600,9 @@ test.describe("Radius Canvas in Chromium", () => {
       refusal
     );
     await expect(page.locator("#plan-status")).toBeHidden();
-    await expect(page.locator("#plan-btn")).toBeDisabled();
+    await expect(page.locator("#plan-btn")).toHaveText("Refresh");
+    await expect(page.locator("#plan-btn")).toBeEnabled();
+    await expect(page.locator("#modeling-refresh")).toHaveCount(0);
     await expect(page.locator("#progress-steps")).toHaveCount(0);
     await page.clock.fastForward(PLAN_RETRY_MS * 2);
     expect(requests).toBe(1);

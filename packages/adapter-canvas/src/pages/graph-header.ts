@@ -39,7 +39,13 @@ export function graphHeader(activePage: string): string {
   ${navLinks}
 </nav>
 <div id="graph-page-content">
-${activePage === "deployed" ? "" : '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'}`;
+${
+  // The Modeled and Planned pages turn their primary button into Refresh when a
+  // retry is recommended. Diff has no primary button, so it keeps its own.
+  activePage === "graph-diff" ?
+    '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'
+  : ""
+}`;
 }
 
 export function graphHeaderClose() {
