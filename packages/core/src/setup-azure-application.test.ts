@@ -69,7 +69,6 @@ describe("Azure application policy ports", () => {
     );
     expect(finalize).toHaveBeenCalledExactlyOnceWith({
       kind: "app-selection-required",
-      values: [],
       evidence: {
         appName: "radius-deploy-owner-repo",
         candidates: candidates.map((candidate) => ({
@@ -188,7 +187,8 @@ describe("Azure application policy ports", () => {
     ).toBeNull();
     expect(test.events.at(-1)).toMatchObject({
       kind: "application-selection",
-      values: [expect.any(String), "app-registration-not-owned"]
+      message: expect.any(String),
+      code: "app-registration-not-owned"
     });
   });
 

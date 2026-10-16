@@ -156,7 +156,7 @@ export function createAzureSetupPresentation({
     finalizeFailure(event: AzureSetupFailure): Promise<void> {
       switch (event.kind) {
         case "invalid-app-name":
-          return fail(400, event.values[0], "invalid-app-name", {
+          return fail(400, event.reason, "invalid-app-name", {
             steps,
             ...event.evidence
           });
@@ -164,7 +164,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "The derived App Registration name is invalid: " +
-              event.values[0] +
+              event.reason +
               " Supply a shorter appName.",
             "invalid-app-name",
             { steps, ...event.evidence }
@@ -172,25 +172,25 @@ export function createAzureSetupPresentation({
         case "existing-client-owner-lookup":
           return fail(
             400,
-            `Could not read owners of the existing AZURE_CLIENT_ID app ${event.values[0]}: ` +
-              event.values[1],
+            `Could not read owners of the existing AZURE_CLIENT_ID app ${event.clientId}: ` +
+              event.detail,
             "app-owner-lookup-failed",
             { steps, ...event.evidence }
           );
         case "existing-client-verification":
           return fail(
             400,
-            `Could not verify the repository's AZURE_CLIENT_ID (${event.values[0]}): ` +
-              event.values[1],
-            event.values[2] || "existing-client-id-failed",
+            `Could not verify the repository's AZURE_CLIENT_ID (${event.clientId}): ` +
+              event.detail,
+            event.code || "existing-client-id-failed",
             { steps, ...event.evidence }
           );
         case "existing-client-ownership":
           return fail(
             400,
-            event.values[0] ||
-              `The repository's AZURE_CLIENT_ID (${event.values[1]}) references an App Registration the current Azure CLI identity does not own. Verify or clear the variable and retry.`,
-            event.values[2] || "existing-client-id-not-owned",
+            event.message ||
+              `The repository's AZURE_CLIENT_ID (${event.clientId}) references an App Registration the current Azure CLI identity does not own. Verify or clear the variable and retry.`,
+            event.code || "existing-client-id-not-owned",
             { steps, ...event.evidence }
           );
         case "invalid-app-id":
@@ -203,23 +203,23 @@ export function createAzureSetupPresentation({
         case "selected-application-owner-lookup":
           return fail(
             400,
-            `Could not read owners of App Registration ${event.values[0]}: ` +
-              event.values[1],
+            `Could not read owners of App Registration ${event.appId}: ` +
+              event.detail,
             "app-owner-lookup-failed",
             { steps, ...event.evidence }
           );
         case "selected-application-ownership":
           return fail(
             400,
-            event.values[0] ||
+            event.message ||
               "The selected App Registration is not owned by the current Azure CLI identity. Choose one you own or create a new application.",
-            event.values[1] || "app-registration-not-owned",
+            event.code || "app-registration-not-owned",
             { steps, ...event.evidence }
           );
         case "app-lookup-failed":
           return fail(
             400,
-            "Failed to look up existing App Registrations: " + event.values[0],
+            "Failed to look up existing App Registrations: " + event.detail,
             "app-lookup-failed",
             { steps, ...event.evidence }
           );
@@ -240,16 +240,16 @@ export function createAzureSetupPresentation({
         case "candidate-owner-lookup":
           return fail(
             400,
-            `Could not read owners of App Registration ${event.values[0]}: ` +
-              event.values[1],
+            `Could not read owners of App Registration ${event.appId}: ` +
+              event.detail,
             "app-owner-lookup-failed",
             { steps, ...event.evidence }
           );
         case "application-selection":
           return fail(
             400,
-            event.values[0] || "Could not select an App Registration.",
-            event.values[1] || "app-selection-failed",
+            event.message || "Could not select an App Registration.",
+            event.code || "app-selection-failed",
             { steps, ...event.evidence }
           );
         case "app-selection-required":
@@ -263,7 +263,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Failed to resolve the current Azure CLI identity before creating the App Registration: " +
-              event.values[0],
+              event.detail,
             "app-owner-lookup-failed",
             { steps, ...event.evidence }
           );
@@ -278,9 +278,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Failed to create App Registration: " +
-              (event.values[0] ||
-                event.values[1] ||
-                "The request was rejected."),
+              (event.stderr || event.stdout || "The request was rejected."),
             "app-create-failed",
             { steps, ...event.evidence }
           );
@@ -288,7 +286,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Failed to resolve the current Azure CLI identity after creating the App Registration: " +
-              event.values[0],
+              event.detail,
             "app-owner-lookup-failed",
             { steps, ...event.evidence }
           );
@@ -296,7 +294,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Failed to assign the Azure CLI identity as an owner of the new App Registration: " +
-              event.values[0],
+              event.detail,
             "app-owner-add-failed",
             { steps, ...event.evidence }
           );
@@ -304,7 +302,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Failed to verify owners of the new App Registration: " +
-              event.values[0],
+              event.detail,
             "app-owner-lookup-failed",
             { steps, ...event.evidence }
           );
@@ -319,7 +317,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Failed to apply Radius provenance tags to the new App Registration: " +
-              event.values[0],
+              event.detail,
             "app-tag-update-failed",
             { steps, ...event.evidence }
           );
@@ -327,7 +325,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Failed to read the App Registration tags after update: " +
-              event.values[0],
+              event.detail,
             "app-tag-read-failed",
             { steps, ...event.evidence }
           );
@@ -341,14 +339,14 @@ export function createAzureSetupPresentation({
         case "app-tag-verify-failed":
           return fail(
             400,
-            `The new App Registration is missing required Radius provenance tags: ${event.values[0]}.`,
+            `The new App Registration is missing required Radius provenance tags: ${event.missingTags}.`,
             "app-tag-verify-failed",
             { steps, ...event.evidence }
           );
         case "app-object-id-failed":
           return fail(
             400,
-            `Could not resolve the Entra object id for App Registration ${event.values[0]}.`,
+            `Could not resolve the Entra object id for App Registration ${event.clientId}.`,
             "app-object-id-failed",
             { steps, ...event.evidence }
           );
@@ -356,9 +354,7 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Could not read the App Registration federated credentials: " +
-              (event.values[0] ||
-                event.values[1] ||
-                "Azure CLI request failed."),
+              (event.stderr || event.stdout || "Azure CLI request failed."),
             "federated-credential-list-failed",
             { steps, ...event.evidence }
           );
@@ -372,8 +368,8 @@ export function createAzureSetupPresentation({
         case "federated-credential-name-collision":
           return fail(
             400,
-            `Federated credential name "${event.values[0]}" already exists with a different subject ` +
-              `("${event.values[1]}" vs required "${event.values[2]}"). Two environment ` +
+            `Federated credential name "${event.credentialName}" already exists with a different subject ` +
+              `("${event.existingSubject}" vs required "${event.requiredSubject}"). Two environment ` +
               `names normalize to the same credential name — rename this environment to avoid characters ` +
               `that collapse together (for example ":" and "-").`,
             "federated-credential-name-collision",
@@ -382,37 +378,37 @@ export function createAzureSetupPresentation({
         case "federated-credential-identity-incomplete":
           return fail(
             400,
-            `Could not verify the complete Entra identity for federated credential "${event.values[0]}".`,
+            `Could not verify the complete Entra identity for federated credential "${event.credentialName}".`,
             "federated-credential-identity-incomplete",
             { steps, ...event.evidence }
           );
         case "credential-provenance-write-failed":
           return fail(
             500,
-            `Federated credential "${event.values[0]}" was ${event.values[1] ? "created" : "found"}, but Radius could not save the ownership record needed for safe cleanup.`,
+            `Federated credential "${event.credentialName}" was ${event.created ? "created" : "found"}, but Radius could not save the ownership record needed for safe cleanup.`,
             "credential-provenance-write-failed",
             { steps, ...event.evidence }
           );
         case "federated-credential-failed":
           return fail(
             400,
-            `Failed to create federated credential "${event.values[0]}": ` +
-              event.values[1],
+            `Failed to create federated credential "${event.credentialName}": ` +
+              event.detail,
             "federated-credential-failed",
             { steps, ...event.evidence }
           );
         case "federated-credential-subject-mismatch":
           return fail(
             400,
-            `Federated credential "${event.values[0]}" ${event.values[1] ? "could not be verified" : "already exists but its subject"} ` +
-              `("${event.values[2] || ""}") does not match the required subject ("${event.values[3]}").`,
+            `Federated credential "${event.credentialName}" ${event.created ? "could not be verified" : "already exists but its subject"} ` +
+              `("${event.actualSubject || ""}") does not match the required subject ("${event.requiredSubject}").`,
             "federated-credential-subject-mismatch",
             { steps, ...event.evidence }
           );
         case "created-federated-credential-identity-incomplete":
           return fail(
             400,
-            `Could not verify the complete Entra identity for federated credential "${event.values[0]}".`,
+            `Could not verify the complete Entra identity for federated credential "${event.credentialName}".`,
             "federated-credential-identity-incomplete",
             { steps, ...event.evidence }
           );
@@ -433,8 +429,7 @@ export function createAzureSetupPresentation({
         case "sp-failed":
           return fail(
             400,
-            "Could not create or find the Service Principal: " +
-              event.values[0],
+            "Could not create or find the Service Principal: " + event.detail,
             "sp-failed",
             { steps, ...event.evidence }
           );
@@ -456,14 +451,14 @@ export function createAzureSetupPresentation({
           return fail(
             400,
             "Could not resolve the Service Principal object id needed to assign Azure roles: " +
-              event.values[0],
+              event.detail,
             "sp-objectid-failed",
             { steps, ...event.evidence }
           );
         case "role-assignment-failed":
           return fail(
             400,
-            "Failed to assign Contributor role: " + event.values[0],
+            "Failed to assign Contributor role: " + event.detail,
             "role-assignment-failed",
             { steps, ...event.evidence }
           );

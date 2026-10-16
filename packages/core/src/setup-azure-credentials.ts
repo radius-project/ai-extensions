@@ -65,7 +65,7 @@ async function createFederatedCredentials({
   ) {
     await ports.finalizeFailure({
       kind: "app-object-id-failed",
-      values: [String(clientId)],
+      clientId: String(clientId),
       evidence: { clientId, appName, azError: appResult.stderr }
     });
     return false;
@@ -90,7 +90,8 @@ async function createFederatedCredentials({
   if (listResult.code !== 0 && listResult.code !== "0") {
     await ports.finalizeFailure({
       kind: "federated-credential-list-failed",
-      values: [String(listResult?.stderr), String(listResult?.stdout)],
+      stderr: String(listResult?.stderr),
+      stdout: String(listResult?.stdout),
       evidence: { clientId, appName, azError: listResult?.stderr || "" }
     });
     return false;
@@ -99,7 +100,6 @@ async function createFederatedCredentials({
   if (!inventory) {
     await ports.finalizeFailure({
       kind: "federated-credential-list-malformed",
-      values: [],
       evidence: { clientId, appName }
     });
     return false;
@@ -159,11 +159,9 @@ async function createFederatedCredentials({
   if (collision) {
     await ports.finalizeFailure({
       kind: "federated-credential-name-collision",
-      values: [
-        String(collision.name),
-        String(collision.existingSubject),
-        String(collision.desiredSubject)
-      ],
+      credentialName: String(collision.name),
+      existingSubject: String(collision.existingSubject),
+      requiredSubject: String(collision.desiredSubject),
       evidence: { clientId, appName }
     });
     return false;
@@ -176,7 +174,7 @@ async function createFederatedCredentials({
     if (!hasCompleteFederatedCredentialIdentity(credential)) {
       await ports.finalizeFailure({
         kind: "federated-credential-identity-incomplete",
-        values: [String(credential.name)],
+        credentialName: String(credential.name),
         evidence: { clientId, appName }
       });
       return false;
@@ -200,7 +198,8 @@ async function createFederatedCredentials({
     } catch (error) {
       await ports.finalizeFailure({
         kind: "credential-provenance-write-failed",
-        values: [credential.name, origin === "created"],
+        credentialName: credential.name,
+        created: origin === "created",
         evidence: { clientId, appName, error: String(error) }
       });
       return false;
@@ -430,10 +429,8 @@ async function createFederatedCredentials({
       if (!result.stderr.includes("already exists")) {
         await ports.finalizeFailure({
           kind: "federated-credential-failed",
-          values: [
-            String(credential.name),
-            String(result.stderr || result.stdout)
-          ],
+          credentialName: String(credential.name),
+          detail: String(result.stderr || result.stdout),
           evidence: { clientId, appName, azError: result.stderr }
         });
         return false;
@@ -482,12 +479,10 @@ async function createFederatedCredentials({
     ) {
       await ports.finalizeFailure({
         kind: "federated-credential-subject-mismatch",
-        values: [
-          credential.name,
-          created,
-          liveCredential?.subject || "",
-          credential.subject
-        ],
+        credentialName: credential.name,
+        created: created,
+        actualSubject: liveCredential?.subject || "",
+        requiredSubject: credential.subject,
         evidence: { clientId, appName }
       });
       return false;
@@ -498,7 +493,7 @@ async function createFederatedCredentials({
     ) {
       await ports.finalizeFailure({
         kind: "created-federated-credential-identity-incomplete",
-        values: [String(credential.name)],
+        credentialName: String(credential.name),
         evidence: { clientId, appName }
       });
       return false;
@@ -520,7 +515,6 @@ async function createFederatedCredentials({
   if (unresolvedCredentials.length > 0) {
     await ports.finalizeFailure({
       kind: "provider-reconciliation-pending",
-      values: [],
       evidence: { clientId, appName }
     });
     return false;
@@ -761,7 +755,6 @@ export async function configureAzureAutoSetupCredentials({
   if (ports.isRollbackPending()) {
     await ports.finalizeFailure({
       kind: "rollback-before-service-principal",
-      values: [],
       evidence: { clientId, appName }
     });
     return false;
@@ -774,7 +767,7 @@ export async function configureAzureAutoSetupCredentials({
     if (servicePrincipal.stopped) return false;
     await ports.finalizeFailure({
       kind: "sp-failed",
-      values: [String(servicePrincipal.stderr)],
+      detail: String(servicePrincipal.stderr),
       evidence: { clientId, appName, azError: servicePrincipal.stderr }
     });
     return false;
@@ -796,7 +789,6 @@ export async function configureAzureAutoSetupCredentials({
   if (ports.isRollbackPending()) {
     await ports.finalizeFailure({
       kind: "rollback-after-service-principal",
-      values: [],
       evidence: { clientId, appName }
     });
     return false;
@@ -817,7 +809,6 @@ export async function configureAzureAutoSetupCredentials({
   if (ports.isRollbackPending()) {
     await ports.finalizeFailure({
       kind: "rollback-after-federated-credential",
-      values: [],
       evidence: { clientId, appName }
     });
     return false;
@@ -834,7 +825,7 @@ export async function configureAzureAutoSetupCredentials({
     if (!lookup.objectId) {
       await ports.finalizeFailure({
         kind: "sp-objectid-failed",
-        values: [String(lookup.error)],
+        detail: String(lookup.error),
         evidence: { clientId, appName, azError: lookup.error }
       });
       return false;
@@ -871,7 +862,7 @@ export async function configureAzureAutoSetupCredentials({
     if (contributor.stopped) return false;
     await ports.finalizeFailure({
       kind: "role-assignment-failed",
-      values: [String(contributor.stderr)],
+      detail: String(contributor.stderr),
       evidence: { clientId, appName, azError: contributor.stderr }
     });
     return false;
@@ -889,7 +880,6 @@ export async function configureAzureAutoSetupCredentials({
   if (ports.isRollbackPending()) {
     await ports.finalizeFailure({
       kind: "rollback-after-contributor",
-      values: [],
       evidence: { clientId, appName }
     });
     return false;
@@ -951,7 +941,6 @@ export async function configureAzureAutoSetupCredentials({
   if (ports.isRollbackPending()) {
     await ports.finalizeFailure({
       kind: "rollback-after-cluster-admin",
-      values: [],
       evidence: { clientId, appName }
     });
     return false;
@@ -1011,7 +1000,6 @@ export async function configureAzureAutoSetupCredentials({
   if (ports.isRollbackPending()) {
     await ports.finalizeFailure({
       kind: "rollback-after-locks-contributor",
-      values: [],
       evidence: { clientId, appName }
     });
     return false;
