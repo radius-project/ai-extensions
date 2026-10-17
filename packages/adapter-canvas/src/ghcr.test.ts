@@ -1024,6 +1024,115 @@ test("retries a rate-limited GitHub 403 with Retry-After", async () => {
   );
 });
 
+test("uses X-RateLimit-Reset when Retry-After is malformed", async () => {
+  const harness = createHarness();
+  const sleeps: number[] = [];
+  let now = 1_800_000_000_000;
+  let ownerAttempts = 0;
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (url.origin === "https://api.test" && url.pathname === "/users/acme") {
+      ownerAttempts++;
+      if (ownerAttempts === 1) {
+        return new Response("", {
+          status: 429,
+          headers: {
+            "Retry-After": "not-a-date",
+            "X-RateLimit-Reset": "1800000003"
+          }
+        });
+      }
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await bootstrapGHCRStatePackage({
+    ...baseOptions,
+    fetchImpl,
+    now: () => now,
+    sleep: async (milliseconds) => {
+      sleeps.push(milliseconds);
+      now += milliseconds;
+    }
+  });
+
+  assert.equal(ownerAttempts, 2);
+  assert.equal(sleeps[0], 3000);
+});
+
+test.each([
+  {
+    name: "successful probe",
+    response: new Response("", { status: 200 }),
+    message: /authentication probe returned HTTP 200/
+  },
+  {
+    name: "missing challenge",
+    response: new Response("", { status: 401 }),
+    message: /did not return a .+ challenge/
+  },
+  {
+    name: "challenge without a realm",
+    response: new Response("", {
+      status: 401,
+      headers: { "WWW-Authenticate": 'Bearer service="ghcr.io"' }
+    }),
+    message: /did not include a token realm/
+  },
+  {
+    name: "cross-origin realm",
+    response: new Response("", {
+      status: 401,
+      headers: {
+        "WWW-Authenticate":
+          'Bearer realm="https://credentials.example.test/token"'
+      }
+    }),
+    message: /pointed to an unexpected origin/
+  }
+])(
+  "rejects a $name authentication challenge",
+  async ({ response, message }) => {
+    const harness = createHarness();
+    const fetchImpl: FetchImplementation = async (input, options = {}) => {
+      const url = new URL(input);
+      if (url.origin === "https://registry.test" && url.pathname === "/v2/") {
+        return response;
+      }
+      return harness.fetchImpl(input, options);
+    };
+
+    await assert.rejects(
+      bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl }),
+      message
+    );
+  }
+);
+
+test("defaults a natural bearer challenge service to ghcr.io", async () => {
+  const harness = createHarness();
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (url.origin === "https://registry.test" && url.pathname === "/v2/") {
+      return new Response("", {
+        status: 401,
+        headers: {
+          "WWW-Authenticate": 'Bearer realm="https://registry.test/token"'
+        }
+      });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl });
+
+  const tokenCall = harness.calls.find(
+    (call) => new URL(call.url).pathname === "/token"
+  );
+  assert.ok(tokenCall);
+  assert.equal(new URL(tokenCall.url).searchParams.get("service"), "ghcr.io");
+});
+
 test("accepts the OCI access_token token response shape", async () => {
   const harness = createHarness({ tokenBody: { access_token: "bearer" } });
 
@@ -1095,6 +1204,18 @@ test.each([
   );
 });
 
+test("reports a non-authentication token endpoint failure", async () => {
+  const harness = createHarness({ tokenStatus: 418 });
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({
+      ...baseOptions,
+      fetchImpl: harness.fetchImpl
+    }),
+    /Failed to obtain a GHCR upload token \(HTTP 418\).*denied/
+  );
+});
+
 test("stops an ambiguous blob upload after one proven-absent retry", async () => {
   const harness = createHarness({ blobAmbiguity: "always-fail" });
 
@@ -1108,6 +1229,142 @@ test("stops an ambiguous blob upload after one proven-absent retry", async () =>
 
   assert.equal(harness.blobPuts, 2);
   assert.equal(harness.manifestPushes, 0);
+});
+
+test("rejects an unexpected blob lookup response", async () => {
+  const harness = createHarness();
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (
+      options.method === "HEAD" &&
+      url.origin === "https://registry.test" &&
+      url.pathname.includes("/blobs/")
+    ) {
+      return new Response("registry unavailable", { status: 418 });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl }),
+    /Failed to check GHCR blob.*HTTP 418.*registry unavailable/
+  );
+});
+
+test("rejects a conflicting digest from an existing blob", async () => {
+  const harness = createHarness();
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (
+      options.method === "HEAD" &&
+      url.origin === "https://registry.test" &&
+      url.pathname.includes("/blobs/")
+    ) {
+      return new Response("", {
+        status: 200,
+        headers: { "Docker-Content-Digest": wrongDigest }
+      });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl }),
+    /returned conflicting digest/
+  );
+});
+
+test("reuses existing digest-matched blobs", async () => {
+  const harness = createHarness();
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    const blobMatch = url.pathname.match(/\/blobs\/(sha256:[a-f0-9]+)$/);
+    if (
+      options.method === "HEAD" &&
+      url.origin === "https://registry.test" &&
+      blobMatch
+    ) {
+      return new Response("", {
+        status: 200,
+        headers: { "Docker-Content-Digest": blobMatch[1] }
+      });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl });
+
+  assert.equal(harness.blobPuts, 0);
+  assert.equal(harness.manifestPushes, 1);
+});
+
+test("reconciles a failed blob upload start when the blob appeared", async () => {
+  const harness = createHarness();
+  let startFailed = false;
+  let blobAppeared = false;
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    const blobMatch = url.pathname.match(/\/blobs\/(sha256:[a-f0-9]+)$/);
+    if (
+      options.method === "POST" &&
+      url.pathname.endsWith("/blobs/uploads/") &&
+      !startFailed
+    ) {
+      startFailed = true;
+      blobAppeared = true;
+      return new Response("", { status: 503 });
+    }
+    if (options.method === "HEAD" && blobAppeared && blobMatch) {
+      blobAppeared = false;
+      return new Response("", {
+        status: 200,
+        headers: { "Docker-Content-Digest": blobMatch[1] }
+      });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl });
+
+  assert.equal(startFailed, true);
+  assert.equal(harness.blobPuts, 1);
+  assert.equal(harness.manifestPushes, 1);
+});
+
+test("stops after two failed blob upload starts remain absent", async () => {
+  const harness = createHarness();
+  let startAttempts = 0;
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (options.method === "POST" && url.pathname.endsWith("/blobs/uploads/")) {
+      startAttempts++;
+      return new Response("", { status: 503 });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl }),
+    /remained absent after reconciliation/
+  );
+
+  assert.equal(startAttempts, 2);
+});
+
+test("rejects an unexpected blob upload start status", async () => {
+  const harness = createHarness();
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (options.method === "POST" && url.pathname.endsWith("/blobs/uploads/")) {
+      return new Response("not accepted", { status: 201 });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl }),
+    /Failed to start GHCR blob upload \(HTTP 201\).*not accepted/
+  );
 });
 
 test.each([
@@ -1407,6 +1664,83 @@ test("rejects malformed successful package metadata", async () => {
   assert.equal(harness.manifestPushes, 0);
 });
 
+test.each([
+  { ownerMetadata: null, ownerType: "" },
+  { ownerMetadata: { type: "Bot" }, ownerType: "Bot" }
+])(
+  "rejects unsupported owner metadata %#",
+  async ({ ownerMetadata, ownerType }) => {
+    const harness = createHarness();
+    const fetchImpl: FetchImplementation = async (input, options = {}) => {
+      const url = new URL(input);
+      if (url.origin === "https://api.test" && url.pathname === "/users/acme") {
+        return json(ownerMetadata);
+      }
+      return harness.fetchImpl(input, options);
+    };
+
+    await assert.rejects(
+      bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl }),
+      new RegExp(`Unsupported GitHub account type "${ownerType}"`)
+    );
+  }
+);
+
+test("reports a malformed GitHub owner response", async () => {
+  const harness = createHarness();
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (url.origin === "https://api.test" && url.pathname === "/users/acme") {
+      return new Response("upstream failure", { status: 418 });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl }),
+    /GitHub API request failed \(HTTP 418\).*upstream failure/
+  );
+});
+
+test("reports package guidance when bootstrap metadata access is rejected", async () => {
+  const harness = createHarness();
+  let packageReads = 0;
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (
+      url.origin === "https://api.test" &&
+      url.pathname.includes("/packages/container/")
+    ) {
+      packageReads++;
+      return new Response("", { status: 403 });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl }),
+    /read:packages,write:packages/
+  );
+  assert.equal(packageReads, 1);
+});
+
+test("reports unknown visibility for an empty visibility value", async () => {
+  const harness = createHarness({
+    initialMetadata: {
+      visibility: "",
+      repository: { full_name: "acme/app" }
+    }
+  });
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({
+      ...baseOptions,
+      fetchImpl: harness.fetchImpl
+    }),
+    /current visibility is "unknown"/
+  );
+});
+
 test.each([null, false, 0, ""])(
   "rejects malformed successful package metadata %#",
   async (finalMetadata) => {
@@ -1483,6 +1817,69 @@ test("rejects a package whose source annotation never creates repository linkage
     }),
     /not linked to "acme\/app"/
   );
+});
+
+test("reports a package that never becomes visible after bootstrap", async () => {
+  const harness = createHarness();
+  const fetchImpl: FetchImplementation = async (input, options = {}) => {
+    const url = new URL(input);
+    if (
+      url.origin === "https://api.test" &&
+      url.pathname.includes("/packages/container/")
+    ) {
+      return json({}, { status: 404 });
+    }
+    return harness.fetchImpl(input, options);
+  };
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({
+      ...baseOptions,
+      fetchImpl,
+      metadataAttempts: 1
+    }),
+    /was not visible through the GitHub Packages API/
+  );
+});
+
+test("rejects an invalid bootstrap registry before contacting GHCR", async () => {
+  const harness = createHarness();
+
+  for (const registry of [
+    "",
+    "https://ghcr.io/acme/package",
+    "ghcr.io/acme/package@sha256:abc",
+    "registry.example.test/acme/package",
+    "ghcr.io/acme",
+    "ghcr.io:444/acme/package",
+    "ghcr.io/acme/package:bootstrap"
+  ]) {
+    await assert.rejects(
+      bootstrapGHCRStatePackage({
+        ...baseOptions,
+        registry,
+        fetchImpl: harness.fetchImpl
+      }),
+      /Invalid GHCR state repository|must be an untagged ghcr.io|must not include an OCI tag/
+    );
+  }
+
+  assert.equal(harness.calls.length, 0);
+});
+
+test("rejects a bootstrap runtime without fetch", async () => {
+  vi.stubGlobal("fetch", undefined);
+  try {
+    await assert.rejects(
+      bootstrapGHCRStatePackage({
+        ...baseOptions,
+        fetchImpl: undefined
+      }),
+      /does not provide fetch/
+    );
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test("reports package-scope guidance when GHCR rejects token exchange", async () => {
@@ -1574,6 +1971,42 @@ test("pins keyring credential lookup to github.com", async () => {
     ["auth", "token", "--hostname", "github.com"],
     ["api", "--hostname", "github.com", "user", "--jq", ".login"]
   ]);
+});
+
+test.each([
+  { token: "", username: "octocat" },
+  { token: "token", username: "" }
+])(
+  "rejects an empty stored package credential",
+  async ({ token, username }) => {
+    await assert.rejects(
+      loadGhKeyringCredentials({
+        runKeyringCommand: async (args) =>
+          args[0] === "auth" ? token : username
+      }),
+      /stored GitHub CLI login/
+    );
+  }
+);
+
+test("withGhcrDockerConfig does not invoke the publish callback when credential loading fails", async () => {
+  let invoked = false;
+
+  await assert.rejects(
+    withGhcrDockerConfig(
+      async () => {
+        invoked = true;
+      },
+      {
+        loadCredentials: async () => {
+          throw new Error("credential unavailable");
+        }
+      }
+    ),
+    /credential unavailable/
+  );
+
+  assert.equal(invoked, false);
 });
 
 test("withGhcrDockerConfig hands rad a ghcr.io docker auth then removes it", async () => {

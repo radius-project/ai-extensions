@@ -474,7 +474,10 @@ export function deleteCredentialProfile(repo: string, name: unknown): boolean {
   const list = root[repo];
   if (!Array.isArray(list)) return false;
   const lower = String(name || "").toLowerCase();
-  const next = list.filter((p) => String(p.name).toLowerCase() !== lower);
+  const next = list.filter(
+    (profile) =>
+      isRecord(profile) && String(profile.name).toLowerCase() !== lower
+  );
   root[repo] = next;
   saveCredentials();
   return next.length !== list.length;

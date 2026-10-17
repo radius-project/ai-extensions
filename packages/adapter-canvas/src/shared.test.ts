@@ -6,6 +6,7 @@ import {
   listCredentialProfiles,
   saveCredentialProfile,
   deleteCredentialProfile,
+  cloudCredential,
   expireGraphProgressWait,
   recordGraphBuildEvent,
   resolveCredentialsFilePath,
@@ -55,6 +56,29 @@ describe("credential profiles", () => {
   it("returns an empty list for an unknown repo", () => {
     delete sharedCredentials.profiles;
     expect(listCredentialProfiles(REPO)).toEqual([]);
+  });
+
+  it("normalizes cloud credential containers and filters malformed profiles", () => {
+    expect(cloudCredential({ tenantId: "tenant" })).toEqual({
+      tenantId: "tenant"
+    });
+    expect(cloudCredential(null)).toEqual({});
+    expect(cloudCredential([])).toEqual({});
+
+    sharedCredentials.profiles = {
+      [REPO]: [{ name: "valid" }, null, "invalid"]
+    };
+    expect(listCredentialProfiles(REPO)).toEqual([{ name: "valid" }]);
+  });
+
+  it("rejects incomplete profile saves and missing deletes", () => {
+    expect(saveCredentialProfile("", { name: "profile" })).toBeNull();
+    expect(saveCredentialProfile(REPO, null)).toBeNull();
+    expect(saveCredentialProfile(REPO, { name: "   " })).toBeNull();
+    expect(deleteCredentialProfile("missing/repo", "profile")).toBe(false);
+
+    saveCredentialProfile(REPO, { name: "kept" });
+    expect(deleteCredentialProfile(REPO, "other")).toBe(false);
   });
 
   it("saves an azure profile with normalized fields and 'verified' status", () => {

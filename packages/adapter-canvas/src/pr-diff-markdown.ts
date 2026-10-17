@@ -41,7 +41,7 @@ function buildIdMap(
     const fullId = r.id || r.name || `node${i}`;
     const segments = fullId.split("/");
     const shortId = segments[segments.length - 1] || `node${i}`;
-    let safeId = shortId.replace(/[^a-zA-Z0-9]/g, "_") || `node${i}`;
+    let safeId = shortId.replace(/[^a-zA-Z0-9]/g, "_");
     if (usedIds.has(safeId)) {
       let n = 2;
       while (usedIds.has(`${safeId}_${n}`)) n++;

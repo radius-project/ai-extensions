@@ -1004,6 +1004,20 @@ describe("resolveOidcSubject", () => {
     ).rejects.toThrow(/Could not read repository/);
   });
 
+  it("reports a missing repository response as a failed request", async () => {
+    await expect(
+      resolveOidcSubject(
+        {
+          targetRepo: "octo-org/octo-repo",
+          envName: "dev",
+          suffix: "environment:dev"
+        },
+        async () => undefined as unknown as GitHubJsonResponse,
+        opts
+      )
+    ).rejects.toThrow(/request failed/);
+  });
+
   it("fails on a non-404 customization error rather than defaulting", async () => {
     const runner = makeRunner({
       "/repos/octo-org/octo-repo": REPO_OK,

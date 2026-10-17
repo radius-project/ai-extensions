@@ -3,10 +3,10 @@
     "newlyExtracted": "Migration floors for scopes still being extracted, not coverage targets. New and changed production code targets 100% (see .github/skills/radius-code-quality/SKILL.md); these thresholds only keep an in-flight extraction from landing below the documented 80% line / 80% function / 70% branch gate. Ratchet each scope up to its measured value once its extraction is complete. The completed `browser` scope retains its 99.5% floor in all four metrics. The `graph-react` package contains the extracted graph implementation and preserves at least that floor, with statements, functions, and lines pinned at 100%."
   },
   "aggregate": {
-    "statements": 46.64,
-    "branches": 46.3,
-    "functions": 59.64,
-    "lines": 46.91
+    "statements": 96.72,
+    "branches": 95.05,
+    "functions": 95.02,
+    "lines": 96.98
   },
   "packages": {
     "adapter-canvas": {
