@@ -13,6 +13,7 @@
     "build:canvas": "pnpm --filter @radius-project/adapter-canvas run build",
     "build:libraries": "node scripts/build-libraries.mjs",
     "test:integration:libraries": "node scripts/build-libraries.mjs && node scripts/test-libraries.mjs",
+    "test:agent:modeling": "node scripts/test-agent-modeling.mjs",
     "test:integration:headlamp": "node scripts/test-headlamp.mjs",
     "watch:canvas": "pnpm --filter @radius-project/adapter-canvas run watch",
     "build:install": "pnpm --filter @radius-project/adapter-canvas run build:install",
