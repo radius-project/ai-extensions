@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { proveGitHubEnvironmentCreated } from "./github-environment-provenance.js";
+import { proveGitHubEnvironmentCreated } from "./setup-github-environment-provenance.js";
 
 // The prover is pure: everything it decides comes from the preflight verdict,
 // the PUT's own response body, and the clock reading taken before the write.

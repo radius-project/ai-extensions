@@ -11,6 +11,28 @@
 // exported from their own module and out of this file.
 
 export { redactCredentials } from "./credential-redaction.js";
+export {
+  ensureGitHubEnvironment,
+  GitHubEnvironmentEnsureError,
+  GitHubEnvironmentEnsureCancelled,
+  parseEnvironmentProviderId,
+  readEnsuredGitHubEnvironment
+} from "./setup-github-environment.js";
+export type {
+  EnsureGitHubEnvironmentInput,
+  GitHubEnvironmentCommandResult,
+  GitHubEnvironmentReadResult,
+  EnsuredGitHubEnvironment,
+  GitHubEnvironmentCreatedCandidate,
+  GitHubEnvironmentResolutionRecord,
+  GitHubEnvironmentRecoveryPort
+} from "./setup-github-environment.js";
+export {
+  proveGitHubEnvironmentCreated,
+  type GitHubEnvironmentCreationEvidence,
+  type GitHubEnvironmentCreationProof,
+  type GitHubEnvironmentPreflight
+} from "./setup-github-environment-provenance.js";
 
 export { admitSetupOperation } from "./setup-admission.js";
 export type {
@@ -222,6 +244,31 @@ export {
   parseWorkflowProtection,
   describeWorkflowProtection
 } from "./workflow-protection.js";
+
+export * from "./setup-azure-continuation.js";
+
+export * from "./setup-azure-contracts.js";
+export * from "./setup-azure-events.js";
+export * from "./setup-azure-recovery.js";
+export {
+  azureRetryDelayMs,
+  buildRoleAssignmentArgs,
+  federatedCredentialIdFrom,
+  findFederatedCredentialNameCollision,
+  isReplicationLagError,
+  isRetryableAzureReadFailure,
+  pickAksResourceGroup,
+  readFederatedCredentialId
+} from "./setup-azure-reads.js";
+export type { RoleAssignmentInput } from "./setup-azure-reads.js";
+export * from "./setup-azure-service-principal.js";
+export * from "./setup-azure-application.js";
+export * from "./setup-azure-credentials.js";
+export * from "./setup-azure-account.js";
+export * from "./setup-azure.js";
+export * from "./setup-github-preflight.js";
+
+export * from "./setup-recovery-error.js";
 export type {
   WorkflowProtectionEvidence,
   WorkflowPendingEnvironment

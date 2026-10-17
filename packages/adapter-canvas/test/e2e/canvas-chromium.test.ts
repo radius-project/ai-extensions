@@ -39,6 +39,7 @@ import {
 } from "../../src/infra.js";
 import type { DeployRepairHandoffInput } from "../../src/server.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
+import { createSelectedNamespaceClaimsPorts } from "../../src/server/routes/create-environment-namespace-claims.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
@@ -2761,6 +2762,151 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toBe(false);
     await expectNoWcagViolations(page);
+  });
+
+  test("keeps operation reads pinned after restoring the original GitHub account @safety", async ({
+    page,
+    canvas
+  }) => {
+    canvas.setGitHubToken(null);
+    const operationId = await canvas.seedRestartedVerificationFailure();
+    const statusArgs = ["auth", "status", "--hostname", "github.com"];
+    const reverseActiveAccount = (command: FakeCliCommand): FakeCliCommand =>
+      (
+        command.tool === "gh" &&
+        JSON.stringify(command.args) === JSON.stringify(statusArgs) &&
+        command.env?.GH_TOKEN === "absent"
+      ) ?
+        {
+          ...command,
+          stdout: command.stdout?.replaceAll(
+            /Active account: (true|false)/g,
+            (_match, active: string) =>
+              `Active account: ${active === "true" ? "false" : "true"}`
+          )
+        }
+      : command;
+    const namespaceArgs = [
+      "api",
+      "--paginate",
+      `/repos/${REPOSITORY}/environments?per_page=100`,
+      "--jq",
+      ".environments[].name"
+    ];
+    const runArgs = [
+      "api",
+      `repos/${REPOSITORY}/actions/runs/39`,
+      "--include",
+      "--method",
+      "GET"
+    ];
+    const restored = {
+      commands: [
+        {
+          tool: "gh",
+          args: namespaceArgs,
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: "fixture-environment"
+        },
+        {
+          tool: "gh",
+          args: runArgs,
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: 'HTTP/2 200\n\n{"status":"in_progress","conclusion":null}'
+        },
+        ...defaultFakeCliScenario().commands.map(reverseActiveAccount)
+      ]
+    };
+    const switched = {
+      commands: [
+        {
+          tool: "gh",
+          args: [
+            "auth",
+            "switch",
+            "--hostname",
+            "github.com",
+            "--user",
+            "acting-user"
+          ],
+          writeFiles: [
+            { path: canvas.scenarioPath, content: JSON.stringify(restored) }
+          ]
+        },
+        ...restored.commands.map(reverseActiveAccount)
+      ]
+    };
+    await canvas.setScenario({
+      commands: [
+        {
+          tool: "gh",
+          args: [
+            "auth",
+            "switch",
+            "--hostname",
+            "github.com",
+            "--user",
+            "repo-user"
+          ],
+          writeFiles: [
+            { path: canvas.scenarioPath, content: JSON.stringify(switched) }
+          ]
+        },
+        ...restored.commands
+      ]
+    });
+
+    const accounts = canvas.accountContext;
+    try {
+      const lease = await accounts.coordinator.withSelectedAccount(
+        "repo-user",
+        { ownerKey: accounts.ownerKey, operationId },
+        async (executor) => {
+          accounts.registerExecutor(operationId, executor);
+        }
+      );
+      expect(lease.restoration).toMatchObject({
+        state: "restored",
+        originalLogin: "acting-user",
+        currentLogin: "acting-user"
+      });
+      const executor = accounts.getExecutor(operationId);
+      if (!executor)
+        throw new Error("The operation lost its selected executor");
+      expect(
+        await createSelectedNamespaceClaimsPorts(executor).listEnvironmentNames(
+          REPOSITORY
+        )
+      ).toEqual({
+        ok: true,
+        names: ["fixture-environment"]
+      });
+      const status = await page.request.get(
+        `${canvas.entry.baseUrl}/api/verify-status?` +
+          new URLSearchParams({
+            repo: REPOSITORY,
+            environment: "fixture-environment",
+            operationId
+          })
+      );
+      expect(status.status()).toBe(200);
+      expect(await status.json()).toMatchObject({
+        state: "in_progress",
+        runId: "39"
+      });
+      const calls = await canvas.cliCalls();
+      for (const args of [namespaceArgs, runArgs]) {
+        expect(
+          calls.filter(
+            (call) =>
+              call.tool === "gh" &&
+              JSON.stringify(call.args) === JSON.stringify(args)
+          )
+        ).toEqual([expect.objectContaining({ matched: true, exitCode: 0 })]);
+      }
+    } finally {
+      accounts.unregisterExecutor(operationId);
+    }
   });
 
   test("queries namespaces from the selected AKS cluster and surfaces refresh failure", async ({

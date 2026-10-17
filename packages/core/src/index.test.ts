@@ -13,6 +13,31 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "assessSetupPackageWriteAccess",
+  "preflightSetupRepository",
+  "selectedSetupPackageIdentity",
+  "ProviderMutationRecoveryError",
+  "ensureGitHubEnvironment",
+  "GitHubEnvironmentEnsureError",
+  "GitHubEnvironmentEnsureCancelled",
+  "parseEnvironmentProviderId",
+  "readEnsuredGitHubEnvironment",
+  "proveGitHubEnvironmentCreated",
+  "azureRetryDelayMs",
+  "buildRoleAssignmentArgs",
+  "configureAzureAutoSetupCredentials",
+  "continuationMatchesLiveContext",
+  "ensureAzureServicePrincipal",
+  "federatedCredentialIdFrom",
+  "findFederatedCredentialNameCollision",
+  "isReplicationLagError",
+  "isRetryableAzureReadFailure",
+  "matchesAzureAppCreateContinuation",
+  "parseAzureAccountIdentity",
+  "pickAksResourceGroup",
+  "readFederatedCredentialId",
+  "resolveAzureAutoSetupApplication",
+  "runAzureSetup",
   "admitSetupOperation",
   "honorSetupStop",
   "saveSetupCheckpoint",
@@ -82,6 +107,8 @@ const EXPECTED_FUNCTIONS = [
 ] as const;
 
 const EXPECTED_VALUES = [
+  "AZURE_APP_CREATE_CONTINUATION_SCHEMA_VERSION",
+  "AZURE_SERVICE_MANAGEMENT_REFERENCE_PROMPT",
   "WORKFLOW_READ_LIMITS",
   "ARTIFACT_PAGE_SIZE",
   "MAX_ARTIFACT_PAGES",
@@ -155,6 +182,36 @@ const MODULE_INTERNAL_NAMES = [
 ] as const;
 
 describe("@radius-project/core package barrel", () => {
+  it("accepts a named role-assignment input through the public barrel", () => {
+    const input: core.RoleAssignmentInput = {
+      assignmentId: "assignment-id",
+      objectId: "principal-id",
+      role: "Contributor",
+      scope: "/subscriptions/sub/resourceGroups/rg",
+      subscriptionId: "sub"
+    };
+
+    expect(core.buildRoleAssignmentArgs(input)).toEqual([
+      "role",
+      "assignment",
+      "create",
+      "--name",
+      "assignment-id",
+      "--assignee-object-id",
+      "principal-id",
+      "--assignee-principal-type",
+      "ServicePrincipal",
+      "--role",
+      "Contributor",
+      "--scope",
+      "/subscriptions/sub/resourceGroups/rg",
+      "--subscription",
+      "sub",
+      "--output",
+      "none"
+    ]);
+  });
+
   it.each(EXPECTED_FUNCTIONS)("exports %s as a callable", (name) => {
     expect(typeof core[name]).toBe("function");
   });

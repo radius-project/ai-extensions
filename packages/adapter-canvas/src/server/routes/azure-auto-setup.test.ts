@@ -14,8 +14,7 @@ import { createRequestContext } from "../request-context.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
 import {
   createAzureAutoSetupRoutes,
-  handleAzureAutoSetup,
-  parseAzureAccountIdentity
+  handleAzureAutoSetup
 } from "./azure-auto-setup.js";
 import type {
   AzureAutoSetupCommandResult,
@@ -46,49 +45,6 @@ type LiveContextDrift =
   | "repository"
   | "oidc"
   | "oidc-error";
-
-describe("Azure account identity parsing", () => {
-  it("accepts the subscription and tenant GUIDs Azure reports", () => {
-    expect(
-      parseAzureAccountIdentity(
-        JSON.stringify({
-          id: SUBSCRIPTION,
-          tenantId: TENANT,
-          user: AZURE_USER
-        })
-      )
-    ).toEqual({
-      subscriptionId: SUBSCRIPTION,
-      tenantId: TENANT,
-      callerIdentity: { kind: "user" }
-    });
-  });
-
-  it("classifies a service-principal caller from the same account payload", () => {
-    expect(
-      parseAzureAccountIdentity(
-        JSON.stringify({
-          id: SUBSCRIPTION,
-          tenantId: TENANT,
-          user: { type: "servicePrincipal", name: APP_ID }
-        })
-      )
-    ).toEqual({
-      subscriptionId: SUBSCRIPTION,
-      tenantId: TENANT,
-      callerIdentity: { kind: "servicePrincipal", appId: APP_ID }
-    });
-  });
-
-  it.each([
-    ["invalid JSON", "{"],
-    ["a non-object", "[]"],
-    ["a non-string tenant", JSON.stringify({ id: SUBSCRIPTION, tenantId: 42 })],
-    ["a non-string subscription", JSON.stringify({ id: 42, tenantId: TENANT })]
-  ])("rejects %s", (_label, stdout) => {
-    expect(parseAzureAccountIdentity(stdout)).toBeNull();
-  });
-});
 
 const servers = new Set<ReturnType<typeof createServer>>();
 
