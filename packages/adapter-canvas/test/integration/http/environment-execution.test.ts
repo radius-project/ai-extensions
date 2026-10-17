@@ -9,11 +9,13 @@ import { createTestCanvasServerRuntime } from "../../support/server/production-r
 import {
   configureOperationStore,
   createOperation,
+  requireInput,
   finish,
   operations,
   OPERATION_SCHEMA_VERSION,
   setVerificationWorkflowState,
   STAGE_DELETE_RADIUS_ENV,
+  STAGE_AUTHORIZE_IDENTITY,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
 import {
@@ -29,6 +31,143 @@ afterEach(async () => {
 });
 
 describe("production environment owner HTTP binding", () => {
+  it.each(["azure", "environment"] as const)(
+    "reaches the real %s setup service without its former setup POST",
+    async (stage) => {
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api user") {
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        }
+        if (
+          command === "api /repos/fixture/app" ||
+          command === "api repos/fixture/app"
+        ) {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              full_name: "fixture/app",
+              permissions: { admin: true }
+            }),
+            stderr: ""
+          };
+        }
+        if (command === "api /repos/fixture/app/environments/dev") {
+          return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+        }
+        if (
+          command.startsWith("api --paginate /repos/fixture/app/environments")
+        ) {
+          return { code: 1, stdout: "", stderr: "namespace fixture refusal" };
+        }
+        throw new Error(`Unexpected selected command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const accountContext = createEnvironmentAccountContext(
+        "runtime-service-wiring",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => "original",
+          switchKeyringAccount: async () => {
+            throw new Error("Unexpected switch");
+          },
+          resetIdentityCache: () => {}
+        })
+      );
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext
+      });
+      const originalFetch = globalThis.fetch;
+      const forbidden: string[] = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (
+          url.endsWith("/api/azure-auto-setup") ||
+          url.endsWith("/api/create-environment")
+        ) {
+          forbidden.push(url);
+          throw new Error("Setup HTTP transport must not be used");
+        }
+        return originalFetch(input, init);
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "setup-panel",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: `op_direct_${stage}`,
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "azure"
+        });
+        op.context.githubLogin = "saved-account";
+        op.currentStage = STAGE_AUTHORIZE_IDENTITY;
+        op.request = {
+          needsAzureCredentials: stage === "azure",
+          azure: {},
+          environment: {}
+        };
+        requireInput(op, {
+          code: "app-selection-required",
+          message: "Choose an app.",
+          checkpoint: "azure-app-selection"
+        });
+        operations.put(op);
+        const settled = new Promise<void>((resolve) => {
+          const stop = owner.onEnvironmentTasksSettled("setup-panel", () => {
+            stop();
+            resolve();
+          });
+        });
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              ),
+              "content-type": "application/json"
+            },
+            body: JSON.stringify({
+              repo: op.repo,
+              environment: op.environment,
+              provider: op.provider,
+              checkpoint: "azure-app-selection",
+              createNew: true
+            })
+          }
+        );
+        expect(response.status).toBe(202);
+        await settled;
+        expect(forbidden).toEqual([]);
+        expect(op.failure.message).toContain(
+          stage === "azure" ?
+            "repo, resourceGroup, and cluster are required."
+          : "namespace fixture refusal"
+        );
+        expect(op.state).toBe("failed");
+        expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
+        expect(
+          run.mock.calls.every(
+            ([args]) => args[0] === "api" && !args.includes("--method")
+          )
+        ).toBe(true);
+      } finally {
+        await runtime.stopServer("setup-panel", true);
+      }
+    }
+  );
+
   it.each([false, true])(
     "uses saved operation ownership for workflow controls (account unavailable=%s)",
     async (unavailable) => {

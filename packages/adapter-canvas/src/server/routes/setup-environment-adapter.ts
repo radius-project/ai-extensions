@@ -2,7 +2,7 @@ import { parse as parseYaml } from "yaml";
 import type { SetupEnvironmentPorts } from "@radius-project/core";
 import { encodeWorkflowContent } from "@radius-project/adapter-shared";
 import type { SelectedGhExecutor } from "../../gh.js";
-import type { CreateEnvironmentDependencies } from "./create-environment.js";
+import type { ConfigureEnvironmentDependencies } from "../services/configure-environment.js";
 import type {
   CreateEnvironmentOperation,
   GhcrPreflightResult
@@ -29,7 +29,7 @@ import {
 } from "./setup-environment-presentation.js";
 
 export function createSetupEnvironmentPorts(input: {
-  dependencies: CreateEnvironmentDependencies;
+  dependencies: ConfigureEnvironmentDependencies;
   operation: CreateEnvironmentOperation;
   selectedExecutor: SelectedGhExecutor;
   instanceId: string;
