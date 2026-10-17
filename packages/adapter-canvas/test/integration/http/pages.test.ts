@@ -123,7 +123,7 @@ describe("canvas pages over real loopback HTTP", () => {
     resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
     const response = await get("/?page=graph-diff");
     expect(response.body).toContain(
-      '<button id="modeling-refresh" type="button" class="rad-btn" hidden>Refresh</button>'
+      '<button id="modeling-refresh" type="button" class="rad-btn rad-btn--primary" style="margin-top:0;" hidden>Refresh</button>'
     );
     expect(response.body).toContain(
       "#modeling-refresh[hidden] { display: none; }"
