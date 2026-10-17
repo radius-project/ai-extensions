@@ -595,6 +595,138 @@ describe("TL-11: radius_report_modeling_failure", () => {
     });
   });
 
+  it("records saved workspace source with a failure on the workspace branch", async () => {
+    const { tools, entry } = await currentAttempt({
+      headCommits: { "workspace:/workspace": "sha-workspace" }
+    });
+
+    await findTool(tools, "radius_report_modeling_failure").handler(report);
+
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toEqual({
+      attemptToken: "attempt-1",
+      error: report.error,
+      sourceRevision: "sha-workspace"
+    });
+  });
+
+  it("records the attempted environment, not a selection changed during source capture", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    entry.state.appModelAttemptEnvironments = {
+      "acme/widgets::main": '["azure","dev"]'
+    };
+    entry.state.plannedEnvironment = "production";
+    vi.mocked(deps.appModel.workspaceSourceRevision).mockImplementation(
+      async () => {
+        entry.state.plannedEnvironment = "new-selection";
+        return "workspace:source-1";
+      }
+    );
+    await findTool(tools, "radius_report_modeling_failure").handler(report);
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toMatchObject({
+      sourceRevision: "workspace:source-1",
+      environmentKey: '["azure","dev"]'
+    });
+  });
+
+  it("releases only this branch's delivered panel handoffs after a failure", async () => {
+    const { tools, entry } = await currentAttempt();
+    entry.state.appBicepHandoffKeys = {
+      "acme/widgets::main": "single",
+      "acme/widgets::main:release": "diff",
+      "acme/widgets::other": "unrelated",
+      "other/repo::main": "other-repository"
+    };
+    entry.state.appBicepHandoffKey = "diff";
+    await findTool(tools, "radius_report_modeling_failure").handler(report);
+    expect(entry.state.appBicepHandoffKeys).toEqual({
+      "acme/widgets::other": "unrelated",
+      "other/repo::main": "other-repository"
+    });
+    expect(entry.state.appBicepHandoffKey).toBeUndefined();
+  });
+
+  it("records the remote branch head commit for a branch outside the workspace", async () => {
+    const { tools, entry } = await currentAttempt({
+      headCommits: { "acme/widgets@release": "sha-remote" }
+    });
+    entry.state.appModelAttemptTokens = {
+      "acme/widgets::release": "attempt-1"
+    };
+
+    await findTool(tools, "radius_report_modeling_failure").handler({
+      ...report,
+      branch: "release"
+    });
+
+    expect(entry.state.appModelFailures?.["acme/widgets::release"]).toEqual({
+      attemptToken: "attempt-1",
+      error: report.error,
+      sourceRevision: "remote:sha-remote"
+    });
+  });
+
+  it("records the failure without a commit when the head commit cannot be read", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    vi.mocked(deps.appModel.workspaceSourceRevision).mockRejectedValue(
+      new Error("git failed")
+    );
+
+    const result = await findTool(
+      tools,
+      "radius_report_modeling_failure"
+    ).handler(report);
+
+    expect(result).toEqual({ recorded: true });
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toEqual({
+      attemptToken: "attempt-1",
+      error: report.error
+    });
+  });
+
+  it.each(["empty", "failed"])(
+    "records a failure without source evidence when the remote revision is %s",
+    async (read) => {
+      const { tools, entry, deps } = await currentAttempt();
+      entry.state.appModelAttemptTokens = {
+        "acme/widgets::release": "attempt-1"
+      };
+      if (read === "failed")
+        vi.mocked(deps.appModel.branchHeadCommit).mockRejectedValue(
+          new Error("offline")
+        );
+      expect(
+        await findTool(tools, "radius_report_modeling_failure").handler({
+          ...report,
+          branch: "release"
+        })
+      ).toEqual({ recorded: true });
+      expect(entry.state.appModelFailures?.["acme/widgets::release"]).toEqual({
+        attemptToken: "attempt-1",
+        error: report.error
+      });
+      expect(deps.appModel.workspaceSourceRevision).not.toHaveBeenCalled();
+    }
+  );
+
+  it("rejects a report superseded while the saved source revision is read", async () => {
+    const { tools, entry, deps } = await currentAttempt();
+    deps.appModel.workspaceSourceRevision = async () => {
+      entry.state.appModelAttemptTokens = {
+        "acme/widgets::main": "attempt-2"
+      };
+      return "saved-source-2";
+    };
+    const result = await findTool(
+      tools,
+      "radius_report_modeling_failure"
+    ).handler(report);
+    expect(result).toMatchObject({ recorded: false });
+    expect(entry.state.appModelFailures).toBeUndefined();
+    expect(entry.state.appModelAttemptTokens?.["acme/widgets::main"]).toBe(
+      "attempt-2"
+    );
+  });
+
   it("releases the dead run's handoff claim so the promised retry can be sent", async () => {
     const { tools, missingModelHandoffs, modelingActivity } =
       await currentAttempt();

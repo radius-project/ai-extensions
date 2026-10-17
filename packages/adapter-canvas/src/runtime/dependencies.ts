@@ -222,6 +222,8 @@ export interface HostCallbackDependencies {
       branches: string[];
       page: string;
       progressView?: GraphProgressView;
+      isCurrent?: () => boolean;
+      environmentKey?: string;
       // The canvas instance's state, so the runtime resolves each branch's model
       // against the same workspace context the route rendered from and can
       // deduplicate against this panel's last handoff.
@@ -293,6 +295,9 @@ export interface AppModelDependencies {
   generatorVersion(): string;
   // Commit the local worktree is on. "" when it cannot be resolved.
   workspaceHeadCommit(
+    workspacePath: string | null | undefined
+  ): Promise<string>;
+  workspaceSourceRevision(
     workspacePath: string | null | undefined
   ): Promise<string>;
   // Whether application source (excluding the model's own directory) changed

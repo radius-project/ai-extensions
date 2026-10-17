@@ -102,9 +102,16 @@ export interface PlanState {
   deploymentsPending: boolean;
   planPending: boolean;
   requestFailed: boolean;
+  // A plan request failed and the primary button offers Refresh instead of
+  // Deploy Application.
+  retryRecommended: boolean;
   environmentStatuses: Record<string, string>;
   deploymentStatuses: Record<string, string>;
 }
+
+export const PLAN_RETRY_LABEL = "Refresh";
+export const PLAN_RETRY_TITLE =
+  "The planned deployment could not be generated. Click Refresh to try again.";
 
 export function createPlanState(): PlanState {
   return {
@@ -115,6 +122,7 @@ export function createPlanState(): PlanState {
     deploymentsPending: false,
     planPending: false,
     requestFailed: false,
+    retryRecommended: false,
     environmentStatuses: {},
     deploymentStatuses: {}
   };
@@ -795,6 +803,12 @@ export function applyPlanEnvState(
         "title",
         "Application, branch, and environment selections are still loading."
       );
+    } else if (hasEnv && state.retryRecommended) {
+      // The retry stays disabled while its own request is pending.
+      button.dataset.mode = "retry";
+      button.textContent = PLAN_RETRY_LABEL;
+      button.disabled = state.planPending;
+      button.setAttribute("title", PLAN_RETRY_TITLE);
     } else if (hasEnv) {
       button.dataset.mode = "deploy";
       button.textContent = "Deploy Application";
@@ -864,6 +878,9 @@ export function applyPlanEnvState(
     } else if (state.selectorsPending) {
       hint.textContent =
         " Application, branch, and environment selections are still loading, so deployment planning is temporarily unavailable.";
+    } else if (hasEnv && state.retryRecommended) {
+      hint.textContent =
+        ' The planned deployment could not be generated. To try again, click "Refresh".';
     } else if (hasEnv) {
       const appName = application || "this application";
       const envName = environment || "the selected environment";
@@ -1243,6 +1260,9 @@ export function applyModeledEnvState(
   }
 }
 
+export const MODELED_ENV_UNAVAILABLE_TITLE =
+  "Environments could not be loaded. Try again before planning a deployment.";
+
 function applyModeledEnvUnavailable(
   context: BrowserContext,
   error: unknown
@@ -1252,10 +1272,7 @@ function applyModeledEnvUnavailable(
   if (button) {
     button.dataset.mode = "unavailable";
     button.disabled = true;
-    button.setAttribute(
-      "title",
-      "Environments could not be loaded. Try again before planning a deployment."
-    );
+    button.setAttribute("title", MODELED_ENV_UNAVAILABLE_TITLE);
   }
   const hint = context.dom.byId("modeled-subtitle-hint");
   if (hint) {

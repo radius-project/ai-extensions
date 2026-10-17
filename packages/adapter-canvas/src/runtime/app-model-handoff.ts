@@ -46,6 +46,7 @@ export interface AppModelHandoffRequest {
   // work started by an abandoned render still mints attempt tokens and asks the
   // agent to model branches nobody is looking at.
   isCurrent?: () => boolean;
+  environmentKey?: string;
 }
 
 export interface AppModelHandoffDependencies {
@@ -168,7 +169,8 @@ export function createAppModelHandoff(
     page,
     progressView,
     state,
-    isCurrent
+    isCurrent,
+    environmentKey
   }: AppModelHandoffRequest): Promise<void> {
     if (!repo) return;
     const stillCurrent = (): boolean => isCurrent === undefined || isCurrent();
@@ -337,9 +339,12 @@ export function createAppModelHandoff(
         state.appModelAttemptGeneration =
           (state.appModelAttemptGeneration ?? 0) + 1;
         state.appModelAttemptTokens ??= {};
+        state.appModelAttemptEnvironments ??= {};
         for (const branch of targets) {
           state.appModelAttemptTokens[appModelTargetKey(repo, branch)] =
             attemptToken;
+          state.appModelAttemptEnvironments[appModelTargetKey(repo, branch)] =
+            environmentKey ?? "";
         }
       }
       try {
@@ -364,6 +369,7 @@ export function createAppModelHandoff(
             const tokenKey = appModelTargetKey(repo, branch);
             if (state.appModelAttemptTokens?.[tokenKey] === attemptToken) {
               delete state.appModelAttemptTokens[tokenKey];
+              delete state.appModelAttemptEnvironments?.[tokenKey];
             }
           }
         }
