@@ -477,12 +477,18 @@ function safeWorkspacePath(
 
 export async function readWorkspaceFile(
   workspacePath: string | null | undefined,
-  repoPath: string | null | undefined
+  repoPath: string | null | undefined,
+  strict = false
 ): Promise<string | null> {
   try {
     const filePath = safeWorkspacePath(workspacePath, repoPath);
     return await fs.readFile(filePath, "utf8");
-  } catch {
+  } catch (error) {
+    if (
+      strict &&
+      !(error instanceof Error && "code" in error && error.code === "ENOENT")
+    )
+      throw error;
     return null;
   }
 }
@@ -625,10 +631,11 @@ export async function fetchWorkspaceFile(
   state: CanvasState,
   repo: string | null | undefined,
   branch: string | null | undefined,
-  repoPath: string
+  repoPath: string,
+  strict = false
 ): Promise<string | null> {
   if (!isWorkspaceSelection(state, repo, branch)) return null;
-  return await readWorkspaceFile(state.workspacePath, repoPath);
+  return await readWorkspaceFile(state.workspacePath, repoPath, strict);
 }
 
 // Commit the working tree is currently on. Used to tell whether a generated

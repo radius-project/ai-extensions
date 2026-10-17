@@ -79,6 +79,8 @@ If `show-radius-type.mjs` fails while locating, querying, or validating the sele
 
 ## Workflow
 
+**Mode selection:** preserve the existing default below unless the user explicitly requests model-only/local authoring or the existing model already records that restriction. For that opt-in, follow [Model-only local/custom authoring](#model-only-localcustom-authoring) instead of selecting the managed-default Azure profile. Do not infer opt-in merely from a missing Environment.
+
 1. Start the run with `"<loaded-node>" "<loaded-skill-base>/scripts/promote-app-model.mjs" --begin`, which prints the staging directory to write everything into (see [Staged runs](#staged-runs)). Then select one runnable deployment profile. Treat explicit user, scenario, and target-repository deployment requirements for Radius types, resource-name parameters, workload roles/count, native configuration keys, secret bindings, provider profile, protocol values, and connection names as acceptance criteria. Verify that the pinned source supports that profile; do not silently replace it with an easier default or optional backend.
 2. Build and maintain an internal requirement ledger. Record every acceptance criterion and planned resource property read or write with its source evidence and consuming workload setting. After type resolution, add the exact `resources[].apiVersion` and recursive `resources[].schema` path returned by `show-radius-type.mjs`, any `readOnly` or `writeOnly` restriction, and the Recipe evidence required for generated values. Record target-Environment registration only as deployment readiness (see [Authoring evidence and deployment readiness](#authoring-evidence-and-deployment-readiness)). Use the ledger for reasoning and validation; do not print it or add it as Bicep comments. Follow [runtime-contract.md](references/runtime-contract.md).
 3. Inventory every executable workload and backing service in the selected profile from manifests, Dockerfiles, compose/Helm files, entrypoints, source configuration reads, client initialization, and referenced config files. Treat web, worker, producer, consumer, migration, scheduler, and sidecar roles separately. Model a backing service only when source evidence proves it is mandatory for the selected startup/configuration path; a repo-wide optional dependency, extra, adapter, test, or example does not become a resource. After completing this inventory, decide external-client ingress using only the selected profile's startup and configuration chain and the [route authoring rule](#appbicep-structure-mandatory-order). Ask and stop if it is ambiguous; do not revisit the decision with files from an unselected profile.
@@ -310,11 +312,52 @@ Do not follow a `defaults.yaml`, GitHub, registry, module, or provider-source UR
 
 ### Authoring evidence and deployment readiness
 
+The following defaults apply outside the explicit model-only path below.
+
 You do not need a deployment Environment to author an application model. The graph views build the model on the client, without a Radius control plane. At deploy time, the deploy workflow registers the release-pinned provider Recipe pack, and any generated `custom-recipe-pack.bicep`, on the selected Environment.
 
 - **Authoring evidence (required, blocks publishing):** source compatibility, the exact resolved schema and API version, the selected Recipe's behavior, credential shape, safe omitted inputs, and checker exit `0`. The selected Recipe is the resolver's managed-default `recipe.definition`, unless explicit target evidence selects a different Recipe.
 - **Deployment readiness (does not block authoring):** registration of each emitted type's Recipe in a specific Environment. When the user does not name an Environment and no Environment contract is supplied, model against the managed-default Azure Recipe profile. Do not search for registration evidence, and do not treat its absence as a blocker. In the final reply, say that Recipe registration is checked when the model is deployed.
 - **Named Environment:** when the user names a target Environment or supplies its Recipe or registration contract, model against that contract. Then a required type that the Environment does not register, or a selected Recipe whose behavior conflicts with the application, is an authoring blocker.
+
+### Model-only local/custom authoring
+
+An explicit user request to author a model without a deployment target may select exact pinned local/custom Recipe source instead of the managed-default Azure profile. This is model authoring, not a local deployment engine: choosing it does not select Kubernetes, AKS, Azure, or a Podman runtime implementation. No Environment registration, Recipe input evaluation, emitted workload validation, or runtime readiness is asserted.
+
+Before beginning this mode, inspect the selected Recipe implementation and all referenced source required to establish its behavior. Keep the source in the target repository and record each exact file's raw-byte SHA-256, resource type and API version. A registry tag or successful compilation alone is insufficient. Record a published artifact's immutable manifest digest when one was inspected; never fetch or disclose a private artifact without authorization. The record contains paths and digests, not credentials, private source, or inferred output values.
+
+Create an evidence JSON file in the target repository with this shape (substitute real source paths and digests; the values below are placeholders):
+
+```json
+{
+  "mode": "model-only",
+  "deployment": "unverified",
+  "profile": "the explicitly selected complete source profile",
+  "recipes": [
+    {
+      "resourceType": "Radius.Compute/containers",
+      "apiVersion": "2025-08-01-preview",
+      "sourcePath": ".radius/recipes/containers/main.bicep",
+      "sourceHash": "sha256:<64 lowercase hex characters>",
+      "artifactDigest": "sha256:<64 lowercase hex characters>"
+    }
+  ]
+}
+```
+
+Start with `"<loaded-node>" "<loaded-skill-base>/scripts/promote-app-model.mjs" --begin --model-only-evidence "<evidence-json>"`. The script verifies source confinement and digests and records the selection in the staged run. On regeneration, `--begin` inherits a recorded model-only selection and rechecks its source hashes; it never clears the restriction. If a source changed, inspect it again and supply updated evidence explicitly.
+
+All workload inventory, source references, schema, API-version, credential-shape, unset-input, protocol, storage, and native runtime-contract requirements remain mandatory. Exact pinned Recipe/source evidence may establish behavior without live Environment registration in this mode only. Registration-related blockers in the default/named-Environment guidance do not apply here, but missing or incompatible behavior still blocks authoring. A Recipe accepting a property does not extend the resource's schema: if the resolved type cannot express a mandatory host mount, collector input, or other setting, stop rather than inventing `platformOptions`, removing workloads, or dropping required configuration.
+
+Before running the unchanged Bicep checker, include this exact line in the staged `app.bicep`:
+
+```bicep
+// Radius authoring: model-only; deployment: unverified.
+```
+
+Only after all checks pass, run the existing origin writer and promotion commands. They require the marker and matching evidence, preserve `authoring` in `app.origin.json`, and reject a missing or changed restriction. Do not write or edit the origin record manually. A successful graph remains an abstract model-only graph, not a deployment plan; deployment planning, graph-diff publication, and deployment are unavailable for these artifacts. Existing generated workflows must be regenerated from this product version to enforce the same restriction outside Canvas.
+
+Report model-only/unverified explicitly in the final reply. This release has no automatic transition to deployment-ready: removing the marker or origin evidence is not validation. Deployment requires a separately reviewed target contract with matching registered Recipes, complete runtime evidence, and deployment-ready authoring; do not upgrade artifacts during refresh, repair, or ordinary staged-file promotion.
 
 The managed-default profile supplies Azure Recipe evidence only; it does not establish AWS Recipe behavior. If the user selects AWS or another explicit Recipe profile, use the exact Recipe evidence supplied in the modeling context or target repository. If that evidence is missing and the model depends on its behavior, report an authoring blocker; do not substitute Azure evidence. For generated custom types, inspect the authored Recipe and its pack as required by [Custom Resource Types](references/custom-resource-types.md); the built-in Azure pack does not establish their behavior.
 

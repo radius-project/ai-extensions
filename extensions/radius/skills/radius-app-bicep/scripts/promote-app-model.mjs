@@ -50,6 +50,11 @@ import {
   writeFileSync
 } from "node:fs";
 import path from "node:path";
+import {
+  modelOnlyRestriction,
+  parseModelOnlyAuthoring,
+  validateModelOnlyArtifacts
+} from "../../../../../packages/core/src/modeling/model-authoring.ts";
 
 const STAGING_DIR_PREFIX = ".staging-";
 const STAGING_IGNORE_PATTERN = `${STAGING_DIR_PREFIX}*/`;
@@ -128,12 +133,23 @@ function isStagingDirName(name) {
   );
 }
 
-function readFile(file) {
+function readFile(file, strict = false) {
   try {
     return readFileSync(file, "utf8");
-  } catch {
+  } catch (error) {
+    if (strict && error.code !== "ENOENT") throw error;
     return null;
   }
+}
+
+function previousAuthoringSource(radiusDir) {
+  for (const directory of [radiusDir, path.dirname(radiusDir)]) {
+    const model = readFile(path.join(directory, "app.bicep"), true);
+    const origin = readFile(path.join(directory, "app.origin.json"), true);
+    if (model !== null || origin !== null)
+      return { model: model || "", origin };
+  }
+  return { model: "", origin: null };
 }
 
 // Fingerprint of a file in `.radius/`, distinguishing the three states the
@@ -383,6 +399,27 @@ function isRealDirectory(target) {
 
 function begin() {
   const radiusDir = resolveRadiusDir();
+  let authoring;
+  try {
+    const { model: previousModel, origin: previousOrigin } =
+      previousAuthoringSource(radiusDir);
+    const evidencePath = flag("model-only-evidence");
+    if (hasFlag("model-only-evidence") && !evidencePath) {
+      throw new Error("--model-only-evidence requires a JSON file.");
+    }
+    if (evidencePath) {
+      authoring = parseModelOnlyAuthoring(
+        JSON.parse(readFileSync(evidencePath, "utf8"))
+      );
+    } else if (modelOnlyRestriction(previousModel, previousOrigin)) {
+      authoring = parseModelOnlyAuthoring(
+        JSON.parse(previousOrigin || "{}").authoring
+      );
+    }
+    if (authoring) verifyRecipeSources(authoring, path.dirname(radiusDir));
+  } catch (error) {
+    fail(`Cannot begin model-only authoring: ${error.message}`);
+  }
   mkdirSync(radiusDir, { recursive: true });
   // `--stale-after-ms` exists so the sweep can be exercised deterministically
   // instead of by waiting hours; runs use the default.
@@ -422,7 +459,8 @@ function begin() {
     version: 1,
     runId: dirName.slice(STAGING_DIR_PREFIX.length),
     startedAt: new Date().toISOString(),
-    baseline: managedFileHashes(radiusDir, managedFilesFor(radiusDir))
+    baseline: managedFileHashes(radiusDir, managedFilesFor(radiusDir)),
+    ...(authoring ? { authoring } : {})
   };
   writeFileSync(
     path.join(stagingDir, STAGING_RUN_RECORD),
@@ -482,7 +520,33 @@ function readRunRecord(stagingDir) {
   for (const value of Object.values(baseline)) {
     if (value !== null && typeof value !== "string") return null;
   }
-  return { baseline };
+  try {
+    return {
+      baseline,
+      ...(parsed.authoring === undefined ?
+        {}
+      : {
+          authoring: parseModelOnlyAuthoring(parsed.authoring)
+        })
+    };
+  } catch {
+    return null;
+  }
+}
+
+function verifyRecipeSources(authoring, repoRoot) {
+  const root = realpathSync(repoRoot);
+  for (const recipe of authoring.recipes) {
+    const file = realpathSync(path.resolve(root, recipe.sourcePath));
+    const relative = path.relative(root, file);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("Recipe evidence source escapes the repository.");
+    }
+    const hash = `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+    if (hash !== recipe.sourceHash) {
+      throw new Error(`Recipe source digest changed: ${recipe.sourcePath}`);
+    }
+  }
 }
 
 // Managed files whose content differs from what the run started with, limited to
@@ -581,6 +645,27 @@ function publish() {
     refuse(
       "The origin record does not describe the application model the run produced, so the published bytes would not be the ones the Bicep checker passed. Nothing was published."
     );
+  }
+  try {
+    validateModelOnlyArtifacts(
+      model,
+      readFile(path.join(stagingDir, "app.origin.json")),
+      record.authoring
+    );
+    if (record.authoring) {
+      verifyRecipeSources(record.authoring, path.dirname(radiusDir));
+    }
+    const previous = previousAuthoringSource(radiusDir);
+    if (
+      modelOnlyRestriction(previous.model, previous.origin) &&
+      !record.authoring
+    ) {
+      throw new Error(
+        "A model-only application cannot be promoted to deployment-ready by regeneration."
+      );
+    }
+  } catch (error) {
+    refuse(error.message);
   }
 
   const files = publishableFiles(present, required);

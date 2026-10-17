@@ -23,8 +23,33 @@ import {
   workspaceSourceChangedSince,
   workspaceModelRecoverable,
   currentWorkspaceBranch,
-  resolveGraphBranchForRequest
+  resolveGraphBranchForRequest,
+  fetchWorkspaceFile
 } from "./workspace.js";
+
+describe("strict authoring evidence reads", () => {
+  it("distinguishes missing provenance from read failures without changing ordinary reads", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "strict-origin-"));
+    const state = {
+      workspacePath: root,
+      workspaceRepo: "acme/app",
+      workspaceBranch: "main"
+    };
+    try {
+      const read = (file: string, strict = true) =>
+        fetchWorkspaceFile(state, "acme/app", "main", file, strict);
+      await expect(read("app.origin.json")).resolves.toBeNull();
+      await fs.writeFile(path.join(root, "app.origin.json"), "{}");
+      await expect(read("app.origin.json")).resolves.toBe("{}");
+      await fs.mkdir(path.join(root, "unreadable"));
+      await expect(read("unreadable")).rejects.toThrow();
+      await expect(read("unreadable", false)).resolves.toBeNull();
+      await expect(read("../outside")).rejects.toThrow();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 // The SDK sets session.workspacePath to the per-session STATE directory
 // (…/session-state/<id>), which is NOT a git checkout. resolveWorktreePath must

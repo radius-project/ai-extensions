@@ -727,6 +727,29 @@ describe("TL-11: radius_report_modeling_failure", () => {
 });
 
 describe("RU-08: radius_generate_pr_diff_markdown", () => {
+  it("refuses model-only graph publication before staging or invoking rad", async () => {
+    const { tools, deps } = setup({
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "model",
+        "remote:acme/widgets@feat":
+          "// Radius authoring: model-only; deployment: unverified."
+      }
+    });
+    const result = await findTool(
+      tools,
+      "radius_generate_pr_diff_markdown"
+    ).handler({
+      repo: "acme/widgets",
+      baseBranch: "main",
+      headBranch: "feat"
+    });
+    expect(result).toMatchObject({
+      textResultForLlm: expect.stringContaining("deployment is unverified"),
+      toolTelemetry: { radiusGraphDiff: { outcome: "unavailable" } }
+    });
+    expect(deps.rad.radArtifactsDirForSelection).not.toHaveBeenCalled();
+    expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+  });
   it("reports missing app.bicep on both branches without calling rad", async () => {
     const { tools, deps } = setup();
     const result = await findTool(

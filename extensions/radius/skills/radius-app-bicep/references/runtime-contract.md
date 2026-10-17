@@ -1,5 +1,7 @@
 # Runtime Contract
 
+For explicit model-only/local authoring, apply the [model-only contract](../SKILL.md#model-only-localcustom-authoring): exact pinned Recipe/source evidence replaces live Environment-registration evidence only. Every schema, workload and runtime-compatibility requirement below still applies. Never infer local runtime support from compilation, publication, graph rendering, or the absence of an Environment.
+
 A compiling `app.bicep` proves only that its syntax and resource shapes are accepted. The generated model must also satisfy every workload's real process, configuration, storage, and dependency contract.
 
 ## Evidence to inspect

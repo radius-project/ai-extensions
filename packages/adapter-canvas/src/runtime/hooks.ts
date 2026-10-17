@@ -50,6 +50,7 @@ const RECIPE_PACK_NOTE =
 // Canvas supplies no Environment contract; the user's request can still name
 // a target whose Recipe and registration checks must remain in force (#962).
 const ENVIRONMENT_INDEPENDENT_NOTE =
+  "Preserve any model-only authoring contract recorded in app.origin.json or app.bicep. Explicit model-only requests follow the skill's pinned local/custom evidence path; do not switch them to Azure or claim deployment readiness. Otherwise: " +
   "This Canvas handoff supplies no deployment Environment contract. If the user names a target Environment or supplies its contract, follow the skill's named-Environment checks for Recipe behavior and registration; do not bypass them. Only when no Environment is named and no contract is supplied, model against the managed-default Azure Recipe profile that the radius-app-bicep skill resolves, and leave registration checks to deployment readiness. Azure Recipe evidence does not establish AWS Recipe behavior. In that no-target case, missing Environment-registration evidence is not a permanent modeling failure.";
 
 // Turns a branches array (which may contain undefined/empty entries meaning

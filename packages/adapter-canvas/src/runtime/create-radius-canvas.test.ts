@@ -71,6 +71,23 @@ async function seedGraph(
 
 // RU-05: get_graph_resources full behavior.
 describe("RU-05: get_graph_resources", () => {
+  it("qualifies available model-only resources without claiming deployment readiness", async () => {
+    const { canvas, deps } = setup();
+    await seedGraph(deps, [
+      { id: "local/web", type: "Radius.Compute/containers" }
+    ]);
+    const entry = await deps.getOrCreateServer("radius-panel");
+    entry.state.graphAuthoringRestriction = "Model-only; deployment unverified";
+    const result = await findAction(canvas, "get_graph_resources").handler(
+      ctx("radius-panel")
+    );
+    expect(result).toMatchObject({
+      ready: true,
+      deploymentReadiness: "unverified",
+      authoringRestriction: "Model-only; deployment unverified",
+      resources: [{ id: "local/web" }]
+    });
+  });
   it("reports ready:false before the graph has been built", async () => {
     const { canvas } = setup();
     const result = await findAction(canvas, "get_graph_resources").handler(

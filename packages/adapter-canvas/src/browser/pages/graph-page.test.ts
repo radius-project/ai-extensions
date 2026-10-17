@@ -132,6 +132,35 @@ function globals(overrides: Record<string, unknown> = {}) {
 }
 
 describe("initializeGraphPage", () => {
+  it.each([true, false])(
+    "shows model-only status and disables planning when loaded=%s",
+    async (loaded) => {
+      const { browser, button, status } = fixture({ loaded });
+      const message = "Model-only application: deployment is unverified.";
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({
+          resources: [{ id: "local/web" }],
+          authoringRestriction: message,
+          fromWorkspace: true
+        })
+      );
+      const render = vi.fn();
+      const teardown = initializeGraphPage(
+        browser.context,
+        globals({ radiusRenderGraph: render })
+      );
+      await flushPromises();
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute("title")).toBe(message);
+      expect(status?.textContent).toBe(message);
+      expect(render).toHaveBeenCalledWith(
+        "graph-container",
+        [{ id: "local/web" }],
+        expect.any(Object)
+      );
+      teardown();
+    }
+  );
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializeGraphPage(browser.context, globals());

@@ -1,5 +1,6 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import { modelOnlyRestriction } from "@radius-project/core/modeling";
 
 // First runtime stage of a background deploy: rebuild the planned application
 // graph when the deploy started before one was resolved, so the deploying page
@@ -17,6 +18,7 @@ export interface PlannedGraphInstanceEntry {
 }
 
 export interface BicepSelection {
+  originText?: string | null;
   content: string | null;
   fromWorkspace: boolean;
   branch: string;
@@ -134,6 +136,14 @@ export function createPlannedGraphRecoveryService(
           branch
         );
         const content = selection.content;
+        const restriction = modelOnlyRestriction(
+          content || "",
+          selection.originText
+        );
+        if (restriction) {
+          log(restriction);
+          return null;
+        }
         if (!content) {
           log(
             "⚠ .radius/app.bicep not present — Copilot will generate it with the Radius app-bicep skill to show the planned graph."

@@ -45,6 +45,10 @@ import type {
   GraphProgressView
 } from "../../shared.js";
 import { expireGraphProgressWait } from "../../shared.js";
+import {
+  MODEL_ONLY_MARKER,
+  MODEL_ONLY_MESSAGE
+} from "@radius-project/core/modeling";
 
 // `record`, `optionalString` and `errorMessage` are module-private in
 // `server.ts`, so they are mirrored here verbatim rather than exported solely
@@ -440,6 +444,24 @@ describe("graph planning workflows", () => {
   );
 
   describe("POST /api/load-graph", () => {
+    it("keeps model-only graph provenance on fresh and cached rendering without resolving provider Recipes", async () => {
+      const h = start({
+        selections: { main: selectionOf({ content: MODEL_ONLY_MARKER }) },
+        staged: { main: { dir: "/staged", remote: false } },
+        compiled: { main: [{ id: "local/web" }] }
+      });
+      const body = '{"repo":"octo/app","branch":"main","refresh":true}';
+      const first = await h.run("loadGraph", body);
+      expect(first.status).toBe(200);
+      expect(first.payload.authoringRestriction).toBe(MODEL_ONLY_MESSAGE);
+      expect(h.state.graphAuthoringRestriction).toBe(MODEL_ONLY_MESSAGE);
+      const cached = await h.run("loadGraph", body);
+      expect(cached.payload).toMatchObject({
+        cached: true,
+        authoringRestriction: MODEL_ONLY_MESSAGE
+      });
+      expect(h.recipePackCalls).toEqual([]);
+    });
     it("answers 400 with the parse failure for a malformed body", async () => {
       const harness = start();
       const outcome = await harness.run("loadGraph", "{not json");
@@ -1343,6 +1365,22 @@ describe("graph planning workflows", () => {
   });
 
   describe("POST /api/plan-graph", () => {
+    it("refuses model-only provider projection before compiling or resolving Recipes", async () => {
+      const h = start({
+        selections: { main: selectionOf({ content: MODEL_ONLY_MARKER }) }
+      });
+      h.state.plannedResources = [{ id: "stale" }];
+      const outcome = await h.run(
+        "planGraph",
+        '{"repo":"octo/app","branch":"main"}'
+      );
+      expect(outcome).toMatchObject({
+        status: 409,
+        payload: { error: MODEL_ONLY_MESSAGE, modelOnly: true }
+      });
+      expect(h.state.plannedResources).toEqual([]);
+      expect(h.recipePackCalls).toEqual([]);
+    });
     it("answers 400 for a malformed body and 503 without a Content-Type for a missing entry", async () => {
       const malformed = await start().run("planGraph", "nope");
       expect(malformed.status).toBe(400);
@@ -1952,6 +1990,29 @@ describe("graph planning workflows", () => {
   });
 
   describe("POST /api/diff-branches", () => {
+    it.each(["main", "feature"])(
+      "refuses publishing an unqualified comparison when %s is model-only",
+      async (branch) => {
+        const h = start({
+          selections: {
+            main: selectionOf({
+              content: branch === "main" ? MODEL_ONLY_MARKER : "model"
+            }),
+            feature: selectionOf({
+              branch: "feature",
+              content: branch === "feature" ? MODEL_ONLY_MARKER : "model"
+            })
+          }
+        });
+        const outcome = await h.run(
+          "diffBranches",
+          '{"repo":"octo/app","base":"main","head":"feature"}'
+        );
+        expect(outcome.status).toBe(409);
+        expect(outcome.payload.error).toBe(MODEL_ONLY_MESSAGE);
+        expect(h.state.diffResources).toEqual([]);
+      }
+    );
     const diffBody = '{"repo":"octo/app","base":"main","head":"feature/x"}';
 
     it("answers 400 without recording a diff error when the body will not parse", async () => {

@@ -13,6 +13,7 @@ import {
   type Dirent
 } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -310,6 +311,88 @@ describe("packaged Bicep literal credential detector", () => {
 });
 
 describe("P0-C built Radius extension artifact", () => {
+  it("preserves model-only evidence with isolated bundled authoring scripts", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "bundled-model-only-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "--allow-empty",
+          "--quiet",
+          "-m",
+          "fixture"
+        ],
+        { cwd: workspace }
+      );
+      const recipe = "param hostPath string\n";
+      writeFileSync(join(workspace, "recipe.bicep"), recipe);
+      writeFileSync(
+        join(workspace, "evidence.json"),
+        JSON.stringify({
+          mode: "model-only",
+          deployment: "unverified",
+          profile: "local",
+          recipes: [
+            {
+              resourceType: "Radius.Compute/containers",
+              apiVersion: "2025-08-01-preview",
+              sourcePath: "recipe.bicep",
+              sourceHash: `sha256:${createHash("sha256").update(recipe).digest("hex")}`
+            }
+          ]
+        })
+      );
+      for (const script of ["promote-app-model", "write-app-origin"]) {
+        copyFileSync(
+          join(DIST_SKILL, "scripts", `${script}.mjs`),
+          join(workspace, `${script}.mjs`)
+        );
+      }
+      const run = (script: string, args: string[]) =>
+        execFileSync(
+          process.execPath,
+          [join(workspace, `${script}.mjs`), ...args],
+          {
+            cwd: workspace,
+            encoding: "utf8"
+          }
+        ).trim();
+      const staged = run("promote-app-model", [
+        "--begin",
+        "--model-only-evidence",
+        "evidence.json"
+      ]);
+      const model =
+        "// Radius authoring: model-only; deployment: unverified.\n";
+      writeFileSync(join(staged, "app.bicep"), model);
+      writeFileSync(join(staged, "bicepconfig.json"), "{}");
+      run("write-app-origin", [
+        join(staged, "app.bicep"),
+        "--skill-version",
+        "fixture"
+      ]);
+      run("promote-app-model", ["--staging", staged]);
+      const origin = JSON.parse(
+        readFileSync(join(workspace, ".radius", "app.origin.json"), "utf8")
+      );
+      expect(origin.authoring).toMatchObject({
+        mode: "model-only",
+        deployment: "unverified",
+        profile: "local"
+      });
+      expect(readFileSync(join(workspace, ".radius/app.bicep"), "utf8")).toBe(
+        model
+      );
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
   let smoke: ArtifactSmokeResult;
 
   beforeAll(async () => {
@@ -537,8 +620,11 @@ describe("P0-C built Radius extension artifact", () => {
         join(REPO_ROOT, "extensions", "radius").length + 1
       );
       if (
-        relative.replaceAll("\\", "/") ===
-        "skills/radius-app-bicep/scripts/show-radius-type.mjs"
+        ["show-radius-type", "write-app-origin", "promote-app-model"].some(
+          (script) =>
+            relative.replaceAll("\\", "/") ===
+            `skills/radius-app-bicep/scripts/${script}.mjs`
+        )
       ) {
         continue;
       }
@@ -1556,7 +1642,7 @@ describe("P0-C built Radius extension artifact", () => {
       asset: "radius-app-bicep skill",
       missingAsset: ["radius-app-bicep"],
       expectedError: "Could not resolve",
-      expectedPath: "show-radius-type.mjs"
+      expectedPath: "write-app-origin.mjs"
     },
     {
       asset: "source-reference guide",

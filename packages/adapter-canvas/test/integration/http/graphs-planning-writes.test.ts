@@ -217,6 +217,38 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("graphs-planning writes real-loopback HIT", () => {
+  it("renders a qualified model-only graph but refuses deployment planning and diff publication", async () => {
+    const marker = "// Radius authoring: model-only; deployment: unverified.";
+    start({
+      selections: {
+        local: selectionOf("local", marker),
+        main: selectionOf("main", "default model")
+      },
+      compiled: { local: [{ id: "local/web" }] }
+    });
+    const server = await container!.getOrCreate("instance");
+    const graph = await post(
+      server.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app","branch":"local"}'
+    );
+    expect(graph.status).toBe(200);
+    expect(await graph.json()).toMatchObject({
+      resources: [{ id: "local/web" }],
+      authoringRestriction: expect.stringContaining("deployment is unverified")
+    });
+    for (const [route, body] of [
+      [
+        "/api/plan-graph",
+        '{"repo":"octo/app","branch":"local","provider":"azure"}'
+      ],
+      ["/api/diff-branches", '{"repo":"octo/app","base":"main","head":"local"}']
+    ]) {
+      const response = await post(server.baseUrl, route, body);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ modelOnly: true });
+    }
+  });
   it("serves the modeled graph and its state transition over a real socket", async () => {
     const harness = start({
       selections: { main: selectionOf("main", "resource app = {}") },
