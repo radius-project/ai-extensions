@@ -12,10 +12,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test as base, type Browser, type Page } from "@playwright/test";
 
+import { runCommand } from "../../../src/gh.js";
 import { COPILOT_APP_SETUP_TIMEOUT_MS } from "./cloud-timeout-budget.js";
 import {
   COPILOT_APP_DEFAULT_CDP_PORT,
-  selectMainPage
+  waitForMainPage
 } from "./copilot-app-cdp.js";
 import {
   assertCopilotAppRunner,
@@ -24,6 +25,7 @@ import {
   cleanupCopilotApp,
   createNodeCopilotAppHostPorts,
   launchCopilotApp,
+  prepareCopilotAppGhAuth,
   resolveCopilotAppExecutable
 } from "./copilot-app-host.js";
 import { attachAppState, waitForSignedInShell } from "./copilot-app-ui.js";
@@ -90,21 +92,24 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
         // The bot PAT signs in to the app. The GitHub App installation token
         // expires after one hour and the app cannot receive a refreshed one.
         const packagesToken = requireEnv("GH_PACKAGES_TOKEN");
+        const hostPorts = createNodeCopilotAppHostPorts();
+        const appEnv = buildCopilotAppEnvironment(process.env, {
+          cdpPort: COPILOT_APP_DEFAULT_CDP_PORT,
+          profileDir,
+          azureConfigDir,
+          signInToken: packagesToken,
+          packagesToken,
+          packagesUser: requireEnv("GH_PACKAGES_USER")
+        });
+        await prepareCopilotAppGhAuth(appEnv, runCommand);
         launching = true;
         const app = await launchCopilotApp(
           {
             executable,
             cdpPort: COPILOT_APP_DEFAULT_CDP_PORT,
-            env: buildCopilotAppEnvironment(process.env, {
-              cdpPort: COPILOT_APP_DEFAULT_CDP_PORT,
-              profileDir,
-              azureConfigDir,
-              signInToken: packagesToken,
-              packagesToken,
-              packagesUser: requireEnv("GH_PACKAGES_USER")
-            })
+            env: appEnv
           },
-          createNodeCopilotAppHostPorts(),
+          hostPorts,
           { timeoutMs: APP_LAUNCH_TIMEOUT_MS, intervalMs: 1_000 }
         );
         stopApp = app.stop;
@@ -112,8 +117,22 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
         browser = await playwright.chromium.connectOverCDP(app.cdpUrl, {
           timeout: 30_000
         });
-        const appPage = selectMainPage(
-          browser.contexts().flatMap((context) => context.pages())
+        const connectedBrowser = browser;
+        const appPage = await waitForMainPage(
+          {
+            pages: () => {
+              if (!connectedBrowser.isConnected())
+                throw new Error(
+                  "The Copilot app disconnected before its page was ready."
+                );
+              return connectedBrowser
+                .contexts()
+                .flatMap((context) => context.pages());
+            },
+            now: hostPorts.now,
+            wait: hostPorts.wait
+          },
+          { timeoutMs: APP_LAUNCH_TIMEOUT_MS, intervalMs: 250 }
         );
         try {
           await waitForSignedInShell(appPage);
@@ -144,7 +163,12 @@ export const test = base.extend<object, { copilotApp: CopilotAppSession }>({
                   },
                   async () => {
                     if (!launching)
-                      await fs.rm(root, { recursive: true, force: true });
+                      await fs.rm(root, {
+                        recursive: true,
+                        force: true,
+                        maxRetries: 10,
+                        retryDelay: 250
+                      });
                     else
                       console.warn(
                         `App startup failed; retaining its profile until the disposable runner exits: ${root}`

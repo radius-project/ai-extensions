@@ -128,6 +128,9 @@ jobs:
       - name: Run Windows managed executable tests
         run: pnpm --filter @radius-project/adapter-shared exec vitest run src/rad.test.ts src/rad-process.test.ts
 
+      - name: Run Windows cloud host configuration tests
+        run: pnpm --filter @radius-project/adapter-canvas exec vitest run test/ci/cloud-e2e-workflows.test.ts test/e2e-cloud/support/copilot-app-host.test.ts
+
       - name: Run Windows filesystem, executable and resolver tests
         run: pnpm --filter @radius-project/adapter-canvas exec vitest run src/credential-provenance-store.test.ts src/operation-store.test.ts src/node-executable.test.ts src/publish-targets.test.ts src/promote-app-model.test.ts src/server/temporary-kubeconfig.test.ts test/integration/runtime/radius-type-definition.test.ts
 
