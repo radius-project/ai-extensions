@@ -1399,6 +1399,20 @@ describe("matched direct-core and Canvas setup parity", () => {
   });
 });
 
+it("reports a failing configuration finalizer once without hanging HTTP", async () => {
+  const harness = start({ defaultBranch: null });
+  let finalizations = 0;
+  harness.dependencies.finalizeSetupFailure = async () => {
+    finalizations++;
+    throw new Error("private cleanup detail");
+  };
+  const response = await post({ repo: "octo/app" });
+  expect(response.status).toBe(500);
+  expect(await response.json()).toMatchObject({ code: "setup-handler-failed" });
+  expect(finalizations).toBe(1);
+  expect(harness.journal).toContain("diagnostic:setup-handler-failed");
+});
+
 describe("publication baseline parity", () => {
   it.each(["direct", "protected", "merge-required"] as const)(
     "preserves the %s command, journal, narration, and durable transcript",
