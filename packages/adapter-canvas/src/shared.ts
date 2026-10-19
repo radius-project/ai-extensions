@@ -303,6 +303,8 @@ export interface CanvasState {
   appModelAttemptGeneration?: number;
   appModelAttemptTokens?: Record<string, string>;
   appModelAttemptEnvironments?: Record<string, string>;
+  // Source evidence read when each attempt started, keyed like the tokens.
+  appModelAttemptSourceRevisions?: Record<string, string>;
   appModelFailures?: Record<
     string,
     {

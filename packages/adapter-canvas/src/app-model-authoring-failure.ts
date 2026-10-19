@@ -11,6 +11,35 @@ export function appModelTargetKey(repo: string, branch: string): string {
   return `${repo}::${branch}`;
 }
 
+export interface SourceRevisionReaders {
+  isWorkspaceSelection(
+    state: CanvasState,
+    repo: string,
+    branch: string
+  ): boolean;
+  workspaceSourceRevision(workspacePath: string | undefined): Promise<string>;
+  branchHeadCommit(repo: string, branch: string): Promise<string | null>;
+}
+
+/**
+ * Reads the source evidence for one selection: the saved workspace fingerprint
+ * for the open checkout, or `remote:<commit>` for any other branch. An empty
+ * answer means unknown. Read errors pass through, so each caller picks how an
+ * unreadable revision is handled.
+ */
+export async function readSelectedSourceRevision(
+  state: CanvasState,
+  repo: string,
+  branch: string,
+  readers: SourceRevisionReaders
+): Promise<string> {
+  if (readers.isWorkspaceSelection(state, repo, branch)) {
+    return readers.workspaceSourceRevision(state.workspacePath);
+  }
+  const commit = await readers.branchHeadCommit(repo, branch);
+  return commit ? `remote:${commit}` : "";
+}
+
 export function appModelAuthoringFailure(
   state: CanvasState,
   repo: string,
@@ -92,4 +121,6 @@ export function clearAppModelAuthoringFailure(
   if (state.appModelAttemptTokens) delete state.appModelAttemptTokens[target];
   if (state.appModelAttemptEnvironments)
     delete state.appModelAttemptEnvironments[target];
+  if (state.appModelAttemptSourceRevisions)
+    delete state.appModelAttemptSourceRevisions[target];
 }

@@ -1236,6 +1236,19 @@ export function deployDeployedApp(
   );
 }
 
+export function modeledHintText(mode: string | undefined): string {
+  if (mode === "plan") {
+    return ' To see how this application would be deployed to one of your existing environments, click "Plan Deployment".';
+  }
+  if (mode === "create-env") {
+    return " To plan the deployment of this application, you must first create an environment.";
+  }
+  if (mode === "unavailable") {
+    return " Environments could not be loaded, so deployment planning is temporarily unavailable.";
+  }
+  return "";
+}
+
 export function applyModeledEnvState(
   context: BrowserContext,
   hasEnv: boolean
@@ -1252,12 +1265,7 @@ export function applyModeledEnvState(
       button.disabled = false;
     }
   }
-  if (hint) {
-    hint.textContent =
-      hasEnv ?
-        ' To see how this application would be deployed to one of your existing environments, click "Plan Deployment".'
-      : " To plan the deployment of this application, you must first create an environment.";
-  }
+  if (hint) hint.textContent = modeledHintText(hasEnv ? "plan" : "create-env");
 }
 
 export const MODELED_ENV_UNAVAILABLE_TITLE =
@@ -1275,10 +1283,7 @@ function applyModeledEnvUnavailable(
     button.setAttribute("title", MODELED_ENV_UNAVAILABLE_TITLE);
   }
   const hint = context.dom.byId("modeled-subtitle-hint");
-  if (hint) {
-    hint.textContent =
-      " Environments could not be loaded, so deployment planning is temporarily unavailable.";
-  }
+  if (hint) hint.textContent = modeledHintText("unavailable");
 }
 
 export function modeledPrimaryAction(

@@ -609,6 +609,24 @@ describe("TL-11: radius_report_modeling_failure", () => {
     });
   });
 
+  it("records the source baseline captured when the attempt started", async () => {
+    const { tools, entry, deps } = await currentAttempt({
+      headCommits: { "workspace:/workspace": "workspace:edited-later" }
+    });
+    entry.state.appModelAttemptSourceRevisions = {
+      "acme/widgets::main": "workspace:at-start"
+    };
+
+    await findTool(tools, "radius_report_modeling_failure").handler(report);
+
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toEqual({
+      attemptToken: "attempt-1",
+      error: report.error,
+      sourceRevision: "workspace:at-start"
+    });
+    expect(deps.appModel.workspaceSourceRevision).not.toHaveBeenCalled();
+  });
+
   it("records the attempted environment, not a selection changed during source capture", async () => {
     const { tools, entry, deps } = await currentAttempt();
     entry.state.appModelAttemptEnvironments = {

@@ -23,6 +23,19 @@ import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monit
 import { deployFailureNoticePrompt } from "../../../src/runtime/hooks.js";
 import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../../src/deploy-artifacts.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
+import { createGraphPlanningWorkflows } from "../../../src/server/routes/graph-workflows.js";
+import {
+  prepareSourceRefResources,
+  setSourceRefResources
+} from "../../../src/source-refs.js";
+import {
+  addGraphProgress,
+  beginPlannedGraphRequest,
+  canReuseModeledGraph,
+  isCurrentPlannedGraphRequest,
+  isCurrentSourceRefToken
+} from "../../../src/server.js";
+import type { CanvasGraphResource } from "../../../src/shared.js";
 import {
   createWorkflowArtifactReader,
   type WorkflowRunner
@@ -1389,6 +1402,139 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
       await harness.extension.shutdown("test");
     }
   });
+
+  it.each([
+    ["loadGraph", "graph", { repo: "acme/widgets", branch: "main" }],
+    ["planGraph", "graph", { repo: "acme/widgets", branch: "main" }],
+    [
+      "diffBranches",
+      "graph-diff",
+      { repo: "acme/widgets", base: "main", head: "feature" }
+    ]
+  ] as const)(
+    "still asks the agent to model when %s polls the same selection during the grace window",
+    async (workflow, page, request) => {
+      const harness = await createRuntimeSdkHarness({
+        workspaceTreeByRepoBranch: {
+          "acme/widgets@main": ["Dockerfile"],
+          "acme/widgets@feature": ["Dockerfile"]
+        },
+        headCommits: { "workspace:/workspace": "workspace:source-1" }
+      });
+      try {
+        const entry = await harness.deps.getOrCreateServer(
+          "radius-panel",
+          page
+        );
+        Object.assign(entry.state, {
+          canvasInstanceId: "radius-panel",
+          contextRepo: "acme/widgets",
+          contextBranch: "main",
+          workspaceRepo: "acme/widgets",
+          workspaceBranch: "main",
+          workspacePath: "/workspace",
+          plannedProvider: "azure",
+          plannedEnvironment: "dev"
+        });
+        const appModelHandoff = harness.capturedHostCallbacks.appBicepHandoff;
+        if (!appModelHandoff) throw new Error("Missing modeling handoff");
+        const handoffs: Promise<unknown>[] = [];
+        const workflows = createGraphPlanningWorkflows({
+          readInstanceEntry: () => entry,
+          resolveBranchForRequest: (_entry, _repo, branch) =>
+            Promise.resolve({
+              status: "resolved",
+              branch: branch || "main",
+              followsWorkspaceBranch: false
+            }),
+          commitBranchResolution: () => true,
+          pipeline: {
+            selectAppBicep: (_entry, _repo, branch) =>
+              Promise.resolve({
+                content: null,
+                fromWorkspace: true,
+                branch,
+                bicepPath: ""
+              }),
+            bicepPathOf: () => ".radius/app.bicep",
+            stageArtifacts: () => Promise.reject(new Error("unexpected")),
+            compileResources: () => Promise.reject(new Error("unexpected")),
+            toCanvasResources: (values) => values as CanvasGraphResource[],
+            graphJsonPathFor: () => "",
+            definitionHashFor: () => "",
+            modelRevisionFor: () => "",
+            discardStagedArtifacts: () => {}
+          },
+          triggerAppBicepHandoff: (
+            handoffEntry,
+            repo,
+            branches,
+            handoffPage,
+            progressView,
+            isCurrent,
+            environmentKey
+          ) => {
+            handoffs.push(
+              Promise.resolve(
+                appModelHandoff({
+                  repo,
+                  branches: Array.isArray(branches) ? branches : [branches],
+                  page: handoffPage,
+                  progressView,
+                  state: handoffEntry?.state,
+                  isCurrent,
+                  environmentKey
+                })
+              )
+            );
+          },
+          triggerGraphRepairHandoff: () => ({
+            attempt: 1,
+            maxAttempts: 3,
+            repairing: true,
+            repairExhausted: false
+          }),
+          clearGraphRepairAttempt: () => {},
+          listBranchPaths: () => Promise.resolve(["Dockerfile"]),
+          observeModelingRun: () => Promise.resolve(null),
+          readBranchSourceRevision: () => Promise.resolve("workspace:source-1"),
+          prepareSourceRefResources,
+          setSourceRefResources,
+          isCurrentSourceRefToken,
+          canReuseModeledGraph,
+          addGraphProgress,
+          beginPlannedGraphRequest,
+          isCurrentPlannedGraphRequest,
+          fetchRecipePack: () => Promise.resolve([]),
+          resolveRecipeOutputs: () => Promise.resolve([]),
+          computeGraphDiff: () => [],
+          record: (value) =>
+            value && typeof value === "object" ?
+              (value as Record<string, unknown>)
+            : {},
+          optionalString: (value) => (typeof value === "string" ? value : ""),
+          errorMessage: (error) => String(error),
+          logError: () => {},
+          now: () => Date.now()
+        });
+        const body = JSON.stringify(request);
+        let polled = false;
+        vi.mocked(harness.deps.clock.wait).mockImplementation(async () => {
+          if (polled) return;
+          polled = true;
+          await workflows[workflow]({ instanceId: "radius-panel", body });
+        });
+
+        await workflows[workflow]({ instanceId: "radius-panel", body });
+        await handoffs[0];
+
+        expect(polled).toBe(true);
+        expect(harness.session.send).toHaveBeenCalledTimes(1);
+      } finally {
+        await harness.extension.shutdown("test");
+      }
+    }
+  );
 
   it("records a current attempt and rejects a stale report", async () => {
     const harness = await createRuntimeSdkHarness({

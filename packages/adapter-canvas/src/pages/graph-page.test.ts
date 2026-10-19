@@ -15,6 +15,10 @@ describe("graphPage", () => {
     expect(html).toContain('<label for="graph-app">Application</label>');
     expect(html).toContain('<label for="graph-branch">Branch</label>');
     expect(html).toContain('id="graph-container-wrapper"');
+    expect(html).toContain(
+      '<button id="modeling-refresh" type="button" class="rad-btn rad-btn--neutral" style="margin-top:0;" hidden>Refresh</button>'
+    );
+    expect(html.split('id="modeling-refresh"')).toHaveLength(2);
     expect(html).toContain(browserEntryMarker("graph-page"));
     expect(html.split(browserScript("graph-page"))).toHaveLength(2);
     expect(readBrowserPageState(html, "radius-graph-page-state")).toEqual({

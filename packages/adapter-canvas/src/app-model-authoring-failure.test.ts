@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   appModelAuthoringFailure,
   appModelTargetKey,
   clearAppModelAuthoringFailure,
+  readSelectedSourceRevision,
   reconcileAppModelAuthoringFailure
 } from "./app-model-authoring-failure.js";
 
@@ -48,6 +49,10 @@ describe("app model authoring failures", () => {
       appModelAttemptEnvironments: {
         "acme/widgets::main": '["azure","dev"]',
         "acme/widgets::other": '["azure","production"]'
+      },
+      appModelAttemptSourceRevisions: {
+        "acme/widgets::main": "remote:sha-1",
+        "acme/widgets::other": "remote:sha-2"
       }
     };
 
@@ -58,6 +63,61 @@ describe("app model authoring failures", () => {
     expect(state.appModelAttemptTokens).toEqual({});
     expect(state.appModelAttemptEnvironments).toEqual({
       "acme/widgets::other": '["azure","production"]'
+    });
+    expect(state.appModelAttemptSourceRevisions).toEqual({
+      "acme/widgets::other": "remote:sha-2"
+    });
+  });
+
+  describe("readSelectedSourceRevision", () => {
+    function readers(commit: string) {
+      return {
+        isWorkspaceSelection: (
+          _state: unknown,
+          _repo: string,
+          branch: string
+        ) => branch === "main",
+        workspaceSourceRevision: vi.fn(
+          async (path: string | undefined) => `workspace:${path}`
+        ),
+        branchHeadCommit: vi.fn(async () => commit)
+      };
+    }
+
+    it("reads the saved workspace fingerprint for the open checkout", async () => {
+      const read = readers("sha-1");
+      expect(
+        await readSelectedSourceRevision(
+          { workspacePath: "/ws" },
+          "acme/widgets",
+          "main",
+          read
+        )
+      ).toBe("workspace:/ws");
+      expect(read.branchHeadCommit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["sha-1", "remote:sha-1"],
+      ["", ""]
+    ])("reads commit %j of another branch as %j", async (commit, expected) => {
+      const read = readers(commit);
+      expect(
+        await readSelectedSourceRevision({}, "acme/widgets", "release", read)
+      ).toBe(expected);
+      expect(read.branchHeadCommit).toHaveBeenCalledWith(
+        "acme/widgets",
+        "release"
+      );
+      expect(read.workspaceSourceRevision).not.toHaveBeenCalled();
+    });
+
+    it("lets a read error reach the caller", async () => {
+      const read = readers("sha-1");
+      read.branchHeadCommit.mockRejectedValue(new Error("offline"));
+      await expect(
+        readSelectedSourceRevision({}, "acme/widgets", "release", read)
+      ).rejects.toThrow("offline");
     });
   });
 

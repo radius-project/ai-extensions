@@ -22,7 +22,8 @@ import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 import {
   appModelTargetKey,
-  clearAppModelAuthoringFailure
+  clearAppModelAuthoringFailure,
+  readSelectedSourceRevision
 } from "../app-model-authoring-failure.js";
 
 interface ToolArgs {
@@ -184,14 +185,13 @@ export function createRadiusTools(
               "The application model now exists; the stale failure was not recorded."
           };
         }
-        const sourceRevision = await (
-          deps.workspace.isWorkspaceSelection(entry.state, repo, branch) ?
-            deps.appModel.workspaceSourceRevision(entry.state.workspacePath)
-          : deps.appModel
-              .branchHeadCommit(repo, branch)
-              .then((commit) => (commit ? `remote:${commit}` : ""))).catch(
-          () => ""
-        );
+        const sourceRevision =
+          entry.state.appModelAttemptSourceRevisions?.[target] ||
+          (await readSelectedSourceRevision(entry.state, repo, branch, {
+            isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
+            workspaceSourceRevision: deps.appModel.workspaceSourceRevision,
+            branchHeadCommit: deps.appModel.branchHeadCommit
+          }).catch(() => ""));
         if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
           return {
             recorded: false,

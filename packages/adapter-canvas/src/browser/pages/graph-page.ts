@@ -17,6 +17,7 @@ import type { GraphProgressView } from "../graph/progress.js";
 import {
   loadModeledEnvState,
   MODELED_ENV_UNAVAILABLE_TITLE,
+  modeledHintText,
   modeledPrimaryAction,
   populateApplications,
   populateBranches
@@ -66,6 +67,8 @@ export function graphRetryDelayMs(attempt: number): number {
 export const GRAPH_RETRY_LABEL = "Refresh";
 export const GRAPH_RETRY_TITLE =
   "Plan Deployment is unavailable until the application model compiles. Click Refresh to try again.";
+export const GRAPH_RETRY_HINT =
+  ' Deployment planning is unavailable until the application model compiles. To try again, click "Refresh".';
 
 interface GraphPageState {
   repo: string;
@@ -114,6 +117,10 @@ export function initializeGraphPage(
   const page = parseState(context);
   const branchSelect = context.dom.selectById("graph-branch");
   const button = context.dom.inputById("deploy-app-btn");
+  // Offers Refresh after a failure while the primary button stays Create
+  // Environment, a prerequisite the model cannot invalidate.
+  const modelingRefresh = context.dom.inputById("modeling-refresh");
+  const hint = context.dom.byId("modeled-subtitle-hint");
   const renderGraph = requireBrowserFunction(globalScope, "radiusRenderGraph");
   const setLoading = requireBrowserFunction(
     globalScope,
@@ -139,18 +146,22 @@ export function initializeGraphPage(
   const syncPrimaryButton = (): void => {
     if (!button) return;
     const mode = button.dataset.mode;
-    // Creating an environment is a prerequisite the model cannot invalidate,
-    // so that mode keeps its own action instead of offering Refresh.
+    if (modelingRefresh) {
+      modelingRefresh.hidden = !retryRecommended || mode !== "create-env";
+      modelingRefresh.disabled = requestActive;
+    }
     if (retryRecommended && mode !== "create-env") {
       showingRetry = true;
       button.textContent = GRAPH_RETRY_LABEL;
       button.disabled = requestActive;
       button.setAttribute("title", GRAPH_RETRY_TITLE);
+      if (hint) hint.textContent = GRAPH_RETRY_HINT;
       return;
     }
     if (showingRetry) {
       showingRetry = false;
       button.removeAttribute("title");
+      if (hint) hint.textContent = modeledHintText(mode);
       if (mode !== "create-env") button.textContent = "Plan Deployment";
       if (mode === "unavailable") {
         button.disabled = true;
@@ -489,7 +500,13 @@ export function initializeGraphPage(
           requestActive = false;
           requestAbort = null;
           syncPrimaryButton();
-          if (options.userRetry && button && !button.disabled) button.focus();
+          if (options.userRetry) {
+            const control =
+              modelingRefresh && !modelingRefresh.hidden ?
+                modelingRefresh
+              : button;
+            if (control && !control.disabled) control.focus();
+          }
         }
       });
   };
@@ -514,6 +531,13 @@ export function initializeGraphPage(
         return;
       }
       if (button.disabled) return;
+      stopRequest();
+      load({ userRetry: true });
+    });
+  }
+  if (modelingRefresh) {
+    entry.on(modelingRefresh, "click", () => {
+      if (modelingRefresh.disabled || modelingRefresh.hidden) return;
       stopRequest();
       load({ userRetry: true });
     });

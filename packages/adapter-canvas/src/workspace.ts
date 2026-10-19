@@ -660,13 +660,36 @@ export async function workspaceHeadCommit(
 // push commits can never drift from the paths a freshness check discounts.
 const GENERATED_PATHS: readonly string[] = GENERATED_MODEL_PATHS;
 
+// Bounds one fingerprint of saved source edits. A large untracked dataset or a
+// slow disk must not hold a graph request open. Over budget, the read throws:
+// the revision is then unknown, never a hash of only part of the edits.
+export interface SourceRevisionBudget {
+  readonly maxFiles: number;
+  readonly maxBytes: number;
+  readonly maxMs: number;
+  readonly now?: () => number;
+}
+
+export const SOURCE_REVISION_BUDGET: SourceRevisionBudget = {
+  maxFiles: 5_000,
+  maxBytes: 256 * 1024 * 1024,
+  maxMs: 10_000
+};
+
 /**
  * Identifies HEAD and saved source edits, excluding generated model files.
- * An unreadable or changing checkout throws rather than proving a change.
+ * An unreadable, changing, or over-budget checkout throws rather than proving
+ * a change.
  */
 export async function workspaceSourceRevision(
-  workspacePath: string | null | undefined
+  workspacePath: string | null | undefined,
+  budget: SourceRevisionBudget = SOURCE_REVISION_BUDGET
 ): Promise<string> {
+  const now = budget.now ?? Date.now;
+  const deadline = now() + budget.maxMs;
+  let bytesRead = 0;
+  const overBudget = (): Error =>
+    new Error("Saved workspace source changes exceed the read budget.");
   const head = await workspaceHeadCommit(workspacePath);
   if (!head || !workspacePath) {
     throw new Error("The workspace source revision could not be read.");
@@ -710,7 +733,9 @@ export async function workspaceSourceRevision(
     ...trackedChanges,
     ...untracked.stdout.split("\0").filter(Boolean)
   ]);
+  if (files.size > budget.maxFiles) throw overBudget();
   for (const relative of [...files].sort()) {
+    if (now() > deadline) throw overBudget();
     const file = path.resolve(workspacePath, relative);
     if (!isWorkspacePath(workspacePath, file)) {
       throw new Error("A source file is outside the workspace.");
@@ -766,9 +791,14 @@ export async function workspaceSourceRevision(
     if (stat.isSymbolicLink()) {
       hash.update(await fs.readlink(file));
     } else if (stat.isFile()) {
+      bytesRead += stat.size;
+      if (bytesRead > budget.maxBytes) throw overBudget();
       const stream = createReadStream(file);
       try {
-        for await (const chunk of stream) hash.update(chunk);
+        for await (const chunk of stream) {
+          if (now() > deadline) throw overBudget();
+          hash.update(chunk);
+        }
       } finally {
         stream.destroy();
       }

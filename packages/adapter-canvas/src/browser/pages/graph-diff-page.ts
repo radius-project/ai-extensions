@@ -157,7 +157,11 @@ export function initializeGraphDiffPage(
     const retryModeling = userRetry;
     userRetry = false;
     if (!repo || !base || !head) return;
-    if (modelingRefresh) modelingRefresh.disabled = true;
+    // Refresh is a recovery action, so it shows only once a request fails.
+    if (modelingRefresh) {
+      modelingRefresh.hidden = true;
+      modelingRefresh.disabled = true;
+    }
     if (modelingFailureVisible) {
       const graphContainer = context.dom.byId("graph-container");
       if (graphContainer) graphContainer.innerHTML = "";
@@ -261,7 +265,9 @@ export function initializeGraphDiffPage(
           requestAbort = null;
           if (modelingRefresh) {
             modelingRefresh.disabled = false;
-            if (retryModeling) modelingRefresh.focus();
+            if (retryModeling && !modelingRefresh.hidden) {
+              modelingRefresh.focus();
+            }
           }
         }
       });

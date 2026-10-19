@@ -527,28 +527,73 @@ describe("graph planning workflows", () => {
       ]);
     });
 
-    it.each(["loadGraph", "planGraph"] as const)(
-      "keeps the %s missing-model handoff fenced after the HTTP response",
-      async (workflow) => {
+    it.each([
+      ["loadGraph", "graph", { repo: "octo/app" }],
+      ["planGraph", "planned", { repo: "octo/app" }],
+      [
+        "diffBranches",
+        "diff",
+        { repo: "octo/app", base: "main", head: "feature/x" }
+      ]
+    ] as const)(
+      "keeps the %s missing-model handoff current until the selection changes",
+      async (workflow, view, request) => {
         const harness = start({
-          selections: { main: selectionOf({ content: null }) }
+          selections: {
+            main: selectionOf({ content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          }
         });
         const handoff = vi.spyOn(
           harness.dependencies,
           "triggerAppBicepHandoff"
         );
-        await harness.run(workflow, '{"repo":"octo/app"}');
+        await harness.run(workflow, JSON.stringify(request));
         const isCurrent = handoff.mock.calls[0]?.[5];
         if (!isCurrent) throw new Error("Missing handoff currency predicate");
         expect(isCurrent()).toBe(true);
-        prepareSourceRefResources(
-          harness.entry,
-          workflow === "loadGraph" ? "graph" : "planned",
-          {
-            repo: "octo/app",
-            branch: "new-selection"
-          }
+        await harness.run(
+          workflow,
+          JSON.stringify({ ...request, restartWait: true })
         );
+        expect(isCurrent()).toBe(true);
+        const record = harness.state.graphProgressRecords?.[view];
+        if (!record) throw new Error(`Missing ${view} progress record.`);
+        record.graphProgressKey = "another-selection";
+        expect(isCurrent()).toBe(false);
+      }
+    );
+
+    it.each([
+      ["loadGraph", "graph", { repo: "octo/app" }],
+      ["planGraph", "planned", { repo: "octo/app" }],
+      [
+        "diffBranches",
+        "diff",
+        { repo: "octo/app", base: "main", head: "feature/x" }
+      ]
+    ] as const)(
+      "ends the %s missing-model handoff when the source selection changes",
+      async (workflow, view, request) => {
+        const harness = start({
+          selections: {
+            main: selectionOf({ content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          }
+        });
+        const handoff = vi.spyOn(
+          harness.dependencies,
+          "triggerAppBicepHandoff"
+        );
+        await harness.run(workflow, JSON.stringify(request));
+        const isCurrent = handoff.mock.calls[0]?.[5];
+        if (!isCurrent) throw new Error("Missing handoff currency predicate");
+        prepareSourceRefResources(harness.entry, view, {
+          repo: "octo/app",
+          branch: "new-selection",
+          baseBranch: "new-base",
+          headBranch: "new-head"
+        });
         expect(isCurrent()).toBe(false);
       }
     );
@@ -691,7 +736,26 @@ describe("graph planning workflows", () => {
     });
 
     it.each([
-      ["loadGraph", "progress"],
+      [undefined, "change saved source files, update the branch, or click"],
+      ["", "change saved source files, update the branch, or click"],
+      [
+        '["azure","prod"]',
+        "change saved source files, update the branch or target environment, or click"
+      ]
+    ])(
+      "offers environment recovery only for an attempt with environment %j",
+      async (environmentKey, recovery) => {
+        const harness = failedAt("sha-1");
+        harness.state.appModelFailures!["octo/app::main"] = {
+          ...harness.state.appModelFailures!["octo/app::main"]!,
+          ...(environmentKey === undefined ? {} : { environmentKey })
+        };
+        const result = await harness.run("loadGraph", '{"repo":"octo/app"}');
+        expect(result.payload.error).toContain(recovery);
+      }
+    );
+
+    it.each([
       ["loadGraph", "request"],
       ["loadGraph", "source reference"],
       ["planGraph", "progress"],

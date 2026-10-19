@@ -20,6 +20,7 @@ import {
   modelingRunLastActivityAtMs,
   workspaceHeadCommit,
   workspaceSourceRevision,
+  SOURCE_REVISION_BUDGET,
   uncommittedGeneratedPaths,
   workspaceSourceChangedSince,
   workspaceModelRecoverable,
@@ -1239,6 +1240,44 @@ describe("workspaceSourceRevision", () => {
       );
     });
   });
+
+  it.each([
+    ["file count", { maxFiles: 1 }, () => 0],
+    ["byte count", { maxBytes: 5 }, () => 0],
+    [
+      "time before a file",
+      { maxMs: 50 },
+      (calls: number) => (calls > 1 ? 100 : 0)
+    ],
+    [
+      "time while a file streams",
+      { maxMs: 50 },
+      (calls: number) => (calls > 2 ? 100 : 0)
+    ]
+  ] as const)(
+    "rejects saved edits over the %s budget instead of hashing part of them",
+    async (_limit, limit, clock) => {
+      await inCheckout(async (dir) => {
+        await fs.writeFile(path.join(dir, "a.txt"), "ten bytes\n");
+        await fs.writeFile(path.join(dir, "b.txt"), "ten bytes\n");
+        let calls = 0;
+        await expect(
+          workspaceSourceRevision(dir, {
+            ...SOURCE_REVISION_BUDGET,
+            ...limit,
+            now: () => clock(++calls)
+          })
+        ).rejects.toThrow("exceed the read budget");
+        expect(
+          await workspaceSourceRevision(dir, {
+            ...SOURCE_REVISION_BUDGET,
+            maxFiles: 2,
+            maxBytes: 20
+          })
+        ).toMatch(/^workspace:[a-f0-9]{64}$/);
+      });
+    }
+  );
 
   it("rejects a checkout with no commit and a non-repository path", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-source-unknown-"));

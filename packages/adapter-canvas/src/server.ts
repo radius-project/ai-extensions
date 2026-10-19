@@ -144,6 +144,7 @@ import {
   workspaceGraphJsonPath,
   workspaceSourceRevision
 } from "./workspace.js";
+import { readSelectedSourceRevision } from "./app-model-authoring-failure.js";
 import {
   DEFAULT_CANVAS_PAGE,
   DEPLOY_REPAIR_ATTEMPT_CAP
@@ -6449,11 +6450,11 @@ export function createProductionCanvasServerRuntime(
         computeGraphDiff(baseResources, headResources),
       observeModelingRun: observeServerWorkspaceModelingRun,
       readBranchSourceRevision: (entry, repo, branch) =>
-        isWorkspaceSelection(entry.state, repo, branch) ?
-          workspaceSourceRevision(entry.state.workspacePath)
-        : getBranchHeadSha(repo, branch).then((commit) =>
-            commit ? `remote:${commit}` : ""
-          ),
+        readSelectedSourceRevision(entry.state, repo, branch, {
+          isWorkspaceSelection,
+          workspaceSourceRevision,
+          branchHeadCommit: getBranchHeadSha
+        }),
       record,
       optionalString,
       errorMessage,

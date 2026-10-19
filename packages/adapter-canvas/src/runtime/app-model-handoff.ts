@@ -67,6 +67,14 @@ export interface AppModelHandoffDependencies {
     state: CanvasState
   ): Promise<AppSourceEvaluation>;
   send(message: HandoffMessage): Promise<void>;
+  // Source evidence for one branch, captured when an attempt starts so the
+  // failure it may report is compared with the source the agent modeled. An
+  // empty answer or an error means unknown.
+  readSourceRevision(
+    repo: string,
+    branch: string,
+    context: CanvasState
+  ): Promise<string>;
   // True when a modeling run targeting these branches is already under way. The
   // handoff is abandoned rather than deferred when it is: the routes re-report
   // on every render, so a run that dies is asked about again.
@@ -318,6 +326,17 @@ export function createAppModelHandoff(
         releaseReservation();
         return;
       }
+      // Read before the attempt token exists, so an edit saved while the agent
+      // models is newer than this baseline and a later render can retry it.
+      const sourceRevisions = await Promise.all(
+        targets.map((branch) =>
+          deps.readSourceRevision(repo, branch, context).catch(() => "")
+        )
+      );
+      if (!ownsReservation()) {
+        releaseReservation();
+        return;
+      }
       // Last check before this handoff becomes observable. Everything above is
       // reversible; minting the tokens and sending the turn are not, and both
       // the source probe and the grace window gave the user time to move on.
@@ -340,11 +359,17 @@ export function createAppModelHandoff(
           (state.appModelAttemptGeneration ?? 0) + 1;
         state.appModelAttemptTokens ??= {};
         state.appModelAttemptEnvironments ??= {};
-        for (const branch of targets) {
-          state.appModelAttemptTokens[appModelTargetKey(repo, branch)] =
-            attemptToken;
-          state.appModelAttemptEnvironments[appModelTargetKey(repo, branch)] =
-            environmentKey ?? "";
+        state.appModelAttemptSourceRevisions ??= {};
+        for (const [index, branch] of targets.entries()) {
+          const tokenKey = appModelTargetKey(repo, branch);
+          state.appModelAttemptTokens[tokenKey] = attemptToken;
+          state.appModelAttemptEnvironments[tokenKey] = environmentKey ?? "";
+          const sourceRevision = sourceRevisions[index];
+          if (sourceRevision) {
+            state.appModelAttemptSourceRevisions[tokenKey] = sourceRevision;
+          } else {
+            delete state.appModelAttemptSourceRevisions[tokenKey];
+          }
         }
       }
       try {
@@ -370,6 +395,7 @@ export function createAppModelHandoff(
             if (state.appModelAttemptTokens?.[tokenKey] === attemptToken) {
               delete state.appModelAttemptTokens[tokenKey];
               delete state.appModelAttemptEnvironments?.[tokenKey];
+              delete state.appModelAttemptSourceRevisions?.[tokenKey];
             }
           }
         }

@@ -135,15 +135,17 @@ function fixture(options: FixtureOptions = {}) {
 }
 
 describe("initializeGraphDiffPage", () => {
-  it("authorizes the explicit Refresh once and never authorizes automatic comparison or polls", async () => {
+  it("authorizes the explicit Refresh once, hides it while a request runs, and never authorizes automatic comparison or polls", async () => {
     const { browser, modelingRefresh } = fixture();
     const bodies: Record<string, unknown>[] = [];
+    const hiddenDuringRequest: boolean[] = [];
     browser.net.handle("/api/diff-branches", (init) => {
       bodies.push(JSON.parse(String(init?.body)));
+      hiddenDuringRequest.push(modelingRefresh.hidden);
       return jsonResponse(
-        bodies.length === 1 ?
-          { modelingFailed: true, error: "Recipe unavailable." }
-        : { needsAppBicep: true }
+        bodies.length === 2 ?
+          { needsAppBicep: true }
+        : { modelingFailed: true, error: "Recipe unavailable." }
       );
     });
     const teardown = initializeGraphDiffPage(browser.context, {
@@ -158,11 +160,21 @@ describe("initializeGraphDiffPage", () => {
     browser.clock.tick(DIFF_DEBOUNCE_MS);
     await flushPromises();
     expect(bodies[1]).toMatchObject({ retryModeling: true, restartWait: true });
-    expect(modelingRefresh.focusCount).toBe(1);
+    expect(modelingRefresh.hidden).toBe(true);
+    expect(modelingRefresh.focusCount).toBe(0);
     expect(modelingRefresh.disabled).toBe(false);
     browser.clock.tick(DIFF_RETRY_MS);
     await flushPromises();
     expect(bodies[2]).not.toHaveProperty("retryModeling");
+    expect(modelingRefresh.hidden).toBe(false);
+    expect(modelingRefresh.focusCount).toBe(0);
+    modelingRefresh.dispatch("click");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(bodies[3]).toMatchObject({ retryModeling: true });
+    expect(modelingRefresh.hidden).toBe(false);
+    expect(modelingRefresh.focusCount).toBe(1);
+    expect(hiddenDuringRequest).toEqual([true, true, true, true]);
     teardown();
     expect(modelingRefresh.listenerCount()).toBe(0);
   });

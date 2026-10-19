@@ -2289,7 +2289,13 @@ test.describe("Radius Canvas in Chromium", () => {
         }
         await expect(refresh).toBeFocused();
         await page.keyboard.press("Enter");
-        await expect(refresh).toBeDisabled();
+        // The diff hides its separate Refresh until a request fails; the graph
+        // pages keep their primary button in place and disable it instead.
+        if (view === "graph-diff") {
+          await expect(page.locator("#modeling-refresh")).toBeHidden();
+        } else {
+          await expect(refresh).toBeDisabled();
+        }
         await expectNoWcagViolations(page);
         release?.();
         await expect(refresh).toBeEnabled();
@@ -2446,7 +2452,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#graph-guidance")).toBeHidden();
     await expect(page.locator("#deploy-app-btn")).toHaveText("Refresh");
     await expect(page.locator("#deploy-app-btn")).toBeEnabled();
-    await expect(page.locator("#modeling-refresh")).toHaveCount(0);
+    await expect(page.locator("#modeling-refresh")).toBeHidden();
     await expect(page.locator("#progress-steps")).toHaveCount(0);
     await page.clock.fastForward(GRAPH_RETRY_MAX_MS * 2);
     expect(requests).toBe(1);

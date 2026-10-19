@@ -12,6 +12,7 @@ import {
   REPO_RETRY_MS,
   applyDeployedEnvState,
   applyModeledEnvState,
+  modeledHintText,
   applyPlanEnvState,
   branchLabel,
   buildApplicationOptions,
@@ -2325,6 +2326,18 @@ describe("modeled pane state", () => {
   it("does nothing on a page without the button", () => {
     const browser = createFakeBrowser();
     expect(() => applyModeledEnvState(browser.context, true)).not.toThrow();
+  });
+
+  it.each([
+    ["plan", 'click "Plan Deployment"'],
+    ["create-env", "must first create an environment"],
+    ["unavailable", "temporarily unavailable"]
+  ])("describes the %s mode in the subtitle hint", (mode, text) => {
+    expect(modeledHintText(mode)).toContain(text);
+  });
+
+  it("leaves the subtitle hint empty before the environment listing settles", () => {
+    expect(modeledHintText(undefined)).toBe("");
   });
 
   it("routes the primary action to the environment form or the planned graph", () => {
