@@ -240,6 +240,31 @@ async function assembleDist(bundleInputs) {
   }
   copyFileSync(join(repoRoot, "LICENSE"), join(distDir, "LICENSE"));
   copyExtensionAssets();
+  for (const script of ["write-app-origin", "promote-app-model"]) {
+    await esbuild.build({
+      entryPoints: [
+        join(
+          extensionDir,
+          "skills",
+          "radius-app-bicep",
+          "scripts",
+          `${script}.mjs`
+        )
+      ],
+      outfile: join(
+        distDir,
+        "skills",
+        "radius-app-bicep",
+        "scripts",
+        `${script}.mjs`
+      ),
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      target,
+      logLevel: "silent"
+    });
+  }
 
   const distPackage = join(distDir, "package.json");
   stripRepositoryScripts(distPackage);

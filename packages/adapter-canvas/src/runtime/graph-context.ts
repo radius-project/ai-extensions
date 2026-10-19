@@ -14,6 +14,7 @@ import type {
   AppSourceEvaluation
 } from "@radius-project/core";
 import { hashAppBicep } from "../app-bicep-hash.js";
+import { modelOnlyRestriction } from "@radius-project/core/modeling";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasState } from "../shared.js";
 
@@ -23,6 +24,7 @@ import type { CanvasState } from "../shared.js";
 // any other branch would need a commit and a push, which modeling deliberately
 // never does.
 export interface AppModelStatus {
+  authoringRestriction?: string | null;
   repo: string;
   branch: string;
   refreshable: boolean;
@@ -149,12 +151,9 @@ export function createGraphContextHelpers(
     fromWorkspace: boolean
   ): Promise<string | null> {
     for (const repoPath of [APP_ORIGIN_REPO_PATH, APP_ORIGIN_ROOT_PATH]) {
-      const text = await (
-        fromWorkspace ?
-          deps.appModel.fetchWorkspaceFile(state, repo, branch, repoPath)
-        : deps.appModel.fetchRepoFile(repo, branch, repoPath)).catch(
-        () => null
-      );
+      const text = await (fromWorkspace ?
+        deps.appModel.fetchWorkspaceFile(state, repo, branch, repoPath)
+      : deps.appModel.fetchRepoFile(repo, branch, repoPath));
       if (text) return text;
     }
     return null;
@@ -226,6 +225,7 @@ export function createGraphContextHelpers(
       repo,
       branch,
       refreshable: fromWorkspace,
+      authoringRestriction: modelOnlyRestriction(model || "", originText),
       freshness: evaluateAppModelFreshness({
         model,
         originText,

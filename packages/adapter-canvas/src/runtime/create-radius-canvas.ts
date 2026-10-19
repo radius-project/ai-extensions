@@ -116,6 +116,12 @@ export function createRadiusCanvas(
           branch: result.context.branch || null,
           baseBranch: result.context.baseBranch || null,
           headBranch: result.context.headBranch || null,
+          ...(result.view === "graph" && entry.state.graphAuthoringRestriction ?
+            {
+              authoringRestriction: entry.state.graphAuthoringRestriction,
+              deploymentReadiness: "unverified"
+            }
+          : {}),
           resources: resources.map((r) => ({
             name: r.name,
             type: r.type,

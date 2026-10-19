@@ -13,6 +13,7 @@ import {
   type GhCommandPresentation
 } from "../../gh-command-display.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import { modelOnlyRestriction } from "@radius-project/core/modeling";
 import {
   needsWorkflowScope,
   shouldRetryWithKeyringCredential
@@ -392,6 +393,7 @@ export function createDeployDispatchService(
   ): Promise<string | null> => {
     const { entry, repo, branch, log } = request;
     let secretError: string | null = null;
+    let authoringChecked = false;
     try {
       let bicepPath = ".radius/app.bicep";
       let bicepSource = await dependencies.fetchFileForSelection(
@@ -415,6 +417,22 @@ export function createDeployDispatchService(
         );
         return null;
       }
+      const originPath = bicepPath.replace(/app\.bicep$/u, "app.origin.json");
+      const restriction = modelOnlyRestriction(
+        bicepSource,
+        await dependencies.fetchFileForSelection(
+          entry,
+          repo,
+          branch,
+          originPath
+        )
+      );
+      if (restriction) {
+        entry.state.deployErrorKind = "model-only";
+        log(restriction);
+        return restriction;
+      }
+      authoringChecked = true;
       const parsed = dependencies.appParams(bicepSource);
       const resolved = dependencies.resolveDeployParams(parsed);
       const { public: publicParams, secret: secretParams } =
@@ -447,12 +465,21 @@ export function createDeployDispatchService(
       log("Deploying with rad commands: " + commands.join("  |  "));
       return secretError;
     } catch (e) {
-      log(
-        "⚠ Could not compute rad commands from bicep (" +
-          dependencies.errorMessage(e) +
-          "); falling back to the environment default."
-      );
-      return secretError;
+      if (authoringChecked) {
+        log(
+          "⚠ Could not compute rad commands from bicep (" +
+            dependencies.errorMessage(e) +
+            "); falling back to the environment default."
+        );
+        return secretError;
+      }
+      const failure =
+        "Could not establish the application authoring contract: " +
+        dependencies.errorMessage(e) +
+        ". No deployment was dispatched.";
+      entry.state.deployErrorKind = "model-only";
+      log(failure);
+      return failure;
     }
   };
 

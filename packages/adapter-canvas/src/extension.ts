@@ -205,9 +205,10 @@ const dependencies: RadiusExtensionDependencies = {
     workspaceSourceChangedSince,
     branchHeadCommit: (repo, branch) => getBranchHeadSha(repo, branch),
     modelingRunLastActivityAtMs,
-    fetchWorkspaceFile,
+    fetchWorkspaceFile: (state, repo, branch, repoPath) =>
+      fetchWorkspaceFile(state, repo, branch, repoPath, true),
     fetchRepoFile: (repo, branch, repoPath) =>
-      fetchFileFromRepo(repo, repoPath, branch)
+      fetchFileFromRepo(repo, repoPath, branch, true)
   },
   radiusAppBicepSkill,
   renderPrDiffMarkdown,

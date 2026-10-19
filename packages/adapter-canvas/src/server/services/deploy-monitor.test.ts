@@ -2075,7 +2075,9 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       ghCredentialSource: () => "keyring",
       fetchFileForSelection: (_entry, _repo, _branch, repoPath) => {
         record(`fetch-file:${repoPath}`);
-        return Promise.resolve("deploy bicep");
+        return Promise.resolve(
+          repoPath.endsWith(".json") ? null : "deploy bicep"
+        );
       },
       appParams: () => [],
       resolveDeployParams: () => ({}),
@@ -2246,6 +2248,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       "github-json:/repos/acme/widgets/actions/oidc/customization/sub",
       "az:ad app federated-credential list",
       "fetch-file:.radius/app.bicep",
+      "fetch-file:.radius/app.origin.json",
       "publish-workflows",
       "sync-workflows",
       "latest-run-id",

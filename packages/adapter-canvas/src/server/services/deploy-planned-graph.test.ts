@@ -66,6 +66,28 @@ describe("planned graph recovery construction", () => {
 });
 
 describe("planned graph recovery", () => {
+  it("does not project model-only resources through the default Azure pack", async () => {
+    const { input, logs } = request();
+    const service = createPlannedGraphRecoveryService(
+      dependencies({
+        fetchBicepSelection: () =>
+          Promise.resolve({
+            content: "// Radius authoring: model-only; deployment: unverified.",
+            fromWorkspace: true,
+            branch: "feat",
+            bicepPath: ".radius/app.bicep"
+          }),
+        fetchRecipePack: () => {
+          throw new Error("must not resolve Azure recipes");
+        },
+        buildGraphViaRad: () => {
+          throw new Error("must not compile for a deployment");
+        }
+      })
+    );
+    expect(await service.recover(input)).toBeNull();
+    expect(logs.join("\n")).toContain("deployment is unverified");
+  });
   it("rebuilds the graph, marks every node pending, and commits it to the panel", async () => {
     const { input, logs, state } = request();
     const calls: Record<string, unknown[]> = {

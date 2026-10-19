@@ -1161,6 +1161,57 @@ describe("deploy dispatch environment and branch preflight", () => {
 });
 
 describe("deploy dispatch rad commands and secrets", () => {
+  it.each([
+    ["// Radius authoring: model-only; deployment: unverified.", null],
+    ["model", '{"authoring":null}'],
+    ["model", "{malformed"]
+  ])(
+    "refuses restricted artifacts before provisioning or dispatch: %s",
+    async (model, origin) => {
+      const { input, state } = request();
+      const gh = recordingGh();
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          fetchFileForSelection: (_entry, _repo, branch, file) => {
+            expect(branch).toBe(input.branch);
+            return Promise.resolve(file.endsWith(".json") ? origin : model);
+          },
+          appParams: () => {
+            throw new Error("parameters must not be read");
+          },
+          ensureDeployWorkflowsOnBranch: () => {
+            throw new Error("must not write workflows");
+          }
+        })
+      );
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(state.deployErrorKind).toBe("model-only");
+      expect(gh.calls).toEqual([]);
+    }
+  );
+
+  it("fails closed when the origin read fails instead of dispatching the environment default", async () => {
+    const { input, state } = request();
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        fetchFileForSelection: (_entry, _repo, _branch, file) => {
+          if (file.endsWith(".json")) throw new Error("origin unavailable");
+          return Promise.resolve("model");
+        }
+      })
+    );
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployError).toContain("origin unavailable");
+    expect(gh.calls).toEqual([]);
+  });
+
   it("computes the rad commands from the branch's app.bicep and records the app name", async () => {
     const { input, state, logs } = request();
     const gh = recordingGh();
@@ -1170,7 +1221,9 @@ describe("deploy dispatch rad commands and secrets", () => {
         ...gh,
         fetchFileForSelection: (_entry, _repo, _branch, repoPath) => {
           reads.push(repoPath);
-          return Promise.resolve("bicep source");
+          return Promise.resolve(
+            repoPath.endsWith(".json") ? null : "bicep source"
+          );
         },
         appParams: () => [PUBLIC_PARAM],
         resolveDeployParams: () => ({ port: "8080" }),
@@ -1184,7 +1237,7 @@ describe("deploy dispatch rad commands and secrets", () => {
 
     await service.prepareAndDispatch(input);
 
-    expect(reads).toEqual([".radius/app.bicep"]);
+    expect(reads).toEqual([".radius/app.bicep", ".radius/app.origin.json"]);
     expect(state.deployAppName).toBe("todo-app");
     expect(gh.calls[0].args.slice(-2)).toEqual([
       "-f",
@@ -1217,7 +1270,11 @@ describe("deploy dispatch rad commands and secrets", () => {
 
     await service.prepareAndDispatch(input);
 
-    expect(reads).toEqual([".radius/app.bicep", "app.bicep"]);
+    expect(reads).toEqual([
+      ".radius/app.bicep",
+      "app.bicep",
+      "app.origin.json"
+    ]);
     // An unresolved name keeps whatever the state already had.
     expect(state.deployAppName).toBe("kept");
     expect(gh.calls[0].args.slice(-2)).toEqual([
@@ -1245,7 +1302,8 @@ describe("deploy dispatch rad commands and secrets", () => {
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        fetchFileForSelection: () => Promise.resolve("bicep source"),
+        fetchFileForSelection: (_entry, _repo, _branch, file) =>
+          Promise.resolve(file.endsWith(".json") ? null : "bicep source"),
         appParams: () => {
           throw new Error("unbalanced braces");
         }
@@ -1268,7 +1326,8 @@ describe("deploy dispatch rad commands and secrets", () => {
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        fetchFileForSelection: () => Promise.resolve("bicep source"),
+        fetchFileForSelection: (_entry, _repo, _branch, file) =>
+          Promise.resolve(file.endsWith(".json") ? null : "bicep source"),
         appParams: () => [SECRET_PARAM],
         partitionParams: () => ({
           public: {},
@@ -1301,7 +1360,8 @@ describe("deploy dispatch rad commands and secrets", () => {
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        fetchFileForSelection: () => Promise.resolve("bicep source"),
+        fetchFileForSelection: (_entry, _repo, _branch, file) =>
+          Promise.resolve(file.endsWith(".json") ? null : "bicep source"),
         appParams: () => [SECRET_PARAM],
         partitionParams: () => ({
           public: {},
@@ -1345,7 +1405,8 @@ describe("deploy dispatch rad commands and secrets", () => {
       dependencies({
         ...gh,
         readProcessEnv: () => ({ GH_TOKEN: "t", PATH: "/usr/bin" }),
-        fetchFileForSelection: () => Promise.resolve("bicep source"),
+        fetchFileForSelection: (_entry, _repo, _branch, file) =>
+          Promise.resolve(file.endsWith(".json") ? null : "bicep source"),
         appParams: () => [SECRET_PARAM],
         partitionParams: () => ({
           public: {},
@@ -1373,7 +1434,8 @@ describe("deploy dispatch rad commands and secrets", () => {
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        fetchFileForSelection: () => Promise.resolve("bicep source"),
+        fetchFileForSelection: (_entry, _repo, _branch, file) =>
+          Promise.resolve(file.endsWith(".json") ? null : "bicep source"),
         appParams: () => [SECRET_PARAM],
         partitionParams: () => ({
           public: {},
@@ -1401,7 +1463,8 @@ describe("deploy dispatch rad commands and secrets", () => {
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        fetchFileForSelection: () => Promise.resolve("bicep source"),
+        fetchFileForSelection: (_entry, _repo, _branch, file) =>
+          Promise.resolve(file.endsWith(".json") ? null : "bicep source"),
         appParams: () => [SECRET_PARAM],
         partitionParams: () => ({
           public: {},
@@ -1430,7 +1493,8 @@ describe("deploy dispatch rad commands and secrets", () => {
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        fetchFileForSelection: () => Promise.resolve("bicep source"),
+        fetchFileForSelection: (_entry, _repo, _branch, file) =>
+          Promise.resolve(file.endsWith(".json") ? null : "bicep source"),
         appParams: () => [SECRET_PARAM],
         partitionParams: () => ({
           public: {},
@@ -1450,7 +1514,8 @@ describe("deploy dispatch rad commands and secrets", () => {
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        fetchFileForSelection: () => Promise.resolve("bicep source"),
+        fetchFileForSelection: (_entry, _repo, _branch, file) =>
+          Promise.resolve(file.endsWith(".json") ? null : "bicep source"),
         appParams: () => [SECRET_PARAM],
         partitionParams: () => ({
           public: {},

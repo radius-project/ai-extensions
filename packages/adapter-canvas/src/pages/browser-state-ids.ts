@@ -19,6 +19,7 @@ interface RepositoryPageState {
 
 export interface PageStateById {
   [GRAPH_PAGE_STATE_ID]: RepositoryPageState & {
+    authoringRestriction?: string;
     resources: CanvasGraphResource[];
     loaded: boolean;
     localSource: boolean;

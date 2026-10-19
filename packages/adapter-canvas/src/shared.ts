@@ -226,6 +226,7 @@ export interface CanvasState {
   graphBranch?: string;
   graphFollowsWorkspaceBranch?: boolean;
   graphFromWorkspace?: boolean;
+  graphAuthoringRestriction?: string | null;
   graphLoaded?: boolean;
   // Each graph page owns an independent record. Navigating to Planned or Diff
   // must not erase a modeled-graph build that is waiting for app.bicep.
@@ -359,6 +360,7 @@ export interface CanvasState {
 // string makes a typo in any of them a compile error instead of a guard that
 // silently never fires.
 export type DeployErrorKind =
+  | "model-only"
   | "branch-not-pushed"
   | "run-unconfirmed"
   | "oidc-subject-missing"

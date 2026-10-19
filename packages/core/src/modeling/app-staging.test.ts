@@ -24,6 +24,7 @@ import {
   stagingDirName
 } from "./app-staging.js";
 import { normalizeAppBicep } from "./app-origin.js";
+import { MODEL_ONLY_MARKER } from "./model-authoring.js";
 
 // The hasher core injects. Identical to the adapter's, which is what the
 // promote script re-implements.
@@ -99,6 +100,16 @@ describe("staging directory names", () => {
 });
 
 describe("requiredStagedFiles", () => {
+  it("refuses a compiling staged model whose model-only evidence was lost", () => {
+    const model = `${MODEL_ONLY_MARKER}\n${MODEL}`;
+    expect(
+      stagedRun({ appBicep: model, originText: origin(model) })
+    ).toMatchObject({
+      status: "unverified",
+      publishable: false,
+      reason: "Model-only marker and origin evidence must both be retained."
+    });
+  });
   it("requires the base set when no custom type was generated", () => {
     expect(requiredStagedFiles(["app.bicep"])).toEqual([
       ...REQUIRED_STAGED_FILES

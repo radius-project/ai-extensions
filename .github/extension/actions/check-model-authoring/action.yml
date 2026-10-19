@@ -1,0 +1,15 @@
+name: Check application authoring contract
+description: Refuse model-only or malformed authoring provenance before deployment side effects.
+inputs:
+  app-file:
+    description: Repository-relative application model path
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Check deployment eligibility
+      shell: bash
+      env:
+        RADIUS_APP_FILE: ${{ inputs.app-file }}
+        ACTION_DIRECTORY: ${{ github.action_path }}
+      run: python3 "$ACTION_DIRECTORY/check.py"

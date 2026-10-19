@@ -5,6 +5,20 @@ import { readBrowserPageState } from "../../test/support/pages/browser-state.js"
 import { graphPage } from "./graph-page.js";
 
 describe("graphPage", () => {
+  it("serializes model-only status safely for reopen without changing resource identity", () => {
+    const html = graphPage({
+      graphLoaded: true,
+      graphResources: [{ id: "local/web" }],
+      graphAuthoringRestriction: HOSTILE_STATE
+    });
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(readBrowserPageState(html, "radius-graph-page-state")).toMatchObject(
+      {
+        resources: [{ id: "local/web" }],
+        authoringRestriction: HOSTILE_STATE
+      }
+    );
+  });
   it("renders the unloaded selector state and one generated entry", () => {
     const html = graphPage({
       graphTargetRepo: "octo/app",

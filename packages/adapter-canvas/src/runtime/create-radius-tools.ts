@@ -19,6 +19,7 @@ import type { ModelingActivity } from "./modeling-activity.js";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
+import { modelOnlyRestriction } from "@radius-project/core/modeling";
 import {
   appModelTargetKey,
   clearAppModelAuthoringFailure
@@ -41,6 +42,7 @@ export function createRadiusTools(
     workspaceState,
     fetchBicepForBranch,
     evaluateAppSourceForBranch,
+    resolveAppModelStatus,
     listSourceTreeForBranch
   } = createGraphContextHelpers(deps);
   const declarationByName = new Map(
@@ -229,6 +231,16 @@ export function createRadiusTools(
               `.radius/app.bicep does not exist on ${baseBranch} or ${headBranch} yet. A PR diff compares the committed model on each branch. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
             );
           }
+          const statuses = await Promise.all([
+            resolveAppModelStatus(repo, baseBranch, state),
+            resolveAppModelStatus(repo, headBranch, state)
+          ]);
+          const restriction =
+            modelOnlyRestriction(baseContent || "") ||
+            modelOnlyRestriction(headContent || "") ||
+            statuses.find((status) => status.authoringRestriction)
+              ?.authoringRestriction;
+          if (restriction) return unavailableGraphDiffResult(restriction);
 
           const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
             await deps.rad.radArtifactsDirForSelection({

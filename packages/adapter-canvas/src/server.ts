@@ -1733,6 +1733,7 @@ export function triggerDeployRepairHandoff(
     if (!state || state.deployStatus !== "failed") return false;
     if (
       state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
+      state.deployErrorKind === "model-only" ||
       // Refused before dispatch because no federated credential can match the
       // token GitHub would mint. Repairing the model cannot change that.
       state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
@@ -4424,6 +4425,7 @@ async function fetchBicepSelection(
   fromWorkspace: boolean;
   branch: string;
   bicepPath: string;
+  originText?: string | null;
 }> {
   const access = accessForSelection(entry, repo, branch);
   if (access.useWorkspace) {
@@ -4433,7 +4435,14 @@ async function fetchBicepSelection(
         content: local.content,
         fromWorkspace: true,
         branch: access.branch,
-        bicepPath: local.repoPath
+        bicepPath: local.repoPath,
+        originText: await fetchWorkspaceFile(
+          entry.state,
+          repo,
+          access.branch,
+          local.repoPath.replace(/app\.bicep$/u, "app.origin.json"),
+          true
+        )
       };
   }
   const remote = await fetchBicepFromRepo(github, repo, access.branch);
@@ -4441,7 +4450,15 @@ async function fetchBicepSelection(
     content: remote,
     fromWorkspace: false,
     branch: access.branch,
-    bicepPath: ""
+    bicepPath: "",
+    originText:
+      (await fetchFileFromRepo(
+        repo,
+        ".radius/app.origin.json",
+        access.branch,
+        true
+      )) ??
+      (await fetchFileFromRepo(repo, "app.origin.json", access.branch, true))
   };
 }
 
@@ -4452,16 +4469,20 @@ async function fetchFileForSelection(
   repoPath: string
 ): Promise<string | null> {
   const access = accessForSelection(entry, repo, branch);
+  const isOrigin =
+    repoPath === ".radius/app.origin.json" || repoPath === "app.origin.json";
   if (access.useWorkspace) {
     const local = await fetchWorkspaceFile(
       entry.state,
       repo,
       access.branch,
-      repoPath
+      repoPath,
+      isOrigin
     );
+    if (isOrigin) return local;
     if (local !== null) return local;
   }
-  return await fetchFileFromRepo(repo, repoPath, access.branch);
+  return await fetchFileFromRepo(repo, repoPath, access.branch, isOrigin);
 }
 
 // Every path on a branch, resolved through the same workspace-or-remote access

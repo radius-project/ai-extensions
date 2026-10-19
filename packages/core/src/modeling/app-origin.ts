@@ -20,6 +20,11 @@
 // the skill instead of rendering a possibly-broken model.
 
 // Repo-relative location of the origin record, next to the model it describes.
+import {
+  parseModelOnlyAuthoring,
+  type ModelOnlyAuthoring
+} from "./model-authoring.js";
+
 export const APP_ORIGIN_REPO_PATH = ".radius/app.origin.json";
 
 // Older layouts keep the model at the repository root, and the record is written
@@ -27,6 +32,7 @@ export const APP_ORIGIN_REPO_PATH = ".radius/app.origin.json";
 export const APP_ORIGIN_ROOT_PATH = "app.origin.json";
 
 export interface AppOrigin {
+  authoring?: ModelOnlyAuthoring;
   // ISO-8601 timestamp of the generation that produced the model.
   generatedAt: string;
   // Full commit SHA of the source the model was generated from.
@@ -159,6 +165,13 @@ export function parseAppOrigin(text: unknown): AppOrigin | null {
   if (!origin.generatedAt || !origin.sourceCommit || !origin.appBicepHash) {
     return null;
   }
+  if (fields.authoring !== undefined) {
+    try {
+      origin.authoring = parseModelOnlyAuthoring(fields.authoring);
+    } catch {
+      return null;
+    }
+  }
   return origin;
 }
 
@@ -171,7 +184,8 @@ export function serializeAppOrigin(origin: AppOrigin): string {
       generatedAt: origin.generatedAt,
       sourceCommit: origin.sourceCommit,
       skillVersion: origin.skillVersion,
-      appBicepHash: origin.appBicepHash
+      appBicepHash: origin.appBicepHash,
+      ...(origin.authoring ? { authoring: origin.authoring } : {})
     },
     null,
     2

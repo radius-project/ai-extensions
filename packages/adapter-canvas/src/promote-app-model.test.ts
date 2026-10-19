@@ -5,6 +5,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { serializeAppOrigin } from "@radius-project/core";
+import { createHash } from "node:crypto";
+import {
+  MODEL_ONLY_MARKER,
+  parseModelOnlyAuthoring
+} from "@radius-project/core/modeling";
 // The staging rules are core's specification for the bundled script, not part
 // of the package's public surface, so they are imported from the modeling
 // barrel rather than the top-level one.
@@ -154,6 +159,139 @@ function gitStatus(root: string): string[] {
 }
 
 describe("--begin", () => {
+  it.each([false, true])(
+    "persists opt-in through writing, promotion and regeneration (root model: %s)",
+    (rootModel) => {
+      const target = repo();
+      const source = "param hostPath string\n";
+      fs.writeFileSync(path.join(target.root, "recipe.bicep"), source);
+      const evidence = parseModelOnlyAuthoring({
+        mode: "model-only",
+        deployment: "unverified",
+        profile: "full local profile",
+        recipes: [
+          {
+            resourceType: "Radius.Compute/containers",
+            apiVersion: "2025-08-01-preview",
+            sourcePath: "recipe.bicep",
+            sourceHash: `sha256:${createHash("sha256").update(source).digest("hex")}`
+          }
+        ]
+      });
+      const evidencePath = path.join(target.root, "evidence.json");
+      fs.writeFileSync(evidencePath, JSON.stringify(evidence));
+      const started = run(target.root, [
+        "--begin",
+        "--model-only-evidence",
+        evidencePath
+      ]);
+      expect(started.status).toBe(0);
+      const stagingDir = started.stdout;
+      const model = `${MODEL_ONLY_MARKER}\n${MODEL}`;
+      stageCompleteRun(stagingDir, model);
+      const writer = path.join(path.dirname(script), "write-app-origin.mjs");
+      const written = spawnSync(
+        process.execPath,
+        [writer, path.join(stagingDir, "app.bicep")],
+        {
+          cwd: target.root,
+          encoding: "utf8"
+        }
+      );
+      expect(written.status, written.stderr).toBe(0);
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(stagingDir, "app.origin.json"), "utf8")
+        ).authoring
+      ).toEqual(evidence);
+      const published = run(target.root, ["--staging", stagingDir]);
+      expect(published.status, published.stderr).toBe(0);
+      expect(
+        fs.readFileSync(path.join(target.radiusDir, "app.bicep"), "utf8")
+      ).toBe(model);
+      const publishedDir = rootModel ? target.root : target.radiusDir;
+      if (rootModel) {
+        for (const file of ["app.bicep", "app.origin.json"]) {
+          fs.renameSync(
+            path.join(target.radiusDir, file),
+            path.join(target.root, file)
+          );
+        }
+      }
+      const refreshed = begin(target, "refresh");
+      expect(
+        JSON.parse(fs.readFileSync(path.join(refreshed, "run.json"), "utf8"))
+          .authoring
+      ).toEqual(evidence);
+      stageCompleteRun(refreshed);
+      const refused = run(target.root, ["--staging", refreshed]);
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain("retain");
+      expect(
+        fs.readFileSync(path.join(publishedDir, "app.bicep"), "utf8")
+      ).toBe(model);
+      const sourceRace = begin(target, "source-race");
+      stageCompleteRun(sourceRace, model);
+      fs.copyFileSync(
+        path.join(publishedDir, "app.origin.json"),
+        path.join(sourceRace, "app.origin.json")
+      );
+      fs.writeFileSync(path.join(target.root, "recipe.bicep"), "changed");
+      const changedAtPromotion = run(target.root, ["--staging", sourceRace]);
+      expect(changedAtPromotion.status).toBe(1);
+      expect(changedAtPromotion.stderr).toContain("digest changed");
+      const changed = run(target.root, ["--begin"]);
+      expect(changed.status).toBe(1);
+      expect(changed.stderr).toContain("digest changed");
+    }
+  );
+
+  it("refuses an unreadable provenance file rather than clearing the restriction", () => {
+    const target = repo();
+    fs.mkdirSync(path.join(target.radiusDir, "app.origin.json"));
+    const result = run(target.root, ["--begin"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Cannot begin model-only authoring");
+  });
+
+  it("refuses lost evidence, invalid opt-in and source symlink escapes", () => {
+    const target = repo(`${MODEL_ONLY_MARKER}\n${MODEL}`);
+    expect(run(target.root, ["--begin"]).status).toBe(1);
+    expect(
+      run(target.root, ["--begin", "--model-only-evidence"]).stderr
+    ).toContain("requires a JSON file");
+    const outside = repo();
+    fs.writeFileSync(path.join(outside.root, "source"), "source");
+    fs.symlinkSync(
+      path.join(outside.root, "source"),
+      path.join(target.root, "recipe")
+    );
+    const evidence = {
+      mode: "model-only",
+      deployment: "unverified",
+      profile: "local",
+      recipes: [
+        {
+          resourceType: "type",
+          apiVersion: "version",
+          sourcePath: "recipe",
+          sourceHash: `sha256:${"a".repeat(64)}`
+        }
+      ]
+    };
+    fs.writeFileSync(
+      path.join(target.root, "evidence.json"),
+      JSON.stringify(evidence)
+    );
+    const result = run(target.root, [
+      "--begin",
+      "--model-only-evidence",
+      "evidence.json"
+    ]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("escapes the repository");
+  });
+
   it("creates a staging directory inside .radius and prints it", () => {
     const target = repo();
     const stagingDir = begin(target);

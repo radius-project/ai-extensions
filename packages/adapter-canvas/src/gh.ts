@@ -1496,8 +1496,16 @@ export function ghApiListNames(
 export function fetchFileFromRepo(
   repo: string,
   path: string,
-  branch = "main"
+  branch = "main",
+  strict = false
 ): Promise<string | null> {
+  if (strict) {
+    return fetchFileFromRepoResult(repo, path, branch).then((result) => {
+      if (result.status === 404) return null;
+      if (result.error) throw new Error(result.error);
+      return result.content;
+    });
+  }
   return ghApiGetContent(`/repos/${repo}/contents/${path}?ref=${branch}`);
 }
 

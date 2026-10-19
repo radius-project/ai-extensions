@@ -2,6 +2,7 @@ import {
   evaluateAppSource,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
 } from "@radius-project/core";
+import { modelOnlyRestriction } from "@radius-project/core/modeling";
 import {
   expireGraphProgressWait,
   recordGraphBuildEvent
@@ -701,6 +702,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       );
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
       const content = selection.content;
+      const authoringRestriction = modelOnlyRestriction(
+        content || "",
+        selection.originText
+      );
       if (content) {
         clearAppModelAuthoringFailure(state, repo, branch);
         if (modelCreationIsRunning(progressHandle.record)) {
@@ -775,12 +780,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state.graphFollowsWorkspaceBranch =
           branchResolution.followsWorkspaceBranch;
         state.graphFromWorkspace = selection.fromWorkspace;
+        state.graphAuthoringRestriction = authoringRestriction;
         state.graphModelRevision = modelRevision;
         return withResolvedBranch(
           json(200, {
             reload: false,
             resources: state.graphResources,
             fromWorkspace: selection.fromWorkspace,
+            ...(authoringRestriction ? { authoringRestriction } : {}),
             cached: true
           }),
           resolvedBranch
@@ -839,6 +846,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // Authoritative provenance: true only when the local workspace actually
         // supplied the app.bicep content (file is on disk).
         state.graphFromWorkspace = selection.fromWorkspace;
+        state.graphAuthoringRestriction = authoringRestriction;
         state.activeGraphView = "graph";
         state.graphLoaded = true;
         state.graphDefinitionHash = definitionHash;
@@ -854,7 +862,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         json(200, {
           reload: !data.refresh,
           resources,
-          fromWorkspace: selection.fromWorkspace
+          fromWorkspace: selection.fromWorkspace,
+          ...(authoringRestriction ? { authoringRestriction } : {})
         }),
         resolvedBranch
       );
@@ -1005,6 +1014,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
       if (!isCurrentPlan()) return json(409, STALE_PAYLOAD);
       const content = selection.content;
+      const restriction = modelOnlyRestriction(
+        content || "",
+        selection.originText
+      );
+      if (restriction) {
+        state.plannedResources = [];
+        return json(409, { error: restriction, modelOnly: true });
+      }
       if (!content) {
         addEvent(
           "checking_model",
@@ -1337,6 +1354,21 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // or overwrite that comparison's attempt and could either reject its
       // legitimate failure report as stale or promote an abandoned handoff.
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
+
+      const restriction =
+        modelOnlyRestriction(
+          baseSelection.content || "",
+          baseSelection.originText
+        ) ||
+        modelOnlyRestriction(
+          headSelection.content || "",
+          headSelection.originText
+        );
+      if (restriction) {
+        state.diffResources = [];
+        state.diffError = restriction;
+        return json(409, { error: restriction, modelOnly: true });
+      }
 
       // An explicit refresh is the retry path the failure text names, so it
       // clears BOTH sides: the user is asking for the whole comparison again,
