@@ -1220,22 +1220,33 @@ describe("createNodeCloudFixturePorts", () => {
   });
 
   it("exposes cloud runners that resolve rather than reject when a tool is absent", async () => {
-    const ports = createNodeCloudFixturePorts();
+    // An empty search path makes every tool genuinely absent. Launching the
+    // real CLIs instead made this test wait on `az --version` network checks,
+    // which occasionally stalled past any timeout on Windows runners.
+    const emptyBin = await fs.mkdtemp(
+      path.join(os.tmpdir(), "radtest-no-tools-")
+    );
+    const priorPath = process.env.PATH;
+    try {
+      process.env.PATH = emptyBin;
+      const ports = createNodeCloudFixturePorts();
 
-    for (const run of [
-      ports.commands.runAz,
-      ports.commands.runGh,
-      ports.commands.runKubectl
-    ]) {
-      const outcome = await run(["--version"]);
-      expect(typeof outcome.code).toBe("number");
-      expect(typeof outcome.stdout).toBe("string");
-      expect(typeof outcome.stderr).toBe("string");
+      for (const run of [
+        ports.commands.runAz,
+        ports.commands.runGh,
+        ports.commands.runKubectl
+      ]) {
+        const outcome = await run(["--version"]);
+        expect(outcome.code).not.toBe(0);
+        expect(outcome.timedOut).toBe(false);
+        expect(typeof outcome.stdout).toBe("string");
+        expect(outcome.stderr).not.toBe("");
+      }
+    } finally {
+      process.env.PATH = priorPath;
+      await fs.rm(emptyBin, { recursive: true, force: true });
     }
-    // Real `az`/`gh`/`kubectl` launches: Windows runners took 15-29s (median
-    // ~20s) across 40 reliability runs and 9 of them exceeded the former 30s
-    // cap, so allow ~4x the slowest observed pass.
-  }, 120_000);
+  });
 
   it("terminates kubectl when its per-probe deadline expires", async () => {
     const directory = await fs.mkdtemp(
