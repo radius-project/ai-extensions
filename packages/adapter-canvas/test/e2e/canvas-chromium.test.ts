@@ -5171,6 +5171,51 @@ test.describe("Radius Canvas in Chromium", () => {
     });
   }
 
+  test("keeps Back to Deployments reachable when the failure error is very long @safety", async ({
+    page,
+    canvas
+  }) => {
+    // A recipe failure's error carries the whole nested Radius error and the
+    // control-plane log. Without a height limit the dialog outgrew the panel,
+    // pushing Back to Deployments off-screen with no way to scroll to it.
+    const line =
+      '{ "code": "OK", "message": "", "target": "/planes/radius/local/resourceGroups/default/providers/Radius.Security/secrets/fixture" }';
+    const error =
+      "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
+      Array.from({ length: 200 }, () => line).join("\n");
+    await page.setViewportSize({ width: 900, height: 600 });
+    await page.route("**/api/deploy-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          active: false,
+          error,
+          errorKind: null,
+          deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+          repairing: false,
+          handoff: { pending: false, state: "idle" },
+          attempt: { targetRepo: "", environment: "" }
+        })
+      });
+    });
+    await page.goto(
+      `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
+    );
+    const subtitle = page.locator("#deploy-progress-subtitle");
+    await expect(subtitle).toContainText("Failed step: Run rad commands.");
+    const back = page.locator("#deploy-fail-back");
+    await expect(back).toBeInViewport();
+    expect(
+      await subtitle.evaluate(
+        (element) => element.scrollHeight > element.clientHeight
+      )
+    ).toBe(true);
+    await back.click();
+    await expect(page.locator("#deploy-progress-modal")).toBeHidden();
+  });
+
   test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({
     page,
     canvas
