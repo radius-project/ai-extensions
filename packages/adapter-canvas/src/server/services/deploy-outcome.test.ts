@@ -1040,8 +1040,14 @@ describe("deploy outcome settles red nodes with an explanation (Exception 5.1)",
     const service = createDeployOutcomeService(
       dependencies({
         fetchRunLog: () => Promise.resolve("Error: recipe quota exceeded"),
-        settleDeployStatuses: (_resources, conclusion, radiusError) => {
+        settleDeployStatuses: (
+          _resources,
+          conclusion,
+          radiusError,
+          resourceErrors
+        ) => {
           settled.push([conclusion, radiusError]);
+          expect(resourceErrors).toEqual([]);
         }
       })
     );
@@ -1049,6 +1055,101 @@ describe("deploy outcome settles red nodes with an explanation (Exception 5.1)",
     await service.settle(request);
 
     expect(settled).toEqual([["failure", "Error: recipe quota exceeded"]]);
+  });
+
+  it("retries a failed run-log read and gives each failed node its own error", async () => {
+    const dbTarget =
+      "/planes/radius/local/resourceGroups/default/providers/Radius.Data/mySqlDatabases/brokendb";
+    const radiusError =
+      "Error: " +
+      JSON.stringify({
+        code: "DeploymentFailed",
+        message: "At least one resource deployment operation failed.",
+        details: [
+          {
+            code: "ResourceDeploymentFailure",
+            target: dbTarget,
+            details: [{ code: "InvalidRequest", message: "bad DBName" }]
+          },
+          {
+            code: "OK",
+            target:
+              "/planes/radius/local/resourceGroups/default/providers/Radius.Compute/containers/web"
+          }
+        ]
+      });
+    const resources: CanvasGraphResource[] = [
+      { id: dbTarget.toLowerCase(), name: "brokendb", deployStatus: "pending" },
+      { name: "web", deployStatus: "success" }
+    ];
+    const { request, state } = outcomeRequest({
+      conclusion: "failure",
+      resources,
+      steps: [{ name: "Run rad commands", conclusion: "failure" }]
+    });
+    const sleeps: number[] = [];
+    const reads: string[] = [];
+    const service = createDeployOutcomeService(
+      dependencies({
+        settleDeployStatuses,
+        fetchRunLog: async () => {
+          reads.push("log");
+          if (reads.length === 1) throw new Error("network down");
+          return radiusError;
+        },
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(reads).toEqual(["log", "log"]);
+    expect(sleeps).toEqual([5000, 5000, 1000]);
+    expect(state.deployError).not.toContain("could not be read");
+    expect(resources.map((resource) => resource.deployMessage)).toEqual([
+      "InvalidRequest: bad DBName",
+      undefined
+    ]);
+    expect(resources[1].deployStatus).toBe("success");
+  });
+
+  it("waits between run-log reads inside the shared observation", async () => {
+    vi.useFakeTimers();
+    const observation = {
+      context: createWorkflowReadSession().observe(15000),
+      identity: "ambient"
+    };
+    const fetchRunLog = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce("Error: recipe failed");
+    const { request, state } = outcomeRequest({
+      conclusion: "failure",
+      observation,
+      statusReader: statusReader([{ status: "ok", graph: [] }])
+    });
+    const settling = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog,
+        sleep: () => {
+          throw new Error("Unowned wait");
+        }
+      })
+    ).settle(request);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchRunLog).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settling;
+    expect(fetchRunLog).toHaveBeenCalledTimes(2);
+    expect(fetchRunLog).toHaveBeenLastCalledWith(
+      "acme/widgets",
+      42,
+      observation
+    );
+    expect(state.deployError).toContain("Error: recipe failed");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("settles a cancelled run without inventing a Radius error", async () => {

@@ -4991,6 +4991,7 @@ test.describe("Radius Canvas in Chromium", () => {
               throw new Error("fixture-private-log-read-error");
             },
             redactDiagnostic: redactCredentials,
+            sleep: async () => {},
             readControlPlaneLog: async () => null
           }
         );
@@ -5019,6 +5020,7 @@ test.describe("Radius Canvas in Chromium", () => {
               readLog: async () =>
                 "deploy\tTeardown\t2026-01-01 Error: <teardown>",
               redactDiagnostic: redactCredentials,
+              sleep: async () => {},
               readControlPlaneLog: async () => null
             }
           )
@@ -5042,6 +5044,7 @@ test.describe("Radius Canvas in Chromium", () => {
                 diagnosticCredential,
               redactDiagnostic: (value) =>
                 redactCredentials(value, [diagnosticCredential]),
+              sleep: async () => {},
               readControlPlaneLog: async () =>
                 "error password=fixture-control-secret " + diagnosticCredential
             }

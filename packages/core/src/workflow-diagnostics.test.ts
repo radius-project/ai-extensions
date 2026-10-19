@@ -4,8 +4,10 @@ import { DEPLOY_RAD_COMMANDS_STEP } from "./index.js";
 import type { WorkflowRunDetail } from "./workflow-observation.js";
 import {
   collectWorkflowFailure,
-  extractRadDeployError
+  extractRadDeployError,
+  extractRadDeployResourceErrors
 } from "./workflow-diagnostics.js";
+import { WorkflowReadInterruptedError } from "./workflow-read-policy.js";
 import {
   explainOidcEnterpriseClaim,
   classifyDeployCloudAuthDrift,
@@ -49,6 +51,7 @@ describe("workflow diagnostic redaction", () => {
           redactDiagnostic: (value) =>
             redactCredentials(value, ["control-plane log", "failure details"]),
           readLog: async () => "Error: { ordinary failure }",
+          sleep: async () => {},
           readControlPlaneLog: async () => {
             if (availability === "unavailable")
               throw new Error("Diagnostic read unavailable");
@@ -101,6 +104,7 @@ describe("workflow diagnostic redaction", () => {
           redactDiagnostic: (value) => value,
           readLog: async () =>
             `deploy\t${phase === "teardown" ? "Teardown" : "Run rad commands"}\t2026-01-01 Error: { ${nested} }`,
+          sleep: async () => {},
           readControlPlaneLog: async () =>
             JSON.stringify(JSON.stringify({ password: controlSecret }))
         }
@@ -128,6 +132,7 @@ describe("workflow diagnostic redaction", () => {
           redactDiagnostic: (value) => value,
           readLog: async () =>
             `${credential}\tRun rad commands\t2026-01-01 ${prefix}unregistered-${"z".repeat(100)}" }`,
+          sleep: async () => {},
           readControlPlaneLog: async () => "ordinary control-plane tail"
         }
       );
@@ -205,6 +210,7 @@ describe("workflow diagnostic redaction", () => {
               redactDiagnostic,
               readLog: async () =>
                 `deploy\tRun rad commands\t2026-01-01 Error: { ${raw} }`,
+              sleep: async () => {},
               readControlPlaneLog: async () => `control-plane evidence ${raw}`
             }
           );
@@ -253,6 +259,7 @@ describe("workflow diagnostic redaction", () => {
       {
         redactDiagnostic: (value) => value,
         readLog: async () => null,
+        sleep: async () => {},
         readControlPlaneLog: async () => "ordinary control-plane tail"
       }
     );
@@ -279,6 +286,7 @@ describe("workflow diagnostic redaction", () => {
         redactDiagnostic,
         readLog: async () =>
           `${credential}\tRun rad commands\t2026-01-01 Error: { quota ${credential} }\nother\tCleanup\t2026-01-01 Error: { secondary failure }`,
+        sleep: async () => {},
         readControlPlaneLog: async () =>
           `provisioning failed: access_token="${credential}"`
       }
@@ -305,6 +313,7 @@ describe("workflow diagnostic redaction", () => {
         redactDiagnostic,
         readLog: async () =>
           `${credential}\tRun rad commands\t2026-01-01 ${prefix}${credential} trailing }`,
+        sleep: async () => {},
         readControlPlaneLog: async () => null
       }
     );
@@ -325,6 +334,7 @@ describe("workflow diagnostic redaction", () => {
         redactDiagnostic: (value) => value,
         readLog: async () =>
           `Error: { password=synthetic-value ${recognizable} }`,
+        sleep: async () => {},
         readControlPlaneLog: async () => "ordinary provisioning detail"
       }
     );
@@ -349,6 +359,7 @@ describe("workflow diagnostic redaction", () => {
       {
         redactDiagnostic,
         readLog: async () => null,
+        sleep: async () => {},
         readControlPlaneLog: async () => controlPlaneLog
       }
     );
@@ -372,6 +383,7 @@ describe("workflow diagnostic redaction", () => {
         redactDiagnostic,
         readLog: async () =>
           `${credential}\tTeardown\t2026-01-01 Error: { persistence detail ${credential} }`,
+        sleep: async () => {},
         readControlPlaneLog: async () => null
       }
     );
@@ -386,6 +398,7 @@ describe("workflow diagnostic redaction", () => {
       readLog: async () => {
         throw new Error("Unexpected log read");
       },
+      sleep: async () => {},
       readControlPlaneLog: async () => {
         throw new Error("Unexpected artifact read");
       }
@@ -407,6 +420,7 @@ describe("workflow diagnostic redaction", () => {
             throw new Error("Redactor unavailable");
           },
           readLog: async () => `Error: ${credential}`,
+          sleep: async () => {},
           readControlPlaneLog: async () => null
         }
       )
@@ -438,6 +452,7 @@ describe("post-deployment teardown evidence", () => {
       {
         readLog: async () => log,
         redactDiagnostic: redactCredentials,
+        sleep: async () => {},
         readControlPlaneLog: async () => null
       }
     );
@@ -595,6 +610,7 @@ describe("post-deployment teardown evidence", () => {
       {
         readLog: async () => null,
         redactDiagnostic: redactCredentials,
+        sleep: async () => {},
         readControlPlaneLog: async () => null
       }
     );
@@ -1021,6 +1037,7 @@ describe("extractErrorLines", () => {
               return "Error: incomplete run";
             },
             redactDiagnostic: redactCredentials,
+            sleep: async () => {},
             readControlPlaneLog: async () => {
               reads.push("control-plane");
               return "incomplete control-plane evidence";
@@ -1032,6 +1049,7 @@ describe("extractErrorLines", () => {
           message:
             "Workflow outcome is unconfirmed. View the full run: https://github.com/org/app/actions/runs/41",
           radiusError: "",
+          resourceErrors: [],
           authDriftMessage: "",
           narration: []
         });
@@ -1061,6 +1079,7 @@ describe("extractErrorLines", () => {
             return `deploy\tAzure Login (OIDC)\t2026-01-01 ${MS_ERROR}`;
           },
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: async () => {
             expect(calls).toEqual(["workflow"]);
             calls.push("control-plane");
@@ -1108,13 +1127,23 @@ describe("extractErrorLines", () => {
               return log;
             },
             redactDiagnostic: redactCredentials,
+            sleep: async (milliseconds) => {
+              calls.push(`sleep:${milliseconds}`);
+            },
             readControlPlaneLog: async () => {
               calls.push("control-plane");
               return log;
             }
           }
         );
-        expect(calls).toEqual(["org/app:41", "control-plane"]);
+        expect(calls).toEqual([
+          "org/app:41",
+          "sleep:1000",
+          "org/app:41",
+          "sleep:2000",
+          "org/app:41",
+          "control-plane"
+        ]);
         expect(result.message).toBe(
           "Deployment failed (failure). Failed step: Azure Login (OIDC).\n\nView the full run: https://github.com/org/app/actions/runs/41"
         );
@@ -1140,6 +1169,7 @@ describe("extractErrorLines", () => {
             throw new Error("fixture-private-log-detail");
           },
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: () => {
             calls.push("control-plane");
             throw new Error("fixture-private-artifact-detail");
@@ -1149,7 +1179,7 @@ describe("extractErrorLines", () => {
       expect(result.message).toBe(
         "Deployment failed (failure). Failed step: Azure Login (OIDC).\n\nThe workflow log could not be read.\n\nThe control-plane log could not be read.\n\nView the full run: https://github.com/org/app/actions/runs/41"
       );
-      expect(calls).toEqual(["log", "control-plane"]);
+      expect(calls).toEqual(["log", "log", "log", "control-plane"]);
       expect(JSON.stringify(result)).not.toContain("fixture-private");
       expect(result.authDriftMessage).toContain("Cloud authentication");
       expect(result.radiusError).toBe("");
@@ -1168,6 +1198,7 @@ describe("extractErrorLines", () => {
         {
           readLog: async () => "Error: recipe failed",
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: () => {
             throw new Error("artifact expired");
           }
@@ -1198,6 +1229,7 @@ describe("extractErrorLines", () => {
         {
           readLog: async () => "Error: earlier recipe failed",
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: async () => "earlier control-plane evidence"
         }
       );
@@ -1214,6 +1246,7 @@ describe("extractErrorLines", () => {
             throw new Error("fixture-private-log-detail");
           },
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: async () => {
             throw new Error("fixture-private-artifact-detail");
           }
@@ -1223,6 +1256,7 @@ describe("extractErrorLines", () => {
         message:
           "Deployment failed (failure). Failed step: Run rad commands.\n\nThe workflow log could not be read.\n\nThe control-plane log could not be read.\n\nView the full run: https://github.com/org/app/actions/runs/42",
         radiusError: "",
+        resourceErrors: [],
         authDriftMessage: "",
         narration: [
           "The workflow log could not be read.",
@@ -1248,6 +1282,7 @@ describe("extractErrorLines", () => {
               throw new Error("must not read diagnostics without outcome");
             },
             redactDiagnostic: redactCredentials,
+            sleep: async () => {},
             readControlPlaneLog: () => {
               throw new Error("must not read artifacts without outcome");
             }
@@ -1257,6 +1292,7 @@ describe("extractErrorLines", () => {
           message:
             "Workflow outcome is unconfirmed. View the full run: https://github.com/org/app/actions/runs/41",
           radiusError: "",
+          resourceErrors: [],
           authDriftMessage: "",
           narration: []
         });
@@ -1274,6 +1310,7 @@ describe("extractErrorLines", () => {
         {
           readLog: () => Promise.reject(new Error("fixture-private")),
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: async () => "recipe provisioning failed"
         }
       );
@@ -1369,6 +1406,7 @@ describe("extractErrorLines", () => {
           {
             readLog: async () => logs.join("\n"),
             redactDiagnostic: redactCredentials,
+            sleep: async () => {},
             readControlPlaneLog: async () => null
           }
         );
@@ -1395,6 +1433,7 @@ describe("extractErrorLines", () => {
         {
           readLog: async () => "Error: failure",
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: async () => lines.join("\n") + "\n\n"
         }
       );
@@ -1465,6 +1504,7 @@ describe("extractErrorLines", () => {
                 "deploy\tCleanup\t2026-01-01 Error: { available teardown evidence }"
               ].join("\n"),
             redactDiagnostic: redactCredentials,
+            sleep: async () => {},
             readControlPlaneLog: async () => null
           }
         );
@@ -1479,5 +1519,364 @@ describe("extractErrorLines", () => {
   it("returns [] for empty input", () => {
     expect(extractErrorLines("")).toEqual([]);
     expect(extractErrorLines(undefined)).toEqual([]);
+  });
+});
+
+// Shape of a real `rad deploy` failure on AWS: a Radius.Data/mySqlDatabases
+// recipe whose RDS instance rejected its DBName. The cause sits four levels
+// below the resource's own target, past any short copy of the run-level error.
+const DB_TARGET =
+  "/planes/radius/local/resourceGroups/default/providers/Radius.Data/mySqlDatabases/brokendb";
+const RDS_TARGET =
+  "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers/AWS.RDS/DBInstance/mysql-fixture";
+const RDS_ERROR =
+  "InvalidRequest: DBName must begin with a letter and contain only alphanumeric characters. (Service: Rds, Status Code: 400, Request ID: 00000000-0000-0000-0000-000000000000) (SDK Attempt Count: 1)";
+const WRAPPER =
+  "At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details.";
+function okDetail(target: string) {
+  return { code: "OK", message: "", target };
+}
+function awsRadError(extraOk = 0): string {
+  const error = {
+    code: "DeploymentFailed",
+    message: WRAPPER,
+    target:
+      "/planes/radius/local/resourceGroups/default/providers/Microsoft.Resources/deployments/rad-deploy-fixture",
+    details: [
+      {
+        code: "ResourceDeploymentFailure",
+        message: "Failed",
+        target: DB_TARGET,
+        details: [
+          {
+            code: "RecipeDeploymentFailed",
+            message:
+              "failed to deploy recipe default of type Radius.Data/mySqlDatabases",
+            details: [
+              {
+                code: "DeploymentFailed",
+                message: WRAPPER,
+                target:
+                  "/planes/radius/local/resourceGroups/default/providers/Microsoft.Resources/deployments/recipe-fixture",
+                details: [
+                  okDetail(
+                    "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers/AWS.RDS/DBSubnetGroup/mysql-fixture"
+                  ),
+                  {
+                    code: "ResourceDeploymentFailure",
+                    message: "Failed",
+                    target: RDS_TARGET,
+                    details: [
+                      {
+                        code: "InvalidRequest",
+                        message: RDS_ERROR.slice("InvalidRequest: ".length)
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      ...Array.from({ length: extraOk }, (_, index) =>
+        okDetail(
+          `/planes/radius/local/resourceGroups/default/providers/Radius.Compute/containers/app-${index}`
+        )
+      ),
+      okDetail(
+        "/planes/radius/local/resourceGroups/default/providers/Radius.Core/applications/todo-list-app"
+      )
+    ]
+  };
+  return (
+    "Error: " +
+    JSON.stringify(error, null, 2) +
+    "\n\nTraceId:  00000000000000000000000000000000"
+  );
+}
+
+describe("extractRadDeployResourceErrors", () => {
+  it("returns the innermost failure under each failed target", () => {
+    expect(extractRadDeployResourceErrors(awsRadError())).toEqual([
+      { target: DB_TARGET, message: RDS_ERROR },
+      {
+        target:
+          "/planes/radius/local/resourceGroups/default/providers/Microsoft.Resources/deployments/recipe-fixture",
+        message: RDS_ERROR
+      },
+      { target: RDS_TARGET, message: RDS_ERROR }
+    ]);
+  });
+
+  it.each([
+    ["no text", undefined],
+    ["empty text", ""],
+    ["no JSON", "Error: recipe failed"],
+    ["a closing brace before the opening one", "} Error: {"],
+    ["malformed JSON", "Error: { not json }"],
+    ["JSON cut off mid-way", awsRadError().slice(0, 600)],
+    [
+      "a top-level array of entries",
+      'Error: [{ "target": "x", "code": "Failed" }]'
+    ],
+    ["no details", 'Error: { "code": "DeploymentFailed", "message": "x" }'],
+    [
+      "only succeeded targets",
+      'Error: { "code": "DeploymentFailed", "details": [{ "code": "OK", "target": "/a" }] }'
+    ]
+  ])("returns nothing for %s", (_name, text) => {
+    expect(extractRadDeployResourceErrors(text)).toEqual([]);
+  });
+
+  it("formats code-only and message-only causes and drops duplicates", () => {
+    const text =
+      "Error: " +
+      JSON.stringify({
+        code: "DeploymentFailed",
+        details: [
+          {
+            code: "ResourceDeploymentFailure",
+            target: "/a",
+            details: [
+              { code: "QuotaExceeded" },
+              { message: "disk full" },
+              { code: "QuotaExceeded" },
+              { code: "OK", message: "ignored" },
+              { code: "", message: "" },
+              "not an entry",
+              null
+            ]
+          },
+          { code: "Conflict", message: "already exists", target: "/b" },
+          { code: "Failed", message: "first wins", target: "/A" },
+          { code: "Failed", message: "untargeted" },
+          { code: "Failed", target: 7, message: "non-string target" }
+        ]
+      });
+    expect(extractRadDeployResourceErrors(text)).toEqual([
+      { target: "/a", message: "QuotaExceeded\ndisk full" },
+      { target: "/b", message: "Conflict: already exists" }
+    ]);
+  });
+});
+
+describe("run-log read retries", () => {
+  const target = { repo: "org/app", runId: 41 };
+  const run: WorkflowRunDetail = {
+    status: "completed",
+    conclusion: "failure",
+    steps: [{ name: "Run rad commands", conclusion: "failure" }],
+    jobs: []
+  };
+
+  it("keeps the Radius error when the second attempt succeeds", async () => {
+    const calls: string[] = [];
+    const result = await collectWorkflowFailure(
+      target,
+      run,
+      { resourcesTouched: true },
+      {
+        readLog: async () => {
+          calls.push("log");
+          if (calls.length === 1) throw new Error("network down");
+          return awsRadError();
+        },
+        redactDiagnostic: redactCredentials,
+        sleep: async (milliseconds) => {
+          calls.push(`sleep:${milliseconds}`);
+        },
+        readControlPlaneLog: async () => null
+      }
+    );
+    expect(calls).toEqual(["log", "sleep:1000", "log"]);
+    expect(result.message).not.toContain("The workflow log could not be read.");
+    expect(result.radiusError).toContain('"code": "DeploymentFailed"');
+    expect(result.resourceErrors[0]).toEqual({
+      target: DB_TARGET,
+      message: RDS_ERROR
+    });
+  });
+
+  it("reports only the last attempt's outcome", async () => {
+    let attempts = 0;
+    const result = await collectWorkflowFailure(
+      target,
+      run,
+      { resourcesTouched: true },
+      {
+        readLog: async () => {
+          attempts++;
+          if (attempts === 1) throw new Error("network down");
+          return null;
+        },
+        redactDiagnostic: redactCredentials,
+        sleep: async () => {},
+        readControlPlaneLog: async () => null
+      }
+    );
+    expect(attempts).toBe(3);
+    expect(result.message).not.toContain("The workflow log could not be read.");
+    expect(result.radiusError).toBe("");
+  });
+
+  it("does not retry an interrupted observation", async () => {
+    let attempts = 0;
+    const result = await collectWorkflowFailure(
+      target,
+      run,
+      { resourcesTouched: true },
+      {
+        readLog: async () => {
+          attempts++;
+          throw new WorkflowReadInterruptedError("cancelled");
+        },
+        redactDiagnostic: redactCredentials,
+        sleep: () => {
+          throw new Error("unexpected retry wait");
+        },
+        readControlPlaneLog: async () => null
+      }
+    );
+    expect(attempts).toBe(1);
+    expect(result.message).toContain("The workflow log could not be read.");
+  });
+
+  it("stops retrying when the wait is interrupted", async () => {
+    let attempts = 0;
+    const result = await collectWorkflowFailure(
+      target,
+      run,
+      { resourcesTouched: true },
+      {
+        readLog: async () => {
+          attempts++;
+          throw new Error("network down");
+        },
+        redactDiagnostic: redactCredentials,
+        sleep: () =>
+          Promise.reject(new WorkflowReadInterruptedError("elapsed")),
+        readControlPlaneLog: async () => null
+      }
+    );
+    expect(attempts).toBe(1);
+    expect(result.message).toContain("The workflow log could not be read.");
+  });
+
+  it("fails explicitly without a sleep before any read", async () => {
+    const reads = {
+      readLog: async () => {
+        throw new Error("Unexpected log read");
+      },
+      redactDiagnostic: redactCredentials,
+      sleep: async () => {},
+      readControlPlaneLog: async () => {
+        throw new Error("Unexpected artifact read");
+      }
+    };
+    Reflect.deleteProperty(reads, "sleep");
+    await expect(
+      collectWorkflowFailure(target, run, { resourcesTouched: true }, reads)
+    ).rejects.toThrow("Workflow diagnostics require a sleep for log retries.");
+  });
+});
+
+describe("collected per-resource errors", () => {
+  const target = { repo: "org/app", runId: 41 };
+  const reads = (log: string) => ({
+    readLog: async () => log,
+    redactDiagnostic: redactCredentials,
+    sleep: async () => {},
+    readControlPlaneLog: async () => null
+  });
+
+  it("parses the full error even when the published copy is shortened", async () => {
+    const log = awsRadError(40);
+    expect(log.length).toBeGreaterThan(4000);
+    const result = await collectWorkflowFailure(
+      target,
+      {
+        status: "completed",
+        conclusion: "failure",
+        steps: [{ name: "Run rad commands", conclusion: "failure" }]
+      },
+      { resourcesTouched: true },
+      reads(log)
+    );
+    expect(result.radiusError).toBe(log.slice(0, 4000));
+    expect(result.resourceErrors.map((error) => error.target)).toEqual([
+      DB_TARGET,
+      "/planes/radius/local/resourceGroups/default/providers/Microsoft.Resources/deployments/recipe-fixture",
+      RDS_TARGET
+    ]);
+  });
+
+  it("sanitizes credentials that only appear once JSON escapes are decoded", async () => {
+    const credential = "opaque-escaped-fixture";
+    const escaped = [...credential]
+      .map((char) => "\\u" + char.charCodeAt(0).toString(16).padStart(4, "0"))
+      .join("");
+    const log =
+      'Error: { "code": "DeploymentFailed", "details": [{ "code": "Failed", "target": "/a", "message": "token ' +
+      escaped +
+      '" }] }';
+    expect(log).not.toContain(credential);
+    const result = await collectWorkflowFailure(
+      target,
+      {
+        status: "completed",
+        conclusion: "failure",
+        steps: [{ name: "Run rad commands", conclusion: "failure" }],
+        jobs: []
+      },
+      { resourcesTouched: true },
+      {
+        ...reads(log),
+        redactDiagnostic: (value) => redactCredentials(value, [credential])
+      }
+    );
+    expect(result.resourceErrors).toEqual([
+      { target: "/a", message: "Failed: token [REDACTED]" }
+    ]);
+  });
+
+  it("does not report resource errors for a failed teardown", async () => {
+    const result = await collectWorkflowFailure(
+      target,
+      {
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          {
+            name: "Run rad commands",
+            status: "completed",
+            conclusion: "success"
+          },
+          { name: "Teardown", status: "completed", conclusion: "failure" }
+        ],
+        jobs: [
+          {
+            name: "deploy",
+            steps: [
+              {
+                name: "Run rad commands",
+                status: "completed",
+                conclusion: "success"
+              },
+              { name: "Teardown", status: "completed", conclusion: "failure" }
+            ]
+          }
+        ]
+      },
+      { resourcesTouched: true },
+      reads(
+        awsRadError()
+          .split("\n")
+          .map((line) => "deploy\tTeardown\t2026-01-01T00:00:00Z " + line)
+          .join("\n")
+      )
+    );
+    expect(result.radiusError).toContain("DeploymentFailed");
+    expect(result.resourceErrors).toEqual([]);
   });
 });

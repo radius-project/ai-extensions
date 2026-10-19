@@ -2,6 +2,7 @@ import {
   collectWorkflowFailure,
   confirmedWorkflowConclusion,
   WorkflowReadInterruptedError,
+  type RadDeployResourceError,
   type WorkflowReadContext,
   type WorkflowRunDetail,
   type WorkflowStep
@@ -46,7 +47,8 @@ export interface DeployOutcomeDependencies {
   settleDeployStatuses(
     resources: CanvasGraphResource[],
     conclusion: string | null | undefined,
-    radiusError?: string
+    radiusError?: string,
+    resourceErrors?: readonly RadDeployResourceError[]
   ): void;
   fetchRunLog(
     repo: string,
@@ -331,20 +333,36 @@ export function createDeployOutcomeService(
           readLog: (targetRepo, runId) =>
             dependencies.fetchRunLog(targetRepo, runId, request.observation),
           readControlPlaneLog: () =>
-            statusReader.controlPlaneLog(request.observation?.context)
+            statusReader.controlPlaneLog(request.observation?.context),
+          sleep: (milliseconds) => {
+            const context = request.observation?.context;
+            if (!context) return dependencies.sleep(milliseconds);
+            return context.wait(
+              context.clock.sleep(milliseconds, {
+                stopped: () => context.check().state === "stopped",
+                onStop: context.onStop
+              })
+            );
+          }
         }
       );
       assertCurrent();
       failure.narration.forEach(log);
       entry.state.deployError = failure.message + (note ? "\n\n" + note : "");
-      const { radiusError, authDriftMessage } = failure;
+      const { radiusError, resourceErrors, authDriftMessage } = failure;
       // Settle the graph now that the exact Radius error is known, so every red
-      // node carries it — or "Deployment cancelled" / "Deployment timed out"
-      // when the run's conclusion, not a resource, decided the outcome
-      // (Exception 5.1). A node the producer already explained keeps its own
-      // message. Runs before the status flips to "failed" below, so the panel
-      // never observes a terminal deploy whose graph is still unsettled.
-      dependencies.settleDeployStatuses(resources, conclusion, radiusError);
+      // node carries its own error from it, or the run-level error, or
+      // "Deployment cancelled" / "Deployment timed out" when the run's
+      // conclusion, not a resource, decided the outcome (Exception 5.1). A node
+      // the producer already explained keeps its own message. Runs before the
+      // status flips to "failed" below, so the panel never observes a terminal
+      // deploy whose graph is still unsettled.
+      dependencies.settleDeployStatuses(
+        resources,
+        conclusion,
+        radiusError,
+        resourceErrors
+      );
       propagate();
       // Stamp the drift prefix + kind last so it leads the message regardless of
       // which describeFailure path ran. The kind keeps the repair guard from
