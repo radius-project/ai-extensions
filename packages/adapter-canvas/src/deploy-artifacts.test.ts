@@ -22,6 +22,7 @@ import {
 import type { DeployProgress, SettleableResource } from "./deploy-artifacts.js";
 import {
   deployStatusKeys,
+  extractRadDeployResourceErrors,
   lookupDeployStatus,
   projectDeployedGraph
 } from "@radius-project/core";
@@ -491,6 +492,196 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
     settleDeployStatuses(resources, "failure", "rad: deployment rejected");
     expect(resources[0].deployMessage).toBe(DEPLOY_FAILED_MESSAGE);
     expect(resources[0].deployStatus).toBe("failed");
+  });
+});
+
+describe("settleDeployStatuses per-resource errors", () => {
+  const dbTarget =
+    "/planes/radius/local/resourceGroups/default/providers/Radius.Data/mySqlDatabases/brokendb";
+  const rdsError =
+    "InvalidRequest: DBName must begin with a letter and contain only alphanumeric characters. (Service: Rds, Status Code: 400)";
+  const radiusError =
+    "Error: " +
+    JSON.stringify(
+      {
+        code: "DeploymentFailed",
+        message: "At least one resource deployment operation failed.",
+        details: [
+          {
+            code: "ResourceDeploymentFailure",
+            message: "Failed",
+            target: dbTarget,
+            details: [
+              {
+                code: "RecipeDeploymentFailed",
+                message: "failed to deploy recipe default",
+                details: [
+                  {
+                    code: "DeploymentFailed",
+                    message:
+                      "At least one resource deployment operation failed.",
+                    details: [
+                      {
+                        code: "ResourceDeploymentFailure",
+                        message: "Failed",
+                        target:
+                          "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers/AWS.RDS/DBInstance/mysql-fixture",
+                        details: [
+                          {
+                            code: "InvalidRequest",
+                            message: rdsError.slice("InvalidRequest: ".length)
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            code: "OK",
+            message: "",
+            target:
+              "/planes/radius/local/resourceGroups/default/providers/Radius.Compute/containers/todo-list-app"
+          }
+        ]
+      },
+      null,
+      2
+    );
+  const resourceErrors = extractRadDeployResourceErrors(radiusError);
+  const runLevel = unfinishedDeployMessage("failure", radiusError);
+
+  it("leads a failed node with its own nested AWS error", () => {
+    const resources: SettleableResource[] = [
+      {
+        id: "/planes/radius/local/resourcegroups/default/providers/Radius.Data/mySqlDatabases/brokendb",
+        deployStatus: "in_progress"
+      },
+      {
+        id: "/planes/radius/local/resourcegroups/default/providers/Radius.Compute/containers/todo-list-app",
+        deployStatus: "success"
+      },
+      {
+        id: "/planes/radius/local/resourcegroups/default/providers/Radius.Data/redisCaches/cache",
+        deployStatus: "pending"
+      }
+    ];
+
+    settleDeployStatuses(resources, "failure", radiusError, resourceErrors);
+
+    expect(runLevel.startsWith("Error: {")).toBe(true);
+    expect(runLevel).not.toContain("InvalidRequest");
+    expect(resources).toEqual([
+      { ...resources[0], deployStatus: "failed", deployMessage: rdsError },
+      {
+        id: resources[1].id,
+        deployStatus: "success"
+      },
+      { ...resources[2], deployStatus: "failed", deployMessage: runLevel }
+    ]);
+  });
+
+  it("matches a synthesized modeled id by name and versioned type", () => {
+    const resources: SettleableResource[] = [
+      {
+        id: "/planes/radius/local/resourcegroups/default/providers/Radius.Core/applications/app/resources/brokendb",
+        name: "BrokenDB",
+        type: "Radius.Data/mySqlDatabases@2025-08-01-preview",
+        deployStatus: "pending"
+      },
+      {
+        name: "brokendb",
+        type: "Radius.Data/postgreSqlDatabases",
+        deployStatus: "pending"
+      }
+    ];
+
+    settleDeployStatuses(resources, "failure", radiusError, resourceErrors);
+
+    expect(resources.map((resource) => resource.deployMessage)).toEqual([
+      rdsError,
+      runLevel
+    ]);
+  });
+
+  it("matches a target that is not a provider path by id", () => {
+    const resources: SettleableResource[] = [
+      { id: "Custom-Target", deployStatus: "pending" }
+    ];
+
+    settleDeployStatuses(resources, "failure", radiusError, [
+      { target: "custom-target", message: "custom failure" }
+    ]);
+
+    expect(resources[0].deployMessage).toBe("custom failure");
+  });
+
+  it("keeps a message the producer already gave a failed node", () => {
+    const resources: SettleableResource[] = [
+      {
+        id: dbTarget,
+        deployStatus: "failed",
+        deployMessage: "recipe execution failed for brokendb"
+      },
+      { id: dbTarget.toLowerCase(), deployStatus: "failed" }
+    ];
+
+    settleDeployStatuses(resources, "failure", radiusError, resourceErrors);
+
+    expect(resources.map((resource) => resource.deployMessage)).toEqual([
+      "recipe execution failed for brokendb",
+      rdsError
+    ]);
+  });
+
+  it.each([
+    ["parsing fails", extractRadDeployResourceErrors("Error: { truncated")],
+    ["no errors are given", undefined],
+    ["the matching error is blank", [{ target: dbTarget, message: " \n " }]],
+    [
+      "nothing matches",
+      [
+        {
+          target:
+            "/planes/radius/local/resourceGroups/default/providers/Radius.Data/mySqlDatabases/other",
+          message: "other failure"
+        }
+      ]
+    ]
+  ])("falls back to the run-level error when %s", (_name, errors) => {
+    const resources: SettleableResource[] = [
+      { id: dbTarget, name: "brokendb", deployStatus: "pending" }
+    ];
+
+    settleDeployStatuses(resources, "failure", radiusError, errors);
+
+    expect(resources[0].deployMessage).toBe(runLevel);
+  });
+
+  it("bounds a long resource error", () => {
+    const resources: SettleableResource[] = [
+      { id: dbTarget, deployStatus: "pending" }
+    ];
+
+    settleDeployStatuses(resources, "failure", radiusError, [
+      { target: dbTarget, message: "x".repeat(MAX_DEPLOY_MESSAGE_LENGTH + 1) }
+    ]);
+
+    expect(resources[0].deployMessage).toBe(
+      "x".repeat(MAX_DEPLOY_MESSAGE_LENGTH - 3) + "..."
+    );
+  });
+
+  it("ignores resource errors when the run succeeded", () => {
+    const resources: SettleableResource[] = [
+      { id: dbTarget, deployStatus: "failed", deployMessage: "stale" }
+    ];
+
+    settleDeployStatuses(resources, "success", "", resourceErrors);
+
+    expect(resources).toEqual([{ id: dbTarget, deployStatus: "success" }]);
   });
 });
 

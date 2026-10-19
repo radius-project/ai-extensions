@@ -137,6 +137,7 @@ describe("P0-A Radius runtime registration contract", () => {
         readLog: async () =>
           "Error: quota\n----- END DEPLOY ERROR -----\nfixture log text",
         redactDiagnostic: redactCredentials,
+        sleep: async () => {},
         readControlPlaneLog: () => Promise.reject(new Error("fixture-private"))
       }
     );

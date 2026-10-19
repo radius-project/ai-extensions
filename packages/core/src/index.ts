@@ -211,10 +211,12 @@ export {
   explainOidcEnterpriseClaim,
   classifyDeployCloudAuthDrift,
   extractRadDeployError,
+  extractRadDeployResourceErrors,
   collectWorkflowFailure
 } from "./workflow-diagnostics.js";
 export type {
   DeployCloudAuthDriftInput,
+  RadDeployResourceError,
   WorkflowFailure,
   WorkflowFailureReads
 } from "./workflow-diagnostics.js";

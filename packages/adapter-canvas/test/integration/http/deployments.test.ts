@@ -367,6 +367,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       {
         redactDiagnostic,
         readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+        sleep: async () => {},
         readControlPlaneLog: async () => controlPlane
       }
     );

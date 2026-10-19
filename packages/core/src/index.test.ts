@@ -40,6 +40,7 @@ const EXPECTED_FUNCTIONS = [
   "explainOidcEnterpriseClaim",
   "classifyDeployCloudAuthDrift",
   "extractRadDeployError",
+  "extractRadDeployResourceErrors",
   "applicationGraphToResources",
   "computeGraphDiff",
   "deployStatusKeys",

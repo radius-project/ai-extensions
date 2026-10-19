@@ -1429,6 +1429,7 @@ describe("direct workflow observer using production artifact binding", () => {
         {
           readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: () => reader.controlPlaneLog()
         }
       );
