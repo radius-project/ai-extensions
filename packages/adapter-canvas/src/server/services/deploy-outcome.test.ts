@@ -1115,6 +1115,34 @@ describe("deploy outcome settles red nodes with an explanation (Exception 5.1)",
     expect(resources[1].deployStatus).toBe("success");
   });
 
+  it("skips a run-log retry wait that does not fit the observation budget", async () => {
+    vi.useFakeTimers();
+    const observation = {
+      context: createWorkflowReadSession().observe(1500),
+      identity: "ambient"
+    };
+    const fetchRunLog = vi.fn().mockRejectedValue(new Error("network down"));
+    const { request, state } = outcomeRequest({
+      conclusion: "failure",
+      observation,
+      statusReader: statusReader([{ status: "ok", graph: [] }])
+    });
+    const settling = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog,
+        sleep: () => {
+          throw new Error("Unowned wait");
+        }
+      })
+    ).settle(request);
+    await vi.advanceTimersByTimeAsync(1000);
+    await settling;
+    expect(fetchRunLog).toHaveBeenCalledTimes(2);
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployError).toContain("The workflow log could not be read.");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("waits between run-log reads inside the shared observation", async () => {
     vi.useFakeTimers();
     const observation = {

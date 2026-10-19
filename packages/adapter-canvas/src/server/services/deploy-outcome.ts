@@ -345,9 +345,14 @@ export function createDeployOutcomeService(
             statusReader.controlPlaneLog(request.observation?.context),
           sleep: (milliseconds) => {
             const context = request.observation?.context;
-            return context ?
-                waitWithin(context, milliseconds)
-              : dependencies.sleep(milliseconds);
+            if (!context) return dependencies.sleep(milliseconds);
+            // A wait that cannot finish inside the budget would leave its timer
+            // running after collection returns, so end the retries instead.
+            if (context.remaining() <= milliseconds)
+              return Promise.reject(
+                new WorkflowReadInterruptedError("elapsed")
+              );
+            return waitWithin(context, milliseconds);
           }
         }
       );
