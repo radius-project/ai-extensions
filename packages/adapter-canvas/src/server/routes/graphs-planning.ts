@@ -563,6 +563,32 @@ export async function handleDeployedGraph(
     }
   }
 
+  // A terminal failed artifact from the monitored run reports a failed
+  // resource without its error. The monitor settled that same run with each
+  // node's own Radius error, so keep it wherever the artifact gave no message
+  // and did not report success.
+  if (
+    sessionMatchesSelection &&
+    progress?.state === "failed" &&
+    monitorRunId != null &&
+    artifactRunId != null &&
+    String(artifactRunId) === String(monitorRunId) &&
+    state.deployStatus === "failed" &&
+    !state.deployErrorKind &&
+    Array.isArray(state.deployingResources)
+  ) {
+    for (const resource of state.deployingResources) {
+      const message = resource.deployMessage?.trim();
+      if (resource.deployStatus !== "failed" || !message) continue;
+      for (const key of dependencies.deployStatusKeys(resource)) {
+        if (messageByKey.has(key) || statusByKey.get(key) === "success")
+          continue;
+        statusByKey.set(key, "failed");
+        messageByKey.set(key, message);
+      }
+    }
+  }
+
   const terminalConclusion =
     (
       !deploying &&

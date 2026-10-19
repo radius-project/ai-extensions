@@ -100,6 +100,20 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployOutcomeDependencies)[] = [
   "now"
 ];
 
+// Waits inside the shared observation, so cancellation or an exhausted budget
+// ends the wait.
+function waitWithin(
+  context: WorkflowReadContext,
+  milliseconds: number
+): Promise<void> {
+  return context.wait(
+    context.clock.sleep(milliseconds, {
+      stopped: () => context.check().state === "stopped",
+      onStop: context.onStop
+    })
+  );
+}
+
 export function createDeployOutcomeService(
   dependencies: DeployOutcomeDependencies
 ): DeployOutcomeService {
@@ -183,12 +197,7 @@ export function createDeployOutcomeService(
         if (context) {
           if (context.remaining() <= 5000) break;
           try {
-            await context.wait(
-              context.clock.sleep(5000, {
-                stopped: () => context.check().state === "stopped",
-                onStop: context.onStop
-              })
-            );
+            await waitWithin(context, 5000);
           } catch (error) {
             if (
               !(error instanceof WorkflowReadInterruptedError) ||
@@ -336,13 +345,9 @@ export function createDeployOutcomeService(
             statusReader.controlPlaneLog(request.observation?.context),
           sleep: (milliseconds) => {
             const context = request.observation?.context;
-            if (!context) return dependencies.sleep(milliseconds);
-            return context.wait(
-              context.clock.sleep(milliseconds, {
-                stopped: () => context.check().state === "stopped",
-                onStop: context.onStop
-              })
-            );
+            return context ?
+                waitWithin(context, milliseconds)
+              : dependencies.sleep(milliseconds);
           }
         }
       );
