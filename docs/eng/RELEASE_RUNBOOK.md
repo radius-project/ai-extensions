@@ -27,7 +27,14 @@ Edge needs nothing from you. The rest of this page is the stable release.
 - Immutable releases are optional. To enforce them later, enable the GitHub setting and set repository variable `REQUIRE_IMMUTABLE_RELEASES=true`.
 - The release GitHub App needs Contents and Pull requests write permissions. It writes every release commit and tag ref; GitHub signs the commits, and each tag must resolve to a **Verified** commit. It additionally needs Administration read only when immutable enforcement is enabled.
 - You need write access to the repository to start the workflow.
-- If the release changes environment creation, confirm that a [Cloud E2E](https://github.com/radius-project/ai-extensions/actions/workflows/cloud-e2e.yml) run on `main` passed after the last such change merged. The nightly run usually covers this; if it has not run since, start it by hand. Triage a failure with the [Cloud E2E runbook](./CLOUD_E2E_RUNBOOK.md) before you release.
+- If the release changes environment creation, confirm that a [Cloud E2E](https://github.com/radius-project/ai-extensions/actions/workflows/cloud-e2e.yml) run on `main` ran the cloud journey and passed after the last such change merged. The nightly run usually covers this; if it has not run since, start it by hand. A green run can skip the journey when the fixture repository is not configured, so check the journey step itself; this prints `success` only when the journey ran and passed:
+
+  ```bash
+  gh run view <run-id> --json jobs \
+    --jq '.jobs[].steps[] | select(.name == "Run the cloud create-environment journey") | .conclusion'
+  ```
+
+  Triage a failure with the [Cloud E2E runbook](./CLOUD_E2E_RUNBOOK.md) before you release.
 
 Each of these is enforced by the workflow, so a mistake here fails fast rather than shipping something wrong.
 
