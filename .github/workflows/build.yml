@@ -32,6 +32,10 @@ on:
         description: Git ref or commit to build. Defaults to the triggering ref.
         type: string
         default: ""
+    secrets:
+      CODECOV_TOKEN:
+        description: Token for uploads from trusted repository workflows.
+        required: false
 permissions: {}
 
 jobs:
@@ -239,11 +243,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # Pull requests only: publish.yml and release.yml reuse this workflow
-      # without the Codecov token. The token is unavailable to fork PRs;
-      # Codecov falls back to tokenless upload.
+      # Pull requests establish patch coverage, while publish.yml refreshes the
+      # project baseline after every push to main. The token is unavailable to
+      # fork PRs, so Codecov falls back to tokenless upload there.
       - name: Upload coverage to Codecov
-        if: ${{ always() && github.event_name == 'pull_request' && steps.coverage.outcome != 'skipped' }}
+        if: ${{ always() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && steps.coverage.outcome != 'skipped' }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

@@ -90,6 +90,8 @@ jobs:
       channel: edge
       plugins: ${{ needs.plugins.outputs.names }}
       ref: ${{ github.sha }}
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   publish:
     name: Publish ${{ matrix.plugin }} to edge
