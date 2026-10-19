@@ -1238,6 +1238,78 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     );
   });
 
+  it("keeps each failed node's own error when the terminal artifact has none", async () => {
+    const harness = start();
+    harness.state.contextRepo = "octo/todo";
+    harness.state.deployEnvName = "aws-demo";
+    harness.state.deployStatus = "failed";
+    harness.state.deployRunId = 7;
+    harness.state.deployingResources = [
+      {
+        id: "brokendb",
+        name: "brokendb",
+        type: "Radius.Data/mySqlDatabases",
+        deployStatus: "failed",
+        deployMessage: "InvalidRequest: DBName must begin with a letter"
+      },
+      {
+        id: "todo",
+        name: "todo",
+        type: "Radius.Compute/containers",
+        deployStatus: "success"
+      }
+    ];
+    harness.modeledResources.push(
+      { id: "brokendb", name: "brokendb", type: "Radius.Data/mySqlDatabases" },
+      { id: "todo", name: "todo", type: "Radius.Compute/containers" }
+    );
+    harness.reader.progress = {
+      schemaVersion: 1,
+      application: "todo",
+      environment: "aws-demo",
+      runId: 7,
+      sequence: 9,
+      state: "failed",
+      resources: [
+        {
+          id: "brokendb",
+          name: "brokendb",
+          type: "Radius.Data/mySqlDatabases",
+          status: "failed",
+          message: ""
+        },
+        {
+          id: "todo",
+          name: "todo",
+          type: "Radius.Compute/containers",
+          status: "success"
+        }
+      ]
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+    const payload = (await response.json()) as {
+      resources: CanvasGraphResource[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(
+      payload.resources.map(({ name, deployStatus, deployMessage }) => ({
+        name,
+        deployStatus,
+        deployMessage
+      }))
+    ).toEqual([
+      {
+        name: "brokendb",
+        deployStatus: "failed",
+        deployMessage: "InvalidRequest: DBName must begin with a letter"
+      },
+      { name: "todo", deployStatus: "success", deployMessage: undefined }
+    ]);
+  });
+
   it("does not apply live session state to another repository", async () => {
     const harness = start();
     harness.state.contextRepo = "octo/app";

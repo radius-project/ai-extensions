@@ -3,7 +3,8 @@ import { deployStatusKeys, lookupDeployStatus } from "@radius-project/core";
 import type {
   DeployStatus,
   DeployProgress,
-  DeployProgressResource
+  DeployProgressResource,
+  RadDeployResourceError
 } from "@radius-project/core";
 import type { ListArtifacts, DownloadArtifact } from "@radius-project/core";
 import {
@@ -282,12 +283,55 @@ export function unfinishedDeployMessage(
   if (conclusion === "monitor_timed_out")
     return DEPLOY_MONITOR_TIMED_OUT_MESSAGE;
   const detail = typeof radiusError === "string" ? radiusError.trim() : "";
+  return boundedDeployMessage(detail) || DEPLOY_FAILED_MESSAGE;
+}
+
+function boundedDeployMessage(detail: string): string {
   if (detail.length > MAX_DEPLOY_MESSAGE_LENGTH)
     return detail.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "...";
-  return detail || DEPLOY_FAILED_MESSAGE;
+  return detail;
+}
+
+// An error target is a Radius resource ID. It matches a node by ID, ignoring
+// case (the error says `resourceGroups`, graph IDs say `resourcegroups`), or by
+// the same `name|type` key deployStatusKeys derives, because modeled IDs are not
+// guaranteed to equal the IDs the control plane reports.
+function resourceErrorKeys(target: string): string[] {
+  const id = target.toLowerCase();
+  const match = /\/providers\/([^/]+\/[^/]+)\/([^/]+)$/.exec(id);
+  return match ? [id, match[2] + "|" + match[1]] : [id];
+}
+
+function buildResourceErrorMap(
+  resourceErrors: readonly RadDeployResourceError[] | undefined
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const { target, message } of resourceErrors ?? []) {
+    const bounded = boundedDeployMessage(message.trim());
+    if (!bounded) continue;
+    for (const key of resourceErrorKeys(target.trim())) {
+      if (!map.has(key)) map.set(key, bounded);
+    }
+  }
+  return map;
+}
+
+function ownResourceError(
+  resource: SettleableResource,
+  errors: Map<string, string>
+): string {
+  if (errors.size === 0) return "";
+  for (const key of deployStatusKeys(resource)) {
+    const message = errors.get(key.toLowerCase());
+    if (message) return message;
+  }
+  return "";
 }
 
 export interface SettleableResource {
+  id?: string;
+  name?: string;
+  type?: string;
   deployStatus?: DeployStatus;
   deployMessage?: string;
 }
@@ -317,18 +361,27 @@ export interface SettleableResource {
  * message it carried describes work in flight ("creating…"), and leaving that on
  * a red node would report progress on a resource that never finished.
  *
+ * When `resourceErrors` names the node's own target, that innermost error is
+ * used instead of the run-level `radiusError`: the run-level text leads with the
+ * outer DeploymentFailed wrapper, so its bounded copy cuts off before the cause.
+ *
  * Output resources are not walked here: they take their status from their parent
  * through the caller's own propagation.
  */
 export function settleDeployStatuses(
   resources: SettleableResource[],
   conclusion?: string | null,
-  radiusError?: string
+  radiusError?: string,
+  resourceErrors?: readonly RadDeployResourceError[]
 ): void {
   if (!Array.isArray(resources)) return;
   const succeeded = conclusion === "success";
   const message =
     succeeded ? "" : unfinishedDeployMessage(conclusion, radiusError);
+  const ownErrors =
+    succeeded ?
+      new Map<string, string>()
+    : buildResourceErrorMap(resourceErrors);
   for (const resource of resources) {
     if (succeeded) {
       resource.deployStatus = "success";
@@ -347,6 +400,6 @@ export function settleDeployStatuses(
     // artifact reporting — finally gets an explanation instead of being red and
     // silent.
     if (unfinished || !(resource.deployMessage ?? "").trim())
-      resource.deployMessage = message;
+      resource.deployMessage = ownResourceError(resource, ownErrors) || message;
   }
 }

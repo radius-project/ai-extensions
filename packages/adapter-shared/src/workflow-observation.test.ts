@@ -83,6 +83,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
         {
           redactDiagnostic: redactor,
           readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
+          sleep: async () => {},
           readControlPlaneLog: async () => `provisioning password=${credential}`
         }
       );
@@ -154,6 +155,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
         {
           readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: async () => {
             calls.push("control-plane");
             return null;
@@ -173,6 +175,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
             message:
               "Deployment failed (failure).\n\nError: observed failure\n\nView the full run: https://github.com/org/app/actions/runs/41",
             radiusError: "Error: observed failure",
+            resourceErrors: [],
             authDriftMessage: "",
             narration: [
               "",
@@ -185,6 +188,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
             message:
               "Workflow outcome is unconfirmed. View the full run: https://github.com/org/app/actions/runs/41",
             radiusError: "",
+            resourceErrors: [],
             authDriftMessage: "",
             narration: []
           }
@@ -243,6 +247,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
         {
           readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
           redactDiagnostic: redactCredentials,
+          sleep: async () => {},
           readControlPlaneLog: () => {
             calls.push("control-plane");
             throw new Error("fixture-private-artifact-detail");
@@ -265,7 +270,9 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
       expect(calls).toEqual([
         "api repos/org/app/actions/runs/41 --include --method GET",
         "api repos/org/app/actions/runs/41/jobs?per_page=100&page=1 --include --method GET",
-        "run view 41 --log --repo org/app",
+        ...Array<string>(mode === "primary" ? 1 : 3).fill(
+          "run view 41 --log --repo org/app"
+        ),
         "control-plane"
       ]);
     }
@@ -320,6 +327,7 @@ describe("non-Canvas workflow caller with real core and shared reads", () => {
           {
             readLog: (repo, runId) => readWorkflowLog(execution, repo, runId),
             redactDiagnostic: redactCredentials,
+            sleep: async () => {},
             readControlPlaneLog: async () => {
               transcript.push("control-plane");
               return null;
