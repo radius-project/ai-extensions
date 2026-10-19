@@ -99,7 +99,7 @@ A new check compares the saved version with the one the installed Radius CLI use
 
 When the source or the skill also changed, those are reported first, as today. An older CLI is the exception, described below: it is checked before everything else.
 
-The canvas gets the current version from the release the managed Radius CLI reports, mapped with the same rule the skill uses, so the two sides always compare like with like. It reads the release once per plugin load and reuses it, since the managed CLI only changes when the plugin loads. A failed read is not kept, so the next graph open tries again. It is not asked at all when the origin record has no saved version to compare with. The read waits for the plugin's own CLI update to finish, so it never sees the old CLI just before it is replaced. An edge release counts only when the user set the developer override, which is the same rule the skill follows.
+The canvas gets the current version from the release the managed Radius CLI reports, mapped with the same rule the skill uses, so the two sides always compare like with like. It reads the release once per plugin load and reuses it, since the managed CLI only changes when the plugin loads. A failed read is not kept, so the next graph open tries again. It is not asked at all when the origin record has no saved version to compare with. Because the answer is kept for the whole plugin load, the read waits for the plugin's own CLI update to finish, and starts that update itself if a graph opens before the plugin has started it. Otherwise it could keep the old CLI's version until the next restart. An edge release counts only when the user set the developer override, which is the same rule the skill follows.
 
 Versions are compared by number, so 0.61 is newer than 0.60, and 0.61 is newer than 0.61.0-rc1.
 
@@ -177,7 +177,7 @@ Each behavior is tested at the lowest level that can prove it.
 ### Canvas unit and runtime integration tests
 
 - The graph status passes the version the CLI uses through to the freshness check, and the CLI is asked once per plugin load.
-- The read goes through `resolveRadForGraph`, whose existing tests cover waiting for the plugin's CLI update to finish.
+- A read that starts before the plugin's CLI update returns the updated CLI's version, not the old one on disk.
 - A record with no `radiusVersion` does not run the CLI at all.
 - A CLI that cannot be found, or that reports a pull request or unauthorized edge release, skips the check rather than failing the graph.
 - **Full upgrade flow, with fakes:** a 0.60 origin record with a 0.61 CLI sends one refresh. Once the origin record says 0.61, no more refreshes are sent.

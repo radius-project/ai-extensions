@@ -28,8 +28,7 @@ import {
 import {
   buildGraphViaRad,
   ensureRadBinary,
-  resolveRadForGraph,
-  resolveRadiusExtensionRef,
+  resolveInstalledRadiusVersion,
   runRadBicepPublishExtension,
   runRadBicepPublish
 } from "@radius-project/adapter-shared";
@@ -203,10 +202,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   appModel: {
     generatorVersion: createGeneratorVersionReader(),
-    radiusVersion: createRadiusCliVersionReader({
-      resolveRadPath: () => resolveRadForGraph(),
-      resolveExtensionRef: (radPath) => resolveRadiusExtensionRef({ radPath })
-    }),
+    radiusVersion: createRadiusCliVersionReader(resolveInstalledRadiusVersion),
     workspaceHeadCommit,
     workspaceModelRecoverable,
     workspaceSourceChangedSince,
