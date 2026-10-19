@@ -5150,18 +5150,22 @@ test.describe("Radius Canvas in Chromium", () => {
     });
   }
 
+  // A recipe failure's error carries the whole nested Radius error and the
+  // control-plane log.
+  const longRecipeError =
+    "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
+    Array.from(
+      { length: 200 },
+      () =>
+        '{ "code": "OK", "message": "", "target": "/planes/radius/local/resourceGroups/default/providers/Radius.Security/secrets/fixture" }'
+    ).join("\n");
+
   test("keeps Back to Deployments reachable when the failure error is very long @safety", async ({
     page,
     canvas
   }) => {
-    // A recipe failure's error carries the whole nested Radius error and the
-    // control-plane log. Without a height limit the dialog outgrew the panel,
-    // pushing Back to Deployments off-screen with no way to scroll to it.
-    const line =
-      '{ "code": "OK", "message": "", "target": "/planes/radius/local/resourceGroups/default/providers/Radius.Security/secrets/fixture" }';
-    const error =
-      "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
-      Array.from({ length: 200 }, () => line).join("\n");
+    // Without a height limit the dialog outgrew the panel, pushing Back to
+    // Deployments off-screen with no way to scroll to it.
     await page.setViewportSize({ width: 900, height: 600 });
     await page.route("**/api/deploy-status**", async (route) => {
       await route.fulfill({
@@ -5170,7 +5174,7 @@ test.describe("Radius Canvas in Chromium", () => {
         body: JSON.stringify({
           status: "failed",
           active: false,
-          error,
+          error: longRecipeError,
           errorKind: null,
           deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
           repairing: false,
@@ -5202,6 +5206,57 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBeGreaterThan(0);
     await back.click();
     await expect(page.locator("#deploy-progress-modal")).toBeHidden();
+  });
+
+  test("keeps the failure error's scroll and focus while the repair handoff polls @safety", async ({
+    page,
+    canvas
+  }) => {
+    let statusPolls = 0;
+    await page.setViewportSize({ width: 900, height: 600 });
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await page.route("**/api/deploy-status", async (route) => {
+      statusPolls++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          error: longRecipeError,
+          deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+          handoff: { pending: true, state: "pending" }
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
+
+    const errorBlock = page.locator("#deploy-progress-error");
+    await expect(errorBlock).toContainText("Failed step: Run rad commands.");
+    await errorBlock.focus();
+    await errorBlock.evaluate((element) => {
+      element.scrollTop = 200;
+    });
+    await expect
+      .poll(() => errorBlock.evaluate((element) => element.scrollTop))
+      .toBe(200);
+
+    // Two more polls guarantee the first of them has re-rendered the failure.
+    const pollsBefore = statusPolls;
+    await expect
+      .poll(() => statusPolls, { timeout: 15_000 })
+      .toBeGreaterThanOrEqual(pollsBefore + 2);
+    await expect(errorBlock).toBeFocused();
+    expect(await errorBlock.evaluate((element) => element.scrollTop)).toBe(200);
   });
 
   test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({

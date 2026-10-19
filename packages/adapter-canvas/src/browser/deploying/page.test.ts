@@ -2875,6 +2875,56 @@ describe("deploy flow", () => {
     teardown();
   });
 
+  it("does not rewrite an unchanged failure while the repair handoff polls", async () => {
+    const page = fixture();
+    const teardown = init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    let error = "deployment failed";
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        error,
+        handoff: { pending: true, state: "pending" }
+      })
+    );
+    let html = "";
+    let writes = 0;
+    Object.defineProperty(page.progressSubtitle, "innerHTML", {
+      get: () => html,
+      set: (value: string) => {
+        writes++;
+        html = value;
+      }
+    });
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(html).toContain("deployment failed");
+    expect(writes).toBe(1);
+
+    // Rewriting would reset the error region's scroll position and focus.
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(writes).toBe(1);
+
+    error = "deployment failed again";
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(writes).toBe(2);
+    expect(html).toContain("deployment failed again");
+
+    // Anything else that replaces the subtitle forces a fresh render.
+    html = "This may take a few minutes…";
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(writes).toBe(3);
+    expect(html).toContain("deployment failed again");
+    teardown();
+  });
+
   it("shows the repair-failed note when Copilot cannot be reached", async () => {
     const page = fixture();
     init(page);

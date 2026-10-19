@@ -986,6 +986,8 @@ export function initializeDeployingPage(
   // Switches the deploy modal into a "failed" state. errorKind lets a
   // well-known failure (an unpushed branch, a missing OIDC credential) render a
   // tailored panel instead of raw workflow error text.
+  let failureMarkup = "";
+  let failureHtml = "";
   const showDeployFailed = (details: DeployFailureDetails): void => {
     if (progressSpinner) progressSpinner.style.display = "none";
     if (progressFailIcon) progressFailIcon.style.display = "";
@@ -1064,7 +1066,16 @@ export function initializeDeployingPage(
         if (details.runUrl) {
           message += `${details.errorText ? "" : "<br>"}<a href="${escapeBrowserHtml(details.runUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link);">View workflow run in GitHub ↗</a>`;
         }
-        progressSubtitle.innerHTML = message;
+        // The handoff poll re-renders this every few seconds. Rewriting the
+        // same markup would reset the error region's scroll and focus.
+        if (
+          message !== failureMarkup ||
+          progressSubtitle.innerHTML !== failureHtml
+        ) {
+          progressSubtitle.innerHTML = message;
+          failureMarkup = message;
+          failureHtml = progressSubtitle.innerHTML;
+        }
         progressSubtitle.style.color = "var(--rad-danger)";
       }
     }
