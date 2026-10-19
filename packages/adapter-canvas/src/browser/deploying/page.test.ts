@@ -2469,7 +2469,7 @@ describe("deploy flow", () => {
     expect(page.progressTitle.innerHTML).toContain("failed");
     expect(page.progressSubtitle.innerHTML).toContain("workflow exploded");
     expect(page.progressSubtitle.innerHTML).toContain(
-      "https://example.test/run/9"
+      '<div id="deploy-progress-error" role="region" aria-label="Deployment error" tabindex="0" style="max-height:50vh; overflow-y:auto;">workflow exploded</div><a href="https://example.test/run/9"'
     );
     expect(page.failRepairNote.textContent).toContain("Copilot is analyzing");
     expect(page.deployBtn.disabled).toBe(false);
@@ -2755,6 +2755,30 @@ describe("deploy flow", () => {
       "did not complete successfully"
     );
     expect(page.failRepairNote.style.display).toBe("none");
+  });
+
+  it("puts the run link on its own line after the default failure message", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        deployRunUrl: "https://example.test/run/3",
+        handoff: { pending: false, state: "" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.progressSubtitle.innerHTML).toContain(
+      'did not complete successfully.<br><a href="https://example.test/run/3"'
+    );
+    expect(page.progressSubtitle.innerHTML).not.toContain(
+      "deploy-progress-error"
+    );
   });
 
   it("shows the handoff-pending note and retries until handoff resolves", async () => {

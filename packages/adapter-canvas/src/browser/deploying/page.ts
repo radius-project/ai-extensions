@@ -1055,12 +1055,14 @@ export function initializeDeployingPage(
         progressTitle.innerHTML = `Deployment of <strong>${escapeBrowserHtml(details.app)}</strong> to <strong>${escapeBrowserHtml(details.environment)}</strong> failed`;
       }
       if (progressSubtitle) {
+        // A long error scrolls in its own focusable block so the run link
+        // after it stays visible and keyboard users can scroll the text.
         let message =
           details.errorText ?
-            escapeBrowserHtml(details.errorText)
+            `<div id="deploy-progress-error" role="region" aria-label="Deployment error" tabindex="0" style="max-height:50vh; overflow-y:auto;">${escapeBrowserHtml(details.errorText)}</div>`
           : "The deploy workflow run did not complete successfully.";
         if (details.runUrl) {
-          message += `<br><a href="${escapeBrowserHtml(details.runUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link);">View workflow run in GitHub ↗</a>`;
+          message += `${details.errorText ? "" : "<br>"}<a href="${escapeBrowserHtml(details.runUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link);">View workflow run in GitHub ↗</a>`;
         }
         progressSubtitle.innerHTML = message;
         progressSubtitle.style.color = "var(--rad-danger)";

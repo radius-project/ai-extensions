@@ -5182,15 +5182,24 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.goto(
       `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
     );
-    const subtitle = page.locator("#deploy-progress-subtitle");
-    await expect(subtitle).toContainText("Failed step: Run rad commands.");
+    const errorBlock = page.locator("#deploy-progress-error");
+    await expect(errorBlock).toContainText("Failed step: Run rad commands.");
     const back = page.locator("#deploy-fail-back");
     await expect(back).toBeInViewport();
+    await expect(
+      page.getByRole("link", { name: "View workflow run in GitHub ↗" })
+    ).toBeInViewport();
     expect(
-      await subtitle.evaluate(
+      await errorBlock.evaluate(
         (element) => element.scrollHeight > element.clientHeight
       )
     ).toBe(true);
+    await expectNoWcagViolations(page);
+    await errorBlock.focus();
+    await page.keyboard.press("End");
+    await expect
+      .poll(() => errorBlock.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
     await back.click();
     await expect(page.locator("#deploy-progress-modal")).toBeHidden();
   });
