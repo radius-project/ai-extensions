@@ -25,6 +25,7 @@ function origin(overrides: Partial<AppOrigin> = {}): AppOrigin {
     generatedAt: "2026-08-10T23:29:00Z",
     sourceCommit: "a".repeat(40),
     skillVersion: "0.1.0-edge-0b33186",
+    radiusVersion: "0.60",
     appBicepHash: hashAppBicep(MODEL),
     ...overrides
   };
@@ -51,6 +52,7 @@ describe("parseAppOrigin", () => {
         generatedAt: " 2026-08-10T23:29:00Z ",
         sourceCommit: " abc ",
         skillVersion: " 0.1.0 ",
+        radiusVersion: " 0.60 ",
         appBicepHash: " sha256:xyz "
       })
     );
@@ -59,6 +61,7 @@ describe("parseAppOrigin", () => {
       generatedAt: "2026-08-10T23:29:00Z",
       sourceCommit: "abc",
       skillVersion: "0.1.0",
+      radiusVersion: "0.60",
       appBicepHash: "sha256:xyz"
     });
   });
@@ -104,6 +107,29 @@ describe("parseAppOrigin", () => {
       parseAppOrigin(JSON.stringify({ ...origin(), skillVersion: 3 }))
     ).toMatchObject({ skillVersion: "" });
   });
+
+  // Every record written before the field existed lacks it. Those models must
+  // still parse, with the Radius version unknown rather than the record void.
+  it("reads a record written before radiusVersion existed as an unknown Radius version", () => {
+    const fields: Record<string, unknown> = { ...origin() };
+    delete fields.radiusVersion;
+
+    expect(parseAppOrigin(JSON.stringify(fields))).toEqual(
+      origin({ radiusVersion: "" })
+    );
+  });
+
+  it.each([
+    ["blank", "  "],
+    ["not a string", 60]
+  ])(
+    "degrades a %s Radius version to unknown instead of voiding the record",
+    (_label, radiusVersion) => {
+      expect(
+        parseAppOrigin(JSON.stringify({ ...origin(), radiusVersion }))
+      ).toMatchObject({ radiusVersion: "" });
+    }
+  );
 });
 
 describe("serializeAppOrigin", () => {
@@ -111,7 +137,7 @@ describe("serializeAppOrigin", () => {
     expect(serializeAppOrigin(origin())).toBe(
       `{\n  "generatedAt": "2026-08-10T23:29:00Z",\n  "sourceCommit": "${"a".repeat(
         40
-      )}",\n  "skillVersion": "0.1.0-edge-0b33186",\n  "appBicepHash": "${hashAppBicep(
+      )}",\n  "skillVersion": "0.1.0-edge-0b33186",\n  "radiusVersion": "0.60",\n  "appBicepHash": "${hashAppBicep(
         MODEL
       )}"\n}\n`
     );
@@ -120,6 +146,7 @@ describe("serializeAppOrigin", () => {
   it("is independent of the input object's key order", () => {
     const reordered = {
       appBicepHash: origin().appBicepHash,
+      radiusVersion: origin().radiusVersion,
       skillVersion: origin().skillVersion,
       sourceCommit: origin().sourceCommit,
       generatedAt: origin().generatedAt
@@ -172,6 +199,7 @@ describe("freshnessIdentity", () => {
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: "a".repeat(40),
         skillVersion: "0.1.0-test",
+        radiusVersion: "0.60",
         appBicepHash: "sha256:recorded"
       }
     };
@@ -180,12 +208,36 @@ describe("freshnessIdentity", () => {
       freshnessIdentity({ ...recorded, appBicepHash: "sha256:different" })
     );
   });
+
+  // A model regenerated for one Radius upgrade records the new version, so the
+  // next upgrade has to read as new evidence and be asked about again.
+  it("separates records saved with different Radius versions", () => {
+    const recorded = {
+      ...base,
+      status: "radius-version-changed" as const,
+      origin: {
+        generatedAt: "2026-08-11T05:32:32.000Z",
+        sourceCommit: "a".repeat(40),
+        skillVersion: "0.1.0-test",
+        radiusVersion: "0.60",
+        appBicepHash: "sha256:recorded"
+      }
+    };
+
+    expect(freshnessIdentity(recorded)).not.toBe(
+      freshnessIdentity({
+        ...recorded,
+        origin: { ...recorded.origin, radiusVersion: "0.61" }
+      })
+    );
+  });
 });
 
 describe("evaluateAppModelFreshness", () => {
   const current = {
     headCommit: "a".repeat(40),
     generatorVersion: "0.1.0-edge-0b33186",
+    radiusVersion: "0.60",
     hashAppBicep
   };
 
@@ -444,5 +496,108 @@ describe("evaluateAppModelFreshness", () => {
 
     expect(result.status).toBe("up-to-date");
     expect(result.stale).toBe(false);
+  });
+  it("reports a Radius version change when the installed CLI is newer", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      radiusVersion: "0.61",
+      model: MODEL,
+      originText: serializeAppOrigin(origin())
+    });
+
+    expect(result.status).toBe("radius-version-changed");
+    expect(result.stale).toBe(true);
+    expect(result.requiresConfirmation).toBe(false);
+    expect(result.reason).toBe(
+      "The model was generated with Radius 0.60, but the installed Radius CLI uses 0.61, so it may no longer compile."
+    );
+  });
+
+  it("requires confirmation when a hand-edited model also needs a newer Radius version", () => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      radiusVersion: "0.61",
+      model: `${MODEL}// hand edit\n`,
+      originText: serializeAppOrigin(origin())
+    });
+
+    expect(result.status).toBe("manually-edited");
+    expect(result.requiresConfirmation).toBe(true);
+    expect(result.reason).toContain("the installed Radius CLI uses 0.61");
+  });
+
+  it.each([
+    ["the source", { sourceChanged: true }, "source-changed"],
+    ["the generator", { generatorVersion: "9.9.9" }, "generator-changed"]
+  ])(
+    "reports %s ahead of a Radius version change",
+    (_label, otherDrift, status) => {
+      expect(
+        evaluateAppModelFreshness({
+          ...current,
+          ...otherDrift,
+          radiusVersion: "0.61",
+          model: MODEL,
+          originText: serializeAppOrigin(origin())
+        }).status
+      ).toBe(status);
+    }
+  );
+
+  // A teammate on an older plugin cannot regenerate this model, and if they
+  // could, it would move the model back to older types for everyone else. So it
+  // is reported, never refreshed, even when something else drifted too.
+  it.each([
+    ["nothing else changed", {}, MODEL],
+    ["the source also changed", { sourceChanged: true }, MODEL],
+    ["the generator also changed", { generatorVersion: "9.9.9" }, MODEL],
+    ["the model was also edited", { sourceChanged: true }, `${MODEL}// edit\n`]
+  ])(
+    "reports an older installed CLI without asking for a refresh when %s",
+    (_label, otherDrift, model) => {
+      const result = evaluateAppModelFreshness({
+        ...current,
+        ...otherDrift,
+        radiusVersion: "0.59",
+        model,
+        originText: serializeAppOrigin(origin())
+      });
+
+      expect(result.status).toBe("radius-cli-outdated");
+      expect(result.stale).toBe(false);
+      expect(result.requiresConfirmation).toBe(false);
+      expect(result.reason).toBe(
+        "The model was generated with Radius 0.60, but the installed Radius CLI uses the older 0.59. Update the Radius plugin to keep working with this model."
+      );
+    }
+  );
+
+  it.each([
+    ["the record saved no Radius version", "", "0.61"],
+    ["the installed CLI version is unknown", "0.60", ""],
+    ["the record saved an edge version", "latest", "0.61"],
+    ["the installed CLI is an edge build", "0.60", "latest"],
+    ["the installed CLI version is not a Radius version", "0.60", "main"]
+  ])("skips the Radius version check when %s", (_label, saved, installed) => {
+    const result = evaluateAppModelFreshness({
+      ...current,
+      radiusVersion: installed,
+      model: MODEL,
+      originText: serializeAppOrigin(origin({ radiusVersion: saved }))
+    });
+
+    expect(result.status).toBe("up-to-date");
+    expect(result.stale).toBe(false);
+  });
+
+  it("fails open when no Radius version is supplied at all", () => {
+    expect(
+      evaluateAppModelFreshness({
+        ...current,
+        radiusVersion: undefined,
+        model: MODEL,
+        originText: serializeAppOrigin(origin())
+      }).status
+    ).toBe("up-to-date");
   });
 });

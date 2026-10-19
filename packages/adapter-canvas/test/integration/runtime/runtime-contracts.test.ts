@@ -857,6 +857,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit,
         skillVersion: "0.1.0-test",
+        radiusVersion: "0.60",
         appBicepHash: hashAppBicep(model)
       });
     const harness = await createRuntimeSdkHarness({
@@ -895,6 +896,129 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     await handoff?.(request);
 
     expect(harness.session.send).not.toHaveBeenCalled();
+
+    await harness.extension.shutdown("test");
+  });
+
+  // The upgrade flow end to end through the real runtime: a newer CLI asks for
+  // one refresh, the regenerated record stops it, and the next upgrade asks
+  // again.
+  it("asks for one refresh per Radius upgrade and stops once the model records the new version", async () => {
+    const model =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+    const origin = (radiusVersion: string) =>
+      serializeAppOrigin({
+        generatedAt: "2026-08-11T05:32:32.000Z",
+        sourceCommit: "a".repeat(40),
+        skillVersion: "0.1.0-test",
+        radiusVersion,
+        appBicepHash: hashAppBicep(model)
+      });
+    let recorded = "0.60";
+    let installed = "0.61";
+    const harness = await createRuntimeSdkHarness({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+      headCommits: { "workspace:/workspace": "a".repeat(40) },
+      sourceChangedSince: false
+    });
+    harness.deps.appModel.fetchWorkspaceFile = async () => origin(recorded);
+    harness.deps.appModel.radiusVersion = async () => installed;
+    const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+    const send = harness.session.send as ReturnType<typeof vi.fn>;
+    const request = { repo: "acme/widgets", branches: ["main"], page: "graph" };
+
+    await handoff?.(request);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(send.mock.calls[0][0])).toContain(
+      "generated with Radius 0.60, but the installed Radius CLI uses 0.61"
+    );
+
+    // The same versions again, as on every later graph open, ask nothing.
+    send.mockClear();
+    await handoff?.(request);
+    expect(send).not.toHaveBeenCalled();
+
+    // The skill regenerated and the record now saves 0.61.
+    recorded = "0.61";
+    await handoff?.(request);
+    expect(send).not.toHaveBeenCalled();
+
+    // A later plugin upgrade is a new situation and is asked about again.
+    installed = "0.62";
+    await handoff?.(request);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("notes an older Radius CLI instead of asking for a refresh it could not complete", async () => {
+    const model =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+    const harness = await createRuntimeSdkHarness({
+      radiusVersion: "0.60",
+      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            radiusVersion: "0.61",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "workspace:/workspace": "b".repeat(40) },
+      // The source moved too. The refresh it would normally ask for cannot
+      // succeed on an older CLI, so it is not asked for.
+      sourceChangedSince: true
+    });
+
+    await harness.capturedHostCallbacks.appBicepHandoff?.({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph"
+    });
+
+    expect(harness.session.send).not.toHaveBeenCalled();
+    expect(harness.session.log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "generated with Radius 0.61, but the installed Radius CLI uses the older 0.60. Update the Radius plugin"
+      )
+    );
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("does not regenerate a model recorded before Radius versions were saved", async () => {
+    const model =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+    const harness = await createRuntimeSdkHarness({
+      radiusVersion: "0.61",
+      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: `${JSON.stringify(
+          {
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          },
+          null,
+          2
+        )}\n`
+      },
+      headCommits: { "workspace:/workspace": "a".repeat(40) },
+      sourceChangedSince: false
+    });
+
+    await harness.capturedHostCallbacks.appBicepHandoff?.({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph"
+    });
+
+    expect(harness.session.send).not.toHaveBeenCalled();
+    expect(harness.deps.appModel.radiusVersion).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
@@ -954,6 +1078,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: String(commit).padStart(40, "0"),
         skillVersion: "0.1.0-test",
+        radiusVersion: "0.60",
         appBicepHash: hashAppBicep(model)
       });
     const handoff = harness.capturedHostCallbacks.appBicepHandoff;

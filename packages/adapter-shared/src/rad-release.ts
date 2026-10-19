@@ -69,3 +69,15 @@ export function radiusExtensionRefForRelease(
     : `${match[1]}.${match[2]}.${match[3]}-${match[4]}`;
   return `${RADIUS_EXTENSION_REGISTRY}:${tag}`;
 }
+
+// The Radius version part of a Radius Bicep extension reference: `0.60` for
+// `br:biceptypes.azurecr.io/radius:0.60`. This is the form the origin record
+// saves as `radiusVersion`. Returns "" for a reference outside the Radius
+// registry, such as a local package, since it names no Radius version.
+export function radiusVersionFromExtensionRef(
+  ref: string | null | undefined
+): string {
+  const prefix = `${RADIUS_EXTENSION_REGISTRY}:`;
+  const value = ref?.trim() ?? "";
+  return value.startsWith(prefix) ? value.slice(prefix.length) : "";
+}

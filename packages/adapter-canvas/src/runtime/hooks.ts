@@ -326,6 +326,16 @@ export function appModelStaleNotice(status: AppModelStatus): string {
   return `Radius: the application model${where} on branch \`${status.branch}\` may be out of date. ${status.freshness.reason} Refreshing it would require regenerating and pushing to that branch.`;
 }
 
+// Note shown when the installed Radius CLI is older than the one the model was
+// generated with. Nothing is regenerated, so this is the only signal the user
+// gets, and the reason it carries already says to update the plugin.
+export function appModelRadiusCliOutdatedNotice(
+  status: AppModelStatus
+): string {
+  const where = status.repo ? ` for ${status.repo}` : "";
+  return `Radius: the application model${where} on branch \`${status.branch}\` was not refreshed. ${status.freshness.reason}`;
+}
+
 // Maximum automatic repair-and-redeploy attempts before handing back to the user.
 export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
 

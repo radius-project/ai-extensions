@@ -286,11 +286,14 @@ export interface ClockDependencies {
 
 // Facts needed to decide whether an existing application model still describes
 // the branch it sits on. Grouped into one narrow port so the freshness check has
-// a single seam: a graph open reads an origin record, a head commit, and the installed
-// generator version, and nothing else.
+// a single seam: a graph open reads an origin record, a head commit, the installed
+// generator version, and the installed Radius version, and nothing else.
 export interface AppModelDependencies {
   // Installed generator (radius-app-bicep) version, or "" when unresolvable.
   generatorVersion(): string;
+  // Radius version the installed Radius CLI compiles with, in the form the
+  // origin record saves it (`0.60`), or "" when it cannot be resolved.
+  radiusVersion(): Promise<string>;
   // Commit the local worktree is on. "" when it cannot be resolved.
   workspaceHeadCommit(
     workspacePath: string | null | undefined

@@ -29,6 +29,7 @@ interface StatusOverrides {
   requiresConfirmation?: boolean;
   reason?: string;
   sourceCommit?: string;
+  radiusVersion?: string;
 }
 
 function modelStatus(
@@ -43,7 +44,10 @@ function modelStatus(
     refreshable: overrides.refreshable ?? true,
     freshness: {
       status,
-      stale: status !== "up-to-date" && status !== "missing",
+      stale:
+        status !== "up-to-date" &&
+        status !== "missing" &&
+        status !== "radius-cli-outdated",
       requiresConfirmation:
         overrides.requiresConfirmation ??
         (status === "unrecorded" || status === "manually-edited"),
@@ -56,6 +60,7 @@ function modelStatus(
             generatedAt: "2026-08-11T05:32:32.000Z",
             sourceCommit: overrides.sourceCommit,
             skillVersion: "0.1.0-test",
+            radiusVersion: overrides.radiusVersion ?? "0.60",
             appBicepHash: "sha256:abc"
           }
     }
@@ -215,6 +220,26 @@ describe("appModelHandoffKey", () => {
     );
 
     expect(before).not.toBe(after);
+  });
+
+  // After one Radius upgrade regenerates the model, its record saves the new
+  // version. The next upgrade has to read as a new situation, or it is never
+  // reported.
+  it("changes when the recorded Radius version changes", () => {
+    const key = (radiusVersion: string) =>
+      appModelHandoffKey(
+        "a/b",
+        ["feat"],
+        [
+          modelStatus("a/b", "feat", {
+            status: "radius-version-changed",
+            sourceCommit: "aaa",
+            radiusVersion
+          })
+        ]
+      );
+
+    expect(key("0.60")).not.toBe(key("0.61"));
   });
 
   it("names every branch it covers", () => {
@@ -1175,6 +1200,94 @@ describe("createAppModelHandoff", () => {
 
     expect(sent).toHaveLength(1);
     expect(sent[0].prompt).toContain("would discard content");
+  });
+
+  it("asks for a refresh when the installed Radius CLI is newer than the model's", async () => {
+    const { handOff, sent, logged } = harness({
+      statuses: {
+        feat: modelStatus("a/b", "feat", {
+          status: "radius-version-changed",
+          sourceCommit: "aaa",
+          reason:
+            "The model was generated with Radius 0.60, but the installed Radius CLI uses 0.61, so it may no longer compile."
+        })
+      }
+    });
+
+    await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].prompt).toContain("the installed Radius CLI uses 0.61");
+    expect(logged).toEqual([]);
+  });
+
+  // An older CLI cannot regenerate the model, so the user gets a note telling
+  // them to update the plugin instead of a refresh that would fail.
+  it.each([
+    ["the workspace branch", true],
+    ["another branch", false]
+  ])(
+    "notes an older Radius CLI on %s without asking for a refresh",
+    async (_label, refreshable) => {
+      const { handOff, sent, logged } = harness({
+        statuses: {
+          feat: modelStatus("a/b", "feat", {
+            status: "radius-cli-outdated",
+            sourceCommit: "aaa",
+            refreshable,
+            reason: "Update the Radius plugin to keep working with this model."
+          })
+        }
+      });
+
+      await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
+
+      expect(sent).toEqual([]);
+      expect(logged).toEqual([
+        "Radius: the application model for a/b on branch `feat` was not refreshed. Update the Radius plugin to keep working with this model."
+      ]);
+    }
+  );
+
+  // A diff can put an older-CLI branch beside a stale one. The note must not be
+  // lost because the stale branch's refresh returns first.
+  it("notes an older Radius CLI even when another branch is refreshed", async () => {
+    const { handOff, sent, logged } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", {
+          status: "radius-cli-outdated",
+          sourceCommit: "aaa"
+        }),
+        feat: modelStatus("a/b", "feat", { status: "source-changed" })
+      }
+    });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["main", "feat"],
+      page: "graph-diff"
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("on branch `main` was not refreshed");
+  });
+
+  it("notes an older Radius CLI once for a panel that renders again", async () => {
+    const { handOff, logged } = harness({
+      statuses: {
+        feat: modelStatus("a/b", "feat", {
+          status: "radius-cli-outdated",
+          sourceCommit: "aaa"
+        })
+      }
+    });
+    const state: CanvasState = {};
+
+    await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
+    await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
+
+    expect(logged).toHaveLength(1);
   });
 
   it("only notes a stale model on a branch modeling may not rewrite", async () => {

@@ -15,6 +15,7 @@
 
 import {
   appBicepHandoffMessage,
+  appModelRadiusCliOutdatedNotice,
   appModelRefreshMessage,
   appModelStaleNotice,
   appModelUnverifiedMessage,
@@ -130,6 +131,7 @@ export function appModelHandoffKey(
         status.refreshable ? "local" : "remote",
         origin?.sourceCommit ?? "",
         origin?.skillVersion ?? "",
+        origin?.radiusVersion ?? "",
         origin ? "" : status.freshness.appBicepHash,
         status.freshness.requiresConfirmation ? "confirm" : "auto"
       ].join("/");
@@ -380,6 +382,17 @@ export function createAppModelHandoff(
 
     if (observedClaim) deps.missingModelHandoffs.release(observedClaim);
     reserveState();
+
+    // A Radius CLI older than the one that generated the model is reported,
+    // never refreshed: the skill cannot regenerate with it, and a regeneration
+    // that could would move a shared model back to older types. Logged before
+    // any refresh below, which may return early. A panel logs it once per
+    // situation, because the key reserved above stops its repeat renders here.
+    for (const status of present) {
+      if (status.freshness.status === "radius-cli-outdated") {
+        deps.log(appModelRadiusCliOutdatedNotice(status));
+      }
+    }
 
     // Checked before plain staleness: a model this extension cannot prove it
     // generated needs the user's agreement, because regenerating it destroys
