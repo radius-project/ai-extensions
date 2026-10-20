@@ -66,6 +66,10 @@ case "${1:-} ${2:-}" in
         printf '%s\n' "${APP_LIST_JSON}"
         ;;
     "resource list")
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
+            exit 64
+        fi
         if [[ "${RAD_DISCOVERY_FAIL}" == "resource" ]]; then
             exit 1
         fi

@@ -924,7 +924,7 @@ app_resources_json() {
     local app="$1"
     local resources_json
     resources_json="$(
-        rad resource list --preview --application "${app}" -o json
+        rad resource list --application "${app}" -o json
     )" || fail "failed to inspect resources for Radius application ${app}"
     resources_json="$(
         normalize_items_json \

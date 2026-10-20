@@ -236,8 +236,8 @@ case "${1:-} ${2:-}" in
         printf '[{"name":"%s"}]\n' "${RAD_APP_LIST_NAME-fallback-app}"
         ;;
     "resource list")
-        if [[ " $* " != *" --preview "* ]]; then
-            echo "rad: resource list must use --preview" >&2
+        if [[ " $* " == *" --preview "* ]]; then
+            echo "Error: unknown flag: --preview" >&2
             exit 64
         fi
         if [[ "${RAD_RESOURCE_LIST_SHOULD_FAIL:-false}" == "true" ]]; then
@@ -640,7 +640,7 @@ assert_status_dir_contains_exactly "${EXPECTED_STATUS_FILES}"
 assert_progress_contract
 progress_jq '.resources == []' ||
     fail "expected an empty .resources array when rad resource list fails"
-assert_output_contains "::warning::rad resource list --preview failed; deploy progress will contain no resources."
+assert_output_contains "::warning::rad resource list failed; deploy progress will contain no resources."
 assert_output_contains "rad: could not reach the control plane"
 
 # ---------------------------------------------------------------------------
@@ -780,7 +780,7 @@ grep -q "LC_ALL=C sed" "${PROGRESS_HELPER}" ||
     fail "artifact name sanitization must strip invalid bytes under LC_ALL=C"
 # APP_NAME is intentionally literal because this checks the generated script.
 # shellcheck disable=SC2016
-grep -q 'rad resource list --preview -a "$APP_NAME" -o json' "${BODY_SCRIPT}" ||
-    fail "deploy progress must list Radius.Core resources with --preview"
+grep -q 'rad resource list -a "$APP_NAME" -o json' "${BODY_SCRIPT}" ||
+    fail "deploy progress must list Radius.Core resources without --preview"
 
 echo "publish-deploy-status tests passed"

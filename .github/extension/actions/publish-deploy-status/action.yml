@@ -136,21 +136,21 @@ runs:
         # still recover if that mapping goes stale. Unknown states normalize to
         # in_progress, never failed, so a new Radius state cannot paint a node red.
         #
-        # `rad resource list --preview -o json` marshals
+        # `rad resource list -o json` marshals
         # []generated.GenericResource directly, so the payload is a bare array
         # with no object wrapper - iterate it with `.[]?` and nothing else.
         RESOURCES_JSON="[]"
         RESOURCE_STDERR=$(mktemp)
-        if RAW_RESOURCES=$(rad resource list --preview -a "$APP_NAME" -o json 2> "$RESOURCE_STDERR"); then
+        if RAW_RESOURCES=$(rad resource list -a "$APP_NAME" -o json 2> "$RESOURCE_STDERR"); then
           if ! RESOURCES_JSON=$(printf '%s' "$RAW_RESOURCES" |
             radius_normalize_resources 2>/dev/null); then
-            echo "::warning::rad resource list --preview returned invalid JSON; deploy progress will contain no resources."
+            echo "::warning::rad resource list returned invalid JSON; deploy progress will contain no resources."
             RESOURCES_JSON="[]"
           fi
         else
           RESOURCE_ERROR=$(tr '\r\n' '  ' < "$RESOURCE_STDERR" | cut -c1-500)
           RESOURCE_ERROR=$(escape_workflow_command "${RESOURCE_ERROR:-unknown error}")
-          echo "::warning::rad resource list --preview failed; deploy progress will contain no resources. ${RESOURCE_ERROR}"
+          echo "::warning::rad resource list failed; deploy progress will contain no resources. ${RESOURCE_ERROR}"
         fi
         [[ -n "$RESOURCES_JSON" ]] || RESOURCES_JSON="[]"
         TERMINAL_SEQUENCE=$(radius_next_terminal_sequence)
