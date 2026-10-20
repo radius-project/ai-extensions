@@ -53,6 +53,7 @@ Start with the status table. Use the phase sections for the work still to come. 
 | Screenshot review           | A selected stable visual state changes after Phase 7 begins                      | Layout, clipping, theme, graph, and status presentation                                                    |
 | Real-host check             | Before release after Phase 8 qualification                                       | Installation, discovery, panel lifecycle, focus, reopen, and reconnect                                     |
 | Cloud E2E                   | Never required for merge; scheduled and on demand                                | That real Azure and GitHub accept what the extension sends                                                 |
+| GitHub API contracts        | Never required for merge; explicitly enabled schedule and manual dispatch        | Selected real GitHub permission responses match production adapters                                        |
 | Headlamp compatibility      | Never required for merge; scheduled and on demand                                | That published library candidates load and render in the real Headlamp host without changing its own graph |
 
 Tests that do not open a browser do not retry. Browser and host checks may retry once to collect useful failure information, but the original failure remains visible and a retry-only pass is recorded as flaky. Setting a check aside requires a linked issue, owner, narrow scope, and clear end condition. Safety checks cannot be skipped or set aside.
