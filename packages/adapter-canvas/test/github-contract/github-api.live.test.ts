@@ -17,6 +17,7 @@ import { needsWorkflowScope } from "../../src/server/services/workflow-credentia
 import { deleteGitHubEnvironmentIdempotent } from "../../src/server/services/github-environment.js";
 import { runVerificationDispatch } from "../../src/server/services/verification-dispatch.js";
 import {
+  createContractDispatchPorts,
   readContractConfig,
   withAppExecutor,
   withCleanup,
@@ -321,9 +322,9 @@ describe.skipIf(process.env.RUN_LIVE_GITHUB_API_TESTS !== "1")(
               ref: branch,
               operationMarker: "",
               allowRegistrationRetry: false,
-              ports: {
-                runGh: (args) => run(executor, args),
-                sendDispatch: async () => {
+              ports: createContractDispatchPorts(
+                (args) => run(executor, args),
+                async () => {
                   dispatchCount += 1;
                   dispatch = await run(executor, [
                     "workflow",
@@ -335,16 +336,8 @@ describe.skipIf(process.env.RUN_LIVE_GITHUB_API_TESTS !== "1")(
                     branch
                   ]);
                   return dispatch;
-                },
-                persist: async () => {},
-                stopBoundary: async () => false,
-                applyIdentity: () => {},
-                terminalizeManualRequired: () => {},
-                now: Date.now,
-                sleep: async () => {
-                  throw new Error("Permission denial must not poll or retry.");
                 }
-              }
+              )
             });
             expect(dispatch?.stderr).toMatch(/HTTP 403/);
             expect(dispatch?.stderr).toMatch(/Resource not accessible/i);

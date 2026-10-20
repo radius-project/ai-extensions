@@ -6,6 +6,25 @@ import {
   resetGhIdentityCache,
   type SelectedGhExecutor
 } from "../../src/gh.js";
+import type { VerificationDispatchPorts } from "../../src/server/services/verification-dispatch.js";
+
+export function createContractDispatchPorts(
+  runGh: VerificationDispatchPorts["runGh"],
+  sendDispatch: VerificationDispatchPorts["sendDispatch"]
+): VerificationDispatchPorts {
+  return {
+    runGh,
+    sendDispatch,
+    persist: async () => {},
+    stopBoundary: async () => true,
+    applyIdentity: () => {},
+    terminalizeManualRequired: () => {},
+    now: Date.now,
+    sleep: async () => {
+      throw new Error("Permission denial must not poll or retry.");
+    }
+  };
+}
 
 export interface ContractConfig {
   repo: string;

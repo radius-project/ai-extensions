@@ -1,7 +1,57 @@
 import { existsSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SelectedGhExecutor } from "../../src/gh.js";
-import { readContractConfig, withAppExecutor, withCleanup } from "./support.js";
+import { runVerificationDispatch } from "../../src/server/services/verification-dispatch.js";
+import {
+  createContractDispatchPorts,
+  readContractConfig,
+  withAppExecutor,
+  withCleanup
+} from "./support.js";
+
+it("lets the live dispatch fixture send once and return the provider denial", async () => {
+  const calls: string[] = [];
+  const denial = {
+    code: 1,
+    stdout: "",
+    stderr: "Resource not accessible by integration (HTTP 403)"
+  };
+  const outcome = await runVerificationDispatch({
+    operation: {},
+    kind: "github_workflow.dispatch",
+    target: "example/contract-sandbox:radius-contract-dispatch.yml",
+    repo: "example/contract-sandbox",
+    workflowPath: ".github/workflows/radius-contract-dispatch.yml",
+    workflowFile: "radius-contract-dispatch.yml",
+    environment: "contract",
+    ref: "main",
+    operationMarker: "",
+    allowRegistrationRetry: false,
+    ports: createContractDispatchPorts(
+      async (args) => {
+        expect(args).toEqual([
+          "run",
+          "list",
+          "--workflow=radius-contract-dispatch.yml",
+          "--limit",
+          "1",
+          "--json",
+          "databaseId",
+          "--repo",
+          "example/contract-sandbox"
+        ]);
+        calls.push("baseline");
+        return { code: 0, stdout: "[]", stderr: "" };
+      },
+      async () => {
+        calls.push("dispatch");
+        return denial;
+      }
+    )
+  });
+  expect(calls).toEqual(["baseline", "dispatch"]);
+  expect(outcome).toMatchObject({ state: "rejected", result: denial });
+});
 
 const env = {
   GITHUB_CONTRACT_REPOSITORY: "example/contract-sandbox",
