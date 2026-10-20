@@ -297,6 +297,10 @@ describe("cloud-e2e.yml", () => {
         "${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}",
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
         "${{ steps.fixture.outputs.full-name }}",
+      AIEXT_CLOUD_E2E_FOREIGN_APP_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_FOREIGN_APP_NAME }}",
+      AIEXT_CLOUD_E2E_ORPHAN_APP_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_ORPHAN_APP_NAME }}",
       AIEXT_CLOUD_E2E_RESOURCE_GROUP:
         "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}",
       CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",

@@ -97,7 +97,7 @@ jobs:
     # dependency install, browser download, teardown, and artifact upload.
     # One value covers both canvas hosts; the Copilot app host has the longer
     # suite budget, because it adds the app start and modeling stages.
-    timeout-minutes: 290
+    timeout-minutes: 340
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
@@ -252,6 +252,11 @@ jobs:
           AIEXT_CLOUD_E2E_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
+          # Optional. Each names an Entra application an administrator seeded
+          # once and that the CI identity does not own. Without a value, the
+          # matching refusal probe skips and says why.
+          AIEXT_CLOUD_E2E_FOREIGN_APP_NAME: ${{ vars.AIEXT_CLOUD_E2E_FOREIGN_APP_NAME }}
+          AIEXT_CLOUD_E2E_ORPHAN_APP_NAME: ${{ vars.AIEXT_CLOUD_E2E_ORPHAN_APP_NAME }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment
           # before starting Canvas or any CLI child command. With the Copilot
