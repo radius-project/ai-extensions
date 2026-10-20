@@ -1951,6 +1951,65 @@ describe("environments — list-environments", () => {
     expect(JSON.parse(recording.body).environments[0].status).toBe("unknown");
   });
 
+  it.each([100, 101, 201])(
+    "finds an environment's verification at run-list position %i",
+    async (position) => {
+      const pages = Array.from(
+        { length: position },
+        (_, index) => `${1000 - index}\tcompleted\tsuccess`
+      );
+      const targetRunId = 1001 - position;
+      const script: CliScript = {
+        [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+        [ENV_PATH.vars("o/r", "dev")]: { stdout: "RADIUS_MANAGED\ttrue" },
+        [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+        [ENV_PATH.statuses("o/r", "100")]: {
+          stdout: `https://github.com/o/r/actions/runs/${targetRunId}`
+        }
+      };
+      const runCalls: string[][] = [];
+      const misses: string[] = [];
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+
+      await handleListEnvironments(
+        ctx,
+        deps({
+          envListCacheGet: () => undefined,
+          envListCacheGeneration: () => 0,
+          envListCacheSet: vi.fn(),
+          now: () => 0,
+          cliExec: (command, args, options, callback) => {
+            if (args.includes(ENV_PATH.verifyRuns("o/r"))) {
+              runCalls.push(args);
+              const visible =
+                args.includes("--paginate") ? pages : pages.slice(0, 100);
+              callback(null, visible.join("\n"), "");
+              return;
+            }
+            cliFake(script, misses)(command, args, options, callback);
+          },
+          readInstanceEntry: () => undefined,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+
+      expect(JSON.parse(recording.body).environments[0].status).toBe("success");
+      expect(runCalls).toEqual([
+        [
+          "api",
+          "--paginate",
+          ENV_PATH.verifyRuns("o/r"),
+          "--jq",
+          '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
+        ]
+      ]);
+      expect(misses).toEqual([]);
+    }
+  );
+
   it.each([
     [
       "azure",
@@ -2145,7 +2204,7 @@ describe("environments — list-environments", () => {
       _options: { timeout: number },
       callback: (error: Error | null, stdout: string, stderr: string) => void
     ) => {
-      if (args.includes("--paginate")) {
+      if (args.includes(ENV_PATH.names("o/r"))) {
         throw new Error("spawn failed");
       }
       callback(null, "", "");
@@ -2176,7 +2235,7 @@ describe("environments — list-environments", () => {
       _options: { timeout: number },
       callback: (error: Error | null, stdout: string, stderr: string) => void
     ) => {
-      if (args.includes("--paginate")) throw new Error("sensitive");
+      if (args.includes(ENV_PATH.names("o/r"))) throw new Error("sensitive");
       callback(null, "", "");
     };
     await handleListEnvironments(

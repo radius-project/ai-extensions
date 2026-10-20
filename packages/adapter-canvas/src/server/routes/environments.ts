@@ -883,6 +883,7 @@ export async function handleListEnvironments(
     //    of the names, so there's no reason to wait.
     const verifyRunsPromise = ghResult([
       "api",
+      "--paginate",
       `/repos/${repo}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
       "--jq",
       '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'

@@ -7,6 +7,7 @@ import {
   providerRecoveryManualGuidance,
   requestStop,
   settleProviderMutation,
+  stopAtBoundary,
   toPersistedOperation
 } from "../../operations.js";
 import {
@@ -179,6 +180,102 @@ describe("isProtectedBranchFailure", () => {
 });
 
 describe("committing a workflow file", () => {
+  it("does not commit twice after a successful write, persisted stop, and restart", async () => {
+    const operation = createOperation({ operationId: "op_workflow" });
+    const saved: string[] = [];
+    const commitSha = "a".repeat(40);
+    const first = harness({
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }],
+      runGhWorkflow: [
+        {
+          code: 0,
+          stdout: JSON.stringify({
+            content: { sha: "blob-1" },
+            commit: { sha: commitSha }
+          })
+        }
+      ]
+    });
+    first.ports.mutationRecovery = {
+      operation,
+      persist: async () => {
+        saved.push(JSON.stringify(toPersistedOperation(operation)));
+      }
+    };
+    const file = ".github/workflows/a.yml";
+    const written = await createWorkflowFileCommitter(
+      first.ports,
+      target
+    ).commitWorkflowFileSmart(file, CONTENT, "Add a");
+
+    expect(written).toMatchObject({ ok: true, commitSha });
+    expect(JSON.parse(saved.at(-1) ?? "{}").providerRecovery.mutations).toEqual(
+      [
+        expect.objectContaining({
+          kind: "github_workflow.put",
+          status: "confirmed"
+        })
+      ]
+    );
+    expect(requestStop(operation)).toBe(true);
+    stopAtBoundary(operation, "after-workflow-commit");
+    const persisted = JSON.stringify(toPersistedOperation(operation));
+    const reloaded = fromPersistedOperation(JSON.parse(persisted));
+    expect(reloaded).toMatchObject({
+      state: "cancelled",
+      control: { stop: { boundary: "after-workflow-commit" } }
+    });
+
+    const second = harness({
+      runGh: [
+        { code: 0, stdout: "blob-1" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-1", content: CONTENT })
+        },
+        {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              sha: commitSha,
+              commit: {
+                message:
+                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:.github/workflows/a.yml:fff71b97a5a94949"
+              }
+            }
+          ])
+        }
+      ]
+    });
+    second.ports.mutationRecovery = {
+      operation: reloaded,
+      persist: async () => {
+        saved.push(JSON.stringify(toPersistedOperation(reloaded)));
+      }
+    };
+
+    await expect(
+      createWorkflowFileCommitter(second.ports, target).commitWorkflowFileSmart(
+        file,
+        CONTENT,
+        "Add a"
+      )
+    ).resolves.toEqual(written);
+    expect(
+      first.calls.filter((call) => call.kind === "runGhWorkflow")
+    ).toHaveLength(1);
+    expect(
+      second.calls.filter((call) => call.kind === "runGhWorkflow")
+    ).toEqual([]);
+    expect(second.calls.map((call) => call.args[1])).toEqual([
+      "/repos/octo/app/contents/.github/workflows/a.yml",
+      "/repos/octo/app/contents/.github/workflows/a.yml",
+      "/repos/octo/app/commits?per_page=100&page=1"
+    ]);
+    expect(second.tempRemovals).toEqual(["/tmp/body-1.json"]);
+    expect(reloaded.state).toBe("cancelled");
+  });
+
   it("does not write when the workflow already matches generated content", async () => {
     const bytes = Buffer.from(CONTENT, "base64");
     const blobSha = createHash("sha1")

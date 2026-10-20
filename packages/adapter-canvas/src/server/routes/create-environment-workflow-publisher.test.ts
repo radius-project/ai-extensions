@@ -265,6 +265,34 @@ describe("buildManualRoleAssignmentGuidance", () => {
 });
 
 describe("describeWorkflowCommitFailure", () => {
+  it.each(["verify", "deploy"] as const)(
+    "gives App permission recovery instead of OAuth scope advice for a %s workflow",
+    (kind) => {
+      const diagnostic =
+        "HTTP 403: refusing to allow a GitHub App to create or update workflow `.github/workflows/x.yml` without `workflows` permission";
+
+      const failure = describeWorkflowCommitFailure(
+        kind,
+        ".github/workflows/x.yml",
+        "octo/app",
+        diagnostic
+      );
+
+      expect(failure.status).toBe(400);
+      expect(failure.code).toBe(`${kind}-workflow-commit-failed`);
+      expect(failure.error).toContain(diagnostic);
+      expect(failure.error).toContain(
+        "Grant the GitHub App Workflows: write permission"
+      );
+      expect(failure.error).toContain(
+        "approve the updated installation permissions"
+      );
+      expect(failure.error).toContain("retry with a new installation token");
+      expect(failure.error).not.toContain("auth refresh -h");
+      expect(failure.error).not.toContain("fork the repository");
+    }
+  );
+
   it("uses the bundled GitHub CLI path for workflow-scope guidance", () => {
     const failure = describeWorkflowCommitFailure(
       "verify",

@@ -262,6 +262,68 @@ function statuses(body: unknown): string[] {
   return (environments ?? []).map((environment) => environment.status);
 }
 
+describe("paginated verification history over HTTP", () => {
+  it("discards partial run output after a later-page error and recovers on a fresh listing", async () => {
+    const script = listingScript("7\tdev");
+    const runPath =
+      "/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100";
+    const firstPage = Array.from(
+      { length: 100 },
+      (_, index) => `${200 - index}\tcompleted\tsuccess`
+    ).join("\n");
+    const laterPage = "42\tcompleted\tsuccess";
+    let failLaterPage = true;
+    const runCalls: string[][] = [];
+    const statusCalls: string[][] = [];
+    const harness = await start(script, {
+      cliExec: (_command, args, _options, callback) => {
+        const path = args.find((arg) => arg.startsWith("/repos/")) ?? "";
+        if (path === runPath) {
+          runCalls.push(args);
+          if (!args.includes("--paginate")) {
+            callback(null, firstPage, "");
+          } else if (failLaterPage) {
+            callback(
+              new Error("page 3 failed"),
+              `${firstPage}\n${laterPage}`,
+              "HTTP 403: API rate limit exceeded"
+            );
+          } else {
+            callback(null, `${firstPage}\n${laterPage}`, "");
+          }
+          return;
+        }
+        if (path.includes("/statuses?")) statusCalls.push(args);
+        const answer = script[path];
+        if (!answer) throw new Error(`Unexpected API path: ${path}`);
+        callback(
+          answer.error ?? null,
+          answer.stdout ?? "",
+          answer.stderr ?? ""
+        );
+      }
+    });
+
+    const failed = await harness.list();
+
+    expect(failed.status).toBe(200);
+    expect(failed.cacheControl).toBe("no-store");
+    expect(statuses(failed.body)).toEqual(["pending"]);
+    expect(statusCalls).toEqual([]);
+    expect(failed.rawBody).not.toContain("API rate limit");
+
+    failLaterPage = false;
+    harness.invalidate(REPO);
+    const recovered = await harness.list();
+
+    expect(recovered.status).toBe(200);
+    expect(statuses(recovered.body)).toEqual(["success"]);
+    expect(runCalls).toHaveLength(2);
+    expect(runCalls.every((args) => args.includes("--paginate"))).toBe(true);
+    expect(statusCalls).toHaveLength(1);
+  });
+});
+
 function rolledBackOperation() {
   const operation = createOperation({
     provider: "azure",

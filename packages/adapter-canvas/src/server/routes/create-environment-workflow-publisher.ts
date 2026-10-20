@@ -246,8 +246,13 @@ export function describeWorkflowCommitFailure(
   ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): { status: number; error: string; code: string } {
   const hint =
-    needsWorkflowScope(stderr) ?
-      workflowScopeHint(ghCommandPresentation)
+    (
+      /refusing to allow a GitHub App .* without .?workflows.? permission/i.test(
+        stderr || ""
+      )
+    ) ?
+      "Grant the GitHub App Workflows: write permission, approve the updated installation permissions, and retry with a new installation token. GitHub CLI auth refresh cannot change GitHub App permissions."
+    : needsWorkflowScope(stderr) ? workflowScopeHint(ghCommandPresentation)
     : WRITE_ACCESS_HINT;
   const label =
     kind === "verify" ? "verify-credentials workflow" : "deploy workflow";

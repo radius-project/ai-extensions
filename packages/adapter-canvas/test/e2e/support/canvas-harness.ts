@@ -839,6 +839,7 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         tool: "gh",
         args: [
           "api",
+          "--paginate",
           `/repos/${REPOSITORY}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
           "--jq",
           '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
