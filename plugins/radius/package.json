@@ -1,0 +1,15 @@
+{
+  "name": "radius",
+  "version": "0.2.3",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "main": "com.github.copilot/extensions/radius/extension.mjs",
+  "description": "Radius canvas extension: application modeling, graph visualization, and deployment for GitHub Copilot.",
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.16"
+  },
+  "radiusSourceRef": "4e657cdd16a005c5e0c4e6d34e35a0cf832224bb"
+}
