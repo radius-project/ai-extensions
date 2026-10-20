@@ -2571,6 +2571,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(payload.error).toContain("retry with a new installation token");
     expect(payload.error).not.toContain("auth refresh -h");
     expect(payload.error).not.toContain("fork the repository");
+    expect(payload.error).not.toContain("PR fallback failed");
     expect(harness.committedFiles).toEqual([]);
     expect(harness.operation.verification).toBeUndefined();
     expect(
@@ -2579,11 +2580,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       )
     ).toHaveLength(1);
     expect(
-      harness.ghCalls.filter((call) =>
-        /^(workflow run |api --method POST \/repos\/octo\/app\/git\/refs)/.test(
-          call
-        )
-      )
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
     ).toEqual([]);
   });
 
