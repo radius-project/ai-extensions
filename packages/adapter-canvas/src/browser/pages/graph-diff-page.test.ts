@@ -82,11 +82,20 @@ function fixture(options: FixtureOptions = {}) {
   const headSelect = createFakeSelect("head-branch");
   headSelect.value = head;
   const status = createFakeElement("diff-status");
+  const modelingRefresh = createFakeInput("modeling-refresh");
+  modelingRefresh.hidden = true;
   const progressHost = createFakeElement(DIFF_PROGRESS_STEPS_ID);
   const graphContainer = createFakeElement("graph-container");
   const summary = createFakeElement("graph-diff-summary");
   summary.textContent = "No application graph changes.";
-  const elements = [state, app, progressHost, graphContainer, summary];
+  const elements = [
+    state,
+    app,
+    progressHost,
+    graphContainer,
+    summary,
+    modelingRefresh
+  ];
   if (withRepoInput) elements.push(repoInput);
   if (withBaseSelect) elements.push(baseSelect);
   if (withHeadSelect) elements.push(headSelect);
@@ -118,6 +127,7 @@ function fixture(options: FixtureOptions = {}) {
     base: baseSelect,
     head: headSelect,
     status,
+    modelingRefresh,
     progressHost,
     graphContainer,
     summary
@@ -125,6 +135,144 @@ function fixture(options: FixtureOptions = {}) {
 }
 
 describe("initializeGraphDiffPage", () => {
+  it("authorizes the explicit Refresh once, hides it while a request runs, and never authorizes automatic comparison or polls", async () => {
+    const { browser, modelingRefresh } = fixture();
+    const bodies: Record<string, unknown>[] = [];
+    const hiddenDuringRequest: boolean[] = [];
+    browser.net.handle("/api/diff-branches", (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      hiddenDuringRequest.push(modelingRefresh.hidden);
+      return jsonResponse(
+        bodies.length === 2 ?
+          { needsAppBicep: true }
+        : { modelingFailed: true, error: "Recipe unavailable." }
+      );
+    });
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(bodies[0]).not.toHaveProperty("retryModeling");
+    expect(modelingRefresh.hidden).toBe(false);
+    modelingRefresh.dispatch("click");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(bodies[1]).toMatchObject({ retryModeling: true, restartWait: true });
+    expect(modelingRefresh.hidden).toBe(true);
+    expect(modelingRefresh.focusCount).toBe(0);
+    expect(modelingRefresh.disabled).toBe(false);
+    browser.clock.tick(DIFF_RETRY_MS);
+    await flushPromises();
+    expect(bodies[2]).not.toHaveProperty("retryModeling");
+    expect(modelingRefresh.hidden).toBe(false);
+    expect(modelingRefresh.focusCount).toBe(0);
+    modelingRefresh.dispatch("click");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(bodies[3]).toMatchObject({ retryModeling: true });
+    expect(modelingRefresh.hidden).toBe(false);
+    expect(modelingRefresh.focusCount).toBe(1);
+    expect(hiddenDuringRequest).toEqual([true, true, true, true]);
+    teardown();
+    expect(modelingRefresh.listenerCount()).toBe(0);
+  });
+
+  it("does not carry an explicit retry into a superseding automatic comparison", async () => {
+    const { browser, modelingRefresh, head } = fixture();
+    const bodies: Record<string, unknown>[] = [];
+    browser.net.handle("/api/diff-branches", (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse({
+        modelingFailed: true,
+        error: "Recipe unavailable."
+      });
+    });
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    modelingRefresh.dispatch("click");
+    head.value = "other";
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(bodies.at(-1)).toMatchObject({ head: "other" });
+    expect(bodies.at(-1)).not.toHaveProperty("retryModeling");
+    teardown();
+  });
+
+  it("keeps Refresh after network failures and handles a page without it", async () => {
+    const { browser, modelingRefresh } = fixture();
+    browser.net.handle("/api/diff-branches", () =>
+      Promise.reject(new Error("offline"))
+    );
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    modelingRefresh.dispatch("click");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(modelingRefresh.hidden).toBe(false);
+    teardown();
+    browser.document.remove("modeling-refresh");
+    const second = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    second();
+  });
+
+  it("recompares model failures without optional retry or stale graph markup", async () => {
+    const { browser, head } = fixture();
+    browser.document.remove("modeling-refresh");
+    browser.document.remove("graph-container");
+    browser.document.remove("graph-diff-summary");
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({
+        modelingFailed: true,
+        error: "Recipe unavailable."
+      })
+    );
+    const setError = vi.fn();
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphError: setError
+    });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(setError).toHaveBeenCalledTimes(2);
+    teardown();
+  });
+
+  it("reports ordinary comparison errors without a retry control", async () => {
+    const { browser, status } = fixture();
+    browser.document.remove("modeling-refresh");
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ error: "Branch unavailable." })
+    );
+    const teardown = initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(status.textContent).toContain("Branch unavailable.");
+    teardown();
+  });
+
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializeGraphDiffPage(browser.context, {

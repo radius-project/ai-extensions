@@ -5,7 +5,8 @@
 //
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { getOrCreateServer, stopServer } from "../../../src/server.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import { deployedGraphPage } from "../../../src/pages/deployed-graph-page.js";
 import { deployingPage } from "../../../src/pages/deploying-page.js";
 import { environmentPage } from "../../../src/pages/environment-page.js";
@@ -23,6 +24,9 @@ import {
 } from "../../support/pages/hostile-state.js";
 
 const INSTANCE_ID = "pages-http-test";
+const { getOrCreateServer, stopServer } = createTestCanvasServerRuntime({
+  executionOwner: createEnvironmentExecutionOwner()
+});
 
 let entry: CanvasServerEntry;
 
@@ -114,6 +118,39 @@ describe("canvas pages over real loopback HTTP", () => {
       expect(response.body).toBe(render());
     }
   );
+
+  it("serves the hidden native retry control and its visibility style on graph-diff", async () => {
+    resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
+    const response = await get("/?page=graph-diff");
+    expect(response.body).toContain(
+      '<button id="modeling-refresh" type="button" class="rad-btn rad-btn--primary" style="margin-top:0;" hidden>Refresh</button>'
+    );
+    expect(response.body).toContain(
+      "#modeling-refresh[hidden] { display: none; }"
+    );
+    expect(response.body).toContain(browserEntryMarker("graph-diff-page"));
+  });
+
+  it("serves graph with a hidden Refresh beside Create Environment", async () => {
+    resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
+    const response = await get("/?page=graph");
+    expect(response.body).toContain(
+      '<button id="modeling-refresh" type="button" class="rad-btn rad-btn--neutral" style="margin-top:0;" hidden>Refresh</button>'
+    );
+    expect(response.body).toContain(
+      "#modeling-refresh[hidden] { display: none; }"
+    );
+    expect(response.body).toContain('id="deploy-app-btn"');
+    expect(response.body).toContain(browserEntryMarker("graph-page"));
+  });
+
+  it("serves planned with its primary button as the only retry control", async () => {
+    resetState({ contextRepo: "octo/app", contextBranch: "feature/x" });
+    const response = await get("/?page=planned");
+    expect(response.body).not.toContain('id="modeling-refresh"');
+    expect(response.body).toContain('id="plan-btn"');
+    expect(response.body).toContain(browserEntryMarker("planned-graph-page"));
+  });
 
   it.each(pageStateCases())(
     "delivers the existing hidden-state contract for $name",

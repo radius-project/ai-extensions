@@ -12,6 +12,29 @@
 
 export { redactCredentials } from "./credential-redaction.js";
 
+export { admitSetupOperation } from "./setup-admission.js";
+export type {
+  SetupAdmissionInput,
+  SetupAdmissionIssue,
+  SetupAdmissionPorts,
+  SetupAdmissionResult,
+  SetupNamespaceIssue,
+  SetupOperationSnapshot,
+  SetupStartResult,
+  SetupTarget
+} from "./setup-admission.js";
+export {
+  honorSetupStop,
+  saveSetupCheckpoint,
+  saveSetupOperation
+} from "./setup-boundary.js";
+export type {
+  SetupCheckpointOperation,
+  SetupCheckpointResult,
+  SetupPersistenceResult,
+  SetupStopPorts
+} from "./setup-boundary.js";
+
 export {
   createWorkflowReadContext,
   createWorkflowReadCooldowns,
@@ -188,10 +211,12 @@ export {
   explainOidcEnterpriseClaim,
   classifyDeployCloudAuthDrift,
   extractRadDeployError,
+  extractRadDeployResourceErrors,
   collectWorkflowFailure
 } from "./workflow-diagnostics.js";
 export type {
   DeployCloudAuthDriftInput,
+  RadDeployResourceError,
   WorkflowFailure,
   WorkflowFailureReads
 } from "./workflow-diagnostics.js";

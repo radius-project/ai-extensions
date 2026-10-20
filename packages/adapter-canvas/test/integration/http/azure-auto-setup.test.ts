@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import {
+  ensureServicePrincipal,
+  finalizeSetupFailure
+} from "../../../src/server.js";
+import {
   addLegacyStep,
   canDismissOperation,
   canResumeInput,
@@ -12,6 +16,7 @@ import {
   fromPersistedOperation,
   INPUT_REQUIRED_STATE,
   isTerminalState,
+  recordGitHubEnvironment,
   requireInput,
   resumeAfterInput,
   toClientView,
@@ -38,6 +43,7 @@ import {
   type FakeCallerIdentity
 } from "../../support/server/azure-auto-setup.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 
 const SUBSCRIPTION = "22222222-2222-2222-2222-222222222222";
 const TENANT = "11111111-1111-1111-1111-111111111111";
@@ -125,11 +131,13 @@ async function successfulSetup(
     requireSmrPrompt?: boolean;
     liveDrift?: "caller" | "oidc";
     publicResume?: boolean;
+    credentialCreateResults?: AzureAutoSetupCommandResult[];
   } = {}
 ) {
   const unmatchedCalls: string[] = [];
   const azCalls: string[] = [];
   const githubCalls: string[] = [];
+  const sleeps: number[] = [];
   const ownerObjectId =
     caller.type === "servicePrincipal" ? SP_OBJECT_ID : OBJECT_ID;
   let callerReads = 0;
@@ -265,6 +273,11 @@ async function successfulSetup(
       return { code: 0, stdout: "[]", stderr: "" };
     }
     if (line.includes("federated-credential create")) {
+      if (options.credentialCreateResults) {
+        const next = options.credentialCreateResults.shift();
+        if (!next) throw new Error("unexpected additional credential create");
+        return next;
+      }
       return { code: 0, stdout: "", stderr: "" };
     }
     if (line.includes("federated-credential show")) {
@@ -349,7 +362,9 @@ async function successfulSetup(
     finalizeSetupFailure: async (_setup, input) => {
       throw new Error(`unexpected setup failure: ${String(input.code)}`);
     },
-    sleep: async () => {}
+    sleep: async (delay) => {
+      sleeps.push(delay);
+    }
   });
   const operationRoutes =
     options.publicResume ?
@@ -426,6 +441,7 @@ async function successfulSetup(
   const running = await entry();
   baseUrl = running.baseUrl;
   return {
+    dependencies,
     get operation() {
       return operation;
     },
@@ -433,6 +449,7 @@ async function successfulSetup(
     unmatchedCalls,
     azCalls,
     githubCalls,
+    sleeps,
     persistedOperation: () => persistedOperation,
     scheduledPersistedOperation: () => scheduledPersistedOperation,
     restorePersistedOperation: () => {
@@ -454,6 +471,265 @@ async function successfulSetup(
 }
 
 describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () => {
+  it.each([
+    "rejection",
+    "exception",
+    "replacement",
+    "read-refused",
+    "read-timeout",
+    "delete-refused",
+    "delete-timeout"
+  ])(
+    "runs real failure cleanup through the selected account: %s",
+    async (scenario) => {
+      const setup = await successfulSetup(false);
+      Object.assign(
+        setup.operation,
+        createOperation({
+          operationId: "op_http_cleanup",
+          repo: "octo/app",
+          environment: "dev",
+          provider: "azure",
+          currentStage: "authorize_identity"
+        })
+      );
+      recordGitHubEnvironment(setup.operation, {
+        state: "created",
+        repo: "octo/app",
+        name: "dev",
+        providerId: "123"
+      });
+      const calls: string[][] = [];
+      let deletes = 0;
+      setup.dependencies.external.getSelectedGitHubExecutor = () =>
+        successfulSelectedGhExecutor({
+          run: async (args) => {
+            calls.push(args);
+            if (args.includes("DELETE")) {
+              deletes += 1;
+              if (scenario === "delete-refused")
+                return { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" };
+              return {
+                code: 0,
+                stdout: "",
+                stderr: "",
+                timedOut: scenario === "delete-timeout"
+              };
+            }
+            if (scenario === "read-refused")
+              return { code: 1, stdout: "", stderr: "HTTP 403: Forbidden" };
+            if (deletes && scenario === "delete-timeout") {
+              if (args.at(-1)?.includes("per_page")) {
+                return {
+                  code: 0,
+                  stdout: JSON.stringify({ total_count: 0, environments: [] }),
+                  stderr: ""
+                };
+              }
+              return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+            }
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                id: scenario === "replacement" ? 456 : 123,
+                name: "dev"
+              }),
+              stderr: "",
+              timedOut: scenario === "read-timeout"
+            };
+          }
+        });
+      setup.dependencies.ensureServicePrincipal = async () => {
+        if (scenario === "exception") throw new Error("setup failed");
+        return { ok: false, stderr: "HTTP 403: Directory permission denied" };
+      };
+      setup.dependencies.finalizeSetupFailure = finalizeSetupFailure;
+
+      const response = await fetch(
+        `${setup.running.baseUrl}/api/azure-auto-setup`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Server-Owned": "token-a"
+          },
+          body: JSON.stringify(VALID_BODY)
+        }
+      );
+      const payload = await response.json();
+      expect(response.status).toBe(400);
+      expect(payload.cleanup).toBeDefined();
+      expect(JSON.stringify(payload)).not.toContain(
+        "Missing the GitHub delete helper"
+      );
+      const deleted = ["rejection", "exception", "delete-timeout"].includes(
+        scenario
+      );
+      expect(payload.cleanup.results).toContainEqual(
+        expect.objectContaining({
+          artifactType: "github_environment",
+          outcome:
+            deleted ?
+              scenario === "delete-timeout" ?
+                "not_found"
+              : "deleted"
+            : scenario === "delete-refused" ? "warning"
+            : "skipped"
+        })
+      );
+      expect(deletes).toBe(
+        ["replacement", "read-refused", "read-timeout"].includes(scenario) ? 0
+        : 1
+      );
+      expect(calls[0]).toEqual(["api", "/repos/octo/app/environments/dev"]);
+      expect(setup.azCalls.some((call) => call.includes(" delete "))).toBe(
+        false
+      );
+    }
+  );
+
+  it("deletes nothing when identity verification fails before cleanup", async () => {
+    const setup = await successfulSetup(false);
+    Object.assign(
+      setup.operation,
+      createOperation({
+        operationId: "op_http_identity_failure",
+        repo: "octo/app",
+        environment: "dev",
+        provider: "azure",
+        currentStage: "authorize_identity"
+      })
+    );
+    recordGitHubEnvironment(setup.operation, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "123"
+    });
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) => {
+        calls.push(args);
+        throw new Error("The selected GitHub account changed.");
+      }
+    });
+    // The real executor verifies identity before every command.
+    executor.verifyIdentity = async () => {
+      throw new Error("The selected GitHub account changed.");
+    };
+    setup.dependencies.external.getSelectedGitHubExecutor = () => executor;
+    setup.dependencies.finalizeSetupFailure = finalizeSetupFailure;
+
+    const response = await fetch(
+      `${setup.running.baseUrl}/api/azure-auto-setup`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Server-Owned": "token-a"
+        },
+        body: JSON.stringify(VALID_BODY)
+      }
+    );
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(calls.some((args) => args.includes("DELETE"))).toBe(false);
+    expect(setup.azCalls.some((call) => call.includes(" delete "))).toBe(false);
+  });
+
+  it("keeps an uncertain service-principal write pending and returns its redacted diagnostic", async () => {
+    const setup = await successfulSetup(false);
+    Object.assign(
+      setup.operation,
+      createOperation({
+        operationId: "op_http_sp_diagnostics",
+        repo: "octo/app",
+        environment: "dev",
+        provider: "azure",
+        currentStage: "authorize_identity"
+      })
+    );
+    const runAz = setup.dependencies.external.runAz;
+    const principalCalls: string[] = [];
+    setup.dependencies.ensureServicePrincipal = ensureServicePrincipal;
+    setup.dependencies.finalizeSetupFailure = finalizeSetupFailure;
+    recordGitHubEnvironment(setup.operation, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "123"
+    });
+    setup.dependencies.external.getSelectedGitHubExecutor = () =>
+      successfulSelectedGhExecutor({
+        run: async () => {
+          throw new Error("Uncertain writes must not start GitHub cleanup.");
+        }
+      });
+    setup.dependencies.external.runAz = async (args) => {
+      if (args[0] !== "ad" || args[1] !== "sp") return runAz(args);
+      principalCalls.push(args[2]);
+      if (args[2] === "show") {
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "Request_ResourceNotFound: No service principal exists."
+        };
+      }
+      if (args[2] === "create") {
+        return {
+          code: 1,
+          stdout: "Directory request failed.",
+          stderr: "HTTP 503: Service Unavailable; password=fixture-value"
+        };
+      }
+      throw new Error(`Unexpected service-principal command: ${args[2]}`);
+    };
+
+    const response = await fetch(
+      `${setup.running.baseUrl}/api/azure-auto-setup`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Server-Owned": "token-a"
+        },
+        body: JSON.stringify(VALID_BODY)
+      }
+    );
+    const payload = await response.json();
+
+    expect(response.status).toBe(202);
+    expect(payload).toMatchObject({
+      code: "provider-mutation-outcome-unknown",
+      reconciling: true,
+      message: expect.stringContaining(
+        "Provider command exit code: 1.\nHTTP 503: Service Unavailable; password=[REDACTED]\nDirectory request failed."
+      )
+    });
+    expect(toClientView(setup.operation).providerRecovery.mutations).toEqual([
+      expect.objectContaining({ status: "outcome_unknown" })
+    ]);
+    expect(setup.azCalls.some((call) => call.includes(" delete "))).toBe(false);
+    expect(toClientView(setup.operation).cleanup).toMatchObject({
+      state: "not_started",
+      rollbackAttempted: false,
+      results: []
+    });
+    expect(JSON.stringify(toPersistedOperation(setup.operation))).not.toContain(
+      "fixture-value"
+    );
+    expect(principalCalls).toEqual([
+      "show",
+      "create",
+      "show",
+      "show",
+      "show",
+      "show",
+      "show",
+      "show"
+    ]);
+  });
+
   it("preserves method mismatch, malformed-body, refusal, and unmatched behavior", async () => {
     const tokens = new Map([
       ["panel-a", "token-a"],
@@ -620,6 +896,70 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     );
     expect(unmatchedCalls).toEqual([]);
   });
+
+  it.each(["recovers", "exhausts"])(
+    "preserves the HTTP result when credential propagation %s",
+    async (outcome) => {
+      const rejection = {
+        code: 1,
+        stdout: "",
+        stderr:
+          "ERROR: Resource 'Application_app-object' does not exist or one of its queried reference-property objects are not present."
+      };
+      const setup = await successfulSetup(
+        true,
+        { type: "user" },
+        {
+          credentialCreateResults:
+            outcome === "recovers" ?
+              [
+                rejection,
+                { code: 0, stdout: "", stderr: "" },
+                { code: 0, stdout: "", stderr: "" }
+              ]
+            : Array.from({ length: 6 }, () => ({ ...rejection }))
+        }
+      );
+      setup.dependencies.finalizeSetupFailure = finalizer();
+      const response = await fetch(
+        `${setup.running.baseUrl}/api/azure-auto-setup`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Server-Owned": "token-a"
+          },
+          body: JSON.stringify(CREATE_BODY)
+        }
+      );
+
+      expect(response.status).toBe(outcome === "recovers" ? 200 : 400);
+      expect(await response.json()).toMatchObject(
+        outcome === "recovers" ?
+          { success: true, clientId: APP_ID, operationId: "op-http-create" }
+        : {
+            code: "federated-credential-failed",
+            error: expect.stringContaining(rejection.stderr)
+          }
+      );
+      expect(
+        setup.azCalls.filter((line) =>
+          line.includes("federated-credential create")
+        )
+      ).toHaveLength(outcome === "recovers" ? 3 : 6);
+      expect(setup.sleeps).toEqual(
+        outcome === "recovers" ? [2000] : [2000, 4000, 6000, 8000, 10000]
+      );
+      if (outcome === "exhausts") {
+        expect(
+          setup.azCalls.some((line) =>
+            line.startsWith("role assignment create ")
+          )
+        ).toBe(false);
+      }
+      expect(setup.unmatchedCalls).toEqual([]);
+    }
+  );
 
   it("restores the private SMR checkpoint and resumes at app creation", async () => {
     const setup = await successfulSetup(

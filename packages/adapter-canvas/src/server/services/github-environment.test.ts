@@ -1099,11 +1099,24 @@ describe("deleteGitHubEnvironmentIdempotent", () => {
 });
 
 describe("selectedEnvironmentReader", () => {
-  it("reads through the executor it was built from, not ambient gh", async () => {
-    const seen: string[][] = [];
+  it("rejects a timed-out read even when it has success-shaped output", async () => {
     const read = selectedEnvironmentReader({
-      run: async (args) => {
-        seen.push(args);
+      run: async () => ({
+        code: 0,
+        stdout: JSON.stringify({ id: 1234567 }),
+        timedOut: true
+      })
+    });
+    await expect(
+      read(["api", "/repos/octo/app/environments/dev"])
+    ).rejects.toThrow("lookup timed out");
+  });
+
+  it("reads through the executor it was built from, not ambient gh", async () => {
+    const seen: Array<[string[], { timeout: number }]> = [];
+    const read = selectedEnvironmentReader({
+      run: async (args, options) => {
+        seen.push([args, options]);
         return {
           code: 0,
           stdout: JSON.stringify({ id: 1234567, name: "dev" }),
@@ -1119,7 +1132,9 @@ describe("selectedEnvironmentReader", () => {
       stdout: JSON.stringify({ id: 1234567, name: "dev" }),
       stderr: ""
     });
-    expect(seen).toEqual([["api", "/repos/octo/app/environments/dev"]]);
+    expect(seen).toEqual([
+      [["api", "/repos/octo/app/environments/dev"], { timeout: 20000 }]
+    ]);
   });
 
   it.each([

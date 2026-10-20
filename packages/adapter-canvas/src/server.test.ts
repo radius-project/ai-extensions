@@ -29,7 +29,7 @@ import {
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
   DEPLOY_HANDOFF_RETRY_DELAY_MS,
   endChildInput,
-  ensureServicePrincipal,
+  ensureServicePrincipal as ensureServicePrincipalWithClock,
   finalizeSetupFailure,
   graphDefinitionHash,
   isCrossSiteMutation,
@@ -51,7 +51,6 @@ import {
   resolveDeploymentEnvironment,
   resolveDeployStatus,
   resolveDeployRepairLoop,
-  onEnvironmentTasksSettled,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff,
   setDeployFailureNotice,
@@ -64,6 +63,7 @@ import {
   DEPLOY_RUN_UNCONFIRMED_KIND,
   preflightRepoAdmin
 } from "./server.js";
+import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
 import { gitHubAppAccessProbePaths } from "./github-app-installation.js";
 import {
@@ -554,6 +554,20 @@ function newAzureOp() {
 }
 
 describe("ensureServicePrincipal", () => {
+  const ensureServicePrincipal: typeof ensureServicePrincipalWithClock = (
+    clientId,
+    runAz,
+    recovery,
+    beforeCreate,
+    sleep = async () => {}
+  ) =>
+    ensureServicePrincipalWithClock(
+      clientId,
+      runAz,
+      recovery,
+      beforeCreate,
+      sleep
+    );
   it("reuses an existing Service Principal without creating a new one", async () => {
     const calls: string[][] = [];
     const result = await ensureServicePrincipal("app-1", async (args) => {
@@ -899,6 +913,380 @@ describe("ensureServicePrincipal", () => {
       stderr: "Request_ResourceNotFound: Resource 'app-1' does not exist"
     };
 
+    it.each([1, 5])(
+      "waits through %i stale absence reads without repeating an uncertain create",
+      async (staleReads) => {
+        const { operation, port } = recovery();
+        let creates = 0;
+        let readsAfterCreate = 0;
+        const sleep = vi.fn(async () => {});
+        const result = await ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "create") {
+              creates += 1;
+              return { code: 1, stderr: "HTTP 503: Service Unavailable" };
+            }
+            if (creates === 0 || readsAfterCreate++ < staleReads) return absent;
+            return { code: 0, stdout: "sp-object-1" };
+          },
+          port,
+          async () => true,
+          sleep
+        );
+
+        expect(result).toMatchObject({
+          ok: true,
+          state: "created_candidate",
+          origin: "unknown",
+          objectId: "sp-object-1"
+        });
+        expect(creates).toBe(1);
+        expect(sleep.mock.calls).toEqual(
+          Array.from({ length: staleReads }, (_, index) => [2000 * (index + 1)])
+        );
+        expect(operation.providerRecovery.mutations[0].status).toBe(
+          "confirmed"
+        );
+      }
+    );
+
+    it.each([
+      { code: 1, stderr: "HTTP 503: Service Unavailable" },
+      { code: 1, stderr: "HTTP 429: Too Many Requests\nRetry-After: 1" },
+      { code: 0, stdout: "untrusted-object", timedOut: true }
+    ])(
+      "retries temporary reconciliation read failures: %j",
+      async (failure) => {
+        const { port } = recovery();
+        let calls = 0;
+        const sleep = vi.fn(async () => {});
+
+        const result = await ensureServicePrincipal(
+          "app-1",
+          async () => {
+            calls += 1;
+            if (calls === 1) return absent;
+            if (calls === 2) return { code: 1, stderr: "HTTP 503" };
+            if (calls === 3) return failure;
+            return { code: 0, stdout: "sp-object-1" };
+          },
+          port,
+          async () => true,
+          sleep
+        );
+
+        expect(result).toMatchObject({ ok: true, objectId: "sp-object-1" });
+        expect(calls).toBe(4);
+        expect(sleep).toHaveBeenCalledOnce();
+      }
+    );
+
+    it.each([
+      "Request_ResourceNotFound: Application is not visible yet.",
+      "Directory_ObjectNotFound: Application is not visible yet.",
+      "HTTP 429: Too Many Requests\nRetry-After: 1"
+    ])("retries a definite temporary create rejection: %s", async (stderr) => {
+      const { operation, port } = recovery();
+      const sleep = vi.fn(async () => {});
+      let creates = 0;
+      const persisted: string[] = [];
+      port.persist = async () => {
+        persisted.push(
+          operation.providerRecovery.mutations[0]?.status || "missing"
+        );
+      };
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "show") return absent;
+          creates += 1;
+          return creates === 1 ?
+              { code: 1, stderr }
+            : { code: 0, stdout: JSON.stringify({ id: "sp-object-1" }) };
+        },
+        port,
+        async () => true,
+        sleep
+      );
+
+      expect(result).toMatchObject({
+        ok: true,
+        state: "created",
+        origin: "this_operation"
+      });
+      expect(creates).toBe(2);
+      expect(persisted).toEqual([
+        "prepared",
+        "not_applied",
+        "prepared",
+        "confirmed"
+      ]);
+      expect(sleep).toHaveBeenCalledOnce();
+    });
+
+    it("reads a rejection from stdout when stderr is blank", async () => {
+      const { port } = recovery();
+      const sleep = vi.fn(async () => {});
+      let creates = 0;
+
+      const retried = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "show") return absent;
+          creates += 1;
+          return creates === 1 ?
+              {
+                code: 1,
+                stderr: " \n",
+                stdout: "HTTP 429: Too Many Requests\nRetry-After: 1"
+              }
+            : { code: 0, stdout: JSON.stringify({ id: "sp-object-1" }) };
+        },
+        port,
+        async () => true,
+        sleep
+      );
+
+      expect(retried).toMatchObject({ ok: true, state: "created" });
+      expect(creates).toBe(2);
+
+      const denied = await ensureServicePrincipal(
+        "app-2",
+        async (args) =>
+          args[2] === "show" ?
+            absent
+          : { code: 1, stderr: " \n", stdout: "HTTP 403: Forbidden" },
+        recovery().port,
+        async () => true,
+        sleep
+      );
+
+      expect(denied).toEqual({ ok: false, stderr: "HTTP 403: Forbidden" });
+    });
+
+    it("bounds definite rejection retries and preserves the final provider error", async () => {
+      const { operation, port } = recovery();
+      let creates = 0;
+      const sleep = vi.fn(async () => {});
+
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "show") return absent;
+          creates += 1;
+          return {
+            code: 1,
+            stderr: `Request_ResourceNotFound: attempt ${creates}`
+          };
+        },
+        port,
+        async () => true,
+        sleep
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        stderr: "Request_ResourceNotFound: attempt 6"
+      });
+      expect(creates).toBe(6);
+      expect(sleep.mock.calls).toEqual([
+        [2000],
+        [4000],
+        [6000],
+        [8000],
+        [10000]
+      ]);
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "not_applied"
+      );
+    });
+
+    it.each([
+      "Authorization_RequestDenied: Application does not exist or cannot be accessed.",
+      "HTTP 403: Forbidden",
+      "Request_BadRequest: Invalid request.",
+      "HTTP 429: Too Many Requests\nRetry-After: 60"
+    ])(
+      "does not retry a permanent refusal or excessive delay: %s",
+      async (stderr) => {
+        const { port } = recovery();
+        let creates = 0;
+        const sleep = vi.fn(async () => {});
+
+        const result = await ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "show") return absent;
+            creates += 1;
+            return { code: 1, stderr };
+          },
+          port,
+          async () => true,
+          sleep
+        );
+
+        expect(result).toEqual({ ok: false, stderr });
+        expect(creates).toBe(1);
+        expect(sleep).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each(["before-backoff", "after-backoff"])(
+      "honors Stop %s without another create",
+      async (boundary) => {
+        const { port } = recovery();
+        let creates = 0;
+        let slept = false;
+        const sleep = vi.fn(async () => {
+          slept = true;
+        });
+
+        const result = await ensureServicePrincipal(
+          "app-1",
+          async (args) => {
+            if (args[2] === "show") return absent;
+            creates += 1;
+            return absent;
+          },
+          port,
+          async () => creates === 0 || (boundary === "after-backoff" && !slept),
+          sleep
+        );
+
+        expect(result).toEqual({ ok: false, stopped: true });
+        expect(creates).toBe(1);
+        expect(sleep).toHaveBeenCalledTimes(
+          boundary === "before-backoff" ? 0 : 1
+        );
+      }
+    );
+
+    it("keeps absence unresolved across restarts and eventually requires manual review", async () => {
+      const { operation, port } = recovery();
+      let creates = 0;
+      const runAz = vi.fn(async (args: string[]) => {
+        if (args[2] === "create") {
+          creates += 1;
+          return { code: 1, stderr: "HTTP 503" };
+        }
+        return absent;
+      });
+      let current = operation;
+      for (let attempt = 1; attempt <= 12; attempt++) {
+        await expect(
+          ensureServicePrincipal("app-1", runAz, {
+            ...port,
+            operation: current
+          })
+        ).rejects.toMatchObject({
+          code:
+            attempt === 12 ?
+              "provider-mutation-manual-required"
+            : "provider-mutation-outcome-unknown"
+        });
+        current = fromPersistedOperation(toPersistedOperation(current));
+      }
+      expect(creates).toBe(1);
+      expect(current.providerRecovery.mutations[0]).toMatchObject({
+        status: "manual_required",
+        reconcileAttempts: 12
+      });
+    });
+
+    it("does not wait longer than the read retry budget permits", async () => {
+      const { operation, port } = recovery();
+      let calls = 0;
+      const sleep = vi.fn(async () => {});
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async () => {
+            calls += 1;
+            if (calls === 1) return absent;
+            return {
+              code: 1,
+              stderr: "HTTP 503: Service Unavailable\nRetry-After: 60"
+            };
+          },
+          port,
+          async () => true,
+          sleep
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+      expect(calls).toBe(3);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "outcome_unknown"
+      );
+    });
+
+    it("honors Stop at the journal boundary before sending the create", async () => {
+      const { operation, port } = recovery();
+      port.persist = async () => {
+        requestStop(operation);
+      };
+      const runAz = vi.fn(async () => absent);
+      let checks = 0;
+      const result = await ensureServicePrincipal(
+        "app-1",
+        runAz,
+        port,
+        async () => ++checks === 1
+      );
+      expect(result).toEqual({ ok: false, stopped: true });
+      expect(runAz).toHaveBeenCalledOnce();
+      expect(runAz.mock.calls[0]).toEqual([
+        ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"]
+      ]);
+    });
+
+    it("keeps a read with no provider detail unresolved with a useful error", async () => {
+      const { port } = recovery();
+      let calls = 0;
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async () => {
+            calls += 1;
+            if (calls === 1) return absent;
+            return { code: 1, stdout: "", stderr: "" };
+          },
+          port
+        )
+      ).rejects.toMatchObject({
+        code: "provider-mutation-outcome-unknown",
+        message: expect.stringContaining(
+          "The Service Principal state could not be read."
+        )
+      });
+      expect(calls).toBe(3);
+    });
+
+    it("uses a definite rejection on stdout for bounded retries", async () => {
+      const { port } = recovery();
+      let creates = 0;
+      const result = await ensureServicePrincipal(
+        "app-1",
+        async (args) => {
+          if (args[2] === "show") return absent;
+          creates += 1;
+          return {
+            code: 1,
+            stdout:
+              creates === 1 ?
+                "HTTP 429: Too Many Requests"
+              : "HTTP 403: Forbidden",
+            stderr: ""
+          };
+        },
+        port
+      );
+      expect(creates).toBe(2);
+      expect(result).toEqual({ ok: false, stderr: "HTTP 403: Forbidden" });
+    });
+
     it("records the create before issuing it and confirms it afterwards", async () => {
       const { operation, port } = recovery();
 
@@ -1007,22 +1395,81 @@ describe("ensureServicePrincipal", () => {
       );
     });
 
-    it("settles as not applied when Entra proves no principal exists", async () => {
+    it("keeps a timed-out create unknown when bounded reads still find no principal", async () => {
       const { operation, port } = recovery();
 
-      const result = await ensureServicePrincipal(
-        "app-1",
-        async (args) =>
-          args[2] === "create" ?
-            { code: 1, stdout: "", stderr: "", timedOut: true }
-          : absent,
-        port
+      await expect(
+        ensureServicePrincipal(
+          "app-1",
+          async (args) =>
+            args[2] === "create" ?
+              { code: 1, stdout: "", stderr: "", timedOut: true }
+            : absent,
+          port
+        )
+      ).rejects.toMatchObject({
+        code: "provider-mutation-outcome-unknown",
+        message: expect.stringContaining(
+          "Provider command exit code: 1 (timed out)."
+        )
+      });
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "outcome_unknown"
+      );
+    });
+
+    it("reports the original redacted create failure after Entra finds no principal", async () => {
+      const { operation, port } = recovery();
+      const runAz = vi.fn(async (args: string[]) =>
+        args[2] === "create" ?
+          {
+            code: 1,
+            stdout: "Request reached the directory.",
+            stderr: "HTTP 503: Service Unavailable; password=fixture-value"
+          }
+        : absent
       );
 
-      expect(result.ok).toBe(false);
-      expect(operation.providerRecovery.mutations[0].status).toBe(
-        "not_applied"
-      );
+      await expect(
+        ensureServicePrincipal("app-1", runAz, port)
+      ).rejects.toMatchObject({
+        code: "provider-mutation-outcome-unknown",
+        message: expect.stringContaining(
+          "Provider command exit code: 1.\nHTTP 503: Service Unavailable; password=[REDACTED]\nRequest reached the directory."
+        )
+      });
+      expect(runAz.mock.calls.map(([args]) => args[2])).toEqual([
+        "show",
+        "create",
+        "show",
+        "show",
+        "show",
+        "show",
+        "show",
+        "show"
+      ]);
+      expect(JSON.stringify(operation)).not.toContain("fixture-value");
+    });
+
+    it("keeps an interrupted legacy create unresolved without issuing another write", async () => {
+      const { operation, port } = recovery();
+      prepareProviderMutation(operation, {
+        kind: "azure_service_principal.create",
+        target: "app-1"
+      });
+      const runAz = vi.fn(async (args: string[]) => {
+        if (args[2] !== "show") {
+          throw new Error("An interrupted create must not be repeated.");
+        }
+        return absent;
+      });
+
+      await expect(
+        ensureServicePrincipal("app-1", runAz, port)
+      ).rejects.toMatchObject({
+        code: "provider-mutation-outcome-unknown"
+      });
+      expect(runAz).toHaveBeenCalledTimes(7);
     });
 
     it("refuses to create a principal once reconciliation demanded a rollback", async () => {
@@ -5997,6 +6444,7 @@ describe("environment deletion session reporting coordinator", () => {
       persistedFailures.push(structuredClone(operation.failure));
     });
     const log = vi.fn();
+    const executionOwner = createEnvironmentExecutionOwner();
     const coordinator = createInstanceRequestCoordinator(
       instanceId,
       () => "http://127.0.0.1:0",
@@ -6023,11 +6471,12 @@ describe("environment deletion session reporting coordinator", () => {
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error),
         log
-      }
+      },
+      { executionOwner, servers: new Map() }
     );
     const settled = new Promise<void>((resolve) => {
       let stop = (): void => {};
-      stop = onEnvironmentTasksSettled(instanceId, () => {
+      stop = executionOwner.onEnvironmentTasksSettled(instanceId, () => {
         stop();
         resolve();
       });

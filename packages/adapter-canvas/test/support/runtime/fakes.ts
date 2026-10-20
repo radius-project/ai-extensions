@@ -36,6 +36,7 @@ import {
 } from "../../../src/workspace.js";
 import { renderPrDiffMarkdown } from "../../../src/pr-diff-markdown.js";
 import { createSessionHolder } from "../../../src/runtime/session.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import type { SessionPort } from "../../../src/runtime/session.js";
 import type {
   RadiusExtensionDependencies,
@@ -45,7 +46,7 @@ import type {
   CanvasServerEntry,
   SessionPromptMessage
 } from "../../../src/server.js";
-import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
+import type { CanvasGraphResource } from "../../../src/shared.js";
 
 export interface FakeServer {
   close: Mock;
@@ -116,10 +117,11 @@ export interface FakeDependenciesOptions {
 
 // Builds a complete RadiusExtensionDependencies fake. `servers` is a real Map
 // (not a fake) since it is just in-memory bookkeeping the SUT is expected to
-// read/write directly, mirroring server.ts's own module-level Map.
+// read/write directly, mirroring the production runtime's server Map.
 export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   const servers = new Map<string, CanvasServerEntry>();
   const sessionHolder = createSessionHolder();
+  const executionOwner = createEnvironmentExecutionOwner();
 
   const workspaceContext: WorkspaceContext = options.workspaceContext ?? {
     workspacePath: "/workspace",
@@ -152,12 +154,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   let lastWebviewActivityAt = 0;
 
   const capturedHostCallbacks: {
-    appBicepHandoff?: (input: {
-      repo: string;
-      branches: string[];
-      page: string;
-      state?: CanvasState;
-    }) => Promise<unknown>;
+    appBicepHandoff?: Parameters<
+      RadiusExtensionDependencies["hostCallbacks"]["setAppBicepHandoff"]
+    >[0];
     deployRepairHandoff?:
       | ((input: {
           repo: string;
@@ -352,17 +351,26 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           })
       )
     },
+    executionOwner: {
+      ...executionOwner,
+      hasActiveEnvironmentTasks: vi.fn(
+        executionOwner.hasActiveEnvironmentTasks
+      ),
+      markEnvironmentInstanceShuttingDown: vi.fn(
+        executionOwner.markEnvironmentInstanceShuttingDown
+      ),
+      onEnvironmentTasksSettled: vi.fn(executionOwner.onEnvironmentTasksSettled)
+    },
     operations: {
-      setupInFlight: vi.fn(() => false),
-      hasActiveEnvironmentTasks: vi.fn((_instanceId: string) => false),
-      markEnvironmentInstanceShuttingDown: vi.fn(),
-      onEnvironmentTasksSettled: vi.fn(
-        (_instanceId: string, _listener: () => void) => () => {}
-      )
+      setupInFlight: vi.fn(() => false)
     },
     appModel: {
       generatorVersion: vi.fn(() => options.generatorVersion ?? "0.1.0-test"),
       workspaceHeadCommit: vi.fn(
+        async (workspacePath: string | null | undefined) =>
+          headCommits[`workspace:${workspacePath}`] ?? ""
+      ),
+      workspaceSourceRevision: vi.fn(
         async (workspacePath: string | null | undefined) =>
           headCommits[`workspace:${workspacePath}`] ?? ""
       ),

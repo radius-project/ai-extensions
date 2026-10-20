@@ -302,6 +302,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     font-weight: 600; font-size: 13px; cursor: pointer; font-family: var(--rad-font);
     transition: background 0.15s, opacity 0.15s;
   }
+  #modeling-refresh[hidden] { display: none; }
   button, .verify-btn, .rad-btn--primary { background: var(--rad-primary); color: #fff; }
   button:hover, .verify-btn:hover, .rad-btn--primary:hover { background: var(--rad-primary-hover); }
   .rad-btn--brand { background: var(--rad-brand); color: #fff; }

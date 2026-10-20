@@ -28,7 +28,9 @@ import {
   type DeleteOperationRecord
 } from "./environments.js";
 import type { CanvasServerEntry } from "../types.js";
-import { getOrCreateServer, persistBestEffort } from "../../server.js";
+import { persistBestEffort } from "../../server.js";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
+import { createTestCanvasServerRuntime } from "../../../test/support/server/production-runtime.js";
 import {
   addLegacyStep as recordLegacyStep,
   finishSucceeded as finishSetupSucceeded,
@@ -58,6 +60,10 @@ interface Recording {
   status: number;
   body: string;
 }
+
+const { getOrCreateServer } = createTestCanvasServerRuntime({
+  executionOwner: createEnvironmentExecutionOwner()
+});
 
 function deferred<T>() {
   let resolve: (value: T) => void = () => {

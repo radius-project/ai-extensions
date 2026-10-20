@@ -1,5 +1,43 @@
 # radius
 
+## 0.2.3
+
+### Patch Changes
+
+- [#1014](https://github.com/radius-project/ai-extensions/pull/1014) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Retry temporary Azure errors when creating an environment's federated credential, while preserving safe recovery and Stop controls.
+
+- [#1032](https://github.com/radius-project/ai-extensions/pull/1032) [@kachawla](https://github.com/kachawla) - **Fixed:** Keep a failed deployment's dialog within the panel, so a long error scrolls and Back to Deployments stays reachable.
+
+- [#1033](https://github.com/radius-project/ai-extensions/pull/1033) [@kachawla](https://github.com/kachawla) - **Fixed:** Show each failed resource's own deployment error on the deployed graph, and keep the Radius error when the workflow log read fails briefly.
+
+- [#1008](https://github.com/radius-project/ai-extensions/pull/1008) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep permanent modeling failures across automatic reloads. Retry after saved source changes, a new branch commit, a target environment or provider change, or an explicit **Refresh**.
+
+  If source reads fail or lack a baseline, automatic retry stays paused. **Refresh** lets you retry after an external fix without a source edit or commit.
+
+  When a retry is recommended on the application graph or the planned graph, the primary button changes from **Plan Deployment** or **Deploy Application** to **Refresh**, and the graph subtitle tells you to click **Refresh**. If the repository has no environment, the graph keeps **Create Environment** and shows a separate **Refresh** button. The graph diff shows its **Refresh** button only after a comparison fails.
+
+- [#1011](https://github.com/radius-project/ai-extensions/pull/1011) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Prevent environment task error reporting failures from terminating the Radius extension.
+
+## 0.2.2
+
+### Patch Changes
+
+- [#956](https://github.com/radius-project/ai-extensions/pull/956) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** When only post-deployment teardown fails, explain that deployment commands succeeded, resources may have changed, and saved state may be out of date; advise reviewing teardown logs and verifying saved state before retrying.
+
+- [#958](https://github.com/radius-project/ai-extensions/pull/958) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Show environment protection waiting evidence as historical observations, make uncertainty explicit, and avoid implying approval when protection checks become unavailable.
+
+- [#981](https://github.com/radius-project/ai-extensions/pull/981) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Generate the application graph before you select or create a deployment environment. When no environment is named and no contract is supplied, model generation leaves Recipe registration checks to deployment. Named environments still require Recipe behavior and registration evidence.
+
+- [#949](https://github.com/radius-project/ai-extensions/pull/949) [@kachawla](https://github.com/kachawla) - **Fixed:** Generated application definitions now give every consumer of a provisioned database or message broker the same username the service is created with, read from one place instead of repeated as a separate value. The username is `myadmin` unless you ask for a specific one or the application's code or checked-in configuration fixes a login; a username the application reads from an environment variable is not treated as fixed, even when Compose, Helm, or Kubernetes manifests set it. Refreshing an existing model keeps the username it already sets, so an existing database's administrator login is not changed.
+
+- [#988](https://github.com/radius-project/ai-extensions/pull/988) [@nellshamrell](https://github.com/nellshamrell) - **Security:** Mask entire credential strings in escaped JSON diagnostics so embedded quotes and backslashes cannot expose part of a secret.
+
+- [#989](https://github.com/radius-project/ai-extensions/pull/989) [@nellshamrell](https://github.com/nellshamrell) - **Security:** Redact known credentials and recognizable credential fields from workflow and control-plane diagnostics before displaying them or sending them to deployment repair.
+
+- [#1005](https://github.com/radius-project/ai-extensions/pull/1005) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Azure environment setup now retries temporary Microsoft Entra errors when it creates the service principal. It shows Entra's real error instead of a general message, and it removes the GitHub environment that a failed setup created. If Radius cannot tell whether the service principal was created, it checks the directory before it retries or removes anything.
+
+- [#950](https://github.com/radius-project/ai-extensions/pull/950) [@kachawla](https://github.com/kachawla) - **Fixed:** Application model validation now reports a container that repeats a provisioned database's or message broker's username as its own value instead of reading it from the resource or one shared variable, so the two cannot drift apart and break the login.
+
 ## 0.2.1
 
 ### Patch Changes

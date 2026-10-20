@@ -10,6 +10,7 @@ import {
 } from "../../support/azure-discovery-contract.js";
 import type { CanvasState, SharedCredentials } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
+import type { EnvironmentOperationRunner } from "../../../src/server.js";
 
 // Resolved from this module rather than the process directory so the suite
 // behaves identically whether it is launched from the workspace root or from
@@ -52,6 +53,12 @@ export const VERIFICATION_WORKFLOW_CONTENT_SHA256 = createHash("sha256")
   .digest("hex");
 
 type ServerModule = typeof import("../../../src/server.js");
+type HarnessServerRuntime = ServerModule &
+  ReturnType<ServerModule["createProductionCanvasServerRuntime"]> & {
+    setEnvironmentOperationRunner(
+      runner: EnvironmentOperationRunner | null
+    ): void;
+  };
 type GhModule = typeof import("../../../src/gh.js");
 type SharedModule = typeof import("../../../src/shared.js");
 type OperationsModule = typeof import("../../../src/operations.js");
@@ -1275,7 +1282,7 @@ export class CanvasHarness {
 
   private readonly page: Page;
   private readonly originalEnv: Record<string, string | undefined>;
-  private readonly serverModule: ServerModule;
+  private readonly serverModule: HarnessServerRuntime;
   private repairHandoffRegistered = false;
   private readonly ghModule: GhModule;
   private readonly originalFetch: typeof fetch;
@@ -1293,7 +1300,7 @@ export class CanvasHarness {
     mode: CanvasHarnessMode;
     originalEnv: Record<string, string | undefined>;
     originalFetch: typeof fetch;
-    serverModule: ServerModule;
+    serverModule: HarnessServerRuntime;
     ghModule: GhModule;
   }) {
     this.page = input.page;
@@ -1334,7 +1341,7 @@ export class CanvasHarness {
       envKeys.map((key) => [key, process.env[key]])
     );
     const originalFetch = globalThis.fetch;
-    let serverModule: ServerModule | undefined;
+    let serverModule: HarnessServerRuntime | undefined;
     let ghModule: GhModule | undefined;
     let sharedModule: SharedModule | undefined;
     let entry: CanvasServerEntry | undefined;
@@ -1412,7 +1419,24 @@ export class CanvasHarness {
 
       // All process and credential-store isolation is in place before the first
       // production import. shared.ts reads its store at module initialization.
-      serverModule = await loadServerModule();
+      const production = await loadServerModule();
+      const { createEnvironmentExecutionOwner } =
+        await import("../../../src/runtime/environment-execution-owner.js");
+      const { createTestCanvasServerRuntime } =
+        await import("../../support/server/production-runtime.js");
+      let environmentOperationRunner: EnvironmentOperationRunner | undefined;
+      serverModule = {
+        ...production,
+        ...createTestCanvasServerRuntime({
+          executionOwner: createEnvironmentExecutionOwner(),
+          get environmentOperationRunner() {
+            return environmentOperationRunner;
+          }
+        }),
+        setEnvironmentOperationRunner: (runner) => {
+          environmentOperationRunner = runner ?? undefined;
+        }
+      };
       ghModule = await import("../../../src/gh.js");
       sharedModule = await import("../../../src/shared.js");
       if (
@@ -1782,7 +1806,7 @@ export class CanvasHarness {
   setEnvironmentOperationRunner(
     runner: ((operationId: string) => Promise<void>) | null
   ): void {
-    this.serverModule.setEnvironmentOperationTestRunner(runner);
+    this.serverModule.setEnvironmentOperationRunner(runner);
   }
 
   setDeployRepairHandoff(
@@ -1791,6 +1815,13 @@ export class CanvasHarness {
     this.assertFakeMode("setDeployRepairHandoff");
     this.serverModule.setDeployRepairHandoff(receiver);
     this.repairHandoffRegistered = receiver !== null;
+  }
+
+  setAppBicepHandoff(
+    receiver: Parameters<ServerModule["setAppBicepHandoff"]>[0]
+  ): void {
+    this.assertFakeMode("setAppBicepHandoff");
+    this.serverModule.setAppBicepHandoff(receiver);
   }
 
   // Drives the real delete OperationRecord the route creates to a terminal,
@@ -1845,7 +1876,7 @@ export class CanvasHarness {
 
   async cleanup(): Promise<void> {
     const errors: unknown[] = [];
-    this.serverModule.setEnvironmentOperationTestRunner(null);
+    this.serverModule.setEnvironmentOperationRunner(null);
     this.serverModule.markEnvironmentInstanceShuttingDown(this.instanceId);
     if (this.serverModule.hasActiveEnvironmentTasks(this.instanceId)) {
       await new Promise<void>((resolve) => {
@@ -1901,6 +1932,7 @@ export class CanvasHarness {
     });
     this.ghModule.resetGhIdentityCache();
     this.serverModule.resetListingCaches();
+    if (this.mode === "fake") this.setAppBicepHandoff(null);
     const sharedModule = await import("../../../src/shared.js");
     replaceSharedCredentials(sharedModule.sharedCredentials);
     globalThis.fetch = this.originalFetch;

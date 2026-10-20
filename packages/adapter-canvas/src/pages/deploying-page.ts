@@ -70,12 +70,12 @@ function deployLandingView(state: CanvasState): string {
 
 <!-- Deploying (transition) modal -->
 <div id="deploy-progress-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
-  <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:flex-start; gap:18px;">
+  <div class="rad-card" style="max-width:520px; width:90%; max-height:calc(100vh - 32px); box-sizing:border-box; overflow-y:auto; margin:0; display:flex; align-items:flex-start; gap:18px;">
     <div id="deploy-progress-spinner" class="rad-spinner-lg" aria-hidden="true"></div>
     <div id="deploy-progress-failicon" style="display:none; flex:none; font-size:26px; line-height:1;" aria-hidden="true">❌</div>
     <div style="min-width:0; flex:1;">
       <div id="deploy-progress-title" style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:4px;"></div>
-      <div id="deploy-progress-subtitle" style="font-size:13px; color:var(--rad-text-secondary);">This may take a few minutes…</div>
+      <div id="deploy-progress-subtitle" style="font-size:13px; color:var(--rad-text-secondary); overflow-wrap:anywhere;">This may take a few minutes…</div>
       <div id="deploy-progress-fail-actions" style="display:none; margin-top:16px;">
         <button id="deploy-fail-back" class="rad-btn rad-btn--neutral" style="margin:0;">Back to Deployments</button>
         <div id="deploy-fail-repair-note" style="display:none; margin-top:10px; font-size:12px; color:var(--rad-text-secondary);"></div>

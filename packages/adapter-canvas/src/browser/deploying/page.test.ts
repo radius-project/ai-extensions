@@ -2469,7 +2469,7 @@ describe("deploy flow", () => {
     expect(page.progressTitle.innerHTML).toContain("failed");
     expect(page.progressSubtitle.innerHTML).toContain("workflow exploded");
     expect(page.progressSubtitle.innerHTML).toContain(
-      "https://example.test/run/9"
+      '<div id="deploy-progress-error" role="region" aria-label="Deployment error" tabindex="0" style="max-height:50vh; overflow-y:auto;">workflow exploded</div><a href="https://example.test/run/9"'
     );
     expect(page.failRepairNote.textContent).toContain("Copilot is analyzing");
     expect(page.deployBtn.disabled).toBe(false);
@@ -2757,6 +2757,30 @@ describe("deploy flow", () => {
     expect(page.failRepairNote.style.display).toBe("none");
   });
 
+  it("puts the run link on its own line after the default failure message", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        deployRunUrl: "https://example.test/run/3",
+        handoff: { pending: false, state: "" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.progressSubtitle.innerHTML).toContain(
+      'did not complete successfully.<br><a href="https://example.test/run/3"'
+    );
+    expect(page.progressSubtitle.innerHTML).not.toContain(
+      "deploy-progress-error"
+    );
+  });
+
   it("shows the handoff-pending note and retries until handoff resolves", async () => {
     const page = fixture();
     init(page);
@@ -2848,6 +2872,56 @@ describe("deploy flow", () => {
     expect(page.progressModal.style.display).toBe("flex");
     expect(page.progressSubtitle.innerHTML).toContain("deployment failed");
     expect(page.failRepairNote.textContent).toContain("Handing this failure");
+    teardown();
+  });
+
+  it("does not rewrite an unchanged failure while the repair handoff polls", async () => {
+    const page = fixture();
+    const teardown = init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    let error = "deployment failed";
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        error,
+        handoff: { pending: true, state: "pending" }
+      })
+    );
+    let html = "";
+    let writes = 0;
+    Object.defineProperty(page.progressSubtitle, "innerHTML", {
+      get: () => html,
+      set: (value: string) => {
+        writes++;
+        html = value;
+      }
+    });
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(html).toContain("deployment failed");
+    expect(writes).toBe(1);
+
+    // Rewriting would reset the error region's scroll position and focus.
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(writes).toBe(1);
+
+    error = "deployment failed again";
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(writes).toBe(2);
+    expect(html).toContain("deployment failed again");
+
+    // Anything else that replaces the subtitle forces a fresh render.
+    html = "This may take a few minutes…";
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(writes).toBe(3);
+    expect(html).toContain("deployment failed again");
     teardown();
   });
 

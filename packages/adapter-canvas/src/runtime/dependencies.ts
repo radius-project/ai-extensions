@@ -22,6 +22,7 @@ import type {
   DeployStatusSummary
 } from "../deploy-tools.js";
 import type { SessionHolder } from "./session.js";
+import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -221,6 +222,8 @@ export interface HostCallbackDependencies {
       branches: string[];
       page: string;
       progressView?: GraphProgressView;
+      isCurrent?: () => boolean;
+      environmentKey?: string;
       // The canvas instance's state, so the runtime resolves each branch's model
       // against the same workspace context the route rendered from and can
       // deduplicate against this panel's last handoff.
@@ -294,6 +297,9 @@ export interface AppModelDependencies {
   workspaceHeadCommit(
     workspacePath: string | null | undefined
   ): Promise<string>;
+  workspaceSourceRevision(
+    workspacePath: string | null | undefined
+  ): Promise<string>;
   // Whether application source (excluding the model's own directory) changed
   // between a recorded commit and the worktree head. undefined when git cannot
   // answer, so the caller falls back instead of reading silence as "unchanged".
@@ -333,12 +339,6 @@ export interface AppModelDependencies {
 
 export interface OperationsDependencies {
   setupInFlight(): boolean;
-  hasActiveEnvironmentTasks(instanceId: string): boolean;
-  markEnvironmentInstanceShuttingDown(instanceId: string): void;
-  onEnvironmentTasksSettled(
-    instanceId: string,
-    listener: () => void
-  ): () => void;
 }
 
 // The single dependency object shared by createRadiusCanvas, createRadiusTools,
@@ -348,6 +348,7 @@ export interface OperationsDependencies {
 export interface RadiusExtensionDependencies {
   logError(message: string): void;
   session: SessionHolder;
+  executionOwner: EnvironmentExecutionOwner;
   clock: ClockDependencies;
   servers: Map<string, CanvasServerEntry>;
   getOrCreateServer(

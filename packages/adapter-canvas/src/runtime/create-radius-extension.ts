@@ -16,6 +16,7 @@ import { createRadiusCanvas } from "./create-radius-canvas.js";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
+import { readSelectedSourceRevision } from "../app-model-authoring-failure.js";
 import {
   createModelingActivity,
   observeWorkspaceModelingRun
@@ -87,6 +88,9 @@ export interface RadiusExtension {
 export function createRadiusExtension(
   deps: RadiusExtensionDependencies
 ): RadiusExtension {
+  if (!deps.executionOwner) {
+    throw new Error("Missing Radius runtime dependency: executionOwner");
+  }
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
   const canvasInstances = createRadiusCanvasInstanceRegistry();
@@ -170,6 +174,12 @@ export function createRadiusExtension(
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>
       Promise.resolve(deps.session.get().send(message)).then(() => undefined),
+    readSourceRevision: (repo, branch, context) =>
+      readSelectedSourceRevision(context, repo, branch, {
+        isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
+        workspaceSourceRevision: deps.appModel.workspaceSourceRevision,
+        branchHeadCommit: deps.appModel.branchHeadCommit
+      }),
     modelingInFlight: (repo, branches, context, waitStartedAtMs) =>
       modelingActivity.inFlight(repo, branches, {
         repo: context.workspaceRepo || "",
@@ -192,8 +202,24 @@ export function createRadiusExtension(
     missingModelHandoffs
   });
   deps.hostCallbacks.setAppBicepHandoff(
-    ({ repo, branches, page, progressView, state }) =>
-      handOffAppModel({ repo, branches, page, progressView, state })
+    ({
+      repo,
+      branches,
+      page,
+      progressView,
+      state,
+      isCurrent,
+      environmentKey
+    }) =>
+      handOffAppModel({
+        repo,
+        branches,
+        page,
+        progressView,
+        state,
+        isCurrent,
+        environmentKey
+      })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
     ({ repo, branch, error, deployRunUrl, attemptId }) =>
@@ -307,7 +333,7 @@ export function createRadiusExtension(
       try {
         const closes = [...deps.servers.keys()].map(async (id) => {
           try {
-            deps.operations.markEnvironmentInstanceShuttingDown(id);
+            deps.executionOwner.markEnvironmentInstanceShuttingDown(id);
             await deps.stopServer(id, true);
           } catch (error) {
             deps.logError(

@@ -23,6 +23,31 @@ export default defineConfig({
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
+        "packages/adapter-canvas/src/runtime/environment-execution-owner.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/core/src/setup-*.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-canvas/src/server/services/setup-checkpoint.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-canvas/src/server/routes/create-environment-refusals.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
         "packages/core/src/deploy-artifact-evidence.ts": {
           statements: 100,
           branches: 100,

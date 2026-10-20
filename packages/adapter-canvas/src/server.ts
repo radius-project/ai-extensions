@@ -141,8 +141,10 @@ import {
   resolveSessionId,
   toSafeRepoRelPath,
   uncommittedGeneratedPaths,
-  workspaceGraphJsonPath
+  workspaceGraphJsonPath,
+  workspaceSourceRevision
 } from "./workspace.js";
+import { readSelectedSourceRevision } from "./app-model-authoring-failure.js";
 import {
   DEFAULT_CANVAS_PAGE,
   DEPLOY_REPAIR_ATTEMPT_CAP
@@ -295,6 +297,10 @@ import {
 } from "./server/services/verification-workflow-cancellation.js";
 import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
 import {
+  persistBestEffort,
+  persistMutationCheckpoint
+} from "./server/services/setup-checkpoint.js";
+import {
   CLEANUP_COMMANDS,
   cleanupRemovedGitHubEnvironment
 } from "./server/services/cleanup-commands.js";
@@ -356,6 +362,11 @@ import {
   providerMutationWillWrite,
   recordProviderReconciliationFailure
 } from "./server/services/provider-mutation-recovery.js";
+import {
+  azureRetryDelayMs,
+  isReplicationLagError,
+  isRetryableAzureReadFailure
+} from "./server/routes/azure-auto-setup-credentials.js";
 import {
   pendingBranchDelete,
   reconcileRecoveredBranchDelete
@@ -432,6 +443,8 @@ import {
 } from "./server/services/verification-retry.js";
 import { runVerificationRetry as runSelectedVerificationRetry } from "./server/services/verification-retry-runner.js";
 import type { CanvasServerEntry } from "./server/types.js";
+import type { CanvasServerDependencyOverrides } from "./server/dependencies.js";
+import type { EnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
 export { resolveDeployStatus } from "./server/services/deployment-resolver.js";
@@ -445,70 +458,10 @@ interface CommandResult {
   timedOut?: boolean;
 }
 
-export async function persistMutationCheckpoint({
-  operation,
-  persist,
-  report,
-  fail
-}: {
-  operation: any;
-  persist: () => Promise<void>;
-  report?: (diagnostic: { code: string; message: string }) => void;
-  fail: (status: number, error: string, code: string) => Promise<void>;
-}): Promise<boolean> {
-  try {
-    await persist();
-  } catch (error) {
-    report?.({
-      code: "operation-store-write-failed",
-      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
-    });
-    // Do not retry the same deterministic write or continue making cloud
-    // changes without durable provenance for what already succeeded.
-    await fail(
-      500,
-      "Radius changed no further cloud resources because it could not save the setup recovery record.",
-      "operation-persistence-failed"
-    );
-    return false;
-  }
-  // Every provider write in the setup passes through here on its way to the
-  // next one, which makes this the one place that can guarantee reconciliation's
-  // verdict is honored. Once recovery has decided the interrupted attempt must
-  // be undone, continuing forward would add resources to the set about to be
-  // deleted — and each one added after the decision is one the rollback's
-  // selection never learned about.
-  if (operation?.providerRecovery?.state === "rollback_pending") {
-    await fail(
-      409,
-      "Radius reconciled the interrupted provider request and must delete the setup resources before making any further provider changes.",
-      "provider-rollback-pending"
-    );
-    return false;
-  }
-  return true;
-}
-
-export async function persistBestEffort({
-  operation,
-  persist,
-  report
-}: {
-  operation: any;
-  persist: () => Promise<void>;
-  report?: (diagnostic: { code: string; message: string }) => void;
-}): Promise<boolean> {
-  try {
-    await persist();
-    return true;
-  } catch (error) {
-    report?.({
-      code: "operation-store-write-failed",
-      message: `Could not persist setup operation ${operation?.operationId || "unknown"}: ${errorMessage(error)}`
-    });
-    return false;
-  }
-}
+export {
+  persistBestEffort,
+  persistMutationCheckpoint
+} from "./server/services/setup-checkpoint.js";
 
 /**
  * Honor a recorded stop at a named safe boundary between remote mutations.
@@ -595,6 +548,7 @@ interface AppBicepHandoffInput {
   // Whether the render that raised this handoff is still on screen, re-checked
   // by the runtime just before it mints attempt tokens and speaks.
   isCurrent?: () => boolean;
+  environmentKey?: string;
 }
 
 export interface DeployRepairHandoffInput {
@@ -732,106 +686,6 @@ function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
   });
 }
 
-// Composition root for the migrated `liveness-source` family. The handlers
-// receive only the three seams they use; the open handler is read through a
-// getter so the SDK entry can still register it after construction.
-const livenessSourceRoutes = createLivenessSourceRoutes({
-  getOpenSourceHandler: () => openSourceHandler,
-  readInstanceState: (instanceId) =>
-    canvasServer.instances.get(instanceId)?.state,
-  getWorkspaceModelRevision: async (instanceId) => {
-    const state = canvasServer.instances.get(instanceId)?.state;
-    if (
-      !state?.graphFromWorkspace ||
-      !state.graphTargetRepo ||
-      !state.graphBranch
-    ) {
-      return null;
-    }
-    const model = await resolveWorkspaceBicep(
-      state,
-      state.graphTargetRepo,
-      state.graphBranch
-    );
-    // Model content only: the revision must not move when a staged-artifact
-    // fingerprint changes, or every stage would look like a model edit.
-    return model ? graphDefinitionHash(model.content, "") : null;
-  },
-  toSafeRepoRelPath
-});
-
-// Server-owned work is scheduled on the instance that received the request, so
-// an instance that is gone reports a miss instead of silently dropping accepted
-// work. Every route that schedules resolves its runner through here.
-function resolveInstanceRunner(
-  instanceId: string,
-  operationId: string
-): ReturnType<typeof createInstanceRequestCoordinator> | null {
-  const coordinator = instanceRequestCoordinators.get(instanceId);
-  if (!coordinator) {
-    console.error(
-      `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operationId}.`
-    );
-    return null;
-  }
-  return coordinator;
-}
-
-function scheduleEnvironmentOperationForInstance(
-  instanceId: string,
-  operation: { operationId: string }
-): boolean {
-  const coordinator = resolveInstanceRunner(instanceId, operation.operationId);
-  if (!coordinator) return false;
-  coordinator.scheduleEnvironmentOperation(operation);
-  return true;
-}
-
-// Composition root for the migrated `operations-status` family. Reads, creates,
-// and resumable actions each receive only the registry, mutation, persistence,
-// projection, and per-instance scheduling seams they invoke.
-const operationsStatusRoutes = createOperationsStatusRoutes(
-  {
-    latest: (repo) => operations.latest(repo),
-    latestAny: () => operations.latestAny(),
-    get: (operationId) => operations.get(operationId),
-    toClientView,
-    productVersion: resolveGeneratorVersion,
-    now: () => Date.now()
-  },
-  {
-    isValidRepoSlug,
-    isResourceGroupName,
-    isAksClusterName,
-    isKubernetesNamespace,
-    isUuid,
-    buildStages,
-    createOperation,
-    claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
-    startConflict: (repo) => operations.startConflict(repo),
-    startOperation: (op) => operations.start(op),
-    persistOperations: () => operations.persist(),
-    finish,
-    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-    errorMessage
-  },
-  {
-    getOperation: (operationId) => operations.get(operationId),
-    canResumeInput,
-    resumeAfterInput,
-    requireInput,
-    finish,
-    isTerminalState,
-    canDismissOperation,
-    dismissOperation,
-    persistOperations: () => operations.persist(),
-    toClientView,
-    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-    errorMessage,
-    inputRequiredState: INPUT_REQUIRED_STATE
-  }
-);
-
 // Composition root for the cooperative controls in the same `operations-status`
 // family: stop, continue, rollback, and the setup, verification, and cleanup
 // retries.
@@ -869,160 +723,6 @@ function requiredVerificationWorkflowContext(op: {
   return { identity, login };
 }
 
-const operationsControlRoutes = createOperationsControlRoutes({
-  get: (operationId) => operations.get(operationId),
-  acquireForRetry: (op) => operations.acquireForRetry(op),
-  persistOperations: () => operations.persist(),
-  checkPullRequestMerge: (op, pullRequestUrl) =>
-    checkSetupPullRequestMergeForOperation(op, pullRequestUrl, {
-      createExecutor: (login) =>
-        githubAccountCoordinator.createReadOnlyExecutor(login),
-      fetchJson: async (executor, apiPath) => {
-        const result = await selectedGhApiJson(executor, apiPath);
-        return { ok: result.ok, json: result.json, error: result.stderr };
-      },
-      errorMessage
-    }),
-  inspectVerificationWorkflow: async (op) => {
-    const { identity, login } = requiredVerificationWorkflowContext(op);
-    const result = await githubAccountCoordinator.withSelectedAccount(
-      login,
-      { instanceId: "operations-control", operationId: op.operationId },
-      (executor) =>
-        readVerificationWorkflowState(executor, identity, {
-          run: (selected, args) => selected.run(args, { timeout: 30000 })
-        }),
-      30000
-    );
-    if (result.value !== "active" && result.value !== "inactive") {
-      throw new Error("GitHub returned an unsupported workflow state.");
-    }
-    return result.value;
-  },
-  cancelVerificationWorkflow: async (op) => {
-    const { identity, login } = requiredVerificationWorkflowContext(op);
-    const result = await githubAccountCoordinator.withSelectedAccount(
-      login,
-      { instanceId: "operations-control", operationId: op.operationId },
-      (executor) =>
-        cancelVerificationWorkflow(executor, identity, {
-          run: (selected, args) => selected.run(args, { timeout: 30000 })
-        }),
-      30000
-    );
-    return result.value;
-  },
-  schedule: ({ kind, instanceId, operation, commandId }) => {
-    const coordinator = resolveInstanceRunner(
-      instanceId,
-      operation.operationId
-    );
-    if (!coordinator) return false;
-    if (kind === "setup_continuation" || kind === "deletion_retry") {
-      coordinator.scheduleEnvironmentOperation(operation);
-    } else {
-      coordinator.scheduleCommandTask(kind, operation, commandId);
-    }
-    return true;
-  },
-  // The environments picker reads a repo-scoped cached listing, so an exit that
-  // closes a setup has to drop it here: the browser reloads the table straight
-  // after, and a cached payload would answer with the environment the abandoned
-  // attempt left behind.
-  invalidateEnvironmentListing: (repo) => {
-    envListCache.invalidate(repo);
-  }
-});
-
-// Composition root for the migrated `repositories` family. Three seams: the
-// subprocess runner, a reader for the live instance state the branch cache is
-// written to, and the workspace-repo predicate, which stays defined here and is
-// injected rather than copied.
-const repositoriesRoutes = createRepositoriesRoutes({
-  cliExec: (command, args, options, callback) => {
-    cliExec(command, args, options, callback);
-  },
-  readInstanceState: (instanceId) =>
-    canvasServer.instances.get(instanceId)?.state,
-  repoMatchesWorkspace
-});
-
-// Composition root for the migrated `deployments` family: the read routes, the
-// destructive POST /api/delete-deployment, GitHub-only
-// POST /api/abandon-deployment, and POST /api/deploy, whose multi-stage runtime
-// behavior lives in the deploy services composed below.
-//
-// The listing cache, its TTL and the deploy service are read through getters
-// because all three are declared further down the module and would otherwise be
-// in the temporal dead zone when this object is built at import time.
-const deploymentsRoutes = createDeploymentsRoutes({
-  ghCommandPresentation: GH_COMMAND_PRESENTATION,
-  isValidRepoSlug,
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  triggerDeployRepairHandoff,
-  triggerDeployFailureNotice,
-  deployHandoffStatus,
-  resolveRepoAppName,
-  resolveEnvDeployment,
-  ghOrThrow: (args) => ghOrThrow(args),
-  resetDeploymentViewState: (state, attemptId) => {
-    resetDeploymentViewState(state, attemptId);
-  },
-  get deployListCache() {
-    return deployListCache;
-  },
-  get deployListTtlMs() {
-    return DEPLOY_LIST_TTL_MS;
-  },
-  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-  reserveDeploymentMutation: (state, reservation) =>
-    reserveDeploymentMutation(state, reservation),
-  releaseDeploymentMutation,
-  deploymentStatusBlocksMutation,
-  localDeploymentBlocksMutation: (state) =>
-    localDeploymentBlocksMutation(state),
-  ensureWorkflowsCurrent: (repo, environment, provider, only) =>
-    ensureWorkflowsCurrent(repo, environment, provider, only),
-  findWorkflowRun,
-  runGh: (args, timeout = 20000, extraEnv) =>
-    new Promise((resolve) => {
-      const opts: CliOptions = { timeout };
-      if (extraEnv) opts.env = extraEnv;
-      cliExec("gh", args, opts, (err, stdout, stderr) => {
-        resolve(toGhCommandResult(err, stdout, stderr, { trimStdout: true }));
-      });
-    }),
-  readProcessEnv: () => process.env,
-  setTimer: (callback, ms) => setTimeout(callback, ms),
-  // Declared as a getter for the same temporal-dead-zone reason as the cache
-  // above: the deploy services are composed further down, after the workflow
-  // file names and the instance container they narrow over exist.
-  get deployRequest() {
-    return deployRequestService;
-  },
-  get abandonment() {
-    return deploymentAbandonmentService;
-  },
-  probeDeleteConflict: (request, instanceId) => {
-    const scope = canvasServer.instances.get(instanceId)?.observation;
-    if (!scope)
-      throw new Error("Workflow observation instance is unavailable.");
-    let observation: WorkflowReadRequest | undefined;
-    const read = () =>
-      (observation ??= scope.observe(
-        undefined,
-        WORKFLOW_READ_LIMITS.deleteConflictMs
-      ));
-    return probeDeleteConflict(request, {
-      resolveEnvDeployment,
-      listArtifacts: (repo, runId) =>
-        listWorkflowArtifacts(repo, runId, undefined, read().context),
-      downloadArtifact: (repo, artifact) =>
-        downloadWorkflowArtifact(repo, artifact, read().context)
-    });
-  }
-});
-
 // Composition root for the `azure-discovery` routes. Four seams:
 // `az` runner (which carries the agent-session-stripped `cliExec` environment
 // the Azure setup routes run under), the general trimmed-stdout CLI runner the
@@ -1036,117 +736,6 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
   parseServedReposFromSubjects: (subjects) =>
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });
-
-const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
-  composeAzureAutoSetupDependencies({
-    isServerOwnedRequest: (instanceId, request) =>
-      instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-      false,
-    lifecycle: {
-      get: (operationId) => operations.get(operationId),
-      isStale: (operation) => isStale(operation),
-      create: (input) => createOperation(input),
-      buildStages: () => buildStages(),
-      start: (operation) => operations.start(operation),
-      persist: () => operations.persist(),
-      report: (diagnostic) => operations.report?.(diagnostic),
-      finish: (operation, state, options) => {
-        finish(operation, state, options);
-      },
-      getAzureAppCreateContinuation,
-      setAzureAppCreateContinuation
-    },
-    progress: {
-      enterStage: (operation, stage) => {
-        enterStage(operation, stage);
-      },
-      setStageState: (operation, stage, state) => {
-        setStageState(operation, stage, state);
-      },
-      hasWarnings: (operation) => hasWarnings(operation),
-      addLegacyStep: (operation, text) => {
-        addLegacyStep(operation, text);
-      },
-      setContext: (operation, patch) => {
-        setContext(operation, patch);
-      },
-      setCloudContext: (operation, provider, patch) => {
-        setCloudContext(operation, provider, patch);
-      },
-      requireInput: (operation, input) => {
-        requireInput(operation, input);
-      },
-      resumeAfterInput: (operation) => {
-        resumeAfterInput(operation);
-      }
-    },
-    artifacts: {
-      withCredentialProvenanceLock,
-      recordAzureApp: (operation, patch) => {
-        recordAzureApp(operation, patch);
-      },
-      recordServicePrincipal: (operation, patch) => {
-        recordServicePrincipal(operation, patch);
-      },
-      recordCreatedFederatedCredential: (operation, entry) => {
-        recordCreatedFederatedCredential(operation, entry);
-      },
-      recordFederatedCredentialProvenance: async (operation, entry) => {
-        const recorded = await recordCredentialProvenance({
-          ...entry,
-          operationId: String(operation.operationId || "")
-        });
-        if (!recorded) {
-          throw new Error(
-            `Invalid provenance for federated credential ${entry.name}.`
-          );
-        }
-      },
-      recordCreatedRoleAssignment: (operation, entry) => {
-        recordCreatedRoleAssignment(operation, entry);
-      }
-    },
-    external: {
-      getSelectedGitHubExecutor: (operationId) =>
-        selectedGitHubExecutorsByOperation.get(operationId),
-      getGitHubIdentity,
-      preflightRepoAdmin: (repo, executor) =>
-        preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
-      preflightGhcrPackageWriteAccess: (executor) =>
-        preflightGhcrPackageWriteAccess(
-          getGhPackageCredentials,
-          getGitHubIdentity,
-          executor,
-          GH_COMMAND_PRESENTATION
-        ),
-      runGitHubJson: (apiPath, executor) =>
-        runGitHubJsonRequest(apiPath, executor),
-      runAz: (args) => runCliCommand("az", args)
-    },
-    tempFile: {
-      createPath: () =>
-        join(
-          tmpdir(),
-          `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
-        ),
-      write: (path, contents) => {
-        writeFileSync(path, contents, { mode: 0o600 });
-      },
-      remove: (path) => {
-        try {
-          unlinkSync(path);
-        } catch {}
-      }
-    },
-    ensureServicePrincipal,
-    finalizeSetupFailure,
-    persistMutationCheckpoint,
-    honorStopBoundary,
-    sleep: (milliseconds) =>
-      new Promise((resolve) => setTimeout(resolve, milliseconds)),
-    stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
-  })
-);
 
 const githubAccountCoordinator = createGitHubAccountCoordinator(
   {
@@ -1241,45 +830,6 @@ const remediationRoutes = createRemediationRoutes(
   })
 );
 
-const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  resolveBranchForRequest: (entry, repo, requestedBranch) =>
-    resolveGraphBranchForRequest(
-      entry.state,
-      repo,
-      requestedBranch,
-      undefined,
-      currentWorkspaceBranch
-    ),
-  commitBranchResolution: (entry, repo, resolution) =>
-    commitWorkspaceBranchResolution(entry.state, repo, resolution),
-  prepareSourceRef: (entry, context) =>
-    prepareSourceRefResources(entry, "graph", context),
-  commitSourceRef: (entry, resources, context, expectedToken) =>
-    setSourceRefResources(entry, "graph", resources, context, expectedToken),
-  isCurrentSourceRef: (entry, expectedToken) =>
-    isCurrentSourceRefToken(entry.state, "graph", expectedToken),
-  triggerAppBicepHandoff: (entry, repo, branch) =>
-    triggerAppBicepHandoff(entry, repo, branch, "graph"),
-  triggerGraphRepairHandoff: (entry, request) =>
-    triggerGraphRepairHandoff(entry, request),
-  clearGraphRepairAttempt: (entry) =>
-    clearGraphRepairAttempt(entry.state, "graph"),
-  fetchBicepSelection: (entry, repo, branch) =>
-    fetchBicepSelection(entry, repo, branch),
-  listBranchPaths: (entry, repo, branch) =>
-    listBranchPaths(entry, repo, branch),
-  workspaceGraphJsonPath: (state, bicepRepoPath) =>
-    workspaceGraphJsonPath(state, bicepRepoPath),
-  radArtifactsDirForSelection: (options) =>
-    radArtifactsDirForSelection({ ...options, github }),
-  buildGraphViaRad: (content, bicepPath, options) =>
-    buildGraphViaRad(content, bicepPath, options),
-  canvasGraphResources,
-  errorMessage,
-  logError: (message) => console.error(message)
-});
-
 // Composition root for the write half of the `graphs-planning` family. The
 // complete dependency object is assembled here and nowhere else; the workflow
 // service receives narrow function seams and the shared modeling pipeline
@@ -1307,69 +857,6 @@ const observeServerWorkspaceModelingRun = (
     modelingRunLastActivityAtMs
   );
 
-const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  resolveBranchForRequest: (
-    entry,
-    repo,
-    requestedBranch,
-    followWorkspaceBranch
-  ) =>
-    resolveGraphBranchForRequest(
-      entry.state,
-      repo,
-      requestedBranch,
-      followWorkspaceBranch,
-      currentWorkspaceBranch
-    ),
-  commitBranchResolution: (entry, repo, resolution) =>
-    commitWorkspaceBranchResolution(entry.state, repo, resolution),
-  pipeline: createGraphPipeline<CanvasServerEntry>({
-    fetchBicepSelection: (entry, repo, branch) =>
-      fetchBicepSelection(entry, repo, branch),
-    resolveRadArtifactsDir: (request) =>
-      radArtifactsDirForSelection({ ...request, github }),
-    buildGraphViaRad: (content, definitionFile, options) =>
-      buildGraphViaRad(content, definitionFile, options),
-    canvasGraphResources,
-    workspaceGraphJsonPath,
-    graphDefinitionHash,
-    radArtifactsFingerprint,
-    removeDirectory: (dir) => {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }),
-  triggerAppBicepHandoff,
-  triggerGraphRepairHandoff: (entry, request) =>
-    triggerGraphRepairHandoff(entry, request),
-  clearGraphRepairAttempt: (entry, view) => {
-    clearGraphRepairAttempt(entry.state, view);
-    if (view === "diff") delete entry.state.diffModelingFailed;
-  },
-  listBranchPaths: (entry, repo, branch) =>
-    listBranchPaths(entry, repo, branch),
-  prepareSourceRefResources: (entry, view, sourceRefInput) =>
-    prepareSourceRefResources(entry, view, sourceRefInput),
-  setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
-    setSourceRefResources(entry, view, resources, sourceRefInput, token),
-  isCurrentSourceRefToken,
-  canReuseModeledGraph,
-  addGraphProgress,
-  beginPlannedGraphRequest,
-  isCurrentPlannedGraphRequest,
-  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
-  resolveRecipeOutputs: (resources, recipes, provider) =>
-    resolveRecipeOutputs(github, resources, recipes, provider),
-  computeGraphDiff: (baseResources, headResources) =>
-    computeGraphDiff(baseResources, headResources),
-  observeModelingRun: observeServerWorkspaceModelingRun,
-  record,
-  optionalString,
-  errorMessage,
-  logError: (message) => console.error(message),
-  now: () => Date.now()
-});
-
 function triggerGraphRepairHandoff(
   entry: CanvasServerEntry,
   request: GraphRepairRequest
@@ -1390,56 +877,6 @@ function triggerGraphRepairHandoff(
   }
   return attempt;
 }
-
-// Composition root for the read-only half of the `graphs-planning` family. The
-// Deployed route reads status through the cached artifact reader, but obtains its
-// fixed topology through the same modeled-graph workflow and cache as the Graph
-// route. It never parses Bicep or invokes rad through a second path.
-const graphsPlanningRoutes = createGraphsPlanningRoutes({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  createDeployStatusReader: (options, instanceId) => {
-    const scope = canvasServer.instances.get(instanceId)?.observation;
-    if (!scope)
-      throw new Error("Workflow observation instance is unavailable.");
-    return scope.reader(options);
-  },
-  loadModeledGraph: async (instanceId, repo, branch) => {
-    const outcome = await graphPlanningWorkflows.loadGraph({
-      instanceId,
-      body: JSON.stringify({ repo, branch, refresh: true })
-    });
-    const workflowError = optionalString(outcome.payload.error);
-    return {
-      status: outcome.status,
-      retry: outcome.payload.needsAppBicep === true,
-      error:
-        workflowError ||
-        (outcome.status >= 400 ?
-          `Modeled graph load failed with status ${outcome.status}.`
-        : undefined)
-    };
-  },
-  buildDeployStatusMap,
-  buildDeployMessageMap,
-  deployStatusKeys,
-  mergeDeployedGraphDisplayMetadata,
-  mergeDeployedGraphMetadata,
-  projectDeployedGraph: (modeled, statusByKey) =>
-    projectDeployedGraph(modeled as any[], statusByKey),
-  canvasGraphResources,
-  applyDeployMessages,
-  settleDeployStatuses,
-  errorMessage,
-  repoMatchesWorkspace,
-  observeModelingRun: observeServerWorkspaceModelingRun,
-  now: () => Date.now()
-});
-
-// The route layer sees exactly one seam: the workflow service above. Parsing
-// and serialization are all it owns.
-const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
-  workflows: graphPlanningWorkflows
-});
 
 // The listing TTL and verify-workflow filename are declared here, before the
 // environments composition root reads them eagerly. Their canonical uses stay
@@ -1499,121 +936,6 @@ async function discoverEnvironmentTarget(
   };
 }
 
-// route, `POST /api/create-environment`, is large enough to own a separate
-// composition root below. Every seam is a narrow named function: the two subprocess
-// runners (`cliExec`, `runCommand`), the repo-file fetch and bicep param parse
-// for `app-params`, the app-name and active-deployment resolvers plus the
-// error logger for `delete-environment`, three narrow accessors over the
-// module-level `envListCache` (so this module owns no cache), the workflow-sync
-// kickoff and clock for `list-environments`, and the operation-registry,
-// run-inspection, and finisher helpers for `verify-status`. `repoMatchesWorkspace`,
-// `errorMessage`, `VERIFY_WORKFLOW_FILE`, and `STAGE_VERIFY` stay defined here
-// and are injected rather than moved, so the route module spawns nothing and
-// reads no module-level mutable state.
-const environmentsRoutes = createEnvironmentsRoutes({
-  errorMessage,
-  redactDiagnostic: (value) => redactGhCredentials(value),
-  repoMatchesWorkspace,
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  runCommand: (command, args, options) => runCommand(command, args, options),
-  fetchFileFromRepo: (repo, path, branch) =>
-    fetchFileFromRepo(repo, path, branch),
-  appParams,
-  resolveRepoAppName: (repo, branch) => resolveRepoAppName(repo, branch),
-  resolveEnvDeployment: (repo, environment, appName) =>
-    resolveEnvDeployment(repo, environment, appName),
-  logError: (message) => console.error(message),
-  discoverEnvironmentTarget: (repo, environment) =>
-    discoverEnvironmentTarget(repo, environment),
-  activeDeleteOperation: (repo, environment) => {
-    return matchDeleteOperationEnvironment(
-      operations.running(repo),
-      environment
-    );
-  },
-  createOperation,
-  buildDeleteStages: (options) => buildDeleteStages(options),
-  startOperation: (op) => operations.start(op),
-  toClientView,
-  scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-  cliExec: (command, args, options, callback) => {
-    cliExec(command, args, options, callback);
-  },
-  activeDeleteEnvironment: (repo) => {
-    const op = operations.latest(repo);
-    if (
-      op &&
-      op.kind === OPERATION_KIND_DELETE &&
-      !isTerminalState(op.state) &&
-      typeof op.environment === "string"
-    ) {
-      return op.environment;
-    }
-    return "";
-  },
-  envListCacheGet: (repo) => envListCache.get(repo),
-  envListCacheSet: (repo, entry) => {
-    envListCache.set(repo, entry);
-  },
-  envListCacheDelete: (repo) => {
-    envListCache.invalidate(repo);
-  },
-  envListCacheGeneration: (repo) => envListCache.generation(repo),
-  envListTtlMs: ENV_LIST_TTL_MS,
-  kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
-    kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
-  now: () => Date.now(),
-  getOperation: (operationId) => operations.get(operationId),
-  getSelectedGitHubExecutor: (operationId) =>
-    selectedGitHubExecutorsByOperation.get(operationId),
-  isSelectedGitHubAuthorizationError: (error) =>
-    isSelectedGhAuthorizationError(error),
-  hasCompleteVerificationIdentity,
-  findWorkflowRun: (
-    repo,
-    workflowFile,
-    sinceMs,
-    knownId,
-    executor,
-    afterRunId
-  ) =>
-    findWorkflowRun(repo, workflowFile, sinceMs, knownId, executor, afterRunId),
-  settleVerificationDispatchRecovery: (operation, runId) => {
-    const op = operation as any;
-    const verification = op?.verification;
-    if (!verification) return;
-    const target = `${op.repo}:${verification.workflow}:${verification.ref}:${verification.environment}`;
-    const mutation = providerMutationRecord(
-      op,
-      "github_workflow.dispatch",
-      target
-    );
-    if (mutation) {
-      settleProviderMutation(
-        op,
-        mutation.mutationId,
-        "confirmed",
-        `Adopted verification run ${runId} after the saved pre-dispatch baseline.`
-      );
-    }
-  },
-  getRunDetail,
-  fetchRunLog,
-  extractErrorLines: (logText, max) => extractErrorLines(logText, max),
-  extractGitHubActionsStepLog,
-  explainOidcEnterpriseClaim,
-  explainNoSubscriptions,
-  addLegacyStep: (operation, text) => addLegacyStep(operation, text),
-  isTerminalState,
-  finish,
-  finishSucceeded,
-  persistBestEffort,
-  persistOperations: () => operations.persist(),
-  reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
-  verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
-  stageVerify: STAGE_VERIFY
-});
-
 // Reads what the repository's environments already claim, for the create
 // route's namespace rung. The read runs as the GitHub account pinned to that
 // operation, the same account every other step of the setup uses, so a customer
@@ -1625,248 +947,10 @@ const namespaceClaimsFor = (operationId: string) => {
   return executor ? createSelectedNamespaceClaimsPorts(executor) : null;
 };
 
-// Composition root for `POST /api/create-environment`. The route's four seams
-// live in `create-environment*.ts`; everything they touch is injected here, so
-// the module spawns no process directly, imports no `node:fs`, and reads no
-// module-level mutable state. `isServerOwnedRequest` is deliberately a
-// per-request function rather than a value: the token is a per-instance
-// `randomUUID()` held by that instance's request coordinator, and this route is
-// reachable only through the internal loopback POST that carries it.
-const createEnvironmentRoutes = createCreateEnvironmentRoutes({
-  ghCommandPresentation: GH_COMMAND_PRESENTATION,
-  isServerOwnedRequest: (instanceId, request) =>
-    instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-    false,
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  getSelectedGitHubExecutor: (operationId) =>
-    selectedGitHubExecutorsByOperation.get(operationId),
-  cliExec: (command, args, options, callback) =>
-    cliExec(command, args, options, callback),
-  readProcessEnv: () => process.env,
-  isValidRepoSlug,
-  getOperation: (operationId) => operations.get(operationId),
-  isStale: (operation) => isStale(operation),
-  isTerminalState: (state) => isTerminalState(state),
-  createOperation,
-  buildStages,
-  startOperation: (operation) => operations.start(operation),
-  persistOperations: () => operations.persist(),
-  reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
-  finishFailed: (operation, failure) => {
-    finish(operation, "failed", { failure });
-  },
-  enterStage: (operation, stage) => {
-    enterStage(operation, stage);
-  },
-  errorMessage,
-  stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
-  stageConfigureEnvironment: STAGE_CONFIGURE_ENVIRONMENT,
-  namespaceClaimsFor,
-  addLegacyStep: (operation, text) => {
-    addLegacyStep(operation, text);
-  },
-  finalizeSetupFailure: (operation, input) =>
-    finalizeSetupFailure(operation, input as never),
-  persistMutationCheckpoint,
-  persistBestEffort,
-  guardStopBoundary,
-  runAzCommand: (args) => runCliCommand("az", args),
-  preflightRepoAdmin: (repo, executor) =>
-    preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
-  preflightGhcrPackageWriteAccess: (executor) =>
-    preflightGhcrPackageWriteAccess(
-      getGhPackageCredentials,
-      getGitHubIdentity,
-      executor,
-      GH_COMMAND_PRESENTATION
-    ),
-  readGitHubJson: (apiPath, executor) =>
-    runGitHubJsonRequest(apiPath, executor),
-  bootstrapGHCRStatePackage: (input) =>
-    bootstrapGHCRStatePackage({
-      targetRepository: input.targetRepository,
-      registry: input.registry,
-      credentials: input.credentials as GhcrPackageCredentials,
-      ghCommandPresentation: GH_COMMAND_PRESENTATION
-    }),
-  stateRegistryForEnvironment,
-  getDefaultBranch: (repo, executor) =>
-    executor ?
-      selectedGetDefaultBranch(executor, repo)
-    : getDefaultBranch(repo),
-  getBranchHeadSha: (repo, branch, executor) =>
-    executor ?
-      selectedGetBranchHeadSha(executor, repo, branch)
-    : getBranchHeadSha(repo, branch),
-  createBranchRef: (repo, branch, sha, executor) =>
-    executor ?
-      selectedCreateBranchRef(executor, repo, branch, sha)
-    : createBranchRef(repo, branch, sha),
-  tempFile: {
-    write: (contents) => {
-      const path = join(
-        tmpdir(),
-        "radius-wf-commit-" +
-          Date.now() +
-          "-" +
-          Math.random().toString(36).slice(2) +
-          ".json"
-      );
-      writeFileSync(path, contents);
-      return path;
-    },
-    remove: (path) => {
-      try {
-        unlinkSync(path);
-      } catch {}
-    }
-  },
-  setCanonicalEnvironment: (operation, environment) => {
-    setCanonicalEnvironment(operation, environment);
-  },
-  recordGitHubEnvironment: (operation, patch) => {
-    recordGitHubEnvironment(operation, patch);
-  },
-  recordGitHubEnvironmentVariable: (operation, entry) => {
-    recordGitHubEnvironmentVariable(operation, entry);
-  },
-  promoteCreatedGitHubEnvironment: (operation, identity) =>
-    promoteCreatedGitHubEnvironment(operation, identity),
-  envListCacheDelete: (repo) => {
-    envListCache.invalidate(repo);
-  },
-  ociStateBackend: OCI_STATE_BACKEND,
-  defaultStateArchive: DEFAULT_STATE_ARCHIVE,
-  azureCredential: () => cloudCredential(sharedCredentials.azure),
-  awsCredential: () => cloudCredential(sharedCredentials.aws),
-  optionalString,
-  generateVerifyWorkflow: (environment, provider, setupPushOperationMarker) =>
-    generateVerifyWorkflow(environment, provider, undefined, {
-      setupPushOperationMarker
-    }),
-  generateDeployWorkflow: (environment, appFile) =>
-    generateDeployWorkflow(environment, appFile),
-  generateDeleteWorkflow: (environment) => generateDeleteWorkflow(environment),
-  recordCommittedWorkflowFile: (operation, entry) => {
-    recordCommittedWorkflowFile(operation, entry);
-  },
-  deleteLegacyDeployWorkflow,
-  createPullRequestApi: (repo, head, base, title, body, executor) =>
-    executor ?
-      selectedCreatePullRequest(executor, repo, head, base, title, body)
-    : createPullRequestApi(repo, head, base, title, body),
-  planCredentialVerification,
-  fetchFileFromRepo: (repo, path, branch, executor) =>
-    executor ?
-      selectedFetchFileFromRepo(executor, repo, path, branch)
-    : fetchFileFromRepo(repo, path, branch),
-  fetchFileFromRepoResult: (repo, path, branch, executor) =>
-    executor ?
-      selectedFetchFileFromRepoResult(executor, repo, path, branch)
-    : fetchFileFromRepoResult(repo, path, branch),
-  buildVerifyWorkflowDispatchArgs,
-  verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
-  stageVerify: STAGE_VERIFY,
-  recordCleanupState: (operation, patch) => {
-    recordCleanupState(operation, patch);
-  },
-  recordCommitState: (operation, patch) => {
-    recordCommitState(operation, patch);
-  },
-  setStageState: (operation, stage, state) => {
-    setStageState(operation, stage, state);
-  },
-  finish: (operation, state, options) => {
-    finish(operation, state, options);
-  },
-  sleep: (milliseconds) =>
-    new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  now: () => Date.now()
-});
-
-// Built once at module initialization so table validation runs a single time
-// and a missing typed handler fails early rather than per instance.
-const serverRoutes = createServerRouteTable({
-  ...livenessSourceRoutes,
-  ...operationsStatusRoutes,
-  ...operationsControlRoutes,
-  ...repositoriesRoutes,
-  ...deploymentsRoutes,
-  ...azureDiscoveryRoutes,
-  ...azureAutoSetupRoutes,
-  ...identityProfilesRoutes,
-  ...identityAuthRoutes,
-  ...remediationRoutes,
-  ...graphsPlanningRoutes,
-  ...graphsPlanningStreamRoutes,
-  ...graphsPlanningWritesRoutes,
-  ...environmentsRoutes,
-  ...createEnvironmentRoutes
-});
-
-// Per-instance coordinators own the server token, background operation runner,
-// recovered verification monitors, and page/unmatched request handling. They are
-// released by the stopped hook when the instance stops.
-const instanceRequestCoordinators = new Map<
-  string,
-  ReturnType<typeof createInstanceRequestCoordinator>
->();
-
-const canvasServer = createCanvasServer(
-  createProductionCanvasServerDependencies({
-    createRequestHandler: ({ instanceId, instances, markActivity }) => {
-      const coordinator = createInstanceRequestCoordinator(
-        instanceId,
-        () => instances.get(instanceId)?.baseUrl || "",
-        productionEnvironmentDeletionPorts()
-      );
-      instanceRequestCoordinators.set(instanceId, coordinator);
-      return createScaffoldRequestHandler({
-        instanceId,
-        instances,
-        routes: serverRoutes,
-        handleUnmatchedRequest: coordinator.handleUnmatchedRequest,
-        // Server-owned internal calls must not refresh the webview activity
-        // clock, or the idle-respawn timer never fires.
-        markActivity: (request) => {
-          if (!coordinator.isServerOwned(request)) markActivity();
-        },
-        validateBrowserMutation: (context) =>
-          coordinator.validateBrowserMutation(context.request),
-        preRoute: preRouteCanvasRequest
-      });
-    },
-    onStarted: (instanceId, entry) => {
-      entry.observation = createWorkflowObservationScope(
-        createDeployStatusReader
-      );
-      shuttingDownInstances.delete(instanceId);
-      entry.state.ghCommandPresentation = GH_COMMAND_PRESENTATION;
-      const coordinator = instanceRequestCoordinators.get(instanceId);
-      if (coordinator) {
-        entry.state.browserMutationNonce = coordinator.browserMutationNonce;
-        coordinator.startRecoveredTasks();
-      }
-    },
-    onStopped: (instanceId) => {
-      instanceRequestCoordinators.delete(instanceId);
-    },
-    defaultPage: DEFAULT_CANVAS_PAGE,
-    preferredPort: preferredPortForInstance
-  })
-);
-
-// Shared instance registry used by the runtime and request handler.
-export const servers = canvasServer.instances;
-
-let environmentOperationTestRunner:
-  ((operationId: string, commandId?: string) => Promise<void>) | null = null;
-
-export function setEnvironmentOperationTestRunner(
-  runner: ((operationId: string, commandId?: string) => Promise<void>) | null
-): void {
-  environmentOperationTestRunner = runner;
-}
+export type EnvironmentOperationRunner = (
+  operationId: string,
+  commandId?: string
+) => Promise<void>;
 
 export function reopenProviderReconciliation(operation: any): boolean {
   if (!operation || unresolvedProviderMutations(operation).length === 0) {
@@ -1891,51 +975,6 @@ export function cleanupProviderRecoveryDisposition(operation: any): {
     ),
     mayCompleteCleanup: blockers.length === 0
   };
-}
-
-const activeEnvironmentTasks = new Map<string, Set<string>>();
-const environmentTasksSettledListeners = new Map<string, Set<() => void>>();
-const shuttingDownInstances = new Set<string>();
-const activeVerificationMonitors = new Set<string>();
-
-export function hasActiveEnvironmentTasks(instanceId: string): boolean {
-  return (activeEnvironmentTasks.get(instanceId)?.size || 0) > 0;
-}
-
-export function markEnvironmentInstanceShuttingDown(instanceId: string): void {
-  shuttingDownInstances.add(instanceId);
-}
-
-export function onEnvironmentTasksSettled(
-  instanceId: string,
-  listener: () => void
-): () => void {
-  let listeners = environmentTasksSettledListeners.get(instanceId);
-  if (!listeners) {
-    listeners = new Set();
-    environmentTasksSettledListeners.set(instanceId, listeners);
-  }
-
-  listeners.add(listener);
-  let listening = true;
-  const stop = () => {
-    if (!listening) return;
-    listening = false;
-    listeners?.delete(listener);
-    if (listeners?.size === 0)
-      environmentTasksSettledListeners.delete(instanceId);
-  };
-  if (!hasActiveEnvironmentTasks(instanceId)) {
-    queueMicrotask(() => {
-      if (!listening || hasActiveEnvironmentTasks(instanceId)) return;
-      try {
-        listener();
-      } catch {
-        // Listener failures must not affect task settlement.
-      }
-    });
-  }
-  return stop;
 }
 
 export function graphDefinitionHash(
@@ -1985,47 +1024,6 @@ export function addGraphProgress(
   if (!record) return false;
   recordGraphBuildEvent(record, event);
   return true;
-}
-
-// deployStatusReaderFromState - build a deployed-graph/status reader for a
-// canvas instance's state.
-//
-// Deploy status and the deployed application graph are published by the deploy
-// workflow as a workflow artifact (see ./deploy-artifacts.ts). Scope the read to
-// the run being monitored when there is one, so an in-flight deploy reports its
-// own status rather than the previous run's; otherwise read the newest matching
-// artifact repo-wide, which is what a fresh canvas session with no run in flight
-// needs.
-//
-// Repo-wide discovery permits a guessed application name as a tie-breaker.
-// An active run instead requires matching application and execution evidence;
-// another application's progress must not paint this deployment's graph.
-async function deployStatusReaderFromState(
-  state: CanvasState,
-  repo: string,
-  branch: string,
-  runId?: number | string | null
-) {
-  const environment = state?.deployEnvName || state?.envName || "";
-  let application = state?.deployAppName || "";
-  if (!application && repo) {
-    application = await resolveRepoAppName(
-      repo,
-      branch || state?.deployingBranch || state?.graphBranch || ""
-    );
-    if (application && state) state.deployAppName = application;
-  }
-  const entry = [...canvasServer.instances.values()].find(
-    (candidate) => candidate.state === state
-  );
-  if (!entry?.observation)
-    throw new Error("Workflow observation instance is unavailable.");
-  return entry.observation.reader({
-    repo,
-    environment,
-    application,
-    runId: runId ?? state?.deployRunId ?? null
-  });
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
@@ -2298,7 +1296,7 @@ async function ensureWorkflowsCurrent(
 // agent to run the radius-app-bicep skill. This is what makes branch/repo
 // selection (not just canvas open) trigger generation automatically.
 let appBicepHandoff: AppBicepHandoff | null = null;
-export function setAppBicepHandoff(fn: AppBicepHandoff): void {
+export function setAppBicepHandoff(fn: AppBicepHandoff | null): void {
   appBicepHandoff = fn;
 }
 
@@ -2468,7 +1466,8 @@ function triggerAppBicepHandoff(
   branches: string | string[],
   page: string,
   progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph",
-  isCurrent?: () => boolean
+  isCurrent?: () => boolean,
+  environmentKey?: string
 ): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
@@ -2483,7 +1482,8 @@ function triggerAppBicepHandoff(
         page,
         progressView,
         state: entry?.state,
-        isCurrent
+        isCurrent,
+        environmentKey
       })
     ).catch(() => {});
   } catch {
@@ -3259,82 +2259,6 @@ const deployOutcomeService = createDeployOutcomeService({
   now: () => Date.now()
 });
 
-const deployMonitorService = createDeployMonitorService({
-  plannedGraph: deployPlannedGraphService,
-  dispatch: deployDispatchService,
-  outcome: deployOutcomeService,
-  deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
-  unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
-  findWorkflowRun: (repo, workflowFile, sinceMs, knownId, afterRunId) =>
-    findWorkflowRun(
-      repo,
-      workflowFile,
-      sinceMs,
-      knownId,
-      undefined,
-      afterRunId
-    ),
-  getRunDetail: (repo, runId, request) =>
-    getRunDetail(repo, runId, undefined, request, { includeProtection: true }),
-  createStatusReader: (state, repo, branch, runId) =>
-    deployStatusReaderFromState(state, repo, branch, runId),
-  buildDeployStatusMap,
-  buildDeployMessageMap,
-  applyDeployMessages,
-  applyDeployStatusToResources,
-  settleDeployStatuses,
-  generatePortalUrl,
-  optionalString,
-  errorMessage,
-  sleep: (milliseconds) =>
-    new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  now: () => Date.now()
-});
-
-const deployRequestService = createDeployRequestService({
-  readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  resolveDeployRepairLoop,
-  resolveDeploymentEnvironment,
-  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-  localDeploymentBlocksMutation: (state) =>
-    localDeploymentBlocksMutation(state),
-  reserveDeploymentMutation: (state, reservation) =>
-    reserveDeploymentMutation(state, reservation),
-  releaseDeploymentMutation,
-  deploymentStatusBlocksMutation,
-  resolveEnvDeployment,
-  runCommand: (command, args) => runCommand(command, args),
-  canvasGraphResources,
-  beginDeployAttempt,
-  triggerDeployRepairHandoff: (entry, instanceId) =>
-    triggerDeployRepairHandoff(entry, instanceId),
-  triggerDeployFailureNotice: (entry, instanceId) =>
-    triggerDeployFailureNotice(entry, instanceId),
-  monitor: deployMonitorService,
-  unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
-  repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
-  errorMessage
-});
-
-const deploymentAbandonmentService = createDeploymentAbandonmentService({
-  ghCommandPresentation: GH_COMMAND_PRESENTATION,
-  isValidRepoSlug,
-  readInstanceState: (instanceId) =>
-    canvasServer.instances.get(instanceId)?.state,
-  activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-  localDeploymentBlocksMutation: (state) =>
-    localDeploymentBlocksMutation(state),
-  reserveDeploymentMutation: (state, reservation) =>
-    reserveDeploymentMutation(state, reservation),
-  releaseDeploymentMutation,
-  deploymentStatusBlocksMutation,
-  resolveEnvDeployment,
-  ghOrThrow: (args) => ghOrThrow(args),
-  invalidateDeployListCache: (repo) => {
-    deployListCache.delete(repo);
-  }
-});
-
 // gh runner that REJECTS on failure, so callers can fail closed instead of
 // silently treating a GitHub outage or timeout as "no data". Used by the
 // deployment-resolution paths where an empty result must not be mistaken for a
@@ -3628,7 +2552,8 @@ export async function ensureServicePrincipal(
     operation: object & { operationId: string };
     persist(): Promise<void>;
   },
-  beforeCreate: () => Promise<boolean> = async () => true
+  beforeCreate: () => Promise<boolean> = async () => true,
+  sleep: (milliseconds: number) => Promise<void> = sleepMs
 ): Promise<
   | {
       ok: true;
@@ -3657,9 +2582,13 @@ export async function ensureServicePrincipal(
   }> => {
     const result = await runAz(showArgs);
     return {
-      ok: result.code === 0 || result.code === "0",
+      ok:
+        result.timedOut !== true && (result.code === 0 || result.code === "0"),
       objectId: String(result.stdout || "").trim(),
-      stderr: String(result.stderr || "").trim()
+      stderr:
+        result.timedOut === true ?
+          `ETIMEDOUT: Service Principal lookup timed out. ${String(result.stderr || "").trim()}`.trim()
+        : String(result.stderr || "").trim()
     };
   };
   const pendingCreate =
@@ -3762,6 +2691,35 @@ export async function ensureServicePrincipal(
       ...(result.timedOut === true ? { timedOut: true } : {})
     };
   };
+  const reconcilePrincipal = async () => {
+    for (let attempt = 0; ; attempt++) {
+      const after = await readObjectId();
+      if (after.ok && after.objectId) {
+        return {
+          state: "applied" as const,
+          value: after.objectId,
+          evidence:
+            "The Service Principal for this operation's exact application client id exists after the interrupted create.",
+          providerId: after.objectId
+        };
+      }
+      if (after.ok) {
+        throw new Error(
+          "The Service Principal lookup returned an empty object id."
+        );
+      }
+      const retryable =
+        isAzResourceNotFound(after.stderr) ||
+        isRetryableAzureReadFailure(after.stderr);
+      const delay = azureRetryDelayMs(after.stderr, 2000 * (attempt + 1));
+      if (!retryable || attempt >= 5 || delay === null) {
+        throw new Error(
+          after.stderr || "The Service Principal state could not be read."
+        );
+      }
+      await sleep(delay);
+    }
+  };
   const mutationKind = "azure_service_principal.create";
   if (
     (!mutationRecovery ||
@@ -3804,78 +2762,78 @@ export async function ensureServicePrincipal(
     };
   }
 
-  const recovered = await executeRecoverableMutation<string>({
-    operation: mutationRecovery.operation,
-    kind: mutationKind,
-    target: clientId,
-    providerIdempotencyKey: clientId,
-    persist: mutationRecovery.persist,
-    beforeMutation: beforeCreate,
-    mutate: runCreate,
-    accept: (result) => createdObjectId(result) || "",
-    // Settled with the confirmed status, so a crash between Entra's answer and
-    // the ledger still leaves a restart able to tell this principal from one
-    // that was already there.
-    providerIdOf: (result) => createdObjectId(result),
-    reconcile: async () => {
-      const after = await readObjectId();
-      if (after.ok && after.objectId) {
-        // `--id` is the App Registration's own client id, so a principal found
-        // this way is the exact principal for the exact application this
-        // operation created. What the read cannot settle is provenance: the
-        // principal was absent before Radius asked for it, and Radius asked
-        // once, but a concurrent creator would look identical. So the object id
-        // is adopted and ownership is not.
-        return {
-          state: "applied",
-          value: after.objectId,
-          evidence:
-            "The Service Principal for this operation's exact application client id exists after the interrupted create.",
-          providerId: after.objectId
-        };
-      }
-      if (after.ok) {
-        throw new Error(
-          "The Service Principal lookup returned an empty object id."
-        );
-      }
-      if (isAzResourceNotFound(after.stderr)) {
-        return {
-          state: "not_applied",
-          evidence:
-            "Microsoft Entra confirmed no Service Principal exists for this application."
-        };
-      }
-      throw new Error(
-        after.stderr || "The Service Principal state could not be read."
-      );
+  for (let attempt = 0; ; attempt++) {
+    const recovered = await executeRecoverableMutation<string>({
+      operation: mutationRecovery.operation,
+      kind: mutationKind,
+      target: clientId,
+      providerIdempotencyKey: clientId,
+      persist: mutationRecovery.persist,
+      beforeMutation: beforeCreate,
+      mutate: runCreate,
+      accept: (result) => createdObjectId(result) || "",
+      // Settled with the confirmed status, so a crash between Entra's answer and
+      // the ledger still leaves a restart able to tell this principal from one
+      // that was already there.
+      providerIdOf: (result) => createdObjectId(result),
+      // A not-found read can lag behind a successful write. It never proves that
+      // an interrupted create was rejected or permits a second create.
+      reconcile: reconcilePrincipal
+    });
+    if (recovered.state === "cancelled") {
+      return { ok: false, stopped: true };
     }
-  });
-  if (recovered.state === "cancelled") {
-    return { ok: false, stopped: true };
-  }
-  if (recovered.state === "not_applied") {
-    const rejected = recovered.result;
-    return {
-      ok: false,
-      stderr:
-        (rejected?.stderr || rejected?.stdout || "").trim() ||
-        "Could not create or find the Service Principal."
-    };
-  }
-  return recovered.recovered ?
-      {
-        ok: true,
-        state: "created_candidate",
-        origin: "unknown",
-        objectId: recovered.value
+    if (recovered.state === "not_applied") {
+      const rejected = recovered.result;
+      const firstOutput = (
+        value:
+          | {
+              stderr?: string;
+              stdout?: string;
+            }
+          | undefined
+      ) =>
+        [value?.stderr, value?.stdout]
+          .map((text) => (text || "").trim())
+          .find(Boolean) || "";
+      const detail = firstOutput(rejected);
+      const permissionFailure =
+        /HTTP\s*(?:401|403)|Authorization|Authentication|Insufficient privileges/i.test(
+          detail
+        );
+      const retryable =
+        rejected &&
+        !permissionFailure &&
+        (isReplicationLagError(detail) || isRetryableAzureReadFailure(detail));
+      const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
+      if (retryable && attempt < 5 && delay !== null) {
+        if (!(await beforeCreate())) return { ok: false, stopped: true };
+        await sleep(delay);
+        if (!(await beforeCreate())) return { ok: false, stopped: true };
+        continue;
       }
-    : {
-        ok: true,
-        state: "created",
-        origin: "this_operation",
-        objectId: recovered.value || null
+      return {
+        ok: false,
+        stderr:
+          detail ||
+          recovered.diagnostic ||
+          "Could not create or find the Service Principal."
       };
+    }
+    return recovered.recovered ?
+        {
+          ok: true,
+          state: "created_candidate",
+          origin: "unknown",
+          objectId: recovered.value
+        }
+      : {
+          ok: true,
+          state: "created",
+          origin: "this_operation",
+          objectId: recovered.value || null
+        };
+  }
 }
 
 /**
@@ -5428,10 +4386,6 @@ async function ensureDeployWorkflowsOnBranch(
   }
 }
 
-export function getLastWebviewActivityAt(): number {
-  return canvasServer.getLastActivityAt();
-}
-
 function accessForSelection(
   entry: { state: CanvasState },
   repo: string,
@@ -5544,25 +4498,6 @@ export function isCrossSiteMutation(
   return site !== "same-origin" && site !== "none";
 }
 
-// Global pre-routing shared by typed routes and unmatched page requests. Reject
-// cross-site mutations before any routing or body parse, then synchronise the
-// requested page onto the instance entry.
-function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
-  const { request } = context;
-  if (isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])) {
-    context.json(403, {
-      error: "Cross-site request rejected.",
-      code: "cross-site-forbidden"
-    });
-    return true;
-  }
-  syncRequestedPage(
-    canvasServer.instances.get(context.instanceId),
-    context.url.searchParams.get("page")
-  );
-  return false;
-}
-
 export type EnvironmentDeletionCoordinatorPorts = Omit<
   EnvironmentDeletionPorts,
   "reportStatePackageDeletionFailure"
@@ -5637,14 +4572,15 @@ function productionEnvironmentDeletionPorts(): EnvironmentDeletionCoordinatorPor
 export function createInstanceRequestCoordinator(
   instanceId: string,
   resolveBaseUrl: () => string,
-  environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts
+  environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts,
+  dependencies: {
+    executionOwner: EnvironmentExecutionOwner;
+    servers: ReadonlyMap<string, CanvasServerEntry>;
+    environmentOperationRunner?: EnvironmentOperationRunner;
+  }
 ) {
-  const serverOwnedTasks = new Map<string, Promise<void>>();
-  const automaticRecoveryRollbacks = new Set<string>();
-  const providerReconciliationTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
+  const { executionOwner, servers } = dependencies;
+  const attachment = executionOwner.attach(instanceId);
   const serverOwnedToken = randomUUID();
   const browserMutationNonce = randomUUID();
 
@@ -5663,27 +4599,14 @@ export function createInstanceRequestCoordinator(
     task: () => Promise<void>
   ): void {
     let reconciliationNeeded = false;
-    let instanceTasks = activeEnvironmentTasks.get(instanceId);
-    if (!instanceTasks) {
-      instanceTasks = new Set();
-      activeEnvironmentTasks.set(instanceId, instanceTasks);
-    }
-    instanceTasks.add(operationId);
+    let currentAtSettlement: ReturnType<typeof operations.get>;
     const op = operations.get(operationId);
     if (op) setExecutionActive(op, true);
-    const prior = serverOwnedTasks.get(operationId);
-    const running = (prior || Promise.resolve())
-      .catch(() => {})
-      .then(
-        () =>
-          new Promise<void>((resolve) => {
-            setImmediate(() => resolve());
-          })
-      )
-      .then(task)
-      .catch(async (error) => {
+    attachment.schedule(operationId, {
+      run: task,
+      failed: async (error) => {
         const current = operations.get(operationId);
-        if (shuttingDownInstances.has(instanceId)) return;
+        if (executionOwner.isShuttingDown(instanceId)) return;
         if (reopenProviderReconciliation(current)) {
           if (
             !current.steps.some(
@@ -5714,26 +4637,13 @@ export function createInstanceRequestCoordinator(
           });
           await operations.persist().catch(() => {});
         }
-      })
-      .finally(() => {
-        if (serverOwnedTasks.get(operationId) !== running) return;
-        const current = operations.get(operationId);
+      },
+      settling: () => {
+        const current = (currentAtSettlement = operations.get(operationId));
         if (current && !current.endedAt) setExecutionActive(current, false);
-        serverOwnedTasks.delete(operationId);
-        const activeForInstance = activeEnvironmentTasks.get(instanceId);
-        activeForInstance?.delete(operationId);
-        if (activeForInstance?.size === 0) {
-          activeEnvironmentTasks.delete(instanceId);
-          for (const listener of environmentTasksSettledListeners.get(
-            instanceId
-          ) || []) {
-            try {
-              listener();
-            } catch {
-              // One shutdown consumer must not block the others.
-            }
-          }
-        }
+      },
+      settled: () => {
+        const current = currentAtSettlement;
         if (
           current?.endedAt &&
           current.providerRecovery?.state === "rollback_pending" &&
@@ -5748,15 +4658,13 @@ export function createInstanceRequestCoordinator(
         ) {
           scheduleProviderReconciliation(operationId);
         }
-      });
-    serverOwnedTasks.set(operationId, running);
+      }
+    });
   }
 
   function scheduleProviderReconciliation(operationId: string): void {
-    if (providerReconciliationTimers.has(operationId)) return;
-    const timer = setTimeout(() => {
-      providerReconciliationTimers.delete(operationId);
-      if (shuttingDownInstances.has(instanceId)) return;
+    attachment.scheduleReconciliation(operationId, () => {
+      if (executionOwner.isShuttingDown(instanceId)) return;
       const operation = operations.get(operationId);
       if (
         !operation ||
@@ -5766,14 +4674,11 @@ export function createInstanceRequestCoordinator(
         return;
       }
       scheduleRecoveredProviderMutation(operation);
-    }, 5000);
-    timer.unref?.();
-    providerReconciliationTimers.set(operationId, timer);
+    });
   }
 
   function scheduleAutomaticRecoveryRollback(operationId: string): void {
-    if (automaticRecoveryRollbacks.has(operationId)) return;
-    automaticRecoveryRollbacks.add(operationId);
+    if (!attachment.claimAutomaticRollback(operationId)) return;
     queueMicrotask(() => {
       void postInternal(
         `/api/operations/${encodeURIComponent(operationId)}/rollback`,
@@ -5787,7 +4692,7 @@ export function createInstanceRequestCoordinator(
           });
         })
         .finally(() => {
-          automaticRecoveryRollbacks.delete(operationId);
+          attachment.releaseAutomaticRollback(operationId);
         });
     });
   }
@@ -5943,8 +4848,8 @@ export function createInstanceRequestCoordinator(
   }
 
   async function runEnvironmentOperation(operationId: string): Promise<void> {
-    if (environmentOperationTestRunner) {
-      await environmentOperationTestRunner(operationId);
+    if (dependencies.environmentOperationRunner) {
+      await dependencies.environmentOperationRunner(operationId);
       return;
     }
     const op = operations.get(operationId);
@@ -6129,8 +5034,8 @@ export function createInstanceRequestCoordinator(
     operationId: string,
     commandId: string
   ): Promise<void> {
-    if (environmentOperationTestRunner) {
-      await environmentOperationTestRunner(operationId, commandId);
+    if (dependencies.environmentOperationRunner) {
+      await dependencies.environmentOperationRunner(operationId, commandId);
       return;
     }
 
@@ -6178,8 +5083,8 @@ export function createInstanceRequestCoordinator(
     operationId: string,
     commandId: string
   ): Promise<void> {
-    if (environmentOperationTestRunner) {
-      await environmentOperationTestRunner(operationId, commandId);
+    if (dependencies.environmentOperationRunner) {
+      await dependencies.environmentOperationRunner(operationId, commandId);
       return;
     }
     const operation = operations.get(operationId);
@@ -6210,8 +5115,8 @@ export function createInstanceRequestCoordinator(
     operationId: string,
     commandId: string
   ): Promise<void> {
-    if (environmentOperationTestRunner) {
-      await environmentOperationTestRunner(operationId, commandId);
+    if (dependencies.environmentOperationRunner) {
+      await dependencies.environmentOperationRunner(operationId, commandId);
       return;
     }
     const op = operations.get(operationId);
@@ -6774,7 +5679,7 @@ export function createInstanceRequestCoordinator(
       if (
         op.kind === "delete" &&
         !op.endedAt &&
-        !serverOwnedTasks.has(op.operationId)
+        !attachment.hasTask(op.operationId)
       ) {
         scheduleServerOwnedTask(op.operationId, () =>
           runEnvironmentOperation(op.operationId)
@@ -6801,10 +5706,9 @@ export function createInstanceRequestCoordinator(
           op.recoveryState !== "verification_acquisition_pending") ||
         op.currentStage !== STAGE_VERIFY ||
         op.endedAt ||
-        activeVerificationMonitors.has(op.operationId)
+        !executionOwner.claimVerificationMonitor(op.operationId)
       )
         continue;
-      activeVerificationMonitors.add(op.operationId);
       scheduleServerOwnedTask(op.operationId, async () => {
         try {
           if (op.recoveryState === "verification_acquisition_pending") {
@@ -6818,7 +5722,7 @@ export function createInstanceRequestCoordinator(
             );
           }
         } finally {
-          activeVerificationMonitors.delete(op.operationId);
+          executionOwner.releaseVerificationMonitor(op.operationId);
         }
       });
     }
@@ -6984,7 +5888,7 @@ export function createInstanceRequestCoordinator(
     });
   };
   // Exposed so the migrated `POST /api/operations` route, which is composed once
-  // at module init, can reach this instance's server-owned task runner. The
+  // per runtime, can reach this instance's server-owned task runner. The
   // route registers and persists the operation itself and then hands the record
   // back here to preserve the established scheduling order.
   const scheduleEnvironmentOperation = (op: { operationId: string }): void => {
@@ -6993,7 +5897,7 @@ export function createInstanceRequestCoordinator(
     );
   };
   // The three cooperative-control runners, exposed for the same reason: the
-  // control routes are composed once at module init and hand the accepted
+  // control routes are composed once per runtime and hand the accepted
   // command back to the instance that received the request.
   const scheduleCommandTask = (
     kind:
@@ -7060,16 +5964,1088 @@ async function preferredPortForInstance(instanceId: string): Promise<number> {
   return 20000 + (hash.readUInt32BE(0) % 40000);
 }
 
-export async function getOrCreateServer(
-  instanceId: string,
-  page?: string
-): Promise<CanvasServerEntry> {
-  return await canvasServer.getOrCreate(instanceId, page);
+export interface ProductionCanvasServerRuntimeOptions {
+  executionOwner: EnvironmentExecutionOwner;
+  environmentOperationRunner?: EnvironmentOperationRunner;
+  environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
+  serverDependencies?: Pick<
+    CanvasServerDependencyOverrides,
+    | "createHttpServer"
+    | "createState"
+    | "now"
+    | "preferredPort"
+    | "prepareIdentity"
+  >;
 }
 
-export async function stopServer(
-  instanceId: string,
-  force = false
-): Promise<void> {
-  await canvasServer.stop(instanceId, force);
+export function createProductionCanvasServerRuntime(
+  options: ProductionCanvasServerRuntimeOptions
+) {
+  const { executionOwner, environmentDeletionPorts, serverDependencies } =
+    options;
+  if (!executionOwner)
+    throw new Error("Missing canvas server dependency: executionOwner");
+  // Composition root for the migrated `liveness-source` family. The handlers
+  // receive only the three seams they use; the open handler is read through a
+  // getter so the SDK entry can still register it after construction.
+  const livenessSourceRoutes = createLivenessSourceRoutes({
+    getOpenSourceHandler: () => openSourceHandler,
+    readInstanceState: (instanceId) =>
+      canvasServer.instances.get(instanceId)?.state,
+    getWorkspaceModelRevision: async (instanceId) => {
+      const state = canvasServer.instances.get(instanceId)?.state;
+      if (
+        !state?.graphFromWorkspace ||
+        !state.graphTargetRepo ||
+        !state.graphBranch
+      ) {
+        return null;
+      }
+      const model = await resolveWorkspaceBicep(
+        state,
+        state.graphTargetRepo,
+        state.graphBranch
+      );
+      // Model content only: the revision must not move when a staged-artifact
+      // fingerprint changes, or every stage would look like a model edit.
+      return model ? graphDefinitionHash(model.content, "") : null;
+    },
+    toSafeRepoRelPath
+  });
+
+  // Server-owned work is scheduled on the instance that received the request, so
+  // an instance that is gone reports a miss instead of silently dropping accepted
+  // work. Every route that schedules resolves its runner through here.
+  function resolveInstanceRunner(
+    instanceId: string,
+    operationId: string
+  ): ReturnType<typeof createInstanceRequestCoordinator> | null {
+    const coordinator = instanceRequestCoordinators.get(instanceId);
+    if (!coordinator) {
+      console.error(
+        `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operationId}.`
+      );
+      return null;
+    }
+    return coordinator;
+  }
+
+  function scheduleEnvironmentOperationForInstance(
+    instanceId: string,
+    operation: { operationId: string }
+  ): boolean {
+    const coordinator = resolveInstanceRunner(
+      instanceId,
+      operation.operationId
+    );
+    if (!coordinator) return false;
+    coordinator.scheduleEnvironmentOperation(operation);
+    return true;
+  }
+
+  // Composition root for the migrated `operations-status` family. Reads, creates,
+  // and resumable actions each receive only the registry, mutation, persistence,
+  // projection, and per-instance scheduling seams they invoke.
+  const operationsStatusRoutes = createOperationsStatusRoutes(
+    {
+      latest: (repo) => operations.latest(repo),
+      latestAny: () => operations.latestAny(),
+      get: (operationId) => operations.get(operationId),
+      toClientView,
+      productVersion: resolveGeneratorVersion,
+      now: () => Date.now()
+    },
+    {
+      isValidRepoSlug,
+      isResourceGroupName,
+      isAksClusterName,
+      isKubernetesNamespace,
+      isUuid,
+      buildStages,
+      createOperation,
+      claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
+      startConflict: (repo) => operations.startConflict(repo),
+      startOperation: (op) => operations.start(op),
+      persistOperations: () => operations.persist(),
+      finish,
+      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+      errorMessage
+    },
+    {
+      getOperation: (operationId) => operations.get(operationId),
+      canResumeInput,
+      resumeAfterInput,
+      requireInput,
+      finish,
+      isTerminalState,
+      canDismissOperation,
+      dismissOperation,
+      persistOperations: () => operations.persist(),
+      toClientView,
+      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+      errorMessage,
+      inputRequiredState: INPUT_REQUIRED_STATE
+    }
+  );
+
+  const operationsControlRoutes = createOperationsControlRoutes({
+    get: (operationId) => operations.get(operationId),
+    acquireForRetry: (op) => operations.acquireForRetry(op),
+    persistOperations: () => operations.persist(),
+    checkPullRequestMerge: (op, pullRequestUrl) =>
+      checkSetupPullRequestMergeForOperation(op, pullRequestUrl, {
+        createExecutor: (login) =>
+          githubAccountCoordinator.createReadOnlyExecutor(login),
+        fetchJson: async (executor, apiPath) => {
+          const result = await selectedGhApiJson(executor, apiPath);
+          return { ok: result.ok, json: result.json, error: result.stderr };
+        },
+        errorMessage
+      }),
+    inspectVerificationWorkflow: async (op) => {
+      const { identity, login } = requiredVerificationWorkflowContext(op);
+      const result = await githubAccountCoordinator.withSelectedAccount(
+        login,
+        { instanceId: "operations-control", operationId: op.operationId },
+        (executor) =>
+          readVerificationWorkflowState(executor, identity, {
+            run: (selected, args) => selected.run(args, { timeout: 30000 })
+          }),
+        30000
+      );
+      if (result.value !== "active" && result.value !== "inactive") {
+        throw new Error("GitHub returned an unsupported workflow state.");
+      }
+      return result.value;
+    },
+    cancelVerificationWorkflow: async (op) => {
+      const { identity, login } = requiredVerificationWorkflowContext(op);
+      const result = await githubAccountCoordinator.withSelectedAccount(
+        login,
+        { instanceId: "operations-control", operationId: op.operationId },
+        (executor) =>
+          cancelVerificationWorkflow(executor, identity, {
+            run: (selected, args) => selected.run(args, { timeout: 30000 })
+          }),
+        30000
+      );
+      return result.value;
+    },
+    schedule: ({ kind, instanceId, operation, commandId }) => {
+      const coordinator = resolveInstanceRunner(
+        instanceId,
+        operation.operationId
+      );
+      if (!coordinator) return false;
+      if (kind === "setup_continuation" || kind === "deletion_retry") {
+        coordinator.scheduleEnvironmentOperation(operation);
+      } else {
+        coordinator.scheduleCommandTask(kind, operation, commandId);
+      }
+      return true;
+    },
+    // The environments picker reads a repo-scoped cached listing, so an exit that
+    // closes a setup has to drop it here: the browser reloads the table straight
+    // after, and a cached payload would answer with the environment the abandoned
+    // attempt left behind.
+    invalidateEnvironmentListing: (repo) => {
+      envListCache.invalidate(repo);
+    }
+  });
+
+  // Composition root for the migrated `repositories` family. Three seams: the
+  // subprocess runner, a reader for the live instance state the branch cache is
+  // written to, and the workspace-repo predicate, which stays defined here and is
+  // injected rather than copied.
+  const repositoriesRoutes = createRepositoriesRoutes({
+    cliExec: (command, args, options, callback) => {
+      cliExec(command, args, options, callback);
+    },
+    readInstanceState: (instanceId) =>
+      canvasServer.instances.get(instanceId)?.state,
+    repoMatchesWorkspace
+  });
+
+  // Composition root for the migrated `deployments` family: the read routes, the
+  // destructive POST /api/delete-deployment, GitHub-only
+  // POST /api/abandon-deployment, and POST /api/deploy, whose multi-stage runtime
+  // behavior lives in the deploy services composed below.
+  //
+  // The listing cache, its TTL and the deploy service are read through getters
+  // because all three are declared later and would otherwise be in the
+  // temporal dead zone when this runtime's route dependencies are built.
+  const deploymentsRoutes = createDeploymentsRoutes({
+    ghCommandPresentation: GH_COMMAND_PRESENTATION,
+    isValidRepoSlug,
+    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    triggerDeployRepairHandoff,
+    triggerDeployFailureNotice,
+    deployHandoffStatus,
+    resolveRepoAppName,
+    resolveEnvDeployment,
+    ghOrThrow: (args) => ghOrThrow(args),
+    resetDeploymentViewState: (state, attemptId) => {
+      resetDeploymentViewState(state, attemptId);
+    },
+    get deployListCache() {
+      return deployListCache;
+    },
+    get deployListTtlMs() {
+      return DEPLOY_LIST_TTL_MS;
+    },
+    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+    reserveDeploymentMutation: (state, reservation) =>
+      reserveDeploymentMutation(state, reservation),
+    releaseDeploymentMutation,
+    deploymentStatusBlocksMutation,
+    localDeploymentBlocksMutation: (state) =>
+      localDeploymentBlocksMutation(state),
+    ensureWorkflowsCurrent: (repo, environment, provider, only) =>
+      ensureWorkflowsCurrent(repo, environment, provider, only),
+    findWorkflowRun,
+    runGh: (args, timeout = 20000, extraEnv) =>
+      new Promise((resolve) => {
+        const opts: CliOptions = { timeout };
+        if (extraEnv) opts.env = extraEnv;
+        cliExec("gh", args, opts, (err, stdout, stderr) => {
+          resolve(toGhCommandResult(err, stdout, stderr, { trimStdout: true }));
+        });
+      }),
+    readProcessEnv: () => process.env,
+    setTimer: (callback, ms) => setTimeout(callback, ms),
+    // Declared as a getter for the same temporal-dead-zone reason as the cache
+    // above: the deploy services are composed further down, after the workflow
+    // file names and the instance container they narrow over exist.
+    get deployRequest() {
+      return deployRequestService;
+    },
+    get abandonment() {
+      return deploymentAbandonmentService;
+    },
+    probeDeleteConflict: (request, instanceId) => {
+      const scope = canvasServer.instances.get(instanceId)?.observation;
+      if (!scope)
+        throw new Error("Workflow observation instance is unavailable.");
+      let observation: WorkflowReadRequest | undefined;
+      const read = () =>
+        (observation ??= scope.observe(
+          undefined,
+          WORKFLOW_READ_LIMITS.deleteConflictMs
+        ));
+      return probeDeleteConflict(request, {
+        resolveEnvDeployment,
+        listArtifacts: (repo, runId) =>
+          listWorkflowArtifacts(repo, runId, undefined, read().context),
+        downloadArtifact: (repo, artifact) =>
+          downloadWorkflowArtifact(repo, artifact, read().context)
+      });
+    }
+  });
+
+  const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
+    composeAzureAutoSetupDependencies({
+      isServerOwnedRequest: (instanceId, request) =>
+        instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
+        false,
+      lifecycle: {
+        get: (operationId) => operations.get(operationId),
+        isStale: (operation) => isStale(operation),
+        create: (input) => createOperation(input),
+        buildStages: () => buildStages(),
+        start: (operation) => operations.start(operation),
+        persist: () => operations.persist(),
+        report: (diagnostic) => operations.report?.(diagnostic),
+        finish: (operation, state, options) => {
+          finish(operation, state, options);
+        },
+        getAzureAppCreateContinuation,
+        setAzureAppCreateContinuation
+      },
+      progress: {
+        enterStage: (operation, stage) => {
+          enterStage(operation, stage);
+        },
+        setStageState: (operation, stage, state) => {
+          setStageState(operation, stage, state);
+        },
+        hasWarnings: (operation) => hasWarnings(operation),
+        addLegacyStep: (operation, text) => {
+          addLegacyStep(operation, text);
+        },
+        setContext: (operation, patch) => {
+          setContext(operation, patch);
+        },
+        setCloudContext: (operation, provider, patch) => {
+          setCloudContext(operation, provider, patch);
+        },
+        requireInput: (operation, input) => {
+          requireInput(operation, input);
+        },
+        resumeAfterInput: (operation) => {
+          resumeAfterInput(operation);
+        }
+      },
+      artifacts: {
+        withCredentialProvenanceLock,
+        recordAzureApp: (operation, patch) => {
+          recordAzureApp(operation, patch);
+        },
+        recordServicePrincipal: (operation, patch) => {
+          recordServicePrincipal(operation, patch);
+        },
+        recordCreatedFederatedCredential: (operation, entry) => {
+          recordCreatedFederatedCredential(operation, entry);
+        },
+        recordFederatedCredentialProvenance: async (operation, entry) => {
+          const recorded = await recordCredentialProvenance({
+            ...entry,
+            operationId: String(operation.operationId || "")
+          });
+          if (!recorded) {
+            throw new Error(
+              `Invalid provenance for federated credential ${entry.name}.`
+            );
+          }
+        },
+        recordCreatedRoleAssignment: (operation, entry) => {
+          recordCreatedRoleAssignment(operation, entry);
+        }
+      },
+      external: {
+        getSelectedGitHubExecutor: (operationId) =>
+          selectedGitHubExecutorsByOperation.get(operationId),
+        getGitHubIdentity,
+        preflightRepoAdmin: (repo, executor) =>
+          preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+        preflightGhcrPackageWriteAccess: (executor) =>
+          preflightGhcrPackageWriteAccess(
+            getGhPackageCredentials,
+            getGitHubIdentity,
+            executor,
+            GH_COMMAND_PRESENTATION
+          ),
+        runGitHubJson: (apiPath, executor) =>
+          runGitHubJsonRequest(apiPath, executor),
+        runAz: (args) => runCliCommand("az", args)
+      },
+      tempFile: {
+        createPath: () =>
+          join(
+            tmpdir(),
+            `radius-fed-cred-${randomBytes(12).toString("hex")}.json`
+          ),
+        write: (path, contents) => {
+          writeFileSync(path, contents, { mode: 0o600 });
+        },
+        remove: (path) => {
+          try {
+            unlinkSync(path);
+          } catch {}
+        }
+      },
+      ensureServicePrincipal,
+      finalizeSetupFailure,
+      persistMutationCheckpoint,
+      honorStopBoundary,
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
+    })
+  );
+
+  const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
+    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    resolveBranchForRequest: (entry, repo, requestedBranch) =>
+      resolveGraphBranchForRequest(
+        entry.state,
+        repo,
+        requestedBranch,
+        undefined,
+        currentWorkspaceBranch
+      ),
+    commitBranchResolution: (entry, repo, resolution) =>
+      commitWorkspaceBranchResolution(entry.state, repo, resolution),
+    prepareSourceRef: (entry, context) =>
+      prepareSourceRefResources(entry, "graph", context),
+    commitSourceRef: (entry, resources, context, expectedToken) =>
+      setSourceRefResources(entry, "graph", resources, context, expectedToken),
+    isCurrentSourceRef: (entry, expectedToken) =>
+      isCurrentSourceRefToken(entry.state, "graph", expectedToken),
+    triggerAppBicepHandoff: (entry, repo, branch) =>
+      triggerAppBicepHandoff(entry, repo, branch, "graph"),
+    triggerGraphRepairHandoff: (entry, request) =>
+      triggerGraphRepairHandoff(entry, request),
+    clearGraphRepairAttempt: (entry) =>
+      clearGraphRepairAttempt(entry.state, "graph"),
+    fetchBicepSelection: (entry, repo, branch) =>
+      fetchBicepSelection(entry, repo, branch),
+    listBranchPaths: (entry, repo, branch) =>
+      listBranchPaths(entry, repo, branch),
+    workspaceGraphJsonPath: (state, bicepRepoPath) =>
+      workspaceGraphJsonPath(state, bicepRepoPath),
+    radArtifactsDirForSelection: (options) =>
+      radArtifactsDirForSelection({ ...options, github }),
+    buildGraphViaRad: (content, bicepPath, options) =>
+      buildGraphViaRad(content, bicepPath, options),
+    canvasGraphResources,
+    errorMessage,
+    logError: (message) => console.error(message)
+  });
+
+  const graphPlanningWorkflows =
+    createGraphPlanningWorkflows<CanvasServerEntry>({
+      readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+      resolveBranchForRequest: (
+        entry,
+        repo,
+        requestedBranch,
+        followWorkspaceBranch
+      ) =>
+        resolveGraphBranchForRequest(
+          entry.state,
+          repo,
+          requestedBranch,
+          followWorkspaceBranch,
+          currentWorkspaceBranch
+        ),
+      commitBranchResolution: (entry, repo, resolution) =>
+        commitWorkspaceBranchResolution(entry.state, repo, resolution),
+      pipeline: createGraphPipeline<CanvasServerEntry>({
+        fetchBicepSelection: (entry, repo, branch) =>
+          fetchBicepSelection(entry, repo, branch),
+        resolveRadArtifactsDir: (request) =>
+          radArtifactsDirForSelection({ ...request, github }),
+        buildGraphViaRad: (content, definitionFile, options) =>
+          buildGraphViaRad(content, definitionFile, options),
+        canvasGraphResources,
+        workspaceGraphJsonPath,
+        graphDefinitionHash,
+        radArtifactsFingerprint,
+        removeDirectory: (dir) => {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }),
+      triggerAppBicepHandoff,
+      triggerGraphRepairHandoff: (entry, request) =>
+        triggerGraphRepairHandoff(entry, request),
+      clearGraphRepairAttempt: (entry, view) => {
+        clearGraphRepairAttempt(entry.state, view);
+        if (view === "diff") delete entry.state.diffModelingFailed;
+      },
+      listBranchPaths: (entry, repo, branch) =>
+        listBranchPaths(entry, repo, branch),
+      prepareSourceRefResources: (entry, view, sourceRefInput) =>
+        prepareSourceRefResources(entry, view, sourceRefInput),
+      setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
+        setSourceRefResources(entry, view, resources, sourceRefInput, token),
+      isCurrentSourceRefToken,
+      canReuseModeledGraph,
+      addGraphProgress,
+      beginPlannedGraphRequest,
+      isCurrentPlannedGraphRequest,
+      fetchRecipePack: (provider) => fetchRecipePack(github, provider),
+      resolveRecipeOutputs: (resources, recipes, provider) =>
+        resolveRecipeOutputs(github, resources, recipes, provider),
+      computeGraphDiff: (baseResources, headResources) =>
+        computeGraphDiff(baseResources, headResources),
+      observeModelingRun: observeServerWorkspaceModelingRun,
+      readBranchSourceRevision: (entry, repo, branch) =>
+        readSelectedSourceRevision(entry.state, repo, branch, {
+          isWorkspaceSelection,
+          workspaceSourceRevision,
+          branchHeadCommit: getBranchHeadSha
+        }),
+      record,
+      optionalString,
+      errorMessage,
+      logError: (message) => console.error(message),
+      now: () => Date.now()
+    });
+
+  // Composition root for the read-only half of the `graphs-planning` family. The
+  // Deployed route reads status through the cached artifact reader, but obtains its
+  // fixed topology through the same modeled-graph workflow and cache as the Graph
+  // route. It never parses Bicep or invokes rad through a second path.
+  const graphsPlanningRoutes = createGraphsPlanningRoutes({
+    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    createDeployStatusReader: (options, instanceId) => {
+      const scope = canvasServer.instances.get(instanceId)?.observation;
+      if (!scope)
+        throw new Error("Workflow observation instance is unavailable.");
+      return scope.reader(options);
+    },
+    loadModeledGraph: async (instanceId, repo, branch) => {
+      const outcome = await graphPlanningWorkflows.loadGraph({
+        instanceId,
+        body: JSON.stringify({ repo, branch, refresh: true })
+      });
+      const workflowError = optionalString(outcome.payload.error);
+      return {
+        status: outcome.status,
+        retry: outcome.payload.needsAppBicep === true,
+        error:
+          workflowError ||
+          (outcome.status >= 400 ?
+            `Modeled graph load failed with status ${outcome.status}.`
+          : undefined)
+      };
+    },
+    buildDeployStatusMap,
+    buildDeployMessageMap,
+    deployStatusKeys,
+    mergeDeployedGraphDisplayMetadata,
+    mergeDeployedGraphMetadata,
+    projectDeployedGraph: (modeled, statusByKey) =>
+      projectDeployedGraph(modeled as any[], statusByKey),
+    canvasGraphResources,
+    applyDeployMessages,
+    settleDeployStatuses,
+    errorMessage,
+    repoMatchesWorkspace,
+    observeModelingRun: observeServerWorkspaceModelingRun,
+    now: () => Date.now()
+  });
+
+  // The route layer sees exactly one seam: the workflow service above. Parsing
+  // and serialization are all it owns.
+  const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
+    workflows: graphPlanningWorkflows
+  });
+
+  // route, `POST /api/create-environment`, is large enough to own a separate
+  // composition root below. Every seam is a narrow named function: the two subprocess
+  // runners (`cliExec`, `runCommand`), the repo-file fetch and bicep param parse
+  // for `app-params`, the app-name and active-deployment resolvers plus the
+  // error logger for `delete-environment`, three narrow accessors over the
+  // module-level `envListCache` (so this module owns no cache), the workflow-sync
+  // kickoff and clock for `list-environments`, and the operation-registry,
+  // run-inspection, and finisher helpers for `verify-status`. `repoMatchesWorkspace`,
+  // `errorMessage`, `VERIFY_WORKFLOW_FILE`, and `STAGE_VERIFY` stay defined here
+  // and are injected rather than moved, so the route module spawns nothing and
+  // reads no module-level mutable state.
+  const environmentsRoutes = createEnvironmentsRoutes({
+    errorMessage,
+    redactDiagnostic: (value) => redactGhCredentials(value),
+    repoMatchesWorkspace,
+    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    runCommand: (command, args, options) => runCommand(command, args, options),
+    fetchFileFromRepo: (repo, path, branch) =>
+      fetchFileFromRepo(repo, path, branch),
+    appParams,
+    resolveRepoAppName: (repo, branch) => resolveRepoAppName(repo, branch),
+    resolveEnvDeployment: (repo, environment, appName) =>
+      resolveEnvDeployment(repo, environment, appName),
+    logError: (message) => console.error(message),
+    discoverEnvironmentTarget: (repo, environment) =>
+      discoverEnvironmentTarget(repo, environment),
+    activeDeleteOperation: (repo, environment) => {
+      return matchDeleteOperationEnvironment(
+        operations.running(repo),
+        environment
+      );
+    },
+    createOperation,
+    buildDeleteStages: (options) => buildDeleteStages(options),
+    startOperation: (op) => operations.start(op),
+    toClientView,
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    cliExec: (command, args, options, callback) => {
+      cliExec(command, args, options, callback);
+    },
+    activeDeleteEnvironment: (repo) => {
+      const op = operations.latest(repo);
+      if (
+        op &&
+        op.kind === OPERATION_KIND_DELETE &&
+        !isTerminalState(op.state) &&
+        typeof op.environment === "string"
+      ) {
+        return op.environment;
+      }
+      return "";
+    },
+    envListCacheGet: (repo) => envListCache.get(repo),
+    envListCacheSet: (repo, entry) => {
+      envListCache.set(repo, entry);
+    },
+    envListCacheDelete: (repo) => {
+      envListCache.invalidate(repo);
+    },
+    envListCacheGeneration: (repo) => envListCache.generation(repo),
+    envListTtlMs: ENV_LIST_TTL_MS,
+    kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
+      kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
+    now: () => Date.now(),
+    getOperation: (operationId) => operations.get(operationId),
+    getSelectedGitHubExecutor: (operationId) =>
+      selectedGitHubExecutorsByOperation.get(operationId),
+    isSelectedGitHubAuthorizationError: (error) =>
+      isSelectedGhAuthorizationError(error),
+    hasCompleteVerificationIdentity,
+    findWorkflowRun: (
+      repo,
+      workflowFile,
+      sinceMs,
+      knownId,
+      executor,
+      afterRunId
+    ) =>
+      findWorkflowRun(
+        repo,
+        workflowFile,
+        sinceMs,
+        knownId,
+        executor,
+        afterRunId
+      ),
+    settleVerificationDispatchRecovery: (operation, runId) => {
+      const op = operation as any;
+      const verification = op?.verification;
+      if (!verification) return;
+      const target = `${op.repo}:${verification.workflow}:${verification.ref}:${verification.environment}`;
+      const mutation = providerMutationRecord(
+        op,
+        "github_workflow.dispatch",
+        target
+      );
+      if (mutation) {
+        settleProviderMutation(
+          op,
+          mutation.mutationId,
+          "confirmed",
+          `Adopted verification run ${runId} after the saved pre-dispatch baseline.`
+        );
+      }
+    },
+    getRunDetail,
+    fetchRunLog,
+    extractErrorLines: (logText, max) => extractErrorLines(logText, max),
+    extractGitHubActionsStepLog,
+    explainOidcEnterpriseClaim,
+    explainNoSubscriptions,
+    addLegacyStep: (operation, text) => addLegacyStep(operation, text),
+    isTerminalState,
+    finish,
+    finishSucceeded,
+    persistBestEffort,
+    persistOperations: () => operations.persist(),
+    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
+    verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+    stageVerify: STAGE_VERIFY
+  });
+
+  // Composition root for `POST /api/create-environment`. The route's four seams
+  // live in `create-environment*.ts`; everything they touch is injected here, so
+  // the module spawns no process directly, imports no `node:fs`, and reads no
+  // module-level mutable state. `isServerOwnedRequest` is deliberately a
+  // per-request function rather than a value: the token is a per-instance
+  // `randomUUID()` held by that instance's request coordinator, and this route is
+  // reachable only through the internal loopback POST that carries it.
+  const createEnvironmentRoutes = createCreateEnvironmentRoutes({
+    ghCommandPresentation: GH_COMMAND_PRESENTATION,
+    isServerOwnedRequest: (instanceId, request) =>
+      instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
+      false,
+    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    getSelectedGitHubExecutor: (operationId) =>
+      selectedGitHubExecutorsByOperation.get(operationId),
+    cliExec: (command, args, options, callback) =>
+      cliExec(command, args, options, callback),
+    readProcessEnv: () => process.env,
+    isValidRepoSlug,
+    getOperation: (operationId) => operations.get(operationId),
+    isStale: (operation) => isStale(operation),
+    isTerminalState: (state) => isTerminalState(state),
+    createOperation,
+    buildStages,
+    startOperation: (operation) => operations.start(operation),
+    persistOperations: () => operations.persist(),
+    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
+    finishFailed: (operation, failure) => {
+      finish(operation, "failed", { failure });
+    },
+    enterStage: (operation, stage) => {
+      enterStage(operation, stage);
+    },
+    errorMessage,
+    stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
+    stageConfigureEnvironment: STAGE_CONFIGURE_ENVIRONMENT,
+    namespaceClaimsFor,
+    addLegacyStep: (operation, text) => {
+      addLegacyStep(operation, text);
+    },
+    finalizeSetupFailure: (operation, input) =>
+      finalizeSetupFailure(operation, input as never),
+    persistMutationCheckpoint,
+    persistBestEffort,
+    guardStopBoundary,
+    runAzCommand: (args) => runCliCommand("az", args),
+    preflightRepoAdmin: (repo, executor) =>
+      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
+    preflightGhcrPackageWriteAccess: (executor) =>
+      preflightGhcrPackageWriteAccess(
+        getGhPackageCredentials,
+        getGitHubIdentity,
+        executor,
+        GH_COMMAND_PRESENTATION
+      ),
+    readGitHubJson: (apiPath, executor) =>
+      runGitHubJsonRequest(apiPath, executor),
+    bootstrapGHCRStatePackage: (input) =>
+      bootstrapGHCRStatePackage({
+        targetRepository: input.targetRepository,
+        registry: input.registry,
+        credentials: input.credentials as GhcrPackageCredentials,
+        ghCommandPresentation: GH_COMMAND_PRESENTATION
+      }),
+    stateRegistryForEnvironment,
+    getDefaultBranch: (repo, executor) =>
+      executor ?
+        selectedGetDefaultBranch(executor, repo)
+      : getDefaultBranch(repo),
+    getBranchHeadSha: (repo, branch, executor) =>
+      executor ?
+        selectedGetBranchHeadSha(executor, repo, branch)
+      : getBranchHeadSha(repo, branch),
+    createBranchRef: (repo, branch, sha, executor) =>
+      executor ?
+        selectedCreateBranchRef(executor, repo, branch, sha)
+      : createBranchRef(repo, branch, sha),
+    tempFile: {
+      write: (contents) => {
+        const path = join(
+          tmpdir(),
+          "radius-wf-commit-" +
+            Date.now() +
+            "-" +
+            Math.random().toString(36).slice(2) +
+            ".json"
+        );
+        writeFileSync(path, contents);
+        return path;
+      },
+      remove: (path) => {
+        try {
+          unlinkSync(path);
+        } catch {}
+      }
+    },
+    setCanonicalEnvironment: (operation, environment) => {
+      setCanonicalEnvironment(operation, environment);
+    },
+    recordGitHubEnvironment: (operation, patch) => {
+      recordGitHubEnvironment(operation, patch);
+    },
+    recordGitHubEnvironmentVariable: (operation, entry) => {
+      recordGitHubEnvironmentVariable(operation, entry);
+    },
+    promoteCreatedGitHubEnvironment: (operation, identity) =>
+      promoteCreatedGitHubEnvironment(operation, identity),
+    envListCacheDelete: (repo) => {
+      envListCache.invalidate(repo);
+    },
+    ociStateBackend: OCI_STATE_BACKEND,
+    defaultStateArchive: DEFAULT_STATE_ARCHIVE,
+    azureCredential: () => cloudCredential(sharedCredentials.azure),
+    awsCredential: () => cloudCredential(sharedCredentials.aws),
+    optionalString,
+    generateVerifyWorkflow: (environment, provider, setupPushOperationMarker) =>
+      generateVerifyWorkflow(environment, provider, undefined, {
+        setupPushOperationMarker
+      }),
+    generateDeployWorkflow: (environment, appFile) =>
+      generateDeployWorkflow(environment, appFile),
+    generateDeleteWorkflow: (environment) =>
+      generateDeleteWorkflow(environment),
+    recordCommittedWorkflowFile: (operation, entry) => {
+      recordCommittedWorkflowFile(operation, entry);
+    },
+    deleteLegacyDeployWorkflow,
+    createPullRequestApi: (repo, head, base, title, body, executor) =>
+      executor ?
+        selectedCreatePullRequest(executor, repo, head, base, title, body)
+      : createPullRequestApi(repo, head, base, title, body),
+    planCredentialVerification,
+    fetchFileFromRepo: (repo, path, branch, executor) =>
+      executor ?
+        selectedFetchFileFromRepo(executor, repo, path, branch)
+      : fetchFileFromRepo(repo, path, branch),
+    fetchFileFromRepoResult: (repo, path, branch, executor) =>
+      executor ?
+        selectedFetchFileFromRepoResult(executor, repo, path, branch)
+      : fetchFileFromRepoResult(repo, path, branch),
+    buildVerifyWorkflowDispatchArgs,
+    verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+    stageVerify: STAGE_VERIFY,
+    recordCleanupState: (operation, patch) => {
+      recordCleanupState(operation, patch);
+    },
+    recordCommitState: (operation, patch) => {
+      recordCommitState(operation, patch);
+    },
+    setStageState: (operation, stage, state) => {
+      setStageState(operation, stage, state);
+    },
+    finish: (operation, state, options) => {
+      finish(operation, state, options);
+    },
+    sleep: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    now: () => Date.now()
+  });
+
+  // Built once per runtime so validation fails before opening any server.
+  const serverRoutes = createServerRouteTable({
+    ...livenessSourceRoutes,
+    ...operationsStatusRoutes,
+    ...operationsControlRoutes,
+    ...repositoriesRoutes,
+    ...deploymentsRoutes,
+    ...azureDiscoveryRoutes,
+    ...azureAutoSetupRoutes,
+    ...identityProfilesRoutes,
+    ...identityAuthRoutes,
+    ...remediationRoutes,
+    ...graphsPlanningRoutes,
+    ...graphsPlanningStreamRoutes,
+    ...graphsPlanningWritesRoutes,
+    ...environmentsRoutes,
+    ...createEnvironmentRoutes
+  });
+
+  // Coordinators retain transport and provider behavior. Task/claim storage lives
+  // in the runtime owner, preserving the scope of each attachment.
+  const instanceRequestCoordinators = new Map<
+    string,
+    ReturnType<typeof createInstanceRequestCoordinator> & {
+      start(baseUrl: string): void;
+    }
+  >();
+
+  const canvasServer = createCanvasServer(
+    createProductionCanvasServerDependencies(
+      {
+        createRequestHandler: ({ instanceId, instances, markActivity }) => {
+          let baseUrl = "";
+          const coordinator = createInstanceRequestCoordinator(
+            instanceId,
+            () => baseUrl,
+            environmentDeletionPorts ?? productionEnvironmentDeletionPorts(),
+            {
+              executionOwner,
+              servers: instances,
+              get environmentOperationRunner() {
+                return options.environmentOperationRunner;
+              }
+            }
+          );
+          instanceRequestCoordinators.set(instanceId, {
+            ...coordinator,
+            start: (url) => {
+              baseUrl = url;
+              coordinator.startRecoveredTasks();
+            }
+          });
+          return createScaffoldRequestHandler({
+            instanceId,
+            instances,
+            routes: serverRoutes,
+            handleUnmatchedRequest: coordinator.handleUnmatchedRequest,
+            // Server-owned internal calls must not refresh the webview activity
+            // clock, or the idle-respawn timer never fires.
+            markActivity: (request) => {
+              if (!coordinator.isServerOwned(request)) markActivity();
+            },
+            validateBrowserMutation: (context) =>
+              coordinator.validateBrowserMutation(context.request),
+            preRoute: preRouteCanvasRequest
+          });
+        },
+        onStarted: (instanceId, entry) => {
+          entry.observation = createWorkflowObservationScope(
+            createDeployStatusReader
+          );
+          executionOwner.markEnvironmentInstanceStarted(instanceId);
+          entry.state.ghCommandPresentation = GH_COMMAND_PRESENTATION;
+          const coordinator = instanceRequestCoordinators.get(instanceId);
+          if (coordinator) {
+            entry.state.browserMutationNonce = coordinator.browserMutationNonce;
+            coordinator.start(entry.baseUrl);
+          }
+        },
+        onStopped: (instanceId) => {
+          instanceRequestCoordinators.delete(instanceId);
+        },
+        defaultPage: DEFAULT_CANVAS_PAGE,
+        preferredPort: preferredPortForInstance
+      },
+      serverDependencies
+    )
+  );
+
+  // deployStatusReaderFromState - build a deployed-graph/status reader for a
+  // canvas instance's state.
+  //
+  // Deploy status and the deployed application graph are published by the deploy
+  // workflow as a workflow artifact (see ./deploy-artifacts.ts). Scope the read to
+  // the run being monitored when there is one, so an in-flight deploy reports its
+  // own status rather than the previous run's; otherwise read the newest matching
+  // artifact repo-wide, which is what a fresh canvas session with no run in flight
+  // needs.
+  //
+  // Repo-wide discovery permits a guessed application name as a tie-breaker.
+  // An active run instead requires matching application and execution evidence;
+  // another application's progress must not paint this deployment's graph.
+  async function deployStatusReaderFromState(
+    state: CanvasState,
+    repo: string,
+    branch: string,
+    runId?: number | string | null
+  ) {
+    const environment = state?.deployEnvName || state?.envName || "";
+    let application = state?.deployAppName || "";
+    if (!application && repo) {
+      application = await resolveRepoAppName(
+        repo,
+        branch || state?.deployingBranch || state?.graphBranch || ""
+      );
+      if (application && state) state.deployAppName = application;
+    }
+    const entry = [...canvasServer.instances.values()].find(
+      (candidate) => candidate.state === state
+    );
+    if (!entry?.observation)
+      throw new Error("Workflow observation instance is unavailable.");
+    return entry.observation.reader({
+      repo,
+      environment,
+      application,
+      runId: runId ?? state?.deployRunId ?? null
+    });
+  }
+
+  const deployMonitorService = createDeployMonitorService({
+    plannedGraph: deployPlannedGraphService,
+    dispatch: deployDispatchService,
+    outcome: deployOutcomeService,
+    deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
+    unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+    findWorkflowRun: (repo, workflowFile, sinceMs, knownId, afterRunId) =>
+      findWorkflowRun(
+        repo,
+        workflowFile,
+        sinceMs,
+        knownId,
+        undefined,
+        afterRunId
+      ),
+    getRunDetail: (repo, runId, request) =>
+      getRunDetail(repo, runId, undefined, request, {
+        includeProtection: true
+      }),
+    createStatusReader: (state, repo, branch, runId) =>
+      deployStatusReaderFromState(state, repo, branch, runId),
+    buildDeployStatusMap,
+    buildDeployMessageMap,
+    applyDeployMessages,
+    applyDeployStatusToResources,
+    settleDeployStatuses,
+    generatePortalUrl,
+    optionalString,
+    errorMessage,
+    sleep: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    now: () => Date.now()
+  });
+
+  const deployRequestService = createDeployRequestService({
+    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    resolveDeployRepairLoop,
+    resolveDeploymentEnvironment,
+    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+    localDeploymentBlocksMutation: (state) =>
+      localDeploymentBlocksMutation(state),
+    reserveDeploymentMutation: (state, reservation) =>
+      reserveDeploymentMutation(state, reservation),
+    releaseDeploymentMutation,
+    deploymentStatusBlocksMutation,
+    resolveEnvDeployment,
+    runCommand: (command, args) => runCommand(command, args),
+    canvasGraphResources,
+    beginDeployAttempt,
+    triggerDeployRepairHandoff: (entry, instanceId) =>
+      triggerDeployRepairHandoff(entry, instanceId),
+    triggerDeployFailureNotice: (entry, instanceId) =>
+      triggerDeployFailureNotice(entry, instanceId),
+    monitor: deployMonitorService,
+    unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
+    repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
+    errorMessage
+  });
+
+  const deploymentAbandonmentService = createDeploymentAbandonmentService({
+    ghCommandPresentation: GH_COMMAND_PRESENTATION,
+    isValidRepoSlug,
+    readInstanceState: (instanceId) =>
+      canvasServer.instances.get(instanceId)?.state,
+    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+    localDeploymentBlocksMutation: (state) =>
+      localDeploymentBlocksMutation(state),
+    reserveDeploymentMutation: (state, reservation) =>
+      reserveDeploymentMutation(state, reservation),
+    releaseDeploymentMutation,
+    deploymentStatusBlocksMutation,
+    resolveEnvDeployment,
+    ghOrThrow: (args) => ghOrThrow(args),
+    invalidateDeployListCache: (repo) => {
+      deployListCache.delete(repo);
+    }
+  });
+
+  function getLastWebviewActivityAt(): number {
+    return canvasServer.getLastActivityAt();
+  }
+
+  // Global pre-routing shared by typed routes and unmatched page requests. Reject
+  // cross-site mutations before any routing or body parse, then synchronise the
+  // requested page onto the instance entry.
+  function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
+    const { request } = context;
+    if (
+      isCrossSiteMutation(request.method, request.headers["sec-fetch-site"])
+    ) {
+      context.json(403, {
+        error: "Cross-site request rejected.",
+        code: "cross-site-forbidden"
+      });
+      return true;
+    }
+    syncRequestedPage(
+      canvasServer.instances.get(context.instanceId),
+      context.url.searchParams.get("page")
+    );
+    return false;
+  }
+
+  async function getOrCreateServer(
+    instanceId: string,
+    page?: string
+  ): Promise<CanvasServerEntry> {
+    return await canvasServer.getOrCreate(instanceId, page);
+  }
+
+  async function stopServer(instanceId: string, force = false): Promise<void> {
+    await canvasServer.stop(instanceId, force);
+  }
+
+  return {
+    servers: canvasServer.instances,
+    getOrCreateServer,
+    stopServer,
+    getLastWebviewActivityAt,
+    hasActiveEnvironmentTasks: executionOwner.hasActiveEnvironmentTasks,
+    markEnvironmentInstanceShuttingDown:
+      executionOwner.markEnvironmentInstanceShuttingDown,
+    onEnvironmentTasksSettled: executionOwner.onEnvironmentTasksSettled
+  };
 }
