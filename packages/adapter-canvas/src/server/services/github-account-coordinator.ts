@@ -13,7 +13,7 @@ export interface GitHubAccountCoordinatorPorts {
 }
 
 export interface GitHubAccountLeaseMetadata {
-  instanceId: string;
+  ownerKey: string;
   operationId?: string;
 }
 
