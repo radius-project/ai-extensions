@@ -1012,6 +1012,32 @@ describe("resolveInstalledRadiusVersion", () => {
     }
   );
 
+  // Every plugin process on the machine shares the managed binary, and another
+  // session's load-time update replaces it with an atomic rename. The next
+  // read has to report the binary now on disk, which is the one graph builds
+  // compile with. POSIX-only: the fake binaries are shebang scripts.
+  itPosix(
+    "reports the binary another session put in place after an earlier read",
+    async () => {
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_RAD_PATH, fakeRad(RADIUS_RELEASE_TAG));
+      fs.chmodSync(MANAGED_RAD_PATH, 0o755);
+      const pinned = radiusVersionFromExtensionRef(
+        radiusExtensionRefForRelease(RADIUS_RELEASE_TAG)
+      );
+      await expect(mod.resolveInstalledRadiusVersion()).resolves.toBe(pinned);
+
+      const replacement = `${MANAGED_RAD_PATH}.other-session`;
+      fs.writeFileSync(replacement, fakeRad("v9.1.0"));
+      fs.chmodSync(replacement, 0o755);
+      fs.renameSync(replacement, MANAGED_RAD_PATH);
+
+      await expect(mod.resolveInstalledRadiusVersion()).resolves.toBe("9.1");
+    }
+  );
+
   itPosix(
     "rejects a pull-request build rather than reporting a version",
     async () => {

@@ -554,14 +554,18 @@ export async function resolveRadiusExtensionRef({
  * registry reference, and throws when no binary can be resolved or the release
  * is refused (a pull-request build, or edge without the developer override).
  *
- * Resolves the binary with ensureRadBinary, not resolveRadForGraph. Callers
- * keep this answer for the rest of the extension load, so it must describe the
- * binary AFTER the load-time reconciliation. resolveRadForGraph only waits for
- * a reconciliation that has already started, and the extension starts its
- * warm-up after the session is attached, so a graph opened in between would
- * read, and keep, the release that is about to be replaced. ensureRadBinary
- * starts the reconciliation itself when nothing has yet, and shares it when
- * the warm-up got there first.
+ * Reads the release on every call. The managed binary lives in a directory
+ * every plugin process on the machine shares, and another process's load-time
+ * reconciliation can replace it at any time, so a remembered answer can go
+ * stale. Graph builds read it per compile for the same reason.
+ *
+ * Resolves the binary with ensureRadBinary, not resolveRadForGraph, so the
+ * answer describes the binary AFTER this process's load-time reconciliation.
+ * resolveRadForGraph only waits for a reconciliation that has already started,
+ * and the extension starts its warm-up after the session is attached, so a
+ * graph opened in between would read the release that is about to be
+ * replaced. ensureRadBinary starts the reconciliation itself when nothing has
+ * yet, and shares it when the warm-up got there first.
  */
 export async function resolveInstalledRadiusVersion({
   log = noop
