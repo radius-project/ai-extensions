@@ -29,15 +29,6 @@ import os from "node:os";
 import path from "node:path";
 
 const STAGING_RUN_RECORD = "run.json";
-// The resolved type contract show-radius-type.mjs stages for this run: a map of
-// `<type>@<api-version>` to each envelope property's schema sensitivity. This
-// script compiles offline and has no type catalog, and the compiled template
-// keeps no trace of which property is sensitive, so the flag can only arrive
-// from the run that resolved the schemas. The name must stay in step with the
-// copy in show-radius-type.mjs; the built-extension smoke test asserts the two
-// packaged scripts agree.
-const STAGING_RESOLVED_TYPES = "resolved-types.json";
-const RESOLVED_TYPES_CONTRACT_VERSION = 1;
 const REPAIR_ATTEMPT_BUDGET = 5;
 const REPAIR_COMPILE_LIMIT = REPAIR_ATTEMPT_BUDGET + 1;
 const EXIT_SUCCESS = 0;
@@ -1269,8 +1260,15 @@ function isPlainObject(value) {
 // that is not part of a modeling run at all, which is the same thing the repair
 // budget does with a missing run record: a plain `.radius/app.bicep` never had a
 // staged contract to consult, so there is nothing to enforce against it.
-function readResolvedTypes(app, staged) {
-  const file = path.join(path.dirname(app), STAGING_RESOLVED_TYPES);
+function readResolvedTypes(resolvedTypesContract, app, staged) {
+  const {
+    RESOLVED_TYPES_CONTRACT_VERSION,
+    RESOLVED_TYPES_FILE,
+    isResolvedTypeEntry,
+    isResolvedTypesContract,
+    marksPropertySensitive
+  } = resolvedTypesContract;
+  const file = path.join(path.dirname(app), RESOLVED_TYPES_FILE);
   if (!staged) {
     return { status: "unstaged", file, types: {} };
   }
@@ -1294,11 +1292,7 @@ function readResolvedTypes(app, staged) {
       detail: "it is not valid JSON"
     };
   }
-  if (
-    !isPlainObject(parsed) ||
-    parsed.contractVersion !== RESOLVED_TYPES_CONTRACT_VERSION ||
-    !isPlainObject(parsed.types)
-  ) {
+  if (!isResolvedTypesContract(parsed)) {
     return {
       status: "unusable",
       file,
@@ -1307,19 +1301,21 @@ function readResolvedTypes(app, staged) {
     };
   }
   for (const [type, entry] of Object.entries(parsed.types)) {
-    if (
-      !isPlainObject(entry) ||
-      Object.values(entry).some((sensitive) => typeof sensitive !== "boolean")
-    ) {
+    if (!isResolvedTypeEntry(entry)) {
       return {
         status: "unusable",
         file,
         types: {},
-        detail: `"${type}" does not map each property to a boolean`
+        detail: `"${type}" is not a version ${RESOLVED_TYPES_CONTRACT_VERSION} entry that lists its properties and the path of each sensitive node`
       };
     }
   }
-  return { status: "ready", file, types: parsed.types };
+  return {
+    status: "ready",
+    file,
+    types: parsed.types,
+    marksSensitive: marksPropertySensitive
+  };
 }
 
 function secureParameterNames(template) {
@@ -1334,8 +1330,10 @@ function secureParameterNames(template) {
 
 // What is wrong with assigning `parameter` to `type`.`property`, or null when
 // nothing is. Every branch that is not "the schema marks it sensitive" reports,
-// because the alternative is to treat an unknown property as sensitive, which is
-// exactly the assumption that shipped the broken model.
+// because the alternative is to treat an unknown property as sensitive, which
+// is exactly the assumption that shipped the broken model. A sensitive
+// read-only property is left to Bicep, which already fails any assignment to a
+// read-only property (BCP073).
 function secureTargetFinding(contract, type, property, parameter) {
   const lead = `parameter ${JSON.stringify(parameter)} is @secure()`;
   if (contract.status === "absent") {
@@ -1351,11 +1349,10 @@ function secureTargetFinding(contract, type, property, parameter) {
       "Resolve the type with show-radius-type.mjs and assign the credential the way its schema requires."
     );
   }
-  const sensitive = entry[property];
-  if (sensitive === true) {
+  if (contract.marksSensitive(entry, property)) {
     return null;
   }
-  if (sensitive === undefined) {
+  if (!entry.properties.includes(property)) {
     return (
       `${lead}, but the resolved schema for "${type}" does not describe ${property}, so its sensitivity is unknown. ` +
       "Assign a credential only to a property the resolved schema marks sensitive."
@@ -1545,10 +1542,12 @@ function compileModel(app) {
 // inside it.
 async function check(app, staged) {
   // Loaded before anything is spawned rather than imported statically, so an
-  // installation missing the sibling module reaches the catch below main() and
+  // installation missing a sibling module reaches the catch below main() and
   // reports the check as unavailable (exit 2) instead of failing to load
-  // (exit 1), without leaving a compile running.
+  // (exit 1), without leaving a compile running. The resolved-type contract is
+  // the module show-radius-type.mjs writes `resolved-types.json` with.
   const securityRuleModule = await import("./bicep-security-rules.mjs");
+  const resolvedTypesContract = await import("./resolved-types-contract.mjs");
   // A security rule that was turned off reports nothing, so a clean compile is
   // only evidence once the rules are known to have run. The inspection runs
   // alongside the compile, and its findings are reported first; a finding
@@ -1612,7 +1611,7 @@ async function check(app, staged) {
     return EXIT_CHECK_UNAVAILABLE;
   }
 
-  const resolvedTypes = readResolvedTypes(app, staged);
+  const resolvedTypes = readResolvedTypes(resolvedTypesContract, app, staged);
   if (resolvedTypes.status === "unusable") {
     report(
       `${app}: error checker-unavailable: the resolved type schemas staged in ${resolvedTypes.file} could not be read: ${resolvedTypes.detail}. ` +

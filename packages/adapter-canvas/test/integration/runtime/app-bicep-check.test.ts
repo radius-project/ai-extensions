@@ -3735,7 +3735,38 @@ function stagedResolvedTypes(directory: string, contract: unknown): void {
 }
 
 function resolvedTypes(types: object): object {
-  return { contractVersion: 1, types };
+  return { contractVersion: 2, types };
+}
+
+// One staged type entry: the envelope properties the schema describes, and the
+// path of each node it marks sensitive.
+function typeEntry(
+  properties: string[],
+  sensitive: { path: string; readOnly: boolean }[] = []
+): object {
+  return { properties, sensitive };
+}
+
+function sensitiveInput(nodePath: string) {
+  return { path: nodePath, readOnly: false };
+}
+
+const pathsType = "Radius.Test/paths@2025-08-01-preview";
+
+// A model that assigns one @secure() parameter to each of `properties` of a
+// resource of pathsType.
+function securePathsModel(...properties: string[]): string {
+  return template(
+    {
+      resource: radiusResource(
+        pathsType,
+        Object.fromEntries(
+          properties.map((property) => [property, "[parameters('credential')]"])
+        )
+      )
+    },
+    { credential: securePassword }
+  );
 }
 
 // The failing shape the check exists to catch: the raw credential assigned to a
@@ -4192,7 +4223,7 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [rabbitMqType]: { password: false } })
+      resolvedTypes({ [rabbitMqType]: typeEntry(["password"]) })
     );
     const compiledOutput = template(
       {
@@ -4251,7 +4282,7 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [rabbitMqType]: { password: false, queue: false } })
+      resolvedTypes({ [rabbitMqType]: typeEntry(["password", "queue"]) })
     );
 
     const result = runChecker(
@@ -4271,7 +4302,12 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [mySqlType]: { password: true, database: false } })
+      resolvedTypes({
+        [mySqlType]: typeEntry(
+          ["database", "password"],
+          [sensitiveInput("password")]
+        )
+      })
     );
     const compiledOutput = template(
       {
@@ -4292,14 +4328,78 @@ describe("secure parameter targets", () => {
     assert.equal(result.stderr, "");
   });
 
+  // The checker does not report a sensitive read-only output: the Recipe sets
+  // it, and Bicep's BCP073 already rejects any value the model assigns there.
+  it("leaves a secure parameter on a sensitive read-only output to Bicep", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({
+        [mySqlType]: typeEntry(
+          ["database", "password"],
+          [{ path: "password", readOnly: true }]
+        )
+      })
+    );
+    const compiledOutput = template(
+      {
+        mysql: radiusResource(mySqlType, {
+          database: "orders",
+          password: "[parameters('mysqlPassword')]"
+        })
+      },
+      { mysqlPassword: securePassword }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(
+        directory,
+        sarif([
+          {
+            level: "warning",
+            ruleId: "BCP073",
+            message: {
+              text: 'The property "password" is read-only. Expressions cannot be assigned to read-only properties.'
+            }
+          }
+        ]),
+        0,
+        compiledOutput
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /warning BCP073/u);
+    assert.doesNotMatch(result.stderr, /secure-parameter-target/u);
+  });
+
+  it("accepts a secure parameter assigned to a sensitive value of an open envelope", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [pathsType]: typeEntry([], [sensitiveInput("[*]")]) })
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, securePathsModel("apiKey"))
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
   it("separates the two types that name the property the same way", () => {
     const directory = temporaryDirectory();
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
       resolvedTypes({
-        [mySqlType]: { password: true },
-        [rabbitMqType]: { password: false }
+        [mySqlType]: typeEntry(["password"], [sensitiveInput("password")]),
+        [rabbitMqType]: typeEntry(["password"])
       })
     );
     const compiledOutput = template(
@@ -4481,31 +4581,35 @@ describe("secure parameter targets", () => {
   it.each([
     {
       name: "a different contract version",
-      contract: { contractVersion: 2, types: {} },
-      expected: /is not a version 1 resolved-type contract/u
+      contract: { contractVersion: 1, types: {} },
+      expected: /is not a version 2 resolved-type contract/u
     },
     {
       name: "no type map",
-      contract: { contractVersion: 1 },
-      expected: /is not a version 1 resolved-type contract/u
+      contract: { contractVersion: 2 },
+      expected: /is not a version 2 resolved-type contract/u
     },
     {
       name: "a JSON array",
       contract: [],
-      expected: /is not a version 1 resolved-type contract/u
+      expected: /is not a version 2 resolved-type contract/u
     },
     {
       name: "a type that is not an object",
-      contract: { contractVersion: 1, types: { [rabbitMqType]: "password" } },
-      expected: /does not map each property to a boolean/u
+      contract: resolvedTypes({ [rabbitMqType]: "password" }),
+      expected: /is not a version 2 entry/u
     },
     {
-      name: "a property sensitivity that is not a boolean",
-      contract: {
-        contractVersion: 1,
-        types: { [rabbitMqType]: { password: "false" } }
-      },
-      expected: /does not map each property to a boolean/u
+      name: "a version 1 property map",
+      contract: resolvedTypes({ [rabbitMqType]: { password: false } }),
+      expected: /is not a version 2 entry/u
+    },
+    {
+      name: "a sensitive node that is not a path",
+      contract: resolvedTypes({
+        [rabbitMqType]: { properties: ["password"], sensitive: ["password"] }
+      }),
+      expected: /is not a version 2 entry/u
     }
   ])(
     "fails closed on staged resolved types with $name",
@@ -4556,7 +4660,9 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [mySqlType]: { password: true } })
+      resolvedTypes({
+        [mySqlType]: typeEntry(["password"], [sensitiveInput("password")])
+      })
     );
 
     const result = runChecker(
@@ -4574,7 +4680,7 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [rabbitMqType]: { queue: false } })
+      resolvedTypes({ [rabbitMqType]: typeEntry(["queue"]) })
     );
 
     const result = runChecker(
@@ -4613,7 +4719,7 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [rabbitMqType]: { password: false } })
+      resolvedTypes({ [rabbitMqType]: typeEntry(["password"]) })
     );
     const compiledOutput = template(
       {
@@ -4644,7 +4750,7 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [rabbitMqType]: { password: false } })
+      resolvedTypes({ [rabbitMqType]: typeEntry(["password"]) })
     );
     const compiledOutput = template({
       messaging: {
@@ -4678,7 +4784,7 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [rabbitMqType]: { password: false } })
+      resolvedTypes({ [rabbitMqType]: typeEntry(["password"]) })
     );
     const compiledOutput = template(
       {
@@ -4706,7 +4812,7 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [rabbitMqType]: { password: false } })
+      resolvedTypes({ [rabbitMqType]: typeEntry(["password"]) })
     );
     const compiledOutput = template(
       {
@@ -4732,7 +4838,10 @@ describe("secure parameter targets", () => {
     stagedResolvedTypes(
       directory,
       resolvedTypes({
-        "Radius.Security/secrets@2025-08-01-preview": { data: false }
+        "Radius.Security/secrets@2025-08-01-preview": typeEntry(
+          ["data"],
+          [sensitiveInput("data[*].value")]
+        )
       })
     );
     const compiledOutput = template(
@@ -4763,7 +4872,7 @@ describe("secure parameter targets", () => {
     stagedRun(directory);
     stagedResolvedTypes(
       directory,
-      resolvedTypes({ [rabbitMqType]: { password: false } })
+      resolvedTypes({ [rabbitMqType]: typeEntry(["password"]) })
     );
     const compiledOutput = template({
       rabbitmq: {
@@ -4783,14 +4892,10 @@ describe("secure parameter targets", () => {
   });
 });
 
-// The writer that produces `resolved-types.json` and the checker that consumes
-// it each state the per-entry acceptance rule in their own script, because the
-// installed plugin has no shared module for them to import. The failure that
-// duplication invites is the two ends disagreeing: a writer looser than the
-// reader merges a malformed entry forward and emits a file its own checker then
-// rejects, reporting against a file the user never authored. These cases pin
-// both ends to the same answer for the same input so they cannot drift apart.
-describe("resolved-type contract agreement", () => {
+// show-radius-type.mjs writes `resolved-types.json` and this checker reads it
+// in a child process. resolved-types-contract.test.ts covers the shared rules;
+// this case covers the file one script writes and the other reads.
+describe("resolved-type contract round trip", () => {
   const resolver = path.join(
     root,
     "extensions",
@@ -4800,96 +4905,69 @@ describe("resolved-type contract agreement", () => {
     "scripts",
     "show-radius-type.mjs"
   );
-  const agreementType = "Radius.Messaging/rabbitMQ@2025-08-01-preview";
 
-  // The writer validates its staging directory, which must carry the staging
-  // name prefix and a run record with a baseline.
-  function writerStagingDirectory(): string {
-    const directory = path.join(
+  it("the checker reads what the writer stages", async () => {
+    // The writer accepts only a directory with the staging name prefix and a
+    // run record that has a baseline.
+    const staging = path.join(
       temporaryDirectory(),
-      `${STAGING_DIR_PREFIX}agreement`
+      `${STAGING_DIR_PREFIX}round-trip`
     );
-    fs.mkdirSync(directory, { recursive: true });
+    fs.mkdirSync(staging, { recursive: true });
     fs.writeFileSync(
-      path.join(directory, STAGING_RUN_RECORD),
-      JSON.stringify({ version: 1, runId: "agreement", baseline: {} })
+      path.join(staging, STAGING_RUN_RECORD),
+      JSON.stringify({ version: 1, runId: "round-trip", baseline: {} })
     );
-    return directory;
-  }
-
-  async function writerAccepts(staged: string): Promise<boolean> {
-    const directory = writerStagingDirectory();
-    fs.writeFileSync(path.join(directory, RESOLVED_TYPES), staged);
-    const { writeStagedResolvedTypes } = (await import(
-      pathToFileURL(resolver).href
-    )) as {
+    const secret = { type: "string", sensitive: true };
+    const [type, apiVersion] = pathsType.split("@");
+    const writer = (await import(pathToFileURL(resolver).href)) as {
       writeStagedResolvedTypes: (
         staging: string,
-        resources: Array<{
-          type: string;
-          apiVersion: string;
-          schema: object;
-        }>
+        resources: Array<{ type: string; apiVersion: string; schema: object }>
       ) => Promise<void>;
     };
-    return await writeStagedResolvedTypes(directory, [
+    await writer.writeStagedResolvedTypes(staging, [
       {
-        type: "Radius.Test/agreement",
-        apiVersion: "2025-08-01-preview",
-        schema: { type: "object" }
+        type,
+        apiVersion,
+        schema: {
+          type: "object",
+          properties: {
+            properties: {
+              type: "object",
+              properties: {
+                apiKey: secret,
+                tls: { type: "object", properties: { clientKey: secret } }
+              }
+            }
+          }
+        }
       }
-    ]).then(
-      () => true,
-      () => false
-    );
-  }
+    ]);
 
-  // The checker is a separate script in a child process, so it is asked the
-  // same question the only way it can be: compile a model beside the staged
-  // file and see whether it calls the contract unreadable.
-  function checkerAccepts(staged: string): boolean {
-    const directory = temporaryDirectory();
-    stagedRun(directory);
-    fs.writeFileSync(path.join(directory, RESOLVED_TYPES), staged);
-    const result = runChecker(
-      directory,
-      fakeBicep(
+    function check(compiledOutput: string) {
+      const directory = temporaryDirectory();
+      stagedRun(directory);
+      fs.copyFileSync(
+        path.join(staging, RESOLVED_TYPES),
+        path.join(directory, RESOLVED_TYPES)
+      );
+      return runChecker(
         directory,
-        sarif([]),
-        0,
-        template({
-          rabbitmq: radiusResource(agreementType, { queue: "orders" })
-        })
-      )
+        fakeBicep(directory, sarif([]), 0, compiledOutput)
+      );
+    }
+
+    const accepted = check(securePathsModel("apiKey"));
+    assert.equal(accepted.status, 0, accepted.stderr);
+
+    const misassigned = check(securePathsModel("apiKey", "tls"));
+    assert.equal(misassigned.status, 1);
+    assert.match(
+      misassigned.stderr,
+      /resource\.properties\.tls: .*does not mark tls sensitive/u
     );
-    return !/could not be read/u.test(result.stderr);
-  }
-
-  it.each([
-    { name: "an entry with no properties", entry: {}, accepted: true },
-    {
-      name: "boolean property sensitivities",
-      entry: { password: false, queue: true },
-      accepted: true
-    },
-    { name: "a string entry", entry: "password", accepted: false },
-    { name: "a null entry", entry: null, accepted: false },
-    { name: "an array entry", entry: [], accepted: false },
-    {
-      name: "a stringly-typed boolean",
-      entry: { password: "false" },
-      accepted: false
-    },
-    { name: "a numeric sensitivity", entry: { password: 0 }, accepted: false },
-    { name: "a null sensitivity", entry: { password: null }, accepted: false }
-  ])("both ends treat $name the same way", async ({ entry, accepted }) => {
-    const staged = JSON.stringify({
-      contractVersion: 1,
-      types: { [agreementType]: entry }
-    });
-
-    assert.equal(await writerAccepts(staged), accepted);
-    assert.equal(checkerAccepts(staged), accepted);
+    assert.doesNotMatch(misassigned.stderr, /resource\.properties\.apiKey/u);
   });
 });
 
@@ -5161,33 +5239,54 @@ describe("security rules", () => {
     );
   });
 
-  // An installation that lost the sibling module must still follow the exit-2
+  // An installation that lost a sibling module must still follow the exit-2
   // contract, so the agent aborts the run instead of trying to repair a model
   // that was never checked.
-  it("is unavailable, without starting a compile, when its security-rule module is missing", () => {
-    const directory = temporaryDirectory();
-    stagedRun(directory);
-    const isolated = path.join(directory, "validate-bicep.mjs");
-    fs.copyFileSync(checker, isolated);
-    const app = path.join(directory, "app.bicep");
-    fs.writeFileSync(app, "");
-    const env = fakeBicep(directory, sarif([]), 0);
-    const driver = path.join(directory, "build");
-    fs.writeFileSync(
-      driver,
-      `require("node:fs").writeFileSync("compile-started", "");\n${fs.readFileSync(driver, "utf8")}`
-    );
+  it.each([
+    { missing: "bicep-security-rules.mjs", present: [] },
+    {
+      missing: "resolved-types-contract.mjs",
+      present: ["bicep-security-rules.mjs"]
+    }
+  ])(
+    "is unavailable, without starting a compile, when $missing is missing",
+    ({ missing, present }) => {
+      const directory = temporaryDirectory();
+      stagedRun(directory);
+      const isolated = path.join(directory, "validate-bicep.mjs");
+      fs.copyFileSync(checker, isolated);
+      for (const sibling of present) {
+        fs.copyFileSync(
+          path.join(path.dirname(checker), sibling),
+          path.join(directory, sibling)
+        );
+      }
+      const app = path.join(directory, "app.bicep");
+      fs.writeFileSync(app, "");
+      const env = fakeBicep(directory, sarif([]), 0);
+      const driver = path.join(directory, "build");
+      fs.writeFileSync(
+        driver,
+        `require("node:fs").writeFileSync("compile-started", "");\n${fs.readFileSync(driver, "utf8")}`
+      );
 
-    const result = spawnSync(process.execPath, [isolated, app], {
-      encoding: "utf8",
-      env: { ...process.env, ...env }
-    });
+      const result = spawnSync(process.execPath, [isolated, app], {
+        encoding: "utf8",
+        env: { ...process.env, ...env }
+      });
 
-    assert.equal(result.status, 2);
-    assert.match(result.stderr, /bicep-security-rules\.mjs/u);
-    assert.match(result.stderr, /ERR_MODULE_NOT_FOUND/u);
-    assert.equal(fs.existsSync(path.join(directory, "compile-started")), false);
-  });
+      assert.equal(result.status, 2);
+      assert.match(
+        result.stderr,
+        new RegExp(missing.replaceAll(".", String.raw`\.`), "u")
+      );
+      assert.match(result.stderr, /ERR_MODULE_NOT_FOUND/u);
+      assert.equal(
+        fs.existsSync(path.join(directory, "compile-started")),
+        false
+      );
+    }
+  );
 
   it("is unavailable when Bicep lists no files for the compile", () => {
     const directory = temporaryDirectory();

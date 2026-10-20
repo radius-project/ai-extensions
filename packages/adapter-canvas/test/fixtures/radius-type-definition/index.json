@@ -11,6 +11,9 @@
     },
     "Radius.Data/postgreSqlDatabases@2025-08-01-preview": {
       "$ref": "radius/radius.test/2025-08-01-preview/types.json#/14"
+    },
+    "Radius.Security/secrets@2025-08-01-preview": {
+      "$ref": "radius/radius.test/2025-08-01-preview/types.json#/60"
     }
   },
   "resourceFunctions": {},

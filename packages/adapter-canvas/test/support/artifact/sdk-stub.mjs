@@ -10,6 +10,7 @@ const REQUIRED_SKILL_FILES = [
   "scripts/promote-app-model.mjs",
   "scripts/validate-bicep.mjs",
   "scripts/bicep-security-rules.mjs",
+  "scripts/resolved-types-contract.mjs",
   "scripts/write-app-origin.mjs",
   "references/source-code-references.md"
 ];

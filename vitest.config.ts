@@ -18,7 +18,8 @@ export default defineConfig({
         "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
-        "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs"
+        "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs",
+        "extensions/radius/skills/radius-app-bicep/scripts/resolved-types-contract.mjs"
       ],
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
@@ -118,6 +119,13 @@ export default defineConfig({
             lines: 100
           },
         "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "extensions/radius/skills/radius-app-bicep/scripts/resolved-types-contract.mjs":
           {
             statements: 100,
             branches: 100,

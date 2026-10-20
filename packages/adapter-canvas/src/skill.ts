@@ -16,6 +16,7 @@ const REQUIRED_SKILL_FILES = [
   "SKILL.md",
   path.join("scripts", "validate-bicep.mjs"),
   path.join("scripts", "bicep-security-rules.mjs"),
+  path.join("scripts", "resolved-types-contract.mjs"),
   path.join("references", "source-code-references.md")
 ];
 const SKILL_INSTRUCTION =

@@ -16,8 +16,12 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import {
+  STAGING_DIR_PREFIX,
+  STAGING_RUN_RECORD
+} from "@radius-project/core/modeling";
 import {
   runArtifactSmoke,
   type ArtifactSmokeResult,
@@ -416,7 +420,8 @@ describe("P0-C built Radius extension artifact", () => {
       "skills/radius-app-bicep/references/source-code-references.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
       "skills/radius-app-bicep/scripts/validate-bicep.mjs",
-      "skills/radius-app-bicep/scripts/bicep-security-rules.mjs"
+      "skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
+      "skills/radius-app-bicep/scripts/resolved-types-contract.mjs"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
@@ -1202,24 +1207,83 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
-  it("packages the staged type-sensitivity contract both credential scripts share", () => {
+  it("packages the staged type-sensitivity contract both credential scripts share", async () => {
     assertCurrentArtifact();
-    const resolverScript = readFileSync(
-      join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
-      "utf8"
-    );
     const checkerScript = readFileSync(
       join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
       "utf8"
     );
     const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
 
-    // The two scripts never import each other, so the staged file name is the
-    // whole of their contract. A build that packaged one side's name and not
-    // the other's would ship a checker that silently never finds the evidence.
-    for (const script of [resolverScript, checkerScript]) {
-      expect(script).toContain('"resolved-types.json"');
-      expect(script).toContain("contractVersion");
+    // The resolver bundles its own copy of the contract, and the checker loads
+    // the copy that ships beside it. The file the packaged resolver stages must
+    // be one that the packaged copy accepts.
+    const resolver = (await import(
+      pathToFileURL(join(DIST_SKILL, "scripts", "show-radius-type.mjs")).href
+    )) as {
+      writeStagedResolvedTypes(
+        staging: string,
+        resources: Array<{ type: string; apiVersion: string; schema: object }>
+      ): Promise<void>;
+    };
+    const contract = (await import(
+      pathToFileURL(join(DIST_SKILL, "scripts", "resolved-types-contract.mjs"))
+        .href
+    )) as {
+      RESOLVED_TYPES_FILE: string;
+      isResolvedTypesContract(value: unknown): boolean;
+      isResolvedTypeEntry(entry: unknown): boolean;
+    };
+    expect(contract.RESOLVED_TYPES_FILE).toBe("resolved-types.json");
+    const workspace = mkdtempSync(join(tmpdir(), "radius-resolved-types-"));
+    try {
+      const staging = join(workspace, `${STAGING_DIR_PREFIX}round-trip`);
+      mkdirSync(staging);
+      writeFileSync(
+        join(staging, STAGING_RUN_RECORD),
+        JSON.stringify({ version: 1, runId: "round-trip", baseline: {} })
+      );
+      await resolver.writeStagedResolvedTypes(staging, [
+        {
+          type: "Radius.Security/secrets",
+          apiVersion: "2025-08-01-preview",
+          schema: {
+            type: "object",
+            properties: {
+              properties: {
+                type: "object",
+                properties: {
+                  data: {
+                    type: "object",
+                    additionalProperties: {
+                      type: "object",
+                      properties: { value: { type: "string", sensitive: true } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]);
+
+      const staged = JSON.parse(
+        readFileSync(join(staging, contract.RESOLVED_TYPES_FILE), "utf8")
+      ) as { types: Record<string, unknown> };
+      expect(contract.isResolvedTypesContract(staged)).toBe(true);
+      expect(staged.types).toEqual({
+        "Radius.Security/secrets@2025-08-01-preview": {
+          properties: ["data"],
+          sensitive: [{ path: "data[*].value", readOnly: false }]
+        }
+      });
+      expect(
+        Object.values(staged.types).every((entry) =>
+          contract.isResolvedTypeEntry(entry)
+        )
+      ).toBe(true);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
     }
     expect(checkerScript).toContain("secure-parameter-target");
     expect(skillGuidance).toContain("resolved-types.json");
