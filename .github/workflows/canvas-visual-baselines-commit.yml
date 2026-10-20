@@ -160,8 +160,8 @@ jobs:
         if: ${{ steps.apply.outcome == 'success' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_PRIVATE_KEY }}
+          client-id: ${{ secrets.RADIUS_RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RADIUS_RELEASE_BOT_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: |
             ai-extensions
