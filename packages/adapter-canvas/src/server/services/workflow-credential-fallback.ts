@@ -62,14 +62,8 @@ export function commandTimedOut(
 // other refusal. Covers the OAuth-app wording GitHub returns for contents
 // writes under `.github/workflows/`, the shorter `gh` phrasings, and the GitHub
 // App variant, which names a missing `workflows` permission instead of a scope.
-export function needsWorkflowScope(stderr?: string): boolean {
-  const text = stderr || "";
-  return (
-    /workflow.{0,20}scope/i.test(text) ||
-    /without .?workflow.? scope/i.test(text) ||
-    /workflows.? permission/i.test(text)
-  );
-}
+import { needsWorkflowScope } from "@radius-project/core";
+export { needsWorkflowScope } from "@radius-project/core";
 
 // Whether a failed workflow-scoped gh command may be retried with the injected
 // token stripped. Fails closed: anything not positively recognised as a

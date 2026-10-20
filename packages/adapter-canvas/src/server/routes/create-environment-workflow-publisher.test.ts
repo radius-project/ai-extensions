@@ -4,6 +4,7 @@ import {
   azureRoleScope,
   buildManualRoleAssignmentGuidance,
   describeWorkflowCommitFailure,
+  providerCredentialStatus,
   publishWorkflowFiles,
   VERIFY_WORKFLOW_PATH,
   WORKFLOW_SCOPE_HINT,
@@ -40,6 +41,42 @@ function configurationRecorder(
 }
 
 describe("applyProviderConfiguration", () => {
+  it.each([
+    {
+      provider: "azure",
+      note: "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
+    },
+    {
+      provider: "aws",
+      note: "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
+    }
+  ])(
+    "keeps the same $provider missing-credential note for apply and status-only calls",
+    async ({ provider, note }) => {
+      const { ports, variables, steps } = configurationRecorder();
+      const expected = { credentialsComplete: false, missingCredNote: note };
+      expect(providerCredentialStatus(provider, {}, ports)).toEqual(expected);
+      expect(variables).toEqual([]);
+      expect(steps).toEqual([]);
+      expect(await applyProviderConfiguration(provider, {}, ports)).toEqual(
+        expected
+      );
+    }
+  );
+
+  it("publishes initial narration before a failed write without later success messages", async () => {
+    const error = new Error("provider outcome unknown");
+    const { ports, steps } = configurationRecorder({
+      setEnvironmentVariable: async () => {
+        throw error;
+      }
+    });
+    await expect(applyProviderConfiguration("azure", {}, ports)).rejects.toBe(
+      error
+    );
+    expect(steps).toEqual(["Setting environment variables and secrets..."]);
+  });
+
   it("writes every azure value the request carries and counts what was set", async () => {
     const { ports, variables, steps } = configurationRecorder();
     const data: CreateEnvironmentRequestData = {

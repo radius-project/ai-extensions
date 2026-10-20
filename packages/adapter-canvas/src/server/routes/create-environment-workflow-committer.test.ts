@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import {
   createOperation,
@@ -12,10 +12,7 @@ import {
 } from "../../operations.js";
 import {
   createWorkflowFileCommitter,
-  isProtectedBranchFailure,
-  readWorkflowCommitProvenance,
   recordedSetupBranchCreate,
-  setupWorkflowBranchName,
   workflowContentDigest,
   type WorkflowFileCommitterPorts
 } from "./create-environment-workflow-committer.js";
@@ -26,18 +23,8 @@ interface GhCall {
   args: string[];
 }
 
-describe("setup workflow branch identity", () => {
-  it("uses the persisted operation suffix and a clock fallback", () => {
-    expect(setupWorkflowBranchName("dev", "op_abcdef123456789", 99)).toBe(
-      "radius/setup-dev-workflows-abcdef123456"
-    );
-    expect(setupWorkflowBranchName("dev", "", 99)).toBe(
-      "radius/setup-dev-workflows-99"
-    );
-  });
-});
-
 interface Script {
+  trace?: unknown[];
   runGh?: Partial<CreateEnvironmentCommandResult>[];
   runGhWorkflow?: Partial<CreateEnvironmentCommandResult>[];
   defaultBranch?: string | null;
@@ -92,6 +79,7 @@ function harness(script: Script = {}): Harness {
     args: string[]
   ): Promise<CreateEnvironmentCommandResult> => {
     calls.push({ kind, args });
+    script.trace?.push([kind, args]);
     const next = queue.shift();
     if (!next) throw new Error(`unscripted ${kind}: ${args.join(" ")}`);
     return Promise.resolve({
@@ -147,36 +135,50 @@ function harness(script: Script = {}): Harness {
 
 const target = { targetRepo: "octo/app", envName: "dev" };
 
-describe("isProtectedBranchFailure", () => {
-  it.each([
-    "HTTP 409: branch protection rules",
-    "changes must be made through a pull request",
-    "required status check is expected",
-    "at least 1 approving review is required",
-    "you do not have permission to push",
-    "Resource not accessible by integration",
-    "push declined due to repository rule violations",
-    "HTTP 403: review is required"
-  ])("treats %s as a protected-branch refusal", (stderr) => {
-    expect(isProtectedBranchFailure(stderr)).toBe(true);
-  });
+afterEach(() => vi.useRealTimers());
 
-  it("does not treat a missing workflow scope as a protected branch", () => {
-    // A pull request cannot fix a missing token scope, so this must not divert
-    // the commit into the PR fallback even though the message is an HTTP 403.
-    expect(
-      isProtectedBranchFailure(
-        "HTTP 403: refusing to allow an OAuth App to create or update workflow `.github/workflows/x.yml` without `workflow` scope"
-      )
-    ).toBe(false);
+it("publication baseline parity: recovered empty-branch deletion", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(1700000000000);
+  const trace: unknown[] = [];
+  const h = harness({
+    trace,
+    runGh: [{ code: 0, stdout: '{"object":{"sha":"sha-1"}}' }],
+    runGhWorkflow: [{ code: 0 }],
+    defaultBranch: "main",
+    headSha: "sha-1"
   });
-
-  it.each([["HTTP 500: internal error"], [""], [undefined]])(
-    "does not divert %s into the pull-request fallback",
-    (stderr) => {
-      expect(isProtectedBranchFailure(stderr as string)).toBe(false);
+  const operation = createOperation({ operationId: "op_workflow" });
+  operation.recoveryState = "provider_reconciliation_pending";
+  prepareProviderMutation(operation, {
+    kind: "github_branch.create",
+    target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
+    providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
+  });
+  h.ports.mutationRecovery = {
+    operation,
+    persist: async () => {
+      trace.push([
+        "save",
+        JSON.parse(JSON.stringify(operation.providerRecovery))
+      ]);
     }
+  };
+  await expect(
+    createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+      "p",
+      CONTENT,
+      "m"
+    )
+  ).rejects.toMatchObject({ code: "provider-mutation-recovered-rollback" });
+  expect(h.calls.filter((call) => call.args.includes("DELETE"))).toHaveLength(
+    1
   );
+  expect({
+    trace,
+    steps: h.steps,
+    durable: operation.providerRecovery
+  }).toMatchSnapshot();
 });
 
 describe("committing a workflow file", () => {
@@ -846,46 +848,6 @@ describe("committing a workflow file", () => {
       viaPr: false
     });
     expect(committer.pullRequestState()).toBeUndefined();
-  });
-});
-
-describe("reading a contents-API write back", () => {
-  it("reads the commit and blob identities GitHub reported", () => {
-    expect(readWorkflowCommitProvenance(PUT_RESPONSE)).toEqual({
-      commitSha: "commit-1",
-      blobSha: "blob-1"
-    });
-  });
-
-  it.each([
-    ["empty output", ""],
-    ["unparseable output", "not json"],
-    ["a JSON scalar", "42"],
-    ["an object with no identities", '{"content":{},"commit":{}}'],
-    ["an object with neither key", "{}"],
-    ["blank identities", '{"content":{"sha":"  "},"commit":{"sha":""}}'],
-    ["non-string identities", '{"content":{"sha":7},"commit":{"sha":null}}']
-  ])("reports no provenance for %s rather than guessing", (_label, stdout) => {
-    expect(readWorkflowCommitProvenance(stdout)).toEqual({
-      commitSha: null,
-      blobSha: null
-    });
-  });
-
-  it("reports no provenance when the response is undefined", () => {
-    expect(readWorkflowCommitProvenance(undefined)).toEqual({
-      commitSha: null,
-      blobSha: null
-    });
-  });
-
-  it("digests the exact bytes a base64 body carries", () => {
-    expect(workflowContentDigest(CONTENT)).toBe(CONTENT_DIGEST);
-    // Base64 is permissive, so an unusable value degrades to "no digest"
-    // rather than to a digest of something else.
-    expect(workflowContentDigest("")).toBe(
-      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    );
   });
 });
 

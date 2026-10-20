@@ -14,8 +14,7 @@ import { createRequestContext } from "../request-context.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
 import {
   createAzureAutoSetupRoutes,
-  handleAzureAutoSetup,
-  parseAzureAccountIdentity
+  handleAzureAutoSetup
 } from "./azure-auto-setup.js";
 import type {
   AzureAutoSetupCommandResult,
@@ -46,49 +45,6 @@ type LiveContextDrift =
   | "repository"
   | "oidc"
   | "oidc-error";
-
-describe("Azure account identity parsing", () => {
-  it("accepts the subscription and tenant GUIDs Azure reports", () => {
-    expect(
-      parseAzureAccountIdentity(
-        JSON.stringify({
-          id: SUBSCRIPTION,
-          tenantId: TENANT,
-          user: AZURE_USER
-        })
-      )
-    ).toEqual({
-      subscriptionId: SUBSCRIPTION,
-      tenantId: TENANT,
-      callerIdentity: { kind: "user" }
-    });
-  });
-
-  it("classifies a service-principal caller from the same account payload", () => {
-    expect(
-      parseAzureAccountIdentity(
-        JSON.stringify({
-          id: SUBSCRIPTION,
-          tenantId: TENANT,
-          user: { type: "servicePrincipal", name: APP_ID }
-        })
-      )
-    ).toEqual({
-      subscriptionId: SUBSCRIPTION,
-      tenantId: TENANT,
-      callerIdentity: { kind: "servicePrincipal", appId: APP_ID }
-    });
-  });
-
-  it.each([
-    ["invalid JSON", "{"],
-    ["a non-object", "[]"],
-    ["a non-string tenant", JSON.stringify({ id: SUBSCRIPTION, tenantId: 42 })],
-    ["a non-string subscription", JSON.stringify({ id: 42, tenantId: TENANT })]
-  ])("rejects %s", (_label, stdout) => {
-    expect(parseAzureAccountIdentity(stdout)).toBeNull();
-  });
-});
 
 const servers = new Set<ReturnType<typeof createServer>>();
 
@@ -162,6 +118,50 @@ const VALID_SETUP = {
   cluster: "aks-radius",
   subscriptionId: SUBSCRIPTION
 };
+
+it("reports a failing finalizer without retrying cleanup or hanging HTTP", async () => {
+  const test = finalizingDependencies();
+  let finalizations = 0;
+  const diagnostics: unknown[] = [];
+  test.dependencies.operations.report = (diagnostic) => {
+    diagnostics.push(diagnostic);
+  };
+  test.dependencies.finalizeSetupFailure = async () => {
+    finalizations++;
+    throw new Error("private cleanup detail");
+  };
+  const response = await invoke("{}", test.dependencies);
+  expect(response.status).toBe(500);
+  expect(await response.json()).toMatchObject({ code: "setup-handler-failed" });
+  expect(finalizations).toBe(1);
+  expect(diagnostics).toEqual([
+    {
+      code: "setup-handler-failed",
+      message: "private cleanup detail"
+    }
+  ]);
+});
+
+it("reports a rejected authorization gate without reading input or invoking setup", async () => {
+  const test = finalizingDependencies();
+  const report = vi.fn();
+  test.dependencies.operations.report = report;
+  test.dependencies.isServerOwnedRequest = () => {
+    throw new Error("private authorization failure");
+  };
+  const response = await invoke("not-json", test.dependencies);
+  expect(response.status).toBe(500);
+  expect(await response.json()).toEqual({
+    code: "setup-handler-failed",
+    error:
+      "Setup could not finish reporting its outcome. Inspect the operation before retrying."
+  });
+  expect(report).toHaveBeenCalledExactlyOnceWith({
+    code: "setup-handler-failed",
+    message: "private authorization failure"
+  });
+  expect(test.calls).toEqual([]);
+});
 
 function orchestrationHarness(
   options: {
@@ -376,6 +376,35 @@ function orchestrationHarness(
 }
 
 describe("POST /api/azure-auto-setup construction (SU-01)", () => {
+  it("reports a non-array application lookup finalizer rejection once without leaking details", async () => {
+    const harness = orchestrationHarness();
+    const runAz = harness.dependencies.external.runAz;
+    harness.dependencies.external.runAz = async (args) =>
+      args.slice(0, 3).join(" ") === "ad app list" ?
+        { code: 0, stdout: "{}", stderr: "" }
+      : runAz(args);
+    const finalizations: AzureAutoSetupFailureInput[] = [];
+    harness.dependencies.finalizeSetupFailure = async (_operation, input) => {
+      finalizations.push(input);
+      throw new Error("private cleanup detail");
+    };
+    const response = await invoke(
+      JSON.stringify(VALID_SETUP),
+      harness.dependencies
+    );
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      code: "setup-handler-failed",
+      error:
+        "Setup could not finish reporting its outcome. Inspect the operation before retrying."
+    });
+    expect(finalizations).toHaveLength(1);
+    expect(finalizations[0].code).toBe("app-lookup-parse");
+    expect(
+      harness.events.filter((event) => event.startsWith("report:"))
+    ).toEqual(["report:setup-handler-failed"]);
+  });
+
   it.each(["rejection", "exception"])(
     "uses the selected account for all cleanup callbacks after a setup %s",
     async (failure) => {

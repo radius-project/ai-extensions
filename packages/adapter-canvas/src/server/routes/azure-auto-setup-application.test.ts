@@ -23,6 +23,7 @@ import {
   createAzureAutoSetupTestDependencies,
   type FakeCallerIdentity
 } from "../../../test/support/server/azure-auto-setup.js";
+import { createAzureApplicationPorts } from "./azure-setup-adapter.js";
 
 const APP_ID = "33333333-3333-3333-3333-333333333333";
 const USER_ID = "44444444-4444-4444-4444-444444444444";
@@ -164,6 +165,51 @@ function harness(
 }
 
 describe("Azure auto-setup App Registration service (SU-08)", () => {
+  it("reads current halt disposition and environment through the bound operation", () => {
+    const test = harness();
+    const { workflow, dependencies } = test.input;
+    const ports = createAzureApplicationPorts(workflow, dependencies);
+    expect(ports.haltKind()).toBe("failed");
+    workflow.operation.inputRequired = {
+      kind: "service-management-reference",
+      code: "service-management-reference-required",
+      message: "Provide the required service reference.",
+      requestedAt: "2026-10-14T10:00:00.000Z"
+    };
+    expect(ports.haltKind()).toBe("input-required");
+    workflow.operation.state = "cancelled";
+    expect(ports.haltKind()).toBe("stopped");
+    workflow.operation.environment = "canonical-dev";
+    expect(ports.environment).toBe("canonical-dev");
+  });
+
+  it("reports non-Error persistence diagnostics before finishing and responding", () => {
+    const reports: unknown[] = [];
+    const test = harness({ report: (report) => reports.push(report) });
+    const ports = createAzureApplicationPorts(
+      test.input.workflow,
+      test.input.dependencies
+    );
+    ports.persistenceFailure("disk unavailable");
+    expect(reports).toEqual([
+      {
+        code: "operation-store-write-failed",
+        message: "Could not persist setup operation op-app: disk unavailable"
+      }
+    ]);
+    expect(test.calls).toEqual(["finish"]);
+    expect(test.responses).toEqual([
+      {
+        status: 500,
+        payload: {
+          error:
+            "Radius changed no cloud resources because it could not save the setup recovery record.",
+          code: "operation-persistence-failed",
+          operationId: "op-app"
+        }
+      }
+    ]);
+  });
   it("rejects an explicitly blank app name before any Azure call", async () => {
     const test = harness({
       overrides: { appNameProvided: true, requestedAppName: "  " }
