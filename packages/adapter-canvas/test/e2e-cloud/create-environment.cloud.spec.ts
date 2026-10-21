@@ -501,7 +501,7 @@ async function readGitHubEnvironmentPresence(
   return classifyGitHubEnvironmentProbe(
     await commands.runGh([
       "api",
-      `repos/${repository}/environments/${environmentName}`
+      `repos/${repository}/environments/${encodeURIComponent(environmentName)}`
     ]),
     environmentName
   );
