@@ -321,20 +321,7 @@ export function explainNoSubscriptions(logText?: string | null): string {
 // IAM role ARN. When these are absent, dispatching verify only produces a run
 // that fails at the cloud-login step (issue #219), so the create-environment
 // handler skips the dispatch and surfaces actionable guidance instead. Pure.
-export function cloudCredentialsComplete(
-  provider: string,
-  creds: {
-    clientId?: string;
-    tenantId?: string;
-    subscriptionId?: string;
-    roleArn?: string;
-  }
-): boolean {
-  if (provider === "azure") {
-    return !!(creds.clientId && creds.tenantId && creds.subscriptionId);
-  }
-  return !!creds.roleArn;
-}
+export { cloudCredentialsComplete } from "@radius-project/core";
 
 // Given the outcome of reading `gh api repos/{repo}` plus the acting gh login,
 // return a clear, actionable error string, or '' when the account can read the

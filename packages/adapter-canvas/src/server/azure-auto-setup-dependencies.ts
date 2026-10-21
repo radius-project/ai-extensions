@@ -4,10 +4,10 @@ import type {
   AzureAutoSetupOperationLifecyclePort,
   AzureAutoSetupOperationProgressPort
 } from "./routes/azure-auto-setup-types.js";
+import type { AzureSetupDependencies } from "./services/azure-setup.js";
 
 export interface AzureAutoSetupCompositionSeams extends Pick<
   AzureAutoSetupDependencies,
-  | "isServerOwnedRequest"
   | "external"
   | "tempFile"
   | "ensureServicePrincipal"
@@ -27,7 +27,7 @@ export function composeAzureAutoSetupDependencies({
   progress,
   artifacts,
   ...dependencies
-}: AzureAutoSetupCompositionSeams): AzureAutoSetupDependencies {
+}: AzureAutoSetupCompositionSeams): AzureSetupDependencies {
   return {
     ...dependencies,
     operations: {
