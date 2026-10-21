@@ -652,6 +652,28 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     expect(session.send).toHaveBeenCalledWith("please log in");
   });
 
+  it("passes a pre-dispatch refusal through the registered host notice", async () => {
+    const { ext, capturedHostCallbacks } = setup();
+    const session = createFakeSession();
+    ext.attachSession(session);
+    const notify = capturedHostCallbacks.deployFailureNotice;
+    if (!notify) throw new Error("Expected the production notice binding.");
+    await notify({
+      repo: "acme/widgets",
+      branch: "feature",
+      error: "run list unavailable",
+      deployRunUrl: "",
+      instanceId: "panel",
+      dispatchRefused: true
+    });
+    expect(session.send).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining("No new workflow was started."),
+        displayPrompt: expect.stringContaining("refused Radius deploy")
+      })
+    );
+  });
+
   it("forwards an already-paired session prompt message untouched", async () => {
     const { ext, capturedHostCallbacks } = setup();
     const session = createFakeSession();

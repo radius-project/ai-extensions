@@ -11,7 +11,74 @@
 // exported from their own module and out of this file.
 
 export { redactCredentials } from "./credential-redaction.js";
+export { ensureDeploymentSecret } from "./deployment-secret.js";
+export { startDeployment } from "./deployment-start.js";
+export {
+  resolveDeploymentRepairLoop,
+  claimDeploymentRepairHandoff,
+  settleDeploymentRepairHandoff,
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  DEPLOY_HANDOFF_RETRY_DELAY_MS,
+  type DeploymentRepairState,
+  type DeploymentRepairClaim
+} from "./deployment-repair.js";
+export {
+  collectDeploymentOutcome,
+  type DeploymentGraphRead
+} from "./deployment-outcome.js";
+export {
+  discoverDeploymentRun,
+  monitorDeploymentRun,
+  type DeploymentRunDetail
+} from "./deployment-monitor.js";
+export {
+  admitDeployment,
+  type DeploymentAdmission,
+  type DeploymentAdmissionPorts,
+  type DeploymentAdmissionTarget
+} from "./deployment-admission.js";
+export {
+  coordinateDeploymentDispatch,
+  classifyDeploymentDispatchFailure,
+  type DeploymentWorkflowTarget,
+  type DeploymentWorkflowReference,
+  type DeploymentDispatchCommand,
+  type DeploymentDispatchEvidence,
+  type DeploymentDispatchPorts
+} from "./deployment-dispatch.js";
+export {
+  selectGitHubAccount,
+  type GitHubAccountSelection,
+  type GitHubAccountSelectionPorts,
+  type GitHubAccountSelectionTarget
+} from "./github-account-selection.js";
 export { runSetupCoordinator } from "./setup-coordinator.js";
+export { monitorSetupVerification } from "./setup-verification-monitor.js";
+export {
+  readSetupVerificationStatus,
+  isAzureRbacVerificationFailure,
+  type SetupVerificationStatusInput,
+  type SetupVerificationRunDetail,
+  type SetupVerificationReadRequest,
+  type SetupVerificationStatusOperation,
+  type SetupVerificationStatus,
+  type SetupVerificationStatusPorts
+} from "./setup-verification-status.js";
+export {
+  classifyVerifyFailure,
+  extractMissingPermissions,
+  type VerifyFailureCategory,
+  type VerifyUnreachableComponent,
+  type VerifyFailureStep,
+  type VerifyFailureInput,
+  type VerifyFailureClassification
+} from "./verify-failure-classification.js";
+export type {
+  SetupVerificationObservation,
+  SetupVerificationMonitorOperation,
+  SetupVerificationMonitorPorts
+} from "./setup-verification-monitor.js";
 export type {
   SetupCoordinatorTarget,
   SetupCoordinatorOperation,
@@ -122,6 +189,19 @@ export type {
   ReaderStatus,
   WorkflowArtifact
 } from "./deploy-artifact-evidence.js";
+export { admitSetupCommand } from "./setup-command-admission.js";
+export { resumeSetupInput } from "./setup-input-resume.js";
+export type {
+  SetupResumeInput,
+  SetupResumeOperation,
+  SetupResumeRequest,
+  SetupInputResumePorts,
+  SetupInputResumeResult
+} from "./setup-input-resume.js";
+export type {
+  SetupCommandAdmissionPorts,
+  SetupCommandAdmissionResult
+} from "./setup-command-admission.js";
 export {
   applicationGraphToResources,
   computeGraphDiff,

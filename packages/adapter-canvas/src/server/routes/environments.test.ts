@@ -182,7 +182,7 @@ function deps(
     explainOidcEnterpriseClaim: unset("explainOidcEnterpriseClaim") as never,
     explainNoSubscriptions: unset("explainNoSubscriptions") as never,
     addLegacyStep: unset("addLegacyStep") as never,
-    isTerminalState: unset("isTerminalState") as never,
+    isTerminalState: isSetupTerminalState,
     finish: unset("finish") as never,
     finishSucceeded: unset("finishSucceeded") as never,
     persistBestEffort: unset("persistBestEffort") as never,
@@ -2634,6 +2634,10 @@ describe("environments — verify-status", () => {
                 request
               ),
             isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+            extractErrorLines,
+            extractGitHubActionsStepLog,
+            explainOidcEnterpriseClaim,
+            explainNoSubscriptions,
             addLegacyStep: vi.fn(),
             finish,
             persistBestEffort,
@@ -2656,12 +2660,19 @@ describe("environments — verify-status", () => {
             })
           );
           expect(persistOperations).toHaveBeenCalledOnce();
+        } else if (failure === "unexpected") {
+          expect(payload).toMatchObject({
+            state: "failed",
+            error:
+              "Credential verification failed (failure).\nThe verification log could not be read: Unexpected log failure"
+          });
+          expect(finish).toHaveBeenCalledOnce();
+          expect(persistOperations).toHaveBeenCalledOnce();
         } else {
           expect(payload).toEqual(
             failure === "cancelled" ?
               { state: "pending", error: "Workflow observation stopped." }
-            : failure === "superseded" ? { state: "pending", runId: 77 }
-            : { state: "unknown", error: "Unexpected log failure" }
+            : { state: "pending", runId: 77 }
           );
           expect(finish).not.toHaveBeenCalled();
           expect(persistOperations).not.toHaveBeenCalled();
@@ -4324,19 +4335,6 @@ describe("environments — real loopback", () => {
     const text = await res.text();
     expect(res.headers.get("cache-control")).not.toBe("no-store");
     expect(text).not.toContain('"environments":[]');
-  });
-
-  it("keeps create-environment in its sibling module and enforces its server-owned guard", async () => {
-    // The large create action has its own typed module rather than being folded
-    // into this environment read/write registry.
-    const registry = createEnvironmentsRoutes(deps({}));
-    expect(Object.keys(registry)).not.toContain("POST /api/create-environment");
-    const res = await fetch(baseUrl + "/api/create-environment", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    expect(res.status).toBe(403);
   });
 });
 

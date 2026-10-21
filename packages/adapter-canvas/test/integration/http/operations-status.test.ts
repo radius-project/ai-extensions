@@ -6,8 +6,10 @@ import { validateBrowserMutationRequest } from "../../../src/server/browser-muta
 import type { CanvasRequestContext } from "../../../src/server/request-context.js";
 import {
   createOperationsStatusRoutes,
+  type OperationActionDependencies,
   type OperationActionRecord
 } from "../../../src/server/routes/operations-status.js";
+import { createOperationResumeService } from "../../../src/server/services/operation-resume.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
   buildDeleteStages,
@@ -49,6 +51,7 @@ interface Harness {
   persistCalls: string[];
   scheduled: Array<{ instanceId: string; operationId: string }>;
   scheduleAccepted: { value: boolean };
+  shuttingDown: { value: boolean };
   startConflict: {
     value: {
       ok: false;
@@ -150,6 +153,7 @@ function start(strictBrowserMutations = false): Harness {
   const persistCalls: string[] = [];
   const scheduled: Array<{ instanceId: string; operationId: string }> = [];
   const scheduleAccepted = { value: true };
+  const shuttingDown = { value: false };
   const startConflict: Harness["startConflict"] = { value: null };
   const persistOperations = (): Promise<void> => {
     persistCalls.push("persist");
@@ -172,6 +176,22 @@ function start(strictBrowserMutations = false): Harness {
       baseUrl: `http://${context.request.headers.host || ""}`,
       nonce: "browser-nonce"
     });
+  const actionDependencies: OperationActionDependencies = {
+    getOperation: (operationId) => records.get(operationId),
+    canResumeInput,
+    resumeAfterInput,
+    requireInput,
+    finish,
+    isTerminalState,
+    canDismissOperation,
+    dismissOperation,
+    persistOperations,
+    toClientView,
+    scheduleEnvironmentOperation,
+    errorMessage: (error) =>
+      error instanceof Error ? error.message : String(error),
+    inputRequiredState: INPUT_REQUIRED_STATE
+  };
 
   const routes = createTestRouteTable(
     createOperationsStatusRoutes(
@@ -224,22 +244,11 @@ function start(strictBrowserMutations = false): Harness {
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error)
       },
-      {
-        getOperation: (operationId) => records.get(operationId),
-        canResumeInput,
-        resumeAfterInput,
-        requireInput,
-        finish,
-        isTerminalState,
-        canDismissOperation,
-        dismissOperation,
-        persistOperations,
-        toClientView,
-        scheduleEnvironmentOperation,
-        errorMessage: (error) =>
-          error instanceof Error ? error.message : String(error),
-        inputRequiredState: INPUT_REQUIRED_STATE
-      }
+      actionDependencies,
+      createOperationResumeService({
+        ...actionDependencies,
+        isShuttingDown: () => shuttingDown.value
+      })
     )
   );
 
@@ -272,6 +281,7 @@ function start(strictBrowserMutations = false): Harness {
     persistCalls,
     scheduled,
     scheduleAccepted,
+    shuttingDown,
     startConflict,
     setLatest(record) {
       latest = record;
@@ -602,6 +612,47 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
       code: "operation-registration-persist-failed"
     });
     expect(harness.scheduled).toEqual([]);
+  });
+
+  it("returns a shutdown refusal instead of accepting a resume", async () => {
+    const harness = start(true);
+    const entry = await container!.getOrCreate("panel-a");
+    const operation = createOperation({
+      provider: "azure",
+      repo: "octo/app",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    requireInput(operation, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      message: "Enter the Service Management Reference."
+    });
+    harness.records.set(operation.operationId, operation);
+    harness.shuttingDown.value = true;
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/${operation.operationId}/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        headers: {
+          Origin: entry.baseUrl,
+          "Sec-Fetch-Site": "same-origin",
+          "X-Radius-Mutation-Nonce": "browser-nonce"
+        },
+        body: "{}"
+      }
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    expect(await response.json()).toMatchObject({
+      code: "operation-shutting-down",
+      operationId: operation.operationId
+    });
+    expect(operation.state).toBe(INPUT_REQUIRED_STATE);
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.persistCalls).toEqual([]);
   });
 
   it("resumes, abandons, and dismisses through typed templates", async () => {

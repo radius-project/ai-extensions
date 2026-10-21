@@ -317,7 +317,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_deploy",
     description:
-      "Deploys the Radius application by dispatching the same GitHub Actions deploy workflow the canvas Deploy button uses. The workflow checks out the target branch from GitHub, so commit and push any repair before calling this. Returns as soon as the deploy is started; poll the radius_deploy_status tool for the outcome. When repairing a failed deploy, pass the attemptId you were given: calling with no arguments repeats this session's last deploy as a brand new one, which leaves the repair loop and its remaining attempts behind.",
+      "Deploys a Radius application without requiring an open Canvas panel, using the same owned workflow as the Deploy button. For a new target pass repo and environment, plus branch to choose a particular committed branch. Commit and push any repair first. Returns an attemptId as soon as monitoring starts; poll radius_deploy_status while pending or in_progress and stop on success or failed. No arguments repeats one unambiguous context as new manual work; multiple contexts require explicit selection. For repair always pass the supplied attemptId to preserve its pinned target and remaining budget.",
     parameters: {
       type: "object",
       properties: {
@@ -329,26 +329,28 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         environment: {
           type: "string",
           description:
-            "GitHub environment to deploy to. Defaults to the last deploy's environment."
+            "GitHub environment to deploy to. Required with repo for a new target; otherwise use one matching owned context."
         },
         repo: {
           type: "string",
           description:
-            "Target repository in owner/repo format. Defaults to the last deploy's repository."
+            "Target repository in owner/repo format. Required with environment for a new target; otherwise use one matching owned context."
         },
         branch: {
           type: "string",
-          description: "Branch to deploy. Defaults to the last deploy's branch."
+          description:
+            "Committed branch to deploy. Repeats retain their resolved branch; a new target resolves its remote default branch."
         },
         provider: {
           type: "string",
           enum: ["azure", "aws"],
-          description: "Cloud provider. Defaults to the last deploy's provider."
+          description:
+            "Cloud provider. Defaults to the selected prior context's provider, or azure for a new target."
         },
         appFile: {
           type: "string",
           description:
-            "Path to the application Bicep file. Defaults to .radius/app.bicep."
+            "Path to the application Bicep file. Defaults to the selected prior context's file, or .radius/app.bicep for a new target."
         }
       }
     }
@@ -356,7 +358,7 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_deploy_status",
     description:
-      "Reports the current Radius deploy state (in_progress, success, or failed) with the workflow run URL and a bounded, fenced diagnostic block when it failed. Poll this after calling radius_deploy until it reports a terminal state.",
+      "Reports an owned Radius deployment without requiring an open panel, with attemptId, workflow URL and bounded fenced diagnostics. Keep polling pending or in_progress; stop on success or failed. A failed result with errorKind run-unconfirmed is an unknown workflow outcome, not authorization to redeploy. Missing, ambiguous or unavailable status returns explicit guidance, never a fabricated pending result. Pass attemptId when multiple contexts exist and for every repair-loop call.",
     parameters: {
       type: "object",
       properties: {

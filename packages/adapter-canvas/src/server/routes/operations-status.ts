@@ -1,5 +1,14 @@
 import type { CanvasRequestContext } from "../request-context.js";
-import { KUBERNETES_NAMESPACE_ERROR } from "@radius-project/core";
+import {
+  KUBERNETES_NAMESPACE_ERROR,
+  type SetupResumeInput,
+  type SetupResumeRequest
+} from "@radius-project/core";
+import {
+  createOperationResumeService,
+  finishSchedulingFailure,
+  type OperationResumeService
+} from "../services/operation-resume.js";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import { setupStartConflictResponse } from "./operation-start-conflict.js";
 import {
@@ -32,22 +41,7 @@ export interface OperationsStatusDependencies {
   now(): number;
 }
 
-interface OperationRequest {
-  azure: {
-    serviceManagementReference?: unknown;
-    appId?: unknown;
-    createNew?: unknown;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-}
-
-function isOperationRequest(value: unknown): value is OperationRequest {
-  if (typeof value !== "object" || value === null || !("azure" in value)) {
-    return false;
-  }
-  return typeof value.azure === "object" && value.azure !== null;
-}
+type OperationRequest = SetupResumeRequest;
 
 // The record `createOperation` returns and every seam that touches it. Typed as
 // broadly as `operations.ts` types it (that module is all `any`), so the route
@@ -163,7 +157,7 @@ export interface OperationActionDependencies {
   persistOperations(): Promise<void>;
   toClientView(operation: OperationActionRecord): unknown;
   scheduleEnvironmentOperation(
-    instanceId: string,
+    instanceId: string | undefined,
     operation: OperationActionRecord
   ): boolean;
   errorMessage(error: unknown): string;
@@ -205,38 +199,6 @@ export const RESUME_OPERATION_ROUTE =
   "/api/operations/:operationId/resume/:code";
 export const ABANDON_OPERATION_ROUTE = "/api/operations/:operationId/abandon";
 export const DISMISS_OPERATION_ROUTE = "/api/operations/:operationId/dismiss";
-
-interface ResumeOperationBody extends Record<string, unknown> {
-  checkpoint?: string;
-  repo?: string;
-  environment?: string;
-  provider?: string;
-}
-
-async function finishSchedulingFailure(
-  operation: OperationRecord,
-  instanceId: string,
-  finishOperation: (failure: Record<string, unknown>) => void,
-  persistOperations: () => Promise<void>,
-  errorMessage: (error: unknown) => string
-): Promise<void> {
-  finishOperation({
-    code: "operation-scheduling-failed",
-    stage: operation.currentStage,
-    stepSeq: null,
-    message:
-      "Radius accepted the environment operation but could not start any setup work for it.",
-    classification: "unknown",
-    evidence: `No server-owned task runner was available for instance ${instanceId}.`
-  });
-  try {
-    await persistOperations();
-  } catch (error) {
-    // The in-memory record is already terminal, so polling still reflects the
-    // failure when this best-effort durable repair cannot be written.
-    errorMessage(error);
-  }
-}
 
 // Operation status. The panel polls this instead of waiting on the POST,
 // which is what lets it stop blocking: the record outlives the request
@@ -728,7 +690,8 @@ function requiredTemplateParameters(
 
 export async function handleResumeOperation(
   context: CanvasRequestContext,
-  dependencies: OperationActionDependencies
+  dependencies: OperationActionDependencies,
+  service = createOperationResumeService(dependencies)
 ): Promise<void> {
   const parameters = requiredTemplateParameters(
     RESUME_OPERATION_ROUTE,
@@ -736,131 +699,21 @@ export async function handleResumeOperation(
   );
   const operationId = decodeURIComponent(parameters.operationId);
   const code = decodeURIComponent(parameters.code);
-  const operation = dependencies.getOperation(operationId);
-  if (!operation) {
-    jsonError(context, 404, {
-      error: "Unknown operation.",
-      code: "unknown-operation"
-    });
-    return;
-  }
-  if (
-    operation.state === "failed_partial" &&
-    operation.failure?.code === "operation-input-expired"
-  ) {
-    jsonError(context, 410, {
-      error: operation.failure.message,
-      code: "operation-input-expired",
-      operation: dependencies.toClientView(operation)
-    });
-    return;
-  }
-  const body = await context.readTextBody();
-  let data: ResumeOperationBody;
-  try {
-    data = JSON.parse(body) as ResumeOperationBody;
-  } catch {
-    data = {};
-  }
-  if (
-    !dependencies.canResumeInput(operation, {
-      code,
-      checkpoint: data.checkpoint,
-      repo: data.repo,
-      environment: data.environment,
-      provider: data.provider
-    })
-  ) {
-    jsonError(context, 409, {
-      error: "The operation is not waiting for this input.",
-      code: "operation-resume-mismatch",
-      operationId
-    });
-    return;
-  }
-  if (!operation.request && operation.resumeRequest) {
-    operation.request = structuredClone(operation.resumeRequest);
-  }
-  const resumeSnapshot = {
-    inputRequired: structuredClone(operation.inputRequired),
-    request:
-      operation.request !== undefined ?
-        structuredClone(operation.request)
-      : undefined,
-    resumeRequest:
-      operation.resumeRequest ?
-        structuredClone(operation.resumeRequest)
-      : undefined
-  };
-  if (!isOperationRequest(operation.request)) {
-    jsonError(context, 409, {
-      error:
-        "The operation cannot be resumed because its saved request is unavailable.",
-      code: "operation-resume-request-unavailable",
-      operationId
-    });
-    return;
-  } else {
-    const request = operation.request;
-    if (code === "service-management-reference-required") {
-      request.azure.serviceManagementReference =
-        data.serviceManagementReference || "";
-      if (operation.resumeRequest?.azure) {
-        operation.resumeRequest.azure.serviceManagementReference =
-          data.serviceManagementReference || "";
+  await service(
+    { operationId, code, instanceId: context.instanceId },
+    async () => {
+      const body = await context.readTextBody();
+      try {
+        return JSON.parse(body) as SetupResumeInput;
+      } catch {
+        return {};
       }
-    } else if (code === "app-selection-required") {
-      request.azure.appId = data.appId || "";
-      request.azure.createNew = data.createNew === true;
-      if (operation.resumeRequest?.azure) {
-        operation.resumeRequest.azure.appId = data.appId || "";
-        operation.resumeRequest.azure.createNew = data.createNew === true;
-      }
-    } else {
-      jsonError(context, 400, {
-        error: "Unsupported resume prompt.",
-        code: "unsupported-resume"
-      });
-      return;
+    },
+    ({ status, body }) => {
+      if (status === 202) context.json(status, body);
+      else jsonError(context, status, body);
     }
-  }
-  dependencies.resumeAfterInput(operation);
-  try {
-    await dependencies.persistOperations();
-  } catch (error) {
-    operation.request = resumeSnapshot.request;
-    if (resumeSnapshot.resumeRequest === undefined) {
-      delete operation.resumeRequest;
-    } else {
-      operation.resumeRequest = resumeSnapshot.resumeRequest;
-    }
-    dependencies.requireInput(operation, resumeSnapshot.inputRequired);
-    jsonError(context, 500, {
-      error:
-        "Radius could not persist the resumed operation. Your answer was not accepted; retry the prompt.",
-      code: "operation-resume-persist-failed",
-      operationId,
-      detail: dependencies.errorMessage(error)
-    });
-    return;
-  }
-  context.json(202, {
-    operationId,
-    statusUrl: `/api/operations/${encodeURIComponent(operationId)}`
-  });
-  const scheduled = dependencies.scheduleEnvironmentOperation(
-    context.instanceId,
-    operation
   );
-  if (!scheduled) {
-    await finishSchedulingFailure(
-      operation,
-      context.instanceId,
-      (failure) => dependencies.finish(operation, "failed", { failure }),
-      dependencies.persistOperations,
-      dependencies.errorMessage
-    );
-  }
 }
 
 export async function handleAbandonOperation(
@@ -943,9 +796,12 @@ export async function handleDismissOperation(
 export function createOperationsStatusRoutes(
   dependencies: OperationsStatusDependencies,
   createDependencies: CreateOperationDependencies,
-  actionDependencies: OperationActionDependencies
+  actionDependencies: OperationActionDependencies,
+  resumeService?: OperationResumeService
 ): RouteHandlerRegistry {
   assertOperationActionDependencies(actionDependencies);
+  const resume =
+    resumeService ?? createOperationResumeService(actionDependencies);
   return {
     "GET /api/operations": (context) =>
       handleLatestOperation(context, dependencies),
@@ -956,7 +812,7 @@ export function createOperationsStatusRoutes(
     "POST /api/operations": (context) =>
       handleCreateOperation(context, createDependencies),
     "POST /api/operations/:operationId/resume/:code": (context) =>
-      handleResumeOperation(context, actionDependencies),
+      handleResumeOperation(context, actionDependencies, resume),
     "POST /api/operations/:operationId/abandon": (context) =>
       handleAbandonOperation(context, actionDependencies),
     "POST /api/operations/:operationId/dismiss": (context) =>

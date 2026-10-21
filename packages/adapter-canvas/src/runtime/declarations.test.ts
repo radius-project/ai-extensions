@@ -21,6 +21,26 @@ function props(schema: Record<string, unknown>): any {
 // RU-01: canvas metadata, the 7-page enum, repo/base/head fields, and schema
 // immutability.
 describe("RU-01: canvas metadata + input schema", () => {
+  it("declares panel-independent deployment selection and both nonterminal polling states", () => {
+    const start = RADIUS_TOOL_DECLARATIONS.find(
+      (tool) => tool.name === "radius_deploy"
+    );
+    const status = RADIUS_TOOL_DECLARATIONS.find(
+      (tool) => tool.name === "radius_deploy_status"
+    );
+    expect(start?.description).toContain(
+      "without requiring an open Canvas panel"
+    );
+    expect(start?.description).toContain(
+      "multiple contexts require explicit selection"
+    );
+    expect(status?.description).toContain(
+      "Keep polling pending or in_progress; stop on success or failed"
+    );
+    expect(status?.description).toContain("run-unconfirmed");
+    expect(status?.description).toContain("never a fabricated pending result");
+  });
+
   it("declares the canvas id/displayName/description", () => {
     expect(RADIUS_CANVAS_ID).toBe("radius");
     expect(RADIUS_CANVAS_DISPLAY_NAME).toBe("Radius");

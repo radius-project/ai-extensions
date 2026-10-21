@@ -16,6 +16,56 @@ import type { VerificationRetryOperation } from "./verification-retry.js";
 const NOW = Date.parse("2026-08-25T00:00:00Z");
 const TRACKING_WINDOW_MS = 45 * 60 * 1000;
 
+describe("verification retry runtime shutdown", () => {
+  it("leaves acquired-command recovery pending when account acquisition is stopped", async () => {
+    const op = operation();
+    let stopped = false;
+    const dependencies = runnerDependencies({
+      isStopped: () => stopped,
+      createExecutor: async () => {
+        stopped = true;
+        throw new Error("Session closed");
+      }
+    });
+    await runVerificationRetry(op, "retry", dependencies);
+    expect(op.endedAt).toBeNull();
+    expect(dependencies.journal.registered).toEqual([]);
+    expect(dependencies.journal.calls).toEqual([]);
+    expect(
+      dependencies.journal.commands.every((entry) => entry.state !== "finished")
+    ).toBe(true);
+  });
+
+  it.each([false, true])(
+    "does not finish a retry when its %s known-run monitor stops locally",
+    async (knownRun) => {
+      const op = operation();
+      if (knownRun)
+        op.verification = {
+          ...op.verification,
+          runId: "41",
+          accountUnavailablePhase: "monitor"
+        };
+      let stopped = false;
+      const dependencies = runnerDependencies({
+        isStopped: () => stopped,
+        monitor: async () => {
+          stopped = true;
+        }
+      });
+      await runVerificationRetry(op, "retry", dependencies);
+      expect(stopped).toBe(true);
+      expect(op.endedAt).toBeNull();
+      expect(dependencies.journal.unregistered).toEqual([op.operationId]);
+      expect(
+        dependencies.journal.commands.every(
+          (entry) => entry.state !== "finished"
+        )
+      ).toBe(true);
+    }
+  );
+});
+
 interface RunnerJournal {
   calls: Array<{ args: string[]; timeout?: number }>;
   registered: string[];
@@ -110,9 +160,9 @@ function runnerDependencies(
     createExecutor: () => Promise.resolve(executor),
     registerExecutor: (operationId) => {
       journal.registered.push(operationId);
-    },
-    unregisterExecutor: (operationId) => {
-      journal.unregistered.push(operationId);
+      return () => {
+        journal.unregistered.push(operationId);
+      };
     },
     stopBoundary: async ({ boundary }) => {
       journal.boundaries.push(boundary);

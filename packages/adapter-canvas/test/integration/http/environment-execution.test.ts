@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "../../../src/runtime/production-github-account-context.js";
+import { createProductionDeploymentExecutionOwner } from "../../../src/runtime/production-deployment-execution-owner.js";
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
@@ -31,8 +32,8 @@ afterEach(async () => {
 });
 
 describe("production environment owner HTTP binding", () => {
-  it.each(["azure", "environment"] as const)(
-    "reaches the real %s setup service without its former setup POST",
+  it.each(["azure", "environment", "repository-refusal"] as const)(
+    "enforces the real %s admission or setup outcome without the former setup POST",
     async (stage) => {
       const run = vi.fn(async (args: string[]) => {
         const command = args.join(" ");
@@ -47,7 +48,7 @@ describe("production environment owner HTTP binding", () => {
             code: 0,
             stdout: JSON.stringify({
               full_name: "fixture/app",
-              permissions: { admin: true }
+              permissions: { admin: stage !== "repository-refusal" }
             }),
             stderr: ""
           };
@@ -150,11 +151,21 @@ describe("production environment owner HTTP binding", () => {
         expect(response.status).toBe(202);
         await settled;
         expect(forbidden).toEqual([]);
-        expect(op.failure.message).toContain(
-          stage === "azure" ?
-            "repo, resourceGroup, and cluster are required."
-          : "namespace fixture refusal"
-        );
+        if (stage === "repository-refusal") {
+          expect(op.failure.code).toBe("repo-admin-required");
+          expect(op.failure.message).toContain("saved-account");
+          expect(
+            run.mock.calls.some(([args]) =>
+              args.some((arg) => arg.includes("/environments"))
+            )
+          ).toBe(false);
+        } else {
+          expect(op.failure.message).toContain(
+            stage === "azure" ?
+              "repo, resourceGroup, and cluster are required."
+            : "namespace fixture refusal"
+          );
+        }
         expect(op.state).toBe("failed");
         expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
         expect(
@@ -277,7 +288,7 @@ describe("production environment owner HTTP binding", () => {
     }
   );
 
-  it("keeps recovery's server-owned transport out of webview activity and surfaces refusal", async () => {
+  it("keeps direct recovery admission out of webview activity and surfaces refusal", async () => {
     const op = createOperation({
       operationId: "op_rollback_transport",
       repo: "fixture/rollback",
@@ -293,24 +304,18 @@ describe("production environment owner HTTP binding", () => {
       executionOwner: createEnvironmentExecutionOwner()
     });
     try {
-      const entry = await runtime.getOrCreateServer("rollback", "environment");
+      await runtime.getOrCreateServer("rollback", "environment");
       await vi.waitFor(() =>
         expect(report).toHaveBeenCalledWith(
           expect.objectContaining({
             scope: "provider-recovery-auto-rollback",
             operationId: op.operationId,
-            message: expect.any(String)
+            message:
+              "Radius did not create any resources it can prove it owns in this attempt."
           })
         )
       );
-      expect(fetcher).toHaveBeenCalledWith(
-        `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            "X-Radius-Server-Owned": expect.any(String)
-          })
-        })
-      );
+      expect(fetcher).not.toHaveBeenCalled();
       expect(runtime.getLastWebviewActivityAt()).toBe(0);
       expect(op.state).toBe("failed");
     } finally {
@@ -320,8 +325,12 @@ describe("production environment owner HTTP binding", () => {
 
   it("refuses construction without the shared owner", () => {
     const options = {
+      deploymentAccount: async () => {
+        throw new Error("Unexpected account selection");
+      },
       executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createProductionGitHubAccountContext()
+      accountContext: createProductionGitHubAccountContext(),
+      deploymentOwner: createProductionDeploymentExecutionOwner()
     };
     Reflect.deleteProperty(options, "executionOwner");
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
@@ -331,12 +340,46 @@ describe("production environment owner HTTP binding", () => {
 
   it("refuses construction without the shared account context", () => {
     const options = {
+      deploymentAccount: async () => {
+        throw new Error("Unexpected account selection");
+      },
       executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createProductionGitHubAccountContext()
+      accountContext: createProductionGitHubAccountContext(),
+      deploymentOwner: createProductionDeploymentExecutionOwner()
     };
     Reflect.deleteProperty(options, "accountContext");
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
       "Missing canvas server dependency: accountContext"
+    );
+  });
+
+  it("refuses construction without the shared deployment owner", () => {
+    const options = {
+      deploymentAccount: async () => {
+        throw new Error("Unexpected account selection");
+      },
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createProductionGitHubAccountContext(),
+      deploymentOwner: createProductionDeploymentExecutionOwner()
+    };
+    Reflect.deleteProperty(options, "deploymentOwner");
+    expect(() => createProductionCanvasServerRuntime(options)).toThrow(
+      "Missing canvas server dependency: deploymentOwner"
+    );
+  });
+
+  it("refuses construction without the shared deployment account resolver", () => {
+    const options = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createProductionGitHubAccountContext(),
+      deploymentOwner: createProductionDeploymentExecutionOwner(),
+      deploymentAccount: async () => {
+        throw new Error("Unexpected account selection");
+      }
+    };
+    Reflect.deleteProperty(options, "deploymentAccount");
+    expect(() => createProductionCanvasServerRuntime(options)).toThrow(
+      "Missing canvas server dependency: deploymentAccount"
     );
   });
 
@@ -468,26 +511,37 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
-  it("preserves transport authorization before malformed setup bodies and browser mutation gates", async () => {
+  it("treats removed setup endpoints as unmatched without setup side effects or forged-header authority", async () => {
     const owner = createEnvironmentExecutionOwner();
     const runtime = createTestCanvasServerRuntime({ executionOwner: owner });
     const entry = await runtime.getOrCreateServer("auth", "environment");
     try {
+      const unknown = await fetch(entry.baseUrl + "/api/unknown-setup-route");
+      const unknownBody = await unknown.text();
       for (const path of ["/api/azure-auto-setup", "/api/create-environment"]) {
-        const response = await fetch(entry.baseUrl + path, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Origin: entry.baseUrl,
-            "Sec-Fetch-Site": "same-origin",
-            "X-Radius-Mutation-Nonce": String(entry.state.browserMutationNonce)
-          },
-          body: "{"
-        });
-        expect(response.status).toBe(403);
-        expect(await response.json()).toMatchObject({
-          code: "server-owned-operation-required"
-        });
+        for (const forgedHeader of [false, true]) {
+          const response = await fetch(entry.baseUrl + path, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Origin: entry.baseUrl,
+              "Sec-Fetch-Site": "same-origin",
+              "X-Radius-Mutation-Nonce": String(
+                entry.state.browserMutationNonce
+              ),
+              ...(forgedHeader ?
+                { "X-Radius-Server-Owned": "forged-token" }
+              : {})
+            },
+            body: "{"
+          });
+          expect(response.status).toBe(unknown.status);
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toBe(
+            "text/html; charset=utf-8"
+          );
+          expect(await response.text()).toBe(unknownBody);
+        }
       }
       const crossSite = await fetch(entry.baseUrl + "/api/operations", {
         method: "POST",

@@ -157,15 +157,15 @@ The full plan is complete when every requirement in the appendices has a passing
 
 #### Accepted tools
 
-| ID    | Tool                                   | Required contract                                                                                        |
-|-------|----------------------------------------|----------------------------------------------------------------------------------------------------------|
-| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery      |
-| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection |
-| TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                            |
-| TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                    |
-| TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                      |
-| TL-09 | `radius_deploy`                        | Attempt identity, environment/repository/branch/provider mapping, dispatch, repeat-last behavior, errors |
-| TL-10 | `radius_deploy_status`                 | In-progress/success/failure, log bounds, workflow URL, diagnostics                                       |
+| ID    | Tool                                   | Required contract                                                                                                          |
+|-------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery                        |
+| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection                   |
+| TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                                              |
+| TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                                      |
+| TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                                        |
+| TL-09 | `radius_deploy`                        | Panel-free owned dispatch, target/account identity, unambiguous repeat/overrides, stale repair refusal, errors             |
+| TL-10 | `radius_deploy_status`                 | Panel-free pending/in-progress/success/failure, explicit unavailable state, attempt/workflow identity, bounded diagnostics |
 
 Every retained action/tool has unit or runtime-integration coverage. Tools reaching a loopback API also have HTTP integration. Path confinement and error propagation are mandatory for both publish tools.
 
@@ -297,29 +297,29 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 
 #### Phase 1 runtime: RU-01–RU-21
 
-| ID    | Unit behavior                                                                                             |
-|-------|-----------------------------------------------------------------------------------------------------------|
-| RU-01 | Canvas ID, display name, description, seven page values, repository/base/head fields, schema immutability |
-| RU-02 | Retained action names/descriptions/required fields/enums and reserved-name exclusion                      |
-| RU-03 | Retained tool names/schemas/descriptions and unique names                                                 |
-| RU-04 | Removed action/tool declarations absent; prior shape recorded                                             |
-| RU-05 | Graph-resources not-ready, active/explicit view, missing/all, filtering, context                          |
-| RU-06 | Source-reference missing/stale input, update/queue/skip, page, reload                                     |
-| RU-07 | Generate-app workspace analysis; compact handoff; candidate order, required assets, and failure           |
-| RU-08 | PR-diff repository/base/head mapping, fetch failure, Markdown result                                      |
-| RU-09 | Custom-type publish confinement, defaults, invocation, errors                                             |
-| RU-10 | Recipe publish confinement, GHCR validation, errors                                                       |
-| RU-11 | Deploy attempt identity, input mapping, dispatch, repeat-last, failure                                    |
-| RU-12 | Deploy status, log bounds, workflow URL, diagnostics                                                      |
-| RU-13 | Default/all pages, active graph view, stable title/URL                                                    |
-| RU-14 | Worktree branch, different-repository fallback, explicit branch                                           |
-| RU-15 | Graph/planned model resolution and explicit diff preload                                                  |
-| RU-16 | Missing-model handoff de-duplicates by repository/branch condition and never blocks open                  |
-| RU-17 | Same-instance reuse; a later instance ID is redirected to the first claim, and release restores it        |
-| RU-18 | Close one instance; shutdown closes all exactly once                                                      |
-| RU-19 | Additional context, permission/session callbacks, host keepalive, failures                                |
-| RU-20 | Production joins once with factory result; factory tests never join                                       |
-| RU-21 | Keepalive remains active during setup, observes terminal state, avoids duplicate cleanup                  |
+| ID    | Unit behavior                                                                                                                                |
+|-------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| RU-01 | Canvas ID, display name, description, seven page values, repository/base/head fields, schema immutability                                    |
+| RU-02 | Retained action names/descriptions/required fields/enums and reserved-name exclusion                                                         |
+| RU-03 | Retained tool names/schemas/descriptions and unique names                                                                                    |
+| RU-04 | Removed action/tool declarations absent; prior shape recorded                                                                                |
+| RU-05 | Graph-resources not-ready, active/explicit view, missing/all, filtering, context                                                             |
+| RU-06 | Source-reference missing/stale input, update/queue/skip, page, reload                                                                        |
+| RU-07 | Generate-app workspace analysis; compact handoff; candidate order, required assets, and failure                                              |
+| RU-08 | PR-diff repository/base/head mapping, fetch failure, Markdown result                                                                         |
+| RU-09 | Custom-type publish confinement, defaults, invocation, errors                                                                                |
+| RU-10 | Recipe publish confinement, GHCR validation, errors                                                                                          |
+| RU-11 | Actual panel-free deployment composition, identity/input mapping, dispatch uncertainty, repeat/ambiguity, shared ownership and shutdown      |
+| RU-12 | Tool-only success versus Canvas complete, both nonterminal states, unavailable status, attempt/workflow identity, log bounds and diagnostics |
+| RU-13 | Default/all pages, active graph view, stable title/URL                                                                                       |
+| RU-14 | Worktree branch, different-repository fallback, explicit branch                                                                              |
+| RU-15 | Graph/planned model resolution and explicit diff preload                                                                                     |
+| RU-16 | Missing-model handoff de-duplicates by repository/branch condition and never blocks open                                                     |
+| RU-17 | Same-instance reuse; a later instance ID is redirected to the first claim, and release restores it                                           |
+| RU-18 | Close one instance; shutdown closes all exactly once                                                                                         |
+| RU-19 | Additional context, permission/session callbacks, host keepalive, failures                                                                   |
+| RU-20 | Production joins once with factory result; factory tests never join                                                                          |
+| RU-21 | Keepalive remains active during setup, observes terminal state, avoids duplicate cleanup                                                     |
 
 #### Phase 2 server: SU-01–SU-18
 

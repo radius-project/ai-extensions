@@ -19,6 +19,7 @@ import {
   createFakeSession
 } from "../../support/runtime/fakes.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
+import { createDeploymentToolHarness } from "../../support/runtime/deployment.js";
 import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monitor.js";
 import { deployFailureNoticePrompt } from "../../../src/runtime/hooks.js";
 import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../../src/deploy-artifacts.js";
@@ -68,8 +69,12 @@ describe("P0-A Radius runtime registration contract", () => {
   it("reports the real unconfirmed monitor outcome as fenced data and a passive notice", async () => {
     const harness = await createRuntimeSdkHarness();
     try {
-      const selected = createFakeServerEntry("selected-panel", "deployed");
-      selected.state = { deployAttempt: { id: "selected-attempt" } };
+      const deployment = createDeploymentToolHarness();
+      harness.deps.deployment = deployment.tools;
+      const selected = deployment.seed(
+        {},
+        { repo: "org/app", branch: "feature" }
+      );
       const observed = createUnconfirmedMonitor("future_conclusion");
       await observed.monitor.run({
         entry: selected,
@@ -80,23 +85,13 @@ describe("P0-A Radius runtime registration contract", () => {
         resources: [],
         log: () => {}
       });
-      harness.servers.set("selected-panel", selected);
-      vi.mocked(harness.deps.deploy.fetch).mockImplementation(async (url) => {
-        expect(url).toBe(`${selected.baseUrl}/api/deploy-status`);
-        return Response.json({
-          status: selected.state.deployStatus,
-          error: selected.state.deployError,
-          errorKind: selected.state.deployErrorKind,
-          deployRunUrl: selected.state.deployRunUrl,
-          attempt: selected.state.deployAttempt,
-          repairing: false
-        });
-      });
       const tool = harness.extension.tools.find(
         ({ name }) => name === "radius_deploy_status"
       );
       if (!tool) throw new Error("Missing status tool");
-      const result = await tool.handler({ attemptId: "selected-attempt" });
+      const result = await tool.handler({
+        attemptId: selected.invocation.attemptId
+      });
       const summary = parseSkillHandoff(result);
       expect(summary).toMatchObject({
         status: "failed",
@@ -131,6 +126,7 @@ describe("P0-A Radius runtime registration contract", () => {
       );
       expect(observed.reads).toHaveLength(1);
       expect(observed.dispatches).toBe(1);
+      expect(harness.deps.deploy.fetch).not.toHaveBeenCalled();
       expect(harness.getOrCreateServer).not.toHaveBeenCalled();
     } finally {
       await harness.extension.shutdown("test");
@@ -156,26 +152,19 @@ describe("P0-A Radius runtime registration contract", () => {
     );
     const harness = await createRuntimeSdkHarness();
     try {
-      const selected = createFakeServerEntry("selected-panel", "deployed");
-      selected.state = {
-        deployAttempt: { id: "selected-attempt" },
-        deployStatus: "failed"
-      };
-      harness.servers.set("selected-panel", selected);
-      vi.mocked(harness.deps.deploy.fetch).mockImplementation(async (url) => {
-        expect(url).toBe(`${selected.baseUrl}/api/deploy-status`);
-        return Response.json({
-          status: "failed",
-          errorKind: null,
-          error: failure.message,
-          attempt: selected.state.deployAttempt
-        });
+      const deployment = createDeploymentToolHarness();
+      harness.deps.deployment = deployment.tools;
+      const selected = deployment.seed({
+        deployStatus: "failed",
+        deployError: failure.message
       });
       const tool = harness.extension.tools.find(
         ({ name }) => name === "radius_deploy_status"
       );
       if (!tool) throw new Error("Missing status tool");
-      const result = await tool.handler({ attemptId: "selected-attempt" });
+      const result = await tool.handler({
+        attemptId: selected.invocation.attemptId
+      });
       const summary = parseSkillHandoff(result);
       expect(summary.status).toBe("failed");
       expect(summary.errorKind).toBeNull();
@@ -191,6 +180,7 @@ describe("P0-A Radius runtime registration contract", () => {
       ).toHaveLength(1);
       expect(summary).not.toHaveProperty("error");
       expect(String(result)).not.toContain("fixture-private");
+      expect(harness.deps.deploy.fetch).not.toHaveBeenCalled();
       expect(harness.getOrCreateServer).not.toHaveBeenCalled();
     } finally {
       await harness.extension.shutdown("test");
@@ -200,57 +190,44 @@ describe("P0-A Radius runtime registration contract", () => {
   it("routes the registered status tool to its named attempt and preserves the Canvas completion value", async () => {
     const harness = await createRuntimeSdkHarness();
     try {
-      const selected = createFakeServerEntry("selected-panel", "deployed");
-      selected.state = {
-        deployAttempt: { id: "selected-attempt" },
+      const deployment = createDeploymentToolHarness();
+      harness.deps.deployment = deployment.tools;
+      const selected = deployment.seed({
         deployStatus: "complete",
-        deployStartedAt: 1700000000000
-      };
-      const newer = createFakeServerEntry("newer-panel", "deployed");
-      newer.state = {
-        deployAttempt: { id: "newer-attempt" },
-        deployStatus: "in_progress",
-        deployStartedAt: 1700000120000
-      };
-      harness.servers.set("newer-panel", newer);
-      harness.servers.set("selected-panel", selected);
-      const statusUrl = `${selected.baseUrl}/api/deploy-status`;
-      const fetchStatus = vi.mocked(harness.deps.deploy.fetch);
-      fetchStatus.mockImplementation(async (input, init) => {
-        if (input !== statusUrl || (init?.method && init.method !== "GET")) {
-          throw new Error(`Unexpected status request: ${String(input)}`);
-        }
-        return Response.json({
-          status: "complete",
-          errorKind: null,
-          deployRunUrl: "https://github.com/acme/widgets/actions/runs/42",
-          startedAt: 1700000000000,
-          finishedAt: 1700000060000,
-          attempt: selected.state.deployAttempt,
-          repairing: false,
-          handoff: { state: "idle" },
-          resources: [{ id: "resource-1", deployStatus: "success" }],
-          active: false
-        });
+        deployStartedAt: 1700000000000,
+        deployFinishedAt: 1700000060000,
+        deployRunUrl: "https://github.com/acme/widgets/actions/runs/42"
       });
+      deployment.seed(
+        {
+          deployStatus: "in_progress",
+          deployStartedAt: 1700000120000
+        },
+        { repo: "fixture/newer" }
+      );
       const tool = harness.extension.tools.find(
         ({ name }) => name === "radius_deploy_status"
       );
       if (!tool) throw new Error("Deploy status tool was not registered");
 
-      const result = await tool.handler({ attemptId: "selected-attempt" });
+      const result = await tool.handler({
+        attemptId: selected.invocation.attemptId
+      });
       if (typeof result !== "string") {
         throw new Error("Deploy status tool did not return JSON text");
       }
 
       expect(JSON.parse(result)).toEqual({
-        status: "complete",
+        status: "success",
         errorKind: null,
         deployRunUrl: "https://github.com/acme/widgets/actions/runs/42",
         startedAt: 1700000000000,
-        finishedAt: 1700000060000
+        finishedAt: 1700000060000,
+        attemptId: selected.invocation.attemptId
       });
-      expect(fetchStatus).toHaveBeenCalledExactlyOnceWith(statusUrl);
+      expect(harness.deps.deploy.fetch).not.toHaveBeenCalled();
+      expect(deployment.run).not.toHaveBeenCalled();
+      expect(harness.servers.size).toBe(0);
       expect(harness.routedOpens).toEqual([]);
       expect(harness.getOrCreateServer).not.toHaveBeenCalled();
     } finally {

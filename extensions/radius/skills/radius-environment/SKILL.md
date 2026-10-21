@@ -18,7 +18,7 @@ Create a GitHub Environment configured with the cloud credentials and private GH
 
 ## Flow
 
-The canvas drives a short wizard per provider: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the user's stored GitHub CLI credential, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification or automatic deployment.
+The canvas drives a short wizard per provider: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the user's stored GitHub CLI credential, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification. Setup is verify-only: successful verification never deploys an application. Deployment requires a separate explicit action.
 
 ### AWS
 
@@ -116,5 +116,5 @@ After the canvas reports success, the new env appears in the **Envs ▾** dropdo
 
 ## Related files
 
-- `extension.mjs` — environment creation (`/api/create-environment`), verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`.
+- `extension.mjs` — environment setup through operation-owned direct services, verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`. Use the wizard rather than calling private setup endpoints.
 - The verification workflow templates are the canonical `verify-aws.yml` / `verify-azure.yml` (both named `Radius - Verify Credentials`) hosted in `radius-project/ai-extensions` at `.github/extension/`. The released extension fetches the matching provider template at the full source commit baked into its build, fills the `verify-ghcr-push` action reference with that same immutable SHA, commits it into the target user repo at `.github/workflows/verify-<provider>.yml`, then dispatches it. A fetch failure is a hard error; no generated verification workflow follows a mutable release ref.

@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createWorkflowFileCommitter } from "@radius-project/core";
 import { createSetupEnvironmentPorts } from "./setup-environment-adapter.js";
 import { persistBestEffort } from "../services/setup-checkpoint.js";
 import type {
-  CreateEnvironmentDependencies,
+  ConfigureEnvironmentDependencies,
   CreateEnvironmentInstanceEntry
-} from "./create-environment.js";
+} from "../services/configure-environment.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 
 const unexpected = (): never => {
@@ -13,16 +13,15 @@ const unexpected = (): never => {
 };
 
 function harness(
-  overrides: Partial<CreateEnvironmentDependencies> = {},
+  overrides: Partial<ConfigureEnvironmentDependencies> = {},
   bindings: Partial<
     Pick<
       Parameters<typeof createSetupEnvironmentPorts>[0],
-      "provider" | "finalize"
+      "provider" | "finalize" | "instanceId" | "isCurrentPresentation"
     >
   > = {}
 ) {
-  const dependencies: CreateEnvironmentDependencies = {
-    isServerOwnedRequest: unexpected,
+  const dependencies: ConfigureEnvironmentDependencies = {
     getSelectedGitHubExecutor: unexpected,
     readInstanceEntry: unexpected,
     isValidRepoSlug: unexpected,
@@ -109,6 +108,37 @@ function harness(
 }
 
 describe("Canvas setup configuration adapter", () => {
+  it.each([
+    [null, null, "the setup branch", "the default branch"],
+    ["", "", "the setup branch", "the default branch"],
+    ["setup/topic", "trunk", "setup/topic", "trunk"]
+  ])(
+    "preserves nullable publication identity and actionable merge guidance",
+    (branch, baseBranch, displayBranch, displayBase) => {
+      const finish = vi.fn();
+      const { ports } = harness({ finish });
+      ports.finishMergeRequired({
+        outcome: "awaiting-merge",
+        pullRequestUrl: null,
+        branch,
+        baseBranch
+      });
+      expect(finish).toHaveBeenCalledExactlyOnceWith(
+        { operationId: "setup-adapter" },
+        "action_required",
+        {
+          terminal: {
+            reason: "pr-merge-required",
+            pullRequestUrl: null,
+            branch,
+            baseBranch,
+            userMessage: `Open and merge a pull request from "${displayBranch}" into "${displayBase}" to finish setup.`
+          }
+        }
+      );
+    }
+  );
+
   it.each(["azure", "aws"])(
     "preserves repository-refusal cleanup execution for %s",
     async (provider) => {
@@ -325,5 +355,38 @@ describe("Canvas setup configuration adapter", () => {
       verifyRunId: "42",
       verifyRunUrl: "https://github.test/run/42"
     });
+  });
+
+  it("does not resolve a presentation when setup has no panel", () => {
+    const readInstanceEntry = vi.fn(unexpected);
+    const h = harness({ readInstanceEntry }, { instanceId: undefined });
+    h.ports.projectVerification({
+      dispatchedAt: 123,
+      verifyRunId: "42",
+      verifyRunUrl: "https://github.test/run/42"
+    });
+    expect(readInstanceEntry).not.toHaveBeenCalled();
+  });
+
+  it("does not publish verification into a replaced presentation", () => {
+    let current = true;
+    let entry: CreateEnvironmentInstanceEntry = { state: {} };
+    const readInstanceEntry = vi.fn(() => entry);
+    const h = harness(
+      { readInstanceEntry },
+      { isCurrentPresentation: () => current }
+    );
+    const verification = {
+      dispatchedAt: 123,
+      verifyRunId: "42",
+      verifyRunUrl: "https://github.test/run/42"
+    };
+    h.ports.projectVerification(verification);
+    expect(entry.state.verifyRunId).toBe("42");
+    current = false;
+    entry = { state: {} };
+    h.ports.projectVerification(verification);
+    expect(entry.state).toEqual({});
+    expect(readInstanceEntry).toHaveBeenCalledOnce();
   });
 });

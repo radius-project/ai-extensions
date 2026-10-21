@@ -11,14 +11,6 @@
 import { vi } from "vitest";
 import type { Mock } from "vitest";
 import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
-  summarizeDeployStatus,
-  describeDeployStarted
-} from "../../../src/deploy-tools.js";
-import {
   getSourceRefResources,
   prepareSourceRefResources,
   setSourceRefResources,
@@ -173,6 +165,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           branch: string;
           error: string;
           deployRunUrl: string;
+          dispatchRefused?: boolean;
           instanceId: string;
         }) => unknown)
       | null;
@@ -301,13 +294,14 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         remote: false
       }))
     },
-    deployTools: {
-      selectDeployEntry,
-      buildDeployPayload,
-      validateDeployPayload,
-      validateDeployAttempt,
-      summarizeDeployStatus,
-      describeDeployStarted
+    deployment: {
+      start: vi.fn(async () => {
+        throw new Error("Direct deployment start was not scripted.");
+      }),
+      status: vi.fn(async () => {
+        throw new Error("Direct deployment status was not scripted.");
+      }),
+      shutdown: vi.fn()
     },
     sourceRefs: {
       getSourceRefResources,
@@ -353,6 +347,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     },
     executionOwner: {
       ...executionOwner,
+      shutdown: vi.fn(executionOwner.shutdown),
+      hasActiveDeletionTasks: vi.fn(executionOwner.hasActiveDeletionTasks),
+      onDeletionTasksSettled: vi.fn(executionOwner.onDeletionTasksSettled),
       hasActiveEnvironmentTasks: vi.fn(
         executionOwner.hasActiveEnvironmentTasks
       ),

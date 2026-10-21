@@ -31,7 +31,15 @@ import {
   runRadBicepPublishExtension,
   runRadBicepPublish
 } from "@radius-project/adapter-shared";
-import { github, fetchFileFromRepo, getBranchHeadSha } from "./gh.js";
+import {
+  github,
+  fetchFileFromRepo,
+  getBranchHeadSha,
+  getGitHubIdentity,
+  resetGhIdentityCache,
+  redactGhCredentials
+} from "./gh.js";
+import { runCommand } from "./gh.js";
 import {
   defaultBranchForState,
   detectWorkspaceContext,
@@ -52,14 +60,6 @@ import {
   workspaceSourceChangedSince
 } from "./workspace.js";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
-import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
-  summarizeDeployStatus,
-  describeDeployStarted
-} from "./deploy-tools.js";
 import {
   createProductionCanvasServerRuntime,
   setAppBicepHandoff,
@@ -104,6 +104,11 @@ import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
+import { createProductionDeploymentExecutionOwner } from "./runtime/production-deployment-execution-owner.js";
+import { githubAccountChoice } from "./runtime/github-account-choice.js";
+import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
+import { createGitHubAccountReadinessService } from "./server/services/github-account-readiness.js";
+import { createProductionDeploymentTools } from "./runtime/production-deployment-tools.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -115,14 +120,66 @@ const execFileAsync = promisify(execFile);
 const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
-const { servers, getOrCreateServer, stopServer, getLastWebviewActivityAt } =
-  createProductionCanvasServerRuntime({ executionOwner, accountContext });
-
+const deploymentOwner = createProductionDeploymentExecutionOwner();
 const ghCommandPresentation = resolveGhCommandPresentation();
+const deploymentAccount = createDeploymentAccountResolver({
+  readIdentity: async () => {
+    resetGhIdentityCache();
+    return getGitHubIdentity();
+  },
+  readiness: createGitHubAccountReadinessService(accountContext.coordinator, {
+    ownerKey: accountContext.ownerKey,
+    ghCommandPresentation
+  }),
+  createExecutor: (login) =>
+    accountContext.coordinator.createReadOnlyExecutor(login),
+  get choose() {
+    return githubAccountChoice(sessionHolder.tryGet());
+  },
+  redactDiagnostic: redactGhCredentials
+});
+const {
+  servers,
+  getOrCreateServer,
+  stopServer,
+  getLastWebviewActivityAt,
+  invalidateDeploymentListCache
+} = createProductionCanvasServerRuntime({
+  executionOwner,
+  accountContext,
+  deploymentOwner,
+  deploymentAccount
+});
+const reportDeploymentError = (error: unknown) =>
+  console.error(
+    "[radius deployment]",
+    redactGhCredentials(errorMessage(error))
+  );
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
   session: sessionHolder,
   executionOwner,
+  deployment: createProductionDeploymentTools({
+    owner: deploymentOwner,
+    account: deploymentAccount,
+    session: sessionHolder,
+    reportError: reportDeploymentError,
+    redactDiagnostic: redactGhCredentials,
+    ghCommandPresentation,
+    invalidateDeployListCache: invalidateDeploymentListCache,
+    reportWorkflowProgress: (message) => console.error(message),
+    runAz: async (args, timeout) => {
+      try {
+        return {
+          code: 0,
+          stdout: await runCommand("az", args, { timeout, stdin: "" }),
+          stderr: ""
+        };
+      } catch (error) {
+        return { code: 1, stdout: "", stderr: errorMessage(error) };
+      }
+    }
+  }),
   clock: {
     now: () => Date.now(),
     wait: (ms) =>
@@ -163,14 +220,6 @@ const dependencies: RadiusExtensionDependencies = {
     runRadBicepPublishExtension,
     runRadBicepPublish,
     radArtifactsDirForSelection
-  },
-  deployTools: {
-    selectDeployEntry,
-    buildDeployPayload,
-    validateDeployPayload,
-    validateDeployAttempt,
-    summarizeDeployStatus,
-    describeDeployStarted
   },
   sourceRefs: {
     getSourceRefResources,

@@ -135,7 +135,8 @@ describe("transport-independent Azure setup", () => {
 
   it("constructs and executes without a server, panel, or HTTP authorization callback", async () => {
     const test = fixture();
-    const { isServerOwnedRequest: _http, ...dependencies } = test.dependencies;
+    const dependencies = test.dependencies;
+    expect(dependencies).not.toHaveProperty("isServerOwnedRequest");
     const service = createAzureSetupService(dependencies);
     const result = await service({
       data: { ...request, operationId: "foreign-operation" }

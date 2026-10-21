@@ -110,7 +110,7 @@ export interface EnvironmentOperationWorkflowDependencies {
   ): Promise<void>;
   getOperation(operationId: string): EnvironmentOperationRecord | undefined;
   setupServices: SetupServices;
-  instanceId: string;
+  instanceId?: string;
   now(): number;
 }
 

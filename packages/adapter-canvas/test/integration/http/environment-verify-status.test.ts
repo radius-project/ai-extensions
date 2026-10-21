@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { redactCredentials } from "@radius-project/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
@@ -19,6 +20,7 @@ import {
 } from "../../../src/deploy.js";
 import { SelectedGhAuthorizationError as SharedAuthorizationError } from "@radius-project/adapter-shared";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
+import { isTerminalState } from "../../../src/operations.js";
 
 // HTTP-integration coverage for the verify-status route's failure-classification
 // contract (issue #99). The classifier itself is proven at the unit level; this
@@ -56,7 +58,7 @@ function fullDeps(
   const base: EnvironmentsDependencies = {
     errorMessage: (error: unknown) =>
       error instanceof Error ? error.message : String(error),
-    redactDiagnostic: unset("redactDiagnostic"),
+    redactDiagnostic: redactCredentials,
     repoMatchesWorkspace: unset("repoMatchesWorkspace"),
     readInstanceEntry: unset("readInstanceEntry"),
     runCommand: unset("runCommand"),
@@ -94,7 +96,7 @@ function fullDeps(
     explainOidcEnterpriseClaim: unset("explainOidcEnterpriseClaim"),
     explainNoSubscriptions: unset("explainNoSubscriptions"),
     addLegacyStep: unset("addLegacyStep"),
-    isTerminalState: unset("isTerminalState"),
+    isTerminalState,
     finish: unset("finish"),
     finishSucceeded: unset("finishSucceeded"),
     persistBestEffort: unset("persistBestEffort"),
@@ -136,6 +138,86 @@ async function startVerifyStatusServer(
 }
 
 describe("verify-status HTTP contract — failure classification", () => {
+  it("redacts and bounds workflow diagnostics before persistence and HTTP serialization", async () => {
+    const operation = {
+      repo: REPO,
+      environment: "dev",
+      state: "verifying",
+      context: { githubLogin: "octocat" },
+      currentStage: "verify",
+      verification: { dispatchedAt: 1, runId: "91" }
+    };
+    const finish = vi.fn();
+    const persistOperations = vi.fn(async () => {
+      const retained = JSON.stringify(finish.mock.calls);
+      expect(retained).not.toContain("fixture private");
+      expect(retained).not.toContain("fixture-opaque-material");
+    });
+    const baseUrl = await startVerifyStatusServer({
+      readInstanceEntry: () => undefined,
+      getOperation: () => operation,
+      hasCompleteVerificationIdentity: () => true,
+      getRunDetail: async () => ({
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          {
+            name: 'Azure Login (OIDC) password="fixture private step"',
+            conclusion: "failure"
+          }
+        ]
+      }),
+      fetchRunLog: async () =>
+        'Error: password="' +
+        "fixture private line ".repeat(1000) +
+        '"\nError: fixture-opaque-material\nError: ' +
+        "z".repeat(6000),
+      redactDiagnostic: (value) =>
+        value.replaceAll("fixture-opaque-material", "[REDACTED]"),
+      extractErrorLines,
+      extractGitHubActionsStepLog,
+      explainOidcEnterpriseClaim,
+      explainNoSubscriptions,
+      finish,
+      persistBestEffort: async ({ persist }) => {
+        await persist();
+        return true;
+      },
+      persistOperations,
+      reportOperationDiagnostic: () => {}
+    });
+    const response = await fetch(
+      `${baseUrl}/api/verify-status?repo=${REPO}&environment=dev&operationId=op-1`
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.json();
+    expect(body).toMatchObject({
+      state: "failed",
+      runId: "91",
+      error: expect.stringContaining(
+        "Credential verification failed (failure)."
+      )
+    });
+    expect(body.error).toHaveLength(4000);
+    expect(body.error).toContain("[REDACTED]");
+    expect(JSON.stringify(body)).not.toContain("fixture private");
+    expect(JSON.stringify(body)).not.toContain("fixture-opaque-material");
+    expect(finish).toHaveBeenCalledExactlyOnceWith(
+      operation,
+      "failed_partial",
+      {
+        failure: expect.objectContaining({
+          message:
+            'Credential verification failed. Failed step: Azure Login (OIDC) password="[REDACTED]".',
+          evidence: body.error
+        })
+      }
+    );
+    expect(persistOperations).toHaveBeenCalledOnce();
+  });
+
   it("publishes and persists the confirmed failure when bounded log output is unavailable", async () => {
     const operation = {
       repo: REPO,
@@ -165,7 +247,10 @@ describe("verify-status HTTP contract — failure classification", () => {
                     jobs: [
                       {
                         steps: [
-                          { name: "Azure Login (OIDC)", conclusion: "failure" }
+                          {
+                            name: "Azure Login (OIDC)",
+                            conclusion: "failure"
+                          }
                         ]
                       }
                     ]

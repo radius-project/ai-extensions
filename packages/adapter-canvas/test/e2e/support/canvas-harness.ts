@@ -1271,6 +1271,7 @@ export async function unwindHarnessConstruction(
 
 export class CanvasHarness {
   readonly accountContext: EnvironmentAccountContext;
+  readonly deploymentAccountChoice: { login?: string };
   readonly entry: CanvasServerEntry;
   readonly instanceId: string;
   readonly rootDir: string;
@@ -1292,6 +1293,7 @@ export class CanvasHarness {
 
   private constructor(input: {
     accountContext: EnvironmentAccountContext;
+    deploymentAccountChoice: { login?: string };
     page: Page;
     entry: CanvasServerEntry;
     instanceId: string;
@@ -1307,6 +1309,7 @@ export class CanvasHarness {
     ghModule: GhModule;
   }) {
     this.accountContext = input.accountContext;
+    this.deploymentAccountChoice = input.deploymentAccountChoice;
     this.page = input.page;
     this.entry = input.entry;
     this.instanceId = input.instanceId;
@@ -1429,6 +1432,31 @@ export class CanvasHarness {
       const { createProductionGitHubAccountContext } =
         await import("../../../src/runtime/production-github-account-context.js");
       const accountContext = createProductionGitHubAccountContext();
+      const deploymentAccountChoice: { login?: string } = {};
+      const gh = await import("../../../src/gh.js");
+      const { createDeploymentAccountResolver } =
+        await import("../../../src/runtime/deployment-account.js");
+      const { createGitHubAccountReadinessService } =
+        await import("../../../src/server/services/github-account-readiness.js");
+      const deploymentAccount = createDeploymentAccountResolver({
+        readIdentity: async () => {
+          gh.resetGhIdentityCache();
+          return gh.getGitHubIdentity();
+        },
+        readiness: createGitHubAccountReadinessService(
+          accountContext.coordinator,
+          {
+            ownerKey: accountContext.ownerKey
+          }
+        ),
+        createExecutor: (login) =>
+          accountContext.coordinator.createReadOnlyExecutor(login),
+        get choose() {
+          const login = deploymentAccountChoice.login;
+          return login ? async () => login : undefined;
+        },
+        redactDiagnostic: gh.redactGhCredentials
+      });
       const { createTestCanvasServerRuntime } =
         await import("../../support/server/production-runtime.js");
       let environmentOperationRunner: EnvironmentOperationRunner | undefined;
@@ -1437,6 +1465,7 @@ export class CanvasHarness {
         ...createTestCanvasServerRuntime({
           executionOwner: createEnvironmentExecutionOwner(),
           accountContext,
+          deploymentAccount,
           get environmentOperationRunner() {
             return environmentOperationRunner;
           }
@@ -1518,6 +1547,7 @@ export class CanvasHarness {
 
       const harness = new CanvasHarness({
         accountContext,
+        deploymentAccountChoice,
         page: options.page,
         entry,
         instanceId,

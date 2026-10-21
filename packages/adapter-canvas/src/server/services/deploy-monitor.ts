@@ -1,12 +1,13 @@
 import type { DeployProgress } from "../../deploy-artifacts.js";
 import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../deploy-artifacts.js";
 import {
-  confirmedWorkflowConclusion,
+  discoverDeploymentRun,
+  monitorDeploymentRun,
   describeWorkflowProtection,
   WORKFLOW_READ_LIMITS,
   WorkflowReadInterruptedError,
   type WorkflowReadContext,
-  type WorkflowRunDetail
+  type DeploymentRunDetail
 } from "@radius-project/core";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { DeployDispatchService } from "./deploy-dispatch.js";
@@ -35,11 +36,7 @@ export interface DeployMonitorInstanceEntry {
   observation?: WorkflowObservationScope;
 }
 
-export type DeployRunDetail = Pick<
-  WorkflowRunDetail,
-  "status" | "conclusion" | "steps"
-> &
-  Partial<Pick<WorkflowRunDetail, "jobs" | "protection">>;
+export type DeployRunDetail = DeploymentRunDetail;
 
 export interface DeployMonitorStatusReader extends DeployOutcomeStatusReader {
   progress(context?: WorkflowReadContext): Promise<DeployProgress | null>;
@@ -142,9 +139,6 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployMonitorDependencies)[] = [
 // same bytes. The step-lifecycle stream and the heartbeat keep the feed moving
 // between refreshes.
 const STATUS_POLL_MS = 15000;
-const RUN_DISCOVERY_ATTEMPTS = 24;
-const RUN_POLL_ATTEMPTS = 240;
-const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_MS = 30000;
 const PENDING_FALLBACK_MS = 25000;
 
@@ -263,22 +257,24 @@ export function createDeployMonitorService(
       const { workflowFile, dispatchedAt, baselineRunId } = dispatched;
 
       log("Waiting for the deploy workflow to start...");
-      let dRunId: number | string | null = null;
-      for (
-        let attempt = 0;
-        attempt < RUN_DISCOVERY_ATTEMPTS && !dRunId;
-        attempt++
-      ) {
-        dRunId = await dependencies.findWorkflowRun(
-          repo,
-          workflowFile,
-          dispatchedAt,
-          null,
-          baselineRunId
-        );
-        assertCurrent();
-        if (!dRunId) await sleep(POLL_INTERVAL_MS);
-      }
+      const isCurrent = () =>
+        !entry.observation?.stopped && request.isCurrent?.() !== false;
+      const dRunId = await discoverDeploymentRun(
+        { repo, workflowFile, dispatchedAt, baselineRunId },
+        {
+          isCurrent,
+          sleep,
+          findRun: (target) =>
+            dependencies.findWorkflowRun(
+              target.repo,
+              target.workflowFile,
+              target.dispatchedAt,
+              null,
+              target.baselineRunId
+            )
+        }
+      );
+      assertCurrent();
       if (!dRunId) {
         log("⚠ No deploy run found for " + workflowFile + ".");
         entry.state.deployError =
@@ -384,7 +380,6 @@ export function createDeployMonitorService(
       };
 
       const DEPLOY_STEP = dependencies.deployRadCommandsStep;
-      let completionObserved = false;
       const stopUnconfirmed = (completed: boolean): void => {
         log(
           completed ?
@@ -413,181 +408,186 @@ export function createDeployMonitorService(
         entry.state.deployStatus = "failed";
       };
 
-      for (let p = 0; p < RUN_POLL_ATTEMPTS; p++) {
-        assertCurrent();
-        observation = entry.observation?.observe();
-        if (observation)
-          observation.onDecision = (decision) => {
-            assertCurrent();
-            if (decision.state === "ready" || decision.reason === "ineligible")
+      const monitored = await monitorDeploymentRun(
+        { repo, runId: dRunId },
+        {
+          isCurrent,
+          sleep,
+          readRun: (target) => {
+            observation = entry.observation?.observe();
+            if (observation)
+              observation.onDecision = (decision) => {
+                assertCurrent();
+                if (
+                  decision.state === "ready" ||
+                  decision.reason === "ineligible"
+                )
+                  return;
+                const notice = `Workflow evidence ${decision.state}: ${decision.reason}.`;
+                if (!readNotices.has(notice)) {
+                  readNotices.add(notice);
+                  log("    " + notice);
+                }
+              };
+            progressContext = observation?.context.limit(
+              WORKFLOW_READ_LIMITS.monitorMs
+            );
+            return dependencies.getRunDetail(
+              target.repo,
+              target.runId,
+              observation
+            );
+          },
+          onObservation: (detail) => {
+            if (!detail) {
+              if (protectionNotice) {
+                log(
+                  "Observation: workflow detail is unavailable; current protection status is unknown."
+                );
+                protectionNotice = "";
+              }
               return;
-            const notice = `Workflow evidence ${decision.state}: ${decision.reason}.`;
-            if (!readNotices.has(notice)) {
-              readNotices.add(notice);
-              log("    " + notice);
             }
+            const nextProtectionNotice =
+              detail.status === "waiting" && detail.protection ?
+                describeWorkflowProtection(detail.protection)
+              : "";
+            if (
+              nextProtectionNotice &&
+              nextProtectionNotice !== protectionNotice
+            )
+              log(nextProtectionNotice);
+            else if (!nextProtectionNotice && protectionNotice)
+              log(
+                detail.status === "completed" ?
+                  "Observation: workflow completed; earlier protection observations are historical."
+                : (
+                  detail.status === "queued" || detail.status === "in_progress"
+                ) ?
+                  "Observation: run left the protection wait; continuing to monitor."
+                : "Observation: current environment protection was not rechecked; approval status is unknown."
+              );
+            protectionNotice = nextProtectionNotice;
+          },
+          onProgress: async (detail) => {
+            // Stream step lifecycle: announce when a step STARTS (in_progress) and
+            // again when it COMPLETES so the feed never goes silent during
+            // long-running steps.
+            for (const s of detail.steps) {
+              const stepName = s.name || "";
+              if (s.status === "in_progress" && !startedD.has(stepName)) {
+                startedD.add(stepName);
+                log("  ▶ " + stepName + "…");
+              }
+              if (s.status === "completed" && !seenD.has(stepName)) {
+                seenD.add(stepName);
+                log(
+                  "  " +
+                    (s.conclusion === "success" ? "✓"
+                    : s.conclusion ? "✗"
+                    : "•") +
+                    " " +
+                    stepName
+                );
+              }
+            }
+
+            // Heartbeat: emit a "still running" line every ~30s for the currently
+            // executing step so the user sees continuous activity even when GitHub
+            // provides no intra-step log lines.
+            const running = detail.steps.find(
+              (s) => s.status === "in_progress"
+            );
+            if (running) {
+              const runningName = running.name || "";
+              if (beatStep !== runningName) {
+                beatStep = runningName;
+                beatStepStartedAt = dependencies.now();
+                lastBeatAt = dependencies.now();
+              } else if (dependencies.now() - lastBeatAt > HEARTBEAT_MS) {
+                lastBeatAt = dependencies.now();
+                log(
+                  "    … " +
+                    runningName +
+                    " still running (" +
+                    Math.round(
+                      (dependencies.now() - beatStepStartedAt) / 1000
+                    ) +
+                    "s)"
+                );
+              }
+            }
+
+            // While the rad-commands step runs, fold in whatever per-resource
+            // status the deploy has published.
+            const deployStep = detail.steps.find((s) => s.name === DEPLOY_STEP);
+            if (
+              deployStep &&
+              deployStep.status === "in_progress" &&
+              resources.length > 0
+            ) {
+              if (!deployStarted) {
+                deployStarted = true;
+                deployStepStartedAt = dependencies.now();
+                entry.state.deployStartedAt = deployStepStartedAt;
+                log("🚀 rad deploy running — provisioning resources...");
+                log(
+                  "  ⏱ Deployment started at " +
+                    new Date(deployStepStartedAt).toISOString()
+                );
+                // Leave nodes gray; each flips to yellow when its own
+                // recipe/operation actually starts.
+              }
+              // The producer rotates changed snapshots through a bounded artifact
+              // ring while `rad deploy` runs. The reader selects the greatest valid
+              // sequence for this run, so artifact list order cannot roll status
+              // backwards.
+              await pollDeployStatus();
+              assertCurrent();
+              // Run this only when the producer has published no progress. This
+              // cannot use setStatus because advanced output nodes must be kept.
+              if (
+                !artifactProgressObserved &&
+                !pendingFallbackApplied &&
+                dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS
+              ) {
+                pendingFallbackApplied = true;
+                advancePendingNodes(resources);
+              }
+            }
+          }
+        }
+      );
+      assertCurrent();
+      if (monitored.kind === "completed") {
+        const { detail } = monitored;
+        if (observation)
+          observation = {
+            ...observation,
+            context: observation.context.limit(WORKFLOW_READ_LIMITS.terminalMs)
           };
-        progressContext = observation?.context.limit(
-          WORKFLOW_READ_LIMITS.monitorMs
-        );
-        const detail = await dependencies.getRunDetail(
+        progressContext = observation?.context;
+        await dependencies.outcome.settle({
+          entry,
           repo,
-          dRunId,
-          observation
-        );
-        assertCurrent();
-        if (!detail) {
-          if (protectionNotice) {
-            log(
-              "Observation: workflow detail is unavailable; current protection status is unknown."
-            );
-            protectionNotice = "";
-          }
-          await sleep(POLL_INTERVAL_MS);
-          continue;
-        }
-        const nextProtectionNotice =
-          detail.status === "waiting" && detail.protection ?
-            describeWorkflowProtection(detail.protection)
-          : "";
-        if (nextProtectionNotice && nextProtectionNotice !== protectionNotice)
-          log(nextProtectionNotice);
-        else if (!nextProtectionNotice && protectionNotice)
-          log(
-            detail.status === "completed" ?
-              "Observation: workflow completed; earlier protection observations are historical."
-            : detail.status === "queued" || detail.status === "in_progress" ?
-              "Observation: run left the protection wait; continuing to monitor."
-            : "Observation: current environment protection was not rechecked; approval status is unknown."
-          );
-        protectionNotice = nextProtectionNotice;
-
-        if (detail.status === "completed") {
-          completionObserved = true;
-          if (
-            typeof detail.conclusion === "string" &&
-            detail.conclusion.trim() !== "" &&
-            !confirmedWorkflowConclusion(detail)
-          ) {
-            stopUnconfirmed(true);
-            return;
-          }
-        }
-
-        // Stream step lifecycle: announce when a step STARTS (in_progress) and
-        // again when it COMPLETES so the feed never goes silent during
-        // long-running steps.
-        for (const s of detail.steps) {
-          const stepName = s.name || "";
-          if (s.status === "in_progress" && !startedD.has(stepName)) {
-            startedD.add(stepName);
-            log("  ▶ " + stepName + "…");
-          }
-          if (s.status === "completed" && !seenD.has(stepName)) {
-            seenD.add(stepName);
-            log(
-              "  " +
-                (s.conclusion === "success" ? "✓"
-                : s.conclusion ? "✗"
-                : "•") +
-                " " +
-                stepName
-            );
-          }
-        }
-
-        // Heartbeat: emit a "still running" line every ~30s for the currently
-        // executing step so the user sees continuous activity even when GitHub
-        // provides no intra-step log lines.
-        const running = detail.steps.find((s) => s.status === "in_progress");
-        if (running) {
-          const runningName = running.name || "";
-          if (beatStep !== runningName) {
-            beatStep = runningName;
-            beatStepStartedAt = dependencies.now();
-            lastBeatAt = dependencies.now();
-          } else if (dependencies.now() - lastBeatAt > HEARTBEAT_MS) {
-            lastBeatAt = dependencies.now();
-            log(
-              "    … " +
-                runningName +
-                " still running (" +
-                Math.round((dependencies.now() - beatStepStartedAt) / 1000) +
-                "s)"
-            );
-          }
-        }
-
-        // While the rad-commands step runs, fold in whatever per-resource
-        // status the deploy has published.
-        const deployStep = detail.steps.find((s) => s.name === DEPLOY_STEP);
-        if (
-          deployStep &&
-          deployStep.status === "in_progress" &&
-          resources.length > 0
-        ) {
-          if (!deployStarted) {
-            deployStarted = true;
-            deployStepStartedAt = dependencies.now();
-            entry.state.deployStartedAt = deployStepStartedAt;
-            log("🚀 rad deploy running — provisioning resources...");
-            log(
-              "  ⏱ Deployment started at " +
-                new Date(deployStepStartedAt).toISOString()
-            );
-            // Leave nodes gray; each flips to yellow when its own
-            // recipe/operation actually starts.
-          }
-          // The producer rotates changed snapshots through a bounded artifact
-          // ring while `rad deploy` runs. The reader selects the greatest valid
-          // sequence for this run, so artifact list order cannot roll status
-          // backwards.
-          await pollDeployStatus();
-          assertCurrent();
-          // Run this only when the producer has published no progress. This
-          // cannot use setStatus because advanced output nodes must be kept.
-          if (
-            !artifactProgressObserved &&
-            !pendingFallbackApplied &&
-            dependencies.now() - deployStepStartedAt > PENDING_FALLBACK_MS
-          ) {
-            pendingFallbackApplied = true;
-            advancePendingNodes(resources);
-          }
-        }
-
-        if (confirmedWorkflowConclusion(detail)) {
-          if (observation)
-            observation = {
-              ...observation,
-              context: observation.context.limit(
-                WORKFLOW_READ_LIMITS.terminalMs
-              )
-            };
-          progressContext = observation?.context;
-          await dependencies.outcome.settle({
-            entry,
-            repo,
-            runId: dRunId,
-            provider,
-            resources,
-            status: detail.status,
-            conclusion: detail.conclusion,
-            steps: detail.steps,
-            jobs: detail.jobs,
-            statusReader,
-            deployStepStartedAt,
-            log,
-            setStatus,
-            pollDeployStatus,
-            observation,
-            isCurrent: request.isCurrent
-          });
-          return;
-        }
-        await sleep(POLL_INTERVAL_MS);
+          runId: dRunId,
+          provider,
+          resources,
+          status: detail.status,
+          conclusion: detail.conclusion,
+          steps: detail.steps,
+          jobs: detail.jobs,
+          statusReader,
+          deployStepStartedAt,
+          log,
+          setStatus,
+          pollDeployStatus,
+          observation,
+          isCurrent: request.isCurrent
+        });
+        return;
       }
-      stopUnconfirmed(completionObserved);
+      stopUnconfirmed(monitored.completionObserved);
     }
   };
 }

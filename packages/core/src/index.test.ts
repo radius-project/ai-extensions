@@ -13,7 +13,25 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "admitDeployment",
+  "claimDeploymentRepairHandoff",
+  "classifyDeploymentDispatchFailure",
+  "collectDeploymentOutcome",
+  "coordinateDeploymentDispatch",
+  "discoverDeploymentRun",
+  "ensureDeploymentSecret",
+  "monitorDeploymentRun",
+  "resolveDeploymentRepairLoop",
+  "settleDeploymentRepairHandoff",
+  "startDeployment",
+  "admitSetupCommand",
+  "resumeSetupInput",
   "runSetupCoordinator",
+  "monitorSetupVerification",
+  "readSetupVerificationStatus",
+  "isAzureRbacVerificationFailure",
+  "classifyVerifyFailure",
+  "extractMissingPermissions",
   "planCredentialVerification",
   "hasVerificationOperationMarker",
   "hasWorkflowRunTrigger",
@@ -21,6 +39,7 @@ const EXPECTED_FUNCTIONS = [
   "assessSetupPackageWriteAccess",
   "preflightSetupRepository",
   "selectedSetupPackageIdentity",
+  "selectGitHubAccount",
   "createWorkflowFileCommitter",
   "recordedSetupBranchCreate",
   "setupWorkflowBranchName",
@@ -126,6 +145,9 @@ const EXPECTED_FUNCTIONS = [
 ] as const;
 
 const EXPECTED_VALUES = [
+  "DEPLOY_HANDOFF_MAX_ATTEMPTS",
+  "DEPLOY_HANDOFF_RETRY_DELAY_MS",
+  "DEPLOY_REPAIR_ATTEMPT_CAP",
   "VERIFY_OPERATION_INPUT",
   "AZURE_APP_CREATE_CONTINUATION_SCHEMA_VERSION",
   "AZURE_SERVICE_MANAGEMENT_REFERENCE_PROMPT",
@@ -172,6 +194,10 @@ const EXPECTED_VALUES = [
 // Helpers that live inside core and are deliberately not part of the package's
 // public contract. Re-exporting one is a surface regression, not a convenience.
 const MODULE_INTERNAL_NAMES = [
+  "checkDeploymentBranch",
+  "prepareDeploymentCommands",
+  "prepareDeploymentWorkflows",
+  "validateDeploymentAzureIdentity",
   "addInboundConnections",
   "stripAPIVersion",
   "azure",

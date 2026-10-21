@@ -1,7 +1,7 @@
 import {
-  collectWorkflowFailure,
-  confirmedWorkflowConclusion,
+  collectDeploymentOutcome,
   WorkflowReadInterruptedError,
+  type DeploymentGraphRead,
   type RadDeployResourceError,
   type WorkflowReadContext,
   type WorkflowRunDetail,
@@ -29,11 +29,7 @@ export interface DeployOutcomeInstanceEntry {
 
 export type DeployRunStep = WorkflowStep;
 
-export interface DeployGraphRead {
-  graph: unknown | null;
-  status: string;
-  error?: unknown;
-}
+export type DeployGraphRead = DeploymentGraphRead;
 
 // The run-scoped artifact reader. Only the two reads the terminal stage makes
 // are declared; the progress read belongs to the polling loop.
@@ -100,20 +96,6 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployOutcomeDependencies)[] = [
   "now"
 ];
 
-// Waits inside the shared observation, so cancellation or an exhausted budget
-// ends the wait.
-function waitWithin(
-  context: WorkflowReadContext,
-  milliseconds: number
-): Promise<void> {
-  return context.wait(
-    context.clock.sleep(milliseconds, {
-      stopped: () => context.check().state === "stopped",
-      onStop: context.onStop
-    })
-  );
-}
-
 export function createDeployOutcomeService(
   dependencies: DeployOutcomeDependencies
 ): DeployOutcomeService {
@@ -134,84 +116,6 @@ export function createDeployOutcomeService(
       "createDeployOutcomeService requires a non-empty cloudAuthDriftKind."
     );
   }
-  // The producer publishes its artifact from a step that runs after
-  // `rad deploy` and before teardown, so by the time the run reports completed
-  // the upload has normally landed. Retry a few times anyway to absorb
-  // upload-finalization lag, since this read is the whole terminal graph.
-  const unavailableGraph = (error: unknown) => {
-    const decision =
-      (
-        error instanceof WorkflowArtifactReadError ||
-        error instanceof WorkflowReadInterruptedError
-      ) ?
-        error.decision
-      : undefined;
-    return {
-      deployed: null,
-      graphStatus: "unavailable",
-      ...(decision && decision.state !== "ready" ?
-        { note: `Artifact evidence ${decision.state}: ${decision.reason}.` }
-      : {})
-    };
-  };
-  const readDeployedGraph = async (
-    statusReader: DeployOutcomeStatusReader,
-    context?: WorkflowReadContext
-  ): Promise<{
-    deployed: unknown;
-    graphStatus: string | null;
-    note?: string;
-  }> => {
-    let deployed: unknown = null;
-    let graphStatus: string | null = null;
-    for (let g = 0; g < 3; g++) {
-      let gr: DeployGraphRead;
-      try {
-        gr = await statusReader.graph(context);
-      } catch (error) {
-        if (
-          error instanceof WorkflowReadInterruptedError &&
-          error.reason === "cancelled"
-        )
-          throw error;
-        return unavailableGraph(error);
-      }
-      graphStatus = gr.status;
-      if (gr.status === "error") {
-        return unavailableGraph(gr.error);
-      }
-      // Permission failures will not resolve by retrying.
-      if (gr.status === "auth" || gr.status === "malformed") break;
-      if (gr.graph) {
-        try {
-          deployed = dependencies.projectSafeGraphResources(gr.graph);
-          break;
-        } catch {
-          // Treat an unsafe producer artifact as malformed without retaining or
-          // repeating any of its data in shared state or user-facing diagnostics.
-          graphStatus = "malformed";
-          break;
-        }
-      }
-      if (g < 2) {
-        if (context) {
-          if (context.remaining() <= 5000) break;
-          try {
-            await waitWithin(context, 5000);
-          } catch (error) {
-            if (
-              !(error instanceof WorkflowReadInterruptedError) ||
-              error.reason !== "elapsed"
-            )
-              throw error;
-            return unavailableGraph(error);
-          }
-        } else await dependencies.sleep(5000);
-      }
-    }
-    return { deployed, graphStatus };
-  };
-
   return {
     async settle(request) {
       const assertCurrent = () => {
@@ -235,81 +139,113 @@ export function createDeployOutcomeService(
         pollDeployStatus
       } = request;
 
-      if (!confirmedWorkflowConclusion(request)) {
-        throw new Error("The workflow outcome could not be confirmed.");
-      }
-
-      log("🗺  Retrieving deploy status and application graph…");
-      const { deployed, graphStatus, note } = await readDeployedGraph(
-        statusReader,
-        request.observation?.context
-      );
-      assertCurrent();
-      // Final status sweep, forced past the poll interval so the last published
-      // state is always folded in.
-      await pollDeployStatus(true);
-      assertCurrent();
-
-      // Record stop time + duration.
-      const finishedAt = dependencies.now();
-      entry.state.deployFinishedAt = finishedAt;
-      if (deployStepStartedAt) {
-        const secs = Math.round((finishedAt - deployStepStartedAt) / 1000);
-        log(
-          "  ⏱ Deployment finished at " +
-            new Date(finishedAt).toISOString() +
-            " (" +
-            secs +
-            "s)"
-        );
-      }
-
-      // The run's own conclusion is authoritative for the overall outcome: it
-      // decides anything the published status left unfinished, without
-      // overwriting a resource the producer already reported as terminal.
-      //
-      // A successful run needs nothing but its conclusion, so settle it now. A
-      // non-success run is settled further down instead, once the exact Radius
-      // error has been extracted from the run log, because that error is what
-      // a red node's message should say (Exception 5.1).
       const propagate = (): void => {
-        // Propagate onto output resources and generate portal links.
         for (const resource of resources) {
           if (resource.deployStatus) setStatus(resource, resource.deployStatus);
         }
       };
-      if (conclusion === "success") {
-        dependencies.settleDeployStatuses(resources, conclusion);
-        propagate();
-      }
+      let graphReadStarted = false;
+      const outcome = await collectDeploymentOutcome(
+        { repo, runId: request.runId },
+        {
+          status: request.status,
+          conclusion,
+          steps: [...request.steps],
+          jobs: request.jobs
+        },
+        { provider, resourcesTouched: deployStepStartedAt > 0 },
+        {
+          isCurrent: () => request.isCurrent?.() !== false,
+          context: request.observation?.context,
+          readGraph: (context) => {
+            if (!graphReadStarted) {
+              graphReadStarted = true;
+              log("🗺  Retrieving deploy status and application graph…");
+            }
+            return statusReader.graph(context);
+          },
+          projectGraph: dependencies.projectSafeGraphResources,
+          readDecision: (error) =>
+            error instanceof WorkflowArtifactReadError ?
+              error.decision
+            : undefined,
+          redactDiagnostic: dependencies.redactDiagnostic,
+          readLog: (targetRepo, runId) =>
+            dependencies.fetchRunLog(targetRepo, runId, request.observation),
+          readControlPlaneLog: () =>
+            statusReader.controlPlaneLog(request.observation?.context),
+          sleep: dependencies.sleep,
+          onGraph: async ({ deployed, graphStatus, note }) => {
+            // Final status sweep, forced past the poll interval so the last published
+            // state is always folded in.
+            await pollDeployStatus(true);
+            assertCurrent();
 
-      if (deployed) {
-        entry.state.deployedGraph = deployed as CanvasState["deployedGraph"];
-        entry.state.deployedGraphRepo = repo;
-        log("  ✓ Deployed graph saved (from workflow artifact).");
-      } else if (graphStatus === "auth") {
-        log("  ⚠ The deploy status artifact could not be read: access denied.");
-        log(
-          "    Check that the active gh account can read Actions artifacts for " +
-            repo +
-            "."
-        );
-      } else if (graphStatus === "malformed") {
-        log(
-          "  ⚠ The deploy status artifact was found but could not be parsed. Continuing."
-        );
-      } else if (graphStatus === "unavailable") {
-        log(
-          "  ⚠ The deploy status artifact could not be read. The workflow outcome is unchanged."
-        );
-      } else {
-        log(
-          "  ⚠ Deployed graph not available (the deploy may not have published one)."
-        );
-      }
-      if (note) log("  " + note);
+            // Record stop time + duration.
+            const finishedAt = dependencies.now();
+            entry.state.deployFinishedAt = finishedAt;
+            if (deployStepStartedAt) {
+              const secs = Math.round(
+                (finishedAt - deployStepStartedAt) / 1000
+              );
+              log(
+                "  ⏱ Deployment finished at " +
+                  new Date(finishedAt).toISOString() +
+                  " (" +
+                  secs +
+                  "s)"
+              );
+            }
 
-      if (conclusion === "success") {
+            // The run's own conclusion is authoritative for the overall outcome: it
+            // decides anything the published status left unfinished, without
+            // overwriting a resource the producer already reported as terminal.
+            //
+            // A successful run needs nothing but its conclusion, so settle it now. A
+            // non-success run is settled further down instead, once the exact Radius
+            // error has been extracted from the run log, because that error is what
+            // a red node's message should say (Exception 5.1).
+            if (conclusion === "success") {
+              dependencies.settleDeployStatuses(resources, conclusion);
+              propagate();
+            }
+
+            if (deployed) {
+              entry.state.deployedGraph = deployed;
+              entry.state.deployedGraphRepo = repo;
+              log("  ✓ Deployed graph saved (from workflow artifact).");
+            } else if (graphStatus === "auth") {
+              log(
+                "  ⚠ The deploy status artifact could not be read: access denied."
+              );
+              log(
+                "    Check that the active gh account can read Actions artifacts for " +
+                  repo +
+                  "."
+              );
+            } else if (graphStatus === "malformed") {
+              log(
+                "  ⚠ The deploy status artifact was found but could not be parsed. Continuing."
+              );
+            } else if (graphStatus === "unavailable") {
+              log(
+                "  ⚠ The deploy status artifact could not be read. The workflow outcome is unchanged."
+              );
+            } else {
+              log(
+                "  ⚠ Deployed graph not available (the deploy may not have published one)."
+              );
+            }
+            if (note) log("  " + note);
+            if (conclusion !== "success") {
+              log("");
+              log("❌ Deployment failed. Conclusion: " + conclusion);
+            }
+          }
+        }
+      );
+      assertCurrent();
+      if (outcome.kind === "success") {
         entry.state.deployStatus = "complete";
         log("");
         log(
@@ -324,39 +260,12 @@ export function createDeployOutcomeService(
         );
         return;
       }
-      log("");
-      log("❌ Deployment failed. Conclusion: " + conclusion);
       // Complete diagnostic collection before publishing failed: status polling
       // may immediately start a repair handoff using this error and graph.
-      const failure = await collectWorkflowFailure(
-        { repo, runId: request.runId },
-        {
-          status: request.status,
-          conclusion,
-          steps: [...request.steps],
-          jobs: request.jobs
-        },
-        { provider, resourcesTouched: deployStepStartedAt > 0 },
-        {
-          redactDiagnostic: dependencies.redactDiagnostic,
-          readLog: (targetRepo, runId) =>
-            dependencies.fetchRunLog(targetRepo, runId, request.observation),
-          readControlPlaneLog: () =>
-            statusReader.controlPlaneLog(request.observation?.context),
-          sleep: (milliseconds) => {
-            const context = request.observation?.context;
-            if (!context) return dependencies.sleep(milliseconds);
-            // A wait that cannot finish inside the budget would leave its timer
-            // running after collection returns, so end the retries instead.
-            if (context.remaining() <= milliseconds)
-              return Promise.reject(
-                new WorkflowReadInterruptedError("elapsed")
-              );
-            return waitWithin(context, milliseconds);
-          }
-        }
-      );
-      assertCurrent();
+      const {
+        failure,
+        graph: { note }
+      } = outcome;
       failure.narration.forEach(log);
       entry.state.deployError = failure.message + (note ? "\n\n" + note : "");
       const { radiusError, resourceErrors, authDriftMessage } = failure;

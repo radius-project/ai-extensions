@@ -66,12 +66,21 @@ import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monit
 import { createDeferred } from "../../support/browser/fakes.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
-import { createFakeServerEntry } from "../../support/runtime/fakes.js";
+import { createDeploymentToolHarness } from "../../support/runtime/deployment.js";
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
+import {
+  createDeploymentExecutionOwner,
+  type DeploymentExecutionOwner
+} from "../../../src/runtime/deployment-execution-owner.js";
+import { createDeploymentReservationBindings } from "../../../src/server/services/deployment-reservations.js";
+import { createDeploymentPresentation } from "../../../src/server/services/deployment-presentation.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 
 let container: CanvasServerContainer | undefined;
+const deploymentOwners: DeploymentExecutionOwner[] = [];
 
 afterEach(async () => {
+  for (const owner of deploymentOwners.splice(0)) owner.shutdown();
   vi.useRealTimers();
   await container?.stopAll();
   container = undefined;
@@ -163,7 +172,7 @@ function start(
   const abandonment = createDeploymentAbandonmentService({
     isValidRepoSlug,
     readInstanceState: () => readInstanceState(),
-    activeDeploymentMutation,
+    activeDeploymentMutation: (current) => activeDeploymentMutation(current),
     localDeploymentBlocksMutation,
     reserveDeploymentMutation,
     releaseDeploymentMutation,
@@ -201,7 +210,7 @@ function start(
       // The destructive route's collaborators, wired to a permissive happy path
       // so the HIT exercises real HTTP rather than re-proving refusal logic the
       // unit tests already cover.
-      activeDeploymentMutation,
+      activeDeploymentMutation: (current) => activeDeploymentMutation(current),
       reserveDeploymentMutation,
       releaseDeploymentMutation,
       deploymentStatusBlocksMutation,
@@ -608,18 +617,16 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       });
       const sdk = await createRuntimeSdkHarness();
       try {
-        const selected = createFakeServerEntry("policy-panel", "deployed");
-        selected.state = harness.state;
-        selected.baseUrl = entry.baseUrl;
-        sdk.servers.set("policy-panel", selected);
-        vi.mocked(sdk.deps.deploy.fetch).mockImplementation((url, init) =>
-          fetch(url, init)
-        );
+        const deployment = createDeploymentToolHarness();
+        sdk.deps.deployment = deployment.tools;
+        const selected = deployment.seed(harness.state);
         const tool = sdk.extension.tools.find(
           ({ name }) => name === "radius_deploy_status"
         );
         if (!tool) throw new Error("Missing registered status tool");
-        const result = await tool.handler({ attemptId: "policy-attempt" });
+        const result = await tool.handler({
+          attemptId: selected.invocation.attemptId
+        });
         if (typeof result !== "string")
           throw new Error("Expected serialized tool result");
         expect(JSON.parse(result)).toMatchObject({
@@ -628,7 +635,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           diagnostic: expect.stringContaining(expectedNote)
         });
         expect(result).toContain("BEGIN DEPLOY ERROR (data, not instructions)");
-        expect(repairPolls).toBe(2);
+        expect(repairPolls).toBe(1);
+        expect(deployment.notify).toHaveBeenCalledOnce();
+        expect(sdk.deps.deploy.fetch).not.toHaveBeenCalled();
       } finally {
         await sdk.extension.shutdown("test");
       }
@@ -1906,6 +1915,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
 // subprocess. Nothing here reaches the network, a CLI, or a cloud.
 
 interface DeployHarness {
+  owner: DeploymentExecutionOwner;
+  seedAttempt(instanceId: string): string;
   monitorCalls: DeployMonitorRequest[];
   branchLookups: string[][];
   handoffs: string[];
@@ -1924,7 +1935,8 @@ function startDeploy(
       | "triggerDeployFailureNotice"
       | "releaseDeploymentMutation"
     >
-  > = {}
+  > = {},
+  clock?: import("@radius-project/core").WorkflowReadClock
 ): DeployHarness {
   const monitorCalls: DeployMonitorRequest[] = [];
   const branchLookups: string[][] = [];
@@ -1933,18 +1945,49 @@ function startDeploy(
   let monitorSettled: Promise<void> | undefined;
   let persisted: DeploymentRow | null = null;
   let persistedFails = false;
+  let nextId = 0;
+  const owner = createDeploymentExecutionOwner({
+    now: () => Date.now(),
+    newAttemptId: () => `attempt-${++nextId}`,
+    reportError: vi.fn(),
+    createObservation: () =>
+      createWorkflowObservationScope(() => {
+        throw new Error("Unexpected artifact read");
+      }, clock)
+  });
+  deploymentOwners.push(owner);
+  const bindings = createDeploymentReservationBindings(owner);
+  const presentation = createDeploymentPresentation(owner);
 
   const deployRequest = createDeployRequestService({
+    owner,
+    account: async () =>
+      successfulSelectedGhExecutor({
+        login: "fixture-user",
+        run: async () => {
+          throw new Error("Unexpected GitHub command");
+        }
+      }),
+    present: (instanceId, execution) => {
+      const panel = container?.instances.get(instanceId);
+      if (panel)
+        presentation.attach(instanceId, panel.state, execution.invocation);
+    },
+    reportError: vi.fn(),
     readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
     resolveDeployRepairLoop,
     resolveDeploymentEnvironment,
-    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
+    activeDeploymentMutation: bindings.active,
     localDeploymentBlocksMutation: (state) =>
-      localDeploymentBlocksMutation(state),
-    reserveDeploymentMutation: (state, reservation) =>
-      reserveDeploymentMutation(state, reservation),
-    releaseDeploymentMutation:
-      callbacks.releaseDeploymentMutation ?? releaseDeploymentMutation,
+      !presentation.owns(state) && localDeploymentBlocksMutation(state),
+    reserveDeploymentMutation: bindings.reserve,
+    releaseDeploymentMutation: (state, reservation) => {
+      try {
+        callbacks.releaseDeploymentMutation?.(state, reservation);
+      } finally {
+        bindings.release(state, reservation);
+      }
+    },
     deploymentStatusBlocksMutation,
     resolveEnvDeployment: () =>
       persistedFails ?
@@ -1968,16 +2011,17 @@ function startDeploy(
       }),
     triggerDeployFailureNotice:
       callbacks.triggerDeployFailureNotice ?? (() => false),
-    monitor: monitorOverride ?? {
-      run: (request) => {
-        monitorCalls.push(request);
-        monitorSettled = new Promise<void>((resolve, reject) => {
-          releaseMonitor = (error?: Error) =>
-            error ? reject(error) : resolve();
-        });
-        return monitorSettled;
-      }
-    },
+    monitorFor: () =>
+      monitorOverride ?? {
+        run: (request) => {
+          monitorCalls.push(request);
+          monitorSettled = new Promise<void>((resolve, reject) => {
+            releaseMonitor = (error?: Error) =>
+              error ? reject(error) : resolve();
+          });
+          return monitorSettled;
+        }
+      },
     unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,
     repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP,
     errorMessage: (error) =>
@@ -2037,6 +2081,10 @@ function startDeploy(
         instances,
         routes,
         markActivity,
+        preRoute: ({ instanceId, state }) => {
+          presentation.synchronize(instanceId, state);
+          return false;
+        },
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");
@@ -2046,10 +2094,41 @@ function startDeploy(
     defaultPage: "deploying",
     now: () => Date.now(),
     preferredPort: async () => 0,
-    prepareIdentity: () => {}
+    prepareIdentity: () => {},
+    onStopped: (instanceId) => presentation.detach(instanceId)
   });
 
   return {
+    owner,
+    seedAttempt(instanceId) {
+      const panel = container?.instances.get(instanceId);
+      if (!panel) throw new Error("Expected panel");
+      const target = {
+        repo: "acme/widgets",
+        environment: "production",
+        branch: "feat",
+        provider: "azure",
+        appFile: ".radius/app.bicep",
+        githubLogin: "fixture-user"
+      };
+      const reservation = owner.reserve(target, "deploy");
+      if (!reservation) throw new Error("Expected reservation");
+      const result = owner.begin({
+        reservation,
+        target,
+        state: panel.state,
+        executor: successfulSelectedGhExecutor({
+          login: target.githubLogin,
+          run: async () => {
+            throw new Error("Unexpected GitHub command");
+          }
+        })
+      });
+      if (result.kind !== "resolved") throw new Error(result.kind);
+      owner.release(reservation);
+      presentation.attach(instanceId, panel.state, result.invocation);
+      return result.invocation.attemptId;
+    },
     monitorCalls,
     branchLookups,
     handoffs,
@@ -2113,13 +2192,52 @@ function failedAttempt(state: CanvasState, extra: Partial<CanvasState>): void {
 
 describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   it.each([
-    { change: "created", exhausted: false },
-    { change: "updated", exhausted: false },
-    { change: "created", exhausted: true },
-    { change: "updated", exhausted: true }
+    { change: "created", exhausted: false, baselineFailure: false },
+    { change: "updated", exhausted: false, baselineFailure: false },
+    { change: "created", exhausted: true, baselineFailure: false },
+    { change: "updated", exhausted: true, baselineFailure: false },
+    { change: "created", exhausted: false, baselineFailure: true },
+    { change: "updated", exhausted: false, baselineFailure: true },
+    {
+      change: "created",
+      exhausted: false,
+      baselineFailure: false,
+      rootFile: true
+    },
+    {
+      change: "created",
+      exhausted: false,
+      baselineFailure: false,
+      preparationFailure: "source"
+    },
+    {
+      change: "created",
+      exhausted: false,
+      baselineFailure: false,
+      preparationFailure: "secret"
+    },
+    {
+      change: "created",
+      exhausted: false,
+      baselineFailure: false,
+      preparationFailure: "publication"
+    },
+    {
+      change: "created",
+      exhausted: false,
+      baselineFailure: false,
+      preparationFailure: "synchronization"
+    }
   ] as const)(
-    "surfaces registration retry results for a $change dispatcher (exhausted: $exhausted)",
-    async ({ change, exhausted }) => {
+    "surfaces registration retry results for a $change dispatcher (exhausted: $exhausted, baseline failure: $baselineFailure)",
+    async (scenario) => {
+      const { change, exhausted, baselineFailure } = scenario;
+      const rootFile = "rootFile" in scenario;
+      const preparationFailure =
+        "preparationFailure" in scenario ?
+          scenario.preparationFailure
+        : undefined;
+      const refused = exhausted || baselineFailure || !!preparationFailure;
       const workflowDispatches: string[][] = [];
       const delays: number[] = [];
       let discoveries = 0;
@@ -2131,6 +2249,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         );
       };
       const dispatch = createDeployDispatchService({
+        isCurrent: () => true,
         deployWorkflowFile: "run-rad-commands.yml",
         deployWorkflowFiles: [
           "run-rad-commands.yml",
@@ -2142,6 +2261,19 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         getBranchHeadSha: () => Promise.resolve("sha-1"),
         getDefaultBranch: unexpected,
         runGh: async (args) => {
+          if (preparationFailure === "secret" && args[0] === "api") {
+            expect(args).toEqual([
+              "api",
+              "/repos/acme/widgets/environments/production/secrets",
+              "--paginate",
+              "--slurp"
+            ]);
+            return {
+              code: 1,
+              stdout: "",
+              stderr: "secret listing unavailable"
+            };
+          }
           expect(args.slice(0, 3)).toEqual([
             "workflow",
             "run",
@@ -2161,29 +2293,53 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         runGitHubJson: unexpected,
         readProcessEnv: () => ({}),
         ghCredentialSource: () => "keyring",
-        fetchFileForSelection: () => Promise.resolve(null),
+        fetchFileForSelection: (_entry, _repo, _branch, path) =>
+          Promise.resolve(
+            (
+              preparationFailure === "source" ||
+                (rootFile && path === ".radius/app.bicep")
+            ) ?
+              null
+            : "bicep source"
+          ),
         appParams: () => [],
         resolveDeployParams: () => ({}),
-        partitionParams: () => ({ public: {}, secret: {} }),
+        partitionParams: () => {
+          const secret: Record<string, string> = {};
+          if (preparationFailure === "secret")
+            secret.password = "synthetic-value";
+          return { public: {}, secret };
+        },
         extractAppName: () => "",
-        buildDeployRadCommand: () => "rad deploy",
+        buildDeployRadCommand: (file) => `deploy ${file}`,
         buildAppGraphRadCommand: () => "rad app graph",
-        ensureDeployWorkflowsOnBranch: () => Promise.resolve(),
-        ensureWorkflowsCurrent: async () => ({
-          created:
-            change === "created" ?
-              [".github/workflows/run-rad-commands.yml"]
-            : [],
-          updated:
-            change === "updated" ?
-              [".github/workflows/run-rad-commands.yml"]
-            : []
-        }),
+        ensureDeployWorkflowsOnBranch: async () => {
+          if (preparationFailure === "publication")
+            throw new Error("branch protected");
+        },
+        ensureWorkflowsCurrent: async () => {
+          if (preparationFailure === "publication") unexpected();
+          if (preparationFailure === "synchronization")
+            throw new Error("template read failed");
+          return {
+            created:
+              change === "created" ?
+                [".github/workflows/run-rad-commands.yml"]
+              : [],
+            updated:
+              change === "updated" ?
+                [".github/workflows/run-rad-commands.yml"]
+              : []
+          };
+        },
         sleep: async (ms) => {
           delays.push(ms);
           latestRunId++;
         },
-        latestWorkflowRunId: () => Promise.resolve(latestRunId),
+        latestWorkflowRunId: async () => {
+          if (baselineFailure) throw new Error("run list unavailable");
+          return latestRunId;
+        },
         classifyDeployDispatchFailure: () => "run-unconfirmed",
         uncommittedGeneratedPaths: () => Promise.resolve([]),
         invalidateDeployListCache: () => {},
@@ -2245,26 +2401,62 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       expect(await response.json()).toEqual({ ok: true });
       await expect
         .poll(() => state.deployStatus)
-        .toBe(exhausted ? "failed" : "success");
+        .toBe(refused ? "failed" : "success");
       await expect.poll(() => activeDeploymentMutation(state)).toBeUndefined();
-      expect(workflowDispatches).toHaveLength(exhausted ? 3 : 2);
+      expect(workflowDispatches).toHaveLength(
+        baselineFailure || preparationFailure ? 0
+        : exhausted ? 3
+        : 2
+      );
+      if (rootFile)
+        expect(workflowDispatches[0]).toContain(
+          'rad_commands=["deploy app.bicep"]'
+        );
       expect(
         workflowDispatches.every(
           (args) =>
             JSON.stringify(args) === JSON.stringify(workflowDispatches[0])
         )
       ).toBe(true);
-      expect(delays).toEqual(exhausted ? [3000, 2000, 5000] : [3000, 2000]);
-      expect(discoveries).toBe(exhausted ? 0 : 1);
-      expect(settlements).toBe(exhausted ? 0 : 1);
+      expect(delays).toEqual(
+        preparationFailure ? []
+        : baselineFailure ? [3000]
+        : exhausted ? [3000, 2000, 5000]
+        : [3000, 2000]
+      );
+      expect(discoveries).toBe(refused ? 0 : 1);
+      expect(settlements).toBe(refused ? 0 : 1);
+      expect(state.deployDispatchEvidence).toBe(
+        refused ? "refused" : "accepted"
+      );
+      if (baselineFailure || preparationFailure)
+        expect(state.deployDispatchReference).toBeUndefined();
+      else
+        expect(state.deployDispatchReference).toMatchObject({
+          repo: "acme/widgets",
+          branch: "feat",
+          environment: "production",
+          baselineRunId: exhausted ? 44 : 43
+        });
       const status = await fetch(`${entry.baseUrl}/api/deploy-status`);
       const body = await status.json();
       expect(status.status).toBe(200);
-      if (exhausted) {
+      if (refused) {
         expect(body).toMatchObject({
           status: "failed",
-          errorKind: "run-unconfirmed",
-          error: expect.stringContaining("Radius already waited and retried")
+          errorKind: "dispatch-refused",
+          error: expect.stringContaining(
+            preparationFailure === "publication" ?
+              "Could not publish deploy workflows"
+            : preparationFailure === "synchronization" ?
+              "Could not synchronize deploy workflows"
+            : preparationFailure === "secret" ? "secret listing unavailable"
+            : preparationFailure === "source" ?
+              "Could not read .radius/app.bicep or app.bicep"
+            : baselineFailure ?
+              "Deployment was not dispatched: run list unavailable"
+            : "Radius already waited and retried"
+          )
         });
       } else {
         expect(body).toMatchObject({
@@ -2308,24 +2500,35 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         }
       });
       try {
-        const harness = startDeploy(observed.monitor, {
-          triggerDeployRepairHandoff,
-          triggerDeployFailureNotice,
-          releaseDeploymentMutation: (state, reservation) => {
-            expect(state.deployStatus).toBe("failed");
-            expect(state.deployErrorKind).toBe("run-unconfirmed");
-            expect(state.deployError).toContain(
-              "its outcome could not be confirmed"
-            );
-            expect(state.deployingResources?.[0]).toMatchObject({
-              deployStatus: "failed",
-              deployMessage: DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
-            });
-            expect(reservation.attemptId).toBe(state.deployAttempt?.id);
-            releases++;
-            releaseDeploymentMutation(state, reservation);
+        const harness = startDeploy(
+          observed.monitor,
+          {
+            triggerDeployRepairHandoff,
+            triggerDeployFailureNotice,
+            releaseDeploymentMutation: (state, reservation) => {
+              expect(state.deployStatus).toBe("failed");
+              expect(state.deployErrorKind).toBe("run-unconfirmed");
+              expect(state.deployError).toContain(
+                "its outcome could not be confirmed"
+              );
+              expect(state.deployingResources?.[0]).toMatchObject({
+                deployStatus: "failed",
+                deployMessage: DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
+              });
+              expect(reservation.attemptId).toBe(state.deployAttempt?.id);
+              releases++;
+              releaseDeploymentMutation(state, reservation);
+            }
+          },
+          {
+            monotonic: () => 0,
+            wall: () => 1700000000000,
+            jitter: () => 0,
+            sleep: async (milliseconds) => {
+              observed.sleeps.push(milliseconds);
+            }
           }
-        });
+        );
         const entry = await container!.getOrCreate("panel-a");
         const state = harness.stateOf("panel-a");
         state.plannedResources = [{ id: "r1", name: "db" }];
@@ -2416,6 +2619,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   function oidcRefusalHarness(subjects: string[]) {
     const workflowDispatches: string[][] = [];
     const dispatch = createDeployDispatchService({
+      isCurrent: () => true,
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [
         "run-rad-commands.yml",
@@ -2627,6 +2831,54 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     expect(harness.handoffs).toEqual(["panel-a"]);
   });
 
+  it("keeps a request-started execution and lease across panel close, refuses a second dispatch, and reattaches status", async () => {
+    const harness = startDeploy();
+    const first = await container!.getOrCreate("panel-a");
+    const response = await post(first.baseUrl, "/api/deploy", deployBody());
+    expect(response.status).toBe(200);
+    await response.text();
+    const current = harness.owner.resolve();
+    if (current.kind !== "resolved") throw new Error(current.kind);
+    const execution = harness.owner.execution(current.invocation);
+    if (!execution) throw new Error("Expected execution");
+    expect(harness.monitorCalls[0].entry).toBe(execution);
+    expect(harness.monitorCalls[0].resources).toBe(
+      execution.state.deployingResources
+    );
+    await container!.stop("panel-a", true);
+    harness.monitorCalls[0].log("continued without a panel");
+    expect(execution.observation.stopped).toBe(false);
+    expect(first.state.deployLogs).toEqual([]);
+    const second = await container!.getOrCreate("panel-b");
+    const duplicate = await post(second.baseUrl, "/api/deploy", deployBody());
+    expect(duplicate.status).toBe(409);
+    await duplicate.text();
+    expect(harness.monitorCalls).toHaveLength(1);
+    const reopened = await container!.getOrCreate("panel-a");
+    Object.assign(reopened.state, {
+      contextRepo: "acme/widgets",
+      contextBranch: "feat",
+      envName: "production"
+    });
+    const status = await fetch(`${reopened.baseUrl}/api/deploy-status`);
+    expect(await status.json()).toMatchObject({
+      status: "in_progress",
+      logs: ["continued without a panel"]
+    });
+    expect(reopened.state.deployAttempt?.id).toBe(current.invocation.attemptId);
+    expect(
+      harness.owner.activeReservation(current.invocation.target)?.attemptId
+    ).toBe(current.invocation.attemptId);
+    execution.state.deployStatus = "complete";
+    await harness.settleMonitor();
+    expect(reopened.state.deployStatus).toBe("complete");
+    expect(first.state.deployStatus).toBe("in_progress");
+    expect(
+      harness.owner.activeReservation(current.invocation.target)
+    ).toBeUndefined();
+    expect(harness.monitorCalls).toHaveLength(1);
+  });
+
   it("resolves the repo default branch when the request names none", async () => {
     const harness = startDeploy();
     const entry = await container!.getOrCreate("panel-a");
@@ -2657,10 +2909,11 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     const entry = await container!.getOrCreate("panel-a");
     const state = harness.stateOf("panel-a");
     failedAttempt(state, { deployRepairAttempts: 1 });
+    const attemptId = harness.seedAttempt("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/deploy`, {
       method: "POST",
-      body: deployBody({ attemptId: "attempt-A" })
+      body: deployBody({ attemptId })
     });
 
     expect(response.status).toBe(200);
@@ -2669,7 +2922,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       repairAttempt: 2,
       repairAttemptCap: DEPLOY_REPAIR_ATTEMPT_CAP
     });
-    expect(state.deployAttempt?.id).toBe("attempt-A");
+    expect(state.deployAttempt?.id).toBe(attemptId);
     expect(state.deployRepairAttempts).toBe(2);
     expect(state.deployRepairing).toBe(true);
     expect(harness.monitorCalls).toHaveLength(1);
@@ -2685,6 +2938,31 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     ["still running", { deployStatus: "in_progress" }, /still running/],
     ["already complete", { deployStatus: "complete" }, /without an attemptId/],
     [
+      "branch not pushed",
+      { deployErrorKind: "branch-not-pushed" },
+      /not model repair/
+    ],
+    [
+      "missing OIDC subject",
+      { deployErrorKind: "oidc-subject-missing" },
+      /not model repair/
+    ],
+    [
+      "OIDC case mismatch",
+      { deployErrorKind: "oidc-subject-case-mismatch" },
+      /not model repair/
+    ],
+    [
+      "cloud auth drift",
+      { deployErrorKind: "cloud-auth-drift" },
+      /not model repair/
+    ],
+    [
+      "dispatch refused",
+      { deployErrorKind: "dispatch-refused" },
+      /No new workflow was started/
+    ],
+    [
       "unconfirmed run",
       {
         deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND,
@@ -2692,7 +2970,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       },
       /may still be in flight/
     ]
-  ])(
+  ] satisfies [string, Partial<CanvasState>, RegExp][])(
     "refuses a repair redeploy that is %s with an inert 409",
     async (_name, extra, message) => {
       const harness = startDeploy();

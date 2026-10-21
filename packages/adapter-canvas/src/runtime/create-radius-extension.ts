@@ -234,10 +234,14 @@ export function createRadiusExtension(
   // The informational sibling of the repair handoff: a deploy whose run could
   // not be confirmed is relayed to chat as a report, never as a repair loop.
   deps.hostCallbacks.setDeployFailureNotice(
-    ({ repo, branch, error, deployRunUrl }) =>
-      deps.session
-        .get()
-        .send(deployFailureNoticeMessage(repo, branch, { error, deployRunUrl }))
+    ({ repo, branch, error, deployRunUrl, dispatchRefused }) =>
+      deps.session.get().send(
+        deployFailureNoticeMessage(repo, branch, {
+          error,
+          deployRunUrl,
+          dispatchRefused
+        })
+      )
   );
   // Routes hand us either a bare prompt or an already-paired
   // {prompt, displayPrompt}; forward both shapes untouched so the server owns
@@ -324,6 +328,8 @@ export function createRadiusExtension(
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       shuttingDown = true;
+      deps.executionOwner.shutdown();
+      deps.deployment.shutdown();
       try {
         console.error(
           `[radius] received ${signal}; shutting down ${deps.servers.size} canvas server(s)...`

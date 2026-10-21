@@ -95,7 +95,7 @@ export async function handleVerifyAzureLogin(
     // Reject non-GUID credential identifiers before using them in command
     // guidance or the az argv. The Windows process adapter quotes argv values,
     // but this remains the domain boundary and defense in depth. Empty falls
-    // back to the ambient CLI context. Mirrors /api/azure-auto-setup.
+    // back to the ambient CLI context. Mirrors the Azure setup service.
     const validationError = dependencies.azureCredentialIdValidationError({
       tenantId,
       subscriptionId

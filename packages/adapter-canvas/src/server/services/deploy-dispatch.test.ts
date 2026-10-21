@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildFederatedCredentialListArgs,
   createDeployDispatchService,
@@ -11,6 +11,14 @@ import type { CanvasState } from "../../shared.js";
 import type { GitHubJsonResponse, GitHubJsonRunner } from "../../azure-oidc.js";
 
 const OK: DeployCommandResult = { code: 0, stdout: "", stderr: "" };
+const NO_SECRETS: DeployCommandResult = {
+  ...OK,
+  stdout: '[{"secrets":[]}]'
+};
+const DEPLOY_SECRET: DeployCommandResult = {
+  ...OK,
+  stdout: '[{"secrets":[{"name":"RADIUS_DEPLOY_PARAMS"}]}]'
+};
 
 interface GhCall {
   args: string[];
@@ -43,7 +51,7 @@ function dependencies(
     },
     readProcessEnv: () => ({}),
     ghCredentialSource: () => "keyring",
-    fetchFileForSelection: () => Promise.resolve(null),
+    fetchFileForSelection: () => Promise.resolve("bicep source"),
     appParams: () => [],
     resolveDeployParams: () => ({}),
     partitionParams: () => ({ public: {}, secret: {} }),
@@ -54,6 +62,7 @@ function dependencies(
     ensureWorkflowsCurrent: () =>
       Promise.resolve({ created: [], updated: [], failed: [] }),
     sleep: () => Promise.resolve(),
+    isCurrent: () => true,
     latestWorkflowRunId: () => Promise.resolve(null),
     classifyDeployDispatchFailure: () => "run-unconfirmed",
     uncommittedGeneratedPaths: () => Promise.resolve([]),
@@ -240,6 +249,7 @@ describe("deploy dispatch construction", () => {
     "ensureWorkflowsCurrent",
     "sleep",
     "latestWorkflowRunId",
+    "isCurrent",
     "classifyDeployDispatchFailure",
     "uncommittedGeneratedPaths",
     "invalidateDeployListCache",
@@ -461,13 +471,15 @@ describe("deploy dispatch environment and branch preflight", () => {
     );
 
     expect(await service.prepareAndDispatch(input)).toMatchObject({
-      dispatched: true
+      dispatched: false
     });
-    expect(state.deployErrorKind).toBeUndefined();
+    expect(gh.calls).toHaveLength(0);
+    expect(state.deployErrorKind).toBe("dispatch-refused");
+    expect(state.deployError).toContain("Could not confirm repository access");
   });
 
-  it("skips the branch preflight when no ref was resolved", async () => {
-    const { input } = request();
+  it("refuses an unresolved branch without attempting dispatch", async () => {
+    const { input, state } = request();
     const gh = recordingGh();
     const service = createDeployDispatchService(
       dependencies({
@@ -480,18 +492,12 @@ describe("deploy dispatch environment and branch preflight", () => {
 
     expect(
       await service.prepareAndDispatch({ ...input, branch: "" })
-    ).toMatchObject({ dispatched: true });
-    expect(gh.calls[0].args).toEqual([
-      "workflow",
-      "run",
-      "run-rad-commands.yml",
-      "--ref",
-      "",
-      "-f",
-      "environment=production",
-      "--repo",
-      "acme/widgets"
-    ]);
+    ).toMatchObject({ dispatched: false });
+    expect(gh.calls).toHaveLength(0);
+    expect(state.deployErrorKind).toBe("dispatch-refused");
+    expect(state.deployError).toContain(
+      "repository and resolved branch are required"
+    );
   });
 
   it("fails fast when no Azure federated credential covers the target environment and truncates near matches", async () => {
@@ -1161,6 +1167,149 @@ describe("deploy dispatch environment and branch preflight", () => {
 });
 
 describe("deploy dispatch rad commands and secrets", () => {
+  it("honors the attempt's explicit application file on its selected repository and branch", async () => {
+    const { input } = request({
+      deployParams: { appFile: "apps/custom.bicep" }
+    });
+    const gh = recordingGh();
+    const read = vi.fn(async () => "custom source");
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        fetchFileForSelection: read,
+        buildDeployRadCommand: (path) => `deploy ${path}`
+      })
+    );
+    expect(await service.prepareAndDispatch(input)).toMatchObject({
+      dispatched: true
+    });
+    expect(read).toHaveBeenCalledExactlyOnceWith(
+      input.entry,
+      "acme/widgets",
+      "feat",
+      "apps/custom.bicep"
+    );
+    expect(gh.calls[0].args).toContain(
+      'rad_commands=["deploy apps/custom.bicep"]'
+    );
+  });
+
+  it.each([
+    { ...DEPLOY_SECRET, code: 1, stderr: "HTTP 403" },
+    { ...DEPLOY_SECRET, timedOut: true },
+    ...[
+      "",
+      "not json",
+      "null",
+      "{}",
+      "[]",
+      "[null]",
+      "[3]",
+      "[{}]",
+      '[{"secrets":null}]',
+      '[{"secrets":[null]}]',
+      '[{"secrets":[1]}]',
+      '[{"secrets":[{}]}]',
+      '[{"secrets":[{"name":3}]}]',
+      '[{"secrets":[{"name":""}]}]',
+      '[{"secrets":[{"name":"not a name"}]}]'
+    ].map((stdout) => ({ ...OK, stdout }))
+  ])(
+    "fails closed on unavailable or malformed secret listing: %j",
+    async (result) => {
+      const { input, state } = request();
+      const gh = recordingGh([result]);
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          fetchFileForSelection: async () => "bicep source",
+          partitionParams: () => ({
+            public: {},
+            secret: { dbPassword: "synthetic-value" }
+          })
+        })
+      );
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(gh.calls.map(({ args }) => args[0])).toEqual(["api"]);
+      expect(state.deployError).toContain(
+        "Could not read RADIUS_DEPLOY_PARAMS"
+      );
+      expect(state.deployErrorKind).toBe("dispatch-refused");
+      expect(state.deployDispatchEvidence).toBe("refused");
+    }
+  );
+
+  it.each(["write-timeout", "write-throw", "verify-failure"] as const)(
+    "does not dispatch or repeat a secret write after %s",
+    async (failure) => {
+      const { input, state } = request();
+      const gh = recordingGh([
+        NO_SECRETS,
+        { ...OK, timedOut: failure === "write-timeout" },
+        { ...DEPLOY_SECRET, code: 1, stderr: "verification unavailable" }
+      ]);
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          fetchFileForSelection: async () => "bicep source",
+          partitionParams: () => ({
+            public: {},
+            secret: { dbPassword: "synthetic-value" }
+          }),
+          runGhWithStdin: async (args, stdin) => {
+            const result = await gh.runGhWithStdin(args, stdin);
+            if (failure === "write-throw")
+              throw new Error("connection lost synthetic-value");
+            return result;
+          }
+        })
+      );
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(gh.calls.filter(({ args }) => args[0] === "secret")).toHaveLength(
+        1
+      );
+      expect(
+        gh.calls.filter(({ args }) => args[0] === "workflow")
+      ).toHaveLength(0);
+      expect(gh.calls.filter(({ args }) => args[0] === "api")).toHaveLength(
+        failure === "verify-failure" ? 2 : 1
+      );
+      expect(state.deployError).not.toContain("synthetic-value");
+      expect(state.deployErrorKind).toBe("dispatch-refused");
+    }
+  );
+
+  it("does not write secrets or publish stale state after retirement during the listing", async () => {
+    const { input, state } = request();
+    let current = true;
+    const write = vi.fn(async () => OK);
+    const service = createDeployDispatchService(
+      dependencies({
+        isCurrent: () => current,
+        fetchFileForSelection: async () => "bicep source",
+        partitionParams: () => ({
+          public: {},
+          secret: { dbPassword: "synthetic-value" }
+        }),
+        runGh: async () => {
+          current = false;
+          return NO_SECRETS;
+        },
+        runGhWithStdin: write
+      })
+    );
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployStatus).toBeUndefined();
+    expect(state.deployDispatchEvidence).toBeUndefined();
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it("computes the rad commands from the branch's app.bicep and records the app name", async () => {
     const { input, state, logs } = request();
     const gh = recordingGh();
@@ -1196,7 +1345,10 @@ describe("deploy dispatch rad commands and secrets", () => {
   });
 
   it("falls back to a root app.bicep and omits the graph command with no app name", async () => {
-    const { input, state } = request({ deployAppName: "kept" });
+    const { input, state } = request({
+      deployAppName: "kept",
+      deployParams: { appFile: ".radius/app.bicep" }
+    });
     const gh = recordingGh();
     const reads: string[] = [];
     const service = createDeployDispatchService(
@@ -1226,21 +1378,27 @@ describe("deploy dispatch rad commands and secrets", () => {
     ]);
   });
 
-  it("dispatches without rad commands when no bicep can be read", async () => {
-    const { input, logs } = request();
+  it("refuses dispatch instead of using environment defaults when no source can be read", async () => {
+    const { input, state } = request();
     const gh = recordingGh();
-    const service = createDeployDispatchService(dependencies({ ...gh }));
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        fetchFileForSelection: async () => null
+      })
+    );
 
     await service.prepareAndDispatch(input);
 
-    expect(gh.calls[0].args).not.toContain("rad_commands");
-    expect(logs).toContain(
-      "⚠ Could not read app.bicep at dispatch; falling back to the environment's RADIUS_RAD_COMMANDS / default deploy."
+    expect(gh.calls).toHaveLength(0);
+    expect(state.deployError).toContain(
+      "Could not read .radius/app.bicep or app.bicep"
     );
+    expect(state.deployErrorKind).toBe("dispatch-refused");
   });
 
-  it("keeps deploying when the bicep cannot be parsed", async () => {
-    const { input, logs } = request();
+  it("refuses deployment when the bicep cannot be parsed", async () => {
+    const { input, logs, state } = request();
     const gh = recordingGh();
     const service = createDeployDispatchService(
       dependencies({
@@ -1253,17 +1411,23 @@ describe("deploy dispatch rad commands and secrets", () => {
     );
 
     expect(await service.prepareAndDispatch(input)).toMatchObject({
-      dispatched: true
+      dispatched: false
     });
     expect(logs).toContain(
-      "⚠ Could not compute rad commands from bicep (unbalanced braces); falling back to the environment default."
+      "❌ Could not prepare deployment commands: unbalanced braces"
     );
+    expect(state.deployErrorKind).toBe("dispatch-refused");
+    expect(gh.calls).toHaveLength(0);
   });
 
   it("leaves an existing RADIUS_DEPLOY_PARAMS secret untouched", async () => {
     const { input } = request();
     const gh = recordingGh([
-      { code: 0, stdout: "OTHER\nRADIUS_DEPLOY_PARAMS\n", stderr: "" }
+      {
+        ...OK,
+        stdout:
+          '[{"secrets":[{"name":"OTHER"}]},{"secrets":[{"name":"RADIUS_DEPLOY_PARAMS"}]}]'
+      }
     ]);
     const service = createDeployDispatchService(
       dependencies({
@@ -1286,18 +1450,14 @@ describe("deploy dispatch rad commands and secrets", () => {
     expect(gh.calls[0].args).toEqual([
       "api",
       "/repos/acme/widgets/environments/production/secrets",
-      "--jq",
-      ".secrets[].name"
+      "--paginate",
+      "--slurp"
     ]);
   });
 
   it("provisions the secret when the environment has none", async () => {
     const { input, logs } = request();
-    const gh = recordingGh([
-      OK,
-      OK,
-      { code: 0, stdout: "RADIUS_DEPLOY_PARAMS", stderr: "" }
-    ]);
+    const gh = recordingGh([NO_SECRETS, OK, DEPLOY_SECRET]);
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
@@ -1329,7 +1489,7 @@ describe("deploy dispatch rad commands and secrets", () => {
     expect(logs).toContain(
       'Provisioning RADIUS_DEPLOY_PARAMS for "production" (dbPassword)...'
     );
-    expect(logs).toContain('✅ RADIUS_DEPLOY_PARAMS is set on "production".');
+    expect(logs).toContain('RADIUS_DEPLOY_PARAMS is set on "production".');
   });
 
   it("does not rewrite the secret as the machine-wide account when the first write is refused", async () => {
@@ -1338,7 +1498,7 @@ describe("deploy dispatch rad commands and secrets", () => {
     // surfaced with account guidance instead of retried.
     const { input, state } = request();
     const gh = recordingGh([
-      OK,
+      NO_SECRETS,
       { code: 1, stderr: "HTTP 403: Resource not accessible", stdout: "" }
     ]);
     const service = createDeployDispatchService(
@@ -1367,7 +1527,7 @@ describe("deploy dispatch rad commands and secrets", () => {
   it("refuses to start a run whose secret write failed", async () => {
     const { input, state, logs } = request();
     const gh = recordingGh([
-      OK,
+      NO_SECRETS,
       { code: 1, stderr: "  forbidden  ", stdout: "" }
     ]);
     const service = createDeployDispatchService(
@@ -1395,9 +1555,12 @@ describe("deploy dispatch rad commands and secrets", () => {
     expect(logs.some((line) => line.startsWith("❌"))).toBe(true);
   });
 
-  it("preserves a secret failure when later command construction throws", async () => {
+  it("refuses invalid command construction before attempting a secret write", async () => {
     const { input, state } = request();
-    const gh = recordingGh([OK, { code: 1, stderr: "forbidden", stdout: "" }]);
+    const gh = recordingGh([
+      NO_SECRETS,
+      { code: 1, stderr: "forbidden", stdout: "" }
+    ]);
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
@@ -1418,15 +1581,13 @@ describe("deploy dispatch rad commands and secrets", () => {
       dispatched: false
     });
     expect(state.deployStatus).toBe("failed");
-    expect(state.deployError).toContain(
-      'Could not provision RADIUS_DEPLOY_PARAMS on environment "production": forbidden'
-    );
-    expect(gh.calls.map((call) => call.args[0])).toEqual(["api", "secret"]);
+    expect(state.deployError).toContain("invalid application name");
+    expect(gh.calls).toHaveLength(0);
   });
 
   it("reports an unknown error when the secret write gives no reason", async () => {
     const { input, state } = request();
-    const gh = recordingGh([OK, { code: 1, stderr: "", stdout: "" }]);
+    const gh = recordingGh([NO_SECRETS, { code: 1, stderr: "", stdout: "" }]);
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
@@ -1446,7 +1607,11 @@ describe("deploy dispatch rad commands and secrets", () => {
 
   it("refuses when the accepted secret is still not present", async () => {
     const { input, state } = request();
-    const gh = recordingGh([OK, OK, { code: 0, stdout: "OTHER", stderr: "" }]);
+    const gh = recordingGh([
+      NO_SECRETS,
+      OK,
+      { ...OK, stdout: '[{"secrets":[{"name":"OTHER"}]}]' }
+    ]);
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
@@ -1469,6 +1634,127 @@ describe("deploy dispatch rad commands and secrets", () => {
 });
 
 describe("deploy dispatch workflow publication and dispatch", () => {
+  it.each([
+    "branch",
+    "branch-guidance",
+    "azure",
+    "publication",
+    "credential-fallback"
+  ] as const)(
+    "does not mutate or project late results after retirement during %s",
+    async (stage) => {
+      const { input, state } = request();
+      let current = true;
+      const gh = recordingGh();
+      const stop = () => {
+        current = false;
+      };
+      const service = createDeployDispatchService(
+        dependencies({
+          ...gh,
+          ...azurePreflight({
+            runAz: async () => {
+              stop();
+              return { ...OK, stdout: "[]" };
+            }
+          }),
+          isCurrent: () => current,
+          getBranchHeadSha: async () => {
+            if (stage === "branch") stop();
+            return stage === "branch-guidance" ? null : "sha";
+          },
+          getDefaultBranch: async () => "trunk",
+          uncommittedGeneratedPaths: async () => {
+            stop();
+            return [".radius"];
+          },
+          ensureDeployWorkflowsOnBranch: async () => {
+            if (stage === "publication") stop();
+          },
+          ghCredentialSource: () => "injected",
+          readProcessEnv: () => ({ GH_TOKEN: "synthetic-value" }),
+          runGh: async (args, options) => {
+            const result = await gh.runGh(args, options);
+            if (stage === "credential-fallback") {
+              stop();
+              return { ...OK, code: 1, stderr: "missing workflow scope" };
+            }
+            return result;
+          }
+        })
+      );
+      if (stage === "azure") input.provider = "azure";
+      expect(await service.prepareAndDispatch(input)).toEqual({
+        dispatched: false
+      });
+      expect(gh.calls).toHaveLength(stage === "credential-fallback" ? 1 : 0);
+      expect(state.deployStatus).toBeUndefined();
+      expect(state.deployError).toBeUndefined();
+      expect(state.deployDispatchEvidence).toBeUndefined();
+    }
+  );
+
+  it("does no preparation for a retired execution", async () => {
+    const { input, state } = request({ deployStatus: "complete" });
+    const read = vi.fn(async () => "sha");
+    const service = createDeployDispatchService(
+      dependencies({
+        isCurrent: () => false,
+        getBranchHeadSha: read
+      })
+    );
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(state.deployStatus).toBe("complete");
+  });
+
+  it("does not publish dispatch results after the invocation is retired", async () => {
+    const { input, state } = request();
+    let current = true;
+    const invalidate = vi.fn();
+    const service = createDeployDispatchService(
+      dependencies({
+        isCurrent: () => current,
+        runGh: async () => {
+          current = false;
+          return OK;
+        },
+        invalidateDeployListCache: invalidate
+      })
+    );
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployDispatchEvidence).toBeUndefined();
+    expect(state.deployDispatchReference).toBeUndefined();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("retains an uncertain execution reference when dispatch throws", async () => {
+    const { input, state } = request();
+    const run = vi.fn(async () => {
+      throw new Error("connection closed");
+    });
+    const service = createDeployDispatchService(dependencies({ runGh: run }));
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(state.deployDispatchEvidence).toBe("uncertain");
+    expect(state.deployErrorKind).toBe("run-unconfirmed");
+    expect(state.deployError).toContain("connection closed");
+    expect(state.deployDispatchReference).toEqual({
+      repo: "acme/widgets",
+      branch: "feat",
+      environment: "production",
+      workflowFile: "run-rad-commands.yml",
+      baselineRunId: null,
+      dispatchedAt: 1_700_000_000_000
+    });
+  });
+
   it("publishes and synchronizes the workflow files before dispatching", async () => {
     const { input } = request();
     const gh = recordingGh();
@@ -1508,8 +1794,8 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     ]);
   });
 
-  it("warns but still dispatches when publication fails", async () => {
-    const { input, logs } = request();
+  it("refuses dispatch when workflow publication fails", async () => {
+    const { input, logs, state } = request();
     const gh = recordingGh();
     const service = createDeployDispatchService(
       dependencies({
@@ -1520,11 +1806,13 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     );
 
     expect(await service.prepareAndDispatch(input)).toMatchObject({
-      dispatched: true
+      dispatched: false
     });
     expect(logs).toContain(
-      '⚠ Could not publish deploy workflows to branch "feat": branch protected. The dispatch below will fail if the branch has no run-rad-commands workflow.'
+      '❌ Could not publish deploy workflows on branch "feat": branch protected. No workflow was dispatched.'
     );
+    expect(gh.calls).toHaveLength(0);
+    expect(state.deployErrorKind).toBe("dispatch-refused");
   });
 
   it("invalidates the deployments listing only after a successful dispatch", async () => {
@@ -1571,8 +1859,8 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     expect(order).toEqual(["baseline", "dispatch"]);
   });
 
-  it("falls back to a null baseline and warns when the run id read fails", async () => {
-    const { input, logs } = request();
+  it("refuses dispatch when the run id baseline cannot be read", async () => {
+    const { input, logs, state } = request();
     const gh = recordingGh();
     const service = createDeployDispatchService(
       dependencies({
@@ -1584,9 +1872,13 @@ describe("deploy dispatch workflow publication and dispatch", () => {
 
     const outcome = await service.prepareAndDispatch(input);
 
-    expect(outcome).toMatchObject({ dispatched: true, baselineRunId: null });
+    expect(outcome).toEqual({ dispatched: false });
+    expect(gh.calls).toEqual([]);
+    expect(state.deployDispatchEvidence).toBe("refused");
+    expect(state.deployDispatchReference).toBeUndefined();
+    expect(state.deployErrorKind).toBe("dispatch-refused");
     expect(logs).toContain(
-      "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will fall back to a time window."
+      "❌ Deployment was not dispatched: run list unavailable"
     );
   });
 
@@ -1601,6 +1893,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
       dependencies({
         ...gh,
         readProcessEnv: () => ({ GITHUB_TOKEN: "t", HOME: "/home/dev" }),
+        ghCredentialSource: () => "injected",
         invalidateDeployListCache: (repo) => evictions.push(repo)
       })
     );
@@ -1613,21 +1906,27 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     expect(evictions).toEqual(["acme/widgets"]);
   });
 
-  it("keeps the first failure when the stripped-token retry also fails", async () => {
+  it("preserves uncertainty when a scope-rejected dispatch retries and then fails", async () => {
     const { input, state } = request();
     const gh = recordingGh([
       { code: 1, stderr: "first failure: missing workflow scope", stdout: "" },
       { code: 1, stderr: "second failure", stdout: "" }
     ]);
     const service = createDeployDispatchService(
-      dependencies({ ...gh, readProcessEnv: () => ({ GH_TOKEN: "t" }) })
+      dependencies({
+        ...gh,
+        readProcessEnv: () => ({ GH_TOKEN: "t" }),
+        ghCredentialSource: () => "injected"
+      })
     );
 
     expect(await service.prepareAndDispatch(input)).toEqual({
       dispatched: false
     });
-    expect(state.deployError).toContain("first failure");
-    expect(state.deployError).not.toContain("second failure");
+    expect(state.deployError).toContain("second failure");
+    expect(state.deployErrorKind).toBe("run-unconfirmed");
+    expect(state.deployDispatchEvidence).toBe("uncertain");
+    expect(gh.calls).toHaveLength(2);
   });
 
   it("does not retry when no token is injected", async () => {
@@ -1641,6 +1940,39 @@ describe("deploy dispatch workflow publication and dispatch", () => {
       dispatched: false
     });
     expect(gh.calls).toHaveLength(1);
+  });
+
+  it("does not mistake a fallback timeout for the first credential's definitive refusal", async () => {
+    const { input, state } = request();
+    const gh = recordingGh([
+      { code: 1, stdout: "", stderr: "missing workflow scope" },
+      {
+        code: 1,
+        stdout: "",
+        stderr: "HTTP 404: workflow not found",
+        timedOut: true
+      }
+    ]);
+    const sleep = vi.fn(async () => {});
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        ghCredentialSource: () => "injected",
+        readProcessEnv: () => ({ GH_TOKEN: "synthetic-value" }),
+        ensureWorkflowsCurrent: async () => ({
+          created: ["run-rad-commands.yml"],
+          updated: []
+        }),
+        sleep
+      })
+    );
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(gh.calls).toHaveLength(2);
+    expect(sleep).toHaveBeenCalledExactlyOnceWith(3000);
+    expect(state.deployDispatchEvidence).toBe("uncertain");
+    expect(state.deployErrorKind).toBe("run-unconfirmed");
   });
 
   it("does not retry a dispatch failure the keyring credential cannot fix", async () => {
@@ -1771,7 +2103,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
 
     await service.prepareAndDispatch(input);
 
-    expect(state.deployErrorKind).toBe("run-unconfirmed");
+    expect(state.deployErrorKind).toBe("dispatch-refused");
     expect(state.deployError).toContain(
       "gh auth refresh -h github.com -s workflow"
     );
@@ -1813,13 +2145,12 @@ describe("deploy dispatch workflow publication and dispatch", () => {
         code: 1,
         stderr: "the token is missing the workflow scope",
         stdout: ""
-      },
-      { code: 1, stderr: "stored credential also refused", stdout: "" }
+      }
     ]);
     const service = createDeployDispatchService(
       dependencies({
         ...gh,
-        readProcessEnv: () => ({ GH_TOKEN: "session-token" }),
+        readProcessEnv: () => ({}),
         ghCredentialSource: () => "injected"
       })
     );
@@ -1940,11 +2271,15 @@ describe("deploy dispatch workflow publication and dispatch", () => {
           })
         );
 
-        expect(await service.prepareAndDispatch(input)).toMatchObject({
-          dispatched: true,
-          baselineRunId: lastReadFails ? null : 44,
-          dispatchedAt: 1_700_000_010_000
-        });
+        expect(await service.prepareAndDispatch(input)).toMatchObject(
+          lastReadFails ?
+            { dispatched: false }
+          : {
+              dispatched: true,
+              baselineRunId: 44,
+              dispatchedAt: 1_700_000_010_000
+            }
+        );
         expect(order).toEqual([
           "wait:3000",
           "baseline:42",
@@ -1954,11 +2289,11 @@ describe("deploy dispatch workflow publication and dispatch", () => {
           "dispatch",
           "wait:5000",
           "baseline:44",
-          "dispatch"
+          ...(lastReadFails ? [] : ["dispatch"])
         ]);
         if (lastReadFails) {
           expect(logs).toContain(
-            "⚠ Could not read the latest run id before dispatch (run list unavailable); run discovery will fall back to a time window."
+            "❌ Deployment was not dispatched: run list unavailable"
           );
         }
       }
@@ -1976,7 +2311,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     }
 
     it.each([false, true])(
-      "retries a dispatcher published before synchronization, including a later publication failure (%s)",
+      "retries only after complete publication (later publication failure: %s)",
       async (laterFailure) => {
         const { input, logs } = request();
         const gh = recordingGh([
@@ -2002,11 +2337,11 @@ describe("deploy dispatch workflow publication and dispatch", () => {
         );
 
         expect(await service.prepareAndDispatch(input)).toMatchObject({
-          dispatched: true
+          dispatched: !laterFailure
         });
-        expect(gh.calls).toHaveLength(2);
-        expect(gh.calls[1].args).toEqual(gh.calls[0].args);
-        expect(recorder.calls).toEqual([3000, 2000]);
+        expect(gh.calls).toHaveLength(laterFailure ? 0 : 2);
+        if (!laterFailure) expect(gh.calls[1].args).toEqual(gh.calls[0].args);
+        expect(recorder.calls).toEqual(laterFailure ? [] : [3000, 2000]);
         if (laterFailure) {
           expect(
             logs.some((log) => log.includes("provider publication failed"))

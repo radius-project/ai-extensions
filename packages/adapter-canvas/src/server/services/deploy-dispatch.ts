@@ -1,11 +1,7 @@
 import type { BicepParam } from "../../bicep.js";
-import {
-  resolveOidcSubject,
-  type GitHubJsonRunner,
-  type ResolveOidcSubjectResult
-} from "../../azure-oidc.js";
+import type { GitHubJsonRunner } from "../../azure-oidc.js";
 import type { CanvasState, DeployErrorKind } from "../../shared.js";
-import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
+import { ensureDeploymentSecret, startDeployment } from "@radius-project/core";
 import { remediationView } from "@radius-project/core/remediations";
 import {
   BARE_GH_COMMAND_PRESENTATION,
@@ -120,9 +116,10 @@ export interface DeployDispatchDependencies {
   // `gh workflow run` for a short window after it is committed, because
   // GitHub has not finished indexing it).
   sleep(ms: number): Promise<void>;
+  isCurrent(): boolean;
   // Reads the newest existing run id for the deploy workflow so a baseline can
-  // be captured immediately before dispatch. Resolves to null on any read
-  // failure, in which case run discovery falls back to its time window.
+  // be captured immediately before dispatch. Null means an empty successful list;
+  // failed or malformed reads must reject rather than erase this evidence.
   latestWorkflowRunId(
     repo: string,
     workflowFile: string
@@ -191,6 +188,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
   "ensureDeployWorkflowsOnBranch",
   "ensureWorkflowsCurrent",
   "sleep",
+  "isCurrent",
   "latestWorkflowRunId",
   "classifyDeployDispatchFailure",
   "uncommittedGeneratedPaths",
@@ -265,7 +263,8 @@ export function createDeployDispatchService(
   // error: retrying it would run the command as whichever account is active
   // machine-wide, which is not the account the rest of the deploy acts as. A
   // timed-out command is never retried — GitHub may already have accepted it.
-  // Only an improvement is kept.
+  // Once retried, the second command owns the outcome; retaining the first
+  // rejection would hide a later timeout or transport failure.
   const withStrippedToken = async (
     first: DeployCommandResult,
     retry: (env: NodeJS.ProcessEnv) => Promise<DeployCommandResult>
@@ -278,20 +277,20 @@ export function createDeployDispatchService(
     const hasInjectedToken = Boolean(
       env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
     );
-    const retryAllowed = shouldRetryWithKeyringCredential({
-      stderr: first.stderr,
-      timedOut: first.timedOut,
-      hasInjectedToken
-    });
-    if (!retryAllowed)
+    const retryAllowed =
+      firstCredentialSource === "injected" &&
+      shouldRetryWithKeyringCredential({
+        stderr: first.stderr,
+        timedOut: first.timedOut,
+        hasInjectedToken
+      });
+    if (!retryAllowed || !dependencies.isCurrent())
       return { result: first, credentialSource: firstCredentialSource };
     const fallbackEnv = { ...env };
     delete fallbackEnv.GH_TOKEN;
     delete fallbackEnv.GITHUB_TOKEN;
     const second = await retry(fallbackEnv);
-    return second.code === 0 ?
-        { result: second, credentialSource: "keyring" }
-      : { result: first, credentialSource: firstCredentialSource };
+    return { result: second, credentialSource: "keyring" };
   };
 
   // Ensure the environment carries the secret params the deployed app.bicep
@@ -305,473 +304,97 @@ export function createDeployDispatchService(
   const provisionSecretParams = async (
     repo: string,
     environment: string,
-    secretParams: Record<string, string>,
+    secretParams: Readonly<Record<string, string>>,
     log: (message: string) => void
   ): Promise<string | null> => {
-    const deployParamsPresent = async (): Promise<boolean> => {
-      const r = await dependencies.runGh([
-        "api",
-        `/repos/${repo}/environments/${encodeURIComponent(
-          environment
-        )}/secrets`,
-        "--jq",
-        ".secrets[].name"
-      ]);
-      return (r.stdout || "")
-        .split("\n")
-        .map((s) => s.trim())
-        .includes("RADIUS_DEPLOY_PARAMS");
-    };
-    if (await deployParamsPresent()) return null;
-    const names = Object.keys(secretParams).join(", ");
-    log(
-      'Provisioning RADIUS_DEPLOY_PARAMS for "' +
-        environment +
-        '" (' +
-        names +
-        ")..."
-    );
-    const setArgs = [
-      "secret",
-      "set",
-      "RADIUS_DEPLOY_PARAMS",
-      "--env",
-      environment,
-      "--repo",
-      repo
-    ];
-    const payload = JSON.stringify(secretParams);
-    // No credential fallback here. Writing a repository secret as whichever
-    // account happens to be active machine-wide is a silent identity change for
-    // a credential-bearing write, and the failures a secret write actually
-    // produces ("Resource not accessible…", 403, 404) never identify a missing
-    // `workflow` scope, so a retry could not be justified by the diagnostic
-    // either. The real error is surfaced with the account guidance instead.
-    const setRes = await dependencies.runGhWithStdin(setArgs, payload);
-    if (setRes.code !== 0) {
-      const env = dependencies.readProcessEnv();
-      const accountHint =
-        env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() ?
-          " The Copilot session token may not be allowed to write this repository's environment secrets; pick the GitHub account to act as in the Create Environment dialog, then retry."
-        : "";
-      const failure =
-        'Could not provision RADIUS_DEPLOY_PARAMS on environment "' +
-        environment +
-        '": ' +
-        ((setRes.stderr || "").trim() || "unknown error") +
-        ". The deploy would fail for a missing required parameter (" +
-        names +
-        "), so it was not started." +
-        accountHint;
-      log("❌ " + failure);
-      return failure;
-    }
-    if (!(await deployParamsPresent())) {
-      const failure =
-        'RADIUS_DEPLOY_PARAMS was accepted but is not present on environment "' +
-        environment +
-        '". The deploy would fail for a missing required parameter (' +
-        names +
-        "), so it was not started.";
-      log("❌ " + failure);
-      return failure;
-    }
-    log('✅ RADIUS_DEPLOY_PARAMS is set on "' + environment + '".');
-    return null;
-  };
-
-  // Recompute the rad commands from the CURRENT app.bicep at dispatch time
-  // (rather than relying on the RADIUS_RAD_COMMANDS variable captured when the
-  // environment was created) so the deploy always reflects the latest bicep.
-  // `rad app graph` is appended so the deployed application graph is rendered
-  // as part of the run.
-  const appendRadCommands = async (
-    request: DeployDispatchRequest,
-    environment: string,
-    dispatchArgs: string[]
-  ): Promise<string | null> => {
-    const { entry, repo, branch, log } = request;
-    let secretError: string | null = null;
-    try {
-      let bicepPath = ".radius/app.bicep";
-      let bicepSource = await dependencies.fetchFileForSelection(
-        entry,
-        repo,
-        branch,
-        ".radius/app.bicep"
-      );
-      if (!bicepSource) {
-        bicepSource = await dependencies.fetchFileForSelection(
-          entry,
-          repo,
-          branch,
-          "app.bicep"
-        );
-        if (bicepSource) bicepPath = "app.bicep";
-      }
-      if (!bicepSource) {
-        log(
-          "⚠ Could not read app.bicep at dispatch; falling back to the environment's RADIUS_RAD_COMMANDS / default deploy."
-        );
-        return null;
-      }
-      const parsed = dependencies.appParams(bicepSource);
-      const resolved = dependencies.resolveDeployParams(parsed);
-      const { public: publicParams, secret: secretParams } =
-        dependencies.partitionParams(parsed, resolved);
-      // Capture the app name so the deploy-status reader can prefer an artifact
-      // belonging to this application. It is a tiebreaker between artifacts in
-      // the same environment, never a lookup key and never a hard filter, so an
-      // unresolved name costs nothing.
-      entry.state.deployAppName =
-        dependencies.extractAppName(bicepSource) ||
-        entry.state.deployAppName ||
-        "";
-      if (Object.keys(secretParams).length > 0) {
-        secretError = await provisionSecretParams(
-          repo,
-          environment,
-          secretParams,
-          log
-        );
-      }
-      const deployCmd = dependencies.buildDeployRadCommand(
-        bicepPath,
-        environment,
-        publicParams
-      );
-      const appName = dependencies.extractAppName(bicepSource);
-      const commands = [deployCmd];
-      if (appName) commands.push(dependencies.buildAppGraphRadCommand(appName));
-      dispatchArgs.push("-f", "rad_commands=" + JSON.stringify(commands));
-      log("Deploying with rad commands: " + commands.join("  |  "));
-      return secretError;
-    } catch (e) {
-      log(
-        "⚠ Could not compute rad commands from bicep (" +
-          dependencies.errorMessage(e) +
-          "); falling back to the environment default."
-      );
-      return secretError;
-    }
-  };
-
-  // Fail fast (with clear, actionable guidance) when the selected branch has
-  // not been pushed to the remote yet. A worktree/feature branch that only
-  // exists locally has no ref on GitHub, so both publishing the workflow files
-  // and dispatching against `--ref <branch>` are doomed. The repo itself is
-  // confirmed reachable (its default branch resolves) before blaming the
-  // branch, so a transient/auth error is not misreported as "not pushed".
-  const branchIsMissingOnRemote = async (
-    repo: string,
-    deployRef: string
-  ): Promise<boolean> => {
-    if (!deployRef) return false;
-    const refSha = await dependencies.getBranchHeadSha(repo, deployRef);
-    if (refSha) return false;
-    const repoDefault = await dependencies.getDefaultBranch(repo);
-    return !!repoDefault;
-  };
-
-  // The preflight answers one of five things, and the difference matters more
-  // than the check itself:
-  //
-  // - "covered": every subject GitHub could mint has a federated credential.
-  // - "skipped": the environment deliberately has no Azure login to check.
-  // - "missing": we got a definitive answer from GitHub and Azure and NOT ONE of
-  //   the possible subjects is present. The workflow could only fail its login,
-  //   so refusing here is strictly better than a late AADSTS700213 (also written
-  //   AADSTS7002138 in some Entra responses).
-  // - "case-mismatch": no exact subject exists, but credentials differ only by
-  //   casing. Re-running environment creation preserves that mismatch, so this
-  //   needs distinct manual remediation, and it reports every mis-cased subject
-  //   so fixing them all takes one pass.
-  // - "unverified": we could not complete the check, or coverage is partial.
-  //   This dispatches with a warning rather than blocking. Blocking here would
-  //   regress every user whose deploy works today but whose machine cannot run
-  //   the check — `az` is not otherwise required to deploy, since the workflow
-  //   authenticates in Actions, not locally. Partial coverage is in the same
-  //   bucket: when GitHub's effective default subject format is indeterminate
-  //   the resolver returns both the mutable and immutable forms, and only one of
-  //   them will ever be presented, so holding just one is not proof of failure.
-  type AzureFederatedCredentialValidation =
-    | { status: "covered" }
-    | { status: "skipped"; message: string }
-    | { status: "missing"; message: string }
-    | { status: "case-mismatch"; message: string }
-    | { status: "unverified"; message: string };
-
-  const validationUnverified = (
-    environment: string,
-    reason: string
-  ): AzureFederatedCredentialValidation => ({
-    status: "unverified",
-    message:
-      `Could not verify Azure federated credential coverage for environment "${environment}": ${reason}. ` +
-      "Deploying anyway — if the workflow fails to log in to Azure with AADSTS700213, re-run Create Environment with Azure auto-setup."
-  });
-
-  type GitHubVariableLookup =
-    | { kind: "value"; value: string }
-    | { kind: "blank" }
-    | { kind: "absent" }
-    | { kind: "error"; reason: string };
-
-  // GitHub Actions resolves a variable from the environment first and falls back
-  // to the repository only when the environment does not define it, so the
-  // preflight has to read them in that order to see what the workflow will see.
-  // A variable that exists with an empty value still shadows the repository one,
-  // so only "absent" falls through.
-  const readGitHubActionsVariable = async (
-    repo: string,
-    environment: string,
-    name: string
-  ): Promise<GitHubVariableLookup> => {
-    const envPath = `/repos/${repo}/environments/${encodeURIComponent(
-      environment
-    )}/variables/${name}`;
-    const repoPath = `/repos/${repo}/actions/variables/${name}`;
-    const read = async (
-      path: string,
-      scope: string
-    ): Promise<GitHubVariableLookup> => {
-      const response = await dependencies.runGitHubJson(path);
-      if (!response.ok) {
-        if (response.status === 404) return { kind: "absent" };
-        return {
-          kind: "error",
-          reason: `GitHub ${scope} ${name} lookup failed (${response.stderr || `HTTP ${response.status ?? "unknown"}`})`
-        };
-      }
-      const value = response.json?.value;
-      if (typeof value !== "string") {
-        return {
-          kind: "error",
-          reason: `GitHub ${scope} has an invalid ${name}`
-        };
-      }
-      if (!value.trim()) return { kind: "blank" };
-      return { kind: "value", value: value.trim() };
-    };
-    const environmentValue = await read(
-      envPath,
-      `environment "${environment}"`
-    );
-    if (environmentValue.kind !== "absent") return environmentValue;
-    return read(repoPath, `repository "${repo}"`);
-  };
-
-  // Entra compares the OIDC subject case-sensitively, but GitHub resolves an
-  // environment by name case-insensitively — so deploying "dev" against an
-  // environment stored as "Dev" reads its variables fine while the token carries
-  // "environment:Dev". Building the subject from the requested spelling would
-  // hard-block that working deploy, so the name GitHub reports wins.
-  const readCanonicalEnvironmentName = async (
-    repo: string,
-    environment: string
-  ): Promise<
-    { kind: "name"; name: string } | { kind: "error"; reason: string }
-  > => {
-    const response = await dependencies.runGitHubJson(
-      `/repos/${repo}/environments/${encodeURIComponent(environment)}`
-    );
-    if (!response.ok) {
-      return {
-        kind: "error",
-        reason: `GitHub environment "${environment}" lookup failed (${response.stderr || `HTTP ${response.status ?? "unknown"}`})`
-      };
-    }
-    const name = response.json?.name;
-    if (typeof name !== "string" || !name.trim()) {
-      return {
-        kind: "error",
-        reason: `GitHub did not report a name for environment "${environment}"`
-      };
-    }
-    return { kind: "name", name: name.trim() };
-  };
-
-  const validateAzureFederatedCredential = async (
-    repo: string,
-    environment: string
-  ): Promise<AzureFederatedCredentialValidation> => {
-    let clientId: string;
-    try {
-      const clientIdLookup = await readGitHubActionsVariable(
-        repo,
-        environment,
-        "AZURE_CLIENT_ID"
-      );
-      if (clientIdLookup.kind === "error") {
-        return validationUnverified(environment, clientIdLookup.reason);
-      }
-      if (clientIdLookup.kind === "blank") {
-        // The upstream provider workflow gates azure/login on
-        // `vars.AZURE_CLIENT_ID != ''`, so an empty value is the documented way
-        // to run a non-OIDC cluster. There is no login to fail and nothing to
-        // check — warning here would send someone off to "fix" a variable that
-        // is deliberately blank.
-        return {
-          status: "skipped",
-          message: `Azure login is disabled for environment "${environment}" (AZURE_CLIENT_ID is empty) — skipping the federated credential check.`
-        };
-      }
-      if (clientIdLookup.kind === "absent") {
-        return validationUnverified(
-          environment,
-          `neither GitHub environment "${environment}" nor repository "${repo}" defines AZURE_CLIENT_ID`
-        );
-      }
-      clientId = clientIdLookup.value;
-    } catch (error) {
-      return validationUnverified(
-        environment,
-        `GitHub variable lookup failed (${dependencies.errorMessage(error)})`
-      );
-    }
-
-    let envName: string;
-    let resolved: ResolveOidcSubjectResult;
-    try {
-      const canonical = await readCanonicalEnvironmentName(repo, environment);
-      if (canonical.kind === "error") {
-        return validationUnverified(environment, canonical.reason);
-      }
-      envName = canonical.name;
-      resolved = await resolveOidcSubject(
-        {
-          targetRepo: repo,
-          envName,
-          suffix: buildEnvironmentSuffix(envName)
+    const outcome = await ensureDeploymentSecret(
+      { repo, environment },
+      secretParams,
+      {
+        isCurrent: dependencies.isCurrent,
+        errorMessage: dependencies.errorMessage,
+        log,
+        readNames: async (target) => {
+          const r = await dependencies.runGh([
+            "api",
+            `/repos/${target.repo}/environments/${encodeURIComponent(
+              target.environment
+            )}/secrets`,
+            "--paginate",
+            "--slurp"
+          ]);
+          if (r.code !== 0 || r.timedOut) {
+            throw new Error(
+              r.stderr.trim() || "Environment secret listing failed."
+            );
+          }
+          const response: unknown = JSON.parse(r.stdout);
+          if (!Array.isArray(response) || response.length === 0) {
+            throw new Error("Environment secret listing is malformed.");
+          }
+          const names: string[] = [];
+          const pages: unknown[] = response;
+          for (const page of pages) {
+            if (
+              !page ||
+              typeof page !== "object" ||
+              !("secrets" in page) ||
+              !Array.isArray(page.secrets)
+            ) {
+              throw new Error("Environment secret listing is malformed.");
+            }
+            const secrets: unknown[] = page.secrets;
+            for (const secret of secrets) {
+              if (
+                !secret ||
+                typeof secret !== "object" ||
+                !("name" in secret) ||
+                typeof secret.name !== "string" ||
+                !/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.name)
+              ) {
+                throw new Error("Environment secret listing is malformed.");
+              }
+              names.push(secret.name);
+            }
+          }
+          return names;
         },
-        dependencies.runGitHubJson
-      );
-    } catch (error) {
-      return validationUnverified(
-        environment,
-        `GitHub OIDC subject resolution failed (${dependencies.errorMessage(error)})`
-      );
-    }
-    const expectedSubjects = resolved.federatedCredentials.map(
-      (credential) => credential.subject
-    );
-
-    let listResult: DeployCommandResult;
-    try {
-      // No `--tenant`: `az ad app federated-credential list` does not accept it
-      // and exits with "unrecognized arguments", which would make this check a
-      // permanent no-op. A signed-in context in the wrong tenant simply fails
-      // the read and lands in the same warn bucket.
-      listResult = await dependencies.runAz(
-        buildFederatedCredentialListArgs(clientId)
-      );
-    } catch (error) {
-      return validationUnverified(
-        environment,
-        `Azure federated credential lookup failed (${dependencies.errorMessage(error)})`
-      );
-    }
-    if (listResult.code !== 0) {
-      return validationUnverified(
-        environment,
-        `Azure federated credential lookup failed (${(listResult.stderr || "").trim() || "unknown error"})`
-      );
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(listResult.stdout || "");
-    } catch (error) {
-      return validationUnverified(
-        environment,
-        `Azure federated credential lookup returned malformed JSON (${dependencies.errorMessage(error)})`
-      );
-    }
-    if (!Array.isArray(parsed)) {
-      return validationUnverified(
-        environment,
-        "Azure federated credential lookup returned an invalid subject list"
-      );
-    }
-    // Flexible federated credentials match on `claimsMatchingExpression` and
-    // report a null subject, so entries without one are skipped rather than
-    // disabling the check for every ordinary credential beside them.
-    const subjects = parsed
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
-    const missingSubjects = expectedSubjects.filter(
-      (subject) => !subjects.includes(subject)
-    );
-    if (missingSubjects.length === 0) return { status: "covered" };
-
-    if (missingSubjects.length < expectedSubjects.length) {
-      // Partial coverage of the indeterminate mutable/immutable pair. Only one
-      // form is ever presented and we cannot tell which, so this is a warning.
-      const missingSubjectText = missingSubjects
-        .map((subject) => `"${subject}"`)
-        .join(" and ");
-      return validationUnverified(
-        environment,
-        `App Registration ${clientId} covers only part of the subject pair GitHub may mint (no credential for ${missingSubjectText})`
-      );
-    }
-
-    // Report every mis-cased subject, not just the first. `expectedSubjects`
-    // holds the mutable and immutable pair, and a credential typed by hand
-    // that got one spelling wrong usually got both wrong. Naming one would
-    // send the user back for a second round, and correcting only that one
-    // lands in the partial-coverage branch above, which warns and dispatches
-    // into the very login failure this check exists to prevent.
-    const caseMismatches: { expected: string; existing: string }[] = [];
-    for (const expected of expectedSubjects) {
-      for (const existing of subjects) {
-        if (existing.toLowerCase() !== expected.toLowerCase()) continue;
-        caseMismatches.push({ expected, existing });
-        break;
+        write: async (target, parameters) => {
+          const setArgs = [
+            "secret",
+            "set",
+            "RADIUS_DEPLOY_PARAMS",
+            "--env",
+            target.environment,
+            "--repo",
+            target.repo
+          ];
+          const payload = JSON.stringify(parameters);
+          // No credential fallback here. Writing a repository secret as whichever
+          // account happens to be active machine-wide is a silent identity change for
+          // a credential-bearing write, and the failures a secret write actually
+          // produces ("Resource not accessible…", 403, 404) never identify a missing
+          // `workflow` scope, so a retry could not be justified by the diagnostic
+          // either. The real error is surfaced with the account guidance instead.
+          const setRes = await dependencies.runGhWithStdin(setArgs, payload);
+          if (setRes.code !== 0 || setRes.timedOut) {
+            const env = dependencies.readProcessEnv();
+            const accountHint =
+              env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() ?
+                " The Copilot session token may not be allowed to write this repository's environment secrets; pick the GitHub account to act as in the Create Environment dialog, then retry."
+              : "";
+            throw new Error(
+              ((setRes.stderr || "").trim() || "unknown error") + accountHint
+            );
+          }
+        }
       }
+    );
+    if (outcome.kind !== "ready") {
+      log("❌ " + outcome.message);
+      return outcome.message;
     }
-    if (caseMismatches.length > 0) {
-      const mismatchText = caseMismatches
-        .map(
-          ({ expected, existing }) =>
-            `expected "${expected}" but the app has "${existing}"`
-        )
-        .join("; ");
-      return {
-        status: "case-mismatch",
-        message:
-          `Azure deploy to environment "${envName}" is blocked because App Registration ${clientId} has federated credential subjects that differ from the ones GitHub mints only by letter casing: ${mismatchText}. ` +
-          // Predicted, not quoted: nothing here calls Entra, so saying so keeps
-          // a user from hunting for a run that never happened. The codes are
-          // still spelled out because that is what they would search for, and
-          // both spellings appear because Entra is not consistent about them.
-          'Entra compares subjects case-sensitively, so this deploy\'s Azure login would be rejected with "No matching federated identity record found for presented assertion subject" (AADSTS700213, also written AADSTS7002138 in some Entra responses). No workflow run was started, so that rejection will not appear in the Actions logs. ' +
-          `Correct the existing credentials rather than re-running Create Environment, which rebuilds the subject from the same spelling. List their ids with: az ad app federated-credential list --id ${clientId} --query "[].{id:id,subject:subject}" -o table. Then fix each one with: az ad app federated-credential update --id ${clientId} --federated-credential-id <id> --parameters "{\\"subject\\":\\"<expected subject>\\"}".`
-      };
-    }
-
-    // Every subject on the app is a near match worth showing: on a repository
-    // covered by GitHub's immutable-default rollout the existing subjects carry
-    // `owner@id/name@id`, and a prefix filter built from the mutable spelling
-    // would hide them exactly when the user most needs to see how close the
-    // credential was.
-    const nearMatchNote =
-      subjects.length > 0 ?
-        ` Existing credential subjects on the app: ${subjects
-          .slice(0, 3)
-          .join(", ")}${subjects.length > 3 ? ", ..." : ""}.`
-      : "";
-    const expectedSubjectText = expectedSubjects
-      .map((subject) => `"${subject}"`)
-      .join(" or ");
-    return {
-      status: "missing",
-      message:
-        `Azure deploy to environment "${envName}" is blocked because App Registration ${clientId} ` +
-        `has no federated credential matching any subject GitHub could present for it (expected one of ${expectedSubjectText}).` +
-        nearMatchNote +
-        " Re-run Create Environment with Azure auto-setup (or create the credential manually) before deploying."
-    };
+    return null;
   };
 
   // Both branch-not-pushed paths (the pre-dispatch remote check and the "No ref
@@ -787,6 +410,7 @@ export function createDeployDispatchService(
     log: (message: string) => void
   ): Promise<void> => {
     const paths = await dependencies.uncommittedGeneratedPaths(entry);
+    if (!dependencies.isCurrent()) return;
     const dirty = paths.length > 0;
     const remediation = remediationView("git-push-branch", {
       branch: deployRef,
@@ -833,6 +457,9 @@ export function createDeployDispatchService(
     async prepareAndDispatch(request) {
       const { entry, repo, branch, provider, requestedEnvironment, log } =
         request;
+      if (!dependencies.isCurrent()) return { dispatched: false };
+      delete entry.state.deployDispatchReference;
+      delete entry.state.deployDispatchEvidence;
       log("━━ Deploying Radius application ━━");
       const envForDeploy =
         entry.state.envName ||
@@ -851,185 +478,175 @@ export function createDeployDispatchService(
       // the selected branch or the repo's real default, so it is never empty.
       const deployRef = branch;
 
-      if (await branchIsMissingOnRemote(repo, deployRef)) {
-        await reportBranchNotPushed(
-          entry,
+      const requestedFile = entry.state.deployParams?.appFile;
+      const started = await startDeployment(
+        {
           repo,
-          deployRef,
-          dependencies.branchNotPushedKind,
-          log
-        );
+          branch: deployRef,
+          environment: envForDeploy,
+          workflowFile: deployWorkflowFile,
+          provider,
+          // Both legacy clients synthesize this default even for root-only apps.
+          appFile:
+            requestedFile === ".radius/app.bicep" ? undefined : requestedFile
+        },
+        {
+          isCurrent: dependencies.isCurrent,
+          errorMessage: dependencies.errorMessage,
+          branch: {
+            head: dependencies.getBranchHeadSha,
+            defaultBranch: dependencies.getDefaultBranch
+          },
+          azure: {
+            readGitHub: dependencies.runGitHubJson,
+            readSubjects: (clientId) =>
+              dependencies.runAz(buildFederatedCredentialListArgs(clientId))
+          },
+          commands: {
+            readFile: (target, path) =>
+              dependencies.fetchFileForSelection(
+                entry,
+                target.repo,
+                target.branch,
+                path
+              ),
+            parameters: (source) => {
+              const parsed = dependencies.appParams(source);
+              return dependencies.partitionParams(
+                parsed,
+                dependencies.resolveDeployParams(parsed)
+              );
+            },
+            applicationName: dependencies.extractAppName,
+            deployCommand: dependencies.buildDeployRadCommand,
+            graphCommand: dependencies.buildAppGraphRadCommand,
+            ensureSecret: (parameters) =>
+              provisionSecretParams(repo, envForDeploy, parameters, log)
+          },
+          publication: {
+            publish: (target, written) =>
+              dependencies.ensureDeployWorkflowsOnBranch(
+                target.repo,
+                target.branch,
+                target.environment,
+                log,
+                written
+              ),
+            synchronize: (target) =>
+              dependencies.ensureWorkflowsCurrent(
+                target.repo,
+                target.environment,
+                provider,
+                [...dependencies.deployWorkflowFiles],
+                target.branch
+              )
+          },
+          dispatch: {
+            latestRunId: () =>
+              dependencies.latestWorkflowRunId(repo, deployWorkflowFile),
+            sleep: dependencies.sleep,
+            now: dependencies.now,
+            dispatch: async (target, commands) => {
+              const args = [
+                "workflow",
+                "run",
+                target.workflowFile,
+                "--ref",
+                target.branch,
+                "-f",
+                "environment=" + target.environment,
+                "--repo",
+                target.repo,
+                "-f",
+                "rad_commands=" + JSON.stringify(commands)
+              ];
+              const result = await dependencies.runGh(args);
+              return result.code === 0 ?
+                  {
+                    result,
+                    credentialSource: dependencies.ghCredentialSource()
+                  }
+                : withStrippedToken(result, (env) =>
+                    dependencies.runGh(args, { env })
+                  );
+            }
+          },
+          onCommands: (application, commands) => {
+            entry.state.deployAppName =
+              application || entry.state.deployAppName || "";
+            log("Deploying with rad commands: " + commands.join("  |  "));
+          },
+          onAzureNote: (status, message) =>
+            log((status === "unverified" ? "⚠ " : "• ") + message),
+          onDispatchReady: (target) =>
+            log(
+              "🚀 Dispatching run rad commands workflow (" +
+                target.workflowFile +
+                ') on branch "' +
+                target.branch +
+                '" for environment "' +
+                target.environment +
+                '"...'
+            )
+        }
+      );
+      if (!dependencies.isCurrent() || started.kind === "cancelled")
         return { dispatched: false };
-      }
-
-      // After the branch check on purpose: an unpushed branch is the cheaper,
-      // more local failure, and reporting federated credentials first would name
-      // the wrong blocker.
-      if (provider === "azure") {
-        const validation = await validateAzureFederatedCredential(
-          repo,
-          envForDeploy
-        );
-        if (validation.status === "missing") {
-          log("❌ " + validation.message);
-          entry.state.deployError = validation.message;
-          entry.state.deployErrorKind = dependencies.oidcSubjectMissingKind;
-          entry.state.deployStatus = "failed";
-          return { dispatched: false };
-        }
-        if (validation.status === "case-mismatch") {
-          log("❌ " + validation.message);
-          entry.state.deployError = validation.message;
-          entry.state.deployErrorKind =
-            dependencies.oidcSubjectCaseMismatchKind;
-          entry.state.deployStatus = "failed";
-          return { dispatched: false };
-        }
-        if (validation.status === "unverified") log("⚠ " + validation.message);
-        if (validation.status === "skipped") log("• " + validation.message);
-      }
-
-      const dispatchArgs = [
-        "workflow",
-        "run",
-        deployWorkflowFile,
-        "--ref",
-        deployRef,
-        "-f",
-        "environment=" + envForDeploy,
-        "--repo",
-        repo
-      ];
-      const deploySecretError = await appendRadCommands(
-        request,
-        envForDeploy,
-        dispatchArgs
-      );
-      // A required secret param could not be provisioned, so starting the run
-      // would only produce a guaranteed `rad deploy` failure. Surface the
-      // reason and stop before dispatching.
-      if (deploySecretError) {
-        entry.state.deployError = deploySecretError;
-        entry.state.deployStatus = "failed";
-        return { dispatched: false };
-      }
-
-      // Make sure the workflow files exist on the branch we are about to
-      // dispatch on. The env-creation flow only commits them to the default
-      // branch, so a feature/worktree branch usually needs them published.
-      let publishedDispatcher = false;
-      try {
-        await dependencies.ensureDeployWorkflowsOnBranch(
-          repo,
-          deployRef,
-          envForDeploy,
-          log,
-          (file) => {
-            if (file === deployWorkflowFile) publishedDispatcher = true;
-          }
-        );
-      } catch (e) {
-        log(
-          '⚠ Could not publish deploy workflows to branch "' +
-            deployRef +
-            '": ' +
-            dependencies.errorMessage(e) +
-            ". The dispatch below will fail if the branch has no run-rad-commands workflow."
-        );
-      }
-
-      // With the deploy workflows present, ensure they are in sync with the
-      // upstream Radius templates before running them, so the deploy never
-      // executes a drifted copy. Syncs the deploy files on both the default
-      // branch and the branch being deployed, which a --ref dispatch checks out.
-      const sync = await dependencies.ensureWorkflowsCurrent(
-        repo,
-        envForDeploy,
-        provider,
-        [...dependencies.deployWorkflowFiles],
-        deployRef
-      );
-      // Either publisher can write the dispatcher before GitHub registers it
-      // (#767). Keep successful writes even if a later provider write fails.
-      const justCreatedDispatcher =
-        publishedDispatcher ||
-        [...sync.created, ...sync.updated].some(
-          (path) => path.split("/").pop() === deployWorkflowFile
-        );
-
-      let deployDispatchedAt = dependencies.now();
-      let baselineRunId: number | string | null = null;
-      log(
-        "🚀 Dispatching run rad commands workflow (" +
-          deployWorkflowFile +
-          ') on branch "' +
-          deployRef +
-          '" for environment "' +
-          envForDeploy +
-          '"...'
-      );
-      const dispatchOnce = async (): Promise<{
-        result: DeployCommandResult;
-        credentialSource: "injected" | "keyring";
-      }> => {
-        let result = await dependencies.runGh(dispatchArgs);
-        let credentialSource = dependencies.ghCredentialSource();
-        if (result.code !== 0) {
-          const attempt = await withStrippedToken(result, (env) =>
-            dependencies.runGh(dispatchArgs, { env })
-          );
-          result = attempt.result;
-          credentialSource = attempt.credentialSource;
-        }
-        return { result, credentialSource };
-      };
-      // Only a just-authored/updated dispatcher gets the extra wait and
-      // retries — an already-registered workflow keeps the common path fast
-      // at a single immediate attempt.
-      const dispatchDelaysMs = justCreatedDispatcher ? [0, 2000, 5000] : [0];
-      if (justCreatedDispatcher) await dependencies.sleep(3000);
-      let dispatchDeployRes: DeployCommandResult = {
-        code: 1,
-        stdout: "",
-        stderr: ""
-      };
-      let dispatchCredentialSource: "injected" | "keyring" =
-        dependencies.ghCredentialSource();
-      for (const delay of dispatchDelaysMs) {
-        if (delay > 0) await dependencies.sleep(delay);
-        // Other runs can start during registration waits. Refresh both discovery
-        // bounds for this attempt, and discard an earlier baseline if this read fails.
-        baselineRunId = null;
-        try {
-          baselineRunId = await dependencies.latestWorkflowRunId(
+      if (started.kind === "refused") {
+        if (started.reason === "branch-not-pushed") {
+          await reportBranchNotPushed(
+            entry,
             repo,
-            deployWorkflowFile
+            deployRef,
+            dependencies.branchNotPushedKind,
+            log
           );
-        } catch (e) {
-          log(
-            "⚠ Could not read the latest run id before dispatch (" +
-              dependencies.errorMessage(e) +
-              "); run discovery will fall back to a time window."
-          );
+          return { dispatched: false };
         }
-        deployDispatchedAt = dependencies.now();
-        const attempt = await dispatchOnce();
-        dispatchDeployRes = attempt.result;
-        dispatchCredentialSource = attempt.credentialSource;
-        if (dispatchDeployRes.code === 0 || dispatchDeployRes.timedOut) break;
-        // Only the not-yet-registered race self-resolves; any other failure
-        // (missing scope, Actions disabled, branch unresolved, …) will not, so
-        // stop retrying and report it immediately.
-        if (!/not found|HTTP 404/i.test(dispatchDeployRes.stderr || "")) break;
+        entry.state.deployError = started.message;
+        entry.state.deployErrorKind =
+          started.reason === "oidc-subject-missing" ?
+            dependencies.oidcSubjectMissingKind
+          : started.reason === "oidc-subject-case-mismatch" ?
+            dependencies.oidcSubjectCaseMismatchKind
+          : "dispatch-refused";
+        if (started.reason === "preparation")
+          entry.state.deployDispatchEvidence = "refused";
+        entry.state.deployStatus = "failed";
+        log("❌ " + started.message);
+        return { dispatched: false };
       }
-      if (dispatchDeployRes.code !== 0) {
+      const { evidence, recentlyPublished: justCreatedDispatcher } = started;
+      entry.state.deployDispatchEvidence = evidence.kind;
+      if (!("reference" in evidence)) {
+        entry.state.deployError =
+          "Deployment was not dispatched: " + evidence.message;
+        entry.state.deployErrorKind = "dispatch-refused";
+        entry.state.deployStatus = "failed";
+        log("❌ " + entry.state.deployError);
+        return { dispatched: false };
+      }
+      entry.state.deployDispatchReference = evidence.reference;
+      if (evidence.kind !== "accepted") {
+        const dispatchDeployRes: DeployCommandResult = evidence.command
+          ?.result ?? {
+          code: "unknown",
+          stdout: "",
+          stderr: evidence.message
+        };
+        const dispatchCredentialSource =
+          evidence.command?.credentialSource ??
+          dependencies.ghCredentialSource();
         const de = (dispatchDeployRes.stderr || "").trim();
         log("❌ Failed to dispatch the run rad commands workflow: " + de);
         // A "No ref found" (or unresolved ref) dispatch error means the branch
         // is not on the remote — surface the same clean, actionable "push the
         // branch" guidance. Every other dispatch failure is a run of unknown
         // outcome, so the split is made once, where it can be tested.
-        const dispatchKind = dependencies.classifyDeployDispatchFailure(de);
+        const dispatchKind =
+          evidence.kind === "uncertain" ?
+            "run-unconfirmed"
+          : dependencies.classifyDeployDispatchFailure(de);
         if (dispatchKind === dependencies.branchNotPushedKind) {
           await reportBranchNotPushed(
             entry,
@@ -1092,7 +709,8 @@ export function createDeployDispatchService(
           ". " +
           (de || "The dispatch request failed.") +
           scopeHint;
-        entry.state.deployErrorKind = dispatchKind;
+        entry.state.deployErrorKind =
+          evidence.kind === "refused" ? "dispatch-refused" : dispatchKind;
         entry.state.deployStatus = "failed";
         return { dispatched: false };
       }
@@ -1103,9 +721,9 @@ export function createDeployDispatchService(
       return {
         dispatched: true,
         workflowFile: deployWorkflowFile,
-        dispatchedAt: deployDispatchedAt,
+        dispatchedAt: evidence.reference.dispatchedAt,
         environment: envForDeploy,
-        baselineRunId
+        baselineRunId: evidence.reference.baselineRunId
       };
     }
   };

@@ -631,6 +631,7 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }, testInfo) => {
+    canvas.deploymentAccountChoice.login = "acting-user";
     const environment = "fixture-environment";
     const opaque = "OpaqueBindingWitness92741";
     const named = "UnregisteredNamedWitness63281";
@@ -643,10 +644,7 @@ test.describe("Radius Canvas in Chromium", () => {
       stdout
     });
     const json = (endpoint: string, value: unknown): FakeCliCommand =>
-      command(
-        ["api", endpoint, "-H", "X-GitHub-Api-Version: 2022-11-28"],
-        JSON.stringify(value)
-      );
+      command(["api", endpoint], JSON.stringify(value));
     const included = (endpoint: string, value: unknown): FakeCliCommand =>
       command(
         ["api", endpoint, "--include", "--method", "GET"],
@@ -661,6 +659,17 @@ test.describe("Radius Canvas in Chromium", () => {
       "GET"
     ];
     const additions: FakeCliCommand[] = [
+      json(
+        `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${encodeURIComponent(WORKTREE_BRANCH)}`,
+        {
+          type: "file",
+          encoding: "base64",
+          content: Buffer.from(
+            "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'fixture-app'\n}\n"
+          ).toString("base64"),
+          sha: "c".repeat(40)
+        }
+      ),
       {
         tool: "gh",
         args: repositoryArtifactArgs,
@@ -679,15 +688,12 @@ test.describe("Radius Canvas in Chromium", () => {
         exitCode: 1,
         stderr: "gh: Not Found (HTTP 404)"
       },
-      command(["api", "user", "--jq", ".login"], "acting-user\n"),
       command(
         [
           "api",
-          `/repos/${REPOSITORY}/git/ref/heads/${encodeURIComponent(WORKTREE_BRANCH)}`,
-          "--jq",
-          ".object.sha"
+          `/repos/${REPOSITORY}/git/ref/heads/${encodeURIComponent(WORKTREE_BRANCH)}`
         ],
-        "fixture-pushed-head\n"
+        JSON.stringify({ object: { sha: "a".repeat(40) } })
       ),
       json(
         `/repos/${REPOSITORY}/environments/${environment}/variables/AZURE_CLIENT_ID`,
@@ -698,6 +704,7 @@ test.describe("Radius Canvas in Chromium", () => {
       }),
       json(`/repos/${REPOSITORY}`, {
         full_name: REPOSITORY,
+        default_branch: "main",
         id: 123,
         owner: { id: 456 }
       }),
@@ -732,7 +739,6 @@ test.describe("Radius Canvas in Chromium", () => {
         [
           "run",
           "list",
-          "--workflow=run-rad-commands.yml",
           "--limit",
           "20",
           "--json",
@@ -770,7 +776,7 @@ test.describe("Radius Canvas in Chromium", () => {
       {
         tool: "gh",
         argsPrefix: dispatchPrefix,
-        env: { GH_TOKEN: "absent", GITHUB_TOKEN: "absent" },
+        env: { GH_TOKEN: "fixture-acting-token", GITHUB_TOKEN: "absent" },
         stdout: ""
       },
       included(`repos/${REPOSITORY}/actions/runs/${runId}`, {
@@ -865,6 +871,15 @@ test.describe("Radius Canvas in Chromium", () => {
     for (const [file, content] of Object.entries(workflows)) {
       for (const branch of ["main", WORKTREE_BRANCH]) {
         scenario.commands.unshift(
+          json(
+            `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${encodeURIComponent(branch)}`,
+            {
+              type: "file",
+              encoding: "base64",
+              content: Buffer.from(content).toString("base64"),
+              sha: "b".repeat(40)
+            }
+          ),
           command(
             [
               "api",
@@ -919,7 +934,7 @@ test.describe("Radius Canvas in Chromium", () => {
         appFile: ".radius/app.bicep"
       }
     });
-    expect(admitted.status()).toBe(200);
+    expect(admitted.status(), await admitted.text()).toBe(200);
     const attemptId = canvas.entry.state.deployAttempt?.id;
     expect(attemptId).toBeTruthy();
     try {
@@ -3116,12 +3131,13 @@ test.describe("Radius Canvas in Chromium", () => {
     });
 
     const accounts = canvas.accountContext;
+    let releaseExecutor: (() => void) | undefined;
     try {
       const lease = await accounts.coordinator.withSelectedAccount(
         "repo-user",
         { ownerKey: accounts.ownerKey, operationId },
         async (executor) => {
-          accounts.registerExecutor(operationId, executor);
+          releaseExecutor = accounts.registerExecutor(operationId, executor);
         }
       );
       expect(lease.restoration).toMatchObject({
@@ -3164,7 +3180,7 @@ test.describe("Radius Canvas in Chromium", () => {
         ).toEqual([expect.objectContaining({ matched: true, exitCode: 0 })]);
       }
     } finally {
-      accounts.unregisterExecutor(operationId);
+      releaseExecutor?.();
     }
   });
 
@@ -3532,6 +3548,162 @@ test.describe("Radius Canvas in Chromium", () => {
       "No supported credential profiles yet."
     );
     await expect(page.locator("#env-step1-next")).toBeDisabled();
+  });
+
+  test("exposes setup service failure details and diagnostic download through the real task owner by keyboard @safety", async ({
+    page,
+    canvas
+  }) => {
+    const ops = await import("../../src/operations.js");
+    const { createAzureSetupService } =
+      await import("../../src/server/services/azure-setup.js");
+    const { setupStageResult } =
+      await import("../../src/server/services/setup-outcome.js");
+    const { createAzureAutoSetupTestDependencies } =
+      await import("../support/server/azure-auto-setup.js");
+    let finalizations = 0;
+    const diagnostics: Array<{ code: string; message: string }> = [];
+    const service = createAzureSetupService(
+      createAzureAutoSetupTestDependencies({
+        operations: {
+          get: (id) => ops.operations.get(id),
+          isStale: ops.isStale,
+          enterStage: ops.enterStage,
+          persist: () => ops.operations.persist(),
+          report: (diagnostic) => diagnostics.push(diagnostic)
+        },
+        external: { getSelectedGitHubExecutor: () => undefined },
+        finalizeSetupFailure: async (operation) => {
+          expect(operation?.operationId).toMatch(/^op_/);
+          finalizations += 1;
+          throw new Error("private finalizer exception");
+        }
+      })
+    );
+    canvas.setEnvironmentOperationRunner(async (operationId) => {
+      const operation = ops.operations.get(operationId);
+      if (!operation) throw new Error("Setup operation was not saved.");
+      ops.enterStage(operation, ops.STAGE_AUTHORIZE_IDENTITY);
+      const outcome = await service({
+        data: {
+          repo: REPOSITORY,
+          environment: "fixture-environment",
+          operationId,
+          resourceGroup: "fixture-resource-group",
+          cluster: "fixture-cluster",
+          subscriptionId: PROFILE_SUBSCRIPTION_ID
+        }
+      });
+      expect(outcome).toMatchObject({
+        kind: "failed",
+        status: 500,
+        body: { code: "setup-handler-failed" }
+      });
+      // Use the production outcome conversion; the real task owner, not the
+      // fixture, must terminalize the operation after the service rejects it.
+      setupStageResult(outcome);
+    });
+    const selected = {
+      id: "fixture-cluster",
+      name: "Fixture Cluster",
+      resourceGroup: "fixture-resource-group"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      })
+    );
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+    await expect(page.locator("#env-gh-identity-note")).toContainText(
+      "Ready to configure deployments"
+    );
+    await page.getByLabel("Environment name").fill("fixture-environment");
+    await page.getByRole("button", { name: "Re-check" }).click();
+    await expect(page.locator("#env-gh-identity-note")).toContainText(
+      "Ready to configure deployments"
+    );
+    await page
+      .getByLabel("Resource Group", { exact: true })
+      .selectOption(selected.resourceGroup);
+    await expect(page.getByLabel("Cluster", { exact: true })).toHaveValue(
+      selected.id
+    );
+    const started = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/operations" &&
+        response.request().method() === "POST"
+    );
+    await page.locator("#deploy-btn:not([disabled])").click();
+    const payload = await (await started).json();
+    expect(payload.operationId).toMatch(/^op_/);
+    await expect
+      .poll(
+        async () => (await canvas.operationRecord(payload.operationId)).state
+      )
+      .toBe("failed");
+    const record = await canvas.operationRecord(payload.operationId);
+    expect(record.failure).toMatchObject({
+      code: "server-owned-task-failed",
+      message: expect.stringContaining(
+        "Setup could not finish reporting its outcome."
+      )
+    });
+    expect(finalizations).toBe(1);
+    expect(diagnostics).toEqual([
+      { code: "setup-handler-failed", message: "private finalizer exception" }
+    ]);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${payload.operationId}`
+    );
+    await expect(page.locator("#env-progress-panel")).toContainText(
+      "Setup could not finish reporting its outcome. In the Environments panel, open Show details and select Download diagnostic snapshot to review the recorded status before deciding whether to retry."
+    );
+    await expect(page.locator("body")).not.toContainText(
+      "private finalizer exception"
+    );
+    const details = page.locator("#env-progress-details > summary");
+    await expect(details).toHaveText("Show details");
+    await details.focus();
+    await page.keyboard.press("Enter");
+    const downloadButton = page.getByRole("button", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(downloadButton).toBeVisible();
+    await downloadButton.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(dialog).toBeVisible();
+    await expectNoWcagViolations(page);
+    const downloadLink = dialog.getByRole("link", {
+      name: "Download snapshot"
+    });
+    await downloadLink.focus();
+    const downloading = page.waitForEvent("download");
+    await page.keyboard.press("Enter");
+    const download = await downloading;
+    const filename = await download.path();
+    if (!filename) throw new Error("Diagnostic download has no local path.");
+    const snapshot = await fs.readFile(filename, "utf8");
+    expect(JSON.parse(snapshot)).toMatchObject({
+      identifierProfile: "support_safe",
+      operation: {
+        operationId: payload.operationId,
+        lifecycle: { state: "failed", currentStage: "authorize_identity" },
+        failure: { classification: "unknown", stage: "authorize_identity" }
+      }
+    });
+    expect(snapshot).not.toContain("private finalizer exception");
+    await expect(dialog).toBeHidden();
+    await expect(downloadButton).toBeFocused();
+    await expectNoWcagViolations(page);
   });
 
   test("keeps composed service-principal retry and cleanup results durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
@@ -4417,6 +4589,7 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
+    canvas.deploymentAccountChoice.login = "acting-user";
     const scenario = defaultFakeCliScenario();
     const deploymentCommand = scenario.commands.find(
       (command) =>
@@ -5719,6 +5892,121 @@ test.describe("Radius Canvas in Chromium", () => {
 
     await reverify.click();
     await page.waitForURL(/\/\?page=environment$/);
+  });
+
+  test("renders bounded redacted verification evidence from the real status service @safety", async ({
+    page,
+    canvas
+  }) => {
+    canvas.setGitHubToken(null);
+    const operationId = await canvas.seedRestartedVerificationFailure();
+    const commands: FakeCliCommand[] = [
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `repos/${REPOSITORY}/actions/runs/39`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout: 'HTTP/2 200\n\n{"status":"completed","conclusion":"failure"}'
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `repos/${REPOSITORY}/actions/runs/39/jobs?per_page=100&page=1`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            jobs: [
+              {
+                steps: [
+                  {
+                    name: 'Azure Login (OIDC) password="fixture private step"',
+                    conclusion: "failure"
+                  }
+                ]
+              }
+            ]
+          })
+      },
+      {
+        tool: "gh",
+        args: ["run", "view", "39", "--log", "--repo", REPOSITORY],
+        stdout:
+          'Error: password="' +
+          "fixture private log ".repeat(1000) +
+          '"\nError: <b>fixture markup</b>\nError: ' +
+          "z".repeat(6000)
+      }
+    ];
+    await canvas.setScenario({
+      commands: [...commands, ...defaultFakeCliScenario().commands]
+    });
+    const accounts = canvas.accountContext;
+    const executor =
+      await accounts.coordinator.createReadOnlyExecutor("repo-user");
+    const releaseExecutor = accounts.registerExecutor(operationId, executor);
+    let operationReads = 0;
+    await page.route(/\/api\/operations\?repo=/, async (route) => {
+      operationReads++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          operation:
+            operationReads <= 2 ?
+              {
+                operationId,
+                kind: "create",
+                environment: "fixture-environment",
+                provider: "azure",
+                state: "verifying",
+                currentStage: "verify",
+                startedAt: new Date().toISOString(),
+                verification: { dispatchedAt: Date.now(), runId: "39" }
+              }
+            : null
+        })
+      });
+    });
+    try {
+      await page.clock.install();
+      const observation = page.waitForResponse((response) =>
+        response.url().includes("/api/verify-status?")
+      );
+      await gotoCanvas(page, canvas, "environment");
+      const response = await observation;
+      expect(response.status()).toBe(200);
+      const body = await response.json();
+      expect(body.state).toBe("failed");
+      expect(body.error).toHaveLength(4000);
+      expect(body.error).toContain("[REDACTED]");
+      expect(JSON.stringify(body)).not.toContain("fixture private");
+      const activity = page.locator("#env-progress-activity");
+      await expect(activity).toContainText(
+        "Credential verification failed (failure)."
+      );
+      await expect(activity).toContainText("[REDACTED]");
+      await expect(activity).toContainText("<b>fixture markup</b>");
+      await expect(activity.locator("b")).toHaveCount(0);
+      await expect(page.locator("body")).not.toContainText("fixture private");
+      await expect(page.locator("#env-progress-panel")).toHaveClass(
+        /env-progress--failed/
+      );
+      await expect(
+        page.locator("#env-progress-verify-bypass-button")
+      ).toBeHidden();
+      await expectNoWcagViolations(page);
+    } finally {
+      releaseExecutor();
+    }
   });
 
   for (const category of ["permissions", "generic"] as const) {

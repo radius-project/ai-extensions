@@ -153,26 +153,51 @@ function numericRunId(
 // that a created-at time window has to tolerate.
 export async function latestWorkflowRunId(
   repo: string,
-  workflowFile: string
+  workflowFile: string,
+  executor?: SelectedGhExecutor
 ): Promise<number | null> {
-  const runs = await ghJson(
-    [
-      "run",
-      "list",
-      "--workflow=" + workflowFile,
-      "--limit",
-      "20",
-      "--json",
-      "databaseId,createdAt",
-      "--repo",
-      repo
-    ],
-    []
-  );
+  const args = [
+    "run",
+    "list",
+    // A selected deploy needs a repository-wide high-water mark: filtering by
+    // workflow name fails before GitHub has registered a newly published file.
+    ...(executor ? [] : ["--workflow=" + workflowFile]),
+    "--limit",
+    "20",
+    "--json",
+    "databaseId,createdAt",
+    "--repo",
+    repo
+  ];
+  const selected =
+    executor ? await selectedWorkflowJson(executor, repo, args) : null;
+  if (
+    selected &&
+    (selected.state !== "value" || !Array.isArray(selected.value))
+  ) {
+    throw new Error(
+      "Could not read a valid workflow run baseline for " + repo + "."
+    );
+  }
+  const runs =
+    selected ?
+      selected.state === "value" ?
+        selected.value
+      : []
+    : await ghJson(args, []);
   if (!Array.isArray(runs)) return null;
   let max: number | null = null;
   for (const value of runs) {
     const r = parseWorkflowRun(value);
+    if (
+      selected &&
+      (!r ||
+        r.databaseId === undefined ||
+        !Number.isSafeInteger(r.databaseId) ||
+        r.databaseId <= 0)
+    ) {
+      throw new Error("The workflow run baseline contains an invalid run id.");
+    }
     if (r?.databaseId === undefined) continue;
     if (max === null || r.databaseId > max) max = r.databaseId;
   }

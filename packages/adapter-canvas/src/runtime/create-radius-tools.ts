@@ -19,7 +19,6 @@ import type { ModelingActivity } from "./modeling-activity.js";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import { missingModelHandoffIncludesBranch } from "./missing-model-handoff-claims.js";
 import type { CanvasState } from "../shared.js";
-import type { DeployToolArgs } from "../deploy-tools.js";
 import {
   appModelTargetKey,
   clearAppModelAuthoringFailure,
@@ -387,103 +386,11 @@ export function createRadiusTools(
     },
     {
       ...declarationByName.get("radius_deploy")!,
-      handler: async (args: ToolArgs = {}) => {
-        try {
-          const deployArgs = args as DeployToolArgs;
-          const entry = deps.deployTools.selectDeployEntry(
-            deps.servers,
-            deployArgs.attemptId
-          );
-          if (!entry) {
-            return args.attemptId ?
-                `Deploy attempt "${args.attemptId}" is no longer active, so this redeploy was not started. A newer deploy may have replaced it; ask the user which deploy to repair rather than retrying against a different one.`
-              : "No Radius canvas session is open, so there is no deploy to repeat. Open the Radius canvas and start a deploy first.";
-          }
-          const retarget = deps.deployTools.validateDeployAttempt(
-            deployArgs,
-            entry.state || {}
-          );
-          if (retarget) return retarget;
-          const payload = deps.deployTools.buildDeployPayload(
-            deployArgs,
-            entry.state || {}
-          );
-          const invalid = deps.deployTools.validateDeployPayload(payload);
-          if (invalid) return invalid;
-          const response = await deps.deploy.fetch(
-            `${entry.baseUrl}/api/deploy`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload)
-            }
-          );
-          const result = (await response.json().catch(() => ({}))) as Record<
-            string,
-            unknown
-          >;
-          if (!response.ok || result.error) {
-            return `⚠️ Could not start the deploy: ${result.error || `HTTP ${response.status}`}`;
-          }
-          return deps.deployTools.describeDeployStarted(payload, result);
-        } catch (err) {
-          return `⚠️ Could not start the deploy: ${errorMessage(err)}`;
-        }
-      }
+      handler: (args: ToolArgs = {}) => deps.deployment.start(args)
     },
     {
       ...declarationByName.get("radius_deploy_status")!,
-      handler: async (args: ToolArgs = {}) => {
-        try {
-          const entry = deps.deployTools.selectDeployEntry(
-            deps.servers,
-            args.attemptId as string | undefined
-          );
-          if (!entry) {
-            return args.attemptId ?
-                `Deploy attempt "${args.attemptId}" is no longer active, so its status is unavailable.`
-              : "No Radius canvas session is open, so there is no deploy status to report.";
-          }
-          const response = await deps.deploy.fetch(
-            `${entry.baseUrl}/api/deploy-status`
-          );
-          if (!response.ok)
-            return `⚠️ Could not read the deploy status: HTTP ${response.status}`;
-          const d = (await response.json().catch(() => ({}))) as Record<
-            string,
-            unknown
-          >;
-          return JSON.stringify(
-            deps.deployTools.summarizeDeployStatus(
-              {
-                status: typeof d.status === "string" ? d.status : "",
-                errorKind: typeof d.errorKind === "string" ? d.errorKind : null,
-                deployRunUrl:
-                  typeof d.deployRunUrl === "string" ? d.deployRunUrl : null,
-                startedAt:
-                  (
-                    typeof d.startedAt === "string" ||
-                    typeof d.startedAt === "number"
-                  ) ?
-                    d.startedAt
-                  : null,
-                finishedAt:
-                  (
-                    typeof d.finishedAt === "string" ||
-                    typeof d.finishedAt === "number"
-                  ) ?
-                    d.finishedAt
-                  : null,
-                error: d.error,
-                logs: d.logs
-              },
-              args.logLines as number | undefined
-            )
-          );
-        } catch (err) {
-          return `⚠️ Could not read the deploy status: ${errorMessage(err)}`;
-        }
-      }
+      handler: (args: ToolArgs = {}) => deps.deployment.status(args)
     }
   ];
 }

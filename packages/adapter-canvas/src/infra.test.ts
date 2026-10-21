@@ -116,6 +116,7 @@ vi.mock("./gh.js", () => ({
 }));
 
 const {
+  createWorkflowTemplateReader,
   syncRepoWorkflows,
   generateVerifyWorkflow,
   generateDeployWorkflow,
@@ -127,6 +128,42 @@ const { hasVerificationOperationMarker } =
   await import("./verification-run-identity.js");
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
+
+describe("scoped workflow template reads", () => {
+  it("isolates readers and expires their own cached template at the exact TTL", async () => {
+    let now = 0;
+    const firstRead = vi.fn(async () => ({
+      content: "first identity",
+      error: null
+    }));
+    const secondRead = vi.fn(async () => ({
+      content: "second identity",
+      error: null
+    }));
+    const first = createWorkflowTemplateReader(firstRead, () => now);
+    const second = createWorkflowTemplateReader(secondRead, () => now);
+    expect(await first("verify-azure.yml")).toBe("first identity");
+    expect(await second("verify-azure.yml")).toBe("second identity");
+    now = 59_999;
+    expect(await first("verify-azure.yml")).toBe("first identity");
+    expect(firstRead).toHaveBeenCalledOnce();
+    now = 60_000;
+    expect(await first("verify-azure.yml")).toBe("first identity");
+    expect(firstRead).toHaveBeenCalledTimes(2);
+    await first("verify-azure.yml", "different-ref");
+    expect(firstRead).toHaveBeenCalledTimes(3);
+    expect(secondRead).toHaveBeenCalledOnce();
+  });
+
+  it("propagates the injected reader failure without sharing cached evidence", async () => {
+    const reader = createWorkflowTemplateReader(async () => {
+      throw new Error("selected account unavailable");
+    });
+    await expect(reader("verify-azure.yml")).rejects.toThrow(
+      "selected account unavailable"
+    );
+  });
+});
 
 describe("verification operation marker", () => {
   it("adds the dispatch input and run title exposed by GitHub run metadata", () => {
@@ -833,6 +870,49 @@ describe("syncRepoWorkflows", () => {
       await generateVerifyWorkflow("dev", "azure")
     );
   });
+
+  it.each(["azure", "aws"])(
+    "uses the injected reader for an exact %s setup verification variant",
+    async (provider) => {
+      const options = { setupPushOperationMarker: "op_123" };
+      const workflow = await generateVerifyWorkflow(
+        "dev",
+        provider,
+        undefined,
+        options
+      );
+      const verify = vi.fn(generateVerifyWorkflow);
+      const write = vi.fn(async () => {
+        throw new Error("An exact setup workflow must not be rewritten.");
+      });
+      const result = await syncRepoWorkflows(
+        "acme/app",
+        [{ name: "dev", provider }],
+        { only: ["radius-verify-credentials.yml"] },
+        {
+          getDefaultBranch: async () => "main",
+          getBranchHeadSha: async () => {
+            throw new Error("Unexpected branch lookup.");
+          },
+          fetchFileFromRepo: async () => workflow,
+          commitFileToRepo: write,
+          generateVerifyWorkflow: verify,
+          generateDeployWorkflow,
+          generateDeleteWorkflow
+        }
+      );
+      expect(result.updated).toEqual([]);
+      expect(result.failed).toEqual([]);
+      expect(write).not.toHaveBeenCalled();
+      expect(verify).toHaveBeenCalledTimes(2);
+      expect(verify).toHaveBeenLastCalledWith(
+        "dev",
+        provider,
+        expect.any(String),
+        options
+      );
+    }
+  );
 
   it("preserves the committed provider when rewriting the shared verify file", async () => {
     // Drifted AWS verify file in a repo that has both an azure and aws env:

@@ -1,20 +1,73 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDeployRequestService,
   type DeployRequestDependencies,
   type DeploymentReservation
 } from "./deploy-request.js";
-import type { DeployMonitorRequest } from "./deploy-monitor.js";
+import type {
+  DeployMonitorRequest,
+  DeployMonitorService
+} from "./deploy-monitor.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
+import {
+  createDeploymentExecutionOwner,
+  type DeploymentExecutionOwner
+} from "../../runtime/deployment-execution-owner.js";
+import { createDeploymentReservationBindings } from "./deployment-reservations.js";
+import { createDeploymentPresentation } from "./deployment-presentation.js";
+import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import { createDeferred } from "../../../test/support/browser/fakes.js";
+
+const owners: DeploymentExecutionOwner[] = [];
+afterEach(() => {
+  for (const owner of owners.splice(0)) owner.shutdown();
+  vi.restoreAllMocks();
+});
 
 // Every seam throws unless a test opts into it, so a path that reaches for a
 // dependency it should not need fails loudly instead of getting a benign
 // default. The four seams below are the ones nearly every case needs.
 function dependencies(
-  overrides: Partial<DeployRequestDependencies> = {}
-): DeployRequestDependencies {
+  overrides: Partial<DeployRequestDependencies> & {
+    monitor?: DeployMonitorService;
+  } = {}
+): DeployRequestDependencies & {
+  presentation: ReturnType<typeof createDeploymentPresentation>;
+} {
+  let nextId = 0;
+  const owner =
+    overrides.owner ??
+    createDeploymentExecutionOwner({
+      now: () => 0,
+      newAttemptId: () =>
+        ++nextId === 1 ? "attempt-new" : `attempt-new-${nextId}`,
+      reportError: vi.fn(),
+      createObservation: () =>
+        createWorkflowObservationScope(() => {
+          throw new Error("Unexpected artifact read");
+        })
+    });
+  owners.push(owner);
+  const bindings = createDeploymentReservationBindings(owner);
+  const presentation = createDeploymentPresentation(owner);
+  const { monitor, ...ports } = overrides;
   return {
+    presentation,
+    owner,
+    account: async () =>
+      successfulSelectedGhExecutor({
+        login: "fixture-user",
+        run: async () => {
+          throw new Error("Unexpected GitHub command");
+        }
+      }),
+    present: (instanceId, execution) => {
+      const panel = ports.readInstanceEntry?.(instanceId);
+      if (panel)
+        presentation.attach(instanceId, panel.state, execution.invocation);
+    },
+    reportError: vi.fn(),
     readInstanceEntry: () => {
       throw new Error("readInstanceEntry not stubbed");
     },
@@ -25,16 +78,13 @@ function dependencies(
     }),
     resolveDeploymentEnvironment: (_state, requested) =>
       typeof requested === "string" ? requested : "",
-    activeDeploymentMutation: () => undefined,
+    activeDeploymentMutation: bindings.active,
     localDeploymentBlocksMutation: () => false,
-    reserveDeploymentMutation: (_state, reservation) => ({
-      ...reservation,
-      expiresAt: 1
-    }),
+    reserveDeploymentMutation: bindings.reserve,
     deploymentStatusBlocksMutation: () => false,
     // Releasing is part of every accepted flow's terminal cleanup, so the
     // default is a no-op and the tests that care assert on it explicitly.
-    releaseDeploymentMutation: () => {},
+    releaseDeploymentMutation: bindings.release,
     resolveEnvDeployment: () => Promise.resolve(null),
     runCommand: () => {
       throw new Error("runCommand not stubbed");
@@ -54,16 +104,17 @@ function dependencies(
     },
     triggerDeployRepairHandoff: () => true,
     triggerDeployFailureNotice: () => false,
-    monitor: {
-      run: () => {
-        throw new Error("monitor.run not stubbed");
-      }
-    },
+    monitorFor: () =>
+      monitor ?? {
+        run: () => {
+          throw new Error("monitor.run not stubbed");
+        }
+      },
     unconfirmedRunKind: "run-unconfirmed",
     repairAttemptCap: 5,
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
-    ...overrides
+    ...ports
   };
 }
 
@@ -88,7 +139,7 @@ interface MonitorControl {
 // A monitor that stays pending until the test settles it, which is what makes
 // "the 200 is written before the deploy finishes" observable.
 function controllableMonitor(): {
-  monitor: DeployRequestDependencies["monitor"];
+  monitor: DeployMonitorService;
   control: MonitorControl;
 } {
   const calls: DeployMonitorRequest[] = [];
@@ -149,6 +200,10 @@ function entryReader(state: CanvasState = {}) {
 
 describe("deploy request service construction", () => {
   it.each([
+    "account",
+    "present",
+    "reportError",
+    "monitorFor",
     "readInstanceEntry",
     "resolveDeployRepairLoop",
     "resolveDeploymentEnvironment",
@@ -165,8 +220,19 @@ describe("deploy request service construction", () => {
     "triggerDeployFailureNotice",
     "errorMessage"
   ] as const)("refuses to construct without %s", (name) => {
+    const owner =
+      (
+        [
+          "present",
+          "readInstanceEntry",
+          "triggerDeployRepairHandoff",
+          "triggerDeployFailureNotice"
+        ].includes(name)
+      ) ?
+        "createDeployRequestService"
+      : "createDeploymentController";
     expect(() => createDeployRequestService(without(name))).toThrow(
-      `createDeployRequestService is missing required dependencies: ${name}`
+      `${owner} is missing required dependencies: ${name}`
     );
   });
 
@@ -174,18 +240,18 @@ describe("deploy request service construction", () => {
     expect(() =>
       createDeployRequestService(without("runCommand", "errorMessage"))
     ).toThrow(
-      "createDeployRequestService is missing required dependencies: runCommand, errorMessage"
+      "createDeploymentController is missing required dependencies: runCommand, errorMessage"
     );
   });
 
   it("refuses to construct without a monitor or a repair cap", () => {
-    expect(() => createDeployRequestService(without("monitor"))).toThrow(
-      "createDeployRequestService is missing required dependencies: monitor"
+    expect(() => createDeployRequestService(without("monitorFor"))).toThrow(
+      "createDeploymentController is missing required dependencies: monitorFor"
     );
     expect(() =>
       createDeployRequestService(without("repairAttemptCap"))
     ).toThrow(
-      "createDeployRequestService is missing required dependencies: repairAttemptCap"
+      "createDeploymentController is missing required dependencies: repairAttemptCap"
     );
   });
 
@@ -193,12 +259,182 @@ describe("deploy request service construction", () => {
     expect(() =>
       createDeployRequestService(without("unconfirmedRunKind"))
     ).toThrow(
-      "createDeployRequestService is missing required dependencies: unconfirmedRunKind"
+      "createDeploymentController is missing required dependencies: unconfirmedRunKind"
     );
   });
 });
 
 describe("deploy request admission", () => {
+  it("refuses missing ownership during construction", () => {
+    expect(() => createDeployRequestService(without("owner"))).toThrow("owner");
+  });
+
+  it("reserves across panels before awaiting account selection and releases an account refusal", async () => {
+    const selecting = createDeferred<void>();
+    const answer = createDeferred<void>();
+    const first = entryWith();
+    const second = entryWith();
+    const account = vi.fn(async () => {
+      selecting.resolve();
+      await answer.promise;
+      throw new Error("The selected account is unavailable.");
+    });
+    const persisted = vi.fn(async () => null);
+    const ports = dependencies({
+      readInstanceEntry: (id) => (id === "first" ? first : second),
+      account,
+      resolveEnvDeployment: persisted
+    });
+    const service = createDeployRequestService(ports);
+    const pending = service.deploy({ instanceId: "first", body: body() });
+    await selecting.promise;
+    expect(
+      (await service.deploy({ instanceId: "second", body: body() })).status
+    ).toBe(409);
+    expect(account).toHaveBeenCalledTimes(1);
+    expect(persisted).not.toHaveBeenCalled();
+    answer.resolve();
+    expect(await pending).toEqual({
+      status: 400,
+      body: { error: "The selected account is unavailable." }
+    });
+    expect(
+      ports.owner.activeReservation({
+        repo: "acme/widgets",
+        environment: "production"
+      })
+    ).toBeUndefined();
+    expect(ports.owner.resolve()).toEqual({ kind: "missing" });
+  });
+
+  it.each(
+    ["account", "persisted", "branch"].flatMap((phase) =>
+      ["selection", "close", "shutdown"].map((change) => ({ phase, change }))
+    )
+  )(
+    "refuses a $change change while awaiting $phase without opening an attempt",
+    async ({ phase, change }) => {
+      const waiting = createDeferred<void>();
+      const resume = createDeferred<void>();
+      const panel = entryWith();
+      let visible = true;
+      const pause = async () => {
+        waiting.resolve();
+        await resume.promise;
+      };
+      const base = dependencies();
+      const monitor = vi.fn(() => {
+        throw new Error("Must not start a monitor");
+      });
+      const ports = dependencies({
+        owner: base.owner,
+        readInstanceEntry: () => (visible ? panel : undefined),
+        account: async (input) => {
+          if (phase === "account") await pause();
+          return base.account(input);
+        },
+        resolveEnvDeployment: async () => {
+          if (phase === "persisted") await pause();
+          return null;
+        },
+        runCommand: async () => {
+          if (phase === "branch") await pause();
+          return "feature/selected";
+        },
+        monitorFor: monitor
+      });
+      const pending = createDeployRequestService(ports).deploy({
+        instanceId: "panel",
+        body: body({ branch: "" })
+      });
+      await waiting.promise;
+      if (change === "selection") panel.state.plannedProvider = "aws";
+      if (change === "close") visible = false;
+      if (change === "shutdown") ports.owner.shutdown();
+      resume.resolve();
+      expect(await pending).toEqual({
+        status: 400,
+        body: { error: "The deployment context changed during admission." }
+      });
+      expect(monitor).not.toHaveBeenCalled();
+      expect(panel.state.deployAttempt).toBeUndefined();
+      expect(
+        ports.owner.activeReservation({
+          repo: "acme/widgets",
+          environment: "production"
+        })
+      ).toBeUndefined();
+    }
+  );
+
+  it.each(["targetRepo", "environment", "branch", "provider", "appFile"])(
+    "refuses a repair that changes %s before account selection or external reads",
+    async (field) => {
+      const base = dependencies();
+      const target = {
+        repo: "acme/widgets",
+        environment: "production",
+        branch: "feat",
+        provider: "azure",
+        appFile: ".radius/app.bicep",
+        githubLogin: "fixture-user"
+      };
+      const reservation = base.owner.reserve(target, "deploy");
+      if (!reservation) throw new Error("Expected reservation");
+      const prior = base.owner.begin({
+        target,
+        reservation,
+        state: { deployStatus: "failed" },
+        executor: await base.account({ target, isCurrent: () => true })
+      });
+      if (prior.kind !== "resolved") throw new Error(prior.kind);
+      base.owner.release(reservation);
+      const account = vi.fn(() => {
+        throw new Error("Must not select an account");
+      });
+      const service = createDeployRequestService(
+        dependencies({
+          owner: base.owner,
+          account,
+          readInstanceEntry: entryReader()
+        })
+      );
+      expect(
+        await service.deploy({
+          instanceId: "a",
+          body: body({
+            attemptId: prior.invocation.attemptId,
+            [field]: "different"
+          })
+        })
+      ).toEqual({
+        status: 409,
+        body: { error: "A repair cannot change the deployment target." }
+      });
+      expect(account).not.toHaveBeenCalled();
+      expect(base.owner.resolve()).toEqual(prior);
+    }
+  );
+
+  it("refuses a stale owner identity even when a panel and repair policy still contain it", async () => {
+    const service = createDeployRequestService(
+      dependencies({
+        readInstanceEntry: entryReader({ deployAttempt: { id: "retired" } })
+      })
+    );
+    expect(
+      await service.deploy({
+        instanceId: "a",
+        body: body({ attemptId: "retired" })
+      })
+    ).toEqual({
+      status: 409,
+      body: {
+        error: "The requested deployment attempt is no longer available."
+      }
+    });
+  });
+
   it.each([
     ["a malformed body", "not json"],
     ["an empty body", ""]
@@ -396,7 +632,7 @@ describe("deploy request admission", () => {
       repo: "acme/leased",
       environment: "leased-env",
       kind: "delete",
-      expiresAt: 1
+      expiresAt: 30 * 60 * 1000
     };
     const service = createDeployRequestService(
       dependencies({
@@ -499,7 +735,7 @@ describe("deploy request admission", () => {
         repo: "acme/widgets",
         environment: "production",
         kind: "deploy",
-        expiresAt: 1
+        expiresAt: 30 * 60 * 1000
       }
     ]);
   });
@@ -519,11 +755,13 @@ describe("deploy request admission", () => {
     );
 
     await service.deploy({ instanceId: "a", body: body() });
+    await control.settle();
     // A repo slug with no owner is its own short name.
     await service.deploy({
       instanceId: "a",
       body: body({ targetRepo: "widgets" })
     });
+    await control.settle();
     // A trailing slash leaves an empty short name, which falls back to the slug.
     await service.deploy({
       instanceId: "a",
@@ -604,58 +842,75 @@ describe("deploy request branch resolution", () => {
     await control.settle();
   });
 
-  it.each([
-    ["a detected default", "  release/7\n", "release/7"],
-    ["an empty answer", "   ", "main"]
-  ])("falls back to %s", async (_name, stdout, expected) => {
-    const calls: [string, string[]][] = [];
-    const { monitor, control } = controllableMonitor();
-    const service = createDeployRequestService(
-      dependencies({
-        readInstanceEntry: entryReader(),
-        runCommand: (command, args) => {
-          calls.push([command, args]);
-          return Promise.resolve(stdout);
-        },
-        monitor
-      })
-    );
+  it.each([["a detected default", "  release/7\n", "release/7"]])(
+    "falls back to %s",
+    async (_name, stdout, expected) => {
+      const calls: [string, string[]][] = [];
+      const { monitor, control } = controllableMonitor();
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: entryReader(),
+          runCommand: (command, args) => {
+            calls.push([command, args]);
+            return Promise.resolve(stdout);
+          },
+          monitor
+        })
+      );
 
-    await service.deploy({ instanceId: "a", body: body({ branch: "" }) });
+      await service.deploy({ instanceId: "a", body: body({ branch: "" }) });
 
-    expect(calls).toEqual([
-      [
-        "gh",
+      expect(calls).toEqual([
         [
-          "repo",
-          "view",
-          "acme/widgets",
-          "--json",
-          "defaultBranchRef",
-          "--jq",
-          ".defaultBranchRef.name"
+          "gh",
+          [
+            "repo",
+            "view",
+            "acme/widgets",
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name"
+          ]
         ]
-      ]
-    ]);
-    expect(control.calls[0].branch).toBe(expected);
-    await control.settle();
-  });
+      ]);
+      expect(control.calls[0].branch).toBe(expected);
+      await control.settle();
+    }
+  );
 
-  it("falls back to main when the lookup fails", async () => {
-    const { monitor, control } = controllableMonitor();
-    const service = createDeployRequestService(
-      dependencies({
-        readInstanceEntry: entryReader(),
-        runCommand: () => Promise.reject(new Error("gh missing")),
-        monitor
-      })
-    );
+  it.each(["empty", "failed"])(
+    "refuses an %s default-branch lookup instead of guessing main",
+    async (mode) => {
+      const { monitor, control } = controllableMonitor();
+      const service = createDeployRequestService(
+        dependencies({
+          readInstanceEntry: entryReader(),
+          runCommand: () =>
+            mode === "empty" ?
+              Promise.resolve("   ")
+            : Promise.reject(new Error("gh missing")),
+          monitor
+        })
+      );
 
-    await service.deploy({ instanceId: "a", body: body({ branch: "" }) });
-
-    expect(control.calls[0].branch).toBe("main");
-    await control.settle();
-  });
+      const result = await service.deploy({
+        instanceId: "a",
+        body: body({ branch: "" })
+      });
+      expect(result).toEqual({
+        status: 400,
+        body: {
+          error:
+            mode === "empty" ?
+              "Could not resolve the deployment branch."
+            : "gh missing"
+        }
+      });
+      expect(control.calls).toEqual([]);
+      await control.settle();
+    }
+  );
 
   it("resolves the branch before the attempt is opened", async () => {
     const order: string[] = [];
@@ -718,10 +973,16 @@ describe("deploy request attempt setup", () => {
       provider: "azure",
       appFile: ".radius/app.bicep"
     });
-    expect(state.envName).toBe("production");
+    expect(state.envName).toBeUndefined();
+    expect(control.calls[0].entry.state.envName).toBe("production");
     expect(state.deployProvider).toBe("azure");
     expect(state.deployingRepo).toBe("acme/widgets");
-    expect(state.appFile).toBe(".radius/app.bicep");
+    expect(state.appFile).toBeUndefined();
+    expect(control.calls[0].entry.state.appFile).toBe(".radius/app.bicep");
+    expect(control.calls[0].resources).toBe(
+      control.calls[0].entry.state.deployingResources
+    );
+    expect(control.calls[0].resources).not.toBe(state.deployingResources);
     expect(state.deployLogs).toEqual([]);
     expect(state.deployLogBase).toBe(0);
     // A clone, not the planned array itself, with every node reset to pending.
@@ -812,11 +1073,14 @@ describe("deploy request attempt setup", () => {
   it("binds the reservation to the attempt the deploy just opened", async () => {
     const reservations: DeploymentReservation[] = [];
     const { monitor, control } = controllableMonitor();
+    const ports = dependencies();
     const service = createDeployRequestService(
       dependencies({
         readInstanceEntry: entryReader(),
-        reserveDeploymentMutation: (_state, reservation) => {
-          const lease = { ...reservation, expiresAt: 1 };
+        owner: ports.owner,
+        reserveDeploymentMutation: (state, reservation) => {
+          const lease = ports.reserveDeploymentMutation(state, reservation);
+          if (!lease) throw new Error("Expected reservation");
           reservations.push(lease);
           return lease;
         },
@@ -832,23 +1096,40 @@ describe("deploy request attempt setup", () => {
 
   it("reports the repair budget only for a loop redeploy", async () => {
     const { monitor, control } = controllableMonitor();
-    const service = createDeployRequestService(
-      dependencies({
-        readInstanceEntry: entryReader(),
-        resolveDeployRepairLoop: () => ({
-          repairLoop: true,
-          attemptId: "attempt-A",
-          repairAttempt: 3
-        }),
-        repairAttemptCap: 5,
-        monitor
-      })
-    );
+    const ports = dependencies({
+      readInstanceEntry: entryReader(),
+      resolveDeployRepairLoop: () => ({
+        repairLoop: true,
+        attemptId: "attempt-A",
+        repairAttempt: 3
+      }),
+      repairAttemptCap: 5,
+      monitor
+    });
+    const target = {
+      repo: "acme/widgets",
+      environment: "production",
+      branch: "feat",
+      provider: "azure",
+      appFile: ".radius/app.bicep",
+      githubLogin: "fixture-user"
+    };
+    const reservation = ports.owner.reserve(target, "deploy");
+    if (!reservation) throw new Error("Expected reservation");
+    const prior = ports.owner.begin({
+      target,
+      reservation,
+      state: { deployStatus: "failed" },
+      executor: await ports.account({ target, isCurrent: () => true })
+    });
+    if (prior.kind !== "resolved") throw new Error(prior.kind);
+    ports.owner.release(reservation);
+    const service = createDeployRequestService(ports);
 
     expect(
       await service.deploy({
         instanceId: "a",
-        body: body({ attemptId: "attempt-A" })
+        body: body({ attemptId: prior.invocation.attemptId })
       })
     ).toEqual({
       status: 200,
@@ -859,8 +1140,82 @@ describe("deploy request attempt setup", () => {
 });
 
 describe("deploy request background monitor ownership", () => {
-  it.each(["removed", "replaced", "attempt", "stopped"] as const)(
-    "fences a %s observer but releases its original reservation after actual settlement",
+  it("keeps an admitted execution alive when presentation and delivery callbacks fail", async () => {
+    const { monitor, control } = controllableMonitor();
+    const reportError = vi.fn();
+    const notice = vi.fn(() => true);
+    const ports = dependencies({
+      readInstanceEntry: entryReader(),
+      present: () => {
+        throw new Error("panel unavailable");
+      },
+      triggerDeployRepairHandoff: () => {
+        throw new Error("handoff unavailable");
+      },
+      triggerDeployFailureNotice: notice,
+      reportError,
+      monitor
+    });
+    expect(
+      (
+        await createDeployRequestService(ports).deploy({
+          instanceId: "a",
+          body: body()
+        })
+      ).status
+    ).toBe(200);
+    expect(control.calls).toHaveLength(1);
+    await control.settle();
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(reportError.mock.calls.map(([error]) => String(error))).toEqual([
+      "Error: panel unavailable",
+      "Error: handoff unavailable"
+    ]);
+    expect(
+      ports.owner.activeReservation({
+        repo: "acme/widgets",
+        environment: "production"
+      })
+    ).toBeUndefined();
+  });
+
+  it("settles a synchronous monitor factory failure and surfaces a failed diagnostic callback", async () => {
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    const reported = createDeferred<void>();
+    const panel = entryWith();
+    const ports = dependencies({
+      readInstanceEntry: () => panel,
+      monitorFor: () => {
+        throw new Error("factory unavailable");
+      },
+      triggerDeployRepairHandoff: () => {
+        throw new Error("delivery unavailable");
+      },
+      reportError: () => {
+        reported.resolve();
+        throw new Error("diagnostic unavailable");
+      }
+    });
+    expect(
+      (
+        await createDeployRequestService(ports).deploy({
+          instanceId: "a",
+          body: body()
+        })
+      ).status
+    ).toBe(200);
+    await reported.promise;
+    await expect.poll(() => panel.state.deploymentMutation).toBeUndefined();
+    expect(panel.state.deployStatus).toBe("failed");
+    expect(panel.state.deployErrorKind).toBe("run-unconfirmed");
+    expect(panel.state.deployError).toContain("factory unavailable");
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+      "[radius deploy] Could not report a deployment callback failure."
+    );
+  });
+
+  it.each(["removed", "replaced", "attempt", "stopped", "shutdown"] as const)(
+    "separates %s presentation from owned work and releases only after settlement",
     async (mode) => {
       const { monitor, control } = controllableMonitor();
       const scope = createWorkflowObservationScope(() => {
@@ -871,38 +1226,43 @@ describe("deploy request background monitor ownership", () => {
       let releases = 0;
       let handoffs = 0;
       let notices = 0;
-      const service = createDeployRequestService(
-        dependencies({
-          readInstanceEntry: () => live,
-          monitor,
-          releaseDeploymentMutation: (state) => {
-            expect(state).toBe(original.state);
-            releases++;
-          },
-          triggerDeployRepairHandoff: () => {
-            handoffs++;
-            return true;
-          },
-          triggerDeployFailureNotice: () => {
-            notices++;
-            return true;
-          }
-        })
-      );
+      const ports = dependencies({
+        readInstanceEntry: () => live,
+        monitor,
+        releaseDeploymentMutation: (state) => {
+          expect(state).toBe(original.state);
+          releases++;
+        },
+        triggerDeployRepairHandoff: () => {
+          handoffs++;
+          return true;
+        },
+        triggerDeployFailureNotice: () => {
+          notices++;
+          return true;
+        }
+      });
+      const service = createDeployRequestService(ports);
       await service.deploy({ instanceId: "a", body: body() });
       if (mode === "removed") live = undefined;
       else if (mode === "replaced") live = { ...original };
       else if (mode === "attempt")
         original.state.deployAttempt = { id: "new-attempt" };
+      else if (mode === "shutdown") ports.owner.shutdown();
       else scope.stop();
+      if (mode !== "attempt") ports.presentation.detach("a");
       control.calls[0].log("late observation");
       expect(original.state.deployLogs).toEqual([]);
       expect(releases).toBe(0);
       await control.settle(new Error("late observation rejection"));
       expect(original.state.deployStatus).toBe("in_progress");
       expect(releases).toBe(1);
-      expect(handoffs).toBe(0);
-      expect(notices).toBe(0);
+      expect(handoffs).toBe(mode === "shutdown" ? 0 : 1);
+      expect(notices).toBe(mode === "shutdown" ? 0 : 1);
+      expect(control.calls[0].entry.state.deployStatus).toBe(
+        mode === "shutdown" ? "in_progress" : "failed"
+      );
+      expect(control.calls[0].isCurrent?.()).toBe(mode !== "shutdown");
       scope.stop();
     }
   );
@@ -1061,7 +1421,7 @@ describe("deploy request background monitor ownership", () => {
     );
 
     await service.deploy({ instanceId: "a", body: body() });
-    state.deployError = "the monitor's own diagnosis";
+    control.calls[0].entry.state.deployError = "the monitor's own diagnosis";
     await control.settle(new Error("late crash"));
 
     expect(state.deployError).toBe("the monitor's own diagnosis");
@@ -1090,10 +1450,10 @@ describe("deploy request background monitor ownership", () => {
     await service.deploy({ instanceId: "panel-a", body: body() });
     // A frozen buffer makes the first addLog inside the catch throw, which is
     // the one case the inner try/catch exists for.
-    Object.freeze(state.deployLogs);
+    Object.freeze(control.calls[0].entry.state.deployLogs);
     await control.settle(new Error("monitor exploded"));
 
-    expect(state.deployStatus).toBe("in_progress");
+    expect(state.deployStatus).toBe("failed");
     expect(handoffs).toEqual(["panel-a"]);
     expect(released).toBe(1);
   });

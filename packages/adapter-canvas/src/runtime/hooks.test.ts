@@ -532,6 +532,9 @@ describe("deployRepairHandoffPrompt", () => {
     expect(out).toContain("radius_deploy");
     expect(out).toContain("radius_deploy_status");
     expect(out).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
+    expect(out).toContain("while status is pending or in_progress");
+    expect(out).toContain("stop on success or failed");
+    expect(out).toContain("errorKind run-unconfirmed as uncertainty");
   });
 
   it("is self-contained: it does not delegate to the radius-deploy skill", () => {
@@ -662,6 +665,30 @@ describe("deployRepairHandoffMessage", () => {
 });
 
 describe("deployFailureNoticePrompt", () => {
+  it.each(["", "read unavailable client_secret=synthetic-value"])(
+    "reports refused preparation without inventing a run or repair: %s",
+    (error) => {
+      const message = deployFailureNoticeMessage("octo/app", "feat", {
+        dispatchRefused: true,
+        error
+      });
+      expect(message.prompt).toContain("No new workflow was started.");
+      expect(message.prompt).toContain(
+        "Do not repair the model or automatically redeploy."
+      );
+      expect(message.prompt).not.toMatch(
+        /may or may not|second run|race the first/
+      );
+      expect(message.prompt).not.toContain("synthetic-value");
+      expect(message.displayPrompt).toBe(
+        "Reporting the refused Radius deploy of octo/app (branch `feat`) (no new workflow was started)."
+      );
+      if (!error)
+        expect(message.prompt).toContain("prerequisites could not be verified");
+      else expect(message.prompt).toContain("[REDACTED]");
+    }
+  );
+
   const failure = {
     error: "dispatch rejected: missing workflow scope",
     deployRunUrl: "https://github.com/octo/app/actions/runs/42"
