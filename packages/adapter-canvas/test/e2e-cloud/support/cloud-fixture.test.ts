@@ -2753,6 +2753,164 @@ describe("createCloudFixture", () => {
   });
 
   describe("reclaimLeakedProductArtifacts", () => {
+    const probeName = "radtest-orphan?probe";
+    const probePath = `repos/${REPOSITORY}/environments/${encodeURIComponent(probeName)}`;
+
+    it("reclaims a probe leak registered absent before submission without deleting seed apps", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", probePath],
+          respond: { code: 1, stderr: "gh: Not Found (HTTP 404)" },
+          times: 1
+        },
+        {
+          tool: "gh",
+          match: ["api", probePath],
+          respond: { stdout: "{}" },
+          times: 1
+        },
+        {
+          tool: "gh",
+          match: ["api", "--method", "DELETE", probePath],
+          respond: {}
+        }
+      ]);
+      await fixture.registerProbeEnvironmentCleanupTarget(probeName);
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        `probe GitHub environment ${probeName}`
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE ${probePath}`
+      );
+      expect(
+        fake.commands.calls.filter(
+          (call) =>
+            call.tool === "az" &&
+            call.args.some((arg) => arg === "DELETE" || arg === "delete")
+        )
+      ).toEqual([]);
+    });
+
+    it.each([
+      { code: 0, stdout: "{}", stderr: "" },
+      { code: 1, stdout: "", stderr: "Forbidden (HTTP 403)" },
+      { code: 1, stdout: "rate limit exceeded", stderr: "" },
+      { code: 1, stdout: "", stderr: "Not Found while resolving host" }
+    ])(
+      "does not register a pre-existing or unreadable environment: %j",
+      async (respond) => {
+        const { fixture, fake } = await createHarness([
+          { tool: "gh", match: ["api", probePath], respond }
+        ]);
+        await expect(
+          fixture.registerProbeEnvironmentCleanupTarget(probeName)
+        ).rejects.toThrow();
+        await fixture.reclaimLeakedProductArtifacts();
+        expect(fake.commands.commandLines("gh")).not.toContain(
+          `api --method DELETE ${probePath}`
+        );
+      }
+    );
+
+    it.each(["", " ", ENVIRONMENT])(
+      "refuses an unsafe probe target %j",
+      async (name) => {
+        const { fixture } = await createHarness();
+        await expect(
+          fixture.registerProbeEnvironmentCleanupTarget(name)
+        ).rejects.toThrow("Probe cleanup needs");
+      }
+    );
+
+    it("does not delete an environment the probe never registered", async () => {
+      const { fixture, fake } = await createHarness([
+        { tool: "gh", match: ["api", probePath], respond: { stdout: "{}" } }
+      ]);
+      await fixture.reclaimLeakedProductArtifacts();
+      expect(fake.commands.commandLines("gh")).not.toContain(
+        `api --method DELETE ${probePath}`
+      );
+    });
+
+    it("skips an absent probe during repeated teardown", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", probePath],
+          respond: { code: 1, stderr: "gh: Not Found (HTTP 404)" }
+        }
+      ]);
+      await fixture.registerProbeEnvironmentCleanupTarget(probeName);
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
+        []
+      );
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
+        []
+      );
+      expect(fake.commands.commandLines("gh")).not.toContain(
+        `api --method DELETE ${probePath}`
+      );
+    });
+
+    it.each(["probe", "delete"])(
+      "reports a probe environment %s failure",
+      async (stage) => {
+        const { fixture } = await createHarness([
+          {
+            tool: "gh",
+            match: ["api", probePath],
+            respond: { code: 1, stderr: "gh: Not Found (HTTP 404)" },
+            times: 1
+          },
+          {
+            tool: "gh",
+            match: ["api", probePath],
+            respond:
+              stage === "probe" ?
+                { code: 1, stderr: "Forbidden (HTTP 403)" }
+              : { stdout: "{}" },
+            times: 1
+          },
+          {
+            tool: "gh",
+            match: ["api", "--method", "DELETE", probePath],
+            respond: { code: 1, stderr: "Forbidden (HTTP 403)" }
+          }
+        ]);
+        await fixture.registerProbeEnvironmentCleanupTarget(probeName);
+        await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+          "probe GitHub environment"
+        );
+      }
+    );
+
+    it("accepts a probe environment removed between the read and delete", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", probePath],
+          respond: { code: 1, stderr: "gh: Not Found (HTTP 404)" },
+          times: 1
+        },
+        {
+          tool: "gh",
+          match: ["api", probePath],
+          respond: { stdout: "{}" },
+          times: 1
+        },
+        {
+          tool: "gh",
+          match: ["api", "--method", "DELETE", probePath],
+          respond: { code: 1, stderr: "gh: Not Found (HTTP 404)" }
+        }
+      ]);
+      await fixture.registerProbeEnvironmentCleanupTarget(probeName);
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        `probe GitHub environment ${probeName}`
+      );
+    });
+
     it("reclaims nothing when the world is already clean", async () => {
       const { fixture, fake } = await createHarness();
 

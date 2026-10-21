@@ -225,6 +225,8 @@ export interface CloudFixture {
   ): void;
   /** Registers a fixture-owned namespace that reclamation may remove. */
   registerNamespaceCleanupTarget(namespace: string): void;
+  /** Registers only an environment verified absent before a refusal probe submits. */
+  registerProbeEnvironmentCleanupTarget(name: string): Promise<void>;
   /** Records that the journey verified Radius removed the application. */
   recordApplicationDeletionSucceeded(
     application: string,
@@ -355,6 +357,7 @@ export async function createCloudFixture(
   const statePackage = stateRegistryForEnvironment(repository, environmentName);
 
   const unwind: UnwindStep[] = [];
+  const probeEnvironmentCleanupTargets = new Set<string>();
   let workspacePath = "";
 
   try {
@@ -1277,6 +1280,24 @@ export async function createCloudFixture(
       });
     },
 
+    async registerProbeEnvironmentCleanupTarget(name) {
+      if (!name.trim() || name === environmentName)
+        throw new Error(
+          "Probe cleanup needs a non-empty environment name distinct from the main environment."
+        );
+      const apiPath = `repos/${repository}/environments/${encodeURIComponent(name)}`;
+      const result = await commands.runGh(["api", apiPath]);
+      if (result.code === 0)
+        throw new Error(
+          `Refusing to register pre-existing probe environment "${name}" for cleanup.`
+        );
+      if (!isGitHubApiNotFound(result))
+        throw new Error(
+          `Could not verify probe environment "${name}" is absent: ${result.stderr || result.stdout}`
+        );
+      probeEnvironmentCleanupTargets.add(name);
+    },
+
     async reclaimLeakedProductArtifacts() {
       const reclaimed: string[] = [];
       const failures: string[] = [];
@@ -1292,6 +1313,29 @@ export async function createCloudFixture(
           failures.push(`${label}: ${describeError(error)}`);
         }
       };
+
+      for (const name of probeEnvironmentCleanupTargets) {
+        const apiPath = `repos/${repository}/environments/${encodeURIComponent(name)}`;
+        try {
+          const probe = await commands.runGh(["api", apiPath]);
+          if (isGitHubApiNotFound(probe)) continue;
+          expectSuccess(probe, `gh api ${apiPath}`);
+          await attempt(`probe GitHub environment ${name}`, async () => {
+            const result = await commands.runGh([
+              "api",
+              "--method",
+              "DELETE",
+              apiPath
+            ]);
+            if (result.code !== 0 && !isGitHubApiNotFound(result))
+              expectSuccess(result, `gh api DELETE ${apiPath}`);
+          });
+        } catch (error) {
+          failures.push(
+            `probe GitHub environment ${name}: ${describeError(error)}`
+          );
+        }
+      }
 
       const applicationFailureStart = failures.length;
       for (const target of applicationCleanupTargets.values()) {

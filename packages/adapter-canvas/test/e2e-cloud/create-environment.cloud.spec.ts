@@ -191,7 +191,7 @@ import {
   probeEnvironmentName,
   readCallerObjectId,
   readDirectoryObjectIds,
-  readFederatedCredentialSubjects,
+  readFederatedCredentials,
   readOperationFailureCode,
   readOrphanEnvironmentName,
   readSingleAppRegistration,
@@ -552,7 +552,7 @@ async function readSeededAppSnapshot(
       ),
       ownersContext
     ),
-    federatedSubjects: readFederatedCredentialSubjects(
+    federatedCredentials: readFederatedCredentials(
       await runAz(
         commands,
         [
@@ -628,9 +628,10 @@ async function assertCreateRefused(input: {
     appName: input.appName
   });
   const around = input.around ?? ((run) => run());
+  await cloud.registerProbeEnvironmentCleanupTarget(input.environmentName);
+  input.onOperationStarted();
   const payload = await around(async () => {
     const operationId = readSubmittedOperationId(await submit());
-    input.onOperationStarted();
     return waitForTerminalOperation(
       canvas.target,
       operationId,

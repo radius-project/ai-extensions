@@ -170,24 +170,51 @@ export function readDirectoryObjectIds(
   );
 }
 
-/** The subjects of an application's federated identity credentials. */
-export function readFederatedCredentialSubjects(
+export const SEED_SENTINEL_CREDENTIAL = Object.freeze({
+  name: "radius-cloud-e2e-sentinel",
+  issuer: "https://sentinel.invalid",
+  subject: "radius-cloud-e2e:never-a-workflow",
+  audiences: Object.freeze(["api://AzureADTokenExchange"])
+});
+
+export interface FederatedCredentialSnapshot {
+  readonly id: string;
+  readonly name: string;
+  readonly issuer: string;
+  readonly subject: string;
+  readonly audiences: readonly string[];
+}
+
+/** Reads complete credential identities and trust settings without removing duplicates. */
+export function readFederatedCredentials(
   payload: unknown,
   context: string
-): string[] {
+): FederatedCredentialSnapshot[] {
   if (!Array.isArray(payload))
     throw new Error(`${context} did not return a list.`);
-  return sortedUnique(
-    payload.map((entry) =>
-      requireString(asRecord(entry)?.subject, "subject", context)
-    )
-  );
+  return payload
+    .map((entry) => {
+      const record = asRecord(entry);
+      const audiences = record?.audiences;
+      if (!Array.isArray(audiences) || audiences.length === 0)
+        throw new Error(`${context} returned no "audiences" list.`);
+      return {
+        id: requireString(record?.id, "id", context),
+        name: requireString(record?.name, "name", context),
+        issuer: requireString(record?.issuer, "issuer", context),
+        subject: requireString(record?.subject, "subject", context),
+        audiences: audiences
+          .map((value) => requireString(value, "audience", context))
+          .sort()
+      };
+    })
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
 
 /** Everything a refusal must leave unchanged on a seeded application. */
 export interface SeededAppSnapshot extends SeededAppRegistration {
   readonly ownerIds: readonly string[];
-  readonly federatedSubjects: readonly string[];
+  readonly federatedCredentials: readonly FederatedCredentialSnapshot[];
 }
 
 function describeListChange(
@@ -219,9 +246,13 @@ export function findSeededAppMutationProblems(
     describeListChange("tags", before.tags, after.tags),
     describeListChange("owners", before.ownerIds, after.ownerIds),
     describeListChange(
-      "federated credential subjects",
-      before.federatedSubjects,
-      after.federatedSubjects
+      "federated credentials",
+      before.federatedCredentials
+        .map((credential) => JSON.stringify(credential))
+        .sort(),
+      after.federatedCredentials
+        .map((credential) => JSON.stringify(credential))
+        .sort()
     )
   ])
     if (change) problems.push(change);
@@ -250,6 +281,20 @@ export function findSeededAppPreconditionProblems(input: {
 }): string[] {
   const { kind, snapshot } = input;
   const problems: string[] = [];
+  if (
+    !snapshot.federatedCredentials.some(
+      (credential) =>
+        credential.id.trim() &&
+        credential.name === SEED_SENTINEL_CREDENTIAL.name &&
+        credential.issuer === SEED_SENTINEL_CREDENTIAL.issuer &&
+        credential.subject === SEED_SENTINEL_CREDENTIAL.subject &&
+        credential.audiences.length === 1 &&
+        credential.audiences[0] === SEED_SENTINEL_CREDENTIAL.audiences[0]
+    )
+  )
+    problems.push(
+      `The seeded ${kind} application needs the sentinel federated credential "${SEED_SENTINEL_CREDENTIAL.name}" with the trust settings in docs/eng/CLOUD_E2E_RUNBOOK.md.`
+    );
   if (snapshot.ownerIds.includes(input.callerObjectId))
     problems.push(
       `The CI identity ${input.callerObjectId} owns the seeded ${kind} application, so the product would reuse it.`

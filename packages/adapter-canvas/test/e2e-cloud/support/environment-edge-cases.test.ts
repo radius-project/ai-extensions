@@ -13,17 +13,19 @@ import {
   probeEnvironmentName,
   readCallerObjectId,
   readDirectoryObjectIds,
-  readFederatedCredentialSubjects,
+  readFederatedCredentials,
   readOperationFailureCode,
   readOrphanEnvironmentName,
   readSingleAppRegistration,
   SIGNED_OUT_FAILURE_CODES,
+  SEED_SENTINEL_CREDENTIAL,
   type SeededAppSnapshot,
   withEnvironmentOverride
 } from "./environment-edge-cases.js";
 
 const REPOSITORY = "radius-project/ai-extensions-fixture";
 const CALLER = "11111111-2222-3333-4444-555555555555";
+const SENTINEL = { id: "sentinel-id", ...SEED_SENTINEL_CREDENTIAL };
 
 function snapshot(
   overrides: Partial<SeededAppSnapshot> = {}
@@ -33,7 +35,7 @@ function snapshot(
     objectId: "obj-1",
     tags: [],
     ownerIds: ["99999999-0000-0000-0000-000000000000"],
-    federatedSubjects: [],
+    federatedCredentials: [SENTINEL],
     ...overrides
   };
 }
@@ -191,23 +193,42 @@ describe("readDirectoryObjectIds", () => {
   });
 });
 
-describe("readFederatedCredentialSubjects", () => {
-  it("returns sorted, unique subjects", () => {
+describe("readFederatedCredentials", () => {
+  it("preserves complete credentials and sorts audiences and records", () => {
     expect(
-      readFederatedCredentialSubjects(
-        [{ subject: "repo:b" }, { subject: "repo:a" }],
+      readFederatedCredentials(
+        [{ ...SENTINEL, id: "z", audiences: ["b", "a"] }, SENTINEL],
         "fic"
       )
-    ).toEqual(["repo:a", "repo:b"]);
+    ).toEqual([SENTINEL, { ...SENTINEL, id: "z", audiences: ["a", "b"] }]);
   });
 
-  it("refuses a payload that is not a list or an entry with no subject", () => {
-    expect(() => readFederatedCredentialSubjects("x", "fic")).toThrow(
+  it("refuses a payload that is not a list", () => {
+    expect(() => readFederatedCredentials("x", "fic")).toThrow(
       "fic did not return a list."
     );
-    expect(() =>
-      readFederatedCredentialSubjects([{ subject: "" }], "fic")
-    ).toThrow('fic returned no "subject".');
+  });
+
+  it.each(["id", "name", "issuer", "subject"])(
+    "rejects a missing %s",
+    (field) => {
+      expect(() =>
+        readFederatedCredentials([{ ...SENTINEL, [field]: "" }], "fic")
+      ).toThrow(`returned no "${field}"`);
+    }
+  );
+
+  it.each([undefined, [], "audience", [4]])(
+    "rejects invalid audiences %j",
+    (audiences) => {
+      expect(() =>
+        readFederatedCredentials([{ ...SENTINEL, audiences }], "fic")
+      ).toThrow();
+    }
+  );
+
+  it("rejects a null entry", () => {
+    expect(() => readFederatedCredentials([null], "fic")).toThrow();
   });
 });
 
@@ -224,20 +245,50 @@ describe("findSeededAppMutationProblems", () => {
           objectId: "obj-2",
           tags: ["radius-managed"],
           ownerIds: [CALLER],
-          federatedSubjects: ["repo:x"]
+          federatedCredentials: []
         })
       )
     ).toEqual([
       "The application identity changed from app-1/obj-1 to app-1/obj-2.",
       "The tags changed from [] to [radius-managed].",
       `The owners changed from [99999999-0000-0000-0000-000000000000] to [${CALLER}].`,
-      "The federated credential subjects changed from [] to [repo:x]."
+      `The federated credentials changed from [${JSON.stringify(SENTINEL)}] to [].`
     ]);
   });
 
   it("reports a changed app id", () => {
     expect(
       findSeededAppMutationProblems(snapshot(), snapshot({ appId: "app-2" }))
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    { id: "replacement-id" },
+    { name: "replacement-name" },
+    { issuer: "https://changed.invalid" },
+    { audiences: ["changed-audience"] }
+  ])(
+    "detects a trust or identity change with the same subject: %j",
+    (change) => {
+      expect(
+        findSeededAppMutationProblems(
+          snapshot(),
+          snapshot({
+            federatedCredentials: [{ ...SENTINEL, ...change }]
+          })
+        )
+      ).toHaveLength(1);
+    }
+  );
+
+  it("detects an added credential with the same subject", () => {
+    expect(
+      findSeededAppMutationProblems(
+        snapshot(),
+        snapshot({
+          federatedCredentials: [SENTINEL, { ...SENTINEL, id: "extra" }]
+        })
+      )
     ).toHaveLength(1);
   });
 });
@@ -248,6 +299,38 @@ describe("findSeededAppPreconditionProblems", () => {
     `radius-repo:${REPOSITORY.toUpperCase()}`,
     "radius-environment:radtest-orphan"
   ];
+
+  it.each([
+    { federatedCredentials: [] },
+    { federatedCredentials: [{ ...SENTINEL, id: "" }] },
+    { federatedCredentials: [{ ...SENTINEL, name: "wrong" }] },
+    {
+      federatedCredentials: [
+        { ...SENTINEL, issuer: "https://token.actions.githubusercontent.com" }
+      ]
+    },
+    {
+      federatedCredentials: [
+        { ...SENTINEL, subject: "repo:real/repo:environment:prod" }
+      ]
+    },
+    { federatedCredentials: [{ ...SENTINEL, audiences: [] }] },
+    { federatedCredentials: [{ ...SENTINEL, audiences: ["wrong"] }] }
+  ])(
+    "rejects a missing or changed sentinel: %j",
+    ({ federatedCredentials }) => {
+      expect(
+        findSeededAppPreconditionProblems({
+          kind: "foreign",
+          snapshot: snapshot({ federatedCredentials }),
+          callerObjectId: CALLER,
+          repository: REPOSITORY
+        })
+      ).toEqual([
+        expect.stringContaining("needs the sentinel federated credential")
+      ]);
+    }
+  );
 
   it("accepts a correct foreign seed", () => {
     expect(

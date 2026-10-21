@@ -167,6 +167,8 @@ Two refusal probes need an Entra app registration that the CI identity does not 
 
 Use an identity that is **not** the CI service principal. That identity can stay the owner, or you can remove all owners. Do not add the CI service principal as an owner.
 
+Before enabling either probe, an administrator must give the bootstrap identity Microsoft Graph **Application.Read.All** application permission and grant tenant admin consent. In Entra, open the app registration whose client ID is stored in `AZURE_CLIENT_ID`, then select **API permissions > Add a permission > Microsoft Graph > Application permissions > Application.Read.All** and grant admin consent. Keep `Application.ReadWrite.OwnedBy` for changes to apps that CI owns; do not grant `Application.ReadWrite.All`. The extra grant permits read-only snapshots of seed apps that CI does not own. This repository change does not apply that tenant grant.
+
 1. Make the foreign app. Give it a unique name and no tags.
 
    ```bash
@@ -182,9 +184,21 @@ Use an identity that is **not** the CI service principal. That identity can stay
      --body '{"tags":["radius-managed","radius-repo:radius-project/ai-extensions-fixture","radius-environment:radtest-orphan-probe"]}'
    ```
 
-3. Set `AIEXT_CLOUD_E2E_FOREIGN_APP_NAME` and `AIEXT_CLOUD_E2E_ORPHAN_APP_NAME` to the two display names.
+3. Add a sentinel federated credential to **each** seed. Replace `<seed-app-id>` with the app's client ID and run this command once for each app.
 
-Each probe reads its app before it starts. It stops with a clear message if the CI identity owns the app, if the foreign app has the `radius-managed` tag, or if the orphan app does not have the correct tags. After the refusal, the probe reads the app again and fails if its tags, owners, or federated credentials changed. The scheduled cleanup deletes apps only by the product's name, `radius-deploy-<owner>-<name>`, so it does not delete the seeded apps.
+   ```bash
+   az rest --method POST \
+     --url "https://graph.microsoft.com/v1.0/applications(appId='<seed-app-id>')/federatedIdentityCredentials" \
+     --body '{"name":"radius-cloud-e2e-sentinel","issuer":"https://sentinel.invalid","subject":"radius-cloud-e2e:never-a-workflow","audiences":["api://AzureADTokenExchange"]}'
+   ```
+
+   The reserved `.invalid` issuer cannot issue real workflow tokens, and the subject is not a GitHub workflow subject. Do not replace these values with a real issuer or repository. This credential proves that refusal preserves an existing credential, not just an empty list.
+
+4. With the bootstrap identity signed in, verify that `az ad app owner list --id <seed-app-id>` and `az ad app federated-credential list --id <seed-app-id>` succeed for each seed. If either command fails, correct the read grant before enabling the probes. Do not add CI as an owner.
+
+5. Set `AIEXT_CLOUD_E2E_FOREIGN_APP_NAME` and `AIEXT_CLOUD_E2E_ORPHAN_APP_NAME` to the two display names.
+
+Each probe reads its app before it starts. It stops with a clear message if the sentinel is missing or has different trust settings, if the CI identity owns the app, if the foreign app has the `radius-managed` tag, or if the orphan app does not have the correct tags. After the refusal, the probe reads the app again and fails if its tags, owners, or any credential's ID, name, issuer, subject, or audiences changed. The fixture registers a probe environment for teardown only after it verifies that the environment is absent, before submission. If a probe fails and leaves that environment behind, guarded teardown removes it. It does not register pre-existing environments or delete seeded Entra apps. The scheduled cleanup deletes apps only by the product's name, `radius-deploy-<owner>-<name>`, so it does not delete the seeded apps.
 
 The dedicated Cloud E2E GitHub App must remain installed only on the fixture repository with `actions: write`, `actions_variables: write`, `administration: write`, `contents: write`, `deployments: write`, `environments: write`, `pull_requests: write`, `secrets: write`, and `workflows: write`. Two of those are easy to get wrong. `administration: write` is what GitHub requires to create a deployment environment, so `read` is not enough. The API name for environment variable management is `actions_variables`, not `variables`. Grant no Packages permission: scheduled cleanup reaches GHCR through `GH_RAD_CI_BOT_PAT` instead, because the journey mints its token without permission inputs and would otherwise inherit package write. Store its client ID and private key as `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
 

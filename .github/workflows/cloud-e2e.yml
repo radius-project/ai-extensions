@@ -208,7 +208,9 @@ jobs:
       # No stored Azure secret exists. The runner's OIDC token is exchanged for
       # an Azure token scoped to the dedicated bootstrap identity, which holds
       # subscription Contributor, RBAC administration, and Graph
-      # `Application.ReadWrite.OwnedBy` - and is federated on this repository's
+      # `Application.ReadWrite.OwnedBy` (plus `Application.Read.All` with admin
+      # consent before enabling seeded-app probes; see CLOUD_E2E_RUNBOOK.md).
+      # It is federated on this repository's
       # default branch only, so no pull request can mint a token for it.
       - name: Sign in to Azure
         if: steps.fixture.outputs.configured == 'true'
