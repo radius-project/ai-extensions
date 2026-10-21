@@ -8,9 +8,11 @@ import {
   DEPLOY_AZURE_FILE,
   DEPLOY_DISPATCHER_FILE
 } from "../../../src/infra.js";
+import { DELETE_FAILED_STATUS } from "../../../src/server/services/delete-conflict.js";
 import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
 import {
   deploymentNamespace,
+  classifyDeploymentDeletion,
   classifyDeploymentPresence,
   createTolerantProbe,
   DELETE_DEPLOYMENT_WORKFLOW,
@@ -20,6 +22,7 @@ import {
   findDeleteEnvironmentRefusalProblems,
   findDeployedApplicationProblems,
   findSurvivingArtifactProblems,
+  isDeploymentDeletionSettled,
   isKubernetesWorkloadReady,
   RADIUS_APPLICATION_LABEL,
   radiusApplicationSelector,
@@ -37,6 +40,7 @@ import {
   REQUIRED_LIFECYCLE_WORKFLOWS,
   REQUIRED_STATE_VARIABLES,
   repositoryListingPath,
+  requireDeploymentDeleted,
   requireWorkflowRunId,
   requireSingleApplication,
   SUCCESSFUL_DEPLOY_STATE,
@@ -564,6 +568,102 @@ describe("classifyDeploymentPresence", () => {
   it("does not match the same application in a different environment", () => {
     expect(classifyDeploymentPresence(rows, "demo", "other-env").present).toBe(
       false
+    );
+  });
+});
+
+describe("classifyDeploymentDeletion", () => {
+  const runUrl = "https://example.invalid/run";
+
+  it("settles as deleted once the row is gone", () => {
+    const deletion = classifyDeploymentDeletion({ present: false });
+    expect(deletion).toEqual({ state: "deleted" });
+    expect(isDeploymentDeletionSettled(deletion)).toBe(true);
+  });
+
+  it("settles as failed with the run url when the product reports delete-failed", () => {
+    const deletion = classifyDeploymentDeletion({
+      present: true,
+      status: DELETE_FAILED_STATUS,
+      runUrl
+    });
+    expect(deletion).toEqual({
+      state: "failed",
+      status: "delete-failed",
+      runUrl
+    });
+    expect(isDeploymentDeletionSettled(deletion)).toBe(true);
+  });
+
+  it.each(["deleting", "success", "in_progress", "", "Delete-Failed"])(
+    "keeps waiting while the row reports %j",
+    (status) => {
+      const deletion = classifyDeploymentDeletion({
+        present: true,
+        status,
+        runUrl
+      });
+      expect(deletion).toEqual({ state: "deleting", status });
+      expect(isDeploymentDeletionSettled(deletion)).toBe(false);
+    }
+  );
+});
+
+describe("requireDeploymentDeleted", () => {
+  it("accepts a completed delete", () => {
+    expect(() =>
+      requireDeploymentDeleted({ state: "deleted" }, "demo", "dev")
+    ).not.toThrow();
+  });
+
+  it("fails a delete-failed row with its status and run url", () => {
+    expect(() =>
+      requireDeploymentDeleted(
+        {
+          state: "failed",
+          status: "delete-failed",
+          runUrl: "https://github.com/owner/repo/actions/runs/42"
+        },
+        "demo",
+        "dev"
+      )
+    ).toThrow(
+      'The delete of deployment "demo" in environment "dev" failed: the deployment listing reports status "delete-failed". ' +
+        "Workflow run: https://github.com/owner/repo/actions/runs/42"
+    );
+  });
+
+  it("says so when a failed row carries no run url", () => {
+    expect(() =>
+      requireDeploymentDeleted(
+        { state: "failed", status: "delete-failed", runUrl: "" },
+        "demo",
+        "dev"
+      )
+    ).toThrow(/Workflow run: <the listing reported no run URL>$/);
+  });
+
+  it("refuses a delete that has not settled", () => {
+    expect(() =>
+      requireDeploymentDeleted(
+        { state: "deleting", status: "deleting" },
+        "demo",
+        "dev"
+      )
+    ).toThrow(
+      /had not settled: the deployment listing still reports status "deleting"/
+    );
+  });
+
+  it("names an empty status rather than printing nothing", () => {
+    expect(() =>
+      requireDeploymentDeleted({ state: "deleting", status: "" }, "demo", "dev")
+    ).toThrow(/still reports status "<empty>"/);
+  });
+
+  it("refuses when the listing was never read successfully", () => {
+    expect(() => requireDeploymentDeleted(undefined, "demo", "dev")).toThrow(
+      'The delete of deployment "demo" in environment "dev" was never observed in the deployment listing.'
     );
   });
 });
