@@ -46,7 +46,7 @@ import type {
   CanvasServerEntry,
   SessionPromptMessage
 } from "../../../src/server.js";
-import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
+import type { CanvasGraphResource } from "../../../src/shared.js";
 
 export interface FakeServer {
   close: Mock;
@@ -157,12 +157,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   let lastWebviewActivityAt = 0;
 
   const capturedHostCallbacks: {
-    appBicepHandoff?: (input: {
-      repo: string;
-      branches: string[];
-      page: string;
-      state?: CanvasState;
-    }) => Promise<unknown>;
+    appBicepHandoff?: Parameters<
+      RadiusExtensionDependencies["hostCallbacks"]["setAppBicepHandoff"]
+    >[0];
     deployRepairHandoff?:
       | ((input: {
           repo: string;
@@ -374,6 +371,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       generatorVersion: vi.fn(() => options.generatorVersion ?? "0.1.0-test"),
       radiusVersion: vi.fn(async () => options.radiusVersion ?? "0.60"),
       workspaceHeadCommit: vi.fn(
+        async (workspacePath: string | null | undefined) =>
+          headCommits[`workspace:${workspacePath}`] ?? ""
+      ),
+      workspaceSourceRevision: vi.fn(
         async (workspacePath: string | null | undefined) =>
           headCommits[`workspace:${workspacePath}`] ?? ""
       ),

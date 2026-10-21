@@ -48,6 +48,31 @@ describe("graphDiffPage", () => {
     });
   });
 
+  it.each([
+    ["empty", []],
+    ["with resources", [{ id: "app/web", diffStatus: "unchanged" }]]
+  ])(
+    "places one hidden primary Refresh after the Head selector (%s)",
+    (_name, diffResources) => {
+      const html = graphDiffPage({
+        diffTargetRepo: "octo/app",
+        diffBase: "main",
+        diffHead: "feature",
+        diffResources
+      });
+      const refresh =
+        '<button id="modeling-refresh" type="button" class="rad-btn rad-btn--primary" style="margin-top:0;" hidden>Refresh</button>';
+      expect(html.split('id="modeling-refresh"')).toHaveLength(2);
+      expect(html).toContain(refresh);
+      expect(html.indexOf('id="head-branch"')).toBeLessThan(
+        html.indexOf(refresh)
+      );
+      expect(html.indexOf(refresh)).toBeLessThan(
+        html.indexOf('id="diff-status"')
+      );
+    }
+  );
+
   it("renders diff counts and serializes resources", () => {
     const resources = [
       { id: "added", diffStatus: "added" },

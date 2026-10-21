@@ -49,6 +49,7 @@ import {
   toSafeRepoRelPath,
   workspaceFileExists,
   workspaceHeadCommit,
+  workspaceSourceRevision,
   workspaceModelRecoverable,
   workspaceSourceChangedSince
 } from "./workspace.js";
@@ -104,6 +105,7 @@ import type { SessionPort } from "./runtime/session.js";
 import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
+import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -114,8 +116,9 @@ const execFileAsync = promisify(execFile);
 // ─── Production dependency wiring ────────────────────────────────────────────
 const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
+const accountContext = createProductionGitHubAccountContext();
 const { servers, getOrCreateServer, stopServer, getLastWebviewActivityAt } =
-  createProductionCanvasServerRuntime({ executionOwner });
+  createProductionCanvasServerRuntime({ executionOwner, accountContext });
 
 const ghCommandPresentation = resolveGhCommandPresentation();
 const dependencies: RadiusExtensionDependencies = {
@@ -204,6 +207,7 @@ const dependencies: RadiusExtensionDependencies = {
     generatorVersion: createGeneratorVersionReader(),
     radiusVersion: createRadiusCliVersionReader(resolveInstalledRadiusVersion),
     workspaceHeadCommit,
+    workspaceSourceRevision,
     workspaceModelRecoverable,
     workspaceSourceChangedSince,
     branchHeadCommit: (repo, branch) => getBranchHeadSha(repo, branch),

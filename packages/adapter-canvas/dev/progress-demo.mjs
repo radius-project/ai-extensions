@@ -38,6 +38,7 @@ import {
 } from "../src/operations.js";
 import { createProductionCanvasServerRuntime } from "../src/server.js";
 import { createEnvironmentExecutionOwner } from "../src/runtime/environment-execution-owner.js";
+import { createProductionGitHubAccountContext } from "../src/runtime/production-github-account-context.js";
 
 const REPO = process.env.RADIUS_DEMO_REPO || "radius-project/ai-extensions";
 const ENV_NAME = process.env.RADIUS_DEMO_ENV || "dev";
@@ -223,7 +224,8 @@ function seed(scenarioKey) {
 
 async function main() {
   const { getOrCreateServer } = createProductionCanvasServerRuntime({
-    executionOwner: createEnvironmentExecutionOwner()
+    executionOwner: createEnvironmentExecutionOwner(),
+    accountContext: createProductionGitHubAccountContext()
   });
   const entry = await getOrCreateServer("progress-demo", "environment");
   // The environment page reads its repo out of the server entry's state, the

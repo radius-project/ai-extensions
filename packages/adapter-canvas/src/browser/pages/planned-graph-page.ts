@@ -103,6 +103,9 @@ export function initializePlannedGraphPage(
   let appBicepRetry: ScopeTimer | null = null;
   let nextRequestRefresh = page.resources.length > 0;
   let restartWait = true;
+  let userRetry = false;
+  // Return focus to the primary button once an explicit Refresh settles.
+  let focusAfterRetry = false;
   // Re-issues the current selection. Assigned once the scheduler exists, since
   // the retry must go through the same serialization as a user-driven request
   // rather than starting a second overlapping compile.
@@ -112,7 +115,10 @@ export function initializePlannedGraphPage(
     if (appBicepRetry !== null) entry.cancel(appBicepRetry);
     appBicepRetry = null;
   };
+  // The scheduler's idle callback re-applies the button state, which turns the
+  // primary button into Refresh after this failure.
   const showModelingFailure = (message: string): void => {
+    plan.retryRecommended = true;
     controller?.destroy();
     controller = null;
     const wrapper = context.dom.byId("graph-container-wrapper");
@@ -121,13 +127,6 @@ export function initializePlannedGraphPage(
       containerId: "graph-container",
       statusIds: ["plan-status"]
     });
-    if (button) {
-      button.disabled = true;
-      button.setAttribute(
-        "title",
-        "Deploy Application is unavailable until the application model compiles."
-      );
-    }
   };
 
   const stopProgress = (): void => {
@@ -153,6 +152,8 @@ export function initializePlannedGraphPage(
     nextRequestRefresh = false;
     const restartExpiredWait = restartWait;
     restartWait = false;
+    const retryModeling = userRetry;
+    userRetry = false;
     const current = (): boolean => entry.active && isCurrent();
 
     if (plan.envsStale && !refresh) {
@@ -252,7 +253,8 @@ export function initializePlannedGraphPage(
           provider: selectedProvider,
           ...(selectedEnvironment ? { environment: selectedEnvironment } : {}),
           refresh,
-          restartWait: restartExpiredWait
+          restartWait: restartExpiredWait,
+          ...(retryModeling ? { retryModeling: true } : {})
         }),
         signal: abort?.signal
       })
@@ -270,6 +272,7 @@ export function initializePlannedGraphPage(
         }
         if (readBoolean(payload, "refreshed")) {
           plan.requestFailed = false;
+          plan.retryRecommended = false;
           if (plan.envsStale) {
             status(
               context,
@@ -321,10 +324,12 @@ export function initializePlannedGraphPage(
           : "The planned deployment response was incomplete. Try again.",
           "error"
         );
+        plan.retryRecommended = true;
       })
       .catch((error: unknown) => {
         if (!current()) return;
         plan.requestFailed = true;
+        plan.retryRecommended = true;
         context.logger.error("Radius planned graph request failed.", error);
         status(
           context,
@@ -345,9 +350,12 @@ export function initializePlannedGraphPage(
     context,
     run,
     () => {
-      if (entry.active) {
-        plan.planPending = false;
-        applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
+      if (!entry.active) return;
+      plan.planPending = false;
+      applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
+      if (focusAfterRetry) {
+        focusAfterRetry = false;
+        if (button && !button.disabled) button.focus();
       }
     },
     PLAN_DEBOUNCE_MS
@@ -358,7 +366,8 @@ export function initializePlannedGraphPage(
 
   // Hold the deploy action closed while a plan is pending: the preview it would
   // deploy does not exist yet, and the request may still fail.
-  const queue = (immediate = false): void => {
+  const queue = (immediate = false, explicitRetry = false): void => {
+    userRetry = explicitRetry;
     stopAppBicepRetry();
     requestAbort?.abort();
     requestAbort = null;
@@ -379,11 +388,21 @@ export function initializePlannedGraphPage(
       if (selector === branch) followWorkspaceBranch = false;
       nextRequestRefresh = false;
       restartWait = true;
+      plan.retryRecommended = false;
+      focusAfterRetry = false;
       queue();
     });
   }
   if (button) {
     entry.on(button, "click", () => {
+      if (button.dataset.mode === "retry") {
+        if (button.disabled) return;
+        restartWait = true;
+        nextRequestRefresh = false;
+        focusAfterRetry = true;
+        queue(true, true);
+        return;
+      }
       if (button.dataset.mode === "create-env") {
         context.nav.assign("/?page=environment&new=1");
         return;

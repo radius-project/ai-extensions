@@ -46,7 +46,7 @@ describe("environmentsPaneMarkup", () => {
   it("requires discovered Azure infrastructure while explaining namespace creation", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html).toContain(
-      "Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name and Radius will create it during environment setup."
+      "Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name. It is created on the first deploy."
     );
     expect(html).not.toContain('id="azure-rg-custom"');
     expect(html).not.toContain('id="azure-cluster-custom"');

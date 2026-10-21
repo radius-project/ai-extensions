@@ -1,14 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createProductionGitHubAccountContext } from "../../../src/runtime/production-github-account-context.js";
+import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
+import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import { createProductionCanvasServerRuntime } from "../../../src/server.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import {
   configureOperationStore,
   createOperation,
+  requireInput,
   finish,
   operations,
   OPERATION_SCHEMA_VERSION,
+  setVerificationWorkflowState,
   STAGE_DELETE_RADIUS_ENV,
+  STAGE_AUTHORIZE_IDENTITY,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
 import {
@@ -24,6 +31,252 @@ afterEach(async () => {
 });
 
 describe("production environment owner HTTP binding", () => {
+  it.each(["azure", "environment"] as const)(
+    "reaches the real %s setup service without its former setup POST",
+    async (stage) => {
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api user") {
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        }
+        if (
+          command === "api /repos/fixture/app" ||
+          command === "api repos/fixture/app"
+        ) {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              full_name: "fixture/app",
+              permissions: { admin: true }
+            }),
+            stderr: ""
+          };
+        }
+        if (command === "api /repos/fixture/app/environments/dev") {
+          return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+        }
+        if (
+          command.startsWith("api --paginate /repos/fixture/app/environments")
+        ) {
+          return { code: 1, stdout: "", stderr: "namespace fixture refusal" };
+        }
+        throw new Error(`Unexpected selected command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const accountContext = createEnvironmentAccountContext(
+        "runtime-service-wiring",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => "original",
+          switchKeyringAccount: async () => {
+            throw new Error("Unexpected switch");
+          },
+          resetIdentityCache: () => {}
+        })
+      );
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext
+      });
+      const originalFetch = globalThis.fetch;
+      const forbidden: string[] = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (
+          url.endsWith("/api/azure-auto-setup") ||
+          url.endsWith("/api/create-environment")
+        ) {
+          forbidden.push(url);
+          throw new Error("Setup HTTP transport must not be used");
+        }
+        return originalFetch(input, init);
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "setup-panel",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: `op_direct_${stage}`,
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "azure"
+        });
+        op.context.githubLogin = "saved-account";
+        op.currentStage = STAGE_AUTHORIZE_IDENTITY;
+        op.request = {
+          needsAzureCredentials: stage === "azure",
+          azure: {},
+          environment: {}
+        };
+        requireInput(op, {
+          code: "app-selection-required",
+          message: "Choose an app.",
+          checkpoint: "azure-app-selection"
+        });
+        operations.put(op);
+        const settled = new Promise<void>((resolve) => {
+          const stop = owner.onEnvironmentTasksSettled("setup-panel", () => {
+            stop();
+            resolve();
+          });
+        });
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              ),
+              "content-type": "application/json"
+            },
+            body: JSON.stringify({
+              repo: op.repo,
+              environment: op.environment,
+              provider: op.provider,
+              checkpoint: "azure-app-selection",
+              createNew: true
+            })
+          }
+        );
+        expect(response.status).toBe(202);
+        await settled;
+        expect(forbidden).toEqual([]);
+        expect(op.failure.message).toContain(
+          stage === "azure" ?
+            "repo, resourceGroup, and cluster are required."
+          : "namespace fixture refusal"
+        );
+        expect(op.state).toBe("failed");
+        expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
+        expect(
+          run.mock.calls.every(
+            ([args]) => args[0] === "api" && !args.includes("--method")
+          )
+        ).toBe(true);
+      } finally {
+        await runtime.stopServer("setup-panel", true);
+      }
+    }
+  );
+
+  it.each([false, true])(
+    "uses saved operation ownership for workflow controls (account unavailable=%s)",
+    async (unavailable) => {
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] === "run" && args[1] === "view")
+          return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+        if (args[0] === "api" && args[1] === "--method")
+          return { code: 0, stdout: "", stderr: "" };
+        throw new Error(`Unexpected command: ${JSON.stringify(args)}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const accountCoordinator = createGitHubAccountCoordinator({
+        createExecutor: async (login) => {
+          expect(login).toBe("saved-account");
+          if (unavailable) throw new Error("Saved account unavailable");
+          return executor;
+        },
+        getActiveKeyringLogin: async () => "original",
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache: () => {}
+      });
+      const lease = vi.spyOn(accountCoordinator, "withSelectedAccount");
+      const accountContext = createEnvironmentAccountContext(
+        "runtime-account-owner",
+        accountCoordinator
+      );
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: createEnvironmentExecutionOwner(),
+        accountContext
+      });
+      try {
+        const entry = await runtime.getOrCreateServer(
+          "control-panel",
+          "environment"
+        );
+        const op = createOperation({
+          operationId: "op_control_account",
+          repo: "fixture/app",
+          environment: "dev",
+          provider: "azure"
+        });
+        op.context.githubLogin = "saved-account";
+        op.verification = { runId: "42" };
+        finish(op, "cancelled");
+        setVerificationWorkflowState(op, "unknown");
+        operations.put(op);
+        const post = () =>
+          fetch(
+            `${entry.baseUrl}/api/operations/${op.operationId}/cancel-workflow`,
+            {
+              method: "POST",
+              headers: {
+                origin: entry.baseUrl,
+                "sec-fetch-site": "same-origin",
+                "x-radius-mutation-nonce": String(
+                  entry.state.browserMutationNonce
+                )
+              }
+            }
+          );
+        const inspected = await post();
+        expect(inspected.status).toBe(unavailable ? 502 : 200);
+        if (unavailable) {
+          expect(await inspected.json()).toMatchObject({
+            code: "workflow-status-read-failed",
+            detail: "Saved account unavailable"
+          });
+          expect(run).not.toHaveBeenCalled();
+        } else {
+          expect(await inspected.json()).toMatchObject({
+            code: "workflow-status-checked"
+          });
+          const cancelled = await post();
+          expect(cancelled.status).toBe(202);
+          expect(await cancelled.json()).toMatchObject({
+            code: "workflow-cancellation-pending"
+          });
+          expect(run.mock.calls.map(([args]) => args)).toEqual([
+            ["run", "view", "42", "--json", "status", "--repo", "fixture/app"],
+            ["run", "view", "42", "--json", "status", "--repo", "fixture/app"],
+            [
+              "api",
+              "--method",
+              "POST",
+              "repos/fixture/app/actions/runs/42/cancel"
+            ]
+          ]);
+        }
+        expect(lease).toHaveBeenCalledTimes(unavailable ? 1 : 2);
+        for (const call of lease.mock.calls) {
+          expect(call).toEqual([
+            "saved-account",
+            { ownerKey: "runtime-account-owner", operationId: op.operationId },
+            expect.any(Function),
+            30000
+          ]);
+        }
+      } finally {
+        await runtime.stopServer("control-panel", true);
+      }
+    }
+  );
+
   it("keeps recovery's server-owned transport out of webview activity and surfaces refusal", async () => {
     const op = createOperation({
       operationId: "op_rollback_transport",
@@ -66,10 +319,24 @@ describe("production environment owner HTTP binding", () => {
   });
 
   it("refuses construction without the shared owner", () => {
-    const options = { executionOwner: createEnvironmentExecutionOwner() };
+    const options = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createProductionGitHubAccountContext()
+    };
     Reflect.deleteProperty(options, "executionOwner");
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
       "Missing canvas server dependency: executionOwner"
+    );
+  });
+
+  it("refuses construction without the shared account context", () => {
+    const options = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createProductionGitHubAccountContext()
+    };
+    Reflect.deleteProperty(options, "accountContext");
+    expect(() => createProductionCanvasServerRuntime(options)).toThrow(
+      "Missing canvas server dependency: accountContext"
     );
   });
 

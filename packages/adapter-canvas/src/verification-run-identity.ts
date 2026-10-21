@@ -1,4 +1,7 @@
-export const VERIFY_OPERATION_INPUT = "radius_operation";
+export {
+  VERIFY_OPERATION_INPUT,
+  hasVerificationOperationMarker
+} from "@radius-project/core";
 export type VerificationRunEvent = "workflow_dispatch" | "push";
 
 export function verificationRunTitle(
@@ -6,14 +9,6 @@ export function verificationRunTitle(
   operationMarker: string
 ): string {
   return `Radius verify ${environment} [${operationMarker}]`;
-}
-
-export function hasVerificationOperationMarker(workflow: unknown): boolean {
-  return (
-    typeof workflow === "string" &&
-    workflow.includes(`${VERIFY_OPERATION_INPUT}:`) &&
-    workflow.includes(`inputs.${VERIFY_OPERATION_INPUT}`)
-  );
 }
 
 export function findExactVerificationRun(

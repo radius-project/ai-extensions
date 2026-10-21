@@ -67,6 +67,7 @@ ${graphHeader("graph")}
 <div style="display:flex; gap:16px; align-items:flex-end; margin-bottom:16px; flex-wrap:wrap;">
   ${controls}
   <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;"${loaded ? "" : " disabled"}>Plan Deployment</button>
+  <button id="modeling-refresh" type="button" class="rad-btn rad-btn--neutral" style="margin-top:0;" hidden>Refresh</button>
 </div>
 ${graphBody}
 ${renderPageState(GRAPH_PAGE_STATE_ID, {

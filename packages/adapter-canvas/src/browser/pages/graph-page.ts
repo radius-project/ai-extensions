@@ -16,6 +16,8 @@ import {
 import type { GraphProgressView } from "../graph/progress.js";
 import {
   loadModeledEnvState,
+  MODELED_ENV_UNAVAILABLE_TITLE,
+  modeledHintText,
   modeledPrimaryAction,
   populateApplications,
   populateBranches
@@ -60,10 +62,13 @@ export function graphRetryDelayMs(attempt: number): number {
     Math.min(attempt, GRAPH_RETRY_SCHEDULE_MS.length - 1)
   ];
 }
-// Why the primary button is inert after a modeling failure. The graph surface
-// carries the diagnostic; this only explains the disabled control.
-export const GRAPH_PLAN_BLOCKED_TITLE =
-  "Plan Deployment is unavailable until the application model compiles.";
+// After a failure the primary button becomes the retry control. The graph
+// surface carries the diagnostic; this only explains the changed control.
+export const GRAPH_RETRY_LABEL = "Refresh";
+export const GRAPH_RETRY_TITLE =
+  "Plan Deployment is unavailable until the application model compiles. Click Refresh to try again.";
+export const GRAPH_RETRY_HINT =
+  ' Deployment planning is unavailable until the application model compiles. To try again, click "Refresh".';
 
 interface GraphPageState {
   repo: string;
@@ -112,15 +117,67 @@ export function initializeGraphPage(
   const page = parseState(context);
   const branchSelect = context.dom.selectById("graph-branch");
   const button = context.dom.inputById("deploy-app-btn");
+  // Offers Refresh after a failure while the primary button stays Create
+  // Environment, a prerequisite the model cannot invalidate.
+  const modelingRefresh = context.dom.inputById("modeling-refresh");
+  const hint = context.dom.byId("modeled-subtitle-hint");
   const renderGraph = requireBrowserFunction(globalScope, "radiusRenderGraph");
   const setLoading = requireBrowserFunction(
     globalScope,
     "radiusSetGraphLoading"
   );
   const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
+  // Whether the primary button currently offers Refresh. It is set when a
+  // failure is shown and cleared by a ready model or a new branch selection.
+  let retryRecommended = false;
+  let showingRetry = false;
+  let requestActive = false;
+  // Whether the selected branch's model has compiled. It starts pending even
+  // for a server-rendered graph, because that page immediately re-requests the
+  // graph and the refresh decides the real state.
+  let modelState: "pending" | "ready" | "failed" = "pending";
+
+  // Keep the primary button in step with the compile state. The server renders
+  // the button without a mode and loadModeledEnvState assigns "plan" later, so
+  // the two inputs settle in either order; re-applying both here is what stops
+  // a late environment listing from leaving a compiled model unplannable. The
+  // create-env and unavailable modes own their own enablement, except while
+  // the button offers Refresh after a failure.
+  const syncPrimaryButton = (): void => {
+    if (!button) return;
+    const mode = button.dataset.mode;
+    if (modelingRefresh) {
+      modelingRefresh.hidden = !retryRecommended || mode !== "create-env";
+      modelingRefresh.disabled = requestActive;
+    }
+    if (retryRecommended && mode !== "create-env") {
+      showingRetry = true;
+      button.textContent = GRAPH_RETRY_LABEL;
+      button.disabled = requestActive;
+      button.setAttribute("title", GRAPH_RETRY_TITLE);
+      if (hint) hint.textContent = GRAPH_RETRY_HINT;
+      return;
+    }
+    if (showingRetry) {
+      showingRetry = false;
+      button.removeAttribute("title");
+      if (hint) hint.textContent = modeledHintText(mode);
+      if (mode !== "create-env") button.textContent = "Plan Deployment";
+      if (mode === "unavailable") {
+        button.disabled = true;
+        button.setAttribute("title", MODELED_ENV_UNAVAILABLE_TITLE);
+      }
+    }
+    if (mode === "create-env" || mode === "unavailable") return;
+    const branch = branchSelect ? branchSelect.value : page.branch;
+    button.disabled = modelState !== "ready" || !branch;
+    button.removeAttribute("title");
+  };
   // Report a failure once, on the graph surface. The surface owns the content
   // area, so writing there also clears whatever loading state was showing.
   const showFailure = (message: string): void => {
+    retryRecommended = true;
+    syncPrimaryButton();
     showGraphModelingFailure(context, setError, message, {
       containerId: "graph-container",
       statusIds: ["graph-status", "graph-refresh-status"],
@@ -132,7 +189,6 @@ export function initializeGraphPage(
   let hasLoadedGraph = page.loaded;
   let generation = 0;
   let branchSelectionGeneration = 0;
-  let requestActive = false;
   let retry: ScopeTimer | null = null;
   // How many `needsAppBicep` retries the current wait has already scheduled.
   // Each wait owns its own counter and resets when a fresh (non-continuing)
@@ -143,31 +199,9 @@ export function initializeGraphPage(
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
   let renderedOptions: GraphOptions | null = null;
-  // Whether the selected branch's model has compiled. It starts pending even
-  // for a server-rendered graph, because that page immediately re-requests the
-  // graph and the refresh decides the real state.
-  let modelState: "pending" | "ready" | "failed" = "pending";
   let followWorkspaceBranch = page.followWorkspaceBranch;
   let graphFromWorkspace = page.localSource;
   let refreshLoadedGraph: (() => void) | null = null;
-
-  // Keep the primary button in step with the compile state. The server renders
-  // the button without a mode and loadModeledEnvState assigns "plan" later, so
-  // the two inputs settle in either order; re-applying both here is what stops
-  // a late environment listing from leaving a compiled model unplannable. The
-  // create-env and unavailable modes own their own enablement.
-  const syncPrimaryButton = (): void => {
-    if (!button) return;
-    const mode = button.dataset.mode;
-    if (mode === "create-env" || mode === "unavailable") return;
-    const branch = branchSelect ? branchSelect.value : page.branch;
-    button.disabled = modelState !== "ready" || !branch;
-    if (modelState === "failed") {
-      button.setAttribute("title", GRAPH_PLAN_BLOCKED_TITLE);
-    } else {
-      button.removeAttribute("title");
-    }
-  };
 
   const stopProgress = (): void => {
     if (progress !== null) entry.cancel(progress);
@@ -332,7 +366,12 @@ export function initializeGraphPage(
   // page branch is only the starting point.
   const currentBranch = (): string => branchSelect?.value.trim() || page.branch;
 
-  const load = (options: { readonly continuing?: boolean } = {}): void => {
+  const load = (
+    options: {
+      readonly continuing?: boolean;
+      readonly userRetry?: boolean;
+    } = {}
+  ): void => {
     if (requestActive || !entry.active) return;
     const branch = currentBranch();
     if (!page.repo || !branch) {
@@ -344,6 +383,7 @@ export function initializeGraphPage(
       return;
     }
     requestActive = true;
+    syncPrimaryButton();
     if (!options.continuing) loadRetryAttempt = 0;
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
@@ -377,7 +417,8 @@ export function initializeGraphPage(
           repo: page.repo,
           branch,
           followWorkspaceBranch,
-          restartWait: options.continuing !== true
+          restartWait: options.continuing !== true,
+          ...(options.userRetry ? { retryModeling: true } : {})
         }),
         signal: requestAbort?.signal
       })
@@ -391,6 +432,7 @@ export function initializeGraphPage(
         }
         if (isRecord(payload) && Array.isArray(payload.resources)) {
           modelState = "ready";
+          retryRecommended = false;
           syncPrimaryButton();
           stopProgress();
           showStatus(context, "Application graph ready.", "info");
@@ -457,6 +499,14 @@ export function initializeGraphPage(
         if (requestGeneration === generation) {
           requestActive = false;
           requestAbort = null;
+          syncPrimaryButton();
+          if (options.userRetry) {
+            const control =
+              modelingRefresh && !modelingRefresh.hidden ?
+                modelingRefresh
+              : button;
+            if (control && !control.disabled) control.focus();
+          }
         }
       });
   };
@@ -467,6 +517,7 @@ export function initializeGraphPage(
       followWorkspaceBranch = false;
       stopRequest();
       modelState = "pending";
+      retryRecommended = false;
       syncPrimaryButton();
       if (branchSelect.value) {
         load();
@@ -474,7 +525,22 @@ export function initializeGraphPage(
     });
   }
   if (button) {
-    entry.on(button, "click", () => modeledPrimaryAction(context, button));
+    entry.on(button, "click", () => {
+      if (!showingRetry) {
+        modeledPrimaryAction(context, button);
+        return;
+      }
+      if (button.disabled) return;
+      stopRequest();
+      load({ userRetry: true });
+    });
+  }
+  if (modelingRefresh) {
+    entry.on(modelingRefresh, "click", () => {
+      if (modelingRefresh.disabled || modelingRefresh.hidden) return;
+      stopRequest();
+      load({ userRetry: true });
+    });
   }
 
   if (page.loaded) {
@@ -519,6 +585,7 @@ export function initializeGraphPage(
           }
           if (isRecord(payload) && Array.isArray(payload.resources)) {
             modelState = "ready";
+            retryRecommended = false;
             syncPrimaryButton();
             stopProgress();
             showStatus(context, "Application graph ready.", "info");
@@ -569,6 +636,7 @@ export function initializeGraphPage(
             if (error) {
               if (readBoolean(payload, "modelingFailed")) {
                 modelState = "failed";
+                retryRecommended = true;
                 syncPrimaryButton();
               }
               showStatus(

@@ -76,3 +76,11 @@ export {
   createWorkflowReadSession,
   isWorkflowReadLimitError
 } from "./workflow-read-budget.js";
+export {
+  setupIdentityEqual,
+  deterministicProviderUuid
+} from "./setup-identity-bindings.js";
+
+export * as ghcrBootstrap from "./ghcr-bootstrap.js";
+
+export * from "./setup-workflow-content.js";
