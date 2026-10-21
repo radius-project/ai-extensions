@@ -1,0 +1,5210 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`publication baseline parity > preserves the direct command, journal, narration, and durable transcript 1`] = `
+{
+  "body": {
+    "actionRequired": false,
+    "environment": "dev",
+    "operationId": "op-http",
+    "provider": "azure",
+    "pullRequestBaseBranch": null,
+    "pullRequestBranch": null,
+    "pullRequestUrl": "",
+    "repo": "octo/app",
+    "stateArchive": "radius-state",
+    "stateBackend": "oci",
+    "stateRegistry": "ghcr.io/octo/app/radius-state-dev",
+    "steps": [
+      "✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.",
+      "✅ GitHub environment "dev" resolved.",
+      "Creating private GHCR state package "ghcr.io/octo/app/radius-state-dev"...",
+      "✅ GHCR state package is private and linked to octo/app.",
+      "Configuring Radius state package "ghcr.io/octo/app/radius-state-dev"...",
+      "✅ Radius state package configured with archive tag "radius-state".",
+      "Setting environment variables and secrets...",
+      "Set 3 environment value(s) for Azure.",
+      "ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: az role assignment create --assignee c --role Contributor --scope /subscriptions/s",
+      "Checking verify-credentials workflow...",
+      "✅ Verify workflow committed.",
+      "Checking deploy workflows...",
+      "✅ Deploy workflows committed.",
+      "Checking delete workflows...",
+      "✅ Delete workflows committed.",
+      "ℹ️ Credential verification dispatch is configured for @octocat using the stored GitHub CLI credential: workflow "radius-verify-credentials.yml", environment "dev", repository "octo/app", ref "main".",
+      "Dispatching verify-credentials workflow...",
+      "✅ Credential verification dispatched.",
+      "Verify run: https://github.com/octo/app/actions/runs/4242",
+    ],
+    "success": true,
+    "verifyRunUrl": "https://github.com/octo/app/actions/runs/4242",
+    "verifySkipReason": "",
+    "verifySkipped": false,
+  },
+  "finished": [],
+  "ledger": {
+    "azureApp": {
+      "appId": null,
+      "displayName": null,
+      "origin": "unknown",
+      "serviceManagementReference": null,
+      "state": "not_started",
+    },
+    "cleanup": {
+      "attempts": 0,
+      "ownerAssignment": "not_requested",
+      "results": [],
+      "state": "not_started",
+    },
+    "commit": {
+      "baseBranch": null,
+      "branch": "main",
+      "headSha": "commit-sha",
+      "mode": "default_branch",
+      "pullRequestUrl": null,
+      "workflowFiles": [
+        {
+          "blobSha": "blob-sha",
+          "branch": "main",
+          "commitSha": "commit-sha",
+          "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+          "mode": "default_branch",
+          "path": ".github/workflows/radius-verify-credentials.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+        {
+          "blobSha": "blob-sha",
+          "branch": "main",
+          "commitSha": "commit-sha",
+          "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+          "mode": "default_branch",
+          "path": ".github/workflows/run-rad-commands.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+        {
+          "blobSha": "blob-sha",
+          "branch": "main",
+          "commitSha": "commit-sha",
+          "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+          "mode": "default_branch",
+          "path": ".github/workflows/radius-delete.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+      ],
+    },
+    "federatedCredentials": [],
+    "githubEnvironment": {
+      "name": "dev",
+      "origin": "this_operation",
+      "providerId": "1234567",
+      "repo": "octo/app",
+      "state": "created",
+    },
+    "githubEnvironmentVariables": [
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_MANAGED",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_BACKEND",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_REGISTRY",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_ARCHIVE",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_CLIENT_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_TENANT_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_SUBSCRIPTION_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+      },
+    ],
+    "roleAssignments": [],
+    "servicePrincipal": {
+      "appId": null,
+      "objectId": null,
+      "origin": "unknown",
+      "state": "not_started",
+    },
+  },
+  "panel": {
+    "deployDispatchedAt": 1700000000000,
+    "verifyRunId": "4242",
+    "verifyRunUrl": "https://github.com/octo/app/actions/runs/4242",
+  },
+  "trace": [
+    [
+      "journal",
+      "persist:1",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "gh",
+      "api --paginate /repos/octo/app/environments?per_page=100 --jq .environments[].name",
+    ],
+    [
+      "journal",
+      "enterStage:configure-environment",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-github-environment",
+    ],
+    [
+      "journal",
+      "preflightRepoAdmin",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-ghcr-bootstrap",
+    ],
+    [
+      "journal",
+      "preflightGhcrPackageWriteAccess",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-github-environment-create",
+    ],
+    [
+      "journal",
+      "persist:2",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:3",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironment:created_candidate",
+    ],
+    [
+      "journal",
+      "promoteCreatedGitHubEnvironment:true",
+    ],
+    [
+      "step",
+      "✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.",
+    ],
+    [
+      "step",
+      "✅ GitHub environment "dev" resolved.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:4",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-github-environment",
+    ],
+    [
+      "journal",
+      "stateRegistry:dev",
+    ],
+    [
+      "step",
+      "Creating private GHCR state package "ghcr.io/octo/app/radius-state-dev"...",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-ghcr-state-package",
+    ],
+    [
+      "journal",
+      "bootstrapGHCRStatePackage",
+    ],
+    [
+      "step",
+      "✅ GHCR state package is private and linked to octo/app.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:5",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-ghcr-state-package",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-radius-managed-variable",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_MANAGED",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:6",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_MANAGED",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "true",
+            "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_25a81ba51b7e68db3914e2427fe7313a",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_MANAGED",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_MANAGED",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_MANAGED --body true --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_MANAGED",
+    ],
+    [
+      "journal",
+      "persist:7",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_MANAGED",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "true",
+            "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_25a81ba51b7e68db3914e2427fe7313a",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_MANAGED",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "journal",
+      "envListCacheDelete:octo/app",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:8",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-radius-managed-variable",
+    ],
+    [
+      "step",
+      "Configuring Radius state package "ghcr.io/octo/app/radius-state-dev"...",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-state-package-configuration",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_BACKEND",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:9",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_BACKEND",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "oci",
+            "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_9926f61e82ab18f98630025589e2948d",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_BACKEND",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_BACKEND",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_BACKEND --body oci --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_BACKEND",
+    ],
+    [
+      "journal",
+      "persist:10",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_BACKEND",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "oci",
+            "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_9926f61e82ab18f98630025589e2948d",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_BACKEND",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:11",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_REGISTRY",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "ghcr.io/octo/app/radius-state-dev",
+            "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_f80c59e689b002f29f313acc02697e12",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_REGISTRY",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_REGISTRY --body ghcr.io/octo/app/radius-state-dev --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "journal",
+      "persist:12",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_REGISTRY",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "ghcr.io/octo/app/radius-state-dev",
+            "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_f80c59e689b002f29f313acc02697e12",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_REGISTRY",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:13",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_ARCHIVE",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "radius-state",
+            "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_fb9d1311d11d79e548882f45bf78c26c",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_ARCHIVE",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_ARCHIVE --body radius-state --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "journal",
+      "persist:14",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_ARCHIVE",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "radius-state",
+            "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_fb9d1311d11d79e548882f45bf78c26c",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_ARCHIVE",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "✅ Radius state package configured with archive tag "radius-state".",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:15",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-state-package-configuration",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-provider-configuration",
+    ],
+    [
+      "step",
+      "Setting environment variables and secrets...",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:16",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_CLIENT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "c",
+            "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_d37880cb00c8178a6a6fc3e4594670e4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_CLIENT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_CLIENT_ID --body c --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_CLIENT_ID",
+    ],
+    [
+      "journal",
+      "persist:17",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_CLIENT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "c",
+            "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_d37880cb00c8178a6a6fc3e4594670e4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_CLIENT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_TENANT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:18",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_TENANT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "t",
+            "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_04e3cd7ad751fe590c5baf44c65752a4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_TENANT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_TENANT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_TENANT_ID --body t --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_TENANT_ID",
+    ],
+    [
+      "journal",
+      "persist:19",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_TENANT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "t",
+            "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_04e3cd7ad751fe590c5baf44c65752a4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_TENANT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:20",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_SUBSCRIPTION_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "s",
+            "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_33b0745081685c14dc0cbea1893f0d0f",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_SUBSCRIPTION_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_SUBSCRIPTION_ID --body s --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "journal",
+      "persist:21",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_SUBSCRIPTION_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "s",
+            "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_33b0745081685c14dc0cbea1893f0d0f",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_SUBSCRIPTION_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "Set 3 environment value(s) for Azure.",
+    ],
+    [
+      "step",
+      "ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: az role assignment create --assignee c --role Contributor --scope /subscriptions/s",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:22",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-provider-configuration",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-policy-read",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/radius-verify-credentials.yml",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/run-rad-commands.yml",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/radius-deploy.yml",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:23",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-commit",
+    ],
+    [
+      "step",
+      "Checking verify-credentials workflow...",
+    ],
+    [
+      "journal",
+      "generateVerifyWorkflow:dev",
+    ],
+    [
+      "journal",
+      "setupPushOperationMarker:op-http",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "content": "b246CiAgd29ya2Zsb3dfZGlzcGF0Y2g6CiAgICBpbnB1dHM6CiAgICAgIGVudmlyb25tZW50OgogICAgICAgIHJlcXVpcmVkOiB0cnVlCiAgICAgIHJhZGl1c19vcGVyYXRpb246CiAgICAgICAgcmVxdWlyZWQ6IGZhbHNlCnJ1bi1uYW1lOiBSYWRpdXMgdmVyaWZ5ICR7eyBpbnB1dHMuZW52aXJvbm1lbnQgfX0gWyR7eyBpbnB1dHMucmFkaXVzX29wZXJhdGlvbiB9fV0Kam9iczo=",
+        "message": "Add Radius verify-credentials workflow for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+      },
+    ],
+    [
+      "journal",
+      "persist:24",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_0f3e53c0c60f8a772f0e9be83504d6b5",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:<default>:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml --input @default",
+    ],
+    [
+      "journal",
+      "persist:25",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_0f3e53c0c60f8a772f0e9be83504d6b5",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:<default>:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "step",
+      "✅ Verify workflow committed.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:26",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "Checking deploy workflows...",
+    ],
+    [
+      "journal",
+      "generateDeployWorkflow:dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/run-rad-commands.yml --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "content": "b246IHdvcmtmbG93X2Rpc3BhdGNoCmpvYnM6Cg==",
+        "message": "Add Radius deploy workflow (run-rad-commands.yml) for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+      },
+    ],
+    [
+      "journal",
+      "persist:27",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/run-rad-commands.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_29d385e266a57a57ba12e31293e701dc",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:<default>:.github/workflows/run-rad-commands.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/run-rad-commands.yml --input @default",
+    ],
+    [
+      "journal",
+      "persist:28",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/run-rad-commands.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_29d385e266a57a57ba12e31293e701dc",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:<default>:.github/workflows/run-rad-commands.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:29",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "journal",
+      "deleteLegacyDeployWorkflow",
+    ],
+    [
+      "journal",
+      "legacyDeployDeleteBranch:default",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:30",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "✅ Deploy workflows committed.",
+    ],
+    [
+      "step",
+      "Checking delete workflows...",
+    ],
+    [
+      "journal",
+      "generateDeleteWorkflow:dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/radius-delete.yml --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "content": "b246IHdvcmtmbG93X2Rpc3BhdGNoCmpvYnM6Cg==",
+        "message": "Add Radius delete workflow (radius-delete.yml) for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+      },
+    ],
+    [
+      "journal",
+      "persist:31",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/radius-delete.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_e3bb05128e0d4c6101304b23711463de",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:<default>:.github/workflows/radius-delete.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/radius-delete.yml --input @default",
+    ],
+    [
+      "journal",
+      "persist:32",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/radius-delete.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_e3bb05128e0d4c6101304b23711463de",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:<default>:.github/workflows/radius-delete.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:33",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "✅ Delete workflows committed.",
+    ],
+    [
+      "step",
+      "ℹ️ Credential verification dispatch is configured for @octocat using the stored GitHub CLI credential: workflow "radius-verify-credentials.yml", environment "dev", repository "octo/app", ref "main".",
+    ],
+    [
+      "step",
+      "Dispatching verify-credentials workflow...",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-verification-dispatch",
+    ],
+    [
+      "gh",
+      "run list --workflow=radius-verify-credentials.yml --limit 1 --json databaseId --repo octo/app",
+    ],
+    [
+      "journal",
+      "persist:34",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "baselineRunId": null,
+            "dispatchedAt": 1700000000000,
+            "environment": "dev",
+            "operationMarker": "op-http",
+            "ref": "main",
+            "workflowPath": ".github/workflows/radius-verify-credentials.yml",
+          },
+          "kind": "github_workflow.dispatch",
+          "mutationId": "pm_f269971dc9f4b256d69e9af2792a9923",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "op-http",
+          "status": "prepared",
+          "target": "octo/app:radius-verify-credentials.yml:main:dev",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      {
+        "baselineRunId": null,
+        "dispatchMutationTarget": "octo/app:radius-verify-credentials.yml:main:dev",
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "workflow_dispatch",
+        "operationMarker": "op-http",
+        "ref": "main",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:before-verification-dispatch-attempt:1",
+    ],
+    [
+      "gh",
+      "workflow run radius-verify-credentials.yml -f environment=dev -f radius_operation=op-http --repo octo/app --ref main",
+    ],
+    [
+      "journal",
+      "dispatchVerifyWorkflow",
+    ],
+    [
+      "journal",
+      "persist:35",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "GitHub CLI returned the created workflow run URL.",
+          "finalDiagnostic": "GitHub CLI exited with 0: https://github.com/octo/app/actions/runs/4242",
+          "initialDiagnostic": "GitHub CLI exited with 0: https://github.com/octo/app/actions/runs/4242",
+          "intent": {
+            "baselineRunId": null,
+            "dispatchedAt": 1700000000000,
+            "environment": "dev",
+            "operationMarker": "op-http",
+            "ref": "main",
+            "workflowPath": ".github/workflows/radius-verify-credentials.yml",
+          },
+          "kind": "github_workflow.dispatch",
+          "mutationId": "pm_f269971dc9f4b256d69e9af2792a9923",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": "4242",
+          "providerIdempotencyKey": "op-http",
+          "status": "confirmed",
+          "target": "octo/app:radius-verify-credentials.yml:main:dev",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      {
+        "baselineRunId": null,
+        "dispatchMutationTarget": "octo/app:radius-verify-credentials.yml:main:dev",
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "workflow_dispatch",
+        "operationMarker": "op-http",
+        "ref": "main",
+        "runId": "4242",
+        "runUrl": "https://github.com/octo/app/actions/runs/4242",
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "step",
+      "✅ Credential verification dispatched.",
+    ],
+    [
+      "step",
+      "Verify run: https://github.com/octo/app/actions/runs/4242",
+    ],
+    [
+      "journal",
+      "enterStage:verify",
+    ],
+    [
+      "journal",
+      "recordCommitState",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:36",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchMutationTarget": "octo/app:radius-verify-credentials.yml:main:dev",
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "workflow_dispatch",
+        "operationMarker": "op-http",
+        "ref": "main",
+        "runId": "4242",
+        "runUrl": "https://github.com/octo/app/actions/runs/4242",
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:after-verification-dispatch",
+    ],
+    [
+      "journal",
+      "recordCleanupState:not_needed",
+    ],
+  ],
+  "verification": {
+    "baselineRunId": null,
+    "dispatchMutationTarget": "octo/app:radius-verify-credentials.yml:main:dev",
+    "dispatchedAt": 1700000000000,
+    "environment": "dev",
+    "event": "workflow_dispatch",
+    "operationMarker": "op-http",
+    "ref": "main",
+    "runId": "4242",
+    "runUrl": "https://github.com/octo/app/actions/runs/4242",
+    "workflow": "radius-verify-credentials.yml",
+  },
+}
+`;
+
+exports[`publication baseline parity > preserves the merge-required command, journal, narration, and durable transcript 1`] = `
+{
+  "body": {
+    "actionRequired": true,
+    "environment": "dev",
+    "operationId": "op-http",
+    "provider": "azure",
+    "pullRequestBaseBranch": "main",
+    "pullRequestBranch": "radius/setup-dev-workflows-op-http",
+    "pullRequestUrl": "https://github.com/octo/app/pull/7",
+    "repo": "octo/app",
+    "stateArchive": "radius-state",
+    "stateBackend": "oci",
+    "stateRegistry": "ghcr.io/octo/app/radius-state-dev",
+    "steps": [
+      "✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.",
+      "✅ GitHub environment "dev" resolved.",
+      "Creating private GHCR state package "ghcr.io/octo/app/radius-state-dev"...",
+      "✅ GHCR state package is private and linked to octo/app.",
+      "Configuring Radius state package "ghcr.io/octo/app/radius-state-dev"...",
+      "✅ Radius state package configured with archive tag "radius-state".",
+      "Setting environment variables and secrets...",
+      "Set 3 environment value(s) for Azure.",
+      "ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: az role assignment create --assignee c --role Contributor --scope /subscriptions/s",
+      "⚠️ Setup-branch credential verification is disabled: The default branch still contains the legacy deploy workflow, which can auto-run after credential verification.",
+      "Checking verify-credentials workflow...",
+      "ℹ️ No permission to push to "main" directly — committing workflows to branch "radius/setup-dev-workflows-op-http" and opening a pull request.",
+      "✅ Verify workflow committed.",
+      "Checking deploy workflows...",
+      "✅ Deploy workflows committed.",
+      "Checking delete workflows...",
+      "✅ Delete workflows committed.",
+      "✅ Opened pull request #7: https://github.com/octo/app/pull/7",
+      "⏭️ Skipping credential verification until the pull request is merged — the verify workflow is not on the default branch yet.",
+      "👉 Merge the pull request above to put the workflows on "main", then retry credential verification.",
+    ],
+    "success": true,
+    "verifyRunUrl": "",
+    "verifySkipReason": "the verify workflow is not on the default branch yet",
+    "verifySkipped": true,
+  },
+  "finished": [
+    {
+      "options": {
+        "terminal": {
+          "baseBranch": "main",
+          "branch": "radius/setup-dev-workflows-op-http",
+          "pullRequestUrl": "https://github.com/octo/app/pull/7",
+          "reason": "pr-merge-required",
+          "userMessage": "Merge the pull request, then retry credential verification to finish setup.",
+        },
+      },
+      "state": "action_required",
+    },
+  ],
+  "ledger": {
+    "azureApp": {
+      "appId": null,
+      "displayName": null,
+      "origin": "unknown",
+      "serviceManagementReference": null,
+      "state": "not_started",
+    },
+    "cleanup": {
+      "attempts": 0,
+      "ownerAssignment": "not_requested",
+      "results": [],
+      "state": "not_started",
+    },
+    "commit": {
+      "baseBranch": null,
+      "branch": "radius/setup-dev-workflows-op-http",
+      "headSha": "commit-sha",
+      "mode": "pull_request",
+      "pullRequestUrl": null,
+      "workflowFiles": [
+        {
+          "blobSha": "blob-sha",
+          "branch": "radius/setup-dev-workflows-op-http",
+          "commitSha": "commit-sha",
+          "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+          "mode": "pull_request",
+          "path": ".github/workflows/radius-verify-credentials.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+        {
+          "blobSha": "blob-sha",
+          "branch": "radius/setup-dev-workflows-op-http",
+          "commitSha": "commit-sha",
+          "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+          "mode": "pull_request",
+          "path": ".github/workflows/run-rad-commands.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+        {
+          "blobSha": "blob-sha",
+          "branch": "radius/setup-dev-workflows-op-http",
+          "commitSha": "commit-sha",
+          "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+          "mode": "pull_request",
+          "path": ".github/workflows/radius-delete.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+      ],
+    },
+    "federatedCredentials": [],
+    "githubEnvironment": {
+      "name": "dev",
+      "origin": "this_operation",
+      "providerId": "1234567",
+      "repo": "octo/app",
+      "state": "created",
+    },
+    "githubEnvironmentVariables": [
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_MANAGED",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_BACKEND",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_REGISTRY",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_ARCHIVE",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_CLIENT_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_TENANT_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_SUBSCRIPTION_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+      },
+    ],
+    "roleAssignments": [],
+    "servicePrincipal": {
+      "appId": null,
+      "objectId": null,
+      "origin": "unknown",
+      "state": "not_started",
+    },
+  },
+  "panel": {
+    "deployDispatchedAt": 1700000000000,
+    "verifyRunId": null,
+    "verifyRunUrl": "",
+  },
+  "trace": [
+    [
+      "journal",
+      "persist:1",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "gh",
+      "api --paginate /repos/octo/app/environments?per_page=100 --jq .environments[].name",
+    ],
+    [
+      "journal",
+      "enterStage:configure-environment",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-github-environment",
+    ],
+    [
+      "journal",
+      "preflightRepoAdmin",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-ghcr-bootstrap",
+    ],
+    [
+      "journal",
+      "preflightGhcrPackageWriteAccess",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-github-environment-create",
+    ],
+    [
+      "journal",
+      "persist:2",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:3",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironment:created_candidate",
+    ],
+    [
+      "journal",
+      "promoteCreatedGitHubEnvironment:true",
+    ],
+    [
+      "step",
+      "✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.",
+    ],
+    [
+      "step",
+      "✅ GitHub environment "dev" resolved.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:4",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-github-environment",
+    ],
+    [
+      "journal",
+      "stateRegistry:dev",
+    ],
+    [
+      "step",
+      "Creating private GHCR state package "ghcr.io/octo/app/radius-state-dev"...",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-ghcr-state-package",
+    ],
+    [
+      "journal",
+      "bootstrapGHCRStatePackage",
+    ],
+    [
+      "step",
+      "✅ GHCR state package is private and linked to octo/app.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:5",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-ghcr-state-package",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-radius-managed-variable",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_MANAGED",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:6",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_MANAGED",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "true",
+            "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_25a81ba51b7e68db3914e2427fe7313a",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_MANAGED",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_MANAGED",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_MANAGED --body true --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_MANAGED",
+    ],
+    [
+      "journal",
+      "persist:7",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_MANAGED",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "true",
+            "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_25a81ba51b7e68db3914e2427fe7313a",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_MANAGED",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "journal",
+      "envListCacheDelete:octo/app",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:8",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-radius-managed-variable",
+    ],
+    [
+      "step",
+      "Configuring Radius state package "ghcr.io/octo/app/radius-state-dev"...",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-state-package-configuration",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_BACKEND",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:9",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_BACKEND",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "oci",
+            "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_9926f61e82ab18f98630025589e2948d",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_BACKEND",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_BACKEND",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_BACKEND --body oci --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_BACKEND",
+    ],
+    [
+      "journal",
+      "persist:10",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_BACKEND",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "oci",
+            "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_9926f61e82ab18f98630025589e2948d",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_BACKEND",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:11",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_REGISTRY",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "ghcr.io/octo/app/radius-state-dev",
+            "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_f80c59e689b002f29f313acc02697e12",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_REGISTRY",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_REGISTRY --body ghcr.io/octo/app/radius-state-dev --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "journal",
+      "persist:12",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_REGISTRY",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "ghcr.io/octo/app/radius-state-dev",
+            "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_f80c59e689b002f29f313acc02697e12",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_REGISTRY",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:13",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_ARCHIVE",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "radius-state",
+            "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_fb9d1311d11d79e548882f45bf78c26c",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_ARCHIVE",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_ARCHIVE --body radius-state --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "journal",
+      "persist:14",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_ARCHIVE",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "radius-state",
+            "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_fb9d1311d11d79e548882f45bf78c26c",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_ARCHIVE",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "✅ Radius state package configured with archive tag "radius-state".",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:15",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-state-package-configuration",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-provider-configuration",
+    ],
+    [
+      "step",
+      "Setting environment variables and secrets...",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:16",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_CLIENT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "c",
+            "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_d37880cb00c8178a6a6fc3e4594670e4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_CLIENT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_CLIENT_ID --body c --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_CLIENT_ID",
+    ],
+    [
+      "journal",
+      "persist:17",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_CLIENT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "c",
+            "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_d37880cb00c8178a6a6fc3e4594670e4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_CLIENT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_TENANT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:18",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_TENANT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "t",
+            "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_04e3cd7ad751fe590c5baf44c65752a4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_TENANT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_TENANT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_TENANT_ID --body t --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_TENANT_ID",
+    ],
+    [
+      "journal",
+      "persist:19",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_TENANT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "t",
+            "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_04e3cd7ad751fe590c5baf44c65752a4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_TENANT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:20",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_SUBSCRIPTION_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "s",
+            "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_33b0745081685c14dc0cbea1893f0d0f",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_SUBSCRIPTION_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_SUBSCRIPTION_ID --body s --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "journal",
+      "persist:21",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_SUBSCRIPTION_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "s",
+            "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_33b0745081685c14dc0cbea1893f0d0f",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_SUBSCRIPTION_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "Set 3 environment value(s) for Azure.",
+    ],
+    [
+      "step",
+      "ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: az role assignment create --assignee c --role Contributor --scope /subscriptions/s",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:22",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-provider-configuration",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-policy-read",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/radius-verify-credentials.yml",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/run-rad-commands.yml",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/radius-deploy.yml",
+    ],
+    [
+      "step",
+      "⚠️ Setup-branch credential verification is disabled: The default branch still contains the legacy deploy workflow, which can auto-run after credential verification.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:23",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-commit",
+    ],
+    [
+      "step",
+      "Checking verify-credentials workflow...",
+    ],
+    [
+      "journal",
+      "generateVerifyWorkflow:dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "content": "b246CiAgd29ya2Zsb3dfZGlzcGF0Y2g6CiAgICBpbnB1dHM6CiAgICAgIGVudmlyb25tZW50OgogICAgICAgIHJlcXVpcmVkOiB0cnVlCiAgICAgIHJhZGl1c19vcGVyYXRpb246CiAgICAgICAgcmVxdWlyZWQ6IGZhbHNlCnJ1bi1uYW1lOiBSYWRpdXMgdmVyaWZ5ICR7eyBpbnB1dHMuZW52aXJvbm1lbnQgfX0gWyR7eyBpbnB1dHMucmFkaXVzX29wZXJhdGlvbiB9fV0Kam9iczo=",
+        "message": "Add Radius verify-credentials workflow for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+      },
+    ],
+    [
+      "journal",
+      "persist:24",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_0f3e53c0c60f8a772f0e9be83504d6b5",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:<default>:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml --input @default",
+    ],
+    [
+      "journal",
+      "persist:25",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "protected branch",
+          "finalDiagnostic": "Provider command exit code: 1.
+protected branch",
+          "initialDiagnostic": "Provider command exit code: 1.
+protected branch",
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_0f3e53c0c60f8a772f0e9be83504d6b5",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "not_applied",
+          "target": "octo/app:<default>:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "branch-head",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "journal",
+      "persist:26",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "kind": "github_branch.create",
+          "mutationId": "pm_0c447855accf3b2f5511ea9160b9d542",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "radius/setup-dev-workflows-op-http",
+          "status": "prepared",
+          "target": "octo/app radius/setup-dev-workflows-op-http sha-base",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "branch-create",
+    ],
+    [
+      "journal",
+      "persist:27",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "kind": "github_branch.create",
+          "mutationId": "pm_0c447855accf3b2f5511ea9160b9d542",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "radius/setup-dev-workflows-op-http",
+          "status": "confirmed",
+          "target": "octo/app radius/setup-dev-workflows-op-http sha-base",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "ℹ️ No permission to push to "main" directly — committing workflows to branch "radius/setup-dev-workflows-op-http" and opening a pull request.",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml?ref=radius%2Fsetup-dev-workflows-op-http --jq .sha",
+    ],
+    [
+      "contents-body",
+      {
+        "branch": "radius/setup-dev-workflows-op-http",
+        "content": "b246CiAgd29ya2Zsb3dfZGlzcGF0Y2g6CiAgICBpbnB1dHM6CiAgICAgIGVudmlyb25tZW50OgogICAgICAgIHJlcXVpcmVkOiB0cnVlCiAgICAgIHJhZGl1c19vcGVyYXRpb246CiAgICAgICAgcmVxdWlyZWQ6IGZhbHNlCnJ1bi1uYW1lOiBSYWRpdXMgdmVyaWZ5ICR7eyBpbnB1dHMuZW52aXJvbm1lbnQgfX0gWyR7eyBpbnB1dHMucmFkaXVzX29wZXJhdGlvbiB9fV0Kam9iczo=",
+        "message": "Add Radius verify-credentials workflow for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+      },
+    ],
+    [
+      "journal",
+      "persist:28",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_10f0b376b313507e8af69790d7970b02",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml --input @radius/setup-dev-workflows-op-http",
+    ],
+    [
+      "journal",
+      "persist:29",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_10f0b376b313507e8af69790d7970b02",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "step",
+      "✅ Verify workflow committed.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:30",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "Checking deploy workflows...",
+    ],
+    [
+      "journal",
+      "generateDeployWorkflow:dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/run-rad-commands.yml?ref=radius%2Fsetup-dev-workflows-op-http --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "branch": "radius/setup-dev-workflows-op-http",
+        "content": "b246IHdvcmtmbG93X2Rpc3BhdGNoCmpvYnM6Cg==",
+        "message": "Add Radius deploy workflow (run-rad-commands.yml) for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+      },
+    ],
+    [
+      "journal",
+      "persist:31",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/run-rad-commands.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_9677e36167f9f08c090dfcd81341397e",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/run-rad-commands.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/run-rad-commands.yml --input @radius/setup-dev-workflows-op-http",
+    ],
+    [
+      "journal",
+      "persist:32",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/run-rad-commands.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_9677e36167f9f08c090dfcd81341397e",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/run-rad-commands.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:33",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "journal",
+      "deleteLegacyDeployWorkflow",
+    ],
+    [
+      "journal",
+      "legacyDeployDeleteBranch:radius/setup-dev-workflows-op-http",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:34",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "✅ Deploy workflows committed.",
+    ],
+    [
+      "step",
+      "Checking delete workflows...",
+    ],
+    [
+      "journal",
+      "generateDeleteWorkflow:dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/radius-delete.yml?ref=radius%2Fsetup-dev-workflows-op-http --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "branch": "radius/setup-dev-workflows-op-http",
+        "content": "b246IHdvcmtmbG93X2Rpc3BhdGNoCmpvYnM6Cg==",
+        "message": "Add Radius delete workflow (radius-delete.yml) for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+      },
+    ],
+    [
+      "journal",
+      "persist:35",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/radius-delete.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_cf3caf11b69e7bf219f5138bfc672145",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/radius-delete.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/radius-delete.yml --input @radius/setup-dev-workflows-op-http",
+    ],
+    [
+      "journal",
+      "persist:36",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/radius-delete.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_cf3caf11b69e7bf219f5138bfc672145",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/radius-delete.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:37",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "✅ Delete workflows committed.",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-pull-request",
+    ],
+    [
+      "journal",
+      "persist:38",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "kind": "github_pull_request.create",
+          "mutationId": "pm_7c60289770e89749a68941d468ba6805",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "radius/setup-dev-workflows-op-http",
+          "status": "prepared",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:main",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "journal",
+      "createPullRequestApi",
+    ],
+    [
+      "pull-request",
+      [
+        "octo/app",
+        "radius/setup-dev-workflows-op-http",
+        "main",
+        "Add Radius deploy workflows for environment dev",
+        "This PR adds the GitHub Actions workflows that power the Radius extension for the **dev** environment:
+
+- \`.github/workflows/radius-verify-credentials.yml\`
+- Radius deploy workflow(s) under \`.github/workflows/\`
+- Radius delete workflow(s) under \`.github/workflows/\`
+
+They were committed to \`radius/setup-dev-workflows-op-http\` because direct pushes to \`main\` are not permitted. Merge this PR to enable deploying and deleting the application from the Radius canvas.",
+      ],
+    ],
+    [
+      "journal",
+      "persist:39",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "kind": "github_pull_request.create",
+          "mutationId": "pm_7c60289770e89749a68941d468ba6805",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "radius/setup-dev-workflows-op-http",
+          "status": "confirmed",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:main",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "✅ Opened pull request #7: https://github.com/octo/app/pull/7",
+    ],
+    [
+      "journal",
+      "recordCommitState",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:40",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-pull-request",
+    ],
+    [
+      "step",
+      "⏭️ Skipping credential verification until the pull request is merged — the verify workflow is not on the default branch yet.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:41",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "workflow_dispatch",
+        "operationMarker": "op-http",
+        "ref": "main",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:after-verification-dispatch",
+    ],
+    [
+      "step",
+      "👉 Merge the pull request above to put the workflows on "main", then retry credential verification.",
+    ],
+    [
+      "journal",
+      "recordCleanupState:not_needed",
+    ],
+    [
+      "journal",
+      "setStageState:verify:skipped",
+    ],
+    [
+      "journal",
+      "finish:action_required",
+    ],
+    [
+      "journal",
+      "persistBestEffort",
+    ],
+    [
+      "journal",
+      "persist:42",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "workflow_dispatch",
+        "operationMarker": "op-http",
+        "ref": "main",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+  ],
+  "verification": {
+    "baselineRunId": null,
+    "dispatchedAt": 1700000000000,
+    "environment": "dev",
+    "event": "workflow_dispatch",
+    "operationMarker": "op-http",
+    "ref": "main",
+    "runId": null,
+    "runUrl": null,
+    "workflow": "radius-verify-credentials.yml",
+  },
+}
+`;
+
+exports[`publication baseline parity > preserves the protected command, journal, narration, and durable transcript 1`] = `
+{
+  "body": {
+    "actionRequired": false,
+    "environment": "dev",
+    "operationId": "op-http",
+    "provider": "azure",
+    "pullRequestBaseBranch": null,
+    "pullRequestBranch": null,
+    "pullRequestUrl": "https://github.com/octo/app/pull/7",
+    "repo": "octo/app",
+    "stateArchive": "radius-state",
+    "stateBackend": "oci",
+    "stateRegistry": "ghcr.io/octo/app/radius-state-dev",
+    "steps": [
+      "✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.",
+      "✅ GitHub environment "dev" resolved.",
+      "Creating private GHCR state package "ghcr.io/octo/app/radius-state-dev"...",
+      "✅ GHCR state package is private and linked to octo/app.",
+      "Configuring Radius state package "ghcr.io/octo/app/radius-state-dev"...",
+      "✅ Radius state package configured with archive tag "radius-state".",
+      "Setting environment variables and secrets...",
+      "Set 3 environment value(s) for Azure.",
+      "ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: az role assignment create --assignee c --role Contributor --scope /subscriptions/s",
+      "Checking verify-credentials workflow...",
+      "ℹ️ No permission to push to "main" directly — committing workflows to branch "radius/setup-dev-workflows-op-http" and opening a pull request.",
+      "✅ Verify workflow committed.",
+      "Checking deploy workflows...",
+      "✅ Deploy workflows committed.",
+      "Checking delete workflows...",
+      "✅ Delete workflows committed.",
+      "✅ Opened pull request #7: https://github.com/octo/app/pull/7",
+      "Discovering credential verification started automatically on branch "radius/setup-dev-workflows-op-http"...",
+      "✅ Credential verification started automatically.",
+      "Verify run: https://github.com/octo/app/actions/runs/4242",
+      "ℹ️ Credential verification is running against branch "radius/setup-dev-workflows-op-http", so it is not waiting for the merge. Merging the pull request above puts the workflows on "main".",
+    ],
+    "success": true,
+    "verifyRunUrl": "https://github.com/octo/app/actions/runs/4242",
+    "verifySkipReason": "",
+    "verifySkipped": false,
+  },
+  "finished": [],
+  "ledger": {
+    "azureApp": {
+      "appId": null,
+      "displayName": null,
+      "origin": "unknown",
+      "serviceManagementReference": null,
+      "state": "not_started",
+    },
+    "cleanup": {
+      "attempts": 0,
+      "ownerAssignment": "not_requested",
+      "results": [],
+      "state": "not_started",
+    },
+    "commit": {
+      "baseBranch": null,
+      "branch": "radius/setup-dev-workflows-op-http",
+      "headSha": "commit-sha",
+      "mode": "pull_request",
+      "pullRequestUrl": null,
+      "workflowFiles": [
+        {
+          "blobSha": "blob-sha",
+          "branch": "radius/setup-dev-workflows-op-http",
+          "commitSha": "commit-sha",
+          "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+          "mode": "pull_request",
+          "path": ".github/workflows/radius-verify-credentials.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+        {
+          "blobSha": "blob-sha",
+          "branch": "radius/setup-dev-workflows-op-http",
+          "commitSha": "commit-sha",
+          "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+          "mode": "pull_request",
+          "path": ".github/workflows/run-rad-commands.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+        {
+          "blobSha": "blob-sha",
+          "branch": "radius/setup-dev-workflows-op-http",
+          "commitSha": "commit-sha",
+          "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+          "mode": "pull_request",
+          "path": ".github/workflows/radius-delete.yml",
+          "previousBlobKnown": true,
+          "previousBlobSha": null,
+          "state": "committed",
+        },
+      ],
+    },
+    "federatedCredentials": [],
+    "githubEnvironment": {
+      "name": "dev",
+      "origin": "this_operation",
+      "providerId": "1234567",
+      "repo": "octo/app",
+      "state": "created",
+    },
+    "githubEnvironmentVariables": [
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_MANAGED",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_BACKEND",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_REGISTRY",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "RADIUS_STATE_ARCHIVE",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_CLIENT_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_TENANT_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+      },
+      {
+        "environment": "dev",
+        "environmentProviderId": "1234567",
+        "name": "AZURE_SUBSCRIPTION_ID",
+        "previousKnown": true,
+        "previousValue": null,
+        "repo": "octo/app",
+        "state": "created",
+        "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+      },
+    ],
+    "roleAssignments": [],
+    "servicePrincipal": {
+      "appId": null,
+      "objectId": null,
+      "origin": "unknown",
+      "state": "not_started",
+    },
+  },
+  "panel": {
+    "deployDispatchedAt": 1700000000000,
+    "verifyRunId": "4242",
+    "verifyRunUrl": "https://github.com/octo/app/actions/runs/4242",
+  },
+  "trace": [
+    [
+      "journal",
+      "persist:1",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "gh",
+      "api --paginate /repos/octo/app/environments?per_page=100 --jq .environments[].name",
+    ],
+    [
+      "journal",
+      "enterStage:configure-environment",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-github-environment",
+    ],
+    [
+      "journal",
+      "preflightRepoAdmin",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-ghcr-bootstrap",
+    ],
+    [
+      "journal",
+      "preflightGhcrPackageWriteAccess",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-github-environment-create",
+    ],
+    [
+      "journal",
+      "persist:2",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:3",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironment:created_candidate",
+    ],
+    [
+      "journal",
+      "promoteCreatedGitHubEnvironment:true",
+    ],
+    [
+      "step",
+      "✅ GitHub environment "dev" created by this setup — Radius owns it and can remove it.",
+    ],
+    [
+      "step",
+      "✅ GitHub environment "dev" resolved.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:4",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-github-environment",
+    ],
+    [
+      "journal",
+      "stateRegistry:dev",
+    ],
+    [
+      "step",
+      "Creating private GHCR state package "ghcr.io/octo/app/radius-state-dev"...",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-ghcr-state-package",
+    ],
+    [
+      "journal",
+      "bootstrapGHCRStatePackage",
+    ],
+    [
+      "step",
+      "✅ GHCR state package is private and linked to octo/app.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:5",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-ghcr-state-package",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-radius-managed-variable",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_MANAGED",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:6",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_MANAGED",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "true",
+            "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_25a81ba51b7e68db3914e2427fe7313a",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_MANAGED",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_MANAGED",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_MANAGED --body true --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_MANAGED",
+    ],
+    [
+      "journal",
+      "persist:7",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_MANAGED",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "true",
+            "valueSha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_25a81ba51b7e68db3914e2427fe7313a",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_MANAGED",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "journal",
+      "envListCacheDelete:octo/app",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:8",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-radius-managed-variable",
+    ],
+    [
+      "step",
+      "Configuring Radius state package "ghcr.io/octo/app/radius-state-dev"...",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-state-package-configuration",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_BACKEND",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:9",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_BACKEND",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "oci",
+            "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_9926f61e82ab18f98630025589e2948d",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_BACKEND",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_BACKEND",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_BACKEND --body oci --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_BACKEND",
+    ],
+    [
+      "journal",
+      "persist:10",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_BACKEND",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "oci",
+            "valueSha256": "7e887edb52b723997076a9f5a72bef4473227a303cbc2cf5118e7be261f41c13",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_9926f61e82ab18f98630025589e2948d",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_BACKEND",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:11",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_REGISTRY",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "ghcr.io/octo/app/radius-state-dev",
+            "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_f80c59e689b002f29f313acc02697e12",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_REGISTRY",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_REGISTRY --body ghcr.io/octo/app/radius-state-dev --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_REGISTRY",
+    ],
+    [
+      "journal",
+      "persist:12",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_REGISTRY",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "ghcr.io/octo/app/radius-state-dev",
+            "valueSha256": "24a37f7b45cb5a6cb278982f8a72e5f85261bdfb25d32d8f766ecc51d777e410",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_f80c59e689b002f29f313acc02697e12",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_REGISTRY",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:13",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "RADIUS_STATE_ARCHIVE",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "radius-state",
+            "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_fb9d1311d11d79e548882f45bf78c26c",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:RADIUS_STATE_ARCHIVE",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set RADIUS_STATE_ARCHIVE --body radius-state --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:RADIUS_STATE_ARCHIVE",
+    ],
+    [
+      "journal",
+      "persist:14",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "RADIUS_STATE_ARCHIVE",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "radius-state",
+            "valueSha256": "28e5131f21df9e112450410a5b5e77fd8d545eb782c2e0f89fa24cb2d801d15e",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_fb9d1311d11d79e548882f45bf78c26c",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:RADIUS_STATE_ARCHIVE",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "✅ Radius state package configured with archive tag "radius-state".",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:15",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-state-package-configuration",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-provider-configuration",
+    ],
+    [
+      "step",
+      "Setting environment variables and secrets...",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:16",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_CLIENT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "c",
+            "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_d37880cb00c8178a6a6fc3e4594670e4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_CLIENT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_CLIENT_ID --body c --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_CLIENT_ID",
+    ],
+    [
+      "journal",
+      "persist:17",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_CLIENT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "c",
+            "valueSha256": "2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_d37880cb00c8178a6a6fc3e4594670e4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_CLIENT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_TENANT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:18",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_TENANT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "t",
+            "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_04e3cd7ad751fe590c5baf44c65752a4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_TENANT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_TENANT_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_TENANT_ID --body t --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_TENANT_ID",
+    ],
+    [
+      "journal",
+      "persist:19",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_TENANT_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "t",
+            "valueSha256": "e3b98a4da31a127d4bde6e43033f66ba274cab0eb7eb1c70ec41402bf6273dd8",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_04e3cd7ad751fe590c5baf44c65752a4",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_TENANT_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "journal",
+      "persist:20",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "name": "AZURE_SUBSCRIPTION_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "s",
+            "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_33b0745081685c14dc0cbea1893f0d0f",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:dev:AZURE_SUBSCRIPTION_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev/variables/AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/environments/dev",
+    ],
+    [
+      "gh",
+      "variable set AZURE_SUBSCRIPTION_ID --body s --env dev --repo octo/app",
+    ],
+    [
+      "journal",
+      "recordGitHubEnvironmentVariable:AZURE_SUBSCRIPTION_ID",
+    ],
+    [
+      "journal",
+      "persist:21",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "name": "AZURE_SUBSCRIPTION_ID",
+            "previousKnown": true,
+            "previousValue": null,
+            "value": "s",
+            "valueSha256": "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
+          },
+          "kind": "github_environment_variable.put",
+          "mutationId": "pm_33b0745081685c14dc0cbea1893f0d0f",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:dev:AZURE_SUBSCRIPTION_ID",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "Set 3 environment value(s) for Azure.",
+    ],
+    [
+      "step",
+      "ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: az role assignment create --assignee c --role Contributor --scope /subscriptions/s",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:22",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:after-provider-configuration",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-policy-read",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/radius-verify-credentials.yml",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/run-rad-commands.yml",
+    ],
+    [
+      "journal",
+      "fetchFileFromRepoResult:.github/workflows/radius-deploy.yml",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:23",
+    ],
+    [
+      "durable",
+      [],
+      null,
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-commit",
+    ],
+    [
+      "step",
+      "Checking verify-credentials workflow...",
+    ],
+    [
+      "journal",
+      "generateVerifyWorkflow:dev",
+    ],
+    [
+      "journal",
+      "setupPushOperationMarker:op-http",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "content": "b246CiAgd29ya2Zsb3dfZGlzcGF0Y2g6CiAgICBpbnB1dHM6CiAgICAgIGVudmlyb25tZW50OgogICAgICAgIHJlcXVpcmVkOiB0cnVlCiAgICAgIHJhZGl1c19vcGVyYXRpb246CiAgICAgICAgcmVxdWlyZWQ6IGZhbHNlCnJ1bi1uYW1lOiBSYWRpdXMgdmVyaWZ5ICR7eyBpbnB1dHMuZW52aXJvbm1lbnQgfX0gWyR7eyBpbnB1dHMucmFkaXVzX29wZXJhdGlvbiB9fV0Kam9iczo=",
+        "message": "Add Radius verify-credentials workflow for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+      },
+    ],
+    [
+      "journal",
+      "persist:24",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_0f3e53c0c60f8a772f0e9be83504d6b5",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:<default>:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml --input @default",
+    ],
+    [
+      "journal",
+      "persist:25",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "protected branch",
+          "finalDiagnostic": "Provider command exit code: 1.
+protected branch",
+          "initialDiagnostic": "Provider command exit code: 1.
+protected branch",
+          "intent": {
+            "branch": "<default>",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_0f3e53c0c60f8a772f0e9be83504d6b5",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "not_applied",
+          "target": "octo/app:<default>:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "branch-head",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "journal",
+      "persist:26",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "kind": "github_branch.create",
+          "mutationId": "pm_0c447855accf3b2f5511ea9160b9d542",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "radius/setup-dev-workflows-op-http",
+          "status": "prepared",
+          "target": "octo/app radius/setup-dev-workflows-op-http sha-base",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "branch-create",
+    ],
+    [
+      "journal",
+      "persist:27",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "kind": "github_branch.create",
+          "mutationId": "pm_0c447855accf3b2f5511ea9160b9d542",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "radius/setup-dev-workflows-op-http",
+          "status": "confirmed",
+          "target": "octo/app radius/setup-dev-workflows-op-http sha-base",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "step",
+      "ℹ️ No permission to push to "main" directly — committing workflows to branch "radius/setup-dev-workflows-op-http" and opening a pull request.",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml?ref=radius%2Fsetup-dev-workflows-op-http --jq .sha",
+    ],
+    [
+      "contents-body",
+      {
+        "branch": "radius/setup-dev-workflows-op-http",
+        "content": "b246CiAgd29ya2Zsb3dfZGlzcGF0Y2g6CiAgICBpbnB1dHM6CiAgICAgIGVudmlyb25tZW50OgogICAgICAgIHJlcXVpcmVkOiB0cnVlCiAgICAgIHJhZGl1c19vcGVyYXRpb246CiAgICAgICAgcmVxdWlyZWQ6IGZhbHNlCnJ1bi1uYW1lOiBSYWRpdXMgdmVyaWZ5ICR7eyBpbnB1dHMuZW52aXJvbm1lbnQgfX0gWyR7eyBpbnB1dHMucmFkaXVzX29wZXJhdGlvbiB9fV0Kam9iczo=",
+        "message": "Add Radius verify-credentials workflow for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+      },
+    ],
+    [
+      "journal",
+      "persist:28",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_10f0b376b313507e8af69790d7970b02",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/radius-verify-credentials.yml --input @radius/setup-dev-workflows-op-http",
+    ],
+    [
+      "journal",
+      "persist:29",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "83926b96c39bf3be51230deb6e905754ed1b83081b44d06af77a93dae23140c5",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:83926b96c39bf3be",
+            "path": ".github/workflows/radius-verify-credentials.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_10f0b376b313507e8af69790d7970b02",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/radius-verify-credentials.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      null,
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "step",
+      "✅ Verify workflow committed.",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:30",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "Checking deploy workflows...",
+    ],
+    [
+      "journal",
+      "generateDeployWorkflow:dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/run-rad-commands.yml?ref=radius%2Fsetup-dev-workflows-op-http --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "branch": "radius/setup-dev-workflows-op-http",
+        "content": "b246IHdvcmtmbG93X2Rpc3BhdGNoCmpvYnM6Cg==",
+        "message": "Add Radius deploy workflow (run-rad-commands.yml) for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+      },
+    ],
+    [
+      "journal",
+      "persist:31",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/run-rad-commands.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_9677e36167f9f08c090dfcd81341397e",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/run-rad-commands.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/run-rad-commands.yml --input @radius/setup-dev-workflows-op-http",
+    ],
+    [
+      "journal",
+      "persist:32",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/run-rad-commands.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/run-rad-commands.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_9677e36167f9f08c090dfcd81341397e",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/run-rad-commands.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:33",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "journal",
+      "deleteLegacyDeployWorkflow",
+    ],
+    [
+      "journal",
+      "legacyDeployDeleteBranch:radius/setup-dev-workflows-op-http",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:34",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "✅ Deploy workflows committed.",
+    ],
+    [
+      "step",
+      "Checking delete workflows...",
+    ],
+    [
+      "journal",
+      "generateDeleteWorkflow:dev",
+    ],
+    [
+      "gh",
+      "api /repos/octo/app/contents/.github/workflows/radius-delete.yml?ref=radius%2Fsetup-dev-workflows-op-http --jq .sha",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-provider-mutation",
+    ],
+    [
+      "contents-body",
+      {
+        "branch": "radius/setup-dev-workflows-op-http",
+        "content": "b246IHdvcmtmbG93X2Rpc3BhdGNoCmpvYnM6Cg==",
+        "message": "Add Radius delete workflow (radius-delete.yml) for environment dev
+
+Radius-Operation: radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+      },
+    ],
+    [
+      "journal",
+      "persist:35",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/radius-delete.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_cf3caf11b69e7bf219f5138bfc672145",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "prepared",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/radius-delete.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "gh",
+      "api --method PUT /repos/octo/app/contents/.github/workflows/radius-delete.yml --input @radius/setup-dev-workflows-op-http",
+    ],
+    [
+      "journal",
+      "persist:36",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "intent": {
+            "branch": "radius/setup-dev-workflows-op-http",
+            "contentSha256": "51c3aca9294f95c2c9874f56ff36c523c07a628bd7f088f6f6e4c1c5c9587ab7",
+            "operationMarker": "radius-operation:op-http:workflow:.github/workflows/radius-delete.yml:51c3aca9294f95c2",
+            "path": ".github/workflows/radius-delete.yml",
+            "previousBlobKnown": true,
+            "previousBlobSha": null,
+          },
+          "kind": "github_workflow.put",
+          "mutationId": "pm_cf3caf11b69e7bf219f5138bfc672145",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": null,
+          "status": "confirmed",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:.github/workflows/radius-delete.yml",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "contents-cleanup",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:37",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-commit",
+    ],
+    [
+      "step",
+      "✅ Delete workflows committed.",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-workflow-pull-request",
+    ],
+    [
+      "journal",
+      "persist:38",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": null,
+          "kind": "github_pull_request.create",
+          "mutationId": "pm_7c60289770e89749a68941d468ba6805",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "radius/setup-dev-workflows-op-http",
+          "status": "prepared",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:main",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "createPullRequestApi",
+    ],
+    [
+      "pull-request",
+      [
+        "octo/app",
+        "radius/setup-dev-workflows-op-http",
+        "main",
+        "Add Radius deploy workflows for environment dev",
+        "This PR adds the GitHub Actions workflows that power the Radius extension for the **dev** environment:
+
+- \`.github/workflows/radius-verify-credentials.yml\`
+- Radius deploy workflow(s) under \`.github/workflows/\`
+- Radius delete workflow(s) under \`.github/workflows/\`
+
+They were committed to \`radius/setup-dev-workflows-op-http\` because direct pushes to \`main\` are not permitted. Merge this PR to enable deploying and deleting the application from the Radius canvas.",
+      ],
+    ],
+    [
+      "journal",
+      "persist:39",
+    ],
+    [
+      "durable",
+      [
+        {
+          "evidence": "The provider acknowledged the mutation.",
+          "kind": "github_pull_request.create",
+          "mutationId": "pm_7c60289770e89749a68941d468ba6805",
+          "preparedAt": "2023-11-14T22:13:20.000Z",
+          "providerId": null,
+          "providerIdempotencyKey": "radius/setup-dev-workflows-op-http",
+          "status": "confirmed",
+          "target": "octo/app:radius/setup-dev-workflows-op-http:main",
+          "updatedAt": "2023-11-14T22:13:20.000Z",
+        },
+      ],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "step",
+      "✅ Opened pull request #7: https://github.com/octo/app/pull/7",
+    ],
+    [
+      "journal",
+      "recordCommitState",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:40",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": null,
+        "runUrl": null,
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:after-workflow-pull-request",
+    ],
+    [
+      "step",
+      "Discovering credential verification started automatically on branch "radius/setup-dev-workflows-op-http"...",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-automatic-verification-discovery:1",
+    ],
+    [
+      "gh",
+      "run list --workflow=radius-verify-credentials.yml --limit 10 --json databaseId,createdAt,displayTitle,event,headBranch --repo octo/app",
+    ],
+    [
+      "journal",
+      "stopBoundary:before-automatic-verification-discovery:2",
+    ],
+    [
+      "gh",
+      "run list --workflow=radius-verify-credentials.yml --limit 10 --json databaseId,createdAt,displayTitle,event,headBranch --repo octo/app",
+    ],
+    [
+      "step",
+      "✅ Credential verification started automatically.",
+    ],
+    [
+      "step",
+      "Verify run: https://github.com/octo/app/actions/runs/4242",
+    ],
+    [
+      "journal",
+      "enterStage:verify",
+    ],
+    [
+      "journal",
+      "checkpoint",
+    ],
+    [
+      "journal",
+      "persist:41",
+    ],
+    [
+      "durable",
+      [],
+      {
+        "baselineRunId": null,
+        "dispatchedAt": 1700000000000,
+        "environment": "dev",
+        "event": "push",
+        "operationMarker": "op-http",
+        "ref": "radius/setup-dev-workflows-op-http",
+        "runId": "4242",
+        "runUrl": "https://github.com/octo/app/actions/runs/4242",
+        "workflow": "radius-verify-credentials.yml",
+      },
+    ],
+    [
+      "journal",
+      "stopBoundary:after-verification-dispatch",
+    ],
+    [
+      "step",
+      "ℹ️ Credential verification is running against branch "radius/setup-dev-workflows-op-http", so it is not waiting for the merge. Merging the pull request above puts the workflows on "main".",
+    ],
+    [
+      "journal",
+      "recordCleanupState:not_needed",
+    ],
+  ],
+  "verification": {
+    "baselineRunId": null,
+    "dispatchedAt": 1700000000000,
+    "environment": "dev",
+    "event": "push",
+    "operationMarker": "op-http",
+    "ref": "radius/setup-dev-workflows-op-http",
+    "runId": "4242",
+    "runUrl": "https://github.com/octo/app/actions/runs/4242",
+    "workflow": "radius-verify-credentials.yml",
+  },
+}
+`;
