@@ -319,13 +319,19 @@ describe("registered environment tools with production runtime services", () => 
       }
     }
   );
-  it.each(["azure", "aws"] as const)(
-    "durably admits %s verify-only setup without Canvas or local HTTP",
-    async (provider) => {
+  it.each([
+    ["azure", "dev"],
+    ["aws", "dev"],
+    ["azure", " dev "],
+    ["aws", "\tdev\n"]
+  ] as const)(
+    "durably admits %s verify-only setup named %j without Canvas or local HTTP",
+    async (provider, environment) => {
       const h = await composition();
       try {
         const result = await h.invoke("radius_setup_environment", {
           ...target,
+          environment,
           provider,
           ...(provider === "azure" ?
             {
@@ -349,6 +355,8 @@ describe("registered environment tools with production runtime services", () => 
           throw new Error("Expected admitted operation");
         await h.settled();
         expect(h.runner).toHaveBeenCalledWith(result.operation.operationId);
+        expect(h.runner).toHaveBeenCalledOnce();
+        expect(h.ready).toHaveBeenCalledWith(expect.objectContaining(target));
         expect(
           operations.get(result.operation.operationId)?.request
         ).toMatchObject({
@@ -364,6 +372,25 @@ describe("registered environment tools with production runtime services", () => 
         expect(h.getOrCreateServer).not.toHaveBeenCalled();
         expect(h.deps.deploy.fetch).not.toHaveBeenCalled();
         expect(h.run).not.toHaveBeenCalled();
+        const identity = {
+          ...target,
+          operationId: result.operation.operationId
+        };
+        expect(
+          await h.invoke("radius_environment_status", identity)
+        ).toMatchObject({
+          kind: "status",
+          operation: identity
+        });
+        expect(
+          await h.invoke("radius_environment_control", {
+            ...identity,
+            action: "stop"
+          })
+        ).toMatchObject({
+          kind: "accepted",
+          operation: identity
+        });
       } finally {
         await h.extension.shutdown();
       }

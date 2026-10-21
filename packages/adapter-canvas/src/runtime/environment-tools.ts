@@ -307,6 +307,7 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
   return {
     start(input: unknown): Promise<EnvironmentToolResult> {
       return run(input, ENVIRONMENT_SETUP_ARGUMENT_SCHEMA, async (args) => {
+        args.environment = text(args.environment).trim();
         const { repo, environment } = targetOf(args);
         const target = { repo, environment };
         const key = `setup:${target.repo}`;
@@ -455,6 +456,23 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
           let snapshot = fingerprint(operation);
           const isCurrent = () => current(operation, snapshot);
           const action = text(args.action);
+          // Cooperative Stop must not reacquire the running setup's account lease.
+          if (action === "stop") {
+            if (!environmentActions(operation).includes("stop")) {
+              return refused(
+                "operation-command-ineligible",
+                "The command is not currently eligible for this setup operation."
+              );
+            }
+            return outcome(
+              await ports.control({
+                operationId: target.operationId,
+                command: "stop",
+                isCurrent
+              }),
+              target
+            );
+          }
           const selected = await account(
             target,
             isCurrent,
@@ -616,7 +634,6 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
             verify: { command: "retry", retryKind: "verification" },
             "retry-setup": { command: "retry", retryKind: "setup" },
             "retry-cleanup": { command: "retry", retryKind: "cleanup" },
-            stop: { command: "stop" },
             "cancel-workflow": { command: "cancel-workflow" },
             rollback: { command: "rollback" },
             exit: { command: "exit" },

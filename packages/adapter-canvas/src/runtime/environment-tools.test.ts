@@ -307,6 +307,83 @@ describe("environment tool handlers", () => {
     ).toMatchObject({ kind: "refused", code: "invalid-azure-operation-input" });
     expect(h.ports.account).not.toHaveBeenCalled();
   });
+  it.each(["dev", " dev ", "\tdev\n", " Dev East "])(
+    "uses one canonical setup target for %j without changing caller input",
+    async (environment) => {
+      const h = harness();
+      h.registry.clear();
+      const input = { ...setup, environment };
+      const canonical = environment.trim();
+      const result = await h.tools.start(input);
+      expect(result).toMatchObject({
+        kind: "accepted",
+        operation: { repo: target.repo, environment: canonical }
+      });
+      if (result.kind !== "accepted") throw new Error("Expected acceptance");
+      expect(input.environment).toBe(environment);
+      expect(h.ports.account).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: { repo: target.repo, environment: canonical }
+        })
+      );
+      expect(h.registry.get(result.operation.operationId)).toMatchObject({
+        environment: canonical,
+        request: { environment: { environment: canonical } },
+        resumeRequest: { environment: { environment: canonical } }
+      });
+      expect(h.persist).toHaveBeenCalledOnce();
+      expect(h.schedule).toHaveBeenCalledOnce();
+      const identity = {
+        repo: target.repo,
+        environment: canonical,
+        operationId: result.operation.operationId
+      };
+      expect(await h.tools.status(identity)).toMatchObject({ kind: "status" });
+      if (environment !== canonical) {
+        expect(
+          await h.tools.status({ ...identity, environment })
+        ).toMatchObject({ code: "operation-target-mismatch" });
+        expect(
+          await h.tools.control({ ...identity, environment, action: "stop" })
+        ).toMatchObject({ code: "operation-target-mismatch" });
+      }
+      expect(await h.tools.start(input)).toMatchObject({
+        kind: "refused",
+        code: "operation-in-progress"
+      });
+      expect(h.schedule).toHaveBeenCalledOnce();
+    }
+  );
+  it.each(["", " ", "\t\n"])(
+    "refuses an empty canonical environment %j before admission",
+    async (environment) => {
+      const h = harness();
+      h.registry.clear();
+      expect(await h.tools.start({ ...setup, environment })).toMatchObject({
+        kind: "refused",
+        code: "invalid-environment-tool-input"
+      });
+      expect(h.ports.account).not.toHaveBeenCalled();
+      expect(h.persist).not.toHaveBeenCalled();
+      expect(h.schedule).not.toHaveBeenCalled();
+    }
+  );
+  it("uses the canonical setup target in required account guidance", async () => {
+    const h = harness();
+    h.registry.clear();
+    vi.mocked(h.ports.account).mockResolvedValue({
+      state: "choice-required",
+      logins: ["octocat", "another-account"]
+    });
+    expect(
+      await h.tools.start({ ...setup, environment: " dev " })
+    ).toMatchObject({
+      kind: "interaction_required",
+      interaction: { ...target, kind: "github-account-selection" }
+    });
+    expect(h.persist).not.toHaveBeenCalled();
+    expect(h.schedule).not.toHaveBeenCalled();
+  });
   it("does not retain an account or register setup when shutdown wins account acquisition", async () => {
     const h = harness();
     h.registry.clear();
@@ -571,6 +648,50 @@ describe("environment tool handlers", () => {
         command: "stop"
       })
     );
+    expect(h.ports.account).not.toHaveBeenCalled();
+    expect(h.ports.readExecutor).not.toHaveBeenCalled();
+  });
+  it("admits local Stop even when saved credentials are unavailable", async () => {
+    const h = harness();
+    h.op.context = {};
+    vi.mocked(h.ports.account).mockResolvedValue({
+      state: "unavailable",
+      message: "Credentials are unavailable."
+    });
+    vi.mocked(h.ports.control).mockImplementation(() => h.accepted());
+    expect(
+      await h.tools.control({ ...h.identity, action: "stop" })
+    ).toMatchObject({ kind: "accepted" });
+    expect(h.ports.account).not.toHaveBeenCalled();
+    expect(h.ports.readExecutor).not.toHaveBeenCalled();
+  });
+  it("keeps local Stop bound to its operation context at queued admission", async () => {
+    const h = harness();
+    vi.mocked(h.ports.control).mockImplementation(async ({ isCurrent }) => {
+      expect(isCurrent?.()).toBe(true);
+      h.op.context.githubLogin = "replacement-account";
+      expect(isCurrent?.()).toBe(false);
+      return {
+        status: 409,
+        body: { code: "operation-context-changed", error: "Stale operation." }
+      };
+    });
+    expect(
+      await h.tools.control({ ...h.identity, action: "stop" })
+    ).toMatchObject({ kind: "refused", code: "operation-context-changed" });
+    expect(h.ports.account).not.toHaveBeenCalled();
+  });
+  it("refuses ineligible local Stop without checking credentials", async () => {
+    const h = harness();
+    finish(h.op, "succeeded");
+    expect(
+      await h.tools.control({ ...h.identity, action: "stop" })
+    ).toMatchObject({
+      kind: "refused",
+      code: "operation-command-ineligible"
+    });
+    expect(h.ports.control).not.toHaveBeenCalled();
+    expect(h.ports.account).not.toHaveBeenCalled();
   });
   it("requires host confirmation for cleanup and never treats an agent boolean as consent", async () => {
     const h = harness();
@@ -713,9 +834,10 @@ describe("environment tool handlers", () => {
     "does not control an operation after its account is %s",
     async (state) => {
       const h = harness();
+      const op = h.stopped();
       vi.mocked(h.ports.account).mockImplementation(async () => {
         if (state === "declined") return { state: "declined" };
-        h.op.environment = "replacement";
+        op.environment = "replacement";
         return {
           state: "selected",
           login: h.executor.login,
@@ -723,7 +845,7 @@ describe("environment tool handlers", () => {
         };
       });
       expect(
-        await h.tools.control({ ...h.identity, action: "stop" })
+        await h.tools.control({ ...h.identity, action: "continue" })
       ).toMatchObject({
         kind: "refused",
         code:
