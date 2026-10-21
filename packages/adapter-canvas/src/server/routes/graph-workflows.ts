@@ -32,7 +32,9 @@ import type {
 } from "../../workspace.js";
 import {
   appModelAuthoringFailure,
-  clearAppModelAuthoringFailure
+  clearAppModelAuthoringFailure,
+  reconcileAppModelAuthoringFailure,
+  type AppModelAuthoringFailure
 } from "../../app-model-authoring-failure.js";
 
 // The use-case layer behind the three `graphs-planning` write routes.
@@ -57,27 +59,22 @@ const MISSING_ENTRY_PAYLOAD = {
 const GENERATING_APP_BICEP_MESSAGE =
   "Copilot is generating .radius/app.bicep with the Radius app-bicep skill.";
 
-// The terminal text every view shows once modeling has permanently failed. An
-// explicit Canvas refresh is the only retry path, because the failure is fenced
-// by the attempt token that produced it and only a refresh mints a new one.
-function appModelAuthoringFailureDetail(error: string): string {
-  return `Application model generation stopped: ${error} Fix the reported issue, then refresh the Radius Canvas to try modeling again.`;
-}
-
-// The explicit-refresh unfence. `clearAppModelAuthoringFailure` also drops the
-// branch's attempt token, which is only safe once that attempt has reported.
-// Dropping a token no failure is recorded against would strand a modeling run
-// that is still in flight: its eventual report is rejected as stale, so the
-// real error never reaches the view and the wait runs to its timeout instead.
-// A diff makes that reachable from a second view, because it clears both of
-// its branches, either of which another view may already be modeling.
-function retryRecordedAuthoringFailure(
-  state: CanvasState,
-  repo: string,
-  branch: string
-): void {
-  if (!appModelAuthoringFailure(state, repo, branch)) return;
-  clearAppModelAuthoringFailure(state, repo, branch);
+// Reloading unchanged source never requests another attempt.
+function appModelAuthoringFailureDetail(
+  failure: AppModelAuthoringFailure,
+  sourceUnavailable = false
+): string {
+  // Only planned attempts record an environment, so only they retry on an
+  // environment change.
+  const update =
+    failure.environmentKey ?
+      "update the branch or target environment"
+    : "update the branch";
+  const recovery =
+    failure.sourceRevision && !sourceUnavailable ?
+      `To retry, change saved source files, ${update}, or click Refresh.`
+    : "The source revision could not be read. Automatic retry is paused. Click Refresh to retry, or reload to check the source again.";
+  return `Application model generation failed: ${failure.error} ${recovery}`;
 }
 
 // `bare` responses are written without a `Content-Type` header, exactly as the
@@ -131,7 +128,10 @@ export interface GraphWorkflowDependencies<
     progressView: GraphProgressView,
     // Re-checked inside the handoff, immediately before it mints attempt tokens
     // and speaks, because it probes and waits long after this route responded.
-    isCurrent?: () => boolean
+    // It follows the selection, not the request, so the page's own automatic
+    // polls for the same repo and branches do not end the handoff.
+    isCurrent?: () => boolean,
+    environmentKey?: string
   ): void;
   triggerGraphRepairHandoff(
     entry: TEntry,
@@ -198,6 +198,13 @@ export interface GraphWorkflowDependencies<
     repo: string,
     branches: string[]
   ): Promise<number | null>;
+  // Saved workspace source fingerprint or remote branch commit. An unavailable
+  // read throws or returns an empty string; neither proves a source change.
+  readBranchSourceRevision(
+    entry: TEntry,
+    repo: string,
+    branch: string
+  ): Promise<string>;
   record(value: unknown): Record<string, unknown>;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
@@ -313,6 +320,17 @@ function isCurrentGraphProgress(
     record?.graphProgressGeneration === handle.generation &&
     record.graphProgressOwner === handle.owner
   );
+}
+
+// True while the view still shows the selection a request started for. Unlike
+// `isCurrentGraphProgress`, a newer automatic request for the same selection
+// (the `needsAppBicep` poll) does not end it; only a selection change does.
+function isCurrentGraphSelection(
+  state: CanvasState,
+  view: GraphProgressView,
+  key: string
+): boolean {
+  return graphProgressRecord(state, view)?.graphProgressKey === key;
 }
 
 // Close the record so nothing still claims to be in flight. The stages stay
@@ -554,20 +572,32 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     branch: string,
     progressView: Extract<GraphProgressView, "graph" | "planned">,
     reportRefusal: (detail: string) => void,
-    retryAuthoring: boolean,
-    isCurrent?: () => boolean
+    isCurrent: () => boolean,
+    // Forwarded to the handoff, which probes and waits long after this request
+    // is replaced by the page's next automatic poll for the same selection.
+    selectionIsCurrent: () => boolean,
+    retry: { userRequested?: boolean; environmentKey?: string }
   ): Promise<GraphWorkflowOutcome> {
-    if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
-    if (retryAuthoring) {
-      retryRecordedAuthoringFailure(entry.state, repo, branch);
-    }
+    if (!isCurrent()) return json(409, STALE_PAYLOAD);
+    const sourceCheck = await reconcileAppModelAuthoringFailure(
+      entry.state,
+      repo,
+      branch,
+      () => dependencies.readBranchSourceRevision(entry, repo, branch),
+      isCurrent,
+      retry
+    );
+    if (!isCurrent()) return json(409, STALE_PAYLOAD);
     const authoringFailure = appModelAuthoringFailure(
       entry.state,
       repo,
       branch
     );
     if (authoringFailure) {
-      const detail = appModelAuthoringFailureDetail(authoringFailure.error);
+      const detail = appModelAuthoringFailureDetail(
+        authoringFailure,
+        sourceCheck === "unavailable"
+      );
       reportRefusal(detail);
       return json(200, {
         error: detail,
@@ -578,7 +608,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       });
     }
     const refusal = await branchRefusalReason(entry, repo, branch);
-    if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
+    if (!isCurrent()) return json(409, STALE_PAYLOAD);
     if (refusal) {
       reportRefusal(refusal);
       return json(200, {
@@ -597,7 +627,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       repo,
       branch,
       "graph",
-      progressView
+      progressView,
+      selectionIsCurrent,
+      retry.environmentKey
     );
     return json(200, {
       error: GENERATING_APP_BICEP_MESSAGE,
@@ -666,15 +698,22 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         { repo, branch }
       );
       activeSourceToken = sourceRefContext.token;
+      const progressKey = JSON.stringify({ repo, branch });
       const progressHandle = beginGraphProgress(
         state,
         "graph",
-        JSON.stringify({ repo, branch }),
+        progressKey,
         { repo, branches: [branch] },
         dependencies.now(),
         data.restartWait === true
       );
       activeProgressHandle = progressHandle;
+      const isCurrentSourceRef = (): boolean =>
+        dependencies.isCurrentSourceRefToken(
+          state,
+          "graph",
+          sourceRefContext.token
+        );
 
       // Every event is gated on the generation, so a superseded request stops
       // writing to the event stream the page is polling.
@@ -738,7 +777,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           branch,
           "graph",
           (detail) => addEvent("creating_model", "failed", detail),
-          data.restartWait === true
+          () =>
+            state.graphBuildGeneration === requestGeneration &&
+            isCurrentGraphProgress(state, progressHandle) &&
+            isCurrentSourceRef(),
+          () =>
+            isCurrentGraphSelection(state, "graph", progressKey) &&
+            isCurrentSourceRef(),
+          { userRequested: data.retryModeling === true }
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
@@ -957,21 +1003,26 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       } else if (data.refresh !== true) {
         state.plannedEnvironment = "";
       }
+      const environmentKey = JSON.stringify([
+        provider,
+        state.plannedEnvironment || ""
+      ]);
       const sourceRefContext = dependencies.prepareSourceRefResources(
         entry,
         "planned",
         { repo, branch }
       );
       activeSourceToken = sourceRefContext.token;
+      const progressKey = JSON.stringify({
+        repo,
+        branch,
+        provider,
+        environment: state.plannedEnvironment
+      });
       const progressHandle = beginGraphProgress(
         state,
         "planned",
-        JSON.stringify({
-          repo,
-          branch,
-          provider,
-          environment: state.plannedEnvironment
-        }),
+        progressKey,
         { repo, branches: [branch] },
         dependencies.now(),
         data.restartWait === true
@@ -979,6 +1030,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       activeProgressHandle = progressHandle;
       const isCurrentPlan = (): boolean =>
         dependencies.isCurrentPlannedGraphRequest(state, planGeneration);
+      const isCurrentSourceRef = (): boolean =>
+        dependencies.isCurrentSourceRefToken(
+          state,
+          "planned",
+          sourceRefContext.token
+        );
 
       const addEvent = (
         stage: GraphBuildStage,
@@ -1022,8 +1079,17 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           branch,
           "planned",
           (detail) => addEvent("creating_model", "failed", detail),
-          data.restartWait === true,
-          isCurrentPlan
+          () =>
+            isCurrentPlan() &&
+            isCurrentGraphProgress(state, progressHandle) &&
+            isCurrentSourceRef(),
+          () =>
+            isCurrentGraphSelection(state, "planned", progressKey) &&
+            isCurrentSourceRef(),
+          {
+            userRequested: data.retryModeling === true,
+            environmentKey
+          }
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
@@ -1279,10 +1345,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         base: data.base,
         head: data.head
       };
+      const progressKey = JSON.stringify({
+        repo,
+        base: data.base,
+        head: data.head
+      });
       const progressHandle = beginGraphProgress(
         state,
         "diff",
-        JSON.stringify({ repo, base: data.base, head: data.head }),
+        progressKey,
         { repo, branches: [data.base, data.head] },
         dependencies.now(),
         data.restartWait === true
@@ -1338,15 +1409,28 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // legitimate failure report as stale or promote an abandoned handoff.
       if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
 
-      // An explicit refresh is the retry path the failure text names, so it
-      // clears BOTH sides: the user is asking for the whole comparison again,
-      // and leaving either side fenced would end the retry immediately. This
-      // runs before the both-missing check so a refresh still unfences the
-      // missing side of a half-modeled comparison.
-      if (data.restartWait === true) {
-        retryRecordedAuthoringFailure(state, repo, data.base);
-        retryRecordedAuthoringFailure(state, repo, data.head);
-      }
+      // Source changes or an explicit retry can release a concluded failure.
+      // This runs before the both-missing check so a half-modeled comparison
+      // still frees the missing side when that branch has moved.
+      const sourceChecks = await Promise.all([
+        reconcileAppModelAuthoringFailure(
+          state,
+          repo,
+          data.base,
+          () => dependencies.readBranchSourceRevision(entry, repo, data.base),
+          isCurrentRequest,
+          { userRequested: data.retryModeling === true }
+        ),
+        reconcileAppModelAuthoringFailure(
+          state,
+          repo,
+          data.head,
+          () => dependencies.readBranchSourceRevision(entry, repo, data.head),
+          isCurrentRequest,
+          { userRequested: data.retryModeling === true }
+        )
+      ]);
+      if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
 
       if (!baseSelection.content && !headSelection.content) {
         addEvent(
@@ -1370,7 +1454,10 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           appModelAuthoringFailure(state, repo, data.base) ??
           appModelAuthoringFailure(state, repo, data.head);
         if (authoringFailure) {
-          const detail = appModelAuthoringFailureDetail(authoringFailure.error);
+          const detail = appModelAuthoringFailureDetail(
+            authoringFailure,
+            sourceChecks.some((check) => check === "unavailable")
+          );
           addEvent("creating_model", "failed", detail);
           return json(200, {
             error: detail,
@@ -1395,17 +1482,24 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         }
         // Re-checked after the refusal probe: the handoff mints the attempt
         // tokens that fence both branches, so a superseded request must not
-        // start one and overwrite the current comparison's attempt. The
-        // predicate goes with it, because the handoff keeps probing and waiting
-        // after this response is written.
+        // start one and overwrite the current comparison's attempt. The handoff
+        // keeps probing and waiting after this response is written, through the
+        // page's next automatic polls, so it ends only on a selection change.
         if (!isCurrentRequest()) return json(409, STALE_PAYLOAD);
+        const handoffSourceToken = sourceRefContext.token;
         dependencies.triggerAppBicepHandoff(
           entry,
           repo,
           [data.base, data.head],
           "graph-diff",
           "diff",
-          isCurrentRequest
+          () =>
+            isCurrentGraphSelection(state, "diff", progressKey) &&
+            dependencies.isCurrentSourceRefToken(
+              state,
+              "diff",
+              handoffSourceToken
+            )
         );
         // No `branch` key here, unlike the other two routes: the diff spans two.
         return json(200, {

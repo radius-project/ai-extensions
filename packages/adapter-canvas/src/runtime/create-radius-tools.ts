@@ -17,11 +17,13 @@ import {
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { ModelingActivity } from "./modeling-activity.js";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
+import { missingModelHandoffIncludesBranch } from "./missing-model-handoff-claims.js";
 import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 import {
   appModelTargetKey,
-  clearAppModelAuthoringFailure
+  clearAppModelAuthoringFailure,
+  readSelectedSourceRevision
 } from "../app-model-authoring-failure.js";
 
 interface ToolArgs {
@@ -183,6 +185,13 @@ export function createRadiusTools(
               "The application model now exists; the stale failure was not recorded."
           };
         }
+        const sourceRevision =
+          entry.state.appModelAttemptSourceRevisions?.[target] ||
+          (await readSelectedSourceRevision(entry.state, repo, branch, {
+            isWorkspaceSelection: deps.workspace.isWorkspaceSelection,
+            workspaceSourceRevision: deps.appModel.workspaceSourceRevision,
+            branchHeadCommit: deps.appModel.branchHeadCommit
+          }).catch(() => ""));
         if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
           return {
             recorded: false,
@@ -193,18 +202,31 @@ export function createRadiusTools(
         entry.state.appModelFailures ??= {};
         entry.state.appModelFailures[target] = {
           attemptToken,
-          error: failure
+          error: failure,
+          ...(sourceRevision ? { sourceRevision } : {}),
+          ...(entry.state.appModelAttemptEnvironments?.[target] !== undefined ?
+            { environmentKey: entry.state.appModelAttemptEnvironments[target] }
+          : {})
         };
         // The run this claim belongs to just ended, so the claim can only
         // suppress the retry the failure message tells the user to make. A diff
         // claim covers both compared branches under one target, while this
         // failure is keyed `repo::branch`, so releasing by branch — not by
         // exact target — is what frees both the single-branch claim and the
-        // diff claim that covers it. Without this the explicit refresh clears
-        // the failure, asks for a handoff, and is dropped by the dead run's
-        // claim until it expires. `missingModelHandoffTarget` owns the target
+        // diff claim that covers it. Without this a source-change retry asks
+        // for a handoff and is dropped by the dead run's claim until it
+        // expires. `missingModelHandoffTarget` owns the target
         // encoding; do not rebuild or parse it here.
         missingModelHandoffs.releaseForBranch(repo, branch);
+        for (const [handoffTarget, key] of Object.entries(
+          entry.state.appBicepHandoffKeys ?? {}
+        )) {
+          if (!missingModelHandoffIncludesBranch(handoffTarget, repo, branch))
+            continue;
+          delete entry.state.appBicepHandoffKeys?.[handoffTarget];
+          if (entry.state.appBicepHandoffKey === key)
+            delete entry.state.appBicepHandoffKey;
+        }
         modelingActivity.release({ repo, branch });
         return { recorded: true };
       }

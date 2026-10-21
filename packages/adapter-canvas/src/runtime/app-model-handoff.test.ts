@@ -125,6 +125,7 @@ function harness(
     send: async (message) => {
       sent.push(message);
     },
+    readSourceRevision: async (_repo, branch) => `remote:${branch}-sha`,
     log: (message) => {
       logged.push(message);
     },
@@ -354,12 +355,16 @@ describe("createAppModelHandoff", () => {
       repo: "a/b",
       branches: ["feat"],
       page: "graph",
-      state
+      state,
+      environmentKey: '["azure","dev"]'
     });
 
     const token = state.appModelAttemptTokens?.["a/b::feat"];
     expect(token).toBeTruthy();
     expect(state.appModelAttemptGeneration).toBe(1);
+    expect(state.appModelAttemptEnvironments?.["a/b::feat"]).toBe(
+      '["azure","dev"]'
+    );
     expect(sent[0].prompt).toContain("radius_report_modeling_failure");
     expect(sent[0].prompt).toContain(`attemptToken \`${token}\``);
     expect(sent[0].prompt).toContain("instanceId `radius-app`");
@@ -384,6 +389,10 @@ describe("createAppModelHandoff", () => {
     const token = state.appModelAttemptTokens?.["a/b::main"];
     expect(token).toBeTruthy();
     expect(state.appModelAttemptTokens?.["a/b::feat"]).toBe(token);
+    expect(state.appModelAttemptEnvironments).toEqual({
+      "a/b::main": "",
+      "a/b::feat": ""
+    });
     expect(state.appModelAttemptGeneration).toBe(1);
     expect(sent[0].prompt).toContain("radius_report_modeling_failure");
     expect(sent[0].prompt).toContain(`attemptToken \`${token}\``);
@@ -413,6 +422,60 @@ describe("createAppModelHandoff", () => {
 
     expect(state.appModelAttemptTokens?.["a/b::main"]).toBeUndefined();
     expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeUndefined();
+    expect(state.appModelAttemptEnvironments).toEqual({});
+    expect(state.appModelAttemptSourceRevisions).toEqual({});
+  });
+
+  it("captures each branch's source baseline when the attempt starts", async () => {
+    const state: CanvasState = {
+      canvasInstanceId: "radius-app",
+      appModelAttemptSourceRevisions: { "a/b::feat": "remote:older" }
+    };
+    const { handOff } = harness({
+      statuses: {
+        main: modelStatus("a/b", "main", { status: "missing" }),
+        feat: modelStatus("a/b", "feat", { status: "missing" })
+      },
+      readSourceRevision: async (_repo, branch) => {
+        if (branch === "feat") throw new Error("unreadable");
+        return "workspace:main-1";
+      }
+    });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["main", "feat"],
+      page: "graph-diff",
+      state
+    });
+
+    expect(state.appModelAttemptSourceRevisions).toEqual({
+      "a/b::main": "workspace:main-1"
+    });
+  });
+
+  it("starts no attempt when the selection changes while the baseline is read", async () => {
+    const state: CanvasState = { canvasInstanceId: "radius-app" };
+    let current = true;
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      readSourceRevision: async () => {
+        current = false;
+        return "remote:feat-sha";
+      }
+    });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state,
+      isCurrent: () => current
+    });
+
+    expect(sent).toEqual([]);
+    expect(state.appModelAttemptTokens).toBeUndefined();
+    expect(state.appModelAttemptSourceRevisions).toBeUndefined();
   });
 
   it("leaves a superseding attempt's tokens in place when an older diff send fails", async () => {
@@ -554,6 +617,26 @@ describe("createAppModelHandoff", () => {
     expect(sent).toEqual([]);
     expect(state.appBicepHandoffKeys?.["a/b::feat"]).toBe("newer-request");
     expect(state.appBicepHandoffKey).toBe("newer-request");
+  });
+
+  it("starts no attempt when a newer reservation replaces it while the baseline is read", async () => {
+    const state: CanvasState = { canvasInstanceId: "radius-app" };
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      readSourceRevision: async () => {
+        state.appBicepHandoffKeys = {
+          ...state.appBicepHandoffKeys,
+          "a/b::feat": "newer-request"
+        };
+        return "remote:feat-sha";
+      }
+    });
+
+    await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
+
+    expect(sent).toEqual([]);
+    expect(state.appModelAttemptTokens).toBeUndefined();
+    expect(state.appBicepHandoffKeys?.["a/b::feat"]).toBe("newer-request");
   });
 
   // The handoff keeps probing and waiting long after the route responded, so a

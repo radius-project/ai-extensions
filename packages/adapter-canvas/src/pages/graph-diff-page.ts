@@ -10,6 +10,12 @@ import { GRAPH_DIFF_STATE_ID } from "./browser-state-ids.js";
 import { renderPageState } from "./page-state.js";
 import { browserScriptTag } from "../browser/scripts.js";
 
+// The Modeled and Planned pages turn their primary button into Refresh when a
+// retry is recommended. Diff has no primary button, so its Refresh takes the
+// same place at the end of the selector row.
+const MODELING_REFRESH_BUTTON =
+  '<button id="modeling-refresh" type="button" class="rad-btn rad-btn--primary" style="margin-top:0;" hidden>Refresh</button>';
+
 export function graphDiffPage(state: CanvasState = {}): string {
   const resources = state?.diffResources || [];
   const baseBranch = state?.diffBase || "main";
@@ -64,6 +70,7 @@ ${GRAPH_DIFF_SUBTITLE}
       <option value="">Loading branches...</option>
     </select>
   </div>
+  ${MODELING_REFRESH_BUTTON}
 </div>
 <div id="diff-status" class="status ${
         state?.diffError ? "error" : "info"
@@ -121,6 +128,7 @@ ${GRAPH_DIFF_SUBTITLE}
       ${branchOptionsHead}
     </select>
   </div>
+  ${MODELING_REFRESH_BUTTON}
 </div>
 <div id="diff-status" class="status ${
       state?.diffError ? "error" : "info"

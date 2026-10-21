@@ -16,13 +16,24 @@ export interface MissingModelHandoffClaim {
 // `a,b` ambiguous between one branch and a two-branch diff.
 const BRANCH_SEPARATOR = ":";
 
-// The single encoder for claim targets. Decoding lives beside it in
-// `releaseForBranch` so the two can never drift apart.
+// Keep target encoding and branch membership together so they cannot drift.
 export function missingModelHandoffTarget(
   repo: string,
   branches: ReadonlyArray<string>
 ): string {
   return `${repo}::${branches.join(BRANCH_SEPARATOR)}`;
+}
+
+export function missingModelHandoffIncludesBranch(
+  target: string,
+  repo: string,
+  branch: string
+): boolean {
+  const prefix = `${repo}::`;
+  return (
+    target.startsWith(prefix) &&
+    target.slice(prefix.length).split(BRANCH_SEPARATOR).includes(branch)
+  );
 }
 
 export interface MissingModelHandoffClaims {
@@ -121,11 +132,8 @@ export function createMissingModelHandoffClaims(
     },
 
     releaseForBranch(repo, branch) {
-      const prefix = `${repo}::`;
       for (const target of [...entries.keys()]) {
-        if (!target.startsWith(prefix)) continue;
-        const branches = target.slice(prefix.length).split(BRANCH_SEPARATOR);
-        if (!branches.includes(branch)) continue;
+        if (!missingModelHandoffIncludesBranch(target, repo, branch)) continue;
         entries.delete(target);
       }
     }
