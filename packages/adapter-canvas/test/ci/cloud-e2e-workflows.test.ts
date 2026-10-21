@@ -874,6 +874,106 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).not.toContain("MAX_AGE_HOURS");
   });
 
+  it.each(["all deletes succeed", "one delete fails"] as const)(
+    "runs the shared resource group cleanup shell when %s",
+    async (scenario) => {
+      const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+      const groupCleanup = steps(workflow.jobs?.purge).find(
+        (step) => step.id === "shared-resource-cleanup"
+      );
+      expect(groupCleanup?.run).toBeDefined();
+      const directory = await mkdtemp(path.join(tmpdir(), "group-cleanup-"));
+      const subscription = "00000000-1111-2222-3333-444444444444";
+      const group = `/subscriptions/${subscription}/resourceGroups/synthetic-group/providers`;
+      const failing = `${group}/Microsoft.DBforPostgreSQL/flexibleServers/pgsql-first`;
+      const passing = `${group}/Microsoft.DBforPostgreSQL/flexibleServers/pgsql-second`;
+      const resources = JSON.stringify([
+        {
+          id: `${group}/Microsoft.ContainerService/managedClusters/synthetic-cluster`,
+          name: "synthetic-cluster",
+          type: "Microsoft.ContainerService/managedClusters"
+        },
+        {
+          id: failing,
+          name: "pgsql-first",
+          type: "Microsoft.DBforPostgreSQL/flexibleServers"
+        },
+        {
+          id: passing,
+          name: "pgsql-second",
+          type: "Microsoft.DBforPostgreSQL/flexibleServers"
+        }
+      ]);
+      const summary = path.join(directory, "summary.md");
+      const deletes = path.join(directory, "deletes.txt");
+      try {
+        const node = process.execPath.replaceAll("'", "'\\''");
+        const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+          cwd: REPOSITORY_ROOT,
+          encoding: "utf8",
+          env: {
+            PATH: process.env.PATH,
+            RUNNER_TEMP: directory,
+            GITHUB_STEP_SUMMARY: summary,
+            AKS_CLUSTER_NAME: "synthetic-cluster",
+            RESOURCE_GROUP: "synthetic-group",
+            SUBSCRIPTION_ID: subscription
+          },
+          input: `
+            node() { '${node}' "$@"; }
+            az() {
+              case "$1 \${2:-}" in
+                "version --output") printf '%s\\n' '{"azure-cli":"2.91.0"}' ;;
+                "resource list") printf '%s\\n' '${resources}' ;;
+                "resource delete")
+                  printf '%s\\n' "$4" >>'${deletes}'
+                  if [[ "$4" == '${failing}' && '${scenario}' == "one delete fails" ]]; then
+                    printf 'ERROR: synthetic failure for %s\\n' "$4" >&2
+                    return 1
+                  fi
+                  printf 'INFO: deleted %s\\n' "$4" >&2 ;;
+                *) return 99 ;;
+              esac
+            }
+            ${groupCleanup?.run}
+          `
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.stdout).toContain('"azure-cli":"2.91.0"');
+        // A failed delete does not stop the rest of the group being reclaimed.
+        expect((await readFile(deletes, "utf8")).trim().split("\n")).toEqual([
+          failing,
+          passing
+        ]);
+        const summaryText = await readFile(summary, "utf8");
+        if (scenario === "all deletes succeed") {
+          expect(result.status).toBe(0);
+          expect(summaryText).toContain("reclaimed from synthetic-group: 2");
+          expect(summaryText).not.toContain("<details>");
+          return;
+        }
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          `ERROR: synthetic failure for ${failing}`
+        );
+        expect(result.stderr).toContain(`INFO: deleted ${passing}`);
+        expect(result.stderr).toContain(
+          "delete Microsoft.DBforPostgreSQL/flexibleServers pgsql-first"
+        );
+        expect(summaryText).toContain("reclaimed from synthetic-group: 1");
+        expect(summaryText).toContain(
+          "az resource delete failed for Microsoft.DBforPostgreSQL/flexibleServers pgsql-first (exit 1)"
+        );
+        expect(summaryText).toContain(
+          "ERROR: synthetic failure for /subscriptions/***/resourceGroups/synthetic-group"
+        );
+        expect(summaryText).not.toContain(subscription);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("removes only allowlisted assignments before deleting leaked service principals", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
