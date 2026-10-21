@@ -861,6 +861,15 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("az resource list \\");
     expect(script).toContain("selectReclaimableGroupResources");
     expect(script).toContain('az resource delete --ids "$id"');
+    // Without --verbose the CLI hides why a delete failed.
+    expect(script).toContain("az version --output json");
+    expect(script).toMatch(
+      /az resource delete --ids "\$id" --verbose 2>"\$delete_log"/
+    );
+    expect(script).toContain('${delete_error//"$SUBSCRIPTION_ID"/***}');
+    expect(script).toMatch(
+      /if \(\( \$\{#failures\[@\]\} > 0 \)\); then[\s\S]*exit 1/
+    );
     // Nothing here is tagged, so age cannot be what qualifies a resource.
     expect(script).not.toContain("MAX_AGE_HOURS");
   });
