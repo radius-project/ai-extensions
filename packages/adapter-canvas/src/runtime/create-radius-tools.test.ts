@@ -1161,3 +1161,39 @@ describe("RU-11/RU-12 direct deployment handler wiring", () => {
     }
   );
 });
+
+describe("registered environment tool wiring", () => {
+  it.each([
+    ["radius_setup_environment", "start"],
+    ["radius_environment_status", "status"],
+    ["radius_environment_control", "control"]
+  ] as const)(
+    "serializes %s results without opening Canvas",
+    async (name, method) => {
+      const { tools, deps } = setup();
+      const input = {
+        repo: "fixture/app",
+        environment: "dev",
+        operationId: "setup-1"
+      };
+      const result = {
+        kind: "refused" as const,
+        code: "fixture-refusal",
+        message: "No work admitted."
+      };
+      vi.mocked(deps.environment[method]).mockResolvedValue(result);
+      expect(
+        JSON.parse(String(await findTool(tools, name).handler(input)))
+      ).toEqual(result);
+      expect(deps.environment[method]).toHaveBeenCalledExactlyOnceWith(input);
+      expect(deps.getOrCreateServer).not.toHaveBeenCalled();
+      expect(deps.deploy.fetch).not.toHaveBeenCalled();
+      vi.mocked(deps.environment[method]).mockRejectedValue(
+        new Error("Binding unavailable")
+      );
+      await expect(findTool(tools, name).handler(input)).rejects.toThrow(
+        "Binding unavailable"
+      );
+    }
+  );
+});

@@ -71,7 +71,10 @@ interface Harness {
   invalidatedListings: string[];
   persistCalls: string[];
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
-  createScheduled: Array<{ instanceId: string; operationId: string }>;
+  createScheduled: Array<{
+    instanceId: string | undefined;
+    operationId: string;
+  }>;
   registry: ReturnType<typeof createRegistry>;
   shuttingDown: { value: boolean };
   setPullRequestMergeCheck(

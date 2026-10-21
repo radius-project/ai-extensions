@@ -298,6 +298,9 @@ import {
   type OperationActionDependencies
 } from "./server/routes/operations-status.js";
 import { createOperationResumeService } from "./server/services/operation-resume.js";
+import { createSetupStartService } from "./server/services/setup-start.js";
+import { verificationBypass } from "./server/services/verification-bypass.js";
+import type { EnvironmentToolsPorts } from "./runtime/environment-tools.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import {
   createOperationsControlService,
@@ -5285,6 +5288,23 @@ export function createProductionCanvasServerRuntime(
     ...operationActionDependencies,
     isShuttingDown: () => executionOwner.isShuttingDown()
   });
+  const setupStartDependencies: Parameters<typeof createSetupStartService>[0] =
+    {
+      isValidRepoSlug,
+      isResourceGroupName,
+      isAksClusterName,
+      isKubernetesNamespace,
+      isUuid,
+      buildStages,
+      createOperation,
+      startConflict: (repo) => operations.startConflict(repo),
+      startOperation: (op) => operations.start(op),
+      persistOperations: () => operations.persist(),
+      finish,
+      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+      errorMessage
+    };
+  const setupStart = createSetupStartService(setupStartDependencies);
   const operationsStatusRoutes = createOperationsStatusRoutes(
     {
       latest: (repo) => operations.latest(repo),
@@ -5295,20 +5315,8 @@ export function createProductionCanvasServerRuntime(
       now: () => Date.now()
     },
     {
-      isValidRepoSlug,
-      isResourceGroupName,
-      isAksClusterName,
-      isKubernetesNamespace,
-      isUuid,
-      buildStages,
-      createOperation,
-      claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
-      startConflict: (repo) => operations.startConflict(repo),
-      startOperation: (op) => operations.start(op),
-      persistOperations: () => operations.persist(),
-      finish,
-      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-      errorMessage
+      ...setupStartDependencies,
+      claimSelectionHandle: (input) => githubSelectionHandles.claim(input)
     },
     operationActionDependencies,
     operationResume
@@ -6289,6 +6297,61 @@ export function createProductionCanvasServerRuntime(
     await canvasServer.stop(instanceId, force);
   }
 
+  const environmentServices: Pick<
+    EnvironmentToolsPorts,
+    | "start"
+    | "control"
+    | "resume"
+    | "verification"
+    | "bypass"
+    | "getOperation"
+    | "readExecutor"
+  > = {
+    start: setupStart,
+    control: operationControl,
+    resume: operationResume,
+    getOperation: (id) => operations.get(id),
+    readExecutor: (login) =>
+      githubAccountCoordinator.createReadOnlyExecutor(login),
+    verification: async (target, executor) => {
+      const scope = createWorkflowObservationScope(createDeployStatusReader);
+      const release = executionOwner.onShutdown(() => scope.stop());
+      try {
+        return await createVerificationStatusService(
+          {
+            ...environmentsDependencies,
+            getSelectedGitHubExecutor: () => executor
+          },
+          () => scope
+        )({ ...target, observation: scope });
+      } finally {
+        release();
+        scope.stop();
+      }
+    },
+    bypass: async (target, executor, isCurrent) => {
+      const scope = createWorkflowObservationScope(createDeployStatusReader);
+      const release = executionOwner.onShutdown(() => scope.stop());
+      try {
+        return await verificationBypass(
+          {
+            data: { ...target },
+            scope,
+            isCurrent,
+            permissionsOnly: true
+          },
+          {
+            ...environmentsDependencies,
+            getSelectedGitHubExecutor: () => executor
+          }
+        );
+      } finally {
+        release();
+        scope.stop();
+      }
+    }
+  };
+
   return {
     servers: canvasServer.instances,
     invalidateDeploymentListCache: (repo: string) => {
@@ -6300,6 +6363,7 @@ export function createProductionCanvasServerRuntime(
     verificationStatus,
     operationControl,
     operationResume,
+    environmentServices,
     getOrCreateServer,
     stopServer,
     getLastWebviewActivityAt,

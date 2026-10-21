@@ -28,7 +28,10 @@ export interface SessionPort {
   workspacePath?: string;
   cwd?: string;
   capabilities?: { ui?: { elicitation?: boolean } };
-  ui?: { select(message: string, options: string[]): Promise<string | null> };
+  ui?: {
+    select(message: string, options: string[]): Promise<string | null>;
+    confirm?(message: string): Promise<boolean>;
+  };
   log?(message: string, options?: SessionLogOptions): void | Promise<void>;
   send(message: unknown): unknown;
   rpc: {

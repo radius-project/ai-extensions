@@ -51,7 +51,10 @@ const TOOL_NAMES = [
   "radius_publish_custom_type_extension",
   "radius_publish_recipe",
   "radius_deploy",
-  "radius_deploy_status"
+  "radius_deploy_status",
+  "radius_setup_environment",
+  "radius_environment_status",
+  "radius_environment_control"
 ];
 
 function parseSkillHandoff(value: unknown): Record<string, unknown> {

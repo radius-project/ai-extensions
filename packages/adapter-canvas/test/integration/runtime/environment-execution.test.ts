@@ -5,6 +5,7 @@ import * as gh from "../../../src/gh.js";
 import { bootstrapRadiusExtension } from "../../../src/runtime/bootstrap.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
+import { createEnvironmentTools } from "../../../src/runtime/environment-tools.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import { createRadiusExtension } from "../../../src/runtime/create-radius-extension.js";
@@ -311,9 +312,14 @@ describe("real server and fake SDK runtime ownership", () => {
     }
   );
 
-  it.each(["azure", "configuration"] as const)(
-    "persists an acknowledged %s write during shutdown before releasing its selected executor",
-    async (stage) => {
+  it.each([
+    ["azure", "service"],
+    ["configuration", "service"],
+    ["azure", "tool"],
+    ["configuration", "tool"]
+  ] as const)(
+    "persists an acknowledged %s write via %s during shutdown before releasing its selected executor",
+    async (stage, entry) => {
       const owner = createEnvironmentExecutionOwner();
       const entered = deferred();
       const writeGate = deferred();
@@ -438,7 +444,7 @@ describe("real server and fake SDK runtime ownership", () => {
         executionOwner: owner,
         accountContext
       });
-      const op = createOperation({
+      let op = createOperation({
         operationId: "shutdown-write",
         repo: "fixture/app",
         environment: "dev",
@@ -464,10 +470,41 @@ describe("real server and fake SDK runtime ownership", () => {
           provider: "azure"
         }
       };
-      operations.put(op);
+      if (entry === "service") operations.put(op);
+      const fake = createFakeDependencies();
+      const extension = await bootstrapRadiusExtension(
+        {
+          ...fake.deps,
+          ...runtime,
+          executionOwner: owner,
+          environment: createEnvironmentTools({
+            ...runtime.environmentServices,
+            owner,
+            session: fake.deps.session,
+            account: async () => ({
+              state: "selected",
+              login: executor.login,
+              executor
+            }),
+            workspace: async () => ({
+              repo: "fixture/app",
+              branch: "feature/setup"
+            }),
+            validateBranch: async () => {},
+            redact: (value) => value,
+            reportError: (error) => {
+              throw error;
+            }
+          })
+        },
+        {
+          createCanvas: (declaration) => declaration,
+          joinSession: async () => createFakeSession()
+        }
+      );
       const snapshots: (typeof op)[] = [];
       vi.spyOn(operations, "persist").mockImplementation(async () => {
-        snapshots.push(structuredClone(op));
+        snapshots.push(structuredClone(operations.latest("fixture/app")));
         if (acknowledged) {
           persisted.resolve();
           await persistGate.promise;
@@ -475,7 +512,32 @@ describe("real server and fake SDK runtime ownership", () => {
       });
       let completed = Promise.resolve();
       try {
-        runtime.setupExecution.scheduleEnvironmentOperation(op);
+        if (entry === "service")
+          runtime.setupExecution.scheduleEnvironmentOperation(op);
+        else {
+          const tool = extension.tools.find(
+            ({ name }) => name === "radius_setup_environment"
+          );
+          if (!tool) throw new Error("Missing registered setup tool");
+          const result = JSON.parse(
+            String(
+              await tool.handler({
+                repo: "fixture/app",
+                environment: "dev",
+                provider: "azure",
+                tenantId: "33333333-3333-4333-8333-333333333333",
+                subscriptionId: "11111111-1111-4111-8111-111111111111",
+                resourceGroup: "fixture-group",
+                cluster: "fixture-cluster",
+                ...(stage === "configuration" ?
+                  { clientId: appId }
+                : { createNew: true })
+              })
+            )
+          );
+          expect(result).toMatchObject({ kind: "accepted" });
+          op = operations.get(result.operation.operationId);
+        }
         completed = new Promise<void>((resolve) => {
           const stop = owner.onEnvironmentTasksSettled(undefined, () => {
             stop();
@@ -548,6 +610,7 @@ describe("real server and fake SDK runtime ownership", () => {
         persistGate.resolve();
         await completed;
         owner.shutdown();
+        await extension.shutdown();
       }
     }
   );

@@ -1,4 +1,4 @@
-// createRadiusTools — builds the 7 radius_* tools from RADIUS_TOOL_DECLARATIONS
+// createRadiusTools — builds the radius_* tools from RADIUS_TOOL_DECLARATIONS
 // plus a RadiusExtensionDependencies dependency object. Same shape as
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
@@ -391,6 +391,21 @@ export function createRadiusTools(
     {
       ...declarationByName.get("radius_deploy_status")!,
       handler: (args: ToolArgs = {}) => deps.deployment.status(args)
+    },
+    {
+      ...declarationByName.get("radius_setup_environment")!,
+      handler: async (args: ToolArgs) =>
+        JSON.stringify(await deps.environment.start(args))
+    },
+    {
+      ...declarationByName.get("radius_environment_status")!,
+      handler: async (args: ToolArgs) =>
+        JSON.stringify(await deps.environment.status(args))
+    },
+    {
+      ...declarationByName.get("radius_environment_control")!,
+      handler: async (args: ToolArgs) =>
+        JSON.stringify(await deps.environment.control(args))
     }
   ];
 }

@@ -51,6 +51,34 @@ function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
 }
 
 describe("direct operation control service", () => {
+  it.each([true, false])(
+    "revalidates a queued command with optional publisher=%s",
+    async (publishResult) => {
+      const { dependencies, input } = fixture();
+      const service = createOperationsControlService(dependencies);
+      const publish = vi.fn();
+      let current = true;
+      const result = service(
+        {
+          ...input,
+          isCurrent: () => current
+        },
+        publishResult ? publish : undefined
+      );
+      current = false;
+      expect(await result).toMatchObject({
+        status: 409,
+        body: {
+          code: "operation-context-changed",
+          operationId: input.operationId
+        }
+      });
+      expect(publish).toHaveBeenCalledTimes(publishResult ? 1 : 0);
+      expect(dependencies.get).not.toHaveBeenCalled();
+      expect(dependencies.persistOperations).not.toHaveBeenCalled();
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+    }
+  );
   it("refuses new controls after shutdown without reading or mutating the operation", async () => {
     const { operation, dependencies, input } = fixture({
       isShuttingDown: () => true

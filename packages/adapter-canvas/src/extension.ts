@@ -109,6 +109,7 @@ import { githubAccountChoice } from "./runtime/github-account-choice.js";
 import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
 import { createGitHubAccountReadinessService } from "./server/services/github-account-readiness.js";
 import { createProductionDeploymentTools } from "./runtime/production-deployment-tools.js";
+import { createEnvironmentTools } from "./runtime/environment-tools.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -143,7 +144,8 @@ const {
   getOrCreateServer,
   stopServer,
   getLastWebviewActivityAt,
-  invalidateDeploymentListCache
+  invalidateDeploymentListCache,
+  environmentServices
 } = createProductionCanvasServerRuntime({
   executionOwner,
   accountContext,
@@ -159,6 +161,24 @@ const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
   session: sessionHolder,
   executionOwner,
+  environment: createEnvironmentTools({
+    ...environmentServices,
+    owner: executionOwner,
+    session: sessionHolder,
+    account: deploymentAccount,
+    workspace: () => detectWorkspaceContext(sessionHolder.get()),
+    validateBranch: async (branch) => {
+      await execFileAsync("git", ["check-ref-format", "--branch", branch], {
+        timeout: 10000
+      });
+    },
+    redact: redactGhCredentials,
+    reportError: (error) =>
+      console.error(
+        "[radius environment]",
+        redactGhCredentials(errorMessage(error))
+      )
+  }),
   deployment: createProductionDeploymentTools({
     owner: deploymentOwner,
     account: deploymentAccount,

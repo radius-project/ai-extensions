@@ -17,6 +17,7 @@ import type {
 import type { SessionHolder } from "./session.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import type { DirectDeploymentTools } from "./direct-deployment-tools.js";
+import type { EnvironmentTools } from "./environment-tools.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -321,6 +322,7 @@ export interface RadiusExtensionDependencies {
   session: SessionHolder;
   executionOwner: EnvironmentExecutionOwner;
   deployment: DirectDeploymentTools;
+  environment: EnvironmentTools;
   clock: ClockDependencies;
   servers: Map<string, CanvasServerEntry>;
   getOrCreateServer(

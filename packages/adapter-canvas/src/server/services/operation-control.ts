@@ -71,6 +71,7 @@ export interface OperationControlResult {
 
 export interface OperationControlInput {
   operationId: string;
+  isCurrent?(): boolean;
   instanceId?: string;
   command:
     "stop" | "continue" | "cancel-workflow" | "rollback" | "exit" | "retry";
@@ -1295,6 +1296,19 @@ export function createOperationsControlService(
     const current = previous
       .catch(() => {})
       .then(async () => {
+        if (input.isCurrent && !input.isCurrent()) {
+          const stale = {
+            status: 409,
+            body: {
+              code: "operation-context-changed",
+              error:
+                "The operation changed before the queued command was admitted.",
+              operationId
+            }
+          };
+          publish?.(stale);
+          return stale;
+        }
         if (dependencies.isShuttingDown?.()) {
           const stopped = {
             status: 503,

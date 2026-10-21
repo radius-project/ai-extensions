@@ -157,15 +157,18 @@ The full plan is complete when every requirement in the appendices has a passing
 
 #### Accepted tools
 
-| ID    | Tool                                   | Required contract                                                                                                          |
-|-------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery                        |
-| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection                   |
-| TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                                              |
-| TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                                      |
-| TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                                        |
-| TL-09 | `radius_deploy`                        | Panel-free owned dispatch, target/account identity, unambiguous repeat/overrides, stale repair refusal, errors             |
-| TL-10 | `radius_deploy_status`                 | Panel-free pending/in-progress/success/failure, explicit unavailable state, attempt/workflow identity, bounded diagnostics |
+| ID    | Tool                                   | Required contract                                                                                                                  |
+|-------|----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery                                |
+| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection                           |
+| TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                                                      |
+| TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                                              |
+| TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                                                |
+| TL-09 | `radius_deploy`                        | Panel-free owned dispatch, target/account identity, unambiguous repeat/overrides, stale repair refusal, errors                     |
+| TL-10 | `radius_deploy_status`                 | Panel-free pending/in-progress/success/failure, explicit unavailable state, attempt/workflow identity, bounded diagnostics         |
+| TL-12 | `radius_setup_environment`             | Panel-free verify-only Azure/AWS admission, strict provider schemas, explicit branch/account target, durable operation identity    |
+| TL-13 | `radius_environment_status`            | Saved operation/repository/environment/account binding, read-only observation, bounded redacted results, live interaction identity |
+| TL-14 | `radius_environment_control`           | Eligible saved-operation controls, trusted host confirmation, typed resume with stale/replay rejection, permissions-only bypass    |
 
 Every retained action/tool has unit or runtime-integration coverage. Tools reaching a loopback API also have HTTP integration. Path confinement and error propagation are mandatory for both publish tools.
 
