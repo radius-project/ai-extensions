@@ -843,6 +843,31 @@ describe("artifact cleanup and compatibility", () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
+    it("passes a whole-millisecond timeout when the read budget is fractional", async () => {
+      let now = 0;
+      const session = createWorkflowReadSession({
+        monotonic: () => now,
+        wall: () => 0,
+        // The observation deadline must not fire while the download runs.
+        sleep: () => new Promise<void>(() => {}),
+        jitter: () => 0
+      });
+      const context = session.observe(60000);
+      now = 0.25;
+      const timeouts: number[] = [];
+      const run = vi.fn<WorkflowRunner>(async (_args, options) => {
+        timeouts.push(options.timeout);
+        return { code: 0, stdout: "", stderr: "" };
+      });
+      await createWorkflowArtifactReads(run).downloadWorkflowArtifact(
+        "org/app",
+        artifact,
+        context
+      );
+      expect(timeouts).toEqual([60000]);
+      expect(timeouts.every(Number.isInteger)).toBe(true);
+    });
+
     it("refuses an expired reader context before listing", async () => {
       const run = vi.fn<WorkflowRunner>(async () => {
         throw new Error("Unexpected list");

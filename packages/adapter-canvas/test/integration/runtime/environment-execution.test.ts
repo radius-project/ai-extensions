@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootstrapRadiusExtension } from "../../../src/runtime/bootstrap.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import { createRadiusExtension } from "../../../src/runtime/create-radius-extension.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import {
@@ -32,11 +34,25 @@ async function composition() {
   const owner = createEnvironmentExecutionOwner();
   const gate = deferred();
   const entered = deferred();
+  const unexpectedAccount = async (): Promise<never> => {
+    throw new Error("Unexpected external account access");
+  };
+  const accountContext = createEnvironmentAccountContext("runtime", {
+    createReadOnlyExecutor: unexpectedAccount,
+    withSelectedAccount: unexpectedAccount
+  });
+  const executor = successfulSelectedGhExecutor();
   const server = createTestCanvasServerRuntime({
     executionOwner: owner,
-    environmentOperationRunner: async () => {
-      entered.resolve();
-      await gate.promise;
+    accountContext,
+    environmentOperationRunner: async (operationId) => {
+      accountContext.registerExecutor(operationId, executor);
+      try {
+        entered.resolve();
+        await gate.promise;
+      } finally {
+        accountContext.unregisterExecutor(operationId);
+      }
     }
   });
   const fake = createFakeDependencies();
@@ -83,6 +99,8 @@ async function composition() {
   }
   return {
     owner,
+    accountContext,
+    executor,
     server,
     deps,
     session,
@@ -116,6 +134,7 @@ describe("real server and fake SDK runtime ownership", () => {
     try {
       expect(runtime.joinSession).toHaveBeenCalledOnce();
       expect(runtime.server.servers.size).toBe(0);
+      expect(runtime.accountContext.getExecutor("op_runtime")).toBeUndefined();
       expect(runtime.owner.hasActiveEnvironmentTasks("panel")).toBe(false);
       runtime.recoverDelete();
       const first = await runtime.canvas.open(context());
@@ -123,9 +142,16 @@ describe("real server and fake SDK runtime ownership", () => {
       await runtime.canvas.onClose(context("wrong"));
       await runtime.canvas.onClose(context());
       expect(runtime.deps.stopServer).not.toHaveBeenCalled();
+      expect(runtime.accountContext.getExecutor("op_runtime")).toBe(
+        runtime.executor
+      );
       const reopened = await runtime.canvas.open(context());
       expect(reopened.url).toBe(first.url);
+      expect(runtime.accountContext.getExecutor("op_runtime")).toBe(
+        runtime.executor
+      );
       await runtime.settle();
+      expect(runtime.accountContext.getExecutor("op_runtime")).toBeUndefined();
       expect(runtime.deps.stopServer).not.toHaveBeenCalled();
       await runtime.canvas.onClose(context());
       expect(runtime.deps.stopServer).toHaveBeenCalledExactlyOnceWith("panel");
