@@ -17,6 +17,7 @@ export {
   RADIUS_EXTENSION_REGISTRY,
   RADIUS_BICEP_EXPERIMENTAL_FEATURES,
   resolveRadiusExtensionRef,
+  resolveInstalledRadiusVersion,
   MANAGED_RAD_BIN,
   MANAGED_RAD_PATH,
   resolveExistingRadBinary,

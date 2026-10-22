@@ -28,9 +28,11 @@ import {
 import {
   buildGraphViaRad,
   ensureRadBinary,
+  resolveInstalledRadiusVersion,
   runRadBicepPublishExtension,
   runRadBicepPublish
 } from "@radius-project/adapter-shared";
+import { createRadiusCliVersionReader } from "./radius-cli-version.js";
 import { github, fetchFileFromRepo, getBranchHeadSha } from "./gh.js";
 import {
   defaultBranchForState,
@@ -203,6 +205,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   appModel: {
     generatorVersion: createGeneratorVersionReader(),
+    radiusVersion: createRadiusCliVersionReader(resolveInstalledRadiusVersion),
     workspaceHeadCommit,
     workspaceSourceRevision,
     workspaceModelRecoverable,

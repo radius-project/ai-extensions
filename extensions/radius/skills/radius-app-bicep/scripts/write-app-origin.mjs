@@ -12,6 +12,12 @@
 // what later lets the canvas treat the file as known-valid without recompiling
 // it on every open.
 //
+// It also records radiusVersion, the Radius version the checker compiled
+// against. It is read from the `extensions.radius` pin in the bicepconfig.json
+// beside the model, which is the file the checker just used, so the agent does
+// not pass it and cannot pass a wrong one. The canvas compares it with the
+// installed Radius CLI to notice a Radius upgrade.
+//
 // The normalization and hash below MUST stay byte-compatible with the
 // extension's own copies: normalizeAppBicep in
 // packages/core/src/modeling/app-origin.ts, and hashAppBicep in
@@ -19,12 +25,18 @@
 // because core is compiled into the browser bundle and cannot import
 // node:crypto.) They are duplicated here rather than imported because this
 // script ships inside the installed plugin, where the workspace packages do not
-// exist; app-origin-writer.test.ts asserts the two implementations agree.
+// exist; app-origin-writer.test.ts asserts the two implementations agree. The
+// Radius registry below is a copy of RADIUS_EXTENSION_REGISTRY in
+// packages/adapter-shared/src/rad-release.ts for the same reason, and the same
+// test builds its pins from that constant.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+const RADIUS_EXTENSION_PREFIX = "br:biceptypes.azurecr.io/radius:";
+const RADIUS_VERSION_TAG = /^[0-9A-Za-z][0-9A-Za-z._-]*$/u;
 
 function fail(message) {
   console.error(message);
@@ -75,6 +87,44 @@ function headCommit(cwd) {
   });
   if (result.error || result.status !== 0) return "";
   return (result.stdout || "").trim();
+}
+
+// Returns the Radius version in the bicepconfig.json pin, or the reason it
+// could not be read. Never fails the run: like a blank skillVersion, a blank
+// radiusVersion only switches one comparison off, while refusing to write the
+// record would make the model read as unverified on every graph open.
+function readRadiusVersion(configPath) {
+  let config;
+  try {
+    config = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch (error) {
+    return {
+      version: "",
+      problem:
+        error && error.code === "ENOENT" ?
+          `${configPath} does not exist`
+        : `${configPath} could not be read as JSON`
+    };
+  }
+  const pin = config?.extensions?.radius;
+  if (typeof pin !== "string" || !pin.trim()) {
+    return {
+      version: "",
+      problem: `${configPath} does not pin extensions.radius`
+    };
+  }
+  const value = pin.trim();
+  const tag =
+    value.startsWith(RADIUS_EXTENSION_PREFIX) ?
+      value.slice(RADIUS_EXTENSION_PREFIX.length)
+    : "";
+  if (!RADIUS_VERSION_TAG.test(tag)) {
+    return {
+      version: "",
+      problem: `extensions.radius in ${configPath} is "${value}", which is not a ${RADIUS_EXTENSION_PREFIX}<version> reference`
+    };
+  }
+  return { version: tag, problem: "" };
 }
 
 const PLACEHOLDER = "<loaded-skill-version>";
@@ -140,13 +190,23 @@ if (!commit) {
   );
 }
 
+const radius = readRadiusVersion(
+  path.join(path.dirname(app), "bicepconfig.json")
+);
+if (radius.problem) {
+  console.error(
+    `warning: ${radius.problem}, so the origin record leaves the Radius version unknown. Later freshness checks will skip the Radius version comparison for this model.`
+  );
+}
+
 // Fixed key order, two-space indent, trailing newline: the record is machine
 // written and machine read, so regenerating an unchanged model must not show up
-// as a diff.
+// as a diff. The order matches serializeAppOrigin in core.
 const origin = {
   generatedAt: flag("generated-at") || new Date().toISOString(),
   sourceCommit: commit,
   skillVersion,
+  radiusVersion: radius.version,
   appBicepHash: hashAppBicep(model)
 };
 

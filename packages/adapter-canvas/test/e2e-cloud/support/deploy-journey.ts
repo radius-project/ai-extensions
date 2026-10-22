@@ -24,6 +24,7 @@ import {
   DEPLOY_AZURE_FILE,
   DEPLOY_DISPATCHER_FILE
 } from "../../../src/infra.js";
+import { DELETE_FAILED_STATUS } from "../../../src/server/services/delete-conflict.js";
 import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
 
 /**
@@ -384,6 +385,62 @@ export function classifyDeploymentPresence(
   );
   if (!match) return { present: false };
   return { present: true, status: match.status, runUrl: match.runUrl };
+}
+
+/**
+ * Where one listing read puts a deployment delete that is in flight.
+ *
+ * Absence alone cannot drive the wait: the resolver keeps a row for a delete
+ * whose run concluded without success and reports it as `delete-failed`. That
+ * row will never disappear, so a wait on absence turns a failed delete into a
+ * full-length timeout. `failed` settles the wait as soon as the product says so.
+ */
+export type DeploymentDeletion =
+  | { readonly state: "deleting"; readonly status: string }
+  | { readonly state: "deleted" }
+  | {
+      readonly state: "failed";
+      readonly status: string;
+      readonly runUrl: string;
+    };
+
+export function classifyDeploymentDeletion(
+  presence: DeploymentPresence
+): DeploymentDeletion {
+  if (!presence.present) return { state: "deleted" };
+  if (presence.status === DELETE_FAILED_STATUS)
+    return {
+      state: "failed",
+      status: presence.status,
+      runUrl: presence.runUrl
+    };
+  return { state: "deleting", status: presence.status };
+}
+
+export function isDeploymentDeletionSettled(
+  deletion: DeploymentDeletion
+): boolean {
+  return deletion.state !== "deleting";
+}
+
+/** Fails a settled wait with the status and run that explain it. */
+export function requireDeploymentDeleted(
+  deletion: DeploymentDeletion | undefined,
+  application: string,
+  environment: string
+): void {
+  const subject = `The delete of deployment "${application}" in environment "${environment}"`;
+  if (!deletion)
+    throw new Error(`${subject} was never observed in the deployment listing.`);
+  if (deletion.state === "deleted") return;
+  if (deletion.state === "failed")
+    throw new Error(
+      `${subject} failed: the deployment listing reports status "${deletion.status}". ` +
+        `Workflow run: ${deletion.runUrl || "<the listing reported no run URL>"}`
+    );
+  throw new Error(
+    `${subject} had not settled: the deployment listing still reports status "${deletion.status || "<empty>"}".`
+  );
 }
 
 /**

@@ -12,7 +12,7 @@ Manual testing remains required only where local fakes cannot prove the behavior
 
 Use disposable Azure and GitHub resources for these checks. Automated tests remain authoritative for deterministic state transitions and persistence behavior.
 
-The complete opt-in live matrix, evidence fields, restart and rollback protocols, and honest gate statuses live in [`docs/eng/ENVIRONMENT_CREATION_READINESS.md`](../../docs/eng/ENVIRONMENT_CREATION_READINESS.md). Do not run those cases without the recorded environment, identity, cost, cleanup, and operator approvals. Customer and support recovery guidance, including the local diagnostic download and manual-cleanup order, lives in [`docs/eng/ENVIRONMENT_CREATION_SUPPORT.md`](../../docs/eng/ENVIRONMENT_CREATION_SUPPORT.md).
+The nightly Cloud E2E workflow runs the main create, deploy, and delete journey against real Azure and GitHub; see [`docs/eng/CLOUD_E2E_RUNBOOK.md`](../../docs/eng/CLOUD_E2E_RUNBOOK.md). Customer and support recovery guidance, including the local diagnostic download and manual-cleanup order, lives in [`docs/eng/ENVIRONMENT_CREATION_SUPPORT.md`](../../docs/eng/ENVIRONMENT_CREATION_SUPPORT.md).
 
 ## Chromium Canvas checks
 

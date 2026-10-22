@@ -19,6 +19,8 @@
 // unverified, which this module reports so the caller can route it back through
 // the skill instead of rendering a possibly-broken model.
 
+import { compareRadiusVersions } from "./radius-version.js";
+
 // Repo-relative location of the origin record, next to the model it describes.
 export const APP_ORIGIN_REPO_PATH = ".radius/app.origin.json";
 
@@ -35,6 +37,12 @@ export interface AppOrigin {
   // May be empty when the writer could not resolve it; the generator-drift check
   // is skipped then rather than treating "unknown" as a version that differs.
   skillVersion: string;
+  // Radius version the app model was checked against: the tag of the Radius
+  // Bicep extension in the pin the Bicep checker compiled with, such as `0.60`,
+  // `0.61.0-rc1`, or `latest`. Empty when the writer could not read the pin, and
+  // in every record written before the field existed. The Radius version check
+  // is skipped then, for the same reason as a blank `skillVersion`.
+  radiusVersion: string;
   // `sha256:<hex>` fingerprint of app.bicep exactly as the generator wrote it.
   // Re-fingerprinting the file on disk and comparing answers two questions at
   // once: whether a human has edited it since, and (because the generator
@@ -58,6 +66,14 @@ export type AppModelFreshnessStatus =
   | "source-changed"
   // A different generator version produced the model.
   | "generator-changed"
+  // The installed Radius CLI uses a newer Radius version than the model was
+  // checked against, so the model may no longer compile.
+  | "radius-version-changed"
+  // The installed Radius CLI uses an OLDER Radius version than the model was
+  // generated with, usually because this plugin is behind a teammate's. Not
+  // stale: a regeneration here could not succeed, and if it could it would move
+  // the model back to older types for everyone on the newer plugin.
+  | "radius-cli-outdated"
   | "up-to-date";
 
 export interface AppModelFreshness {
@@ -102,6 +118,9 @@ export interface AppModelFreshnessInput {
   sourceChanged?: boolean;
   // Current generator version. Empty when it could not be resolved.
   generatorVersion?: string | null;
+  // Radius version the installed Radius CLI compiles with, in the same form as
+  // `AppOrigin.radiusVersion`. Empty when it could not be resolved.
+  radiusVersion?: string | null;
   // Whether the model on disk could be recovered after an overwrite, because it
   // is committed and unmodified. Only consulted when there is no origin record,
   // where it decides whether replacing the file can destroy anything. Undefined
@@ -135,9 +154,10 @@ export function normalizeAppBicep(content: string): string {
 // malformed JSON, a non-object, or a missing/blank `generatedAt`,
 // `sourceCommit`, or `appBicepHash`. Those three are load-bearing: without any
 // one of them the record cannot answer the question it exists to answer.
-// `skillVersion` is allowed to be blank: an unresolvable generator version is a
-// missing fact, and the writer recording it as such is better than refusing to
-// record it at all, which would report every generated model as unverified.
+// `skillVersion` and `radiusVersion` are allowed to be blank: an unresolvable
+// version is a missing fact, and the writer recording it as such is better than
+// refusing to record it at all, which would report every generated model as
+// unverified. A record written before `radiusVersion` existed reads as blank.
 export function parseAppOrigin(text: unknown): AppOrigin | null {
   if (typeof text !== "string" || !text.trim()) return null;
   let parsed: unknown;
@@ -154,6 +174,7 @@ export function parseAppOrigin(text: unknown): AppOrigin | null {
     generatedAt: optionalString(fields.generatedAt),
     sourceCommit: optionalString(fields.sourceCommit),
     skillVersion: optionalString(fields.skillVersion),
+    radiusVersion: optionalString(fields.radiusVersion),
     appBicepHash: optionalString(fields.appBicepHash)
   };
   if (!origin.generatedAt || !origin.sourceCommit || !origin.appBicepHash) {
@@ -171,6 +192,7 @@ export function serializeAppOrigin(origin: AppOrigin): string {
       generatedAt: origin.generatedAt,
       sourceCommit: origin.sourceCommit,
       skillVersion: origin.skillVersion,
+      radiusVersion: origin.radiusVersion,
       appBicepHash: origin.appBicepHash
     },
     null,
@@ -187,7 +209,10 @@ function freshness(
 ): AppModelFreshness {
   return {
     status,
-    stale: status !== "up-to-date" && status !== "missing",
+    stale:
+      status !== "up-to-date" &&
+      status !== "missing" &&
+      status !== "radius-cli-outdated",
     requiresConfirmation,
     reason,
     appBicepHash,
@@ -213,6 +238,7 @@ export function freshnessIdentity(status: AppModelFreshness): string {
   return [
     status.origin?.sourceCommit ?? "",
     status.origin?.skillVersion ?? "",
+    status.origin?.radiusVersion ?? "",
     status.origin ? "" : status.appBicepHash,
     status.requiresConfirmation ? "confirm" : "auto"
   ].join("/");
@@ -271,6 +297,28 @@ export function evaluateAppModelFreshness(
     );
   }
 
+  const edited = origin.appBicepHash !== appBicepHash;
+
+  // Checked before any drift. An older CLI cannot regenerate this model: the
+  // pin in bicepconfig.json names the newer Radius version, and the skill
+  // refuses to move a pin backwards. Asking for a refresh would only produce a
+  // modeling run that fails, and on a shared branch a regeneration that did
+  // succeed would move the model back to older types for everyone else.
+  const radiusVersion = optionalString(input.radiusVersion);
+  const radiusOrder =
+    origin.radiusVersion && radiusVersion ?
+      compareRadiusVersions(origin.radiusVersion, radiusVersion)
+    : null;
+  if (radiusOrder !== null && radiusOrder > 0) {
+    return freshness(
+      "radius-cli-outdated",
+      `The model was generated with Radius ${origin.radiusVersion}, but the installed Radius CLI uses the older ${radiusVersion}. Update the Radius plugin to keep working with this model.`,
+      origin,
+      false,
+      appBicepHash
+    );
+  }
+
   const headCommit = optionalString(input.headCommit);
   // A caller that could inspect the source answers directly; otherwise fall back
   // to head equality, which is coarse but is all a remote branch can offer.
@@ -283,17 +331,19 @@ export function evaluateAppModelFreshness(
     origin.skillVersion &&
     generatorVersion !== origin.skillVersion
   );
+  const radiusMoved = radiusOrder !== null && radiusOrder < 0;
 
   const drifted: AppModelFreshnessStatus | null =
     sourceMoved ? "source-changed"
     : generatorMoved ? "generator-changed"
+    : radiusMoved ? "radius-version-changed"
     : null;
   const driftReason =
     sourceMoved ?
       `The model was generated from commit ${origin.sourceCommit}, but the source has changed since${headCommit ? ` (the branch is now at ${headCommit})` : ""}, so it may no longer describe the current source.`
-    : `The model was generated by radius-app-bicep ${origin.skillVersion}, but ${generatorVersion} is installed now.`;
-
-  const edited = origin.appBicepHash !== appBicepHash;
+    : generatorMoved ?
+      `The model was generated by radius-app-bicep ${origin.skillVersion}, but ${generatorVersion} is installed now.`
+    : `The model was generated with Radius ${origin.radiusVersion}, but the installed Radius CLI uses ${radiusVersion}, so it may no longer compile.`;
 
   if (!drifted) {
     return freshness(
