@@ -1,4 +1,4 @@
-// Seam 5 of the `POST /api/create-environment` slice: the namespace claim.
+// The environment setup namespace claim.
 //
 // Radius binds one environment to one Kubernetes namespace within a cluster.
 // The wizard refuses a duplicate before submitting, but that check reads a
