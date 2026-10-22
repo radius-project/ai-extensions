@@ -18,6 +18,7 @@ import type {
 } from "./server/services/verification-status.js";
 import { createSetupWorkflowRecoveryPort } from "./server/services/setup-workflow-recovery.js";
 import {
+  createEnvironmentOperationExecution,
   createInstanceRequestCoordinator,
   type EnvironmentOperationRunner
 } from "./server.js";
@@ -307,15 +308,25 @@ describe("production coordinator scheduling scopes", () => {
       };
       const fetcher = vi.fn(unavailable);
       vi.stubGlobal("fetch", fetcher);
-      const handler = coordinator(owner, "a", async () => block());
+      const control = vi.fn<OperationControlService>(unavailable);
+      const a = coordinator(
+        owner,
+        "a",
+        async () => block(),
+        undefined,
+        undefined,
+        undefined,
+        control
+      );
       if (trigger === "recovery scan") {
         block();
-        handler.startRecoveredTasks();
+        a.startRecoveredTasks();
       } else {
-        handler.scheduleEnvironmentOperation(op);
+        a.scheduleEnvironmentOperation(op);
         await settled(owner, "a");
       }
       await Promise.resolve();
+      expect(control).not.toHaveBeenCalled();
       expect(fetcher).not.toHaveBeenCalled();
       expect(owner.hasActiveEnvironmentTasks("a")).toBe(false);
     }
@@ -337,20 +348,29 @@ describe("production coordinator scheduling scopes", () => {
     const recovery = createSetupWorkflowRecoveryPort(op, persist);
     const fetcher = vi.fn(unavailable);
     vi.stubGlobal("fetch", fetcher);
-    const handler = coordinator(owner, "a", async () => {
-      recovery.settleManual(
-        "github_branch.create",
-        target,
-        "Review the recovered branch before cleanup."
-      );
-      finish(op, "failed_partial");
-      await recovery.persist();
-    });
-    handler.scheduleEnvironmentOperation(op);
+    const control = vi.fn<OperationControlService>(unavailable);
+    const a = coordinator(
+      owner,
+      "a",
+      async () => {
+        recovery.settleManual(
+          "github_branch.create",
+          target,
+          "Review the recovered branch before cleanup."
+        );
+        finish(op, "failed_partial");
+        await recovery.persist();
+      },
+      undefined,
+      undefined,
+      undefined,
+      control
+    );
+    a.scheduleEnvironmentOperation(op);
     await settled(owner, "a");
-    handler.startRecoveredTasks();
     await Promise.resolve();
     expect(persist).toHaveBeenCalledOnce();
+    expect(control).not.toHaveBeenCalled();
     expect(fetcher).not.toHaveBeenCalled();
     expect(owner.hasActiveEnvironmentTasks("a")).toBe(false);
   });
@@ -373,94 +393,6 @@ describe("production coordinator scheduling scopes", () => {
         )
       ).toThrow(
         `Missing request coordinator dependency: setupServices.${name}`
-      );
-    }
-  );
-
-  it.each(["before", "during"] as const)(
-    "refuses setup after shutdown %s a direct Azure invocation",
-    async (when) => {
-      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
-      const owner = createEnvironmentExecutionOwner();
-      const op = operation();
-      op.context.githubLogin = "saved-account";
-      op.request = { needsAzureCredentials: true, azure: {}, environment: {} };
-      const run = vi.fn(async (args: string[]) => {
-        const command = args.join(" ");
-        if (command === "api user")
-          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
-        if (
-          command === "api repos/fixture/app" ||
-          command === "api /repos/fixture/app"
-        )
-          return {
-            code: 0,
-            stdout: '{"full_name":"fixture/app","permissions":{"admin":true}}',
-            stderr: ""
-          };
-        if (command === "api /repos/fixture/app/environments/dev") {
-          if (when === "before")
-            owner.markEnvironmentInstanceShuttingDown("panel");
-          return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
-        }
-        throw new Error(`Unexpected command: ${command}`);
-      });
-      const executor = successfulSelectedGhExecutor({
-        login: "saved-account",
-        requiresKeyringSwitch: false,
-        run
-      });
-      const context = createEnvironmentAccountContext(
-        "runtime",
-        createGitHubAccountCoordinator({
-          createExecutor: async () => executor,
-          getActiveKeyringLogin: async () => "original",
-          switchKeyringAccount: unavailable,
-          resetIdentityCache: () => {}
-        })
-      );
-      const entered = deferred();
-      const gate = deferred();
-      const authorizeAzure = vi.fn<SetupServices["authorizeAzure"]>(
-        async () => {
-          entered.resolve();
-          await gate.promise;
-          return {
-            kind: "completed",
-            status: 200,
-            body: { clientId: "completed-group" }
-          };
-        }
-      );
-      const configureEnvironment = vi.fn(unavailable);
-      const unregister = vi.spyOn(context, "unregisterExecutor");
-      const handler = coordinator(owner, "panel", undefined, context, {
-        authorizeAzure,
-        configureEnvironment
-      });
-      const done = settled(owner, "panel");
-      handler.scheduleEnvironmentOperation(op);
-      try {
-        if (when === "during") {
-          await Promise.race([entered.promise, done]);
-          expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
-          expect(authorizeAzure).toHaveBeenCalledOnce();
-          owner.markEnvironmentInstanceShuttingDown("panel");
-          expect(context.getExecutor(op.operationId)).toBe(executor);
-        }
-      } finally {
-        gate.resolve();
-        await done;
-      }
-      expect(authorizeAzure).toHaveBeenCalledTimes(when === "before" ? 0 : 1);
-      expect(configureEnvironment).not.toHaveBeenCalled();
-      expect(op.state).not.toBe("succeeded");
-      expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
-      expect(op.endedAt).toBeNull();
-      expect(context.getExecutor(op.operationId)).toBeUndefined();
-      expect(unregister).toHaveBeenCalledExactlyOnceWith(op.operationId);
-      expect(run.mock.calls.every(([args]) => !args.includes("--method"))).toBe(
-        true
       );
     }
   );
@@ -497,7 +429,9 @@ describe("production coordinator scheduling scopes", () => {
       onOperationTerminal(() => {
         order.push("announce");
       });
-      const verify = vi.fn(async () => {
+      let scope: VerificationStatusInput["observation"];
+      const verify = vi.fn(async (input: VerificationStatusInput) => {
+        scope = input.observation;
         requestStop(op);
         return { status: 200, body: { state: "pending" } };
       });
@@ -526,6 +460,7 @@ describe("production coordinator scheduling scopes", () => {
       );
       expect(report).toHaveBeenCalledTimes(failure ? 1 : 0);
       expect(verify).toHaveBeenCalledOnce();
+      expect(scope?.stopped).toBe(true);
       expect(account.getExecutor(op.operationId)).toBeUndefined();
       expect(vi.getTimerCount()).toBe(0);
     }
@@ -556,7 +491,9 @@ describe("production coordinator scheduling scopes", () => {
       const persist = vi
         .spyOn(operations, "persist")
         .mockResolvedValue(undefined);
-      const verify = vi.fn(async () => {
+      let scope: VerificationStatusInput["observation"];
+      const verify = vi.fn(async (input: VerificationStatusInput) => {
+        scope = input.observation;
         return outcome;
       });
       const handler = coordinator(
@@ -583,6 +520,7 @@ describe("production coordinator scheduling scopes", () => {
       });
       expect(persist).toHaveBeenCalledOnce();
       expect(verify).toHaveBeenCalledOnce();
+      expect(scope?.stopped).toBe(true);
       expect(account.getExecutor(op.operationId)).toBeUndefined();
     }
   );
@@ -695,12 +633,16 @@ describe("production coordinator scheduling scopes", () => {
       const entered = deferred();
       const fetch = vi.fn(unavailable);
       vi.stubGlobal("fetch", fetch);
+      let observation: VerificationStatusInput["observation"];
       const verify = vi.fn(async (input: VerificationStatusInput) => {
-        expect(input).toEqual({
+        expect(input).toMatchObject({
           repo: op.repo,
           environment: op.environment,
           operationId: op.operationId
         });
+        expect(input.compatibility).toBeUndefined();
+        observation = input.observation;
+        expect(observation?.stopped).toBe(false);
         entered.resolve();
         await gate.promise;
         if (failure) throw new Error("verification unavailable");
@@ -727,6 +669,7 @@ describe("production coordinator scheduling scopes", () => {
       }
       expect(context.getExecutor(op.operationId)).toBeUndefined();
       expect(verify).toHaveBeenCalledOnce();
+      expect(observation?.stopped).toBe(true);
       expect(fetch).not.toHaveBeenCalled();
       if (failure) expect(op.failure.message).toBe("verification unavailable");
     }
@@ -814,7 +757,7 @@ describe("production coordinator scheduling scopes", () => {
     const owner = createEnvironmentExecutionOwner({
       deferTask: async () => {},
       microtask: queueMicrotask,
-      reconciliationTimer: () => undefined
+      reconciliationTimer: () => vi.fn()
     });
     const op = operation();
     const notice =
@@ -915,14 +858,14 @@ describe("production coordinator scheduling scopes", () => {
     await Promise.all([settled(owner, "a"), settled(owner, "b")]);
   });
 
-  it("does not add a provider-reconciliation claim or a cross-panel queue", async () => {
+  it("deduplicates provider-reconciliation work across panel subscribers", async () => {
     const owner = createEnvironmentExecutionOwner();
     const op = operation();
     op.recoveryState = "provider_reconciliation_pending";
     const gate = deferred();
     const entered = deferred();
     const runner = vi.fn(async () => {
-      if (runner.mock.calls.length === 2) entered.resolve();
+      entered.resolve();
       await gate.promise;
     });
     const a = coordinator(owner, "a", runner);
@@ -930,10 +873,10 @@ describe("production coordinator scheduling scopes", () => {
     a.startRecoveredTasks();
     coordinator(owner, "b", runner).startRecoveredTasks();
     await entered.promise;
-    expect(runner).toHaveBeenCalledTimes(2);
+    expect(runner).toHaveBeenCalledOnce();
     gate.resolve();
     await Promise.all([settled(owner, "a"), settled(owner, "b")]);
-    expect(runner).toHaveBeenCalledTimes(3);
+    expect(runner).toHaveBeenCalledOnce();
   });
 
   it("shares the acquisition monitor claim across attachments and releases it at completion", async () => {
@@ -970,8 +913,9 @@ describe("production coordinator scheduling scopes", () => {
     coordinator(owner, "a").startRecoveredTasks();
     await settled(owner, "a");
     expect(op.failure.code).toBe("verification-retry-github-account-missing");
-    expect(owner.claimVerificationMonitor(op.operationId)).toBe(true);
-    owner.releaseVerificationMonitor(op.operationId);
+    const release = owner.claimVerificationMonitor(op.operationId);
+    expect(release).toEqual(expect.any(Function));
+    release?.();
   });
 
   it.each([
@@ -1004,7 +948,7 @@ describe("production coordinator scheduling scopes", () => {
     }
   );
 
-  it("keeps automatic rollback claims per attachment and releases failed admissions", async () => {
+  it("shares automatic rollback claims across attachments and releases failed admissions", async () => {
     const owner = createEnvironmentExecutionOwner();
     const op = operation();
     finish(op, "failed");
@@ -1012,7 +956,7 @@ describe("production coordinator scheduling scopes", () => {
     const gate = deferred();
     const posted = deferred();
     const control = vi.fn<OperationControlService>(async () => {
-      if (control.mock.calls.length === 2) posted.resolve();
+      posted.resolve();
       await gate.promise;
       return { body: { error: "rollback refused" }, status: 409 };
     });
@@ -1041,12 +985,12 @@ describe("production coordinator scheduling scopes", () => {
     a.startRecoveredTasks();
     b.startRecoveredTasks();
     await posted.promise;
-    expect(control).toHaveBeenCalledTimes(2);
+    expect(control).toHaveBeenCalledOnce();
     expect(fetcher).not.toHaveBeenCalled();
     gate.resolve();
-    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce());
     a.startRecoveredTasks();
-    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2));
     expect(report).toHaveBeenCalledWith({
       scope: "provider-recovery-auto-rollback",
       operationId: "op",
@@ -1145,12 +1089,12 @@ describe("production coordinator scheduling scopes", () => {
     }
   );
 
-  it("retains finalizer rollback scheduling after shutdown marking", async () => {
+  it("ignores a panel-only shutdown marker when settling shared setup", async () => {
     const owner = createEnvironmentExecutionOwner();
     const op = operation();
-    const posted = deferred();
+    const requested = deferred();
     const control = vi.fn<OperationControlService>(async () => {
-      posted.resolve();
+      requested.resolve();
       return { status: 202, body: {} };
     });
     const fetcher = vi.fn(unavailable);
@@ -1169,13 +1113,13 @@ describe("production coordinator scheduling scopes", () => {
       control
     );
     a.scheduleEnvironmentOperation(op);
-    await posted.promise;
+    await requested.promise;
     await settled(owner, "a");
-    expect(control).toHaveBeenCalledWith({
-      operationId: "op",
+    expect(control).toHaveBeenCalledExactlyOnceWith({
       instanceId: "a",
-      command: "rollback",
-      isCurrent: expect.any(Function)
+      operationId: "op",
+      isCurrent: expect.any(Function),
+      command: "rollback"
     });
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -1189,6 +1133,10 @@ describe("production coordinator scheduling scopes", () => {
         microtask: queueMicrotask,
         reconciliationTimer: (callback) => {
           timers.push(callback);
+          return () => {
+            const index = timers.indexOf(callback);
+            if (index >= 0) timers.splice(index, 1);
+          };
         }
       });
       const op = operation();
@@ -1210,13 +1158,15 @@ describe("production coordinator scheduling scopes", () => {
       stop();
       // Settlement notifications precede the finalizer's follow-up scheduling.
       expect(timers).toHaveLength(1);
+      const callback = timers[0];
+      if (state === "shutdown") owner.shutdown();
       if (state !== "shutdown") owner.markEnvironmentInstanceStarted("a");
       if (state === "removed") operations.clear();
       if (state === "terminal") finish(op, "failed");
       if (state === "resolved") {
         settleProviderMutation(op, mutation.mutationId, "confirmed");
       }
-      timers[0]();
+      callback();
       await settled(owner, "a");
       expect(runner).toHaveBeenCalledTimes(state === "reopened" ? 2 : 1);
     }
@@ -1227,13 +1177,592 @@ describe("production coordinator scheduling scopes", () => {
     async (shutdown) => {
       const owner = createEnvironmentExecutionOwner();
       const op = operation();
-      if (shutdown) owner.markEnvironmentInstanceShuttingDown("a");
       coordinator(owner, "a", async () => {
+        if (shutdown) owner.shutdown();
         throw new Error("runner failed");
       }).scheduleEnvironmentOperation(op);
       await settled(owner, "a");
       expect(op.endedAt !== null).toBe(!shutdown);
       if (!shutdown) expect(op.failure.code).toBe("server-owned-task-failed");
+    }
+  );
+
+  it.each([false, true])(
+    "retains deletion shutdown fencing with unresolved mutation=%s",
+    async (unresolved) => {
+      const timers = vi.fn(() => () => {});
+      const owner = createEnvironmentExecutionOwner({
+        deferTask: async () => {},
+        microtask: queueMicrotask,
+        reconciliationTimer: timers
+      });
+      const op = operation("deletion-shutdown");
+      op.kind = "delete";
+      if (unresolved)
+        prepareProviderMutation(op, {
+          kind: "azure_app.create",
+          target: "fixture-app"
+        });
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockResolvedValue(undefined);
+      coordinator(owner, "panel", async () => {
+        owner.markEnvironmentInstanceShuttingDown("panel");
+        throw new Error("In-flight deletion interrupted");
+      }).scheduleEnvironmentOperation(op);
+      await settled(owner, "panel");
+      expect(op.endedAt).toBeNull();
+      expect(op.failure).toBeNull();
+      expect(op.executionActive).toBe(false);
+      expect(persist).not.toHaveBeenCalled();
+      expect(timers).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["recovered", "retry"] as const)(
+    "cancels %s selected-account acquisition backoff on shutdown without another read or terminal failure",
+    async (kind) => {
+      vi.useFakeTimers();
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("shutdown-account-backoff");
+      op.currentStage = STAGE_VERIFY;
+      op.recoveryState = "verification_pending";
+      op.context.githubLogin = "saved-account";
+      op.verification = {
+        runId: "17",
+        dispatchedAt: Date.now(),
+        acquisitionDeadline: Date.now() + 60_000
+      };
+      const acquire = vi.fn(async () => {
+        throw new Error("HTTP 429: API rate limit exceeded");
+      });
+      const account = createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: acquire,
+        withSelectedAccount: unavailable
+      });
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockResolvedValue(undefined);
+      const handler = coordinator(owner, "panel", undefined, account);
+      if (kind === "recovered") handler.startRecoveredTasks();
+      else handler.scheduleCommandTask("verification_retry", op, "retry");
+      const done = settled(owner, "panel");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      owner.shutdown();
+      await done;
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(op.endedAt).toBeNull();
+      expect(persist).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+    }
+  );
+
+  it("persists expired recovered account acquisition without another read or executor", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const op = operation("expired-account");
+    op.currentStage = STAGE_VERIFY;
+    op.recoveryState = "verification_pending";
+    op.context.githubLogin = "saved-account";
+    op.verification = { runId: "17", acquisitionDeadline: Date.now() - 1 };
+    const acquire = vi.fn(unavailable);
+    const account = createEnvironmentAccountContext("runtime", {
+      createReadOnlyExecutor: acquire,
+      withSelectedAccount: unavailable
+    });
+    const persist = vi
+      .spyOn(operations, "persist")
+      .mockResolvedValue(undefined);
+    coordinator(owner, "panel", undefined, account).startRecoveredTasks();
+    await settled(owner, "panel");
+    expect(acquire).not.toHaveBeenCalled();
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure).toMatchObject({ code: "verification-tracking-expired" });
+    expect(persist).toHaveBeenCalledOnce();
+    expect(account.getExecutor(op.operationId)).toBeUndefined();
+  });
+
+  it.each([false, true])(
+    "keeps the retry executor through Stop persistence with failure=%s",
+    async (failure) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("retry-stop");
+      op.currentStage = STAGE_VERIFY;
+      op.context.githubLogin = "saved-account";
+      op.verification = {
+        runId: "17",
+        accountUnavailablePhase: "monitor",
+        acquisitionDeadline: Date.now() + 60_000
+      };
+      const accepted = acceptCommand(op, {
+        kind: "retry_verification",
+        attempt: 1,
+        target: STAGE_VERIFY
+      });
+      requestStop(op);
+      const executor = successfulSelectedGhExecutor({ login: "saved-account" });
+      const account = createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: async () => executor,
+        withSelectedAccount: unavailable
+      });
+      const entered = deferred();
+      const gate = deferred();
+      const report = vi
+        .spyOn(operations, "report")
+        .mockImplementation(() => {});
+      const announce = vi.fn();
+      onOperationTerminal(announce);
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        if (op.state !== "cancelled") return;
+        entered.resolve();
+        await gate.promise;
+        if (failure) throw new Error("stop storage unavailable");
+      });
+      const verify = vi.fn(unavailable);
+      coordinator(
+        owner,
+        "panel",
+        undefined,
+        account,
+        undefined,
+        verify
+      ).scheduleCommandTask(
+        "verification_retry",
+        op,
+        accepted.command.commandId
+      );
+      const done = settled(owner, "panel");
+      try {
+        await Promise.race([entered.promise, done]);
+        expect(op.state).toBe("cancelled");
+        expect(account.getExecutor(op.operationId)).toBe(executor);
+        expect(announce).not.toHaveBeenCalled();
+      } finally {
+        gate.resolve();
+        await done;
+        owner.shutdown();
+      }
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+      expect(owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+      expect(verify).not.toHaveBeenCalled();
+      expect(announce).toHaveBeenCalledTimes(failure ? 0 : 1);
+      expect(report).toHaveBeenCalledTimes(failure ? 1 : 0);
+      if (failure)
+        expect(report).toHaveBeenCalledWith({
+          code: "operation-store-write-failed",
+          message: `Could not persist setup operation ${op.operationId}: stop storage unavailable`
+        });
+      expect(op.control.commands[0]).toMatchObject({
+        state: "finished",
+        outcome: "cancelled"
+      });
+    }
+  );
+
+  it.each(["completed", "shutdown", "removed"] as const)(
+    "settles an acknowledged retry dispatch before executor release when %s",
+    async (state) => {
+      const shutdown = state === "shutdown";
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("retry-dispatch");
+      op.currentStage = STAGE_VERIFY;
+      op.context.githubLogin = "saved-account";
+      op.verification = {
+        workflow: "radius-verify-credentials.yml",
+        ref: "topic",
+        environment: "dev",
+        operationMarker: op.operationId,
+        acquisitionDeadline: Date.now() + 60_000
+      };
+      const accepted = acceptCommand(op, {
+        kind: "retry_verification",
+        attempt: 1,
+        target: STAGE_VERIFY
+      });
+      const entered = deferred();
+      const gate = deferred();
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] === "run" && args[1] === "list")
+          return { code: 0, stdout: '[{"databaseId":16}]', stderr: "" };
+        if (args[0] !== "workflow")
+          throw new Error(`Unexpected command: ${args.join(" ")}`);
+        entered.resolve();
+        await gate.promise;
+        return {
+          code: 0,
+          stdout: "https://github.com/fixture/app/actions/runs/17",
+          stderr: ""
+        };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: async () => executor,
+        withSelectedAccount: unavailable
+      });
+      const snapshots: (typeof op)[] = [];
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        snapshots.push(structuredClone(op));
+      });
+      const verify = vi.fn(async () => {
+        if (state === "removed") operations.clear();
+        else finish(op, "succeeded");
+        return { status: 200, body: { state: "success" } };
+      });
+      coordinator(
+        owner,
+        "panel",
+        undefined,
+        account,
+        undefined,
+        verify
+      ).scheduleCommandTask(
+        "verification_retry",
+        op,
+        accepted.command.commandId
+      );
+      const done = settled(owner, "panel");
+      try {
+        await Promise.race([entered.promise, done]);
+        expect(account.getExecutor(op.operationId)).toBe(executor);
+        if (shutdown) owner.shutdown();
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(snapshots.at(-1)?.providerRecovery.mutations).toEqual([
+          expect.objectContaining({ status: "prepared" })
+        ]);
+      } finally {
+        gate.resolve();
+        await done;
+        owner.shutdown();
+      }
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+      expect(owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(verify).toHaveBeenCalledTimes(shutdown ? 0 : 1);
+      expect(op.endedAt === null).toBe(state !== "completed");
+      expect(snapshots.at(-1)?.providerRecovery.mutations).toEqual([
+        expect.objectContaining({
+          kind: "github_workflow.dispatch_retry",
+          status: "confirmed"
+        })
+      ]);
+      expect(op.verification.runId).toBe("17");
+    }
+  );
+
+  it.each([false, true])(
+    "fails recovered saved-account acquisition closed with known run=%s",
+    async (knownRun) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("unavailable-account");
+      op.currentStage = STAGE_VERIFY;
+      op.recoveryState = "verification_pending";
+      op.context.githubLogin = "saved-account";
+      op.verification = {
+        runId: knownRun ? "17" : null,
+        acquisitionDeadline: Date.now() + 60_000
+      };
+      const acquire = vi.fn(async () => {
+        throw new Error("Selected account unavailable");
+      });
+      const account = createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: acquire,
+        withSelectedAccount: unavailable
+      });
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockResolvedValue(undefined);
+      coordinator(owner, "panel", undefined, account).startRecoveredTasks();
+      await settled(owner, "panel");
+      expect(acquire).toHaveBeenCalledExactlyOnceWith("saved-account");
+      expect(op.failure).toMatchObject({
+        code: "verification-retry-github-account-unavailable",
+        evidence: "Selected account unavailable"
+      });
+      expect(op.verification.accountUnavailablePhase).toBe(
+        knownRun ? "monitor" : "dispatch"
+      );
+      expect(persist).toHaveBeenCalledOnce();
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+      owner.shutdown();
+    }
+  );
+
+  it.each([false, true])(
+    "keeps verification continuation settlement behind shared shutdown=%s",
+    async (shutdown) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("continuation-shutdown");
+      op.currentStage = STAGE_VERIFY;
+      op.context.githubLogin = "saved-account";
+      op.verification = { runId: "17", dispatchedAt: Date.now() };
+      const accepted = acceptCommand(op, {
+        kind: "continue_setup",
+        attempt: 1,
+        target: STAGE_VERIFY
+      });
+      const executor = successfulSelectedGhExecutor({ login: "saved-account" });
+      const account = createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: async () => executor,
+        withSelectedAccount: unavailable
+      });
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockResolvedValue(undefined);
+      const verify = vi.fn(async () => {
+        if (shutdown) owner.shutdown();
+        else finish(op, "succeeded");
+        return { status: 200, body: { state: "success" } };
+      });
+      coordinator(
+        owner,
+        "panel",
+        undefined,
+        account,
+        undefined,
+        verify
+      ).scheduleCommandTask(
+        "verification_monitor",
+        op,
+        accepted.command.commandId
+      );
+      await settled(owner, "panel");
+      expect(verify).toHaveBeenCalledOnce();
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+      expect(persist).toHaveBeenCalledTimes(shutdown ? 0 : 1);
+      expect(op.endedAt === null).toBe(shutdown);
+      expect(op.control.commands[0].state).toBe(
+        shutdown ? "accepted" : "finished"
+      );
+    }
+  );
+
+  it("cannot execute environment deletion through panel-free setup construction", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const scope = owner.attachRuntime();
+    const op = operation();
+    op.kind = "delete";
+    const persist = vi
+      .spyOn(operations, "persist")
+      .mockResolvedValue(undefined);
+    const account = createEnvironmentAccountContext("runtime", {
+      createReadOnlyExecutor: unavailable,
+      withSelectedAccount: unavailable
+    });
+    const execution = createEnvironmentOperationExecution({
+      executionOwner: owner,
+      scope,
+      accountContext: account,
+      setupServices: {
+        authorizeAzure: unavailable,
+        configureEnvironment: unavailable
+      },
+      verificationStatus: unavailable,
+      admitRecoveryRollback: unavailable
+    });
+    expect(persist).not.toHaveBeenCalled();
+    execution.scheduleEnvironmentOperation(op);
+    await new Promise<void>((resolve) => {
+      const stop = scope.onTasksSettled(() => {
+        stop();
+        resolve();
+      });
+    });
+    expect(op.failure).toMatchObject({
+      code: "server-owned-task-failed",
+      message: "Environment deletion requires the server-ready deletion runner."
+    });
+    expect(persist).toHaveBeenCalledOnce();
+    expect(scope.hasActiveTasks()).toBe(false);
+  });
+
+  it.each([
+    "account",
+    "before",
+    "during",
+    "replacement-before-configuration",
+    "replacement-during-configuration"
+  ] as const)(
+    "honors setup shutdown and presentation-generation boundaries (%s)",
+    async (when) => {
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation();
+      op.context.githubLogin = "saved-account";
+      op.request = { needsAzureCredentials: true, azure: {}, environment: {} };
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api user")
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        if (
+          command === "api repos/fixture/app" ||
+          command === "api /repos/fixture/app"
+        )
+          return {
+            code: 0,
+            stdout: '{"full_name":"fixture/app","permissions":{"admin":true}}',
+            stderr: ""
+          };
+        if (command === "api /repos/fixture/app/environments/dev") {
+          if (when === "before") owner.shutdown();
+          return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+        }
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const context = createEnvironmentAccountContext(
+        "runtime",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => {
+            if (when === "account") owner.shutdown();
+            return executor;
+          },
+          getActiveKeyringLogin: async () => "original",
+          switchKeyringAccount: unavailable,
+          resetIdentityCache: () => {}
+        })
+      );
+      const entered = deferred();
+      const gate = deferred();
+      const authorizeAzure = vi.fn<SetupServices["authorizeAzure"]>(
+        async () => {
+          entered.resolve();
+          await gate.promise;
+          return {
+            kind: "completed",
+            status: 200,
+            body: { clientId: "completed-group" }
+          };
+        }
+      );
+      const configureEnvironment = vi.fn<SetupServices["configureEnvironment"]>(
+        async (_request, instanceId, isCurrentPresentation) => {
+          expect(instanceId).toBe("panel");
+          expect(isCurrentPresentation).toEqual(expect.any(Function));
+          expect(isCurrentPresentation?.()).toBe(
+            when === "replacement-during-configuration"
+          );
+          if (when === "replacement-during-configuration") {
+            coordinator(owner, "panel");
+            expect(isCurrentPresentation?.()).toBe(false);
+          }
+          return { kind: "completed", status: 200, body: {} };
+        }
+      );
+      const handler = coordinator(owner, "panel", undefined, context, {
+        authorizeAzure,
+        configureEnvironment
+      });
+      const done = settled(owner, "panel");
+      handler.scheduleEnvironmentOperation(op);
+      try {
+        if (when !== "before" && when !== "account") {
+          await Promise.race([entered.promise, done]);
+          expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
+          expect(authorizeAzure).toHaveBeenCalledOnce();
+          if (when === "during") {
+            owner.shutdown();
+          } else if (when === "replacement-before-configuration") {
+            coordinator(owner, "panel");
+          }
+          expect(context.getExecutor(op.operationId)).toBe(executor);
+        }
+      } finally {
+        gate.resolve();
+        await done;
+      }
+      expect(authorizeAzure).toHaveBeenCalledTimes(
+        when === "before" || when === "account" ? 0 : 1
+      );
+      expect(configureEnvironment).toHaveBeenCalledTimes(
+        when.startsWith("replacement") ? 1 : 0
+      );
+      expect(op.state).not.toBe("succeeded");
+      expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
+      expect(op.endedAt).toBeNull();
+      expect(context.getExecutor(op.operationId)).toBeUndefined();
+      expect(run.mock.calls.every(([args]) => !args.includes("--method"))).toBe(
+        true
+      );
+    }
+  );
+
+  it.each(["refused", "missing-error", "rejected"] as const)(
+    "shares automatic rollback claims and releases %s admissions",
+    async (failure) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation();
+      finish(op, "failed");
+      op.providerRecovery = { state: "rollback_pending" };
+      const gate = deferred();
+      const requested = deferred();
+      const control = vi.fn<OperationControlService>(async () => {
+        requested.resolve();
+        await gate.promise;
+        if (failure === "rejected") throw new Error("admission unavailable");
+        return failure === "refused" ?
+            { status: 409, body: { error: "rollback refused" } }
+          : { status: 503, body: {} };
+      });
+      const fetcher = vi.fn(unavailable);
+      vi.stubGlobal("fetch", fetcher);
+      const report = vi.spyOn(operations, "report");
+      const a = coordinator(
+        owner,
+        "a",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        control
+      );
+      const b = coordinator(
+        owner,
+        "b",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        control
+      );
+      a.startRecoveredTasks();
+      a.startRecoveredTasks();
+      b.startRecoveredTasks();
+      await requested.promise;
+      expect(control).toHaveBeenCalledOnce();
+      expect(control).toHaveBeenCalledWith({
+        instanceId: "a",
+        operationId: "op",
+        isCurrent: expect.any(Function),
+        command: "rollback"
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+      gate.resolve();
+      await vi.waitFor(() => expect(report).toHaveBeenCalledOnce());
+      b.startRecoveredTasks();
+      await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2));
+      expect(control).toHaveBeenLastCalledWith({
+        instanceId: "b",
+        operationId: "op",
+        isCurrent: expect.any(Function),
+        command: "rollback"
+      });
+      expect(report).toHaveBeenCalledWith({
+        scope: "provider-recovery-auto-rollback",
+        operationId: "op",
+        message:
+          failure === "refused" ? "rollback refused"
+          : failure === "rejected" ? "admission unavailable"
+          : "Operation control failed with status 503."
+      });
     }
   );
 });

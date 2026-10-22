@@ -29,9 +29,12 @@ export interface VerificationRetryStopBoundaryInput {
 }
 
 export interface VerificationRetryRunnerDependencies {
+  isStopped?(): boolean;
   createExecutor(login: string): Promise<SelectedGhExecutor>;
-  registerExecutor(operationId: string, executor: SelectedGhExecutor): void;
-  unregisterExecutor(operationId: string): void;
+  registerExecutor(
+    operationId: string,
+    executor: SelectedGhExecutor
+  ): () => void;
   stopBoundary(input: VerificationRetryStopBoundaryInput): Promise<boolean>;
   buildDispatchArgs(input: {
     workflowFile: string;
@@ -220,6 +223,7 @@ export async function runVerificationRetry(
     acquisitionDeadline,
     dependencies
   );
+  if (acquisition.state === "stopped") return;
   if (acquisition.state === "unavailable") {
     await failSelectedAccount({
       operation,
@@ -260,7 +264,10 @@ export async function runVerificationRetry(
   }
 
   const executor = acquisition.executor;
-  dependencies.registerExecutor(operation.operationId, executor);
+  const releaseExecutor = dependencies.registerExecutor(
+    operation.operationId,
+    executor
+  );
   try {
     const saved = operation.verification || {};
     const resumeKnownRun = shouldResumeKnownVerificationRun({
@@ -297,6 +304,7 @@ export async function runVerificationRetry(
       }
       if (!(await stopBoundary("after-verification-retry-dispatch"))) return;
       await dependencies.monitor(operation.operationId);
+      if (dependencies.isStopped?.()) return;
       dependencies.setCommandState(
         operation,
         commandId,
@@ -592,6 +600,7 @@ export async function runVerificationRetry(
     await dependencies.persist(operation);
     if (!(await stopBoundary("after-verification-retry-dispatch"))) return;
     await dependencies.monitor(operation.operationId);
+    if (dependencies.isStopped?.()) return;
     dependencies.setCommandState(
       operation,
       commandId,
@@ -600,6 +609,6 @@ export async function runVerificationRetry(
     );
     await dependencies.persist(operation);
   } finally {
-    dependencies.unregisterExecutor(operation.operationId);
+    releaseExecutor();
   }
 }

@@ -17,7 +17,7 @@ function harness(
   bindings: Partial<
     Pick<
       Parameters<typeof createSetupEnvironmentPorts>[0],
-      "provider" | "finalize"
+      "provider" | "finalize" | "instanceId" | "isCurrentPresentation"
     >
   > = {}
 ) {
@@ -355,5 +355,38 @@ describe("Canvas setup configuration adapter", () => {
       verifyRunId: "42",
       verifyRunUrl: "https://github.test/run/42"
     });
+  });
+
+  it("does not resolve a presentation when setup has no panel", () => {
+    const readInstanceEntry = vi.fn(unexpected);
+    const h = harness({ readInstanceEntry }, { instanceId: undefined });
+    h.ports.projectVerification({
+      dispatchedAt: 123,
+      verifyRunId: "42",
+      verifyRunUrl: "https://github.test/run/42"
+    });
+    expect(readInstanceEntry).not.toHaveBeenCalled();
+  });
+
+  it("does not publish verification into a replaced presentation", () => {
+    let current = true;
+    let entry: CreateEnvironmentInstanceEntry = { state: {} };
+    const readInstanceEntry = vi.fn(() => entry);
+    const h = harness(
+      { readInstanceEntry },
+      { isCurrentPresentation: () => current }
+    );
+    const verification = {
+      dispatchedAt: 123,
+      verifyRunId: "42",
+      verifyRunUrl: "https://github.test/run/42"
+    };
+    h.ports.projectVerification(verification);
+    expect(entry.state.verifyRunId).toBe("42");
+    current = false;
+    entry = { state: {} };
+    h.ports.projectVerification(verification);
+    expect(entry.state).toEqual({});
+    expect(readInstanceEntry).toHaveBeenCalledOnce();
   });
 });
