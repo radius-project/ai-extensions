@@ -38,6 +38,331 @@ afterEach(() => {
 });
 
 describe("runtime environment execution ownership", () => {
+  it("fences only a replaced setup presentation, not other panels or deletion scopes", () => {
+    const owner = createEnvironmentExecutionOwner();
+    const first = owner.attach("panel");
+    const runtime = owner.attachRuntime();
+    owner.attachDeletion("panel");
+    owner.attach("other");
+    expect(first.isCurrent()).toBe(true);
+    const replacement = owner.attach("panel");
+    expect(first.isCurrent()).toBe(false);
+    expect(replacement.isCurrent()).toBe(true);
+    expect(runtime.isCurrent()).toBe(true);
+    first.detach();
+    expect(replacement.isCurrent()).toBe(true);
+    replacement.detach();
+    replacement.detach();
+    expect(replacement.isCurrent()).toBe(false);
+  });
+
+  it("stops queued setup, cancels timers and rejects admission without stopping legacy deletion", async () => {
+    const callbacks: Array<() => void> = [];
+    const cancel = vi.fn();
+    const owner = createEnvironmentExecutionOwner({
+      deferTask: async () => {},
+      microtask: queueMicrotask,
+      reconciliationTimer: (callback) => {
+        callbacks.push(callback);
+        return cancel;
+      }
+    });
+    const setup = owner.attachRuntime();
+    const deletion = owner.attachDeletion("panel");
+    const pending = task(vi.fn(async () => {}));
+    const legacy = task(vi.fn(async () => {}));
+    const reconcile = vi.fn();
+    setup.schedule("queued", pending);
+    setup.scheduleReconciliation("recover", reconcile);
+    owner.shutdown();
+    owner.shutdown();
+    expect(setup.isShuttingDown()).toBe(true);
+    expect(owner.isShuttingDown()).toBe(true);
+    expect(cancel).toHaveBeenCalledOnce();
+    callbacks[0]();
+    expect(reconcile).not.toHaveBeenCalled();
+    setup.scheduleReconciliation("later", reconcile);
+    expect(callbacks).toHaveLength(1);
+    expect(() =>
+      setup.schedule(
+        "new",
+        task(async () => {})
+      )
+    ).toThrow("Setup execution is shutting down.");
+    deletion.schedule("legacy", legacy);
+    await Promise.all([
+      new Promise<void>((resolve) => {
+        const stop = setup.onTasksSettled(() => {
+          stop();
+          resolve();
+        });
+      }),
+      settled(owner, "panel")
+    ]);
+    expect(pending.run).not.toHaveBeenCalled();
+    expect(legacy.run).toHaveBeenCalledOnce();
+    expect(pending.settled).toHaveBeenCalledOnce();
+    expect(legacy.settled).toHaveBeenCalledOnce();
+    expect(setup.hasActiveTasks()).toBe(false);
+  });
+
+  it("notifies shutdown subscribers once and isolates failure and stale unsubscribe", () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const owner = createEnvironmentExecutionOwner();
+    const callback = vi.fn();
+    const release = owner.onShutdown(callback);
+    const releaseReplacement = owner.onShutdown(callback);
+    release();
+    release();
+    owner.onShutdown(() => {
+      throw new Error("observer failure");
+    });
+    const following = vi.fn();
+    owner.onShutdown(following);
+    owner.shutdown();
+    owner.shutdown();
+    releaseReplacement();
+    expect(callback).toHaveBeenCalledOnce();
+    expect(following).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledExactlyOnceWith(
+      "[radius] setup shutdown callback failed: observer failure"
+    );
+    const late = vi.fn();
+    owner.onShutdown(late)();
+    expect(late).toHaveBeenCalledOnce();
+  });
+
+  it("signals deletion settlement while shared setup still owns its task", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const setup = owner.attach("panel");
+    const deletion = owner.attachDeletion("panel");
+    const setupGate = deferred();
+    const deleteGate = deferred();
+    setup.schedule(
+      "setup",
+      task(() => setupGate.promise)
+    );
+    deletion.schedule(
+      "delete",
+      task(() => deleteGate.promise)
+    );
+    const completed = settled(owner, "panel");
+    const deletionDone = new Promise<void>((resolve) => {
+      const stop = owner.onDeletionTasksSettled("panel", () => {
+        stop();
+        resolve();
+      });
+    });
+    expect(owner.hasActiveDeletionTasks("panel")).toBe(true);
+    try {
+      deleteGate.resolve();
+      await deletionDone;
+      expect(owner.hasActiveDeletionTasks("panel")).toBe(false);
+      expect(owner.hasActiveEnvironmentTasks("panel")).toBe(true);
+      deletion.markShuttingDown();
+      expect(setup.isShuttingDown()).toBe(false);
+      expect(deletion.isShuttingDown()).toBe(true);
+    } finally {
+      setupGate.resolve();
+      deleteGate.resolve();
+      await completed;
+    }
+    expect(owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+  });
+
+  it("does not close deletion subscribers when an earlier listener schedules another deletion", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const scope = owner.attachDeletion("panel");
+    const gate = deferred();
+    const replacement = deferred();
+    scope.schedule(
+      "first",
+      task(() => gate.promise)
+    );
+    const stop = owner.onDeletionTasksSettled("panel", () => {
+      stop();
+      scope.schedule(
+        "next",
+        task(() => replacement.promise)
+      );
+    });
+    const close = vi.fn();
+    const finished = new Promise<void>((resolve) => {
+      const unsubscribe = owner.onDeletionTasksSettled("panel", () => {
+        close();
+        unsubscribe();
+        resolve();
+      });
+    });
+    const entered = new Promise<void>((resolve) => {
+      owner.onEnvironmentTasksSettled("panel", resolve);
+    });
+    try {
+      gate.resolve();
+      await entered;
+      expect(owner.hasActiveDeletionTasks("panel")).toBe(true);
+      expect(close).not.toHaveBeenCalled();
+    } finally {
+      replacement.resolve();
+      await finished;
+    }
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it.each(["settling", "settled"] as const)(
+    "reports a throwing %s callback without leaking ownership",
+    async (phase) => {
+      const diagnostic = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+      const owner = createEnvironmentExecutionOwner();
+      const scope = owner.attach("panel");
+      const work = task(async () => {});
+      work[phase].mockImplementation(() => {
+        throw new Error(`${phase} failed`);
+      });
+      scope.schedule("op", work);
+      await settled(owner, "panel");
+      expect(scope.hasTask("op")).toBe(false);
+      expect(scope.hasActiveTasks()).toBe(false);
+      expect(work.settling).toHaveBeenCalledOnce();
+      expect(work.settled).toHaveBeenCalledOnce();
+      expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+        `[radius] environment task finalization failed (operationId=op, instanceId=panel): ${phase} failed`
+      );
+      const next = task(async () => {});
+      scope.schedule("op", next);
+      await settled(owner, "panel");
+      expect(next.settled).toHaveBeenCalledOnce();
+    }
+  );
+
+  it.each(["settling", "listener"] as const)(
+    "does not notify idle consumers or finalize old work after %s schedules a successor",
+    async (phase) => {
+      const owner = createEnvironmentExecutionOwner();
+      const scope = owner.attach("panel");
+      const entered = deferred();
+      const gate = deferred();
+      const next = task(async () => {
+        entered.resolve();
+        await gate.promise;
+      });
+      const work = task(async () => {});
+      if (phase === "settling") {
+        work.settling.mockImplementation(() => scope.schedule("op", next));
+      } else {
+        const stop = scope.onTasksSettled(() => {
+          stop();
+          scope.schedule("op", next);
+        });
+      }
+      scope.schedule("op", work);
+      const notified = vi.fn();
+      const stop = scope.onTasksSettled(notified);
+      const completed = settled(owner, "panel");
+      try {
+        await entered.promise;
+        expect(scope.hasActiveTasks()).toBe(true);
+        expect(scope.hasTask("op")).toBe(true);
+        expect(work.settled).not.toHaveBeenCalled();
+        expect(notified).not.toHaveBeenCalled();
+      } finally {
+        gate.resolve();
+        await completed;
+        stop();
+      }
+      expect(next.settled).toHaveBeenCalledOnce();
+      expect(notified).toHaveBeenCalledOnce();
+    }
+  );
+
+  it("ignores an already-queued old timer without clearing the replacement timer", async () => {
+    const callbacks: Array<() => void> = [];
+    const cancel = vi.fn();
+    const owner = createEnvironmentExecutionOwner({
+      deferTask: async () => {},
+      microtask: queueMicrotask,
+      reconciliationTimer: (callback) => {
+        callbacks.push(callback);
+        return cancel;
+      }
+    });
+    const first = owner.attach("old");
+    const replacement = owner.attach("new");
+    const stale = vi.fn();
+    const current = vi.fn();
+    first.scheduleReconciliation("op", stale);
+    replacement.schedule(
+      "op",
+      task(async () => {})
+    );
+    expect(cancel).toHaveBeenCalledOnce();
+    await settled(owner, "new");
+    replacement.scheduleReconciliation("op", current);
+    callbacks[0]();
+    first.scheduleReconciliation("op", stale);
+    expect(callbacks).toHaveLength(2);
+    expect(stale).not.toHaveBeenCalled();
+    callbacks[1]();
+    callbacks[0]();
+    callbacks[1]();
+    expect(current).toHaveBeenCalledOnce();
+    expect(stale).not.toHaveBeenCalled();
+  });
+
+  it("cancels the actual reconciliation timer when a new command is scheduled", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const owner = createEnvironmentExecutionOwner();
+    const scope = owner.attach("panel");
+    const callback = vi.fn();
+    scope.scheduleReconciliation("op", callback);
+    expect(vi.getTimerCount()).toBe(1);
+    scope.schedule(
+      "op",
+      task(async () => {})
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    await settled(owner, "panel");
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it("keeps panel-free diagnostics while shutdown reaches every shared attachment", async () => {
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = owner.attachRuntime();
+    const panel = owner.attach("panel");
+    const entered = deferred();
+    const gate = deferred();
+    const work = task(async () => {
+      entered.resolve();
+      await gate.promise;
+      throw new Error("runner failed");
+    });
+    work.failed.mockRejectedValue(new Error("settlement failed"));
+    runtime.schedule("op", work);
+    expect(runtime.instanceId).toBeUndefined();
+    expect(runtime.hasActiveTasks()).toBe(true);
+    expect(panel.hasActiveTasks()).toBe(false);
+    await entered.promise;
+    runtime.markShuttingDown();
+    expect(runtime.isShuttingDown()).toBe(true);
+    expect(panel.isShuttingDown()).toBe(true);
+    gate.resolve();
+    await new Promise<void>((resolve) => {
+      const stop = runtime.onTasksSettled(() => {
+        stop();
+        resolve();
+      });
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(runtime.hasActiveTasks()).toBe(false);
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+      "[radius] environment task finalization failed (operationId=op, scope=runtime): settlement failed"
+    );
+  });
+
   it("constructs without work and isolates runtime claims and shutdown markers", () => {
     const owner = createEnvironmentExecutionOwner();
     const other = createEnvironmentExecutionOwner();
@@ -47,14 +372,21 @@ describe("runtime environment execution ownership", () => {
     expect(other.isShuttingDown("panel")).toBe(false);
     owner.markEnvironmentInstanceStarted("panel");
     expect(owner.isShuttingDown("panel")).toBe(false);
-    expect(owner.claimVerificationMonitor("op")).toBe(true);
-    expect(owner.claimVerificationMonitor("op")).toBe(false);
-    expect(other.claimVerificationMonitor("op")).toBe(true);
-    owner.releaseVerificationMonitor("op");
-    expect(owner.claimVerificationMonitor("op")).toBe(true);
+    const release = owner.claimVerificationMonitor("op");
+    expect(release).toEqual(expect.any(Function));
+    expect(owner.claimVerificationMonitor("op")).toBeUndefined();
+    const otherRelease = other.claimVerificationMonitor("op");
+    expect(otherRelease).toEqual(expect.any(Function));
+    release?.();
+    const replacementRelease = owner.claimVerificationMonitor("op");
+    expect(replacementRelease).toEqual(expect.any(Function));
+    release?.();
+    expect(owner.claimVerificationMonitor("op")).toBeUndefined();
+    replacementRelease?.();
+    otherRelease?.();
   });
 
-  it("chains an attachment's commands but not another panel's same operation", async () => {
+  it("serializes the same operation across subscribers without losing queued work", async () => {
     const owner = createEnvironmentExecutionOwner();
     const first = owner.attach("a");
     const second = owner.attach("b");
@@ -80,19 +412,19 @@ describe("runtime environment execution ownership", () => {
       })
     );
     await entered.promise;
-    await settled(owner, "b");
+    expect(owner.hasActiveEnvironmentTasks("b")).toBe(true);
     expect(owner.hasActiveEnvironmentTasks("a")).toBe(true);
     expect(first.hasTask("op")).toBe(true);
-    expect(order).toEqual(["a:start", "b:start"]);
+    expect(order).toEqual(["a:start"]);
     blocked.resolve();
-    await settled(owner, "a");
-    expect(order).toEqual(["a:start", "b:start", "a:command"]);
+    await Promise.all([settled(owner, "a"), settled(owner, "b")]);
+    expect(order).toEqual(["a:start", "a:command", "b:start"]);
     expect(initial.settling).not.toHaveBeenCalled();
     expect(initial.settled).not.toHaveBeenCalled();
     expect(first.hasTask("op")).toBe(false);
   });
 
-  it("retains instance-ID aggregation and operation-set settlement on replacement", async () => {
+  it("keeps a replacement active after the older same-ID task settles", async () => {
     const owner = createEnvironmentExecutionOwner();
     const first = owner.attach("same");
     const replacement = owner.attach("same");
@@ -112,9 +444,7 @@ describe("runtime environment execution ownership", () => {
     );
     expect(owner.hasActiveEnvironmentTasks("same")).toBe(true);
     await entered.promise;
-    // The inherited set is not a reference counter. Finishing the old
-    // attachment removes the shared operation ID, even if the new one runs.
-    expect(owner.hasActiveEnvironmentTasks("same")).toBe(false);
+    expect(owner.hasActiveEnvironmentTasks("same")).toBe(true);
     expect(replacement.hasTask("op")).toBe(true);
     const completed = deferred();
     const continuation = task(async () => {});
@@ -260,16 +590,21 @@ describe("runtime environment execution ownership", () => {
     stopIdle();
   });
 
-  it("preserves per-attachment rollback claims and reconciliation timer release", async () => {
+  it("shares rollback claims and reconciliation timers across subscribers", async () => {
     vi.useFakeTimers();
     const owner = createEnvironmentExecutionOwner();
     const a = owner.attach("a");
     const b = owner.attach("b");
-    expect(a.claimAutomaticRollback("op")).toBe(true);
-    expect(a.claimAutomaticRollback("op")).toBe(false);
-    expect(b.claimAutomaticRollback("op")).toBe(true);
-    a.releaseAutomaticRollback("op");
-    expect(a.claimAutomaticRollback("op")).toBe(true);
+    const release = a.claimAutomaticRollback("op");
+    expect(release).toEqual(expect.any(Function));
+    expect(a.claimAutomaticRollback("op")).toBeUndefined();
+    expect(b.claimAutomaticRollback("op")).toBeUndefined();
+    release?.();
+    const replacementRelease = b.claimAutomaticRollback("op");
+    expect(replacementRelease).toEqual(expect.any(Function));
+    release?.();
+    expect(a.claimAutomaticRollback("op")).toBeUndefined();
+    replacementRelease?.();
     const callback = vi.fn();
     a.scheduleReconciliation("op", callback);
     a.scheduleReconciliation("op", callback);
@@ -279,10 +614,10 @@ describe("runtime environment execution ownership", () => {
     expect(callback).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     // The provider callback, not storage, owns its shutdown predicate.
-    expect(callback).toHaveBeenCalledTimes(2);
+    expect(callback).toHaveBeenCalledOnce();
     a.scheduleReconciliation("op", callback);
     await vi.advanceTimersByTimeAsync(5000);
-    expect(callback).toHaveBeenCalledTimes(3);
+    expect(callback).toHaveBeenCalledTimes(2);
   });
 
   it("does not use shutdown marking as task admission or discard settling work", async () => {

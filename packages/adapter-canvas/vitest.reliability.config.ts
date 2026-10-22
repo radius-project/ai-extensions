@@ -36,6 +36,7 @@ export default defineConfig({
       "src/workspace.test.ts",
       "src/server/create-canvas-server.test.ts",
       "src/runtime/environment-execution-owner.test.ts",
+      "src/runtime/setup-execution.test.ts",
       "src/runtime/environment-account-context.test.ts",
       "src/server/services/github-account-{coordinator,readiness}.test.ts",
       "src/server-environment-execution.test.ts",
