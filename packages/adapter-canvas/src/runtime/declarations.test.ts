@@ -234,6 +234,33 @@ describe("RU-03: tool declarations", () => {
   });
 
   describe("RU-19: session start guidance", () => {
+    it("opens the graph first and leaves missing-model authoring to the Canvas handoff", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        '1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).'
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "let the Canvas queue its automatic radius-app-bicep authoring handoff"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "After opening, do not inspect the workspace for app.bicep, poll for a missing model, call radius_generate_app or the radius-app-bicep skill, or delegate model generation independently."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "End the current turn so the Canvas-owned handoff can run."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "First, check whether"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "Only AFTER the skill has written"
+      );
+    });
+
+    it("keeps explicitly requested model authoring available", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion."
+      );
+    });
+
     it("does not ask the agent to generate a graph diff before pull requests", () => {
       expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
         "radius_generate_pr_diff_markdown"
