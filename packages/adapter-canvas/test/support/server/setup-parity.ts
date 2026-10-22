@@ -19,7 +19,7 @@ import {
   setContext
 } from "../../../src/operations.js";
 import { ensureServicePrincipal } from "../../../src/server.js";
-import type { CreateEnvironmentDependencies } from "../../../src/server/routes/create-environment.js";
+import type { ConfigureEnvironmentDependencies } from "../../../src/server/services/configure-environment.js";
 import type { CreateEnvironmentRequestData } from "../../../src/server/routes/create-environment-refusals.js";
 import type { CreateEnvironmentOperation } from "../../../src/server/routes/create-environment-types.js";
 import type { AzureAutoSetupOperation } from "../../../src/server/routes/azure-auto-setup-types.js";
@@ -47,7 +47,7 @@ export function unexpectedParityCall(...args: unknown[]): never {
 
 export function createParityAzureFixture(
   operation: AzureAutoSetupOperation,
-  environment: CreateEnvironmentDependencies,
+  environment: ConfigureEnvironmentDependencies,
   trace: (entry: unknown) => void
 ) {
   const provenance = new Map<string, unknown>();
@@ -275,7 +275,7 @@ export function createParityAzureFixture(
 
 export async function runDirectParityConfiguration(
   data: CreateEnvironmentRequestData,
-  dependencies: CreateEnvironmentDependencies,
+  dependencies: ConfigureEnvironmentDependencies,
   instanceId = "panel-a"
 ) {
   return createConfigureEnvironmentService(dependencies)({ data }, instanceId);
