@@ -83,5 +83,3 @@ Record every retained and removed resource, the evidence used to identify it, th
 Escalate when diagnostics report unknown values, reconciliation becomes manual-required, the panel offers no transition for a non-terminal operation, a cleanup target cannot be identified precisely, Retry rollback cannot verify absence, an operation remains stuck beyond its documented tracking window, or the installed host cannot download diagnostics.
 
 Include the diagnostic export, installed release-candidate identifier, operation state, expected and observed result, actions already attempted, and retained-resource disposition. Do not include raw command output, tokens, secrets, or copied environment variables.
-
-Release qualification and evidence requirements are tracked in [Environment creation readiness](./ENVIRONMENT_CREATION_READINESS.md).

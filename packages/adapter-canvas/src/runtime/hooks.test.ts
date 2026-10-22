@@ -15,6 +15,7 @@ import {
   appModelUnverifiedPrompt,
   appModelUnverifiedDisplayPrompt,
   appModelUnverifiedMessage,
+  appModelRadiusCliOutdatedNotice,
   appModelStaleNotice,
   appModelRefreshPrompt,
   appModelRefreshDisplayPrompt,
@@ -316,6 +317,7 @@ function modelStatus(
             generatedAt: "2026-08-11T05:32:32.000Z",
             sourceCommit: overrides.sourceCommit,
             skillVersion: "0.1.0-test",
+            radiusVersion: "0.60",
             appBicepHash: "sha256:abc"
           }
     }
@@ -499,6 +501,29 @@ describe("appModelStaleNotice", () => {
   it("omits the repo phrase when the repo is unknown", () => {
     expect(
       appModelStaleNotice(modelStatus("", "main", { status: "source-changed" }))
+    ).toContain("the application model on branch `main`");
+  });
+});
+
+describe("appModelRadiusCliOutdatedNotice", () => {
+  it("says the model was not refreshed and why", () => {
+    expect(
+      appModelRadiusCliOutdatedNotice(
+        modelStatus("octo/app", "main", {
+          status: "radius-cli-outdated",
+          reason: "Update the Radius plugin."
+        })
+      )
+    ).toBe(
+      "Radius: the application model for octo/app on branch `main` was not refreshed. Update the Radius plugin."
+    );
+  });
+
+  it("omits the repo phrase when the repo is unknown", () => {
+    expect(
+      appModelRadiusCliOutdatedNotice(
+        modelStatus("", "main", { status: "radius-cli-outdated" })
+      )
     ).toContain("the application model on branch `main`");
   });
 });
