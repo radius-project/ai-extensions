@@ -159,7 +159,7 @@ export type DeployDispatchOutcome =
       // Newest run id that existed just before this dispatch, so the run
       // monitor can identify the run this dispatch created as the first one
       // whose id exceeds it, rather than matching a prior run by time window.
-      // Null only for a successful empty history read.
+      // Null for empty history or the legacy caller's tolerant read fallback.
       baselineRunId: number | string | null;
     };
 
