@@ -15,6 +15,16 @@ export { ensureDeploymentSecret } from "./deployment-secret.js";
 export { startDeployment } from "./deployment-start.js";
 export { deploymentApplicationPaths } from "./deployment-commands.js";
 export {
+  resolveDeploymentRepairLoop,
+  claimDeploymentRepairHandoff,
+  settleDeploymentRepairHandoff,
+  DEPLOY_REPAIR_ATTEMPT_CAP,
+  DEPLOY_HANDOFF_MAX_ATTEMPTS,
+  DEPLOY_HANDOFF_RETRY_DELAY_MS,
+  type DeploymentRepairState,
+  type DeploymentRepairClaim
+} from "./deployment-repair.js";
+export {
   collectDeploymentOutcome,
   type DeploymentGraphRead
 } from "./deployment-outcome.js";

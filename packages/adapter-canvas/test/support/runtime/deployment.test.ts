@@ -1,5 +1,54 @@
 import { describe, expect, it } from "vitest";
-import { createDeploymentPipelineRunner } from "./deployment.js";
+import {
+  createDeploymentControllerHarness,
+  createDeploymentPipelineRunner
+} from "./deployment.js";
+
+describe("deployment controller fixture", () => {
+  it("completes one real admission and releases its reservation", async () => {
+    const fixture = createDeploymentControllerHarness();
+    try {
+      const result = await fixture.controller.start({
+        data: { ...fixture.target, targetRepo: fixture.target.repo },
+        source: {},
+        isCurrent: () => true,
+        present: () => {},
+        notifications: [fixture.notify]
+      });
+      expect(result.kind).toBe("started");
+      await expect.poll(() => fixture.monitor.mock.calls.length).toBe(1);
+      await expect
+        .poll(() => fixture.owner.activeReservation(fixture.target))
+        .toBeUndefined();
+      expect(fixture.owner.resolve()).toMatchObject({ kind: "resolved" });
+      expect(fixture.notify).toHaveBeenCalledOnce();
+      expect(fixture.reportError).not.toHaveBeenCalled();
+    } finally {
+      fixture.owner.shutdown();
+    }
+  });
+
+  it("isolates seeded attempts and rejects unscripted commands", async () => {
+    const first = createDeploymentControllerHarness();
+    const second = createDeploymentControllerHarness();
+    try {
+      const seeded = first.seed({ deployStatus: "failed" });
+      expect(first.owner.snapshot(seeded.invocation)?.deployStatus).toBe(
+        "failed"
+      );
+      expect(second.owner.resolve()).toEqual({ kind: "missing" });
+      await expect(first.run(["unexpected"])).rejects.toThrow(
+        "Unscripted GitHub command"
+      );
+      expect(first.owner.activeReservation(first.target)).toBeUndefined();
+      first.owner.shutdown();
+      expect(() => first.seed()).toThrow("Could not reserve fixture target.");
+    } finally {
+      first.owner.shutdown();
+      second.owner.shutdown();
+    }
+  });
+});
 
 describe("selected deployment pipeline fixture", () => {
   it("fails and records commands outside the scripted repository", async () => {

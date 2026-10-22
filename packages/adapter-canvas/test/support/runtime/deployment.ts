@@ -1,6 +1,118 @@
 import { vi } from "vitest";
 import { readFileSync } from "node:fs";
+import {
+  createDeploymentExecutionOwner,
+  type DeploymentTarget,
+  type DeploymentExecutionOwner
+} from "../../../src/runtime/deployment-execution-owner.js";
+import { createProductionDeploymentController } from "../../../src/runtime/production-deployment-controller.js";
+import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
+import type { DeployMonitorRequest } from "../../../src/server/services/deploy-monitor.js";
+import type { CanvasState } from "../../../src/shared.js";
+import type { DeploymentAccountResolver } from "../../../src/runtime/deployment-account.js";
 import type { SelectedGhExecutor } from "../../../src/gh.js";
+import { successfulSelectedGhExecutor } from "../server/selected-gh.js";
+
+export function createDeploymentControllerHarness(
+  options: {
+    owner?: DeploymentExecutionOwner;
+    run?: SelectedGhExecutor["run"];
+  } = {}
+) {
+  let nextId = 0;
+  const reportError = vi.fn();
+  const owner =
+    options.owner ??
+    createDeploymentExecutionOwner({
+      now: () => 1700000000000,
+      newAttemptId: () => `attempt-${++nextId}`,
+      reportError,
+      createObservation: () =>
+        createWorkflowObservationScope(() => {
+          throw new Error("Artifact read not scripted.");
+        })
+    });
+  const run = vi.fn<SelectedGhExecutor["run"]>(
+    options.run ??
+      (async (args) => {
+        if (
+          args[0] === "api" &&
+          (args[1].includes("/variables?") || args[1].includes("/deployments?"))
+        )
+          return { code: 0, stdout: "", stderr: "" };
+        if (args[0] === "repo" && args[1] === "view")
+          return { code: 0, stdout: "trunk", stderr: "" };
+        throw new Error(`Unscripted GitHub command: ${JSON.stringify(args)}`);
+      })
+  );
+  const executor = successfulSelectedGhExecutor({ login: "fixture-user", run });
+  const account = vi.fn<DeploymentAccountResolver>(async () => ({
+    state: "selected",
+    login: executor.login,
+    executor
+  }));
+  const monitor = vi.fn(async (request: DeployMonitorRequest) => {
+    request.entry.state.deployStatus = "complete";
+    request.entry.state.deployFinishedAt = 1700000060000;
+  });
+  const controller = createProductionDeploymentController({
+    owner,
+    account,
+    reportError,
+    monitorFor: () => ({ run: monitor })
+  });
+  const notify = vi.fn();
+  const target: DeploymentTarget = {
+    repo: "fixture/app",
+    environment: "dev",
+    branch: "feature/model",
+    provider: "azure",
+    appFile: ".radius/app.bicep",
+    githubLogin: executor.login
+  };
+  function seed(
+    state: CanvasState = {},
+    overrides: Partial<DeploymentTarget> = {}
+  ) {
+    const selected = { ...target, ...overrides };
+    const reservation = owner.reserve(selected, "deploy");
+    if (!reservation) throw new Error("Could not reserve fixture target.");
+    const begun = owner.begin({
+      target: selected,
+      executor,
+      reservation,
+      state: {
+        deployStatus: "complete",
+        envName: selected.environment,
+        deployParams: {
+          targetRepo: selected.repo,
+          environment: selected.environment,
+          branch: selected.branch,
+          provider: selected.provider,
+          appFile: selected.appFile
+        },
+        ...state
+      }
+    });
+    owner.release(reservation);
+    if (begun.kind !== "resolved") throw new Error(begun.kind);
+    const execution = owner.execution(begun.invocation);
+    if (!execution) throw new Error("Missing fixture execution.");
+    return execution;
+  }
+  return {
+    owner,
+    run,
+    executor,
+    account,
+    monitor,
+    controller,
+    notify,
+    reportError,
+    target,
+    seed
+  };
+}
 
 export function createDeploymentPipelineRunner(
   conclusion: "success" | "failure" | "uncertain"

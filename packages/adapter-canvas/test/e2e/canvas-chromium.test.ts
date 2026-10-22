@@ -680,6 +680,7 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }, testInfo) => {
+    canvas.deploymentAccountChoice.login = "acting-user";
     const environment = "fixture-environment";
     const opaque = "OpaqueBindingWitness92741";
     const named = "UnregisteredNamedWitness63281";
@@ -692,10 +693,7 @@ test.describe("Radius Canvas in Chromium", () => {
       stdout
     });
     const json = (endpoint: string, value: unknown): FakeCliCommand =>
-      command(
-        ["api", endpoint, "-H", "X-GitHub-Api-Version: 2022-11-28"],
-        JSON.stringify(value)
-      );
+      command(["api", endpoint], JSON.stringify(value));
     const included = (endpoint: string, value: unknown): FakeCliCommand =>
       command(
         ["api", endpoint, "--include", "--method", "GET"],
@@ -710,6 +708,17 @@ test.describe("Radius Canvas in Chromium", () => {
       "GET"
     ];
     const additions: FakeCliCommand[] = [
+      json(
+        `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${encodeURIComponent(WORKTREE_BRANCH)}`,
+        {
+          type: "file",
+          encoding: "base64",
+          content: Buffer.from(
+            "resource app 'Radius.Core/applications@2025-08-01-preview' = {\n  name: 'fixture-app'\n}\n"
+          ).toString("base64"),
+          sha: "c".repeat(40)
+        }
+      ),
       {
         tool: "gh",
         args: repositoryArtifactArgs,
@@ -728,15 +737,12 @@ test.describe("Radius Canvas in Chromium", () => {
         exitCode: 1,
         stderr: "gh: Not Found (HTTP 404)"
       },
-      command(["api", "user", "--jq", ".login"], "acting-user\n"),
       command(
         [
           "api",
-          `/repos/${REPOSITORY}/git/ref/heads/${encodeURIComponent(WORKTREE_BRANCH)}`,
-          "--jq",
-          ".object.sha"
+          `/repos/${REPOSITORY}/git/ref/heads/${encodeURIComponent(WORKTREE_BRANCH)}`
         ],
-        "fixture-pushed-head\n"
+        JSON.stringify({ object: { sha: "a".repeat(40) } })
       ),
       json(
         `/repos/${REPOSITORY}/environments/${environment}/variables/AZURE_CLIENT_ID`,
@@ -747,6 +753,7 @@ test.describe("Radius Canvas in Chromium", () => {
       }),
       json(`/repos/${REPOSITORY}`, {
         full_name: REPOSITORY,
+        default_branch: "main",
         id: 123,
         owner: { id: 456 }
       }),
@@ -781,7 +788,6 @@ test.describe("Radius Canvas in Chromium", () => {
         [
           "run",
           "list",
-          "--workflow=run-rad-commands.yml",
           "--limit",
           "20",
           "--json",
@@ -819,7 +825,7 @@ test.describe("Radius Canvas in Chromium", () => {
       {
         tool: "gh",
         argsPrefix: dispatchPrefix,
-        env: { GH_TOKEN: "absent", GITHUB_TOKEN: "absent" },
+        env: { GH_TOKEN: "fixture-acting-token", GITHUB_TOKEN: "absent" },
         stdout: ""
       },
       included(`repos/${REPOSITORY}/actions/runs/${runId}`, {
@@ -914,6 +920,15 @@ test.describe("Radius Canvas in Chromium", () => {
     for (const [file, content] of Object.entries(workflows)) {
       for (const branch of ["main", WORKTREE_BRANCH]) {
         scenario.commands.unshift(
+          json(
+            `/repos/${REPOSITORY}/contents/.github/workflows/${file}?ref=${encodeURIComponent(branch)}`,
+            {
+              type: "file",
+              encoding: "base64",
+              content: Buffer.from(content).toString("base64"),
+              sha: "b".repeat(40)
+            }
+          ),
           command(
             [
               "api",
@@ -939,6 +954,7 @@ test.describe("Radius Canvas in Chromium", () => {
     const deliveries: DeployRepairHandoffInput[] = [];
     canvas.setDeployRepairHandoff(async (input) => {
       deliveries.push(input);
+      if (deliveries.length === 1) throw new Error("Fixture host unavailable");
     });
     // Planned inputs only: admission mints the attempt and the real monitor
     // discovers, classifies and settles the failed run without state seeding.
@@ -968,9 +984,25 @@ test.describe("Radius Canvas in Chromium", () => {
         appFile: ".radius/app.bicep"
       }
     });
-    expect(admitted.status()).toBe(200);
+    expect(admitted.status(), await admitted.text()).toBe(200);
     const attemptId = canvas.entry.state.deployAttempt?.id;
     expect(attemptId).toBeTruthy();
+    const closedState = canvas.entry.state;
+    await page.goto("about:blank");
+    await canvas.reconnectPanel(async () => {
+      await expect.poll(() => deliveries.length, { timeout: 15_000 }).toBe(2);
+      expect(deliveries[0].attemptId).toBe(attemptId);
+      expect(deliveries[1].attemptId).toBe(attemptId);
+    });
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      envName: environment
+    });
+    const restored = await page.request.get(
+      `${canvas.baseUrl}/api/deploy-status`
+    );
+    expect((await restored.json()).attempt.id).toBe(attemptId);
+    expect(canvas.entry.state).not.toBe(closedState);
     try {
       await expect
         .poll(() => canvas.entry.state.deployStatus, { timeout: 15_000 })
@@ -1014,7 +1046,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect
       .poll(() => canvas.entry.state.deployHandoffState)
       .toBe("delivered");
-    expect(deliveries).toHaveLength(1);
+    expect(deliveries).toHaveLength(2);
     expect(deliveries[0]).toMatchObject({
       attemptId,
       instanceId: canvas.instanceId,
@@ -1041,7 +1073,7 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(publication).not.toContain(opaque);
     expect(publication).not.toContain(named);
     await page.request.get(`${canvas.baseUrl}/api/deploy-status`);
-    expect(deliveries).toHaveLength(1);
+    expect(deliveries).toHaveLength(2);
     const calls = await canvas.cliCalls();
     expect(calls.filter((call) => !call.matched)).toEqual([]);
     expect(
@@ -4785,6 +4817,7 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
+    canvas.deploymentAccountChoice.login = "acting-user";
     const scenario = defaultFakeCliScenario();
     const deploymentCommand = scenario.commands.find(
       (command) =>
