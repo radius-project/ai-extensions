@@ -13,9 +13,8 @@ import {
   isWorkflowReadLimitError
 } from "@radius-project/adapter-shared";
 
-// The `environments` family, minus `POST /api/create-environment`, which is
-// large enough to live in its own `create-environment*.ts` seams. The five
-// routes here are the environment picker's read surface (`list-environments`,
+// The five routes in the `environments` family are the environment picker's
+// read surface (`list-environments`,
 // `verify-status`), the deploy page's parameter probe (`app-params`), the
 // verify-failure override (`bypass-verification`), and the one destructive
 // route (`delete-environment`). They are migrated together because they are the
