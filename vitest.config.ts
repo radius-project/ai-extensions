@@ -23,6 +23,27 @@ export default defineConfig({
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
+        "packages/adapter-canvas/src/runtime/{deployment-attempt,deployment-execution-owner,production-deployment-execution-owner}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/server/services/deployment-reservations.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/server/services/deployment-presentation.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 93.75,
+            lines: 100
+          },
         "packages/core/src/github-account-selection.ts": {
           statements: 100,
           branches: 100,

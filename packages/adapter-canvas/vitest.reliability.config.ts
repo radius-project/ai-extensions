@@ -38,6 +38,8 @@ export default defineConfig({
       "src/selected-{repository-reader,repository-write,bicep-source}.test.ts",
       "src/remote-rad-artifacts.test.ts",
       "src/runtime/{deployment-account,deployment-executor,github-account-choice}.test.ts",
+      "src/runtime/{deployment-attempt,deployment-execution-owner,production-deployment-execution-owner}.test.ts",
+      "src/server/services/deployment-{presentation,reservations}.test.ts",
       "test/integration/runtime/account-repository-bindings.test.ts",
       "src/workspace.test.ts",
       "src/server/create-canvas-server.test.ts",
