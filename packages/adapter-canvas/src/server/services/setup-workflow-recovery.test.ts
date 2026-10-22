@@ -5,7 +5,13 @@ import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import {
   prepareProviderMutation,
   providerMutationRecord,
-  settleProviderMutation
+  settleProviderMutation,
+  createOperation,
+  reconcileRestoredOperation,
+  providerRecoveryManualGuidance,
+  canStartRollback,
+  toPersistedOperation,
+  fromPersistedOperation
 } from "../../operations.js";
 
 describe("Canvas setup workflow recovery binding", () => {
@@ -42,6 +48,10 @@ describe("Canvas setup workflow recovery binding", () => {
       status: "manual_required",
       evidence: "Inspect the recorded branch."
     });
+    binding.markRollbackPending();
+    expect(binding.find("github_workflow.put", "workflow")?.status).toBe(
+      "manual_required"
+    );
     settleProviderMutation(
       operation,
       mutation.mutationId,
@@ -51,6 +61,93 @@ describe("Canvas setup workflow recovery binding", () => {
     expect(binding.unresolved()).toEqual([]);
     await binding.persist();
     expect(saves).toBe(1);
+  });
+
+  it.each([null, "GitHub refused the recorded branch deletion."])(
+    "blocks rollback from saved non-applied branch deletion evidence %j",
+    (evidence) => {
+      const operation = createOperation({
+        operationId: "op_branch_removal",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      const mutation = prepareProviderMutation(operation, {
+        kind: "github_branch.delete",
+        target: "fixture/app\0setup-branch\0original-head"
+      });
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        "not_applied",
+        evidence
+      );
+      operation.providerRecovery.state = "rollback_pending";
+      const restored = fromPersistedOperation(toPersistedOperation(operation));
+      reconcileRestoredOperation(restored);
+      expect(restored).toMatchObject({
+        state: "failed_partial",
+        requiresDurableRewrite: true,
+        failure: { code: "provider-reconciliation-manual-required" }
+      });
+      expect(providerRecoveryManualGuidance(restored)).toBe(
+        evidence ||
+          "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again."
+      );
+      expect(canStartRollback(restored)).toMatchObject({
+        ok: false,
+        code: "rollback-provider-outcome-unknown"
+      });
+    }
+  );
+
+  it("preserves actionable manual guidance ahead of raw deletion diagnostics", () => {
+    const operation = createOperation({
+      repo: "fixture/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    prepareProviderMutation(operation, {
+      kind: "github_branch.create",
+      target: "fixture/app\0setup-branch\0original-head"
+    });
+    const deletion = prepareProviderMutation(operation, {
+      kind: "github_branch.delete",
+      target: "fixture/app\0setup-branch\0original-head"
+    });
+    settleProviderMutation(
+      operation,
+      deletion.mutationId,
+      "not_applied",
+      "HTTP 403"
+    );
+    const binding = createSetupWorkflowRecoveryPort(operation, async () => {});
+    const guidance =
+      "Review setup-branch in fixture/app before starting setup again.";
+    binding.settleManual(
+      "github_branch.create",
+      "fixture/app\0setup-branch\0original-head",
+      guidance
+    );
+    expect(operation.providerRecovery.state).toBe("manual_required");
+    binding.markRollbackPending();
+    expect(operation.providerRecovery.state).toBe("manual_required");
+    expect(providerRecoveryManualGuidance(operation)).toBe(guidance);
+  });
+
+  it("keeps an older manual blocker without mutation details fail closed", () => {
+    const operation = createOperation({
+      repo: "fixture/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    operation.providerRecovery.state = "manual_required";
+    expect(providerRecoveryManualGuidance(operation)).toBe(
+      "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+    );
+    const binding = createSetupWorkflowRecoveryPort(operation, async () => {});
+    binding.markRollbackPending();
+    expect(operation.providerRecovery.state).toBe("manual_required");
   });
 
   it("retains the original recovery exception and performs one readback without a blind retry", async () => {
