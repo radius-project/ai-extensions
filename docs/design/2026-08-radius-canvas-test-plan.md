@@ -242,12 +242,14 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | LC-09 | Shutdown closes every remaining server exactly once                                                                          |
 | LC-10 | Session-repository graph/planned views use the current worktree branch, never `main`                                         |
 | LC-11 | A different repository/branch uses committed remote `.radius/app.bicep`                                                      |
-| LC-12 | Graph diff uses explicit base/head selections; a matching workspace side prefers saved models, other sides read GitHub       |
+| LC-12 | Graph diff compares explicitly selected base and head branches                                                               |
 | LC-13 | Missing or stale model triggers handoff once per repository/branch *condition*; a changed condition reports again            |
 | LC-14 | Heartbeat detects interruption and recovers the same page                                                                    |
 | LC-15 | External errors are surfaced; no success-shaped fallback is returned                                                         |
 | LC-16 | Deploy repair handoff preserves attempt identity across tool calls                                                           |
 | LC-17 | Setup state survives navigation and supports safe polling, acknowledgement, and resume without exposing raw failure evidence |
+
+LC-12 requires explicit branch selection, not a workspace-to-remote fallback or a claim that committed-only PR comparisons are already delivered. The [GitHub migration inventory](2026-09-github-radius-migration-inventory.md#graph-reads-source-references-and-comparison) tracks Stage 4's committed PR comparison policy and removal of silent fallback.
 
 #### Cancellation and abandoned work
 

@@ -110,11 +110,11 @@ For graph and planned views, when no `.radius/app.bicep` or `app.bicep` can be r
 - **Repository and branch match the current workspace:** saving `.radius/app.bicep` or `app.bicep` to disk is enough to preview the graph. Graph and planned views, and the matching side of a graph diff, prefer this saved model. No commit or push is required. Unsaved editor-buffer changes are not read by the model loader.
 - **Repository or branch differs from the current workspace:** the canvas reads the selected branch on GitHub. Its model must describe that branch's code and already be committed and pushed there; a local-only commit is not enough. Publishing is a separate step, not a requirement for a current-workspace preview. Prefer opening a pull request into the target branch rather than committing directly to it, and never push a generated model straight to a protected branch such as `main` without the user's explicit confirmation.
 
-The workspace lookup tries `.radius/app.bicep`, then `app.bicep`. If neither supplies readable, nonempty content, it falls back to the selected GitHub branch and tries the same paths there. Deleting a local model therefore does not necessarily make the graph report a missing model.
+The current workspace lookup tries `.radius/app.bicep`, then `app.bicep`. If neither supplies readable, nonempty content, it falls back to the selected GitHub branch and tries the same paths there. Deleting a local model therefore does not necessarily make the graph report a missing model.
 
 Graph diffs apply this lookup independently to the explicit base and head selections. A missing model on one side contributes an empty graph, so the other side can still show additions or removals. If both models are unavailable, the Canvas comparison workflow can request authoring; the `radius_generate_pr_diff_markdown` tool instead reports that the diff is unavailable.
 
-For the current graph view, keep the Canvas open while `.radius/app.bicep` is generated; it detects the saved model and renders in place. Refresh or reopen other views after updating the model. For a remote selection, a refresh can only see changes available on GitHub.
+Keep the graph, planned, or graph-diff view open while the Canvas is generating a missing model. All three views retry automatically and update once the saved model is available to the selected repository and branch; no manual Refresh or reopen is needed during generation. Use Refresh or reopen after manual model edits. For a remote selection, the model must be available on GitHub.
 
 ## Prerequisites
 

@@ -877,7 +877,7 @@ describe("TL-11: radius_report_modeling_failure", () => {
 });
 
 describe("RU-08: radius_generate_pr_diff_markdown", () => {
-  it("reports missing app.bicep on both branches without calling rad", async () => {
+  it("reports missing models without prescribing lookup policy or invoking rad", async () => {
     const { tools, deps } = setup();
     const result = await findTool(
       tools,
@@ -885,20 +885,10 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
     expect(result).toMatchObject({
       resultType: "success",
-      textResultForLlm: expect.stringContaining(
-        "No .radius/app.bicep or app.bicep could be read for main or feat."
-      ),
+      textResultForLlm:
+        "No .radius/app.bicep or app.bicep could be read for main or feat. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.",
       toolTelemetry: { radiusGraphDiff: { outcome: "unavailable" } }
     });
-    expect(result.textResultForLlm).toContain(
-      "prefers the saved on-disk model for a side matching the current workspace repository and branch"
-    );
-    expect(result.textResultForLlm).toContain(
-      "other selections read committed models from GitHub"
-    );
-    expect(result.textResultForLlm).toContain(
-      "Do not commit or push the current worktree merely to compare it."
-    );
     expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
   });
 

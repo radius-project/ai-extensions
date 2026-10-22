@@ -248,7 +248,7 @@ export function createRadiusTools(
 
           if (!baseContent && !headContent) {
             return unavailableGraphDiffResult(
-              `No .radius/app.bicep or app.bicep could be read for ${baseBranch} or ${headBranch}. A PR diff prefers the saved on-disk model for a side matching the current workspace repository and branch; other selections read committed models from GitHub. Do not commit or push the current worktree merely to compare it. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
+              `No .radius/app.bicep or app.bicep could be read for ${baseBranch} or ${headBranch}. Create the pull request without a graph diff section, report this reason in chat, and do not open the graph-diff Canvas.`
             );
           }
 
