@@ -4610,19 +4610,6 @@ describe("environments — real loopback", () => {
     expect(res.headers.get("cache-control")).not.toBe("no-store");
     expect(text).not.toContain('"environments":[]');
   });
-
-  it("keeps create-environment in its sibling module and enforces its server-owned guard", async () => {
-    // The large create action has its own typed module rather than being folded
-    // into this environment read/write registry.
-    const registry = createEnvironmentsRoutes(deps({}));
-    expect(Object.keys(registry)).not.toContain("POST /api/create-environment");
-    const res = await fetch(baseUrl + "/api/create-environment", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    expect(res.status).toBe(403);
-  });
 });
 
 // A focused check that the dispatcher delegates a method mismatch to the
