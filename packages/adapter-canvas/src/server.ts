@@ -295,6 +295,9 @@ import {
   createOperationResumeService,
   type OperationResumeService
 } from "./server/services/operation-resume.js";
+import { createSetupStartService } from "./server/services/setup-start.js";
+import { verificationBypass } from "./server/services/verification-bypass.js";
+import type { EnvironmentToolsPorts } from "./runtime/environment-tools.js";
 import {
   createOperationsControlService,
   type OperationControlService,
@@ -367,6 +370,7 @@ import {
   createGitHubSelectionHandleStore
 } from "./server/services/github-account-readiness.js";
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
+import type { EnvironmentsDependencies } from "./server/routes/environments-types.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import {
@@ -5809,9 +5813,24 @@ export function createProductionCanvasServerRuntime(
     );
   };
 
-  // Composition root for the migrated `operations-status` family. Reads, creates,
-  // and resumable actions each receive only the registry, mutation, persistence,
-  // projection, and per-instance scheduling seams they invoke.
+  const setupStartDependencies: Parameters<typeof createSetupStartService>[0] =
+    {
+      awsEnabled,
+      isValidRepoSlug,
+      isResourceGroupName,
+      isAksClusterName,
+      isKubernetesNamespace,
+      isUuid,
+      buildStages,
+      createOperation,
+      startConflict: (repo) => operations.startConflict(repo),
+      startOperation: (op) => operations.start(op),
+      persistOperations: () => operations.persist(),
+      finish,
+      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+      errorMessage
+    };
+  const setupStart = createSetupStartService(setupStartDependencies);
   const operationsStatusRoutes = createOperationsStatusRoutes(
     {
       latest: (repo) => operations.latest(repo),
@@ -5822,21 +5841,8 @@ export function createProductionCanvasServerRuntime(
       now: () => Date.now()
     },
     {
-      awsEnabled,
-      isValidRepoSlug,
-      isResourceGroupName,
-      isAksClusterName,
-      isKubernetesNamespace,
-      isUuid,
-      buildStages,
-      createOperation,
-      claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
-      startConflict: (repo) => operations.startConflict(repo),
-      startOperation: (op) => operations.start(op),
-      persistOperations: () => operations.persist(),
-      finish,
-      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-      errorMessage
+      ...setupStartDependencies,
+      claimSelectionHandle: (input) => githubSelectionHandles.claim(input)
     },
     operationActionDependencies,
     operationResume
@@ -6343,7 +6349,7 @@ export function createProductionCanvasServerRuntime(
     verificationStatusDependencies,
     () => createWorkflowObservationScope(createDeployStatusReader)
   );
-  const environmentsRoutes = createEnvironmentsRoutes({
+  const environmentsDependencies: EnvironmentsDependencies = {
     awsEnabled,
     ...verificationStatusDependencies,
     repoMatchesWorkspace,
@@ -6430,7 +6436,8 @@ export function createProductionCanvasServerRuntime(
       }
     },
     verifyWorkflowFile: VERIFY_WORKFLOW_FILE
-  });
+  };
+  const environmentsRoutes = createEnvironmentsRoutes(environmentsDependencies);
 
   // Direct environment setup retains the concrete adapters without an HTTP wrapper.
   const configureEnvironmentDependencies: ConfigureEnvironmentDependencies = {
@@ -6857,12 +6864,68 @@ export function createProductionCanvasServerRuntime(
     await canvasServer.stop(instanceId, force);
   }
 
+  const environmentServices: Pick<
+    EnvironmentToolsPorts,
+    | "start"
+    | "control"
+    | "resume"
+    | "verification"
+    | "bypass"
+    | "getOperation"
+    | "readExecutor"
+  > = {
+    start: setupStart,
+    control: operationControl,
+    resume: operationResume,
+    getOperation: (id) => operations.get(id),
+    readExecutor: (login) =>
+      githubAccountCoordinator.createReadOnlyExecutor(login),
+    verification: async (target, executor) => {
+      const scope = createWorkflowObservationScope(createDeployStatusReader);
+      const release = executionOwner.onShutdown(() => scope.stop());
+      try {
+        return await createVerificationStatusService(
+          {
+            ...environmentsDependencies,
+            getSelectedGitHubExecutor: () => executor
+          },
+          () => scope
+        )({ ...target, observation: scope });
+      } finally {
+        release();
+        scope.stop();
+      }
+    },
+    bypass: async (target, executor, isCurrent) => {
+      const scope = createWorkflowObservationScope(createDeployStatusReader);
+      const release = executionOwner.onShutdown(() => scope.stop());
+      try {
+        return await verificationBypass(
+          {
+            data: { ...target },
+            scope,
+            isCurrent,
+            permissionsOnly: true
+          },
+          {
+            ...environmentsDependencies,
+            getSelectedGitHubExecutor: () => executor
+          }
+        );
+      } finally {
+        release();
+        scope.stop();
+      }
+    }
+  };
+
   return {
     servers: canvasServer.instances,
     setupExecution,
     verificationStatus,
     operationControl,
     operationResume,
+    environmentServices,
     getOrCreateServer,
     stopServer,
     getLastWebviewActivityAt,

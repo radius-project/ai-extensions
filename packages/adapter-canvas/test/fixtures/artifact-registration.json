@@ -53,7 +53,11 @@
               },
               "view": {
                 "type": "string",
-                "enum": ["graph", "planned", "diff"],
+                "enum": [
+                  "graph",
+                  "planned",
+                  "diff"
+                ],
                 "description": "Graph view to inspect. Defaults to the active canvas page."
               }
             }
@@ -81,7 +85,10 @@
                       "description": "Repo-relative path with optional #L<line>"
                     }
                   },
-                  "required": ["id", "codeReference"]
+                  "required": [
+                    "id",
+                    "codeReference"
+                  ]
                 }
               },
               "contextToken": {
@@ -89,7 +96,10 @@
                 "description": "Graph context token returned by get_graph_resources"
               }
             },
-            "required": ["contextToken", "refs"]
+            "required": [
+              "contextToken",
+              "refs"
+            ]
           },
           "handlerCallable": true
         }
@@ -101,7 +111,7 @@
   "tools": [
     {
       "name": "radius_generate_app",
-      "description": "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, the absolute path of the Node.js interpreter the skill's scripts must run under (nodeCommand), instruction, optional generator version, and optional ambiguity brief. When the machine has no supported Node.js installation, returns a JSON object with nodeCommand set to null, the installations that were found and refused, and an instruction to stop and ask the user to install Node.js \u2014 never to download or install a runtime. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
+      "description": "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, the absolute path of the Node.js interpreter the skill's scripts must run under (nodeCommand), instruction, optional generator version, and optional ambiguity brief. When the machine has no supported Node.js installation, returns a JSON object with nodeCommand set to null, the installations that were found and refused, and an instruction to stop and ask the user to install Node.js — never to download or install a runtime. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -141,7 +151,13 @@
             "maxLength": 4000
           }
         },
-        "required": ["instanceId", "repo", "branch", "attemptToken", "error"]
+        "required": [
+          "instanceId",
+          "repo",
+          "branch",
+          "attemptToken",
+          "error"
+        ]
       },
       "handlerCallable": true
     },
@@ -164,7 +180,11 @@
             "description": "Head branch (PR source, e.g. 'feature/add-redis')"
           }
         },
-        "required": ["repo", "baseBranch", "headBranch"]
+        "required": [
+          "repo",
+          "baseBranch",
+          "headBranch"
+        ]
       },
       "handlerCallable": true
     },
@@ -205,7 +225,10 @@
             "description": "OCI target under the repository being modeled, e.g. br:ghcr.io/<owner>/<repo>/<recipe>:<tag>."
           }
         },
-        "required": ["file", "target"]
+        "required": [
+          "file",
+          "target"
+        ]
       },
       "handlerCallable": true
     },
@@ -233,7 +256,10 @@
           },
           "provider": {
             "type": "string",
-            "enum": ["azure", "aws"],
+            "enum": [
+              "azure",
+              "aws"
+            ],
             "description": "Cloud provider. Defaults to the last deploy's provider."
           },
           "appFile": {
@@ -259,6 +285,253 @@
             "description": "How many trailing deploy log lines to include (default 40, max 200)."
           }
         }
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_setup_environment",
+      "description": "Configure and verify an Azure or AWS environment without opening Canvas. Setup never deploys. Specify repo, environment and provider. Azure requires tenantId, subscriptionId, resourceGroup and cluster; AWS requires roleArn, accountId, region and cluster. Do not mix provider-specific fields. Omit branch only for the session repository's current worktree branch. Account selection and sensitive consent use trusted host interaction, never tool arguments. Poll the returned operationId with radius_environment_status.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string",
+            "minLength": 1
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1
+          },
+          "namespace": {
+            "type": "string",
+            "minLength": 1
+          },
+          "profileName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "azure",
+              "aws"
+            ]
+          },
+          "tenantId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "subscriptionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "resourceGroup": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cluster": {
+            "type": "string",
+            "minLength": 1
+          },
+          "clusterResourceGroup": {
+            "type": "string",
+            "minLength": 1
+          },
+          "clientId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "appId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "appName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "createNew": {
+            "type": "boolean"
+          },
+          "serviceManagementReference": {
+            "type": "string",
+            "minLength": 1
+          },
+          "roleArn": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accountId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "region": {
+            "type": "string",
+            "minLength": 1
+          },
+          "vpcId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "subnetIds": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "repo",
+          "environment",
+          "provider"
+        ],
+        "additionalProperties": false
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_environment_status",
+      "description": "Read a specified setup operation and bounded verification evidence without opening Canvas. operationId, repo and environment must match the saved operation and its account. Status never dispatches workflows, deploys, repairs or authorizes cleanup. Unknown or unavailable evidence is not success or permission to retry.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "operationId",
+          "repo",
+          "environment"
+        ],
+        "additionalProperties": false
+      },
+      "handlerCallable": true
+    },
+    {
+      "name": "radius_environment_control",
+      "description": "Apply an eligible command to an exact saved setup operation. Only resume accepts and requires interactionId, provider (azure), checkpoint and a typed answer; use the current supported setup-input prompt, never an informational requirement ID. Sensitive commands require trusted host confirmation. Stop is cooperative, not remote cancellation. Rollback only removes proven-owned setup artifacts; this is not an environment-deletion tool.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "continue",
+              "verify",
+              "retry-setup",
+              "retry-cleanup",
+              "stop",
+              "cancel-workflow",
+              "rollback",
+              "exit",
+              "abandon",
+              "bypass-verification",
+              "resume"
+            ]
+          },
+          "interactionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "azure"
+            ]
+          },
+          "checkpoint": {
+            "type": "string",
+            "minLength": 1
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "const": "service-management-reference-required"
+                  },
+                  "serviceManagementReference": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "code",
+                  "serviceManagementReference"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "const": "app-selection-required"
+                  },
+                  "createNew": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "code",
+                  "createNew"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "const": "app-selection-required"
+                  },
+                  "createNew": {
+                    "const": false
+                  },
+                  "appId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "code",
+                  "createNew",
+                  "appId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "operationId",
+          "repo",
+          "environment",
+          "action"
+        ],
+        "additionalProperties": false
       },
       "handlerCallable": true
     }
