@@ -716,6 +716,7 @@ jobs:
           failures=()
           delete_log="$RUNNER_TEMP/group-cleanup-delete.log"
           while IFS=$'\t' read -r id name type; do
+            type="${type%$'\r'}"
             [[ -n "$id" ]] || continue
             delete_status=0
             az resource delete --ids "$id" --verbose 2>"$delete_log" || delete_status=$?
@@ -735,7 +736,7 @@ jobs:
               continue
             fi
             deleted=$((deleted + 1))
-          done < <(jq --binary -r '.[] | [.id, .name, .type] | @tsv' "$reclaimable")
+          done < <(jq -r '.[] | [.id, .name, .type] | @tsv' "$reclaimable")
 
           echo "- Azure resources reclaimed from $RESOURCE_GROUP: $deleted" >>"$GITHUB_STEP_SUMMARY"
           if (( ${#failures[@]} > 0 )); then

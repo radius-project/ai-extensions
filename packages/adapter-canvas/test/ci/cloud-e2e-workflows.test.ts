@@ -1083,9 +1083,13 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).not.toContain("MAX_AGE_HOURS");
   });
 
-  it.each(["all deletes succeed", "one delete fails"] as const)(
-    "runs the shared resource group cleanup shell when %s",
-    async (scenario) => {
+  it.each(
+    ["all deletes succeed", "one delete fails"].flatMap((scenario) =>
+      ["LF", "CRLF"].map((lineEnding) => ({ scenario, lineEnding }))
+    )
+  )(
+    "runs the shared resource group cleanup shell when $scenario with $lineEnding rows",
+    async ({ scenario, lineEnding }) => {
       const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
       const groupCleanup = steps(workflow.jobs?.purge).find(
         (step) => step.id === "shared-resource-cleanup"
@@ -1130,6 +1134,11 @@ describe("cloud-e2e-cleanup.yml", () => {
           },
           input: `
             node() { '${node}' "$@"; }
+            jq() {
+              command jq "$@" | while IFS= read -r row; do
+                printf '%s${lineEnding === "CRLF" ? "\\r\\n" : "\\n"}' "\${row%$'\\r'}"
+              done
+            }
             az() {
               case "$1 \${2:-}" in
                 "version --output") printf '%s\\n' '{"azure-cli":"2.91.0"}' ;;
