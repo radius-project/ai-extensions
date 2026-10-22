@@ -1045,7 +1045,7 @@ export async function selectedFetchFileFromRepoResult(
   const result = await executor.run(
     [
       "api",
-      `/repos/${repo}/contents/${path}?ref=${branch}`,
+      `/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`,
       "--jq",
       ".content"
     ],

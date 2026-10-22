@@ -156,7 +156,7 @@ export async function stageRemoteRadArtifacts(
   let configText;
   try {
     configText = await github.getContent(
-      `/repos/${repo}/contents/${configRepoPath}?ref=${branch}`
+      `/repos/${repo}/contents/${configRepoPath}?ref=${encodeURIComponent(branch)}`
     );
   } catch (err) {
     log(
@@ -194,7 +194,7 @@ export async function stageRemoteRadArtifacts(
       let bytes;
       try {
         bytes = await github.getContentBytes(
-          `/repos/${repo}/contents/${artifactRepoPath}?ref=${branch}`
+          `/repos/${repo}/contents/${artifactRepoPath}?ref=${encodeURIComponent(branch)}`
         );
       } catch (err) {
         log(
