@@ -3,11 +3,12 @@ import { errorMessage } from "./util.js";
 export interface EnvironmentExecutionClock {
   deferTask(): Promise<void>;
   microtask(callback: () => void): void;
-  reconciliationTimer(callback: () => void): unknown;
+  reconciliationTimer(callback: () => void): () => void;
 }
 
 interface EnvironmentTask {
   run(): Promise<void>;
+  cancelled?(): void;
   failed(error: unknown): Promise<void>;
   settling(): void;
   settled(): void;
@@ -15,7 +16,7 @@ interface EnvironmentTask {
 
 interface TaskRecord {
   operationId: string;
-  instanceId: string;
+  instanceId: string | undefined;
   generation: number;
   promise: Promise<void>;
 }
@@ -29,24 +30,14 @@ const productionClock: EnvironmentExecutionClock = {
   reconciliationTimer: (callback) => {
     const timer = setTimeout(callback, 5000);
     timer.unref?.();
-    return timer;
+    return () => clearTimeout(timer);
   }
 };
 
-/**
- * Runtime bookkeeping, with the existing inner scopes retained. Attachments
- * keep their original transport closures; a generation is provenance, not a
- * new cancellation fence or a cross-panel operation lock.
- */
 export function createEnvironmentExecutionOwner(
   clock: EnvironmentExecutionClock = productionClock
 ) {
-  const activeTasks = new Map<string, Set<string>>();
-  const settledListeners = new Map<string, Set<() => void>>();
-  const shuttingDownInstances = new Set<string>();
-  const verificationMonitors = new Set<string>();
   const blockedAdmissions = new Set<string>();
-  const attachments = new Map<string, number>();
   const admissions = new Map<
     string,
     {
@@ -55,10 +46,72 @@ export function createEnvironmentExecutionOwner(
       recovery: Set<(operationId: string) => void>;
     }
   >();
+  const activeTasks = new Map<string | undefined, Set<Promise<void>>>();
+  const settledListeners = new Map<string | undefined, Set<() => void>>();
+  const deletionSettledListeners = new Map<
+    string | undefined,
+    Set<() => void>
+  >();
+  const activeDeletions = new Set<Promise<void>>();
+  const shuttingDownInstances = new Set<string | undefined>();
+  const sharedTasks = new Map<string, TaskRecord>();
+  const currentAttachments = new Map<string | undefined, number>();
+  const automaticRollbacks = new Map<string, symbol>();
+  const verificationMonitors = new Map<string, symbol>();
+  const reconciliationTimers = new Map<string, { cancel: () => void }>();
+  const shutdownListeners = new Set<{ listener: () => void }>();
+  let shuttingDown = false;
   let generation = 0;
 
-  function hasActiveEnvironmentTasks(instanceId: string): boolean {
+  function hasActiveEnvironmentTasks(instanceId: string | undefined): boolean {
     return (activeTasks.get(instanceId)?.size || 0) > 0;
+  }
+
+  function hasActiveDeletionTasks(instanceId: string | undefined): boolean {
+    return [...(activeTasks.get(instanceId) || [])].some((task) =>
+      activeDeletions.has(task)
+    );
+  }
+
+  function notifyShutdown(listener: () => void): void {
+    try {
+      listener();
+    } catch (error) {
+      console.error(
+        `[radius] setup shutdown callback failed: ${errorMessage(error)}`
+      );
+    }
+  }
+
+  function shutdown(): void {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    for (const timer of reconciliationTimers.values())
+      notifyShutdown(timer.cancel);
+    reconciliationTimers.clear();
+    for (const { listener } of shutdownListeners) notifyShutdown(listener);
+    shutdownListeners.clear();
+  }
+
+  function onShutdown(listener: () => void): () => void {
+    const registration = { listener };
+    if (shuttingDown) notifyShutdown(listener);
+    else shutdownListeners.add(registration);
+    return () => {
+      shutdownListeners.delete(registration);
+    };
+  }
+
+  function claim(
+    claims: Map<string, symbol>,
+    operationId: string
+  ): (() => void) | undefined {
+    if (claims.has(operationId)) return undefined;
+    const registration = Symbol(operationId);
+    claims.set(operationId, registration);
+    return () => {
+      if (claims.get(operationId) === registration) claims.delete(operationId);
+    };
   }
 
   function notify(listener: () => void): void {
@@ -70,13 +123,15 @@ export function createEnvironmentExecutionOwner(
   }
 
   function onEnvironmentTasksSettled(
-    instanceId: string,
-    listener: () => void
+    instanceId: string | undefined,
+    listener: () => void,
+    registry = settledListeners,
+    isActive = hasActiveEnvironmentTasks
   ): () => void {
-    let listeners = settledListeners.get(instanceId);
+    let listeners = registry.get(instanceId);
     if (!listeners) {
       listeners = new Set();
-      settledListeners.set(instanceId, listeners);
+      registry.set(instanceId, listeners);
     }
     listeners.add(listener);
     let listening = true;
@@ -84,30 +139,58 @@ export function createEnvironmentExecutionOwner(
       if (!listening) return;
       listening = false;
       listeners.delete(listener);
-      if (listeners.size === 0) settledListeners.delete(instanceId);
+      if (listeners.size === 0) registry.delete(instanceId);
     };
-    if (!hasActiveEnvironmentTasks(instanceId)) {
+    if (!isActive(instanceId)) {
       clock.microtask(() => {
-        if (!listening || hasActiveEnvironmentTasks(instanceId)) return;
+        if (!listening || isActive(instanceId)) return;
         notify(listener);
       });
     }
     return stop;
   }
 
-  function attach(instanceId: string) {
+  function attachScope(instanceId?: string, tasks = sharedTasks) {
     const attachmentGeneration = ++generation;
-    attachments.set(instanceId, attachmentGeneration);
-    const tasks = new Map<string, TaskRecord>();
-    const automaticRollbacks = new Set<string>();
-    const reconciliationTimers = new Map<string, unknown>();
+    if (tasks === sharedTasks) {
+      currentAttachments.set(instanceId, attachmentGeneration);
+    }
+    const scopeIdentity =
+      instanceId === undefined ? "scope=runtime" : `instanceId=${instanceId}`;
+    function reportFinalizationError(
+      operationId: string,
+      error: unknown
+    ): void {
+      console.error(
+        `[radius] environment task finalization failed (operationId=${operationId}, ${scopeIdentity}): ${errorMessage(error)}`
+      );
+    }
 
     return {
       instanceId,
       generation: attachmentGeneration,
-      isCurrent: () => attachments.get(instanceId) === attachmentGeneration,
+      isCurrent: () =>
+        currentAttachments.get(instanceId) === attachmentGeneration,
+      detach: () => {
+        if (currentAttachments.get(instanceId) === attachmentGeneration) {
+          currentAttachments.delete(instanceId);
+        }
+      },
+      hasActiveTasks: () => hasActiveEnvironmentTasks(instanceId),
+      onTasksSettled: (listener: () => void) =>
+        onEnvironmentTasksSettled(instanceId, listener),
+      isShuttingDown: () =>
+        shuttingDown ||
+        (tasks !== sharedTasks && shuttingDownInstances.has(instanceId)),
+      markShuttingDown: () => {
+        if (tasks === sharedTasks) shutdown();
+        else shuttingDownInstances.add(instanceId);
+      },
       hasTask: (operationId: string) => tasks.has(operationId),
       schedule(operationId: string, task: EnvironmentTask): void {
+        if (shuttingDown && tasks === sharedTasks) {
+          throw new Error("Setup execution is shutting down.");
+        }
         const admission = admissions.get(operationId);
         if (admission) admission.started = true;
         let instanceTasks = activeTasks.get(instanceId);
@@ -115,68 +198,95 @@ export function createEnvironmentExecutionOwner(
           instanceTasks = new Set();
           activeTasks.set(instanceId, instanceTasks);
         }
-        instanceTasks.add(operationId);
+        const timer = reconciliationTimers.get(operationId);
+        if (timer) {
+          reconciliationTimers.delete(operationId);
+          timer.cancel();
+        }
         const prior = tasks.get(operationId)?.promise;
         const running = (prior || Promise.resolve())
           .catch(() => {})
           .then(() => clock.deferTask())
-          .then(task.run)
+          .then(() => {
+            if (shuttingDown && tasks === sharedTasks) {
+              task.cancelled?.();
+              return;
+            }
+            return task.run();
+          })
           .catch(task.failed)
           .finally(() => {
-            if (tasks.get(operationId)?.promise !== running) return;
-            task.settling();
-            tasks.delete(operationId);
-            // Queries deliberately retain instance-ID aggregation, including
-            // the existing operation-set semantics on same-ID replacement.
+            if (tasks.get(operationId) === record) {
+              try {
+                task.settling();
+              } catch (error) {
+                reportFinalizationError(operationId, error);
+              }
+              if (tasks.get(operationId) === record) tasks.delete(operationId);
+            }
             const active = activeTasks.get(instanceId);
-            active?.delete(operationId);
+            active?.delete(running);
+            const deletionSettled = activeDeletions.delete(running);
             if (active?.size === 0) {
               activeTasks.delete(instanceId);
-              for (const listener of settledListeners.get(instanceId) || []) {
+              for (const listener of [
+                ...(settledListeners.get(instanceId) || [])
+              ]) {
+                if (hasActiveEnvironmentTasks(instanceId)) break;
                 notify(listener);
               }
             }
-            task.settled();
+            if (deletionSettled && !hasActiveDeletionTasks(instanceId)) {
+              for (const listener of [
+                ...(deletionSettledListeners.get(instanceId) || [])
+              ]) {
+                if (hasActiveDeletionTasks(instanceId)) break;
+                notify(listener);
+              }
+            }
+            if (!tasks.has(operationId)) {
+              try {
+                task.settled();
+              } catch (error) {
+                reportFinalizationError(operationId, error);
+              }
+            }
           });
-        tasks.set(operationId, {
+        const record: TaskRecord = {
           operationId,
           instanceId,
           generation: attachmentGeneration,
           promise: running
-        });
+        };
+        tasks.set(operationId, record);
+        instanceTasks.add(running);
+        if (tasks !== sharedTasks) activeDeletions.add(running);
         void running.catch((error: unknown) => {
-          console.error(
-            `[radius] environment task finalization failed (operationId=${operationId}, instanceId=${instanceId}): ${errorMessage(error)}`
-          );
+          reportFinalizationError(operationId, error);
         });
       },
       scheduleReconciliation(operationId: string, callback: () => void): void {
+        if (shuttingDown) return;
         if (reconciliationTimers.has(operationId)) return;
-        const timer = clock.reconciliationTimer(() => {
-          reconciliationTimers.delete(operationId);
-          callback();
-        });
-        reconciliationTimers.set(operationId, timer);
+        const registration = {
+          cancel: clock.reconciliationTimer(() => {
+            if (reconciliationTimers.get(operationId) !== registration) return;
+            reconciliationTimers.delete(operationId);
+            callback();
+          })
+        };
+        reconciliationTimers.set(operationId, registration);
       },
-      claimAutomaticRollback(operationId: string): boolean {
-        if (automaticRollbacks.has(operationId)) return false;
-        automaticRollbacks.add(operationId);
-        return true;
-      },
-      releaseAutomaticRollback(operationId: string): void {
-        automaticRollbacks.delete(operationId);
-      }
+      claimAutomaticRollback: (operationId: string) =>
+        claim(automaticRollbacks, operationId)
     };
   }
 
   return {
-    attach,
     claimAdmission(operationId: string) {
       if (admissions.has(operationId) || blockedAdmissions.has(operationId))
         return null;
-      const hadTask = [...activeTasks.values()].some((tasks) =>
-        tasks.has(operationId)
-      );
+      const hadTask = sharedTasks.has(operationId);
       const admission = {
         started: false,
         blocked: false,
@@ -217,6 +327,19 @@ export function createEnvironmentExecutionOwner(
       if (!admission.blocked) admission.recovery.add(recover);
       return true;
     },
+    attach: (instanceId: string) => attachScope(instanceId),
+    attachDeletion: (instanceId: string) => attachScope(instanceId, new Map()),
+    attachRuntime: () => attachScope(),
+    shutdown,
+    onShutdown,
+    hasActiveDeletionTasks,
+    onDeletionTasksSettled: (instanceId: string, listener: () => void) =>
+      onEnvironmentTasksSettled(
+        instanceId,
+        listener,
+        deletionSettledListeners,
+        hasActiveDeletionTasks
+      ),
     hasActiveEnvironmentTasks,
     onEnvironmentTasksSettled,
     markEnvironmentInstanceShuttingDown(instanceId: string): void {
@@ -225,16 +348,10 @@ export function createEnvironmentExecutionOwner(
     markEnvironmentInstanceStarted(instanceId: string): void {
       shuttingDownInstances.delete(instanceId);
     },
-    isShuttingDown: (instanceId: string) =>
-      shuttingDownInstances.has(instanceId),
-    claimVerificationMonitor(operationId: string): boolean {
-      if (verificationMonitors.has(operationId)) return false;
-      verificationMonitors.add(operationId);
-      return true;
-    },
-    releaseVerificationMonitor(operationId: string): void {
-      verificationMonitors.delete(operationId);
-    }
+    isShuttingDown: (instanceId?: string) =>
+      shuttingDown || shuttingDownInstances.has(instanceId),
+    claimVerificationMonitor: (operationId: string) =>
+      claim(verificationMonitors, operationId)
   };
 }
 

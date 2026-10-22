@@ -22,7 +22,8 @@ export interface SetupServices {
   authorizeAzure(request: Record<string, unknown>): Promise<SetupOutcome>;
   configureEnvironment(
     request: Record<string, unknown>,
-    instanceId: string
+    instanceId?: string,
+    isCurrentPresentation?: () => boolean
   ): Promise<SetupOutcome>;
 }
 

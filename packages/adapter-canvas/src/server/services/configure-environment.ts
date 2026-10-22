@@ -359,7 +359,8 @@ export function createConfigureEnvironmentService(
   validateDependencies(dependencies);
   return async (
     input: SetupInput<CreateEnvironmentRequestData>,
-    instanceId: string
+    instanceId?: string,
+    isCurrentPresentation?: () => boolean
   ): Promise<SetupOutcome> => {
     let outcome: SetupOutcome | undefined;
     const complete = (result: SetupOutcome) => {
@@ -370,7 +371,8 @@ export function createConfigureEnvironmentService(
         input,
         instanceId,
         dependencies,
-        complete
+        complete,
+        isCurrentPresentation
       );
       if (!outcome)
         throw new Error("Environment setup did not report an outcome.");
@@ -383,9 +385,10 @@ export function createConfigureEnvironmentService(
 
 async function runConfigureEnvironmentService(
   input: SetupInput<CreateEnvironmentRequestData>,
-  instanceId: string,
+  instanceId: string | undefined,
   dependencies: ConfigureEnvironmentDependencies,
-  complete: (outcome: SetupOutcome) => void
+  complete: (outcome: SetupOutcome) => void,
+  isCurrentPresentation?: () => boolean
 ): Promise<void> {
   const stopped = (status: number, body: Record<string, unknown>) =>
     complete({ kind: "stopped", status, body });
@@ -519,6 +522,7 @@ async function runConfigureEnvironmentService(
         operation,
         selectedExecutor,
         instanceId,
+        isCurrentPresentation,
         provider,
         steps,
         stopBoundary,
