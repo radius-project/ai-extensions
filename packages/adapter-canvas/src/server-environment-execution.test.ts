@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createWorkflowFileCommitter } from "@radius-project/core";
+import { bindWorkflowFileCommitterPorts } from "./server/routes/create-environment-workflow-committer.js";
 import {
   createEnvironmentAccountContext,
   type EnvironmentAccountContext
@@ -6,6 +8,7 @@ import {
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 import type { SetupServices } from "./server/services/setup-outcome.js";
+import { createSetupWorkflowRecoveryPort } from "./server/services/setup-workflow-recovery.js";
 import {
   createInstanceRequestCoordinator,
   type EnvironmentOperationRunner
@@ -16,13 +19,18 @@ import {
 } from "./runtime/environment-execution-owner.js";
 import {
   acceptCommand,
+  canStartRollback,
   createOperation,
   finish,
+  fromPersistedOperation,
   operations,
   addLegacyStep,
   prepareProviderMutation,
+  reconcileRestoredOperation,
+  recordGitHubEnvironment,
   settleProviderMutation,
   requestStop,
+  toPersistedOperation,
   STAGE_VERIFY
 } from "./operations.js";
 
@@ -118,6 +126,224 @@ afterEach(() => {
 });
 
 describe("production coordinator scheduling scopes", () => {
+  it.each([
+    "not_applied",
+    "cancelled",
+    "unknown",
+    "persistence failure"
+  ] as const)(
+    "keeps core recovery %s fail closed through owner settlement and saved-record admission",
+    async (outcome) => {
+      const owner = createEnvironmentExecutionOwner({
+        deferTask: async () => {},
+        microtask: queueMicrotask,
+        reconciliationTimer: () => () => {}
+      });
+      const op = operation("op_recovery");
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: "fixture/app",
+        environment: "dev"
+      });
+      const target = "fixture/app\0setup-branch\0original-head";
+      const creation = prepareProviderMutation(op, {
+        kind: "github_branch.create",
+        target
+      });
+      settleProviderMutation(op, creation.mutationId, "confirmed", null);
+      op.providerRecovery.state = "rollback_pending";
+      let saved = toPersistedOperation(op);
+      const failure = new Error("Recovery storage unavailable.");
+      const persist = async () => {
+        if (
+          outcome === "persistence failure" &&
+          op.providerRecovery.mutations.some(
+            (mutation: { status: string }) =>
+              mutation.status === "manual_required"
+          )
+        ) {
+          throw failure;
+        }
+        saved = toPersistedOperation(op);
+      };
+      vi.spyOn(operations, "persist").mockImplementation(persist);
+      const ports = bindWorkflowFileCommitterPorts({
+        getDefaultBranch: async () => "main",
+        getBranchHeadSha: unavailable,
+        createBranchRef: unavailable,
+        runGh: async (args) => {
+          expect(args).toEqual([
+            "api",
+            "/repos/fixture/app/git/ref/heads/setup-branch"
+          ]);
+          return {
+            code: 0,
+            stdout: '{"object":{"sha":"original-head"}}',
+            stderr: ""
+          };
+        },
+        runGhWorkflow: unavailable,
+        mutationRecovery: { operation: op, persist },
+        tempFile: {
+          write: () => {
+            throw new Error("Unexpected workflow write");
+          },
+          remove: () => {
+            throw new Error("Unexpected workflow cleanup");
+          }
+        },
+        errorMessage: String,
+        pushStep: () => {
+          throw new Error("Unexpected publication success");
+        },
+        now: () => 0
+      });
+      const recovery = ports.mutationRecovery;
+      if (!recovery) throw new Error("Missing workflow recovery binding");
+      const execute = recovery.execute;
+      recovery.execute = async (input) => {
+        if (input.kind !== "github_branch.delete") return execute(input);
+        const deletion = prepareProviderMutation(op, input);
+        settleProviderMutation(
+          op,
+          deletion.mutationId,
+          outcome === "unknown" ? "outcome_unknown" : "not_applied",
+          null
+        );
+        await persist();
+        if (outcome === "unknown") throw failure;
+        return { state: outcome === "cancelled" ? "cancelled" : "not_applied" };
+      };
+      const fetcher = vi.fn(unavailable);
+      vi.stubGlobal("fetch", fetcher);
+      let observed: unknown;
+      const handler = coordinator(owner, "a", async () => {
+        try {
+          await createWorkflowFileCommitter(ports, {
+            targetRepo: "fixture/app",
+            envName: "dev"
+          }).commitWorkflowFileSmart(
+            ".github/workflows/verify.yml",
+            "content",
+            "message"
+          );
+        } catch (error) {
+          observed = error;
+          throw error;
+        }
+      });
+      handler.scheduleEnvironmentOperation(op);
+      await settled(owner, "a");
+      if (outcome === "unknown" || outcome === "persistence failure") {
+        expect(observed).toBe(failure);
+      } else {
+        expect(observed).toMatchObject({
+          code: "provider-mutation-manual-required"
+        });
+      }
+      const refusal = {
+        ok: false,
+        code:
+          outcome === "unknown" ? "operation-active" : (
+            "rollback-provider-outcome-unknown"
+          )
+      };
+      expect(canStartRollback(op)).toMatchObject(refusal);
+      const restored = fromPersistedOperation(saved);
+      reconcileRestoredOperation(restored);
+      expect(canStartRollback(restored)).toMatchObject(refusal);
+      if (outcome === "persistence failure") {
+        expect(restored.providerRecovery.mutations).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              kind: "github_branch.create",
+              status: "confirmed"
+            }),
+            expect.objectContaining({
+              kind: "github_branch.delete",
+              status: "not_applied"
+            })
+          ])
+        );
+      }
+      expect(restored.setupArtifacts.githubEnvironment).toMatchObject({
+        state: "created"
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(owner.hasActiveEnvironmentTasks("a")).toBe(false);
+      owner.markEnvironmentInstanceShuttingDown("a");
+    }
+  );
+
+  it.each(["recovery scan", "task settlement"] as const)(
+    "does not schedule destructive recovery after non-applied branch deletion during %s",
+    async (trigger) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation();
+      const block = () => {
+        const mutation = prepareProviderMutation(op, {
+          kind: "github_branch.delete",
+          target: "fixture/app\0setup-branch\0original-head"
+        });
+        settleProviderMutation(
+          op,
+          mutation.mutationId,
+          "not_applied",
+          "The recorded branch remains."
+        );
+        finish(op, "failed_partial");
+        op.providerRecovery.state = "rollback_pending";
+      };
+      const fetcher = vi.fn(unavailable);
+      vi.stubGlobal("fetch", fetcher);
+      const handler = coordinator(owner, "a", async () => block());
+      if (trigger === "recovery scan") {
+        block();
+        handler.startRecoveredTasks();
+      } else {
+        handler.scheduleEnvironmentOperation(op);
+        await settled(owner, "a");
+      }
+      await Promise.resolve();
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(owner.hasActiveEnvironmentTasks("a")).toBe(false);
+    }
+  );
+
+  it("keeps downstream cleanup blocked when saving the manual blocker fails", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const op = operation();
+    const target = "fixture/app\0setup-branch\0original-head";
+    const creation = prepareProviderMutation(op, {
+      kind: "github_branch.create",
+      target
+    });
+    settleProviderMutation(op, creation.mutationId, "confirmed", null);
+    op.providerRecovery.state = "rollback_pending";
+    const persist = vi.fn(async () => {
+      throw new Error("Recovery storage unavailable.");
+    });
+    const recovery = createSetupWorkflowRecoveryPort(op, persist);
+    const fetcher = vi.fn(unavailable);
+    vi.stubGlobal("fetch", fetcher);
+    const handler = coordinator(owner, "a", async () => {
+      recovery.settleManual(
+        "github_branch.create",
+        target,
+        "Review the recovered branch before cleanup."
+      );
+      finish(op, "failed_partial");
+      await recovery.persist();
+    });
+    handler.scheduleEnvironmentOperation(op);
+    await settled(owner, "a");
+    handler.startRecoveredTasks();
+    await Promise.resolve();
+    expect(persist).toHaveBeenCalledOnce();
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(owner.hasActiveEnvironmentTasks("a")).toBe(false);
+  });
+
   it.each(["authorizeAzure", "configureEnvironment"] as const)(
     "requires the explicit %s service at construction",
     (name) => {
