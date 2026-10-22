@@ -182,17 +182,6 @@ describe("POST /api/operations server-owned execution", () => {
     expect(operations.all()).toEqual([]);
   });
 
-  it.each(["/api/azure-auto-setup", "/api/create-environment"])(
-    "rejects direct calls to the internal mutation route %s",
-    async (path) => {
-      const response = await postJson(path, {});
-      expect(response).toMatchObject({
-        status: 403,
-        body: { code: "server-owned-operation-required" }
-      });
-    }
-  );
-
   it("resumes only the prompt currently owned by the operation", async () => {
     operations.clear();
     setEnvironmentOperationTestRunner(async () => {});

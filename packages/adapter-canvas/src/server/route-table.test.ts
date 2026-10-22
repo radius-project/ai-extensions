@@ -17,7 +17,6 @@ import { createOperationsControlRoutes } from "./routes/operations-control.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 import { createAwsDiscoveryRoutes } from "./routes/aws-discovery.js";
-import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
 import {
@@ -32,8 +31,6 @@ import { createGraphPipeline } from "./routes/graph-pipeline.js";
 import { createGraphsPlanningWritesRoutes } from "./routes/graphs-planning-writes.js";
 import { createGraphPlanningWorkflows } from "./routes/graph-workflows.js";
 import { createEnvironmentsRoutes } from "./routes/environments.js";
-import { createCreateEnvironmentRoutes } from "./routes/create-environment.js";
-import { createAzureAutoSetupTestDependencies } from "../../test/support/server/azure-auto-setup.js";
 import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 
 const productionHandlers = {
@@ -94,7 +91,7 @@ const productionHandlers = {
       inputRequiredState: "input_required"
     }
   ),
-  // Construction-only, like the create-environment routes below: this suite
+  // Construction-only: this suite
   // asserts table shape and ownership, and the control behavior is covered by
   // routes/operations-control.test.ts and the HTTP integration suite.
   ...createOperationsControlRoutes({
@@ -170,7 +167,6 @@ const productionHandlers = {
     parseServedReposFromSubjects: () => []
   }),
   ...createAwsDiscoveryRoutes({ runCli: () => Promise.resolve("") }),
-  ...createAzureAutoSetupRoutes(createAzureAutoSetupTestDependencies()),
   ...createIdentityProfilesRoutes({
     listCredentialProfiles: () => [],
     saveCredentialProfile: () => null,
@@ -404,95 +400,22 @@ const productionHandlers = {
     reportOperationDiagnostic: () => {},
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: "verify"
-  }),
-  // Construction-only: this suite asserts table shape and ownership, so the
-  // handler is never invoked here. Its behavior is covered by the collocated
-  // seam tests and by test/integration/http/create-environment.test.ts.
-  ...createCreateEnvironmentRoutes({
-    isServerOwnedRequest: () => false,
-    readInstanceEntry: () => undefined,
-    getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
-    cliExec: () => ({ stdin: null }),
-    readProcessEnv: () => ({}),
-    namespaceClaimsFor: () => ({
-      listEnvironmentNames: () => Promise.resolve({ ok: true, names: [] }),
-      readEnvironmentVariables: () =>
-        Promise.resolve({ ok: true, variables: {} })
-    }),
-    isValidRepoSlug: () => false,
-    getOperation: () => null,
-    isStale: () => false,
-    createOperation: () => ({ operationId: "op" }),
-    buildStages: () => [],
-    startOperation: () => ({ ok: true }),
-    persistOperations: () => Promise.resolve(),
-    reportOperationDiagnostic: () => {},
-    finishFailed: () => {},
-    enterStage: () => {},
-    errorMessage: (error) => String(error),
-    stageAuthorizeIdentity: "authorize-identity",
-    stageConfigureEnvironment: "configure-environment",
-    addLegacyStep: () => {},
-    finalizeSetupFailure: () =>
-      Promise.resolve({ status: 500, body: { error: "", code: "" } }),
-    persistMutationCheckpoint: () => Promise.resolve(true),
-    persistBestEffort: () => Promise.resolve(true),
-    isTerminalState: () => false,
-    guardStopBoundary: () => Promise.resolve(true),
-    runAzCommand: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
-    preflightRepoAdmin: () => Promise.resolve(""),
-    preflightGhcrPackageWriteAccess: () =>
-      Promise.resolve({ ok: true, credentials: null }),
-    readGitHubJson: () =>
-      Promise.resolve({ ok: true, status: 200, json: {}, stderr: "" }),
-    bootstrapGHCRStatePackage: () => Promise.resolve({ visibility: undefined }),
-    stateRegistryForEnvironment: () => "",
-    getDefaultBranch: () => Promise.resolve("main"),
-    getBranchHeadSha: () => Promise.resolve(null),
-    createBranchRef: () => Promise.resolve({ ok: false, stderr: "" }),
-    tempFile: { write: () => "", remove: () => {} },
-    setCanonicalEnvironment: () => {},
-    recordGitHubEnvironment: () => {},
-    recordGitHubEnvironmentVariable: () => {},
-    promoteCreatedGitHubEnvironment: () => false,
-    envListCacheDelete: () => {},
-    ociStateBackend: "oci",
-    defaultStateArchive: "latest",
-    azureCredential: () => ({}),
-    awsCredential: () => ({}),
-    optionalString: () => "",
-    generateVerifyWorkflow: () => Promise.resolve(""),
-    generateDeployWorkflow: () => Promise.resolve({}),
-    generateDeleteWorkflow: () => Promise.resolve({}),
-    recordCommittedWorkflowFile: () => {},
-    deleteLegacyDeployWorkflow: () => Promise.resolve(true),
-    createPullRequestApi: () => Promise.resolve({ ok: false, stderr: "" }),
-    planCredentialVerification: () =>
-      Promise.resolve({
-        shouldDispatch: false,
-        trigger: "none",
-        ref: "main",
-        defaultBranch: "main",
-        pullRequestUrl: "",
-        skipReason: ""
-      }),
-    fetchFileFromRepo: () => Promise.resolve(null),
-    fetchFileFromRepoResult: () =>
-      Promise.resolve({ content: null, error: "HTTP 404", status: 404 }),
-    buildVerifyWorkflowDispatchArgs: () => [],
-    verifyWorkflowFile: "radius-verify-credentials.yml",
-    stageVerify: "verify",
-    recordCleanupState: () => {},
-    recordCommitState: () => {},
-    setStageState: () => {},
-    finish: () => {},
-    sleep: () => Promise.resolve(),
-    now: () => 0
   })
 };
 const table = createServerRouteTable(productionHandlers);
 
 describe("server route ownership boundary", () => {
+  it.each(["/api/azure-auto-setup", "/api/create-environment"])(
+    "has no handler or declaration for removed setup endpoint %s",
+    (path) => {
+      expect(matchRoute(table, "POST", path)).toBeUndefined();
+      expect(matchRoute(table, "GET", path)).toBeUndefined();
+      expect(
+        SERVER_ROUTE_DECLARATIONS.some((route) => route.path === path)
+      ).toBe(false);
+    }
+  );
+
   it("pins all declared routes to one owner", () => {
     const declarationKeys = SERVER_ROUTE_DECLARATIONS.map(routeKey);
     const handlerKeys = Object.keys(productionHandlers);

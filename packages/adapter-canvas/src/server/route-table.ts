@@ -174,7 +174,6 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   legacyPost("/api/delete-environment", "exact", "json", "environments"),
   declare("POST", "/api/bypass-verification", "exact", "json", "environments"),
   declare("POST", "/api/operations", "exact", "json", "operations-status"),
-  legacyPost("/api/azure-auto-setup", "exact", "json", "azure-discovery"),
   declare(
     "GET",
     "/api/list-azure-app-registrations",
@@ -191,7 +190,6 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   ),
   declare("GET", "/api/list-aws-roles", "exact", "none", "aws-discovery"),
   legacyPost("/api/app-params", "exact", "json", "environments"),
-  legacyPost("/api/create-environment", "exact", "json", "environments"),
   declare("GET", "/api/load-graph-stream", "exact", "none", "graphs-planning"),
   declare("GET", "/api/progress", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deployed-graph", "exact", "none", "graphs-planning"),
