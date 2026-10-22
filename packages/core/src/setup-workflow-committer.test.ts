@@ -8,6 +8,7 @@ import { createWorkflowFileCommitter } from "./setup-workflow-committer.js";
 import { setupEnvironmentHarness } from "../test/support/setup-environment.js";
 import type { SetupWorkflowCommandResult } from "./setup-workflow-contracts.js";
 import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import type { RecoverableMutationResult } from "./setup-azure-recovery.js";
 
 const target = { targetRepo: "octo/app", envName: "dev" };
 const path = ".github/workflows/verify.yml";
@@ -33,6 +34,21 @@ function harness(results: Partial<SetupWorkflowCommandResult>[] = []) {
   });
   ports.mutationRecovery = h.ports.recovery;
   return { ...h, ports, calls };
+}
+
+function recoveringBranchHarness() {
+  const h = harness([{ stdout: '{"object":{"sha":"base"}}' }]);
+  h.mutations.push({
+    mutationId: "branch",
+    kind: "github_branch.create",
+    target: "octo/app\0saved\0base",
+    status: "confirmed",
+    evidence: null
+  });
+  const recovery = h.ports.mutationRecovery;
+  if (!recovery) throw new Error("Missing recovery fixture");
+  recovery.rollbackPending = () => true;
+  return { ...h, recovery };
 }
 
 describe("workflow publication recovery decisions", () => {
@@ -340,6 +356,96 @@ describe("workflow publication recovery decisions", () => {
           "message"
         )
       ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
+    }
+  );
+
+  it.each([
+    { state: "not_applied" },
+    { state: "not_applied", diagnostic: "Branch deletion was refused." },
+    {
+      state: "not_applied",
+      result: { code: 1, stdout: "", stderr: "Deletion denied." }
+    },
+    {
+      state: "not_applied",
+      result: { code: 1, stdout: "Deletion rejected.", stderr: "" }
+    },
+    { state: "cancelled" }
+  ] satisfies RecoverableMutationResult<never>[])(
+    "blocks downstream rollback when recovered branch removal returns $state",
+    async (removal) => {
+      const h = recoveringBranchHarness();
+      const recovery = h.recovery;
+      const execute = recovery.execute;
+      recovery.execute = (input) =>
+        input.kind === "github_branch.delete" ?
+          Promise.resolve(removal)
+        : execute(input);
+
+      await expect(
+        createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+          path,
+          "content",
+          "message"
+        )
+      ).rejects.toMatchObject({ code: "provider-mutation-manual-required" });
+      expect(h.transcript).not.toContain("rollback");
+      expect(h.transcript).toContainEqual([
+        "manual",
+        "github_branch.create",
+        "octo/app\0saved\0base",
+        expect.stringContaining("could not confirm removal")
+      ]);
+      expect(h.transcript.at(-1)).toBe("persist");
+      if ("diagnostic" in removal && removal.diagnostic) {
+        expect(h.transcript).toContainEqual([
+          "manual",
+          "github_branch.create",
+          "octo/app\0saved\0base",
+          expect.stringContaining(removal.diagnostic)
+        ]);
+      }
+    }
+  );
+
+  it("requests rollback only after confirmed branch removal is persisted", async () => {
+    const h = recoveringBranchHarness();
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        path,
+        "content",
+        "message"
+      )
+    ).rejects.toMatchObject({ code: "provider-mutation-recovered-rollback" });
+    expect(h.mutations.at(-1)).toMatchObject({
+      kind: "github_branch.delete",
+      status: "confirmed"
+    });
+    expect(h.transcript.slice(-2)).toEqual(["rollback", "persist"]);
+  });
+
+  it.each(["execution", "manual persistence"] as const)(
+    "preserves a %s failure without announcing branch removal",
+    async (failureAt) => {
+      const h = recoveringBranchHarness();
+      const failure = new Error("Recovery storage unavailable.");
+      const execute = h.recovery.execute;
+      h.recovery.execute = (input) => {
+        if (input.kind !== "github_branch.delete") return execute(input);
+        if (failureAt === "execution") throw failure;
+        return Promise.resolve({ state: "cancelled" });
+      };
+      h.recovery.persist = async () => {
+        throw failure;
+      };
+      await expect(
+        createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+          path,
+          "content",
+          "message"
+        )
+      ).rejects.toBe(failure);
+      expect(h.transcript).not.toContain("rollback");
     }
   );
 
