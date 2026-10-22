@@ -164,6 +164,8 @@ jobs:
           owner: ${{ steps.pin.outputs.owner }}
           repositories: ${{ steps.pin.outputs.name }}
           permission-actions: write
+          # GitHub requires Administration write to delete an Environment.
+          permission-administration: write
           permission-contents: write
           # Deleting a deployment record is a write. The records are linked to
           # their environment by name, so deleting the environment strands them

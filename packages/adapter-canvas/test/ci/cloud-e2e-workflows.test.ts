@@ -882,6 +882,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
 
     expect(token?.with?.["permission-actions"]).toBe("write");
+    expect(token?.with?.["permission-administration"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
     // Deleting a deployment record is a write, and the records outlive the
     // environment that names them, so environment write alone is not enough.
