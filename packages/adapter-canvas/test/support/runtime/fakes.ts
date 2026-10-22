@@ -103,6 +103,9 @@ export interface FakeDependenciesOptions {
   // of a committed, unmodified model, so tests opt in to the risky states.
   modelRecoverable?: boolean;
   generatorVersion?: string;
+  // Radius version the installed CLI uses. Defaults to "0.60", the version the
+  // shared origin fixtures record.
+  radiusVersion?: string;
   // Newest modeling-run staging activity in the workspace checkout. Defaults to
   // null: no run in flight, which is the ordinary case, so tests opt in to a
   // run that is already under way.
@@ -366,6 +369,7 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     },
     appModel: {
       generatorVersion: vi.fn(() => options.generatorVersion ?? "0.1.0-test"),
+      radiusVersion: vi.fn(async () => options.radiusVersion ?? "0.60"),
       workspaceHeadCommit: vi.fn(
         async (workspacePath: string | null | undefined) =>
           headCommits[`workspace:${workspacePath}`] ?? ""

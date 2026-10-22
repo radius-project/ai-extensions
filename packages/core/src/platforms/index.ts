@@ -56,3 +56,5 @@ export function generatePortalUrl(
     clusterName: ""
   });
 }
+
+export * from "./setup-azure-identity.js";

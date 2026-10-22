@@ -202,7 +202,8 @@ export function createGraphContextHelpers(
     // ignoring the model's own directory), so ask it there. A remote branch has
     // no cheap equivalent, and its only consequence is an advisory notice, so it
     // falls back to the coarse comparison.
-    const recordedCommit = parseAppOrigin(originText)?.sourceCommit;
+    const recorded = parseAppOrigin(originText);
+    const recordedCommit = recorded?.sourceCommit;
     const sourceChanged =
       fromWorkspace && recordedCommit ?
         await deps.appModel
@@ -222,6 +223,15 @@ export function createGraphContextHelpers(
           .catch(() => undefined)
       : undefined;
 
+    // Only asked when the record saved a Radius version to compare with. A
+    // record written before the field existed skips the check anyway, so there
+    // is no reason to run the CLI for it. A failed read is unknown, which skips
+    // the check rather than failing the graph.
+    const radiusVersion =
+      recorded?.radiusVersion ?
+        await deps.appModel.radiusVersion().catch(() => "")
+      : "";
+
     return {
       repo,
       branch,
@@ -233,6 +243,7 @@ export function createGraphContextHelpers(
         sourceChanged,
         modelRecoverable,
         generatorVersion: deps.appModel.generatorVersion(),
+        radiusVersion,
         hashAppBicep
       })
     };

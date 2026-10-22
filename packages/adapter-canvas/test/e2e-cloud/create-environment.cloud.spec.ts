@@ -129,6 +129,7 @@ import {
 } from "./support/delete-environment-journey.js";
 import {
   deploymentNamespace,
+  classifyDeploymentDeletion,
   classifyDeploymentPresence,
   createTolerantProbe,
   DELETE_DEPLOYMENT_WORKFLOW,
@@ -138,6 +139,7 @@ import {
   findDeleteEnvironmentRefusalProblems,
   findDeployedApplicationProblems,
   findSurvivingArtifactProblems,
+  isDeploymentDeletionSettled,
   REQUIRED_LIFECYCLE_WORKFLOWS,
   readApplicationNames,
   readDeploymentRows,
@@ -146,8 +148,10 @@ import {
   readWorkflowRunStatus,
   quiesceOwnedWorkflowRuns,
   repositoryListingPath,
+  requireDeploymentDeleted,
   requireWorkflowRunId,
-  requireSingleApplication
+  requireSingleApplication,
+  type DeploymentDeletion
 } from "./support/deploy-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
@@ -1131,7 +1135,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         throw error;
       }
 
-      const deletionPresence = createTolerantProbe(async () => {
+      // A `delete-failed` row never disappears, so the wait settles on it
+      // instead of running out the clock, and the failure names the run.
+      let deletion: DeploymentDeletion | undefined;
+      const deletionProgress = createTolerantProbe(async () => {
         const rows = readDeploymentRows(
           await page.evaluate(
             async (path) => {
@@ -1145,22 +1152,30 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             )
           )
         );
-        return classifyDeploymentPresence(
-          rows,
-          deployedApplication,
-          cloud.environmentName
-        ).present;
+        deletion = classifyDeploymentDeletion(
+          classifyDeploymentPresence(
+            rows,
+            deployedApplication,
+            cloud.environmentName
+          )
+        );
+        return isDeploymentDeletionSettled(deletion);
       });
       try {
         await expect
-          .poll(deletionPresence.read, {
+          .poll(deletionProgress.read, {
             timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
             intervals: [5_000]
           })
-          .toBe(false);
+          .toBe(true);
       } catch (error) {
-        throw deletionPresence.explain(error);
+        throw deletionProgress.explain(error);
       }
+      requireDeploymentDeleted(
+        deletion,
+        deployedApplication,
+        cloud.environmentName
+      );
 
       cloud.recordApplicationDeletionSucceeded(
         deployedApplication,
