@@ -62,7 +62,7 @@ Both documents track their own delivery status; the test plan's phase table is t
 
 - External errors must propagate as explicit failures; never return success-shaped fallbacks.
 - Destructive environment and deployment operations fail closed whenever identity, preconditions, or external state cannot be established.
-- The session repository's graph and planned views use the current worktree branch, never an implicit `main`. Graph diff uses explicit committed base and head branches.
+- The session repository's graph and planned views use the current worktree branch, never an implicit `main`. Graph diff uses explicit base and head selections: a side matching the workspace repository and branch prefers the saved on-disk model; other selections read committed models from GitHub. Do not require a commit or push to preview the current workspace.
 - Reject stale source-reference context tokens, confine filesystem paths to the workspace, and preserve deployment repair attempt identity.
 - Bind test HTTP servers to `127.0.0.1` on OS-assigned ports. Close servers, streams, child processes, timers, browser contexts, and temporary workspaces on success and failure.
 - Rendered HTML, JavaScript strings, URLs, and serialized state must be escaped for their output context.

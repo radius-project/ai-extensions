@@ -886,10 +886,19 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     expect(result).toMatchObject({
       resultType: "success",
       textResultForLlm: expect.stringContaining(
-        "does not exist on main or feat yet"
+        "No .radius/app.bicep or app.bicep could be read for main or feat."
       ),
       toolTelemetry: { radiusGraphDiff: { outcome: "unavailable" } }
     });
+    expect(result.textResultForLlm).toContain(
+      "prefers the saved on-disk model for a side matching the current workspace repository and branch"
+    );
+    expect(result.textResultForLlm).toContain(
+      "other selections read committed models from GitHub"
+    );
+    expect(result.textResultForLlm).toContain(
+      "Do not commit or push the current worktree merely to compare it."
+    );
     expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
   });
 

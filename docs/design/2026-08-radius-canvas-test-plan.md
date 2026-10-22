@@ -242,7 +242,7 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | LC-09 | Shutdown closes every remaining server exactly once                                                                          |
 | LC-10 | Session-repository graph/planned views use the current worktree branch, never `main`                                         |
 | LC-11 | A different repository/branch uses committed remote `.radius/app.bicep`                                                      |
-| LC-12 | Graph diff compares explicit committed base/head branches                                                                    |
+| LC-12 | Graph diff uses explicit base/head selections; a matching workspace side prefers saved models, other sides read GitHub       |
 | LC-13 | Missing or stale model triggers handoff once per repository/branch *condition*; a changed condition reports again            |
 | LC-14 | Heartbeat detects interruption and recovers the same page                                                                    |
 | LC-15 | External errors are surfaced; no success-shaped fallback is returned                                                         |
