@@ -11,6 +11,8 @@
 // Every exported declaration is deep-frozen so a consumer (or a careless test)
 // cannot mutate the canonical shape out from under other importers.
 
+import { ENVIRONMENT_TOOL_DECLARATIONS } from "./environment-tool-schema.js";
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     for (const key of Object.keys(value as Record<string, unknown>)) {
@@ -372,5 +374,6 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
         }
       }
     }
-  }
+  },
+  ...ENVIRONMENT_TOOL_DECLARATIONS
 ]);
