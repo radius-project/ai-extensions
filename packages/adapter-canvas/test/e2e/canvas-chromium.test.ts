@@ -2909,6 +2909,168 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
+  test("shows GitHub App workflow permission recovery from the fake CLI in Chromium @safety", async ({
+    page,
+    canvas
+  }, testInfo) => {
+    const workflowPath = ".github/workflows/radius-verify-credentials.yml";
+    const diagnostic = `HTTP 403: refusing to allow a GitHub App to create or update workflow \`${workflowPath}\` without \`workflows\` permission`;
+    const selected = {
+      id: "fixture-cluster",
+      name: "Fixture Cluster",
+      resourceGroup: "fixture-resource-group"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      }),
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/${workflowPath}`,
+          "--jq",
+          ".sha"
+        ],
+        exitCode: 1,
+        stderr: "HTTP 404: Not Found"
+      },
+      {
+        tool: "gh",
+        argsPrefix: [
+          "api",
+          "--method",
+          "PUT",
+          `/repos/${REPOSITORY}/contents/${workflowPath}`
+        ],
+        exitCode: 1,
+        stderr: diagnostic
+      }
+    );
+    await canvas.setScenario(scenario);
+    let release: () => void = () => {};
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    canvas.setEnvironmentOperationRunner(async (operationId) => {
+      const ops = await import("../../src/operations.js");
+      const { cliExec } = await import("../../src/gh.js");
+      const { writeFileSync, rmSync } = await import("node:fs");
+      const { createWorkflowFileCommitter } =
+        await import("../../src/server/routes/create-environment-workflow-committer.js");
+      const { describeWorkflowCommitFailure } =
+        await import("../../src/server/routes/create-environment-workflow-publisher.js");
+      const operation = ops.operations.get(operationId);
+      if (!operation) throw new Error("Setup operation was not saved.");
+      ops.enterStage(operation, ops.STAGE_CONFIGURE_ENVIRONMENT);
+      await ready;
+      const runGh = (args: string[]) =>
+        new Promise<{ code: number; stdout: string; stderr: string }>(
+          (resolve) => {
+            cliExec("gh", args, { timeout: 12000 }, (error, stdout, stderr) => {
+              resolve({ code: error ? 1 : 0, stdout, stderr });
+            });
+          }
+        );
+      const bodyPath = path.join(canvas.rootDir, "workflow-body.json");
+      const unexpectedBranchFallback = async (): Promise<never> => {
+        throw new Error(
+          "Workflow permission refusal must not create a branch."
+        );
+      };
+      const committer = createWorkflowFileCommitter(
+        {
+          runGh,
+          runGhWorkflow: runGh,
+          getDefaultBranch: async () => WORKTREE_BRANCH,
+          getBranchHeadSha: unexpectedBranchFallback,
+          createBranchRef: unexpectedBranchFallback,
+          tempFile: {
+            write: (body) => {
+              writeFileSync(bodyPath, body);
+              return bodyPath;
+            },
+            remove: (file) => rmSync(file, { force: true })
+          },
+          errorMessage: (error) =>
+            error instanceof Error ? error.message : String(error),
+          pushStep: (message) => ops.addLegacyStep(operation, message),
+          now: () => 0
+        },
+        { targetRepo: REPOSITORY, envName: "fixture-environment" }
+      );
+      const result = await committer.commitWorkflowFileSmart(
+        workflowPath,
+        Buffer.from("name: Fixture verification\n").toString("base64"),
+        "Add verification workflow"
+      );
+      expect(result.ok).toBe(false);
+      expect(result.stderr?.trim()).toBe(diagnostic);
+      const failure = describeWorkflowCommitFailure(
+        "verify",
+        workflowPath,
+        REPOSITORY,
+        result.stderr
+      );
+      ops.finish(operation, "failed", {
+        failure: {
+          code: failure.code,
+          stage: ops.STAGE_CONFIGURE_ENVIRONMENT,
+          message: failure.error,
+          classification: "user-fixable"
+        }
+      });
+      await ops.operations.persist();
+    });
+    try {
+      await gotoCanvas(page, canvas, "environment");
+      await openEnvironmentWizard(page);
+      await page.getByLabel("Environment name").fill("fixture-environment");
+      await page
+        .getByLabel("Resource Group", { exact: true })
+        .selectOption(selected.resourceGroup);
+      await page.locator("#deploy-btn:not([disabled])").click();
+      await expect(page.locator("#env-progress-panel")).toBeVisible();
+      release();
+      const failure = page.locator("#env-progress-failure-message");
+      await expect(failure).toContainText(
+        "Grant the GitHub App Workflows: write permission"
+      );
+      await expect(failure).toContainText(
+        "approve the updated installation permissions"
+      );
+      await expect(failure).toContainText(
+        "retry with a new installation token"
+      );
+      await expect(failure).not.toContainText("auth refresh -h");
+      await failure.scrollIntoViewIfNeeded();
+      await captureDeployEvidence(
+        page,
+        testInfo,
+        "github-app-workflow-permission-failure"
+      );
+      const calls = await canvas.cliCalls();
+      expect(
+        calls.filter(
+          (call) =>
+            call.args.slice(0, 4).join(" ") ===
+            `api --method PUT /repos/${REPOSITORY}/contents/${workflowPath}`
+        )
+      ).toHaveLength(1);
+      expect(
+        calls.some(
+          (call) => call.args[0] === "workflow" && call.args[1] === "run"
+        )
+      ).toBe(false);
+    } finally {
+      release();
+    }
+  });
+
   test("plans a deployment for an existing environment from its row", async ({
     page,
     canvas
@@ -4528,7 +4690,8 @@ test.describe("Radius Canvas in Chromium", () => {
     const deploymentWorkflow = scenario.commands.find(
       (command) =>
         command.tool === "gh" &&
-        command.args?.[1] === `/repos/${REPOSITORY}/actions/runs/1`
+        command.args?.[1] === `/repos/${REPOSITORY}/actions/runs/1` &&
+        command.args.includes("--jq")
     );
     if (deploymentWorkflow) {
       deploymentWorkflow.stdout =
