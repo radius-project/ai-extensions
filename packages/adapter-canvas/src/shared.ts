@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePluginRoot } from "./plugin-root.js";
+import type { DeploymentWorkflowReference } from "@radius-project/core";
 
 export interface CredentialProfile {
   [key: string]: unknown;
@@ -326,6 +327,8 @@ export interface CanvasState {
   deployEnvName?: string;
   deployAppName?: string;
   deployDispatchedAt?: number;
+  deployDispatchReference?: DeploymentWorkflowReference;
+  deployDispatchEvidence?: "refused" | "accepted" | "uncertain";
   deployRunId?: string | number | null;
   deployRunUrl?: string | null;
   deployErrorKind?: DeployErrorKind | null;
@@ -365,6 +368,7 @@ export interface CanvasState {
 // silently never fires.
 export type DeployErrorKind =
   | "branch-not-pushed"
+  | "dispatch-refused"
   | "run-unconfirmed"
   | "oidc-subject-missing"
   | "oidc-subject-case-mismatch"

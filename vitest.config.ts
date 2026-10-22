@@ -23,6 +23,33 @@ export default defineConfig({
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
+        "packages/core/src/deployment-{admission,azure-preflight,branch,commands,dispatch,publication,secret,start}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/selected-{bicep-source,repository-reader,repository-write}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/runtime/deployment-{executor,workflow-preparation,workflows}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/server/services/deploy-dispatch.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
         "packages/adapter-canvas/src/runtime/environment-execution-owner.ts": {
           statements: 100,
           branches: 100,

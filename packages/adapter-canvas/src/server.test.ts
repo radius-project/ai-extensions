@@ -5343,6 +5343,15 @@ describe("triggerDeployRepairHandoff", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("does not hand off a confirmed dispatch refusal for model repair", () => {
+    const handoff = vi.fn();
+    setDeployRepairHandoff(handoff);
+    const entry = failedEntry({ deployErrorKind: "dispatch-refused" });
+    expect(triggerDeployRepairHandoff(entry)).toBe(false);
+    expect(handoff).not.toHaveBeenCalled();
+    expect(entry.state.deployRepairing).not.toBe(true);
+  });
+
   it("does not hand off an OIDC subject case mismatch", () => {
     const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
@@ -5826,6 +5835,19 @@ describe("triggerDeployRepairHandoff", () => {
       // repairLoop before error cannot turn a refusal into a live loop.
       expect(spent.repairLoop).toBe(false);
       expect(spent.error).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
+    });
+
+    it("requires a fresh user deploy after a confirmed dispatch refusal", () => {
+      const state = failedEntry({ deployErrorKind: "dispatch-refused" }).state;
+      const result = resolveDeployRepairLoop(state, state.deployAttempt?.id);
+      expect(result).toEqual({
+        repairLoop: false,
+        attemptId: "",
+        repairAttempt: 0,
+        error: expect.stringContaining(
+          "do not repair the model or automatically redeploy"
+        )
+      });
     });
 
     it("allows the final attempt within the cap", () => {
