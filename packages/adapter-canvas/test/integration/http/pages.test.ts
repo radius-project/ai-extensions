@@ -237,7 +237,7 @@ describe("canvas pages over real loopback HTTP", () => {
     const response = await get("/?page=environment");
 
     expect(response.body).toContain(
-      "Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name and Radius will create it during environment setup."
+      "Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name. It is created on the first deploy."
     );
     expect(response.body).not.toContain('id="azure-rg-custom"');
     expect(response.body).not.toContain('id="azure-cluster-custom"');

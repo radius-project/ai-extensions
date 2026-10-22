@@ -108,6 +108,7 @@ function origin(model: string): string {
     generatedAt: "2026-08-20T00:00:00.000Z",
     sourceCommit: "a".repeat(40),
     skillVersion: "1.0.0",
+    radiusVersion: "0.60",
     appBicepHash: hashAppBicep(model)
   });
 }

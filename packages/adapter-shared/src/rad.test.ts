@@ -42,6 +42,10 @@ import {
 } from "./rad.js";
 import { radSpawnOptions } from "./rad-process.mjs";
 import { RADIUS_RELEASE_TAG } from "./radius-release.js";
+import {
+  radiusExtensionRefForRelease,
+  radiusVersionFromExtensionRef
+} from "./rad-release.js";
 
 // rad.js derives its managed bin directory from os.homedir() at import time.
 // Point HOME and USERPROFILE at a throwaway directory before that import so the
@@ -988,6 +992,121 @@ describe("resolveRadForGraph", () => {
       // bicepconfig to a different schema than the compile actually uses.
       expect(releaseRead).toBe(tag);
       expect(releaseThatRuns).toBe(releaseRead);
+    }
+  );
+});
+
+describe("resolveInstalledRadiusVersion", () => {
+  const RELEASES_API = `https://api.github.com/repos/radius-project/radius/releases/tags/${RADIUS_RELEASE_TAG}`;
+  const savedEnv: Record<string, string | undefined> = {};
+  const fakeRad = (release: string) =>
+    `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ version: ${JSON.stringify(release)}, release: ${JSON.stringify(release)} }));\n`;
+
+  beforeEach(() => {
+    savedEnv.RADIUS_RAD_BINARY = process.env.RADIUS_RAD_BINARY;
+    savedEnv.RADIUS_RAD_SKIP_VERSION_CHECK =
+      process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    delete process.env.RADIUS_RAD_BINARY;
+    delete process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    resetManagedBin();
+    writeManagedBicepStub();
+  });
+
+  afterEach(() => {
+    for (const [name, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    resetManagedBin();
+    vi.restoreAllMocks();
+  });
+
+  const itPosix = process.platform === "win32" ? it.skip : it;
+
+  // The interleaving the extension produces: the session is attached, a graph
+  // opens, and only then does the load-time warm-up start. The canvas keeps
+  // this answer for the whole load, so reading the stale binary on disk here
+  // would hide the upgrade until the next restart. POSIX-only: the fake
+  // binaries are shebang scripts.
+  itPosix(
+    "reads the pinned release when the read starts before the load-time warm-up",
+    async () => {
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_RAD_PATH, fakeRad("v0.59.0"));
+      fs.chmodSync(MANAGED_RAD_PATH, 0o755);
+      const asset = mod.releaseAsset();
+      mockHttpsGet(
+        {
+          [RELEASES_API]: {
+            body: JSON.stringify({
+              tag_name: RADIUS_RELEASE_TAG,
+              assets: [{ name: asset, digest: "" }]
+            })
+          },
+          [`https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`]:
+            { body: fakeRad(RADIUS_RELEASE_TAG) }
+        },
+        []
+      );
+
+      const version = await mod.resolveInstalledRadiusVersion();
+
+      expect(version).not.toBe("0.59");
+      expect(version).toBe(
+        radiusVersionFromExtensionRef(
+          radiusExtensionRefForRelease(RADIUS_RELEASE_TAG)
+        )
+      );
+    }
+  );
+
+  // Every plugin process on the machine shares the managed binary, and another
+  // session's load-time update replaces it with an atomic rename. The next
+  // read has to report the binary now on disk, which is the one graph builds
+  // compile with. POSIX-only: the fake binaries are shebang scripts.
+  itPosix(
+    "reports the binary another session put in place after an earlier read",
+    async () => {
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      fs.mkdirSync(path.dirname(MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(MANAGED_RAD_PATH, fakeRad(RADIUS_RELEASE_TAG));
+      fs.chmodSync(MANAGED_RAD_PATH, 0o755);
+      const pinned = radiusVersionFromExtensionRef(
+        radiusExtensionRefForRelease(RADIUS_RELEASE_TAG)
+      );
+      await expect(mod.resolveInstalledRadiusVersion()).resolves.toBe(pinned);
+
+      const replacement = `${MANAGED_RAD_PATH}.other-session`;
+      fs.writeFileSync(replacement, fakeRad("v9.1.0"));
+      fs.chmodSync(replacement, 0o755);
+      fs.renameSync(replacement, MANAGED_RAD_PATH);
+
+      await expect(mod.resolveInstalledRadiusVersion()).resolves.toBe("9.1");
+    }
+  );
+
+  itPosix(
+    "rejects a pull-request build rather than reporting a version",
+    async () => {
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-version-pr-"));
+      const override = path.join(tmp, RAD);
+      fs.writeFileSync(override, fakeRad("pr-1234"));
+      fs.chmodSync(override, 0o755);
+      process.env.RADIUS_RAD_BINARY = override;
+      process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+
+      try {
+        await expect(mod.resolveInstalledRadiusVersion()).rejects.toThrow(
+          /pull-request build/u
+        );
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
     }
   );
 });

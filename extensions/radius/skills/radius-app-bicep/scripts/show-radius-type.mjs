@@ -22,8 +22,10 @@ import {
   isRadiusPullRequestRelease,
   radiusEdgeAuthorizationError,
   radiusCliIdentity,
-  radiusExtensionRefForRelease
+  radiusExtensionRefForRelease,
+  radiusVersionFromExtensionRef
 } from "../../../../../packages/adapter-shared/src/rad-release.ts";
+import { compareRadiusVersions } from "../../../../../packages/core/src/modeling/radius-version.ts";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -237,6 +239,56 @@ function validateStagingDirectory(input) {
   return stagingDir;
 }
 
+// The Radius version the last published modeling run saved in its origin
+// record, or "" when there is none or it cannot be read. Read from `.radius/`,
+// beside the bicepconfig.json whose pin it describes.
+function savedRadiusVersion(radiusDir) {
+  let origin;
+  try {
+    origin = JSON.parse(
+      fs.readFileSync(path.join(radiusDir, "app.origin.json"), "utf8")
+    );
+  } catch {
+    return "";
+  }
+  return isObject(origin) && typeof origin.radiusVersion === "string" ?
+      origin.radiusVersion.trim()
+    : "";
+}
+
+// Decides what to do with a configured Radius pin that differs from the one the
+// managed CLI needs. Returns true when the pin may move to the CLI's, and throws
+// when it may not.
+//
+// A pin equal to the Radius version the last run saved is the one modeling
+// wrote, so moving it forward to the CLI's newer version replaces nothing a
+// person chose. Any other pin was set on purpose and is left for the user to
+// change. A pin NEWER than the CLI is never moved back: that is a plugin behind
+// the one that generated the model, and moving the pin would put the model on
+// older types for everyone else on the branch.
+function mayMoveRadiusPin(configured, extension, saved, source) {
+  const pinVersion = radiusVersionFromExtensionRef(configured);
+  const cliVersion = radiusVersionFromExtensionRef(extension);
+  const order = compareRadiusVersions(pinVersion, cliVersion);
+  if (order !== null && order > 0) {
+    throw new Error(
+      `The Radius extension pinned in "${source}" ("${configured}") is newer than the managed Radius CLI's ("${extension}"), so this application model was generated with a newer Radius version than this plugin provides. Update the Radius plugin and run modeling again. Do not change extensions.radius.`
+    );
+  }
+  // An edge pin left by an earlier run has no order, but any released version
+  // is a better pin than `latest`. Moving TO `latest` is never allowed, so an
+  // edge CLI cannot replace a released pin.
+  const movesForward =
+    order === null ?
+      pinVersion === "latest" &&
+      compareRadiusVersions(cliVersion, cliVersion) !== null
+    : order < 0;
+  if (saved !== "" && pinVersion === saved && movesForward) return true;
+  throw new Error(
+    `Configured Radius extension "${configured}" in "${source}" does not match managed Radius extension "${extension}", and it is not the pin an earlier modeling run wrote, so it was left unchanged. Ask the user to set extensions.radius to "${extension}" or remove it, then run modeling again.`
+  );
+}
+
 export async function writeStagedBicepConfig(stagingInput, extension) {
   const stagingDir = validateStagingDirectory(stagingInput);
   const staged = path.join(stagingDir, "bicepconfig.json");
@@ -269,13 +321,21 @@ export async function writeStagedBicepConfig(stagingInput, extension) {
   if (configuredRadius !== undefined && typeof configuredRadius !== "string") {
     throw new Error(`"extensions.radius" in "${source}" must be a string.`);
   }
-  const radius =
+  const configured =
     typeof configuredRadius === "string" ? configuredRadius.trim() : "";
-  if (radius !== "" && radius !== extension) {
-    throw new Error(
-      `Configured Radius extension "${radius}" does not match managed Radius extension "${extension}".`
-    );
-  }
+  const radius =
+    (
+      configured !== "" &&
+      configured !== extension &&
+      mayMoveRadiusPin(
+        configured,
+        extension,
+        savedRadiusVersion(path.dirname(stagingDir)),
+        source
+      )
+    ) ?
+      extension
+    : configured;
 
   const output = {
     ...config,

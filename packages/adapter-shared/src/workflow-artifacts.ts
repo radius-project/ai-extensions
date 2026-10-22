@@ -184,7 +184,10 @@ export function createWorkflowArtifactReads(
     context?: WorkflowReadContext
   ): Promise<string> {
     const controller = new AbortController();
-    const limit = context ? Math.min(timeout, context.remaining()) : timeout;
+    // A monotonic clock leaves a fractional remainder, and execFile rejects a
+    // timeout that is not a whole number of milliseconds.
+    const limit =
+      context ? Math.min(timeout, Math.ceil(context.remaining())) : timeout;
     if (limit <= 0 || context?.check().state === "stopped")
       throw new WorkflowReadInterruptedError(
         context?.check().state === "stopped" ? "cancelled" : "elapsed"
