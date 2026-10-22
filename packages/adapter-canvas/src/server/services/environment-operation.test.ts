@@ -178,11 +178,66 @@ function dependencies(
 
 describe("runEnvironmentOperationWorkflow", () => {
   it.each([
-    ["azure", "azure_application.create"],
-    ["environment", "github_workflow.put"]
+    null,
+    "provider connection lost",
+    { detail: "unstructured failure" }
+  ])(
+    "finalizes an unstructured environment read rejection without inventing provider success: %j",
+    async (failure) => {
+      const op = operation();
+      const test = dependencies(op, {
+        readGitHubJson: async () => {
+          throw failure;
+        }
+      });
+      expect(
+        await runEnvironmentOperationWorkflow(
+          op,
+          successfulSelectedGhExecutor(),
+          test.dependencies
+        )
+      ).toEqual({ shouldMonitor: false });
+      expect(test.failures).toEqual([
+        {
+          status: 400,
+          error: String(failure),
+          code: "github-environment-resolution-failed",
+          remediation: null
+        }
+      ]);
+      expect(test.posts).toEqual([]);
+      expect(unresolvedProviderMutations(op)).toEqual([]);
+    }
+  );
+
+  it.each([
+    [
+      "azure",
+      "azure_application.create",
+      "One recovery attempt.",
+      "One recovery attempt."
+    ],
+    [
+      "environment",
+      "github_workflow.put",
+      "One recovery attempt.",
+      "One recovery attempt."
+    ],
+    [
+      "azure",
+      "azure_application.create",
+      "",
+      "Azure setup is reconciling an uncertain provider mutation."
+    ],
+    [
+      "environment",
+      "github_workflow.put",
+      undefined,
+      "Environment setup is reconciling an uncertain provider mutation."
+    ]
   ] as const)(
     "does not reconcile a returned %s reconciliation outcome a second time",
-    async (stage, mutationKind) => {
+    async (stage, mutationKind, message, expectedMessage) => {
       const op = operation();
       setCanonicalEnvironment(op, "Production");
       recordGitHubEnvironment(op, {
@@ -204,7 +259,7 @@ describe("runEnvironmentOperationWorkflow", () => {
             return {
               kind: "reconciling",
               status: 202,
-              body: { message: "One recovery attempt." }
+              body: { message }
             };
           },
           configureEnvironment: async () => {
@@ -212,7 +267,7 @@ describe("runEnvironmentOperationWorkflow", () => {
             return {
               kind: "reconciling",
               status: 202,
-              body: { message: "One recovery attempt." }
+              body: { message }
             };
           }
         }
@@ -225,7 +280,7 @@ describe("runEnvironmentOperationWorkflow", () => {
         )
       ).rejects.toMatchObject({
         code: "provider-mutation-outcome-unknown",
-        message: "One recovery attempt."
+        message: expectedMessage
       });
       expect(op).toEqual(saved);
       expect(test.events).toEqual([

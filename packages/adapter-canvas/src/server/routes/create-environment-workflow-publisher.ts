@@ -1,42 +1,16 @@
 import { needsWorkflowScope } from "./create-environment-gh-runner.js";
-import type { CreateEnvironmentRequestData } from "./create-environment-refusals.js";
 import type {
-  CreateEnvironmentOperation,
-  WorkflowCommitOutcome
-} from "./create-environment-types.js";
-import {
-  applySetupProviderConfiguration,
-  setupProviderCredentialStatus,
-  type SetupProviderConfigurationEvent,
-  type SetupProviderCredentialPorts,
-  type SetupProviderCredentialStatus
+  SetupProviderConfigurationEvent,
+  SetupProviderCredentialStatus,
+  SetupWorkflowPublicationEvent
 } from "@radius-project/core";
 export { azureRoleScope } from "@radius-project/core";
-import {
-  publishSetupWorkflowFiles,
-  type SetupWorkflowPublicationEvent
-} from "@radius-project/core";
-import { encodeWorkflowContent } from "@radius-project/adapter-shared";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
   type GhCommandPresentation
 } from "../../gh-command-display.js";
 import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
-
-// Seam 5 of the `POST /api/create-environment` slice: steps 2, 3, 4 and 4b —
-// writing the provider's configuration onto the GitHub environment, then
-// publishing the verify, deploy and delete workflow files.
-//
-// `fail` stays in the use case. This module never finalizes an operation or
-// writes a response; a commit failure comes back as a `WorkflowPublishRefusal`
-// describing the status, message and code the use case should fail with, so the
-// decision to end the request is still made in exactly one place.
-//
-// `checkpoint` also stays in the use case, which passes its own gate in as
-// `gate`. The gate is invoked at the same points, in the same order, as when
-// this code was inline: after each committed file. The use case still owns what
-// a gate means and when cancellation is observed; this module only calls it.
 
 export const WRITE_ACCESS_HINT = `Check that you have write access to the repository and that GitHub Actions is enabled. ${FORK_REPOSITORY_SETUP_GUIDANCE}`;
 
@@ -73,11 +47,6 @@ export const WORKFLOW_SCOPE_HINT = workflowScopeHint(
 export const VERIFY_WORKFLOW_PATH =
   ".github/workflows/radius-verify-credentials.yml";
 
-export interface ProviderConfigurationPorts extends SetupProviderCredentialPorts {
-  setEnvironmentVariable(name: string, value: unknown): Promise<boolean>;
-  pushStep(message: string): void;
-}
-
 // Whether the identifying cloud credentials the verify-credentials workflow
 // needs to authenticate were actually configured. When they're absent the use
 // case skips dispatching verify (issue #219) and surfaces `missingCredNote`
@@ -85,19 +54,6 @@ export interface ProviderConfigurationPorts extends SetupProviderCredentialPorts
 export interface ProviderCredentialStatus {
   credentialsComplete: boolean;
   missingCredNote: string;
-}
-
-export function providerCredentialStatus(
-  provider: string,
-  data: CreateEnvironmentRequestData,
-  ports: Pick<
-    ProviderConfigurationPorts,
-    "azureCredential" | "awsCredential" | "optionalString"
-  >
-): ProviderCredentialStatus {
-  return presentProviderCredentialStatus(
-    setupProviderCredentialStatus(provider, data, ports)
-  );
 }
 
 export function presentProviderCredentialStatus({
@@ -127,26 +83,9 @@ export function buildManualRoleAssignmentGuidance(
   return `az role assignment create --assignee ${assignee} --role Contributor --scope ${scope}`;
 }
 
-export async function applyProviderConfiguration(
-  provider: string,
-  data: CreateEnvironmentRequestData,
-  ports: ProviderConfigurationPorts
-): Promise<ProviderCredentialStatus> {
-  return presentProviderCredentialStatus(
-    await applySetupProviderConfiguration(provider, data, {
-      azureCredential: () => ports.azureCredential(),
-      awsCredential: () => ports.awsCredential(),
-      optionalString: (value) => ports.optionalString(value),
-      setEnvironmentVariable: (name, value) =>
-        ports.setEnvironmentVariable(name, value),
-      report: (event) => reportProviderConfiguration(event, ports)
-    })
-  );
-}
-
 export function reportProviderConfiguration(
   event: SetupProviderConfigurationEvent,
-  ports: Pick<ProviderConfigurationPorts, "pushStep">
+  ports: { pushStep(message: string): void }
 ): void {
   switch (event.kind) {
     case "configuration-started":
@@ -215,113 +154,12 @@ export function describeWorkflowCommitFailure(
   };
 }
 
-export interface WorkflowPublishRefusal {
-  outcome: "refused";
-  status: number;
-  error: string;
-  code: string;
-  ghError: string;
-}
-
-export interface WorkflowPublishCancelled {
-  outcome: "cancelled";
-}
-
-export interface WorkflowPublishCompleted {
-  outcome: "published";
-}
-
-export type WorkflowPublishResult =
-  WorkflowPublishRefusal | WorkflowPublishCancelled | WorkflowPublishCompleted;
-
-export interface WorkflowPublisherPorts {
-  ghCommandPresentation?: GhCommandPresentation;
-  generateVerifyWorkflow(
-    environment: string,
-    provider: string,
-    setupPushOperationMarker?: string
-  ): Promise<string>;
-  generateDeployWorkflow(
-    environment: string,
-    appFile: string
-  ): Promise<Record<string, string>>;
-  generateDeleteWorkflow(environment: string): Promise<Record<string, string>>;
-  commitWorkflowFileSmart(
-    path: string,
-    contentB64: string,
-    message: string
-  ): Promise<WorkflowCommitOutcome>;
-  recordCommittedWorkflowFile(
-    operation: CreateEnvironmentOperation,
-    entry: {
-      path: string;
-      branch: string | null;
-      mode: string;
-      commitSha: string | null;
-      blobSha: string | null;
-      contentSha256: string | null;
-      previousBlobSha: string | null;
-      previousBlobKnown: boolean;
-    }
-  ): void;
-  deleteLegacyDeployWorkflow(
-    repo: string,
-    branch?: string
-  ): Promise<boolean | "cancelled">;
-  pullRequestBranch(): string | null;
-  errorMessage(error: unknown): string;
-  pushStep(message: string): void;
-  // The use case's own cancellation gate. `false` means the operation was
-  // finalized and answered, so publication must stop without touching GitHub
-  // again.
-  gate(): Promise<boolean>;
-}
-
-export interface WorkflowPublisherTarget {
-  operation: CreateEnvironmentOperation;
-  targetRepo: string;
-  envName: string;
-  provider: string;
-  defaultBranch: string;
-  setupPushOperationMarker?: string;
-}
-
-// Steps 3, 4 and 4b. The verify and deploy workflows are required; the delete
-// workflows are best effort, so a failure there is narrated and the flow
-// continues.
-export async function publishWorkflowFiles(
-  ports: WorkflowPublisherPorts,
-  target: WorkflowPublisherTarget
-): Promise<WorkflowPublishResult> {
-  const result = await publishSetupWorkflowFiles(
-    {
-      ...ports,
-      encode: encodeWorkflowContent,
-      report: (event) => reportWorkflowPublication(event, ports),
-      recordCommittedWorkflowFile: (entry) =>
-        ports.recordCommittedWorkflowFile(target.operation, entry)
-    },
-    target
-  );
-  if (result.outcome === "refused") {
-    return {
-      outcome: "refused",
-      ...describeWorkflowCommitFailure(
-        result.workflow,
-        result.path,
-        target.targetRepo,
-        result.stderr,
-        ports.ghCommandPresentation
-      ),
-      ghError: result.stderr
-    };
-  }
-  return result;
-}
-
 export function reportWorkflowPublication(
   event: SetupWorkflowPublicationEvent,
-  ports: Pick<WorkflowPublisherPorts, "pushStep" | "errorMessage">
+  ports: {
+    pushStep(message: string): void;
+    errorMessage(error: unknown): string;
+  }
 ): void {
   switch (event.kind) {
     case "checking":
