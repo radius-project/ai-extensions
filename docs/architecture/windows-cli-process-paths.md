@@ -1,6 +1,8 @@
 # Windows CLI process call paths
 
-The Radius Canvas has one shared process adapter for GitHub, Azure, AWS, and Kubernetes command-line calls. Issue #384 is confined to the Windows non-`gh` branch of that adapter; the diagram shows every current route family that reaches it and the separate Radius CLI path that bypasses it.
+The Radius Canvas has one shared process adapter for GitHub, Azure, AWS, and Kubernetes command-line calls. Issue #384 is confined to the Windows non-`gh` branch of that adapter; the diagram records the route families at the investigation baseline and the separate Radius CLI path that bypasses it.
+
+**Historical entry points:** The setup routes shown below have since been removed. Operation execution now calls `createAzureSetupService` and `createConfigureEnvironmentService` directly; see the [current setup ownership](../design/2026-09-github-radius-migration-inventory.md#stage-2-obsolete-setup-endpoint-removal). The diagrams preserve the issue's original call path, not a supported HTTP setup interface.
 
 ```mermaid
 graph TD

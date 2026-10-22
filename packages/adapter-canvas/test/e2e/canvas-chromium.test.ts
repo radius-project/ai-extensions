@@ -3583,6 +3583,162 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#env-step1-next")).toBeDisabled();
   });
 
+  test("exposes setup service failure details and diagnostic download through the real task owner by keyboard @safety", async ({
+    page,
+    canvas
+  }) => {
+    const ops = await import("../../src/operations.js");
+    const { createAzureSetupService } =
+      await import("../../src/server/services/azure-setup.js");
+    const { setupStageResult } =
+      await import("../../src/server/services/setup-outcome.js");
+    const { createAzureAutoSetupTestDependencies } =
+      await import("../support/server/azure-auto-setup.js");
+    let finalizations = 0;
+    const diagnostics: Array<{ code: string; message: string }> = [];
+    const service = createAzureSetupService(
+      createAzureAutoSetupTestDependencies({
+        operations: {
+          get: (id) => ops.operations.get(id),
+          isStale: ops.isStale,
+          enterStage: ops.enterStage,
+          persist: () => ops.operations.persist(),
+          report: (diagnostic) => diagnostics.push(diagnostic)
+        },
+        external: { getSelectedGitHubExecutor: () => undefined },
+        finalizeSetupFailure: async (operation) => {
+          expect(operation?.operationId).toMatch(/^op_/);
+          finalizations += 1;
+          throw new Error("private finalizer exception");
+        }
+      })
+    );
+    canvas.setEnvironmentOperationRunner(async (operationId) => {
+      const operation = ops.operations.get(operationId);
+      if (!operation) throw new Error("Setup operation was not saved.");
+      ops.enterStage(operation, ops.STAGE_AUTHORIZE_IDENTITY);
+      const outcome = await service({
+        data: {
+          repo: REPOSITORY,
+          environment: "fixture-environment",
+          operationId,
+          resourceGroup: "fixture-resource-group",
+          cluster: "fixture-cluster",
+          subscriptionId: PROFILE_SUBSCRIPTION_ID
+        }
+      });
+      expect(outcome).toMatchObject({
+        kind: "failed",
+        status: 500,
+        body: { code: "setup-handler-failed" }
+      });
+      // Use the production outcome conversion; the real task owner, not the
+      // fixture, must terminalize the operation after the service rejects it.
+      setupStageResult(outcome);
+    });
+    const selected = {
+      id: "fixture-cluster",
+      name: "Fixture Cluster",
+      resourceGroup: "fixture-resource-group"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      })
+    );
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+    await expect(page.locator("#env-gh-identity-note")).toContainText(
+      "Ready to configure deployments"
+    );
+    await page.getByLabel("Environment name").fill("fixture-environment");
+    await page.getByRole("button", { name: "Re-check" }).click();
+    await expect(page.locator("#env-gh-identity-note")).toContainText(
+      "Ready to configure deployments"
+    );
+    await page
+      .getByLabel("Resource Group", { exact: true })
+      .selectOption(selected.resourceGroup);
+    await expect(page.getByLabel("Cluster", { exact: true })).toHaveValue(
+      selected.id
+    );
+    const started = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/operations" &&
+        response.request().method() === "POST"
+    );
+    await page.locator("#deploy-btn:not([disabled])").click();
+    const payload = await (await started).json();
+    expect(payload.operationId).toMatch(/^op_/);
+    await expect
+      .poll(
+        async () => (await canvas.operationRecord(payload.operationId)).state
+      )
+      .toBe("failed");
+    const record = await canvas.operationRecord(payload.operationId);
+    expect(record.failure).toMatchObject({
+      code: "server-owned-task-failed",
+      message: expect.stringContaining(
+        "Setup could not finish reporting its outcome."
+      )
+    });
+    expect(finalizations).toBe(1);
+    expect(diagnostics).toEqual([
+      { code: "setup-handler-failed", message: "private finalizer exception" }
+    ]);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${payload.operationId}`
+    );
+    await expect(page.locator("#env-progress-panel")).toContainText(
+      "Setup could not finish reporting its outcome. In the Environments panel, open Show details and select Download diagnostic snapshot to review the recorded status before deciding whether to retry."
+    );
+    await expect(page.locator("body")).not.toContainText(
+      "private finalizer exception"
+    );
+    const details = page.locator("#env-progress-details > summary");
+    await expect(details).toHaveText("Show details");
+    await details.focus();
+    await page.keyboard.press("Enter");
+    const downloadButton = page.getByRole("button", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(downloadButton).toBeVisible();
+    await downloadButton.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(dialog).toBeVisible();
+    await expectNoWcagViolations(page);
+    const downloadLink = dialog.getByRole("link", {
+      name: "Download snapshot"
+    });
+    await downloadLink.focus();
+    const downloading = page.waitForEvent("download");
+    await page.keyboard.press("Enter");
+    const download = await downloading;
+    const filename = await download.path();
+    if (!filename) throw new Error("Diagnostic download has no local path.");
+    const snapshot = await fs.readFile(filename, "utf8");
+    expect(JSON.parse(snapshot)).toMatchObject({
+      identifierProfile: "support_safe",
+      operation: {
+        operationId: payload.operationId,
+        lifecycle: { state: "failed", currentStage: "authorize_identity" },
+        failure: { classification: "unknown", stage: "authorize_identity" }
+      }
+    });
+    expect(snapshot).not.toContain("private finalizer exception");
+    await expect(dialog).toBeHidden();
+    await expect(downloadButton).toBeFocused();
+    await expectNoWcagViolations(page);
+  });
+
   test("keeps composed service-principal retry and cleanup results durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
     page,
     canvas
