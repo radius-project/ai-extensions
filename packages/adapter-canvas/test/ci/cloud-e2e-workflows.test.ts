@@ -1145,12 +1145,18 @@ describe("cloud-e2e-cleanup.yml", () => {
         });
         expect(result.error).toBeUndefined();
         expect(result.stdout).toContain('"azure-cli":"2.91.0"');
+        const stderr = result.stderr.replaceAll("\r", "");
         // A failed delete does not stop the rest of the group being reclaimed.
-        expect((await readFile(deletes, "utf8")).trim().split("\n")).toEqual([
-          failing,
-          passing
-        ]);
-        const summaryText = await readFile(summary, "utf8");
+        expect(
+          (await readFile(deletes, "utf8"))
+            .replaceAll("\r", "")
+            .trim()
+            .split("\n")
+        ).toEqual([failing, passing]);
+        const summaryText = (await readFile(summary, "utf8")).replaceAll(
+          "\r",
+          ""
+        );
         if (scenario === "all deletes succeed") {
           expect(result.status).toBe(0);
           expect(summaryText).toContain("reclaimed from synthetic-group: 2");
@@ -1158,11 +1164,9 @@ describe("cloud-e2e-cleanup.yml", () => {
           return;
         }
         expect(result.status).toBe(1);
-        expect(result.stderr).toContain(
-          `ERROR: synthetic failure for ${failing}`
-        );
-        expect(result.stderr).toContain(`INFO: deleted ${passing}`);
-        expect(result.stderr).toContain(
+        expect(stderr).toContain(`ERROR: synthetic failure for ${failing}`);
+        expect(stderr).toContain(`INFO: deleted ${passing}`);
+        expect(stderr).toContain(
           "delete Microsoft.DBforPostgreSQL/flexibleServers pgsql-first"
         );
         expect(summaryText).toContain("reclaimed from synthetic-group: 1");

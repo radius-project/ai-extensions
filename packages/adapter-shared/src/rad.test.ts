@@ -80,10 +80,10 @@ function resetManagedBin(): void {
   fs.rmSync(path.dirname(MANAGED_RAD_PATH), { recursive: true, force: true });
 }
 
-function writeManagedBicepStub(): void {
-  fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
-  fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
-  if (process.platform !== "win32") fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+function writeManagedBicepStub(bicepPath: string = MANAGED_BICEP_PATH): void {
+  fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
+  fs.writeFileSync(bicepPath, "bicep");
+  if (process.platform !== "win32") fs.chmodSync(bicepPath, 0o755);
 }
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
@@ -1197,11 +1197,7 @@ describe("buildGraphViaRad", () => {
       process.env.TMPDIR = root;
       vi.resetModules();
       mod = await import("./rad.js");
-      fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
-      fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
-      if (process.platform !== "win32") {
-        fs.chmodSync(mod.MANAGED_BICEP_PATH, 0o755);
-      }
+      writeManagedBicepStub(mod.MANAGED_BICEP_PATH);
     });
 
     afterEach(() => {
@@ -2518,8 +2514,7 @@ describe("managed rad download and reconciliation boundaries", () => {
       },
       calls
     );
-    fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
-    fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+    writeManagedBicepStub();
     const logs: string[] = [];
 
     await expect(
@@ -2592,8 +2587,7 @@ describe("managed rad download and reconciliation boundaries", () => {
       },
       calls
     );
-    fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
-    fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+    writeManagedBicepStub();
     const logs: string[] = [];
 
     await expect(
@@ -2629,7 +2623,7 @@ describe("managed rad download and reconciliation boundaries", () => {
       optionsCalls
     );
     fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
-    fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+    writeManagedBicepStub();
 
     await expect(mod.ensureRadBinary()).resolves.toBe(mod.MANAGED_RAD_PATH);
     expect(optionsCalls[0].headers).toMatchObject({
@@ -2659,7 +2653,7 @@ describe("managed rad download and reconciliation boundaries", () => {
     );
     fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
     fs.writeFileSync(`${mod.MANAGED_RAD_PATH}.download.lock`, "peer");
-    fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+    writeManagedBicepStub();
     const logs: string[] = [];
 
     try {
@@ -2717,8 +2711,7 @@ describe("managed rad download and reconciliation boundaries", () => {
         },
         []
       );
-      fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
-      fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+      writeManagedBicepStub();
       vi.spyOn(fs, "renameSync").mockImplementation((source, destination) => {
         if (destination === mod.MANAGED_RAD_PATH) {
           fs.copyFileSync(process.execPath, mod.MANAGED_RAD_PATH);
@@ -2789,7 +2782,7 @@ describe("managed rad download and reconciliation boundaries", () => {
       const mod = await import("./rad.js");
       fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
       fs.writeFileSync(`${mod.MANAGED_RAD_PATH}.download.lock`, "peer");
-      fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+      writeManagedBicepStub();
       const asset = mod.releaseAsset();
       mockHttpsGet(
         {
@@ -2844,7 +2837,7 @@ describe("managed rad download and reconciliation boundaries", () => {
     const mod = await import("./rad.js");
     fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
     fs.writeFileSync(mod.MANAGED_RAD_PATH, "not an executable image");
-    fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+    writeManagedBicepStub();
     const logs: string[] = [];
 
     await expect(
@@ -2877,7 +2870,7 @@ describe("managed rad download and reconciliation boundaries", () => {
       const mod = await import("./rad.js");
       fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
       fs.copyFileSync(process.execPath, mod.MANAGED_RAD_PATH);
-      fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+      writeManagedBicepStub();
       mockHttpsGet({}, []);
       const logs: string[] = [];
 
@@ -2922,7 +2915,7 @@ describe("managed rad download and reconciliation boundaries", () => {
       const mod = await import("./rad.js");
       fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
       fs.copyFileSync(process.execPath, mod.MANAGED_RAD_PATH);
-      fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+      writeManagedBicepStub();
 
       await expect(mod.ensureRadBinary()).resolves.toBe(mod.MANAGED_RAD_PATH);
       expect(fs.statSync(mod.MANAGED_RAD_PATH).size).toBe(
@@ -2940,8 +2933,7 @@ describe("managed rad download and reconciliation boundaries", () => {
     process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
     vi.resetModules();
     const mod = await import("./rad.js");
-    fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
-    fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
+    writeManagedBicepStub();
 
     const first = mod.ensureRadBinary();
     const second = mod.ensureRadBinary();
