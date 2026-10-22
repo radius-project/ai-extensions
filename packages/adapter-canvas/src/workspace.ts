@@ -3,7 +3,8 @@
 // checkout for generated app model files on the active branch.
 
 import { execFile } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -58,7 +59,9 @@ function runGit(
 // answer can be "nothing". This variant keeps the two apart.
 function runGitResult(
   workspacePath: string | null | undefined,
-  args: readonly string[]
+  args: readonly string[],
+  trimOutput = true,
+  maxBuffer = 1024 * 1024
 ): Promise<{ ok: boolean; stdout: string }> {
   return new Promise((resolve) => {
     if (!workspacePath) {
@@ -68,9 +71,15 @@ function runGitResult(
     execFile(
       "git",
       ["-C", workspacePath, ...args],
-      { timeout: 5000, encoding: "utf8" },
+      { timeout: 5000, encoding: "utf8", maxBuffer },
       (err, stdout) => {
-        resolve({ ok: !err, stdout: err ? "" : stdout.trim() });
+        resolve({
+          ok: !err,
+          stdout:
+            err ? ""
+            : trimOutput ? stdout.trim()
+            : stdout
+        });
       }
     );
   });
@@ -650,6 +659,158 @@ export async function workspaceHeadCommit(
 // has to commit a generated model before pushing. One list means the paths a
 // push commits can never drift from the paths a freshness check discounts.
 const GENERATED_PATHS: readonly string[] = GENERATED_MODEL_PATHS;
+
+// Bounds one fingerprint of saved source edits. A large untracked dataset or a
+// slow disk must not hold a graph request open. Over budget, the read throws:
+// the revision is then unknown, never a hash of only part of the edits.
+export interface SourceRevisionBudget {
+  readonly maxFiles: number;
+  readonly maxBytes: number;
+  readonly maxMs: number;
+  readonly now?: () => number;
+}
+
+export const SOURCE_REVISION_BUDGET: SourceRevisionBudget = {
+  maxFiles: 5_000,
+  maxBytes: 256 * 1024 * 1024,
+  maxMs: 10_000
+};
+
+/**
+ * Identifies HEAD and saved source edits, excluding generated model files.
+ * An unreadable, changing, or over-budget checkout throws rather than proving
+ * a change.
+ */
+export async function workspaceSourceRevision(
+  workspacePath: string | null | undefined,
+  budget: SourceRevisionBudget = SOURCE_REVISION_BUDGET
+): Promise<string> {
+  const now = budget.now ?? Date.now;
+  const deadline = now() + budget.maxMs;
+  let bytesRead = 0;
+  const overBudget = (): Error =>
+    new Error("Saved workspace source changes exceed the read budget.");
+  const head = await workspaceHeadCommit(workspacePath);
+  if (!head || !workspacePath) {
+    throw new Error("The workspace source revision could not be read.");
+  }
+  const sourcePaths = [
+    "--",
+    ".",
+    ...GENERATED_PATHS.map((generated) => `:(exclude)${generated}`)
+  ];
+  const [diff, untracked] = await Promise.all([
+    runGitResult(
+      workspacePath,
+      [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        head,
+        ...sourcePaths
+      ],
+      false,
+      16 * 1024 * 1024
+    ),
+    runGitResult(
+      workspacePath,
+      ["ls-files", "--others", "--exclude-standard", "-z", ...sourcePaths],
+      false,
+      16 * 1024 * 1024
+    )
+  ]);
+  if (!diff.ok || !untracked.ok) {
+    throw new Error("Saved workspace source changes could not be read.");
+  }
+  const hash = createHash("sha256");
+  hash.update(head);
+  const canonicalWorkspace = await fs.realpath(workspacePath);
+  const trackedChanges = new Set(diff.stdout.split("\0").filter(Boolean));
+  const files = new Set([
+    ...trackedChanges,
+    ...untracked.stdout.split("\0").filter(Boolean)
+  ]);
+  if (files.size > budget.maxFiles) throw overBudget();
+  for (const relative of [...files].sort()) {
+    if (now() > deadline) throw overBudget();
+    const file = path.resolve(workspacePath, relative);
+    if (!isWorkspacePath(workspacePath, file)) {
+      throw new Error("A source file is outside the workspace.");
+    }
+    let stat;
+    try {
+      const parent = await fs.realpath(path.dirname(file));
+      if (!isWorkspacePath(canonicalWorkspace, parent)) {
+        throw new Error("A source file is outside the workspace.");
+      }
+      stat = await fs.lstat(file);
+    } catch (error) {
+      if (
+        trackedChanges.has(relative) &&
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        hash.update(JSON.stringify([relative, "deleted"]));
+        continue;
+      }
+      throw error;
+    }
+    if (stat.isDirectory()) {
+      // Git lists nested repositories and submodules as directories. Their
+      // commits count as source changes; uncommitted nested edits need Refresh.
+      const nestedHead = await runGitResult(file, [
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}"
+      ]);
+      const nestedRevision =
+        nestedHead.ok ? nestedHead : (
+          await runGitResult(file, ["symbolic-ref", "HEAD"])
+        );
+      if (!nestedRevision.ok)
+        throw new Error("A nested source repository could not be read.");
+      hash.update(
+        JSON.stringify([relative, "repository", nestedRevision.stdout])
+      );
+      continue;
+    }
+    hash.update(
+      JSON.stringify([
+        relative,
+        stat.isSymbolicLink(),
+        stat.mode & 0o111,
+        stat.size
+      ])
+    );
+    // Read link text, never an external target. Regular files are streamed so
+    // a dataset or binary cannot require one file-sized allocation.
+    if (stat.isSymbolicLink()) {
+      hash.update(await fs.readlink(file));
+    } else if (stat.isFile()) {
+      bytesRead += stat.size;
+      if (bytesRead > budget.maxBytes) throw overBudget();
+      const stream = createReadStream(file);
+      try {
+        for await (const chunk of stream) {
+          if (now() > deadline) throw overBudget();
+          hash.update(chunk);
+        }
+      } finally {
+        stream.destroy();
+      }
+    } else {
+      throw new Error("A source path is not a file.");
+    }
+  }
+  if ((await workspaceHeadCommit(workspacePath)) !== head) {
+    throw new Error("The workspace commit changed while source was read.");
+  }
+  return `workspace:${hash.digest("hex")}`;
+}
 
 /**
  * Which generator-owned paths have changes that are not committed yet — staged,

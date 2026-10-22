@@ -401,7 +401,7 @@ async function inspectRepository(
 
 export function createGitHubAccountReadinessService(
   coordinator: GitHubAccountCoordinator,
-  options: GitHubAccountReadinessServiceOptions = {}
+  options: GitHubAccountReadinessServiceOptions & { ownerKey: string }
 ): GitHubAccountReadinessService {
   const ports = options.ports || {
     probePackageAccess: (executor, repo, environment) =>
@@ -410,11 +410,11 @@ export function createGitHubAccountReadinessService(
   const ghCommandPresentation =
     options.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
   return {
-    async check({ instanceId, repo, environment, login }) {
+    async check({ repo, environment, login }) {
       try {
         const lease = await coordinator.withSelectedAccount(
           login,
-          { instanceId },
+          { ownerKey: options.ownerKey },
           async (executor) => {
             const repository = await inspectRepository(executor, repo);
             // Installation tokens report no OAuth scopes, so workflow access

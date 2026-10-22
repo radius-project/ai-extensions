@@ -237,7 +237,7 @@ export interface AzureAutoSetupDependencies {
 export interface AzureAutoSetupWorkflow {
   operation: AzureAutoSetupOperation;
   steps: string[];
-  respond(status: number, payload: unknown): void;
+  respond(status: number, payload: Record<string, unknown>): void;
   runAz(args: string[]): Promise<AzureAutoSetupCommandResult>;
   runGitHubJson(apiPath: string): Promise<GitHubJsonResponse>;
   fail(

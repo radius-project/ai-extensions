@@ -7,6 +7,8 @@ import { spawn as spawnProcess, execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { redactCredentials } from "../../../src/credential-redaction.js";
+import type { runCommand } from "../../../src/gh.js";
 import {
   cdpUrlForPort,
   probeCdpEndpoint,
@@ -138,6 +140,78 @@ export function buildCopilotAppEnvironment(
   };
 }
 
+export async function prepareCopilotAppGhAuth(
+  appEnv: NodeJS.ProcessEnv,
+  run: typeof runCommand
+): Promise<void> {
+  const token = appEnv.GH_TOKEN?.trim();
+  const expectedLogin = appEnv.GH_PACKAGES_USER?.trim();
+  if (!token || !expectedLogin || !appEnv.GH_CONFIG_DIR?.trim())
+    throw new Error(
+      "Copilot app sign-in requires a token, an expected account, and an isolated GH_CONFIG_DIR."
+    );
+  const env: NodeJS.ProcessEnv = Object.fromEntries(
+    Object.entries(appEnv).map(([key, value]) => [key.toUpperCase(), value])
+  );
+  // gh refuses stored login when a token override is present. Verification
+  // must also use stored credentials, not accidentally prove the override.
+  for (const name of [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "COPILOT_GITHUB_TOKEN",
+    "GH_PACKAGES_TOKEN",
+    "GH_HOST",
+    "GH_DEBUG"
+  ])
+    delete env[name];
+  env.GH_PROMPT_DISABLED = "1";
+  const options = {
+    env,
+    preserveGitHubToken: true,
+    timeout: 60_000,
+    stdin: ""
+  };
+  try {
+    await run(
+      "gh",
+      [
+        "auth",
+        "login",
+        "--hostname",
+        "github.com",
+        "--git-protocol",
+        "https",
+        "--with-token"
+      ],
+      { ...options, stdin: `${token}\n` }
+    );
+    await run(
+      "gh",
+      ["auth", "status", "--active", "--hostname", "github.com"],
+      options
+    );
+    const login = await run(
+      "gh",
+      ["api", "user", "--hostname", "github.com", "--jq", ".login"],
+      options
+    );
+    if (login.trim().toLowerCase() !== expectedLogin.toLowerCase())
+      throw new Error(
+        `Stored GitHub CLI account is ${login.trim() || "<empty>"}; expected ${expectedLogin}.`
+      );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const cause = new Error(redactCredentials(message, [token]));
+    throw new Error(
+      `Copilot app GitHub CLI sign-in failed: ${cause.message}`,
+      // eslint-disable-next-line preserve-caught-error -- The raw cause can contain the PAT.
+      { cause }
+    );
+  }
+}
+
 /** True when `tasklist /FO CSV /NH` output lists the image name. */
 export function tasklistHasImage(output: string, image: string): boolean {
   const wanted = image.toLowerCase();
@@ -199,7 +273,14 @@ export async function cleanupCopilotApp(
     errors.push(error);
   }
   if (errors.length > 0)
-    throw new AggregateError(errors, "Copilot app cleanup failed.");
+    throw new AggregateError(
+      errors,
+      `Copilot app cleanup failed: ${errors
+        .map((error) =>
+          error instanceof Error ? error.message : String(error)
+        )
+        .join("; ")}`
+    );
 }
 
 /**

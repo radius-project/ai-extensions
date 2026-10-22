@@ -1706,6 +1706,114 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(calls.log).not.toContain("settleDeployStatuses(failure)");
   });
 
+  function terminalFailureFixture(
+    overrides: Partial<CanvasState> = {},
+    progress: Partial<DeployProgress> = {}
+  ) {
+    const ids = ["db", "web", "api", "cache", "queue"];
+    return fakes(
+      { log: [] },
+      {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "failed",
+          deployRunId: 7,
+          deployingResources: [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "InvalidRequest: bad DBName"
+            },
+            {
+              id: "web",
+              deployStatus: "failed",
+              deployMessage: "Error: run-level"
+            },
+            { id: "api", deployStatus: "failed", deployMessage: "monitor" },
+            { id: "cache", deployStatus: "failed", deployMessage: "monitor" },
+            { id: "queue", deployStatus: "failed", deployMessage: " " }
+          ],
+          ...overrides
+        },
+        modeledResources: ids.map((id) => ({ id })),
+        reader: {
+          graph: {
+            graph: null,
+            status: "ok",
+            artifact: {
+              id: 1,
+              name: "radius-deploy-status",
+              created_at: "2026-09-11T00:02:00Z"
+            }
+          },
+          progress: progressPayload(
+            [
+              { id: "db", status: "failed" },
+              { id: "web", status: "in_progress" },
+              { id: "api", status: "failed", message: "producer explained" },
+              { id: "cache", status: "success" },
+              { id: "queue", status: "failed" }
+            ].map((resource) => ({
+              ...resource,
+              name: resource.id,
+              type: "Radius.Compute/containers"
+            })) as DeployProgress["resources"],
+            { runId: 7, state: "failed", ...progress }
+          )
+        }
+      }
+    );
+  }
+
+  it("keeps the monitor's own errors on nodes a terminal failed artifact left unexplained", async () => {
+    const { deps } = terminalFailureFixture();
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(
+      payload.resources.map((resource) => [
+        resource.id,
+        resource.deployStatus,
+        resource.deployMessage
+      ])
+    ).toEqual([
+      ["db", "failed", "InvalidRequest: bad DBName"],
+      ["web", "failed", "Error: run-level"],
+      ["api", "failed", "producer explained"],
+      ["cache", "success", undefined],
+      ["queue", "failed", undefined]
+    ]);
+  });
+
+  it.each([
+    [
+      "the artifact is from a newer run",
+      { deployFinishedAt: Date.parse("2026-09-11T00:01:00Z") },
+      { runId: 8 }
+    ],
+    ["the monitor has not failed", { deployStatus: "complete" }, {}],
+    [
+      "the failure has a classified kind",
+      { deployErrorKind: "run-unconfirmed" },
+      {}
+    ],
+    ["no run is monitored", { deployRunId: undefined }, {}]
+  ] as const)(
+    "does not borrow monitor errors when %s",
+    async (_case, overrides, progress) => {
+      const { deps } = terminalFailureFixture(overrides, progress);
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0].deployStatus).not.toBe("pending");
+      expect(payload.resources[0].deployMessage).toBeUndefined();
+    }
+  );
+
   it.each([
     ["failed", undefined, undefined, false],
     ["succeeded", undefined, undefined, false],

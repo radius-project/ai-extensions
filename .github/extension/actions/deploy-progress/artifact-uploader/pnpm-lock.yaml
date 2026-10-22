@@ -305,8 +305,8 @@ packages:
   bottleneck@2.19.5:
     resolution: {integrity: sha1-XfC5D1n9R2VuvmPHiphBkgXK3ZE=}
 
-  brace-expansion@2.1.4:
-    resolution: {integrity: sha1-WJ2rEcABjQNmvmTNi/Esjb7MgyY=}
+  brace-expansion@2.1.7:
+    resolution: {integrity: sha512-uZbew1NqdmPDTMJ8ah1y+b+9QEJrfkXFk3RcTQw3X0jW/xRUvFKsg1CfQdSYGdTbXZWExtU3J3ccxtnfw1Fi0g==}
 
   buffer-crc32@1.0.0:
     resolution: {integrity: sha1-oQmTuQVQgdVTBL2f60oHLeF59AU=}
@@ -596,8 +596,8 @@ packages:
   undici-types@7.16.0:
     resolution: {integrity: sha1-/8zf82rqSITL/OmnUKBYAiT1ikY=}
 
-  undici@6.28.0:
-    resolution: {integrity: sha1-nw44V0T+9QIdZZbFvM14P2EZPBw=}
+  undici@6.29.0:
+    resolution: {integrity: sha512-R+RODBqp6i2pPflGdq+xIOUkl+RNfGgHwoinecKu/JCuf2uO06cOKoDbI2P7Dn6KcswdKwrczbU6IYJ6K8X+wg==}
     engines: {node: '>=18.17'}
 
   universal-user-agent@7.0.3:
@@ -671,17 +671,17 @@ snapshots:
       '@octokit/plugin-rest-endpoint-methods': 17.0.0(@octokit/core@7.0.7)
       '@octokit/request': 10.0.13
       '@octokit/request-error': 7.1.1
-      undici: 6.28.0
+      undici: 6.29.0
 
   '@actions/http-client@3.0.2':
     dependencies:
       tunnel: 0.0.6
-      undici: 6.28.0
+      undici: 6.29.0
 
   '@actions/http-client@4.0.1':
     dependencies:
       tunnel: 0.0.6
-      undici: 6.28.0
+      undici: 6.29.0
 
   '@actions/io@3.0.2': {}
 
@@ -1019,7 +1019,7 @@ snapshots:
 
   bottleneck@2.19.5: {}
 
-  brace-expansion@2.1.4:
+  brace-expansion@2.1.7:
     dependencies:
       balanced-match: 1.0.2
 
@@ -1167,11 +1167,11 @@ snapshots:
 
   minimatch@5.1.9:
     dependencies:
-      brace-expansion: 2.1.4
+      brace-expansion: 2.1.7
 
   minimatch@9.0.9:
     dependencies:
-      brace-expansion: 2.1.4
+      brace-expansion: 2.1.7
 
   minimist@1.2.8: {}
 
@@ -1313,7 +1313,7 @@ snapshots:
 
   undici-types@7.16.0: {}
 
-  undici@6.28.0: {}
+  undici@6.29.0: {}
 
   universal-user-agent@7.0.3: {}
 

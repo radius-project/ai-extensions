@@ -3,10 +3,18 @@ import type {
   WorkflowTarget
 } from "./workflow-observation.js";
 import { confirmedWorkflowConclusion } from "./workflow-observation.js";
+import { WorkflowReadInterruptedError } from "./workflow-read-policy.js";
 import { redactCredentials } from "./credential-redaction.js";
 
 // Must match the step in .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
+
+// Waits before each retry of the run-log read. One brief network drop must not
+// erase the Radius error, but status polling waits on this collection before it
+// publishes the failure, so the retries stay few and short.
+const RUN_LOG_READ_RETRY_DELAYS_MS: readonly number[] = [1000, 2000];
+
+const RAD_DEPLOY_ERROR_MAX_CHARS = 4000;
 
 function failedPostDeploymentTeardown(
   run: Pick<WorkflowRunDetail, "steps"> &
@@ -63,13 +71,46 @@ export interface WorkflowFailureReads {
    * do not necessarily invoke this callback.
    */
   redactDiagnostic(value: string): string;
+  /** Waits between run-log read attempts. A rejection ends the retries. */
+  sleep(milliseconds: number): Promise<void>;
+}
+
+export interface RadDeployResourceError {
+  target: string;
+  message: string;
 }
 
 export interface WorkflowFailure {
   message: string;
   radiusError: string;
+  /** Each failed resource's own innermost error, parsed from the full rad error. */
+  resourceErrors: RadDeployResourceError[];
   authDriftMessage: string;
   narration: string[];
+}
+
+async function readRunLogWithRetry(
+  target: WorkflowTarget,
+  reads: WorkflowFailureReads
+): Promise<{ log: string | null; failed: boolean }> {
+  for (let attempt = 0; ; attempt++) {
+    let failed = false;
+    let interrupted = false;
+    try {
+      const log = await reads.readLog(target.repo, target.runId);
+      if (log?.trim()) return { log, failed: false };
+    } catch (error) {
+      failed = true;
+      interrupted = error instanceof WorkflowReadInterruptedError;
+    }
+    const delay = RUN_LOG_READ_RETRY_DELAYS_MS[attempt];
+    if (interrupted || delay === undefined) return { log: null, failed };
+    try {
+      await reads.sleep(delay);
+    } catch {
+      return { log: null, failed };
+    }
+  }
 }
 
 export async function collectWorkflowFailure(
@@ -85,6 +126,9 @@ export async function collectWorkflowFailure(
   if (typeof reads.redactDiagnostic !== "function") {
     throw new Error("Workflow diagnostics require a credential redactor.");
   }
+  if (typeof reads.sleep !== "function") {
+    throw new Error("Workflow diagnostics require a sleep for log retries.");
+  }
   const redact = (value: string): string =>
     redactCredentials(reads.redactDiagnostic(value));
   const { conclusion, steps } = run;
@@ -94,6 +138,7 @@ export async function collectWorkflowFailure(
     return {
       message: "Workflow outcome is unconfirmed. View the full run: " + url,
       radiusError: "",
+      resourceErrors: [],
       authDriftMessage: "",
       narration: []
     };
@@ -127,13 +172,9 @@ export async function collectWorkflowFailure(
   // quoted value must not consume the following diagnostics on another pass.
   message = redact(message);
   const runLink = redact("\n\nView the full run: " + url);
-  let log: string | null = null;
   const unavailable: string[] = [];
-  try {
-    log = await reads.readLog(target.repo, target.runId);
-  } catch {
-    unavailable.push("The workflow log could not be read.");
-  }
+  const { log, failed: logFailed } = await readRunLogWithRetry(target, reads);
+  if (logFailed) unavailable.push("The workflow log could not be read.");
   const claimHelp = redact(
     explainOidcEnterpriseClaim(
       redact(extractGitHubActionsStepLog(log, "Azure Login (OIDC)"))
@@ -163,7 +204,7 @@ export async function collectWorkflowFailure(
           step.conclusion === "failure"
       )
     ) ?
-      extractRadDeployError(redact(deployLog))
+      extractFullRadDeployError(redact(deployLog))
     : "";
   const teardownLog = extractGitHubActionsStepLog(log, "Teardown");
   const teardownJobs = new Set(
@@ -171,12 +212,23 @@ export async function collectWorkflowFailure(
   );
   const teardownDetail =
     teardownJob && teardownJobs.size === 1 && teardownJobs.has(teardownJob) ?
-      extractRadDeployError(redact(teardownLog))
+      extractFullRadDeployError(redact(teardownLog))
     : "";
-  const detail =
+  // Per-resource errors are parsed before the published detail is shortened,
+  // because a larger application's error JSON outgrows that limit.
+  const fullDetail =
     teardownJob ? teardownDetail : (
-      primary || extractRadDeployError(redact(log || ""))
+      primary || extractFullRadDeployError(redact(log || ""))
     );
+  const detail = fullDetail.slice(0, RAD_DEPLOY_ERROR_MAX_CHARS);
+  // Parsing decodes JSON escapes, so the decoded text is sanitized again.
+  const resourceErrors =
+    teardownJob ?
+      []
+    : extractRadDeployResourceErrors(fullDetail).map((error) => ({
+        target: redact(error.target),
+        message: redact(error.message)
+      }));
   if (detail) {
     message += "\n\n" + detail;
     narration.push(
@@ -217,6 +269,7 @@ export async function collectWorkflowFailure(
   return {
     message,
     radiusError: detail,
+    resourceErrors,
     authDriftMessage,
     narration
   };
@@ -441,7 +494,7 @@ export function classifyDeployCloudAuthDrift(
 
 export function extractRadDeployError(
   logText?: string | null,
-  maxChars = 4000
+  maxChars = RAD_DEPLOY_ERROR_MAX_CHARS
 ): string {
   if (!logText) return "";
   // Strip the "job\tstep\ttimestamp " prefix `gh run view --log` adds, if present,
@@ -474,4 +527,94 @@ export function extractRadDeployError(
   }
   // Fallback: collect trailing error-ish lines.
   return extractErrorLines(lines.join("\n"), 20).join("\n").slice(0, maxChars);
+}
+
+function extractFullRadDeployError(logText: string): string {
+  return extractRadDeployError(logText, Number.POSITIVE_INFINITY);
+}
+
+interface RadErrorNode {
+  code: string;
+  message: string;
+  target: string;
+  details: RadErrorNode[];
+}
+
+function radErrorNodes(values: unknown): RadErrorNode[] {
+  if (!Array.isArray(values)) return [];
+  const text = (field: unknown) =>
+    typeof field === "string" ? field.trim() : "";
+  return values.flatMap((value: unknown) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value))
+      return [];
+    const record = value as Record<string, unknown>;
+    return [
+      {
+        code: text(record.code),
+        message: text(record.message),
+        target: text(record.target),
+        details: radErrorNodes(record.details)
+      }
+    ];
+  });
+}
+
+function radErrorFailed(node: RadErrorNode): boolean {
+  return node.code !== "OK" && !!(node.code || node.message);
+}
+
+// The deepest failed entries under a node: the cause rather than the wrappers
+// ("ResourceDeploymentFailure", "RecipeDeploymentFailed", "DeploymentFailed")
+// that `rad deploy` reports around it.
+function innermostRadErrors(node: RadErrorNode): string[] {
+  if (!radErrorFailed(node)) return [];
+  const nested = node.details.flatMap(innermostRadErrors);
+  if (nested.length) return nested;
+  return [
+    node.code && node.message ?
+      node.code + ": " + node.message
+    : node.message || node.code
+  ];
+}
+
+/**
+ * extractRadDeployResourceErrors - each failed resource's own error from a
+ * `rad deploy` error block ("Error: { ... }"), keyed by the resource's `target`.
+ *
+ * The run-level error leads with the outer DeploymentFailed wrapper, so a short
+ * copy of it never reaches the resource's real cause. This walks `details`,
+ * and for every targeted entry that failed returns the innermost failure
+ * messages beneath it. The first entry wins for a repeated target. Returns []
+ * when the text holds no parseable error JSON.
+ */
+export function extractRadDeployResourceErrors(
+  radError?: string | null
+): RadDeployResourceError[] {
+  if (!radError) return [];
+  const start = radError.indexOf("{");
+  const end = radError.lastIndexOf("}");
+  if (start < 0 || end < start) return [];
+  let roots: RadErrorNode[];
+  try {
+    roots = radErrorNodes([JSON.parse(radError.slice(start, end + 1))]);
+  } catch {
+    return [];
+  }
+  const errors: RadDeployResourceError[] = [];
+  const seen = new Set<string>();
+  const visit = (node: RadErrorNode): void => {
+    for (const detail of node.details) {
+      const key = detail.target.toLowerCase();
+      if (key && !seen.has(key)) {
+        const messages = [...new Set(innermostRadErrors(detail))];
+        if (messages.length) {
+          seen.add(key);
+          errors.push({ target: detail.target, message: messages.join("\n") });
+        }
+      }
+      visit(detail);
+    }
+  };
+  roots.forEach(visit);
+  return errors;
 }

@@ -316,6 +316,7 @@ const productionHandlers = {
       }),
       triggerAppBicepHandoff: () => {},
       observeModelingRun: () => Promise.resolve(null),
+      readBranchSourceRevision: () => Promise.resolve(""),
       triggerGraphRepairHandoff: () => ({
         attempt: 1,
         maxAttempts: 3,

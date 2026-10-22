@@ -103,7 +103,7 @@ describe("GitHub account coordinator", () => {
       );
       const result = await coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => "done"
       );
       expect(result).toMatchObject({
@@ -116,31 +116,6 @@ describe("GitHub account coordinator", () => {
     }
   });
 
-  it("reports no original account for an injected credential when none is active", async () => {
-    const coordinator = createGitHubAccountCoordinator(
-      ports({
-        activeLogin: "",
-        events: [],
-        source: "injected",
-        requiresKeyringSwitch: false
-      })
-    );
-
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "panel" },
-        async () => "done"
-      )
-    ).resolves.toMatchObject({
-      restoration: {
-        state: "not_required",
-        originalLogin: null,
-        currentLogin: null
-      }
-    });
-  });
-
   it("switches for selected work and restores the original account", async () => {
     const events: string[] = [];
     const coordinator = createGitHubAccountCoordinator(
@@ -149,7 +124,7 @@ describe("GitHub account coordinator", () => {
 
     const result = await coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "panel", operationId: "operation-1" },
+      { ownerKey: "runtime", operationId: "operation-1" },
       async () => {
         events.push("work");
         return "done";
@@ -202,7 +177,7 @@ describe("GitHub account coordinator", () => {
 
     const result = await coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "panel" },
+      { ownerKey: "runtime" },
       async () => {
         activeLogin = "external";
         return "done";
@@ -221,154 +196,6 @@ describe("GitHub account coordinator", () => {
     expect(events.at(-1)).toBe("reset");
   });
 
-  it("uses installation-only recovery guidance when gh is unavailable", async () => {
-    let activeLogin = "original";
-    const coordinator = createGitHubAccountCoordinator(
-      {
-        createExecutor: async (login) => executor(login, "keyring", true, []),
-        getActiveKeyringLogin: async () => activeLogin,
-        switchKeyringAccount: async (login) => {
-          activeLogin = login;
-          return { ok: true };
-        },
-        resetIdentityCache: () => {}
-      },
-      {
-        ghCommandPresentation: {
-          kind: "unavailable",
-          shell: "posix",
-          installationNote: "Install GitHub CLI."
-        }
-      }
-    );
-
-    const result = await coordinator.withSelectedAccount(
-      "selected",
-      { instanceId: "panel" },
-      async () => {
-        activeLogin = "external";
-        return "done";
-      }
-    );
-
-    expect(result.restoration.guidance).toBe("Install GitHub CLI.");
-  });
-
-  it("uses default restoration failure guidance when switching back gives no detail", async () => {
-    let activeLogin = "original";
-    const coordinator = createGitHubAccountCoordinator(
-      {
-        createExecutor: async (login) => executor(login, "keyring", true, []),
-        getActiveKeyringLogin: async () => activeLogin,
-        switchKeyringAccount: async (login) => {
-          if (login === "original") return { ok: false };
-          activeLogin = login;
-          return { ok: true };
-        },
-        resetIdentityCache: () => {}
-      },
-      {
-        ghCommandPresentation: {
-          kind: "unavailable",
-          shell: "posix",
-          installationNote: "Install GitHub CLI."
-        }
-      }
-    );
-
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "panel" },
-        async () => "done"
-      )
-    ).resolves.toMatchObject({
-      restoration: {
-        state: "failed",
-        currentLogin: "selected",
-        guidance: "GitHub account restoration failed. Install GitHub CLI."
-      }
-    });
-  });
-
-  it("reports a non-error failure before restoration can read the active account", async () => {
-    let activeLogin = "original";
-    let activeLoginReads = 0;
-    const coordinator = createGitHubAccountCoordinator(
-      {
-        createExecutor: async (login) => executor(login, "keyring", true, []),
-        getActiveKeyringLogin: async () => {
-          activeLoginReads += 1;
-          if (activeLoginReads === 3) throw "keyring unavailable";
-          return activeLogin;
-        },
-        switchKeyringAccount: async (login) => {
-          activeLogin = login;
-          return { ok: true };
-        },
-        resetIdentityCache: () => {}
-      },
-      {
-        ghCommandPresentation: {
-          kind: "unavailable",
-          shell: "posix",
-          installationNote: "Install GitHub CLI."
-        }
-      }
-    );
-
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "panel" },
-        async () => "done"
-      )
-    ).resolves.toMatchObject({
-      restoration: {
-        state: "failed",
-        currentLogin: null,
-        guidance: "keyring unavailable Install GitHub CLI."
-      }
-    });
-  });
-
-  it("reports an error after restoration reads the selected account", async () => {
-    let activeLogin = "original";
-    const coordinator = createGitHubAccountCoordinator(
-      {
-        createExecutor: async (login) => executor(login, "keyring", true, []),
-        getActiveKeyringLogin: async () => activeLogin,
-        switchKeyringAccount: async (login) => {
-          if (login === "original") throw new Error("keyring write failed");
-          activeLogin = login;
-          return { ok: true };
-        },
-        resetIdentityCache: () => {}
-      },
-      {
-        ghCommandPresentation: {
-          kind: "unavailable",
-          shell: "posix",
-          installationNote: "Install GitHub CLI."
-        }
-      }
-    );
-
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "panel" },
-        async () => "done"
-      )
-    ).resolves.toMatchObject({
-      restoration: {
-        state: "failed",
-        currentLogin: "selected",
-        guidance: "keyring write failed Install GitHub CLI."
-      }
-    });
-  });
-
   it("restores after selected work fails", async () => {
     const coordinator = createGitHubAccountCoordinator(
       ports({ activeLogin: "original", events: [] })
@@ -378,7 +205,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => {
           throw failure;
         }
@@ -404,7 +231,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => {
           throw new Error("setup failed");
         }
@@ -412,45 +239,6 @@ describe("GitHub account coordinator", () => {
     ).rejects.toThrow(
       "setup failed GitHub account restoration also failed. restore denied"
     );
-  });
-
-  it("uses fallback blocked-restoration guidance when the CLI is unavailable without an installation note", async () => {
-    let activeLogin = "original";
-    const coordinator = createGitHubAccountCoordinator(
-      {
-        createExecutor: async (login) => executor(login, "keyring", true, []),
-        getActiveKeyringLogin: async () => activeLogin,
-        switchKeyringAccount: async (login) => {
-          activeLogin = login === "original" ? "" : login;
-          return { ok: true };
-        },
-        resetIdentityCache: () => {}
-      },
-      {
-        ghCommandPresentation: {
-          kind: "unavailable",
-          shell: "posix",
-          installationNote: ""
-        }
-      }
-    );
-
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "one" },
-        async () => {
-          throw new Error("setup failed");
-        }
-      )
-    ).rejects.toThrow("setup failed GitHub account restoration also failed.");
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "two" },
-        async () => "never"
-      )
-    ).rejects.toThrow("Restore the original account and retry.");
   });
 
   it("blocks later leases until the original account is active after restoration fails", async () => {
@@ -471,14 +259,14 @@ describe("GitHub account coordinator", () => {
 
     const first = await coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "one" },
+      { ownerKey: "one" },
       async () => "done"
     );
     expect(first.restoration.state).toBe("failed");
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "two" },
+        { ownerKey: "two" },
         async () => "never"
       )
     ).rejects.toThrow("cannot safely change GitHub CLI accounts");
@@ -488,7 +276,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "three" },
+        { ownerKey: "three" },
         async () => "recovered"
       )
     ).resolves.toMatchObject({ value: "recovered" });
@@ -518,7 +306,7 @@ describe("GitHub account coordinator", () => {
     });
     const first = coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "one" },
+      { ownerKey: "one" },
       async () => {
         enteredWork();
         await workGate;
@@ -528,7 +316,7 @@ describe("GitHub account coordinator", () => {
     await workEntered;
     const second = coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "two" },
+      { ownerKey: "two" },
       async () => "second"
     );
 
@@ -551,7 +339,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => "never"
       )
     ).rejects.toThrow("could not determine the original");
@@ -570,7 +358,7 @@ describe("GitHub account coordinator", () => {
     await expect(
       coordinator.withSelectedAccount(
         "selected",
-        { instanceId: "panel" },
+        { ownerKey: "runtime" },
         async () => {
           ran = true;
           return "never";
@@ -578,87 +366,6 @@ describe("GitHub account coordinator", () => {
       )
     ).rejects.toThrow("switch denied");
     expect(ran).toBe(false);
-  });
-
-  it("uses the default switch failure when GitHub provides no detail", async () => {
-    const coordinator = createGitHubAccountCoordinator({
-      createExecutor: async (login) => executor(login, "keyring", true, []),
-      getActiveKeyringLogin: async () => "original",
-      switchKeyringAccount: async () => ({ ok: false }),
-      resetIdentityCache: () => {}
-    });
-
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "panel" },
-        async () => "never"
-      )
-    ).rejects.toThrow("Could not switch the GitHub CLI account to @selected");
-  });
-
-  it("fails when a reported switch does not activate the selected account", async () => {
-    const coordinator = createGitHubAccountCoordinator({
-      createExecutor: async (login) => executor(login, "keyring", true, []),
-      getActiveKeyringLogin: async () => "original",
-      switchKeyringAccount: async () => ({ ok: true }),
-      resetIdentityCache: () => {}
-    });
-
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "panel" },
-        async () => "never"
-      )
-    ).rejects.toThrow("expected @selected, received @original");
-  });
-
-  it("describes a missing active account after a reported switch as unknown", async () => {
-    let activeLoginReads = 0;
-    const coordinator = createGitHubAccountCoordinator({
-      createExecutor: async (login) => executor(login, "keyring", true, []),
-      getActiveKeyringLogin: async () => {
-        activeLoginReads += 1;
-        return activeLoginReads === 1 ? "original" : "";
-      },
-      switchKeyringAccount: async () => ({ ok: true }),
-      resetIdentityCache: () => {}
-    });
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "panel" },
-        async () => "never"
-      )
-    ).rejects.toThrow("expected @selected, received @unknown");
-  });
-
-  it("reports a failed restoration when the original account is not reactivated", async () => {
-    let activeLogin = "original";
-    const coordinator = createGitHubAccountCoordinator({
-      createExecutor: async (login) => executor(login, "keyring", true, []),
-      getActiveKeyringLogin: async () => activeLogin,
-      switchKeyringAccount: async (login) => {
-        activeLogin = login === "original" ? "unexpected" : login;
-        return { ok: true };
-      },
-      resetIdentityCache: () => {}
-    });
-
-    await expect(
-      coordinator.withSelectedAccount(
-        "selected",
-        { instanceId: "panel" },
-        async () => "done"
-      )
-    ).resolves.toMatchObject({
-      restoration: {
-        state: "failed",
-        originalLogin: "original",
-        currentLogin: "unexpected"
-      }
-    });
   });
 
   it("serializes selected-account switches within this process", async () => {
@@ -690,8 +397,8 @@ describe("GitHub account coordinator", () => {
     };
 
     const runs = [
-      coordinator.withSelectedAccount("selected", { instanceId: "one" }, work),
-      coordinator.withSelectedAccount("selected", { instanceId: "two" }, work)
+      coordinator.withSelectedAccount("selected", { ownerKey: "one" }, work),
+      coordinator.withSelectedAccount("selected", { ownerKey: "two" }, work)
     ];
     await entered;
     releaseFirst();
@@ -724,7 +431,7 @@ describe("GitHub account coordinator", () => {
     });
     const first = coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "one" },
+      { ownerKey: "one" },
       async () => {
         firstEntered();
         await firstGate;
@@ -734,7 +441,7 @@ describe("GitHub account coordinator", () => {
     await entered;
     const second = coordinator.withSelectedAccount(
       "selected",
-      { instanceId: "two" },
+      { ownerKey: "two" },
       async () => "never",
       100
     );
@@ -746,63 +453,5 @@ describe("GitHub account coordinator", () => {
     );
     releaseFirst();
     await first;
-  });
-
-  it("ignores a queued lease timer after the lease has been acquired", async () => {
-    type Timer = ReturnType<typeof setTimeout>;
-    const callbacks: Array<() => void> = [];
-    const coordinator = createGitHubAccountCoordinator(
-      ports({ activeLogin: "original", events: [] }),
-      {
-        setTimer: (callback) => {
-          callbacks.push(callback);
-          return callbacks.length as unknown as Timer;
-        },
-        clearTimer: () => {}
-      }
-    );
-    let releaseFirst: () => void = () => {};
-    const firstGate = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-    let enterFirst: () => void = () => {};
-    const firstEntered = new Promise<void>((resolve) => {
-      enterFirst = resolve;
-    });
-    let releaseSecond: () => void = () => {};
-    const secondGate = new Promise<void>((resolve) => {
-      releaseSecond = resolve;
-    });
-    let enterSecond: () => void = () => {};
-    const secondEntered = new Promise<void>((resolve) => {
-      enterSecond = resolve;
-    });
-    const first = coordinator.withSelectedAccount(
-      "selected",
-      { instanceId: "one" },
-      async () => {
-        enterFirst();
-        await firstGate;
-        return "first";
-      }
-    );
-    await firstEntered;
-    const second = coordinator.withSelectedAccount(
-      "selected",
-      { instanceId: "two" },
-      async () => {
-        enterSecond();
-        await secondGate;
-        return "second";
-      }
-    );
-
-    releaseFirst();
-    await secondEntered;
-    callbacks[0]?.();
-    releaseSecond();
-
-    await expect(first).resolves.toMatchObject({ value: "first" });
-    await expect(second).resolves.toMatchObject({ value: "second" });
   });
 });

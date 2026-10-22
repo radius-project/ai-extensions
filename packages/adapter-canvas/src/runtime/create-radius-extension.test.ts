@@ -538,6 +538,7 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: String(commit).padStart(40, "0"),
         skillVersion: "0.1.0-test",
+        radiusVersion: "0.60",
         appBicepHash: hashAppBicep("resource db {}")
       });
     fake.sessionHolder.set(createFakeSession());

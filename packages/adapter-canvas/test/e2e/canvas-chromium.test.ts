@@ -39,6 +39,7 @@ import {
 } from "../../src/infra.js";
 import type { DeployRepairHandoffInput } from "../../src/server.js";
 import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
+import { createSelectedNamespaceClaimsPorts } from "../../src/server/routes/create-environment-namespace-claims.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
@@ -54,6 +55,7 @@ import {
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 import { createUnconfirmedMonitor } from "../support/server/unconfirmed-monitor.js";
 import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
+import { workspaceSourceRevision } from "../../src/workspace.js";
 import {
   DEPLOYED_GRAPH_STATE_ID,
   DEPLOYING_PAGE_STATE_ID,
@@ -75,8 +77,57 @@ import {
 import {
   ensureFixtureProject,
   sendSessionPrompt,
-  waitForIdleSession
+  waitForIdleSession,
+  waitForSignedInShell
 } from "../e2e-cloud/support/copilot-app-ui.js";
+
+for (const { name, markup } of [
+  {
+    name: "welcome",
+    markup:
+      '<button aria-label="Sign in to GitHub, Control + Enter">Sign in</button>'
+  },
+  {
+    name: "device authorization",
+    markup:
+      "<h1>Authorize the app using this code.</h1><button>Copy code</button>"
+  },
+  {
+    name: "repository onboarding",
+    markup: "<h1>Connect your repositories</h1><button>Continue</button>"
+  }
+]) {
+  test(`Copilot sign-in refuses ${name} without user interaction @safety`, async ({
+    page
+  }) => {
+    await page.setContent(`
+      ${markup}
+      <output id="clicks">0</output>
+      <script>
+        document.querySelector('button').onclick = () => {
+          document.querySelector('#clicks').textContent = '1';
+        };
+      </script>
+    `);
+    await expect(waitForSignedInShell(page)).rejects.toThrow(
+      "Cloud E2E requires an upstream unattended authentication interface; human approval is not supported."
+    );
+    await expect(page.locator("#clicks")).toHaveText("0");
+  });
+}
+
+test("Copilot sign-in preserves an existing signed-in shell @safety", async ({
+  page
+}) => {
+  await page.setContent(`
+    <nav aria-label="Quick links"><button>New</button></nav>
+    <section aria-label="Projects"><button>New project or session</button></section>
+  `);
+  await waitForSignedInShell(page);
+  await expect(
+    page.getByRole("button", { name: "New", exact: true })
+  ).toBeVisible();
+});
 
 test("Copilot project selection waits for an asynchronous result @safety", async ({
   page
@@ -2061,6 +2112,260 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toContainText("Application graph ready");
   });
 
+  test("keeps a modeling failure on reload and retries once after a saved source edit @safety", async ({
+    page,
+    canvas
+  }, testInfo) => {
+    await fs.unlink(path.join(canvas.workspacePath, ".radius", "app.bicep"));
+    await fs.writeFile(
+      path.join(canvas.workspacePath, "Dockerfile"),
+      "FROM scratch\n"
+    );
+    const target = `${REPOSITORY}::${WORKTREE_BRANCH}`;
+    const revision = await workspaceSourceRevision(canvas.workspacePath);
+    Object.assign(canvas.entry.state, {
+      appModelAttemptTokens: { [target]: "failed-attempt" },
+      appModelFailures: {
+        [target]: {
+          attemptToken: "failed-attempt",
+          error: "The configured Recipe rejects the required credential shape.",
+          sourceRevision: revision
+        }
+      }
+    });
+    let handoffs = 0;
+    canvas.setAppBicepHandoff(async ({ state }) => {
+      if (state !== canvas.entry.state)
+        throw new Error("Unexpected handoff instance");
+      handoffs++;
+      const attemptToken = `retry-${handoffs}`;
+      state.appModelAttemptTokens ??= {};
+      state.appModelFailures ??= {};
+      state.appModelAttemptTokens[target] = attemptToken;
+      state.appModelFailures[target] = {
+        attemptToken,
+        error: "The configured Recipe still rejects the credential shape.",
+        sourceRevision: await workspaceSourceRevision(canvas.workspacePath)
+      };
+    });
+    const status = page.getByRole("alert");
+    try {
+      await gotoCanvas(page, canvas, "graph");
+      await expect(status).toContainText("Application model generation failed");
+      await expect(status).toContainText("change saved source files");
+      await page.screenshot({ path: testInfo.outputPath("after.png") });
+      await testInfo.attach("modeling-failure-warning", {
+        path: testInfo.outputPath("after.png"),
+        contentType: "image/png"
+      });
+      for (let reload = 0; reload < 2; reload++) {
+        await page.reload();
+        await expect(status).toContainText(
+          "Application model generation failed"
+        );
+      }
+      expect(handoffs).toBe(0);
+
+      await fs.appendFile(
+        path.join(canvas.workspacePath, SOURCE_FILE),
+        "// saved edit\n"
+      );
+      await page.reload();
+      await expect.poll(() => handoffs).toBe(1);
+      await expect
+        .poll(
+          () => canvas.entry.state.appModelFailures?.[target]?.sourceRevision
+        )
+        .toBe(await workspaceSourceRevision(canvas.workspacePath));
+      await page.reload();
+      await expect(status).toContainText("still rejects");
+      expect(handoffs).toBe(1);
+      await page.reload();
+      await expect(status).toContainText("still rejects");
+      expect(handoffs).toBe(1);
+      const refresh = page.getByRole("button", {
+        name: "Refresh",
+        exact: true
+      });
+      await expectNoWcagViolations(page);
+      for (let tab = 0; tab < 24; tab++) {
+        await page.keyboard.press("Tab");
+        if (
+          await refresh.evaluate(
+            (element) => element === document.activeElement
+          )
+        )
+          break;
+      }
+      await expect(refresh).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect.poll(() => handoffs).toBe(2);
+      await page.reload();
+      await expect(status).toContainText("still rejects");
+      expect(handoffs).toBe(2);
+      await expectNoWcagViolations(page);
+    } finally {
+      canvas.setAppBicepHandoff(null);
+    }
+  });
+
+  test("retries planned modeling only after the selected environment changes @safety", async ({
+    page,
+    canvas
+  }) => {
+    await fs.unlink(path.join(canvas.workspacePath, ".radius", "app.bicep"));
+    await fs.writeFile(
+      path.join(canvas.workspacePath, "Dockerfile"),
+      "FROM scratch\n"
+    );
+    await page.route("**/api/list-environments?**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          environments: [
+            { name: "first", provider: "azure", status: "success" },
+            { name: "second", provider: "azure", status: "success" }
+          ]
+        })
+      });
+    });
+    const target = `${REPOSITORY}::${WORKTREE_BRANCH}`;
+    Object.assign(canvas.entry.state, {
+      plannedEnvironment: "first",
+      appModelAttemptTokens: { [target]: "failed-attempt" },
+      appModelFailures: {
+        [target]: {
+          attemptToken: "failed-attempt",
+          error: "Recipe unavailable for first.",
+          sourceRevision: await workspaceSourceRevision(canvas.workspacePath),
+          environmentKey: '["azure","first"]'
+        }
+      }
+    });
+    const handoffs: string[] = [];
+    canvas.setAppBicepHandoff(async ({ state, environmentKey }) => {
+      if (!state || !environmentKey)
+        throw new Error("Missing attempted environment");
+      handoffs.push(environmentKey);
+      const attemptToken = `retry-${handoffs.length}`;
+      state.appModelAttemptTokens = { [target]: attemptToken };
+      state.appModelFailures = {
+        [target]: {
+          attemptToken,
+          error: "Recipe unavailable for second.",
+          sourceRevision: await workspaceSourceRevision(canvas.workspacePath),
+          environmentKey
+        }
+      };
+    });
+    try {
+      await gotoCanvas(page, canvas, "planned");
+      const alert = page.getByRole("alert");
+      await expect(alert).toContainText("Recipe unavailable for first.");
+      await page.reload();
+      await expect(alert).toContainText("Recipe unavailable for first.");
+      expect(handoffs).toEqual([]);
+      await page.locator("#planned-env").selectOption("second");
+      await expect.poll(() => handoffs).toEqual(['["azure","second"]']);
+      await page.reload();
+      await expect(alert).toContainText("Recipe unavailable for second.");
+      expect(handoffs).toEqual(['["azure","second"]']);
+    } finally {
+      canvas.setAppBicepHandoff(null);
+    }
+  });
+
+  for (const [view, route] of [
+    ["graph", "/api/load-graph"],
+    ["planned", "/api/plan-graph"],
+    ["graph-diff", "/api/diff-branches"]
+  ] as const) {
+    test(`retries ${view} only from explicit Refresh and restores keyboard focus after errors @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const requests: Record<string, unknown>[] = [];
+      let release: (() => void) | undefined;
+      const pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let explicitRequests = 0;
+      await page.route(`**${route}`, async (request) => {
+        const body: Record<string, unknown> = request.request().postDataJSON();
+        requests.push(body);
+        if (body.retryModeling === true) {
+          explicitRequests++;
+          if (explicitRequests === 1) await pending;
+          if (explicitRequests === 2) {
+            await request.abort("failed");
+            return;
+          }
+        }
+        await request.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            modelingFailed: true,
+            appModelAuthoringFailed: true,
+            error: "Recipe unavailable. Click Refresh to retry."
+          })
+        });
+      });
+      try {
+        await gotoCanvas(page, canvas, view);
+        const refresh = page.getByRole("button", {
+          name: "Refresh",
+          exact: true
+        });
+        await expect(refresh).toBeVisible();
+        await expect(refresh).toHaveId(
+          view === "graph" ? "deploy-app-btn"
+          : view === "planned" ? "plan-btn"
+          : "modeling-refresh"
+        );
+        expect(
+          requests.every((request) => request.retryModeling !== true)
+        ).toBe(true);
+        await expectNoWcagViolations(page);
+        for (let tab = 0; tab < 24; tab++) {
+          await page.keyboard.press("Tab");
+          if (
+            await refresh.evaluate(
+              (element) => element === document.activeElement
+            )
+          )
+            break;
+        }
+        await expect(refresh).toBeFocused();
+        await page.keyboard.press("Enter");
+        // The diff hides its separate Refresh until a request fails; the graph
+        // pages keep their primary button in place and disable it instead.
+        if (view === "graph-diff") {
+          await expect(page.locator("#modeling-refresh")).toBeHidden();
+        } else {
+          await expect(refresh).toBeDisabled();
+        }
+        await expectNoWcagViolations(page);
+        release?.();
+        await expect(refresh).toBeEnabled();
+        await expect(refresh).toBeFocused();
+        expect(explicitRequests).toBe(1);
+        await page.keyboard.press("Enter");
+        await expect.poll(() => explicitRequests).toBe(2);
+        await expect(refresh).toBeEnabled();
+        await expect(refresh).toBeFocused();
+        await expectNoWcagViolations(page);
+        await page.reload();
+        await expect(refresh).toBeVisible();
+        expect(explicitRequests).toBe(2);
+        expect(requests.at(-1)).not.toHaveProperty("retryModeling");
+      } finally {
+        release?.();
+      }
+    });
+  }
+
   test("keeps the modeling status stable while the graph automatically polls", async ({
     page,
     canvas
@@ -2195,7 +2500,9 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toHaveAttribute("role", "alert");
     await expect(page.locator("#graph-refresh-status")).toBeHidden();
     await expect(page.locator("#graph-guidance")).toBeHidden();
-    await expect(page.locator("#deploy-app-btn")).toBeDisabled();
+    await expect(page.locator("#deploy-app-btn")).toHaveText("Refresh");
+    await expect(page.locator("#deploy-app-btn")).toBeEnabled();
+    await expect(page.locator("#modeling-refresh")).toBeHidden();
     await expect(page.locator("#progress-steps")).toHaveCount(0);
     await page.clock.fastForward(GRAPH_RETRY_MAX_MS * 2);
     expect(requests).toBe(1);
@@ -2349,7 +2656,9 @@ test.describe("Radius Canvas in Chromium", () => {
       refusal
     );
     await expect(page.locator("#plan-status")).toBeHidden();
-    await expect(page.locator("#plan-btn")).toBeDisabled();
+    await expect(page.locator("#plan-btn")).toHaveText("Refresh");
+    await expect(page.locator("#plan-btn")).toBeEnabled();
+    await expect(page.locator("#modeling-refresh")).toHaveCount(0);
     await expect(page.locator("#progress-steps")).toHaveCount(0);
     await page.clock.fastForward(PLAN_RETRY_MS * 2);
     expect(requests).toBe(1);
@@ -2761,6 +3070,151 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toBe(false);
     await expectNoWcagViolations(page);
+  });
+
+  test("keeps operation reads pinned after restoring the original GitHub account @safety", async ({
+    page,
+    canvas
+  }) => {
+    canvas.setGitHubToken(null);
+    const operationId = await canvas.seedRestartedVerificationFailure();
+    const statusArgs = ["auth", "status", "--hostname", "github.com"];
+    const reverseActiveAccount = (command: FakeCliCommand): FakeCliCommand =>
+      (
+        command.tool === "gh" &&
+        JSON.stringify(command.args) === JSON.stringify(statusArgs) &&
+        command.env?.GH_TOKEN === "absent"
+      ) ?
+        {
+          ...command,
+          stdout: command.stdout?.replaceAll(
+            /Active account: (true|false)/g,
+            (_match, active: string) =>
+              `Active account: ${active === "true" ? "false" : "true"}`
+          )
+        }
+      : command;
+    const namespaceArgs = [
+      "api",
+      "--paginate",
+      `/repos/${REPOSITORY}/environments?per_page=100`,
+      "--jq",
+      ".environments[].name"
+    ];
+    const runArgs = [
+      "api",
+      `repos/${REPOSITORY}/actions/runs/39`,
+      "--include",
+      "--method",
+      "GET"
+    ];
+    const restored = {
+      commands: [
+        {
+          tool: "gh",
+          args: namespaceArgs,
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: "fixture-environment"
+        },
+        {
+          tool: "gh",
+          args: runArgs,
+          env: { GH_TOKEN: "fixture-repo-token" },
+          stdout: 'HTTP/2 200\n\n{"status":"in_progress","conclusion":null}'
+        },
+        ...defaultFakeCliScenario().commands.map(reverseActiveAccount)
+      ]
+    };
+    const switched = {
+      commands: [
+        {
+          tool: "gh",
+          args: [
+            "auth",
+            "switch",
+            "--hostname",
+            "github.com",
+            "--user",
+            "acting-user"
+          ],
+          writeFiles: [
+            { path: canvas.scenarioPath, content: JSON.stringify(restored) }
+          ]
+        },
+        ...restored.commands.map(reverseActiveAccount)
+      ]
+    };
+    await canvas.setScenario({
+      commands: [
+        {
+          tool: "gh",
+          args: [
+            "auth",
+            "switch",
+            "--hostname",
+            "github.com",
+            "--user",
+            "repo-user"
+          ],
+          writeFiles: [
+            { path: canvas.scenarioPath, content: JSON.stringify(switched) }
+          ]
+        },
+        ...restored.commands
+      ]
+    });
+
+    const accounts = canvas.accountContext;
+    try {
+      const lease = await accounts.coordinator.withSelectedAccount(
+        "repo-user",
+        { ownerKey: accounts.ownerKey, operationId },
+        async (executor) => {
+          accounts.registerExecutor(operationId, executor);
+        }
+      );
+      expect(lease.restoration).toMatchObject({
+        state: "restored",
+        originalLogin: "acting-user",
+        currentLogin: "acting-user"
+      });
+      const executor = accounts.getExecutor(operationId);
+      if (!executor)
+        throw new Error("The operation lost its selected executor");
+      expect(
+        await createSelectedNamespaceClaimsPorts(executor).listEnvironmentNames(
+          REPOSITORY
+        )
+      ).toEqual({
+        ok: true,
+        names: ["fixture-environment"]
+      });
+      const status = await page.request.get(
+        `${canvas.entry.baseUrl}/api/verify-status?` +
+          new URLSearchParams({
+            repo: REPOSITORY,
+            environment: "fixture-environment",
+            operationId
+          })
+      );
+      expect(status.status()).toBe(200);
+      expect(await status.json()).toMatchObject({
+        state: "in_progress",
+        runId: "39"
+      });
+      const calls = await canvas.cliCalls();
+      for (const args of [namespaceArgs, runArgs]) {
+        expect(
+          calls.filter(
+            (call) =>
+              call.tool === "gh" &&
+              JSON.stringify(call.args) === JSON.stringify(args)
+          )
+        ).toEqual([expect.objectContaining({ matched: true, exitCode: 0 })]);
+      }
+    } finally {
+      accounts.unregisterExecutor(operationId);
+    }
   });
 
   test("queries namespaces from the selected AKS cluster and surfaces refresh failure", async ({
@@ -4991,6 +5445,7 @@ test.describe("Radius Canvas in Chromium", () => {
               throw new Error("fixture-private-log-read-error");
             },
             redactDiagnostic: redactCredentials,
+            sleep: async () => {},
             readControlPlaneLog: async () => null
           }
         );
@@ -5019,6 +5474,7 @@ test.describe("Radius Canvas in Chromium", () => {
               readLog: async () =>
                 "deploy\tTeardown\t2026-01-01 Error: <teardown>",
               redactDiagnostic: redactCredentials,
+              sleep: async () => {},
               readControlPlaneLog: async () => null
             }
           )
@@ -5042,6 +5498,7 @@ test.describe("Radius Canvas in Chromium", () => {
                 diagnosticCredential,
               redactDiagnostic: (value) =>
                 redactCredentials(value, [diagnosticCredential]),
+              sleep: async () => {},
               readControlPlaneLog: async () =>
                 "error password=fixture-control-secret " + diagnosticCredential
             }
@@ -5149,6 +5606,115 @@ test.describe("Radius Canvas in Chromium", () => {
       await expect(page.locator("#deploy-progress-modal")).toBeHidden();
     });
   }
+
+  // A recipe failure's error carries the whole nested Radius error and the
+  // control-plane log.
+  const longRecipeError =
+    "Deployment failed (failure). Failed step: Run rad commands.\n\n" +
+    Array.from(
+      { length: 200 },
+      () =>
+        '{ "code": "OK", "message": "", "target": "/planes/radius/local/resourceGroups/default/providers/Radius.Security/secrets/fixture" }'
+    ).join("\n");
+
+  test("keeps Back to Deployments reachable when the failure error is very long @safety", async ({
+    page,
+    canvas
+  }) => {
+    // Without a height limit the dialog outgrew the panel, pushing Back to
+    // Deployments off-screen with no way to scroll to it.
+    await page.setViewportSize({ width: 900, height: 600 });
+    await page.route("**/api/deploy-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          active: false,
+          error: longRecipeError,
+          errorKind: null,
+          deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+          repairing: false,
+          handoff: { pending: false, state: "idle" },
+          attempt: { targetRepo: "", environment: "" }
+        })
+      });
+    });
+    await page.goto(
+      `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
+    );
+    const errorBlock = page.locator("#deploy-progress-error");
+    await expect(errorBlock).toContainText("Failed step: Run rad commands.");
+    const back = page.locator("#deploy-fail-back");
+    await expect(back).toBeInViewport();
+    await expect(
+      page.getByRole("link", { name: "View workflow run in GitHub ↗" })
+    ).toBeInViewport();
+    expect(
+      await errorBlock.evaluate(
+        (element) => element.scrollHeight > element.clientHeight
+      )
+    ).toBe(true);
+    await expectNoWcagViolations(page);
+    await errorBlock.focus();
+    await page.keyboard.press("End");
+    await expect
+      .poll(() => errorBlock.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    await back.click();
+    await expect(page.locator("#deploy-progress-modal")).toBeHidden();
+  });
+
+  test("keeps the failure error's scroll and focus while the repair handoff polls @safety", async ({
+    page,
+    canvas
+  }) => {
+    let statusPolls = 0;
+    await page.setViewportSize({ width: 900, height: 600 });
+    await page.route("**/api/deploy", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await page.route("**/api/deploy-status", async (route) => {
+      statusPolls++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          error: longRecipeError,
+          deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+          handoff: { pending: true, state: "pending" }
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const deployNow = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deployNow).toHaveText("Deploy");
+    await deployNow.click();
+
+    const errorBlock = page.locator("#deploy-progress-error");
+    await expect(errorBlock).toContainText("Failed step: Run rad commands.");
+    await errorBlock.focus();
+    await errorBlock.evaluate((element) => {
+      element.scrollTop = 200;
+    });
+    await expect
+      .poll(() => errorBlock.evaluate((element) => element.scrollTop))
+      .toBe(200);
+
+    // Two more polls guarantee the first of them has re-rendered the failure.
+    const pollsBefore = statusPolls;
+    await expect
+      .poll(() => statusPolls, { timeout: 15_000 })
+      .toBeGreaterThanOrEqual(pollsBefore + 2);
+    await expect(errorBlock).toBeFocused();
+    expect(await errorBlock.evaluate((element) => element.scrollTop)).toBe(200);
+  });
 
   test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({
     page,

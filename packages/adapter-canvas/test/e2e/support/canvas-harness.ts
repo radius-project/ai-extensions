@@ -11,6 +11,7 @@ import {
 import type { CanvasState, SharedCredentials } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { EnvironmentOperationRunner } from "../../../src/server.js";
+import type { EnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 
 // Resolved from this module rather than the process directory so the suite
 // behaves identically whether it is launched from the workspace root or from
@@ -1269,6 +1270,7 @@ export async function unwindHarnessConstruction(
 }
 
 export class CanvasHarness {
+  readonly accountContext: EnvironmentAccountContext;
   readonly entry: CanvasServerEntry;
   readonly instanceId: string;
   readonly rootDir: string;
@@ -1289,6 +1291,7 @@ export class CanvasHarness {
   private readonly seededOperationIds = new Set<string>();
 
   private constructor(input: {
+    accountContext: EnvironmentAccountContext;
     page: Page;
     entry: CanvasServerEntry;
     instanceId: string;
@@ -1303,6 +1306,7 @@ export class CanvasHarness {
     serverModule: HarnessServerRuntime;
     ghModule: GhModule;
   }) {
+    this.accountContext = input.accountContext;
     this.page = input.page;
     this.entry = input.entry;
     this.instanceId = input.instanceId;
@@ -1422,6 +1426,9 @@ export class CanvasHarness {
       const production = await loadServerModule();
       const { createEnvironmentExecutionOwner } =
         await import("../../../src/runtime/environment-execution-owner.js");
+      const { createProductionGitHubAccountContext } =
+        await import("../../../src/runtime/production-github-account-context.js");
+      const accountContext = createProductionGitHubAccountContext();
       const { createTestCanvasServerRuntime } =
         await import("../../support/server/production-runtime.js");
       let environmentOperationRunner: EnvironmentOperationRunner | undefined;
@@ -1429,6 +1436,7 @@ export class CanvasHarness {
         ...production,
         ...createTestCanvasServerRuntime({
           executionOwner: createEnvironmentExecutionOwner(),
+          accountContext,
           get environmentOperationRunner() {
             return environmentOperationRunner;
           }
@@ -1509,6 +1517,7 @@ export class CanvasHarness {
       Object.assign(entry.state, options.initialState || {});
 
       const harness = new CanvasHarness({
+        accountContext,
         page: options.page,
         entry,
         instanceId,
@@ -1817,6 +1826,13 @@ export class CanvasHarness {
     this.repairHandoffRegistered = receiver !== null;
   }
 
+  setAppBicepHandoff(
+    receiver: Parameters<ServerModule["setAppBicepHandoff"]>[0]
+  ): void {
+    this.assertFakeMode("setAppBicepHandoff");
+    this.serverModule.setAppBicepHandoff(receiver);
+  }
+
   // Drives the real delete OperationRecord the route creates to a terminal,
   // exactly as the production runner does (environment-deletion.ts): enter every
   // stage and finish. The completion is gated on the returned `release` so the
@@ -1925,6 +1941,7 @@ export class CanvasHarness {
     });
     this.ghModule.resetGhIdentityCache();
     this.serverModule.resetListingCaches();
+    if (this.mode === "fake") this.setAppBicepHandoff(null);
     const sharedModule = await import("../../../src/shared.js");
     replaceSharedCredentials(sharedModule.sharedCredentials);
     globalThis.fetch = this.originalFetch;

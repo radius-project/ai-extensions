@@ -17,6 +17,7 @@ export {
   RADIUS_EXTENSION_REGISTRY,
   RADIUS_BICEP_EXPERIMENTAL_FEATURES,
   resolveRadiusExtensionRef,
+  resolveInstalledRadiusVersion,
   MANAGED_RAD_BIN,
   MANAGED_RAD_PATH,
   resolveExistingRadBinary,
@@ -75,3 +76,11 @@ export {
   createWorkflowReadSession,
   isWorkflowReadLimitError
 } from "./workflow-read-budget.js";
+export {
+  setupIdentityEqual,
+  deterministicProviderUuid
+} from "./setup-identity-bindings.js";
+
+export * as ghcrBootstrap from "./ghcr-bootstrap.js";
+
+export * from "./setup-workflow-content.js";

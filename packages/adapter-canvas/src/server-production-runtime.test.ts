@@ -12,12 +12,23 @@ import {
   operations
 } from "./operations.js";
 import { disabledOperationStore } from "./operation-store.js";
+import { createEnvironmentAccountContext } from "./runtime/environment-account-context.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import type { CanvasState } from "./shared.js";
 
 const unexpectedDeletion = async (): Promise<never> => {
   throw new Error("Unexpected external deletion");
 };
+
+const accountContext = () =>
+  createEnvironmentAccountContext("production-runtime-test", {
+    createReadOnlyExecutor: async () => {
+      throw new Error("Unexpected account read");
+    },
+    withSelectedAccount: async () => {
+      throw new Error("Unexpected account lease");
+    }
+  });
 
 const deletionPorts: EnvironmentDeletionCoordinatorPorts = {
   deleteRadiusEnvironment: unexpectedDeletion,
@@ -49,6 +60,7 @@ function runtime(
 ) {
   return createProductionCanvasServerRuntime({
     executionOwner: createEnvironmentExecutionOwner(),
+    accountContext: accountContext(),
     environmentDeletionPorts: deletionPorts,
     serverDependencies: {
       preferredPort: async () => 0,
@@ -421,6 +433,7 @@ describe("production canvas server runtime", () => {
     });
     const server = createProductionCanvasServerRuntime({
       executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: accountContext(),
       environmentOperationRunner: runner,
       environmentDeletionPorts: deletionPorts,
       serverDependencies: {
@@ -486,6 +499,7 @@ describe("production canvas server runtime", () => {
     });
     const server = createProductionCanvasServerRuntime({
       executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: accountContext(),
       environmentOperationRunner: runner,
       environmentDeletionPorts: deletionPorts,
       serverDependencies: {
@@ -593,6 +607,7 @@ describe("production canvas server runtime", () => {
     });
     const server = createProductionCanvasServerRuntime({
       executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: accountContext(),
       environmentOperationRunner: runner,
       environmentDeletionPorts: deletionPorts,
       serverDependencies: {
