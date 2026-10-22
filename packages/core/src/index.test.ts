@@ -14,6 +14,11 @@ import * as core from "./index.js";
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
   "runSetupCoordinator",
+  "monitorSetupVerification",
+  "readSetupVerificationStatus",
+  "isAzureRbacVerificationFailure",
+  "classifyVerifyFailure",
+  "extractMissingPermissions",
   "planCredentialVerification",
   "hasVerificationOperationMarker",
   "hasWorkflowRunTrigger",

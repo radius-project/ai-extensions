@@ -18,6 +18,8 @@ export default defineConfig({
       "src/server/routes/setup-environment*.test.ts",
       "src/server/routes/create-environment-workflow-committer.test.ts",
       "src/server/services/setup-workflow-recovery.test.ts",
+      "src/server/services/verification-{status,retry,retry-runner}.test.ts",
+      "../core/src/verify-failure-classification.test.ts",
       "src/server/routes/azure-auto-setup-application.test.ts",
       "src/server/routes/create-environment-refusals.test.ts",
       "src/server/routes/azure-auto-setup-credentials.test.ts",

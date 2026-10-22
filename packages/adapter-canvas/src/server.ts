@@ -439,6 +439,13 @@ import {
   verificationTrackingDeadline
 } from "./server/services/verification-retry.js";
 import { runVerificationRetry as runSelectedVerificationRetry } from "./server/services/verification-retry-runner.js";
+import { monitorSetupVerification } from "@radius-project/core";
+import {
+  createVerificationStatusService,
+  type VerificationStatusInput,
+  type VerificationStatusResult,
+  type VerificationStatusDependencies
+} from "./server/services/verification-status.js";
 import type { CanvasServerEntry } from "./server/types.js";
 import type { CanvasServerDependencyOverrides } from "./server/dependencies.js";
 import type { EnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
@@ -4203,6 +4210,9 @@ export function createInstanceRequestCoordinator(
     executionOwner: EnvironmentExecutionOwner;
     accountContext: EnvironmentAccountContext;
     setupServices: SetupServices;
+    verificationStatus(
+      input: VerificationStatusInput
+    ): Promise<VerificationStatusResult>;
     servers: ReadonlyMap<string, CanvasServerEntry>;
     environmentOperationRunner?: EnvironmentOperationRunner;
   }
@@ -4211,6 +4221,10 @@ export function createInstanceRequestCoordinator(
     dependencies;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
+  if (typeof dependencies.verificationStatus !== "function")
+    throw new Error(
+      "Missing request coordinator dependency: verificationStatus"
+    );
   for (const name of ["authorizeAzure", "configureEnvironment"] as const) {
     if (typeof setupServices?.[name] !== "function") {
       throw new Error(
@@ -4360,64 +4374,58 @@ export function createInstanceRequestCoordinator(
       initialOperation || { operationId },
       Date.now
     );
-    let delayMs = 5000;
-    while (Date.now() < deadline) {
-      const op = operations.get(operationId);
-      if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
-      // Each polling observation is a safe boundary: nothing is being written.
-      if (shouldStop(op)) {
+    await monitorSetupVerification(deadline, {
+      current: () => {
+        const op = operations.get(operationId);
+        return op ?
+            {
+              active: !op.endedAt && op.currentStage === STAGE_VERIFY,
+              stopRequested: shouldStop(op)
+            }
+          : undefined;
+      },
+      observe: async () => {
+        const op = operations.get(operationId);
+        const outcome = await dependencies.verificationStatus({
+          repo: op?.repo || "",
+          environment: op?.environment,
+          operationId
+        });
+        if (outcome.status < 200 || outcome.status >= 300) {
+          throw new Error(
+            outcome.body.error ||
+              `Verification status failed with HTTP ${outcome.status}.`
+          );
+        }
+        return outcome.body;
+      },
+      stop: async () => {
+        const op = operations.get(operationId);
+        if (!op) return;
         stopAtBoundary(op, "verification-observation", { announce: false });
         const saved = await saveOperation(op);
         if (saved) announceOperationTerminal(op);
-        return;
-      }
-      const params = new URLSearchParams({
-        repo: op.repo,
-        environment: op.environment,
-        operationId
-      });
-      const response = await fetch(
-        `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
-        { headers: { "X-Radius-Server-Owned": serverOwnedToken } }
-      );
-      const result: any = await response.json();
-      if (!response.ok) {
-        throw new Error(
-          result?.error ||
-            `Verification status failed with HTTP ${response.status}.`
-        );
-      }
-      if (result?.state === "success" || result?.state === "failed") return;
-      if (result?.terminal || result?.state === "expired") {
-        const current = operations
-          .all()
-          .find((candidate: any) => candidate.operationId === operationId);
-        if (current && !current.endedAt) {
-          finish(current, "failed_partial", {
-            failure: {
-              code: "verification-tracking-expired",
-              stage: current.currentStage,
-              stepSeq: null,
-              message:
-                result?.error ||
-                "Credential verification is no longer being tracked.",
-              classification: "user-fixable",
-              evidence: null
-            }
-          });
-          await saveOperation(current);
-        }
-        return;
-      }
-      const jitterMs = Math.floor(Math.random() * 1000);
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
-      );
-      delayMs = Math.min(Math.ceil(delayMs * 1.5), 15_000);
-    }
-    throw new Error(
-      "Credential verification did not complete within 45 minutes."
-    );
+      },
+      expire: async (message) => {
+        const op = operations.get(operationId);
+        if (!op || op.endedAt) return;
+        finish(op, "failed_partial", {
+          failure: {
+            code: "verification-tracking-expired",
+            stage: op.currentStage,
+            stepSeq: null,
+            message,
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await saveOperation(op);
+      },
+      now: Date.now,
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      jitter: () => Math.floor(Math.random() * 1000)
+    });
   }
 
   async function monitorVerificationAsSelectedAccount(
@@ -6223,9 +6231,35 @@ export function createProductionCanvasServerRuntime(
   // `errorMessage`, `VERIFY_WORKFLOW_FILE`, and `STAGE_VERIFY` stay defined here
   // and are injected rather than moved, so the route module spawns nothing and
   // reads no module-level mutable state.
-  const environmentsRoutes = createEnvironmentsRoutes({
+  const verificationStatusDependencies: VerificationStatusDependencies = {
+    getOperation: (operationId) => operations.get(operationId),
+    getSelectedGitHubExecutor: (operationId) =>
+      accountContext.getExecutor(operationId),
+    isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+    hasCompleteVerificationIdentity,
+    getRunDetail,
+    fetchRunLog,
+    extractErrorLines,
+    extractGitHubActionsStepLog,
+    explainOidcEnterpriseClaim,
+    explainNoSubscriptions,
+    addLegacyStep,
+    isTerminalState,
+    finish,
+    finishSucceeded,
+    persistBestEffort,
+    persistOperations: () => operations.persist(),
+    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
     errorMessage,
-    redactDiagnostic: (value) => redactGhCredentials(value),
+    redactDiagnostic: redactGhCredentials,
+    stageVerify: STAGE_VERIFY
+  };
+  const verificationStatus = createVerificationStatusService(
+    verificationStatusDependencies,
+    () => createWorkflowObservationScope(createDeployStatusReader)
+  );
+  const environmentsRoutes = createEnvironmentsRoutes({
+    ...verificationStatusDependencies,
     repoMatchesWorkspace,
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     runCommand: (command, args, options) => runCommand(command, args, options),
@@ -6276,12 +6310,6 @@ export function createProductionCanvasServerRuntime(
     kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
       kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
     now: () => Date.now(),
-    getOperation: (operationId) => operations.get(operationId),
-    getSelectedGitHubExecutor: (operationId) =>
-      accountContext.getExecutor(operationId),
-    isSelectedGitHubAuthorizationError: (error) =>
-      isSelectedGhAuthorizationError(error),
-    hasCompleteVerificationIdentity,
     findWorkflowRun: (
       repo,
       workflowFile,
@@ -6317,21 +6345,7 @@ export function createProductionCanvasServerRuntime(
         );
       }
     },
-    getRunDetail,
-    fetchRunLog,
-    extractErrorLines: (logText, max) => extractErrorLines(logText, max),
-    extractGitHubActionsStepLog,
-    explainOidcEnterpriseClaim,
-    explainNoSubscriptions,
-    addLegacyStep: (operation, text) => addLegacyStep(operation, text),
-    isTerminalState,
-    finish,
-    finishSucceeded,
-    persistBestEffort,
-    persistOperations: () => operations.persist(),
-    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
-    verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
-    stageVerify: STAGE_VERIFY
+    verifyWorkflowFile: VERIFY_WORKFLOW_FILE
   });
 
   // Direct environment setup retains the concrete adapters without an HTTP wrapper.
@@ -6515,6 +6529,14 @@ export function createProductionCanvasServerRuntime(
               executionOwner,
               accountContext,
               setupServices,
+              verificationStatus: (input) => {
+                const observation = instances.get(instanceId)?.observation;
+                if (!observation)
+                  throw new Error(
+                    "Workflow observation instance is unavailable."
+                  );
+                return verificationStatus({ ...input, observation });
+              },
               servers: instances,
               get environmentOperationRunner() {
                 return options.environmentOperationRunner;
@@ -6722,6 +6744,7 @@ export function createProductionCanvasServerRuntime(
 
   return {
     servers: canvasServer.instances,
+    verificationStatus,
     getOrCreateServer,
     stopServer,
     getLastWebviewActivityAt,

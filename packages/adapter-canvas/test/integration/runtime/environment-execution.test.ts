@@ -17,6 +17,7 @@ import {
   prepareProviderMutation,
   recordGitHubEnvironment,
   settleProviderMutation,
+  STAGE_VERIFY,
   toPersistedOperation
 } from "../../../src/operations.js";
 
@@ -169,6 +170,101 @@ describe("real server and fake SDK runtime ownership", () => {
         }
       } finally {
         await runtime.cleanup();
+      }
+    }
+  );
+
+  it.each([false, true])(
+    "observes a pinned verification without a panel or HTTP server (persistence failure=%s)",
+    async (persistenceFailure) => {
+      const owner = createEnvironmentExecutionOwner();
+      const unexpected = async (): Promise<never> => {
+        throw new Error("Unexpected account acquisition");
+      };
+      const accountContext = createEnvironmentAccountContext(
+        "verification-runtime",
+        {
+          createReadOnlyExecutor: unexpected,
+          withSelectedAccount: unexpected
+        }
+      );
+      const run = vi.fn(async (args: string[]) => {
+        const endpoint = args.find((arg) => arg.startsWith("repos/"));
+        const result =
+          endpoint === "repos/fixture/app/actions/runs/17" ?
+            { status: "completed", conclusion: "success" }
+          : (
+            endpoint ===
+            "repos/fixture/app/actions/runs/17/jobs?per_page=100&page=1"
+          ) ?
+            { jobs: [] }
+          : undefined;
+        if (args[0] !== "api" || result === undefined) {
+          throw new Error(`Unexpected GitHub command: ${args.join(" ")}`);
+        }
+        expect(args).toEqual(["api", endpoint, "--include", "--method", "GET"]);
+        return {
+          code: 0,
+          stdout:
+            "HTTP/2.0 200 OK\r\ncontent-type: application/json\r\n\r\n" +
+            JSON.stringify(result),
+          stderr: ""
+        };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const server = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext
+      });
+      const op = createOperation({
+        operationId: "headless-verification",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.currentStage = STAGE_VERIFY;
+      op.context.githubLogin = executor.login;
+      op.verification = {
+        runId: "17",
+        dispatchedAt: Date.now(),
+        workflow: "verify.yml",
+        ref: "topic",
+        environment: "dev"
+      };
+      operations.put(op);
+      accountContext.registerExecutor(op.operationId, executor);
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockImplementation(async () => {
+          if (persistenceFailure)
+            throw new Error("Verification checkpoint unavailable");
+        });
+      const report = vi
+        .spyOn(operations, "report")
+        .mockImplementation(() => {});
+      try {
+        expect(server.servers.size).toBe(0);
+        expect(run).not.toHaveBeenCalled();
+        const outcome = await server.verificationStatus({
+          repo: op.repo,
+          environment: op.environment,
+          operationId: op.operationId
+        });
+        expect(outcome, JSON.stringify(outcome)).toMatchObject({
+          status: 200,
+          body: { state: "success", runId: "17" }
+        });
+        expect(server.servers.size).toBe(0);
+        expect(op.state).toBe("succeeded");
+        expect(persist).toHaveBeenCalledOnce();
+        expect(report).toHaveBeenCalledTimes(persistenceFailure ? 1 : 0);
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+      } finally {
+        accountContext.unregisterExecutor(op.operationId);
       }
     }
   );

@@ -16,6 +16,7 @@ import {
   setVerificationWorkflowState,
   STAGE_DELETE_RADIUS_ENV,
   STAGE_AUTHORIZE_IDENTITY,
+  STAGE_VERIFY,
   STAGE_DELETE_STATE_PACKAGE
 } from "../../../src/operations.js";
 import {
@@ -31,6 +32,124 @@ afterEach(async () => {
 });
 
 describe("production environment owner HTTP binding", () => {
+  it.each(["open", "closed-before-account", "closed-during-read"] as const)(
+    "monitors directly with the existing panel observation lifetime (%s)",
+    async (lifetime) => {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered = () => {};
+      const waiting = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const run = vi.fn(async (args: string[]) => {
+        const endpoint = args[1];
+        if (endpoint === "repos/fixture/app/actions/runs/17") {
+          entered();
+          await gate;
+        } else if (
+          endpoint !==
+          "repos/fixture/app/actions/runs/17/jobs?per_page=100&page=1"
+        ) {
+          throw new Error(`Unexpected selected command: ${args.join(" ")}`);
+        }
+        expect(args).toEqual(["api", endpoint, "--include", "--method", "GET"]);
+        return {
+          code: 0,
+          stdout:
+            "HTTP/2 200\n\n" +
+            JSON.stringify(
+              endpoint.endsWith("/17") ?
+                { status: "completed", conclusion: "success" }
+              : { jobs: [] }
+            ),
+          stderr: ""
+        };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext("panel-observation", {
+        createReadOnlyExecutor: async () => {
+          if (lifetime === "closed-before-account") {
+            entered();
+            await gate;
+          }
+          return executor;
+        },
+        withSelectedAccount: async () => {
+          throw new Error("Unexpected write lease");
+        }
+      });
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext: account
+      });
+      const op = createOperation({
+        operationId: "op_direct_monitor",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.currentStage = STAGE_VERIFY;
+      op.recoveryState = "verification_pending";
+      op.context.githubLogin = "saved-account";
+      op.verification = {
+        runId: "17",
+        workflow: "verify.yml",
+        ref: "topic",
+        environment: "dev",
+        dispatchedAt: Date.now()
+      };
+      operations.put(op);
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockResolvedValue(undefined);
+      const fetcher = vi.spyOn(globalThis, "fetch");
+      const entry = await runtime.getOrCreateServer("monitor", "environment");
+      const done = new Promise<void>((resolve) => {
+        const unsubscribe = owner.onEnvironmentTasksSettled("monitor", () => {
+          unsubscribe();
+          resolve();
+        });
+      });
+      try {
+        await Promise.race([waiting, done]);
+        expect(op.failure).toBeNull();
+        if (lifetime !== "open") await runtime.stopServer("monitor", true);
+        release();
+        await done;
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(persist).toHaveBeenCalledOnce();
+        expect(account.getExecutor(op.operationId)).toBeUndefined();
+        expect(entry.observation?.stopped).toBe(lifetime !== "open");
+        if (lifetime === "open") {
+          expect(op.state).toBe("succeeded");
+          expect(run).toHaveBeenCalledTimes(2);
+        } else {
+          expect(op.state).toBe("failed");
+          expect(op.failure).toMatchObject({
+            code: "server-owned-task-failed",
+            message:
+              lifetime === "closed-before-account" ?
+                "Workflow observation instance is unavailable."
+              : "Workflow observation stopped."
+          });
+          if (lifetime === "closed-before-account")
+            expect(run).not.toHaveBeenCalled();
+        }
+        expect(runtime.getLastWebviewActivityAt()).toBe(0);
+      } finally {
+        release();
+        await done;
+        await runtime.stopServer("monitor", true);
+      }
+    }
+  );
+
   it.each(["azure", "environment", "repository-refusal"] as const)(
     "enforces the real %s admission or setup outcome without the former setup POST",
     async (stage) => {
