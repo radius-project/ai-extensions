@@ -919,8 +919,10 @@ describe("cloud-e2e-cleanup.yml", () => {
             RESOURCE_GROUP: "synthetic-group",
             SUBSCRIPTION_ID: subscription
           },
+          // Match Linux jq output instead of adding CR to the last TSV field.
           input: `
             node() { '${node}' "$@"; }
+            ${process.platform === "win32" ? 'jq() { command jq --binary "$@"; }' : ""}
             az() {
               case "$1 \${2:-}" in
                 "version --output") printf '%s\\n' '{"azure-cli":"2.91.0"}' ;;
