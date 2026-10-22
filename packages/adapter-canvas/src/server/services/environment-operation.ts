@@ -121,7 +121,7 @@ export interface EnvironmentOperationWorkflowDependencies {
     | { ok: false; status: number; error: string; code: string }
     | { ok: false; stopped: true }
   >;
-  instanceId: string;
+  instanceId?: string;
   now(): number;
 }
 

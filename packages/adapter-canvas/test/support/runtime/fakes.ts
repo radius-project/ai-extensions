@@ -356,6 +356,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     },
     executionOwner: {
       ...executionOwner,
+      shutdown: vi.fn(executionOwner.shutdown),
+      hasActiveDeletionTasks: vi.fn(executionOwner.hasActiveDeletionTasks),
+      onDeletionTasksSettled: vi.fn(executionOwner.onDeletionTasksSettled),
       hasActiveEnvironmentTasks: vi.fn(
         executionOwner.hasActiveEnvironmentTasks
       ),
