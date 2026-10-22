@@ -262,8 +262,8 @@ function statuses(body: unknown): string[] {
   return (environments ?? []).map((environment) => environment.status);
 }
 
-describe("paginated verification history over HTTP", () => {
-  it("discards partial run output after a later-page error and recovers on a fresh listing", async () => {
+describe("bounded verification history over HTTP", () => {
+  it("reads an older verification by id, rejects partial failure, and recovers on a fresh listing", async () => {
     const script = listingScript("7\tdev");
     const runPath =
       "/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100";
@@ -271,8 +271,12 @@ describe("paginated verification history over HTTP", () => {
       { length: 100 },
       (_, index) => `${200 - index}\tcompleted\tsuccess`
     ).join("\n");
-    const laterPage = "42\tcompleted\tsuccess";
-    let failLaterPage = true;
+    const runDetail = JSON.stringify({
+      path: ".github/workflows/radius-verify-credentials.yml",
+      status: "completed",
+      conclusion: "success"
+    });
+    let failLookup = true;
     const runCalls: string[][] = [];
     const statusCalls: string[][] = [];
     const harness = await start(script, {
@@ -280,16 +284,19 @@ describe("paginated verification history over HTTP", () => {
         const path = args.find((arg) => arg.startsWith("/repos/")) ?? "";
         if (path === runPath) {
           runCalls.push(args);
-          if (!args.includes("--paginate")) {
-            callback(null, firstPage, "");
-          } else if (failLaterPage) {
+          callback(null, firstPage, "");
+          return;
+        }
+        if (path === "/repos/octo/app/actions/runs/42") {
+          runCalls.push(args);
+          if (failLookup) {
             callback(
-              new Error("page 3 failed"),
-              `${firstPage}\n${laterPage}`,
+              new Error("run lookup failed"),
+              runDetail,
               "HTTP 403: API rate limit exceeded"
             );
           } else {
-            callback(null, `${firstPage}\n${laterPage}`, "");
+            callback(null, runDetail, "");
           }
           return;
         }
@@ -309,18 +316,40 @@ describe("paginated verification history over HTTP", () => {
     expect(failed.status).toBe(200);
     expect(failed.cacheControl).toBe("no-store");
     expect(statuses(failed.body)).toEqual(["pending"]);
-    expect(statusCalls).toEqual([]);
+    expect(statusCalls).toHaveLength(1);
     expect(failed.rawBody).not.toContain("API rate limit");
 
-    failLaterPage = false;
+    failLookup = false;
     harness.invalidate(REPO);
     const recovered = await harness.list();
 
     expect(recovered.status).toBe(200);
     expect(statuses(recovered.body)).toEqual(["success"]);
-    expect(runCalls).toHaveLength(2);
-    expect(runCalls.every((args) => args.includes("--paginate"))).toBe(true);
-    expect(statusCalls).toHaveLength(1);
+    expect(runCalls).toHaveLength(4);
+    expect(runCalls.every((args) => !args.includes("--paginate"))).toBe(true);
+    expect(statusCalls).toHaveLength(2);
+  });
+
+  it("does not treat a successful deployment run as credential verification", async () => {
+    const script = listingScript("7\tdev");
+    script[
+      "/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"
+    ] = {
+      stdout: "200\tcompleted\tsuccess"
+    };
+    script["/repos/octo/app/actions/runs/42"] = {
+      stdout: JSON.stringify({
+        path: ".github/workflows/run-rad-commands.yml",
+        status: "completed",
+        conclusion: "success"
+      })
+    };
+    const harness = await start(script);
+
+    const result = await harness.list();
+
+    expect(result.status).toBe(200);
+    expect(statuses(result.body)).toEqual(["unknown"]);
   });
 });
 

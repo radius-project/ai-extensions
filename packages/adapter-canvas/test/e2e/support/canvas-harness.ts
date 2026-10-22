@@ -840,7 +840,6 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         tool: "gh",
         args: [
           "api",
-          "--paginate",
           `/repos/${REPOSITORY}/actions/workflows/radius-verify-credentials.yml/runs?per_page=100`,
           "--jq",
           '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
@@ -938,6 +937,25 @@ export function defaultFakeCliScenario(): FakeCliScenario {
           '(.[0].state // "") + "\\t" + (.[0].log_url // .[0].target_url // "") + "\\t" + (.[0].description // "")'
         ],
         stdout: `success\thttps://github.com/${REPOSITORY}/actions/runs/1\t`
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+          "--jq",
+          '.[0].log_url // .[0].target_url // ""'
+        ],
+        stdout: `https://github.com/${REPOSITORY}/actions/runs/1`
+      },
+      {
+        tool: "gh",
+        args: ["api", `/repos/${REPOSITORY}/actions/runs/1`],
+        stdout: JSON.stringify({
+          path: ".github/workflows/run-rad-commands.yml",
+          status: "completed",
+          conclusion: "success"
+        })
       },
       {
         tool: "gh",

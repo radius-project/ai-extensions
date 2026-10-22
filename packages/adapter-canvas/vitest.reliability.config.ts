@@ -19,7 +19,6 @@ export default defineConfig({
       "src/server/services/setup-workflow-recovery.test.ts",
       "src/server/routes/azure-auto-setup-application.test.ts",
       "src/server/routes/create-environment-refusals.test.ts",
-      "src/server/routes/create-environment-workflow-committer.test.ts",
       "src/server/routes/azure-auto-setup-credentials.test.ts",
       "src/server/services/{setup-checkpoint,operation-stop-boundary}.test.ts",
       "../adapter-shared/src/workflow-artifacts*.test.ts",
