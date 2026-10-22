@@ -33,7 +33,7 @@ afterEach(async () => {
 
 describe("production environment owner HTTP binding", () => {
   it.each(["open", "closed-before-account", "closed-during-read"] as const)(
-    "monitors directly with the existing panel observation lifetime (%s)",
+    "keeps shared verification observation alive across panel closure (%s)",
     async (lifetime) => {
       let release = () => {};
       const gate = new Promise<void>((resolve) => {
@@ -126,21 +126,9 @@ describe("production environment owner HTTP binding", () => {
         expect(persist).toHaveBeenCalledOnce();
         expect(account.getExecutor(op.operationId)).toBeUndefined();
         expect(entry.observation?.stopped).toBe(lifetime !== "open");
-        if (lifetime === "open") {
-          expect(op.state).toBe("succeeded");
-          expect(run).toHaveBeenCalledTimes(2);
-        } else {
-          expect(op.state).toBe("failed");
-          expect(op.failure).toMatchObject({
-            code: "server-owned-task-failed",
-            message:
-              lifetime === "closed-before-account" ?
-                "Workflow observation instance is unavailable."
-              : "Workflow observation stopped."
-          });
-          if (lifetime === "closed-before-account")
-            expect(run).not.toHaveBeenCalled();
-        }
+        expect(op.state).toBe("succeeded");
+        expect(op.failure).toBeNull();
+        expect(run).toHaveBeenCalledTimes(2);
         expect(runtime.getLastWebviewActivityAt()).toBe(0);
       } finally {
         release();
