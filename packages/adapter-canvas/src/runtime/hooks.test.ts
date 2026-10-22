@@ -623,7 +623,9 @@ describe("deployRepairHandoffPrompt", () => {
     expect(out).toContain("radius_deploy");
     expect(out).toContain("radius_deploy_status");
     expect(out).toContain(String(DEPLOY_REPAIR_ATTEMPT_CAP));
-    expect(out).toContain("until the deploy reaches a terminal state");
+    expect(out).toContain("while status is pending or in_progress");
+    expect(out).toContain("stop on success or failed");
+    expect(out).toContain("errorKind run-unconfirmed as uncertainty");
   });
 
   it("is self-contained: it does not delegate to the radius-deploy skill", () => {

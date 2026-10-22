@@ -412,7 +412,7 @@ export function deployRepairHandoffPrompt(
     "",
     `For a modeling or schema failure: ${repairInstructions}`,
     `Then commit the repaired ${appFile} and push it to ${branchName} before redeploying. ${custom ? "Commit only that path with a literal pathspec; never commit unrelated staged changes. " : ""}The deploy runs on GitHub Actions against that branch as it exists on GitHub, so a fix left only in the local worktree is not deployed — the workflow would check out and redeploy the unchanged file. If you cannot push to that branch (for example it is protected), stop and tell the user, or open a pull request; do not redeploy an unchanged branch.`,
-    "Once the fix is pushed, redeploy by calling the radius_deploy tool, and poll the radius_deploy_status tool until the deploy reaches a terminal state.",
+    "Once the fix is pushed, redeploy by calling the radius_deploy tool. Poll radius_deploy_status while status is pending or in_progress; stop on success or failed. Report unavailable status or errorKind run-unconfirmed as uncertainty, not a confirmed workflow failure or permission to redeploy.",
     attemptId ?
       `Pass attemptId "${attemptId}" to both tools. It identifies this deploy attempt, so the call is rejected rather than acting on a different deploy if the user starts another one. Do not pass repo, environment, branch, provider, or appFile: the attempt already fixes those.`
     : "",

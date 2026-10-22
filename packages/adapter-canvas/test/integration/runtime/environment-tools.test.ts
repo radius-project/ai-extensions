@@ -998,7 +998,6 @@ describe("registered environment tools with production runtime services", () => 
         ).toHaveLength(confirmed ? 1 : 0);
         expect(h.runner).not.toHaveBeenCalled();
         expect(h.runtime.servers.size).toBe(0);
-        expect(h.deps.deploy.fetch).not.toHaveBeenCalled();
       } finally {
         await h.extension.shutdown();
       }
@@ -1055,7 +1054,6 @@ describe("registered environment tools with production runtime services", () => 
         expect(h.persist).toHaveBeenCalled();
         expect(h.runtime.servers.size).toBe(0);
         expect(h.getOrCreateServer).not.toHaveBeenCalled();
-        expect(h.deps.deploy.fetch).not.toHaveBeenCalled();
         expect(h.run).not.toHaveBeenCalled();
         const identity = {
           ...target,

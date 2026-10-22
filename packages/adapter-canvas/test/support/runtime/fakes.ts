@@ -11,14 +11,6 @@
 import { vi } from "vitest";
 import type { Mock } from "vitest";
 import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
-  summarizeDeployStatus,
-  describeDeployStarted
-} from "../../../src/deploy-tools.js";
-import {
   getSourceRefResources,
   prepareSourceRefResources,
   setSourceRefResources,
@@ -298,16 +290,17 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         remote: false
       }))
     },
-    deployment: { shutdown: vi.fn(), hasPendingWork: vi.fn(() => false) },
-    restoreDeploymentPresentation: vi.fn(),
-    deployTools: {
-      selectDeployEntry,
-      buildDeployPayload,
-      validateDeployPayload,
-      validateDeployAttempt,
-      summarizeDeployStatus,
-      describeDeployStarted
+    deployment: {
+      start: vi.fn(async () => {
+        throw new Error("Direct deployment start was not scripted.");
+      }),
+      status: vi.fn(async () => {
+        throw new Error("Direct deployment status was not scripted.");
+      }),
+      shutdown: vi.fn(),
+      hasPendingWork: vi.fn(() => false)
     },
+    restoreDeploymentPresentation: vi.fn(),
     environment: {
       start: vi.fn(async () => {
         throw new Error("Environment setup was not scripted.");
@@ -351,15 +344,6 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     process: {
       existsSync: vi.fn(() => true),
       execFile: vi.fn(async () => ({ stdout: "", stderr: "" }))
-    },
-    deploy: {
-      fetch: vi.fn(
-        async () =>
-          new Response(JSON.stringify({}), {
-            status: 200,
-            headers: { "Content-Type": "application/json" }
-          })
-      )
     },
     executionOwner: {
       ...executionOwner,

@@ -33,6 +33,24 @@ export default defineConfig({
             functions: 100,
             lines: 100
           },
+        "packages/adapter-canvas/src/deploy-tools.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-canvas/src/runtime/production-deployment-tools.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-canvas/src/runtime/direct-deployment-tools.ts": {
+          statements: 94.93,
+          branches: 94.66,
+          functions: 100,
+          lines: 98.63
+        },
         "packages/core/src/deployment-repair.ts": {
           statements: 100,
           branches: 100,
