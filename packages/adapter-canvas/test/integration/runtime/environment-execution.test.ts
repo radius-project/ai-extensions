@@ -12,7 +12,12 @@ import {
 import {
   createOperation,
   finish,
-  operations
+  fromPersistedOperation,
+  operations,
+  prepareProviderMutation,
+  recordGitHubEnvironment,
+  settleProviderMutation,
+  toPersistedOperation
 } from "../../../src/operations.js";
 
 function deferred() {
@@ -122,6 +127,52 @@ afterEach(() => {
 });
 
 describe("real server and fake SDK runtime ownership", () => {
+  it.each(["not_applied", "manual_required"] as const)(
+    "keeps remaining resources after opening and reopening a saved %s branch deletion",
+    async (status) => {
+      const runtime = await composition();
+      const fetcher = vi.spyOn(globalThis, "fetch");
+      try {
+        const saved = createOperation({
+          operationId: "op_branch_removal",
+          repo: "fixture/app",
+          provider: "azure",
+          environment: "dev"
+        });
+        recordGitHubEnvironment(saved, {
+          state: "created",
+          repo: "fixture/app",
+          environment: "dev"
+        });
+        const deletion = prepareProviderMutation(saved, {
+          kind: "github_branch.delete",
+          target: "fixture/app\0setup-branch\0original-head"
+        });
+        settleProviderMutation(saved, deletion.mutationId, status, null);
+        finish(saved, "failed_partial");
+        saved.providerRecovery.state = "rollback_pending";
+        const op = fromPersistedOperation(toPersistedOperation(saved));
+        operations.put(op);
+        const ledger = structuredClone(op.setupArtifacts);
+        expect(ledger.githubEnvironment.state).toBe("created");
+
+        for (let opening = 0; opening < 2; opening++) {
+          await runtime.canvas.open(context());
+          expect(fetcher).not.toHaveBeenCalled();
+          expect(runtime.owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+          expect(
+            runtime.accountContext.getExecutor(op.operationId)
+          ).toBeUndefined();
+          expect(op.control.commands).toEqual([]);
+          expect(op.setupArtifacts).toEqual(ledger);
+          await runtime.canvas.onClose(context());
+        }
+      } finally {
+        await runtime.cleanup();
+      }
+    }
+  );
+
   it("requires an explicit owner before runtime construction", () => {
     const fake = createFakeDependencies();
     const invalid = { ...fake.deps };

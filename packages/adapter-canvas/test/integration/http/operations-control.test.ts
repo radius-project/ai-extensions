@@ -23,6 +23,7 @@ import {
   createRegistry,
   enterStage,
   finish,
+  fromPersistedOperation,
   isTerminalState,
   dismissOperation,
   recordAzureApp,
@@ -30,11 +31,14 @@ import {
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordServicePrincipal,
+  prepareProviderMutation,
+  settleProviderMutation,
   setCommandState,
   setStageState,
   setVerificationWorkflowState,
   stopAtBoundary,
   toClientView,
+  toPersistedOperation,
   INPUT_REQUIRED_STATE,
   OPERATION_KIND_DELETE,
   STAGE_VERIFY
@@ -323,6 +327,44 @@ function action(
 }
 
 describe("operation controls real-loopback HIT", () => {
+  it.each(["not_applied", "outcome_unknown", "manual_required"] as const)(
+    "refuses rollback of a restored %s branch deletion without scheduling cleanup",
+    async (status) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const saved = stoppedSetup({ includeEnvironment: true });
+      const mutation = prepareProviderMutation(saved, {
+        kind: "github_branch.delete",
+        target: "fixture/app\0setup-branch\0original-head"
+      });
+      settleProviderMutation(saved, mutation.mutationId, status, null);
+      const restored = fromPersistedOperation(toPersistedOperation(saved));
+      restored.providerRecovery.state = "rollback_pending";
+      const op = seed(harness, restored);
+      const before = structuredClone(op);
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await post(
+          entry.baseUrl,
+          `/api/operations/${op.operationId}/rollback`
+        );
+        expect(response.status).toBe(409);
+        expect(response.headers.get("Content-Type")).toBe("application/json");
+        expect(await body(response)).toMatchObject({
+          code: "rollback-provider-outcome-unknown"
+        });
+      }
+      const view = await poll(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}`
+      );
+      expect(action(view, "rollback")).toBeUndefined();
+      expect(harness.scheduled).toEqual([]);
+      expect(harness.persistCalls).toEqual([]);
+      expect(op).toEqual(before);
+    }
+  );
+
   it("returns the blocking cleanup operation and lets it reacquire the lock", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
