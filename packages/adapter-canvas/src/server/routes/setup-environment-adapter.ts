@@ -32,7 +32,8 @@ export function createSetupEnvironmentPorts(input: {
   dependencies: ConfigureEnvironmentDependencies;
   operation: CreateEnvironmentOperation;
   selectedExecutor: SelectedGhExecutor;
-  instanceId: string;
+  instanceId?: string;
+  isCurrentPresentation?: () => boolean;
   provider: string;
   steps: string[];
   stopBoundary(boundary: string): Promise<boolean>;
@@ -235,7 +236,11 @@ export function createSetupEnvironmentPorts(input: {
       d.buildVerifyWorkflowDispatchArgs(request),
     enterVerifyStage: () => d.enterStage(operation, d.stageVerify),
     projectVerification: ({ dispatchedAt, verifyRunId, verifyRunUrl }) => {
-      const entry = d.readInstanceEntry(input.instanceId);
+      if (input.isCurrentPresentation && !input.isCurrentPresentation()) return;
+      const entry =
+        input.instanceId === undefined ?
+          undefined
+        : d.readInstanceEntry(input.instanceId);
       if (entry) {
         entry.state.deployDispatchedAt = dispatchedAt;
         entry.state.verifyRunId = verifyRunId;
