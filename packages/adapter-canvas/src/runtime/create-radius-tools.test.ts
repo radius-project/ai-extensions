@@ -43,13 +43,6 @@ function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
   return { ...fake, tools, modelingActivity, missingModelHandoffs };
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" }
-  });
-}
-
 function parseSkillHandoff(value: unknown): Record<string, unknown> {
   if (typeof value !== "string") {
     throw new Error("Expected the skill handoff to be JSON text.");
@@ -1133,294 +1126,38 @@ describe("RU-10: radius_publish_recipe", () => {
   });
 });
 
-// RU-11: deploy identity/mapping/dispatch/repeat/failure.
-describe("RU-11: radius_deploy", () => {
-  it("reports there is nothing to deploy when no canvas session is open", async () => {
-    const { tools } = setup();
-    const result = await findTool(tools, "radius_deploy").handler({});
-    expect(result).toContain("No Radius canvas session is open");
-  });
+describe("RU-11/RU-12 direct deployment handler wiring", () => {
+  it.each([
+    ["radius_deploy", "start"],
+    ["radius_deploy_status", "status"]
+  ] as const)(
+    "forwards %s to the shared runtime without a panel or HTTP request",
+    async (name, method) => {
+      const { tools, deps } = setup();
+      const input = { attemptId: "attempt-A", logLines: 12 };
+      vi.mocked(deps.deployment[method]).mockResolvedValue("runtime result");
+      expect(await findTool(tools, name).handler(input)).toBe("runtime result");
+      expect(deps.deployment[method]).toHaveBeenCalledExactlyOnceWith(input);
+      expect(deps.servers.size).toBe(0);
+      expect(deps.getOrCreateServer).not.toHaveBeenCalled();
+    }
+  );
 
-  it("reports an inactive attempt when attemptId does not match any open instance", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:0",
-      url: "http://127.0.0.1:0/?page=deployed",
-      page: "deployed",
-      state: { deployAttempt: { id: "attempt-A", targetRepo: "acme/widgets" } }
-    });
-    const result = await findTool(tools, "radius_deploy").handler({
-      attemptId: "attempt-B"
-    });
-    expect(result).toContain('"attempt-B"');
-    expect(result).toContain("no longer active");
-  });
-
-  it("dispatches the deploy via fetch and reports the started message, identifying repo/branch/environment", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({})
-    );
-    const result = await findTool(tools, "radius_deploy").handler({
-      repo: "acme/widgets",
-      environment: "production",
-      branch: "main",
-      provider: "azure"
-    });
-    expect(deps.deploy.fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:9999/api/deploy",
-      expect.objectContaining({ method: "POST" })
-    );
-    expect(result).toContain("acme/widgets");
-    expect(result).toContain("production");
-    expect(result).toContain("started");
-  });
-
-  it("passes the repair-loop position from the route through to the agent", async () => {
-    // The budget is only useful if it reaches the agent on every redeploy, so
-    // the tool has to surface what the route reports rather than drop it.
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {
-        deployAttempt: {
-          id: "attempt-A",
-          targetRepo: "acme/widgets",
-          environment: "production",
-          branch: "main",
-          provider: "azure",
-          appFile: ".radius/app.bicep"
-        }
-      }
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ ok: true, repairAttempt: 3, repairAttemptCap: 5 })
-    );
-    const result = await findTool(tools, "radius_deploy").handler({
-      attemptId: "attempt-A"
-    });
-    expect(result).toContain("automatic repair attempt 3 of 5");
-  });
-
-  it("repeats the last deploy from this session when called with no arguments", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {
-        deployParams: {
-          targetRepo: "acme/widgets",
-          environment: "production",
-          branch: "main",
-          provider: "azure",
-          appFile: ".radius/app.bicep"
-        },
-        deployStartedAt: Date.now()
-      }
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({})
-    );
-    await findTool(tools, "radius_deploy").handler({});
-    const body = JSON.parse(
-      (deps.deploy.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body
-    );
-    expect(body.targetRepo).toBe("acme/widgets");
-    expect(body.environment).toBe("production");
-  });
-
-  it("surfaces a dispatch failure returned by the server as a friendly warning", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ error: "workflow dispatch failed" }, 500)
-    );
-    const result = await findTool(tools, "radius_deploy").handler({
-      repo: "acme/widgets",
-      environment: "production"
-    });
-    expect(result).toContain("Could not start the deploy");
-    expect(result).toContain("workflow dispatch failed");
-  });
-
-  it("surfaces a deploy transport failure", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error("connection reset")
-    );
-
-    const result = await findTool(tools, "radius_deploy").handler({
-      repo: "acme/widgets",
-      environment: "production"
-    });
-
-    expect(result).toContain("Could not start the deploy");
-    expect(result).toContain("connection reset");
-  });
-
-  it("treats an empty successful deploy response as a started deploy", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response("not json", { status: 200 })
-    );
-
-    const result = await findTool(tools, "radius_deploy").handler({
-      repo: "acme/widgets",
-      environment: "production"
-    });
-
-    expect(result).toContain("started");
-  });
-});
-
-// RU-12: deploy status/log bounds/URL/diagnostics.
-describe("RU-12: radius_deploy_status", () => {
-  it("reports no deploy status when no canvas session is open", async () => {
-    const { tools } = setup();
-    const result = await findTool(tools, "radius_deploy_status").handler({});
-    expect(result).toContain("no deploy status to report");
-  });
-
-  it("reports the workflow run URL and a bounded log tail on failure", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    const logs = Array.from({ length: 300 }, (_, i) => `line ${i}`);
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({
-        status: "failed",
-        error: "deploy failed",
-        deployRunUrl: "https://github.com/acme/widgets/actions/runs/1",
-        logs
-      })
-    );
-    const result = await findTool(tools, "radius_deploy_status").handler({});
-    const parsed = JSON.parse(result);
-    expect(parsed.status).toBe("failed");
-    expect(parsed.deployRunUrl).toBe(
-      "https://github.com/acme/widgets/actions/runs/1"
-    );
-    expect(parsed.diagnostic).toContain("line 299");
-    // Default tail cap is 40 lines — "line 259" is the 40th-from-end line.
-    expect(parsed.diagnostic).toContain("line 260");
-    expect(parsed.diagnostic).not.toContain("line 259\n");
-  });
-
-  it("honors a custom logLines count bounded to the max", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    const logs = Array.from({ length: 300 }, (_, i) => `line ${i}`);
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ status: "failed", error: "x", logs })
-    );
-    const result = await findTool(tools, "radius_deploy_status").handler({
-      logLines: 999
-    });
-    const parsed = JSON.parse(result);
-    // capped at DEPLOY_LOG_TAIL_MAX (200)
-    expect(parsed.diagnostic).toContain("line 100");
-    expect(parsed.diagnostic).not.toContain("line 99\n");
-  });
-
-  it("reports a read failure as a friendly warning", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({}, 500)
-    );
-    const result = await findTool(tools, "radius_deploy_status").handler({});
-    expect(result).toContain("Could not read the deploy status");
-    expect(result).toContain("HTTP 500");
-  });
-
-  it("surfaces a deploy-status transport failure", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error("status connection reset")
-    );
-
-    const result = await findTool(tools, "radius_deploy_status").handler({});
-
-    expect(result).toContain("Could not read the deploy status");
-    expect(result).toContain("status connection reset");
-  });
-
-  it("normalizes an empty successful status response", async () => {
-    const { tools, deps } = setup();
-    deps.servers.set("radius-panel", {
-      server: { close: vi.fn((cb?: () => void) => cb?.()) } as never,
-      baseUrl: "http://127.0.0.1:9999",
-      url: "http://127.0.0.1:9999/?page=deployed",
-      page: "deployed",
-      state: {}
-    });
-    (deps.deploy.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response("not json", { status: 200 })
-    );
-
-    const result = JSON.parse(
-      await findTool(tools, "radius_deploy_status").handler({})
-    );
-
-    expect(result.status).toBe("pending");
-  });
+  it.each([
+    ["radius_deploy", "start"],
+    ["radius_deploy_status", "status"]
+  ] as const)(
+    "never turns a %s binding failure into an empty successful response",
+    async (name, method) => {
+      const { tools, deps } = setup();
+      vi.mocked(deps.deployment[method]).mockRejectedValue(
+        new Error("runtime unavailable")
+      );
+      await expect(findTool(tools, name).handler({})).rejects.toThrow(
+        "runtime unavailable"
+      );
+    }
+  );
 });
 
 describe("registered environment tool wiring", () => {
@@ -1448,7 +1185,6 @@ describe("registered environment tool wiring", () => {
       ).toEqual(result);
       expect(deps.environment[method]).toHaveBeenCalledExactlyOnceWith(input);
       expect(deps.getOrCreateServer).not.toHaveBeenCalled();
-      expect(deps.deploy.fetch).not.toHaveBeenCalled();
       vi.mocked(deps.environment[method]).mockRejectedValue(
         new Error("Binding unavailable")
       );

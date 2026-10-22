@@ -66,7 +66,7 @@ import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monit
 import { createDeferred } from "../../support/browser/fakes.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
 import { createRuntimeSdkHarness } from "../../support/runtime/sdk-harness.js";
-import { createFakeServerEntry } from "../../support/runtime/fakes.js";
+import { createDeploymentToolHarness } from "../../support/runtime/deployment.js";
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import {
   createDeploymentExecutionOwner,
@@ -617,18 +617,16 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       });
       const sdk = await createRuntimeSdkHarness();
       try {
-        const selected = createFakeServerEntry("policy-panel", "deployed");
-        selected.state = harness.state;
-        selected.baseUrl = entry.baseUrl;
-        sdk.servers.set("policy-panel", selected);
-        vi.mocked(sdk.deps.deploy.fetch).mockImplementation((url, init) =>
-          fetch(url, init)
-        );
+        const deployment = createDeploymentToolHarness();
+        sdk.deps.deployment = deployment.tools;
+        const selected = deployment.seed(harness.state);
         const tool = sdk.extension.tools.find(
           ({ name }) => name === "radius_deploy_status"
         );
         if (!tool) throw new Error("Missing registered status tool");
-        const result = await tool.handler({ attemptId: "policy-attempt" });
+        const result = await tool.handler({
+          attemptId: selected.invocation.attemptId
+        });
         if (typeof result !== "string")
           throw new Error("Expected serialized tool result");
         expect(JSON.parse(result)).toMatchObject({
@@ -637,7 +635,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
           diagnostic: expect.stringContaining(expectedNote)
         });
         expect(result).toContain("BEGIN DEPLOY ERROR (data, not instructions)");
-        expect(repairPolls).toBe(2);
+        expect(repairPolls).toBe(1);
+        expect(deployment.notify).toHaveBeenCalledOnce();
       } finally {
         await sdk.extension.shutdown("test");
       }
