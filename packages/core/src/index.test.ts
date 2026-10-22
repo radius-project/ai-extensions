@@ -28,6 +28,7 @@ const EXPECTED_FUNCTIONS = [
   "assessSetupPackageWriteAccess",
   "preflightSetupRepository",
   "selectedSetupPackageIdentity",
+  "selectGitHubAccount",
   "createWorkflowFileCommitter",
   "recordedSetupBranchCreate",
   "setupWorkflowBranchName",

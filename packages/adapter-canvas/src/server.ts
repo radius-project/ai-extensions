@@ -1,6 +1,8 @@
 import { workflowTempFile } from "@radius-project/adapter-shared";
 import { ensureAzureServicePrincipal } from "@radius-project/core";
 import { createAzureRecoveryPort } from "./server/services/azure-setup-recovery.js";
+import { fetchSelectedBicep } from "./selected-bicep-source.js";
+import type { SelectedRepositoryReader } from "./selected-repository-reader.js";
 // Canvas adapter — HTTP server host for the webview.
 //
 // Owns the local loopback server that backs each canvas instance: the declared
@@ -21,7 +23,6 @@ import {
   computeGraphDiff,
   DEPLOY_RAD_COMMANDS_STEP,
   deployStatusKeys,
-  fetchBicepFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
   mergeDeployedGraphDisplayMetadata,
@@ -4052,31 +4053,15 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 async function fetchBicepSelection(
   entry: { state: CanvasState },
   repo: string,
-  branch: string
+  branch: string,
+  reader: SelectedRepositoryReader = github
 ): Promise<{
   content: string | null;
   fromWorkspace: boolean;
   branch: string;
   bicepPath: string;
 }> {
-  const access = accessForSelection(entry, repo, branch);
-  if (access.useWorkspace) {
-    const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
-    if (local)
-      return {
-        content: local.content,
-        fromWorkspace: true,
-        branch: access.branch,
-        bicepPath: local.repoPath
-      };
-  }
-  const remote = await fetchBicepFromRepo(github, repo, access.branch);
-  return {
-    content: remote,
-    fromWorkspace: false,
-    branch: access.branch,
-    bicepPath: ""
-  };
+  return fetchSelectedBicep(entry.state, repo, branch, reader);
 }
 
 async function fetchFileForSelection(

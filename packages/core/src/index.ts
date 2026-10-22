@@ -11,6 +11,12 @@
 // exported from their own module and out of this file.
 
 export { redactCredentials } from "./credential-redaction.js";
+export {
+  selectGitHubAccount,
+  type GitHubAccountSelection,
+  type GitHubAccountSelectionPorts,
+  type GitHubAccountSelectionTarget
+} from "./github-account-selection.js";
 export { runSetupCoordinator } from "./setup-coordinator.js";
 export { monitorSetupVerification } from "./setup-verification-monitor.js";
 export {

@@ -53,7 +53,7 @@ export interface GitHubAccountReadiness {
 
 export interface GitHubAccountReadinessService {
   check(input: {
-    instanceId: string;
+    instanceId?: string;
     repo: string;
     environment: string;
     login: string;

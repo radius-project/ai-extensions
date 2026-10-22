@@ -33,6 +33,9 @@ import {
 } from "../../../src/server.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
+import { fetchSelectedBicep } from "../../../src/selected-bicep-source.js";
+import { createSelectedRepositoryReader } from "../../../src/selected-repository-reader.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 
 let container: CanvasServerContainer | undefined;
 // Everything the workflows sent to the server log instead of the canvas.
@@ -45,6 +48,7 @@ afterEach(async () => {
 });
 
 interface PipelineScript {
+  selectAppBicep?: GraphPipeline["selectAppBicep"];
   selections: Record<string, AppBicepSelection>;
   compiled: Record<string, CanvasGraphResource[]>;
   compileThrows?: unknown;
@@ -93,8 +97,10 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   }
 
   const pipeline: GraphPipeline = {
-    selectAppBicep: (_entry, _repo, branch) =>
-      Promise.resolve(scripted(active.selections, branch, "selectAppBicep")),
+    selectAppBicep: (entry, repo, branch) =>
+      active.selectAppBicep ?
+        active.selectAppBicep(entry, repo, branch)
+      : Promise.resolve(scripted(active.selections, branch, "selectAppBicep")),
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
     stageArtifacts: () => Promise.resolve({ dir: "", remote: false }),
     compileResources: ({ selection }) => {
@@ -220,6 +226,88 @@ function post(baseUrl: string, path: string, body: string): Promise<Response> {
 }
 
 describe("graphs-planning writes real-loopback HIT", () => {
+  it.each(["model", "missing", "denied"] as const)(
+    "keeps the selected repository and special-character branch through HTTP and real model reads (%s)",
+    async (outcome) => {
+      const branch = "feature/model&review=1";
+      const reads: string[] = [];
+      const reader = createSelectedRepositoryReader(
+        successfulSelectedGhExecutor({
+          run: async (args) => {
+            reads.push(args[1]);
+            if (
+              args[0] !== "api" ||
+              ![
+                "/repos/octo/selected/contents/.radius/app.bicep?ref=feature%2Fmodel%26review%3D1",
+                "/repos/octo/selected/contents/app.bicep?ref=feature%2Fmodel%26review%3D1"
+              ].includes(args[1])
+            )
+              throw new Error("Unexpected repository read");
+            if (outcome !== "model")
+              return {
+                code: 1,
+                stdout: "",
+                stderr: outcome === "missing" ? "HTTP 404" : "HTTP 403: denied"
+              };
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                type: "file",
+                encoding: "base64",
+                content: Buffer.from("resource app = {}").toString("base64")
+              }),
+              stderr: ""
+            };
+          }
+        })
+      );
+      const harness = start({
+        selectAppBicep: (entry, repo, requestedBranch) =>
+          fetchSelectedBicep(entry.state, repo, requestedBranch, reader),
+        compiled: { [branch]: [{ id: "res-selected", name: "selected" }] }
+      });
+      Object.assign(harness.state, {
+        workspaceRepo: "octo/unrelated",
+        workspaceBranch: "main",
+        workspacePath: "/synthetic/unrelated"
+      });
+      const entry = await container!.getOrCreate("exact-repository");
+      const response = await post(
+        entry.baseUrl,
+        "/api/load-graph",
+        JSON.stringify({
+          repo: "octo/selected",
+          branch,
+          followWorkspaceBranch: false
+        })
+      );
+      const body = await response.json();
+      if (outcome === "model") {
+        expect(response.status).toBe(200);
+        expect(body).toMatchObject({
+          reload: true,
+          fromWorkspace: false,
+          resources: [{ id: "res-selected" }]
+        });
+        expect(harness.state.graphTargetRepo).toBe("octo/selected");
+        expect(harness.state.graphBranch).toBe(branch);
+      } else if (outcome === "missing") {
+        expect(body).toMatchObject({ needsAppBicep: true, branch });
+      } else {
+        expect(body).toMatchObject({
+          error: expect.stringContaining("denied")
+        });
+        expect(body).not.toHaveProperty("needsAppBicep");
+      }
+      expect(reads).toHaveLength(outcome === "missing" ? 2 : 1);
+      expect(
+        reads.every((value) =>
+          value.endsWith("?ref=feature%2Fmodel%26review%3D1")
+        )
+      ).toBe(true);
+    }
+  );
+
   it("serves the modeled graph and its state transition over a real socket", async () => {
     const harness = start({
       selections: { main: selectionOf("main", "resource app = {}") },
