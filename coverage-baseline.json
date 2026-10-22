@@ -4,15 +4,15 @@
   },
   "aggregate": {
     "statements": 95.4,
-    "branches": 93.8,
-    "functions": 91.5,
-    "lines": 95.8
+    "branches": 93.9,
+    "functions": 91.6,
+    "lines": 95.9
   },
   "packages": {
     "adapter-canvas": {
       "statements": 94.2,
-      "branches": 91.8,
-      "functions": 89.5,
+      "branches": 91.9,
+      "functions": 89.6,
       "lines": 94.7
     },
     "adapter-shared": {

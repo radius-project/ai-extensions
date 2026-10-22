@@ -13,6 +13,8 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "admitSetupCommand",
+  "resumeSetupInput",
   "runSetupCoordinator",
   "monitorSetupVerification",
   "readSetupVerificationStatus",

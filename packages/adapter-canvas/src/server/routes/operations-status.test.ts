@@ -258,7 +258,7 @@ interface HappyPathCapture {
   built: unknown[];
   started: OperationRecord[];
   persistCalls: number;
-  scheduled: Array<{ instanceId: string; op: OperationRecord }>;
+  scheduled: Array<{ instanceId: string | undefined; op: OperationRecord }>;
   finished: unknown[];
 }
 

@@ -338,3 +338,5 @@ export * from "./setup-environment-contracts.js";
 
 export * from "./setup-verification-policy.js";
 export * from "./setup-verification-plan.js";
+export * from "./setup-command-admission.js";
+export * from "./setup-input-resume.js";

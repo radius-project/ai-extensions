@@ -75,8 +75,12 @@ interface Harness {
   invalidatedListings: string[];
   persistCalls: string[];
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
-  createScheduled: Array<{ instanceId: string; operationId: string }>;
+  createScheduled: Array<{
+    instanceId: string | undefined;
+    operationId: string;
+  }>;
   registry: ReturnType<typeof createRegistry>;
+  shuttingDown: { value: boolean };
   setPullRequestMergeCheck(
     check: () => Promise<
       | { state: "merged" }
@@ -93,6 +97,7 @@ function start(): Harness {
   const scheduled: Harness["scheduled"] = [];
   const createScheduled: Harness["createScheduled"] = [];
   const invalidatedListings: string[] = [];
+  const shuttingDown = { value: false };
   let pullRequestMergeCheck = (): Promise<
     | { state: "merged" }
     | { state: "open" }
@@ -108,15 +113,22 @@ function start(): Harness {
 
   const routes = createTestRouteTable({
     ...createOperationsControlRoutes({
+      isShuttingDown: () => shuttingDown.value,
       get: (operationId) => records.get(operationId) ?? null,
       acquireForRetry: (operation) => registry.acquireForRetry(operation),
       persistOperations,
+      reportOperationDiagnostic: () => {
+        throw new Error("Unexpected operation control diagnostic");
+      },
       // Merge-proof eligibility is the route unit suite's to decide; no journey
       // here may reach GitHub for it, so the port refuses rather than answers.
       checkPullRequestMerge: () => pullRequestMergeCheck(),
       inspectVerificationWorkflow: () => Promise.resolve("inactive"),
       cancelVerificationWorkflow: () => Promise.resolve("inactive"),
       schedule: ({ kind, instanceId, commandId }) => {
+        if (instanceId === undefined) {
+          throw new Error("HTTP control lost its attachment identity");
+        }
         scheduled.push({ kind, instanceId, commandId });
         return true;
       },
@@ -225,6 +237,7 @@ function start(): Harness {
     scheduled,
     createScheduled,
     registry,
+    shuttingDown,
     invalidatedListings,
     setPullRequestMergeCheck: (check) => {
       pullRequestMergeCheck = check;
@@ -364,6 +377,29 @@ describe("operation controls real-loopback HIT", () => {
       expect(op).toEqual(before);
     }
   );
+  it("refuses a control during shutdown without accepting or changing the operation", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const operation = seed(harness, stoppedSetup());
+    const before = structuredClone(operation);
+    harness.shuttingDown.value = true;
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${operation.operationId}/continue`
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({
+      code: "operation-shutting-down",
+      operationId: operation.operationId
+    });
+    expect(operation).toEqual(before);
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.persistCalls).toEqual([]);
+  });
 
   it("returns the blocking cleanup operation and lets it reacquire the lock", async () => {
     const harness = start();
@@ -600,6 +636,35 @@ describe("operation controls real-loopback HIT", () => {
     expect(harness.persistCalls).toEqual(["persist"]);
     expect(harness.scheduled).toEqual([]);
   });
+
+  it.each(["account", "record"] as const)(
+    "refuses stale %s merge proof through the retained verification retry route",
+    async (change) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const op = seed(harness, mergeHandoff());
+      op.context = { githubLogin: "alice" };
+      harness.setPullRequestMergeCheck(async () => {
+        if (change === "account") op.context = { githubLogin: "bob" };
+        else harness.records.set(op.operationId, structuredClone(op));
+        return { state: "merged" };
+      });
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/retry/verification`
+      );
+      expect(response.status).toBe(409);
+      expect(response.headers.get("Content-Type")).toBe("application/json");
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(await response.json()).toMatchObject({
+        code: "operation-active",
+        operationId: op.operationId
+      });
+      expect(harness.persistCalls).toEqual(["persist"]);
+      expect(harness.scheduled).toEqual([]);
+      expect(op.control.commands).toEqual([]);
+    }
+  );
 
   it("refuses a control request that cannot prove it came from the panel", async () => {
     const harness = start();

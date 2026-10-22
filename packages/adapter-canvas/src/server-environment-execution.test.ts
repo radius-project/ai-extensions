@@ -8,6 +8,10 @@ import {
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 import type { SetupServices } from "./server/services/setup-outcome.js";
+import {
+  createOperationsControlService,
+  type OperationControlService
+} from "./server/services/operation-control.js";
 import type {
   VerificationStatusInput,
   VerificationStatusResult
@@ -68,7 +72,8 @@ function coordinator(
   },
   verificationStatus: (
     input: VerificationStatusInput
-  ) => Promise<VerificationStatusResult> = unavailable
+  ) => Promise<VerificationStatusResult> = unavailable,
+  operationControl: OperationControlService = unavailable
 ) {
   return createInstanceRequestCoordinator(
     instanceId,
@@ -96,6 +101,7 @@ function coordinator(
       accountContext,
       setupServices,
       verificationStatus,
+      operationControl,
       servers: new Map(),
       environmentOperationRunner: runner
     }
@@ -581,46 +587,48 @@ describe("production coordinator scheduling scopes", () => {
     }
   );
 
-  it.each(["accountContext", "verificationStatus"] as const)(
-    "requires the explicit %s dependency",
-    (name) => {
-      const dependencies = {
-        executionOwner: createEnvironmentExecutionOwner(),
-        accountContext: createEnvironmentAccountContext("runtime", {
-          createReadOnlyExecutor: unavailable,
-          withSelectedAccount: unavailable
-        }),
-        servers: new Map(),
-        verificationStatus: unavailable,
-        setupServices: {
-          authorizeAzure: unavailable,
-          configureEnvironment: unavailable
-        }
-      };
-      Reflect.deleteProperty(dependencies, name);
-      expect(() =>
-        createInstanceRequestCoordinator(
-          "panel",
-          () => "",
-          {
-            deleteRadiusEnvironment: unavailable,
-            runAz: unavailable,
-            readAzureIdentity: unavailable,
-            deleteGitHubEnvironment: unavailable,
-            deleteStatePackage: unavailable,
-            withCredentialProvenanceLock: (work) => work(),
-            readCredentialProvenance: () => [],
-            removeCredentialProvenance: unavailable,
-            clearEnvironmentCredentialProvenance: unavailable,
-            persist: unavailable,
-            errorMessage: String,
-            log: () => {}
-          },
-          dependencies
-        )
-      ).toThrow(`Missing request coordinator dependency: ${name}`);
-    }
-  );
+  it.each([
+    "accountContext",
+    "verificationStatus",
+    "operationControl"
+  ] as const)("requires the explicit %s dependency", (name) => {
+    const dependencies = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: unavailable,
+        withSelectedAccount: unavailable
+      }),
+      servers: new Map(),
+      verificationStatus: unavailable,
+      operationControl: unavailable,
+      setupServices: {
+        authorizeAzure: unavailable,
+        configureEnvironment: unavailable
+      }
+    };
+    Reflect.deleteProperty(dependencies, name);
+    expect(() =>
+      createInstanceRequestCoordinator(
+        "panel",
+        () => "",
+        {
+          deleteRadiusEnvironment: unavailable,
+          runAz: unavailable,
+          readAzureIdentity: unavailable,
+          deleteGitHubEnvironment: unavailable,
+          deleteStatePackage: unavailable,
+          withCredentialProvenanceLock: (work) => work(),
+          readCredentialProvenance: () => [],
+          removeCredentialProvenance: unavailable,
+          clearEnvironmentCredentialProvenance: unavailable,
+          persist: unavailable,
+          errorMessage: String,
+          log: () => {}
+        },
+        dependencies
+      )
+    ).toThrow(`Missing request coordinator dependency: ${name}`);
+  });
 
   it("leases setup under the runtime key and saved account before honoring a stop", async () => {
     const owner = createEnvironmentExecutionOwner();
@@ -996,27 +1004,45 @@ describe("production coordinator scheduling scopes", () => {
     }
   );
 
-  it("keeps automatic rollback claims per attachment and releases failed posts", async () => {
+  it("keeps automatic rollback claims per attachment and releases failed admissions", async () => {
     const owner = createEnvironmentExecutionOwner();
     const op = operation();
     finish(op, "failed");
     op.providerRecovery = { state: "rollback_pending" };
     const gate = deferred();
     const posted = deferred();
-    const fetcher = vi.fn(async () => {
-      if (fetcher.mock.calls.length === 2) posted.resolve();
+    const control = vi.fn<OperationControlService>(async () => {
+      if (control.mock.calls.length === 2) posted.resolve();
       await gate.promise;
-      return Response.json({ error: "rollback refused" }, { status: 409 });
+      return { body: { error: "rollback refused" }, status: 409 };
     });
+    const fetcher = vi.fn(unavailable);
     vi.stubGlobal("fetch", fetcher);
     const report = vi.spyOn(operations, "report");
-    const a = coordinator(owner, "a");
-    const b = coordinator(owner, "b");
+    const a = coordinator(
+      owner,
+      "a",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      control
+    );
+    const b = coordinator(
+      owner,
+      "b",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      control
+    );
     a.startRecoveredTasks();
     a.startRecoveredTasks();
     b.startRecoveredTasks();
     await posted.promise;
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(control).toHaveBeenCalledTimes(2);
+    expect(fetcher).not.toHaveBeenCalled();
     gate.resolve();
     await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2));
     a.startRecoveredTasks();
@@ -1028,31 +1054,130 @@ describe("production coordinator scheduling scopes", () => {
     });
   });
 
+  it.each(["removed", "replaced", "id", "repository", "environment"] as const)(
+    "fences a %s recovery target at queued admission",
+    async (change) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation();
+      finish(op, "failed");
+      op.providerRecovery = { state: "rollback_pending" };
+      const get = vi.fn(() => op);
+      const schedule = vi.fn(() => true);
+      const service = createOperationsControlService({
+        get,
+        acquireForRetry: () => ({ ok: true }),
+        persistOperations: unavailable,
+        reportOperationDiagnostic: () => {
+          throw new Error("Unexpected diagnostic");
+        },
+        checkPullRequestMerge: unavailable,
+        inspectVerificationWorkflow: unavailable,
+        cancelVerificationWorkflow: unavailable,
+        schedule,
+        invalidateEnvironmentListing: () => {
+          throw new Error("Unexpected invalidation");
+        }
+      });
+      const report = vi.spyOn(operations, "report");
+      const handler = coordinator(
+        owner,
+        "a",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        service
+      );
+      handler.startRecoveredTasks();
+      if (change === "removed") operations.clear();
+      else if (change === "replaced") operations.put(structuredClone(op));
+      else if (change === "id") op.operationId = "different-id";
+      else if (change === "repository") op.repo = "other/repository";
+      else op.environment = "other-environment";
+      await vi.waitFor(() =>
+        expect(report).toHaveBeenCalledWith({
+          scope: "provider-recovery-auto-rollback",
+          operationId: "op",
+          message:
+            "The operation changed before the queued command was admitted."
+        })
+      );
+      expect(get).not.toHaveBeenCalled();
+      expect(schedule).not.toHaveBeenCalled();
+      expect(op.control.commands).toEqual([]);
+    }
+  );
+
+  it.each(["missing-error", "exception"] as const)(
+    "reports automatic admission %s and releases the claim for recovery",
+    async (failure) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation();
+      finish(op, "failed");
+      op.providerRecovery = { state: "rollback_pending" };
+      const control = vi.fn<OperationControlService>(async () => {
+        if (failure === "exception") throw new Error("admission offline");
+        return { status: 503, body: {} };
+      });
+      const report = vi.spyOn(operations, "report");
+      const handler = coordinator(
+        owner,
+        "a",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        control
+      );
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        handler.startRecoveredTasks();
+        await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(attempt));
+      }
+      expect(control).toHaveBeenCalledTimes(2);
+      expect(report).toHaveBeenLastCalledWith({
+        scope: "provider-recovery-auto-rollback",
+        operationId: "op",
+        message:
+          failure === "exception" ? "admission offline" : (
+            "Operation control failed with status 503."
+          )
+      });
+    }
+  );
+
   it("retains finalizer rollback scheduling after shutdown marking", async () => {
     const owner = createEnvironmentExecutionOwner();
     const op = operation();
     const posted = deferred();
-    const fetcher = vi.fn(async () => {
+    const control = vi.fn<OperationControlService>(async () => {
       posted.resolve();
-      return Response.json({});
+      return { status: 202, body: {} };
     });
+    const fetcher = vi.fn(unavailable);
     vi.stubGlobal("fetch", fetcher);
-    const a = coordinator(owner, "a", async () => {
-      finish(op, "failed");
-      op.providerRecovery = { state: "rollback_pending" };
-      owner.markEnvironmentInstanceShuttingDown("a");
-    });
+    const a = coordinator(
+      owner,
+      "a",
+      async () => {
+        finish(op, "failed");
+        op.providerRecovery = { state: "rollback_pending" };
+        owner.markEnvironmentInstanceShuttingDown("a");
+      },
+      undefined,
+      undefined,
+      undefined,
+      control
+    );
     a.scheduleEnvironmentOperation(op);
     await posted.promise;
     await settled(owner, "a");
-    expect(fetcher).toHaveBeenCalledWith(
-      "http://127.0.0.1:1/a/api/operations/op/rollback",
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          "X-Radius-Server-Owned": expect.any(String)
-        })
-      })
-    );
+    expect(control).toHaveBeenCalledWith({
+      operationId: "op",
+      instanceId: "a",
+      command: "rollback",
+      isCurrent: expect.any(Function)
+    });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it.each(["shutdown", "reopened", "removed", "terminal", "resolved"] as const)(

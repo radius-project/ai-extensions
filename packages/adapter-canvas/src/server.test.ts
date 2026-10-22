@@ -6494,6 +6494,9 @@ describe("environment deletion session reporting coordinator", () => {
         verificationStatus: async () => {
           throw new Error("Unexpected verification during deletion");
         },
+        operationControl: async () => {
+          throw new Error("Unexpected setup control during deletion");
+        },
         servers: new Map()
       }
     );

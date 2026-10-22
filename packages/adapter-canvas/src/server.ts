@@ -287,7 +287,16 @@ import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { probeDeleteConflict } from "./server/services/delete-conflict.js";
-import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
+import {
+  createOperationsStatusRoutes,
+  type OperationActionDependencies
+} from "./server/routes/operations-status.js";
+import { createOperationResumeService } from "./server/services/operation-resume.js";
+import {
+  createOperationsControlService,
+  type OperationControlService,
+  type OperationsControlDependencies
+} from "./server/services/operation-control.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
 import {
@@ -4213,6 +4222,7 @@ export function createInstanceRequestCoordinator(
     verificationStatus(
       input: VerificationStatusInput
     ): Promise<VerificationStatusResult>;
+    operationControl: OperationControlService;
     servers: ReadonlyMap<string, CanvasServerEntry>;
     environmentOperationRunner?: EnvironmentOperationRunner;
   }
@@ -4225,6 +4235,8 @@ export function createInstanceRequestCoordinator(
     throw new Error(
       "Missing request coordinator dependency: verificationStatus"
     );
+  if (typeof dependencies.operationControl !== "function")
+    throw new Error("Missing request coordinator dependency: operationControl");
   for (const name of ["authorizeAzure", "configureEnvironment"] as const) {
     if (typeof setupServices?.[name] !== "function") {
       throw new Error(
@@ -4332,11 +4344,31 @@ export function createInstanceRequestCoordinator(
 
   function scheduleAutomaticRecoveryRollback(operationId: string): void {
     if (!attachment.claimAutomaticRollback(operationId)) return;
+    const operation = operations.get(operationId);
+    const repo = operation?.repo;
+    const environment = operation?.environment;
     queueMicrotask(() => {
-      void postInternal(
-        `/api/operations/${encodeURIComponent(operationId)}/rollback`,
-        {}
-      )
+      void dependencies
+        .operationControl({
+          operationId,
+          instanceId,
+          command: "rollback",
+          isCurrent: () =>
+            Boolean(operation) &&
+            operations.get(operationId) === operation &&
+            operation.operationId === operationId &&
+            operation.repo === repo &&
+            operation.environment === environment
+        })
+        .then((result) => {
+          if (result.status < 200 || result.status >= 300) {
+            throw new Error(
+              typeof result.body.error === "string" ?
+                result.body.error
+              : `Operation control failed with status ${result.status}.`
+            );
+          }
+        })
         .catch((error) => {
           operations.report?.({
             scope: "provider-recovery-auto-rollback",
@@ -4348,24 +4380,6 @@ export function createInstanceRequestCoordinator(
           attachment.releaseAutomaticRollback(operationId);
         });
     });
-  }
-
-  async function postInternal(pathname: string, data: unknown): Promise<any> {
-    const response = await fetch(`${resolveBaseUrl()}${pathname}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": serverOwnedToken
-      },
-      body: JSON.stringify(data)
-    });
-    const result: any = await response.json();
-    if (!response.ok && !result?.inputRequired) {
-      throw new Error(
-        result?.error || `Request failed with HTTP ${response.status}.`
-      );
-    }
-    return result;
   }
 
   async function monitorVerification(operationId: string): Promise<void> {
@@ -5730,10 +5744,13 @@ export function createProductionCanvasServerRuntime(
   // an instance that is gone reports a miss instead of silently dropping accepted
   // work. Every route that schedules resolves its runner through here.
   function resolveInstanceRunner(
-    instanceId: string,
+    instanceId: string | undefined,
     operationId: string
   ): ReturnType<typeof createInstanceRequestCoordinator> | null {
-    const coordinator = instanceRequestCoordinators.get(instanceId);
+    const coordinator =
+      instanceId === undefined ? undefined : (
+        instanceRequestCoordinators.get(instanceId)
+      );
     if (!coordinator) {
       console.error(
         `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operationId}.`
@@ -5744,7 +5761,7 @@ export function createProductionCanvasServerRuntime(
   }
 
   function scheduleEnvironmentOperationForInstance(
-    instanceId: string,
+    instanceId: string | undefined,
     operation: { operationId: string }
   ): boolean {
     const coordinator = resolveInstanceRunner(
@@ -5755,6 +5772,25 @@ export function createProductionCanvasServerRuntime(
     coordinator.scheduleEnvironmentOperation(operation);
     return true;
   }
+
+  const operationActionDependencies: OperationActionDependencies = {
+    getOperation: (operationId) => operations.get(operationId),
+    canResumeInput,
+    resumeAfterInput,
+    requireInput,
+    finish,
+    isTerminalState,
+    canDismissOperation,
+    dismissOperation,
+    persistOperations: () => operations.persist(),
+    toClientView,
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    errorMessage,
+    inputRequiredState: INPUT_REQUIRED_STATE
+  };
+  const operationResume = createOperationResumeService(
+    operationActionDependencies
+  );
 
   // Composition root for the migrated `operations-status` family. Reads, creates,
   // and resumable actions each receive only the registry, mutation, persistence,
@@ -5784,27 +5820,15 @@ export function createProductionCanvasServerRuntime(
       scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
       errorMessage
     },
-    {
-      getOperation: (operationId) => operations.get(operationId),
-      canResumeInput,
-      resumeAfterInput,
-      requireInput,
-      finish,
-      isTerminalState,
-      canDismissOperation,
-      dismissOperation,
-      persistOperations: () => operations.persist(),
-      toClientView,
-      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-      errorMessage,
-      inputRequiredState: INPUT_REQUIRED_STATE
-    }
+    operationActionDependencies,
+    operationResume
   );
 
-  const operationsControlRoutes = createOperationsControlRoutes({
+  const operationsControlDependencies: OperationsControlDependencies = {
     get: (operationId) => operations.get(operationId),
     acquireForRetry: (op) => operations.acquireForRetry(op),
     persistOperations: () => operations.persist(),
+    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
     checkPullRequestMerge: (op, pullRequestUrl) =>
       checkSetupPullRequestMergeForOperation(op, pullRequestUrl, {
         createExecutor: (login) =>
@@ -5864,7 +5888,14 @@ export function createProductionCanvasServerRuntime(
     invalidateEnvironmentListing: (repo) => {
       envListCache.invalidate(repo);
     }
-  });
+  };
+  const operationControl = createOperationsControlService(
+    operationsControlDependencies
+  );
+  const operationsControlRoutes = createOperationsControlRoutes(
+    operationsControlDependencies,
+    operationControl
+  );
 
   // Composition root for the migrated `repositories` family. Three seams: the
   // subprocess runner, a reader for the live instance state the branch cache is
@@ -6537,6 +6568,18 @@ export function createProductionCanvasServerRuntime(
                   );
                 return verificationStatus({ ...input, observation });
               },
+              operationControl: (input, publish) =>
+                operationControl(
+                  {
+                    ...input,
+                    isCurrent: () =>
+                      instanceRequestCoordinators.get(instanceId)
+                        ?.scheduleCommandTask ===
+                        coordinator.scheduleCommandTask &&
+                      (input.isCurrent?.() ?? true)
+                  },
+                  publish
+                ),
               servers: instances,
               get environmentOperationRunner() {
                 return options.environmentOperationRunner;
@@ -6745,6 +6788,8 @@ export function createProductionCanvasServerRuntime(
   return {
     servers: canvasServer.instances,
     verificationStatus,
+    operationControl,
+    operationResume,
     getOrCreateServer,
     stopServer,
     getLastWebviewActivityAt,

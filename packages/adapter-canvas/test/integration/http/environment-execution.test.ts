@@ -406,7 +406,7 @@ describe("production environment owner HTTP binding", () => {
     }
   );
 
-  it("keeps recovery's server-owned transport out of webview activity and surfaces refusal", async () => {
+  it("keeps direct recovery out of webview activity and surfaces admission refusal", async () => {
     const op = createOperation({
       operationId: "op_rollback_transport",
       repo: "fixture/rollback",
@@ -422,7 +422,7 @@ describe("production environment owner HTTP binding", () => {
       executionOwner: createEnvironmentExecutionOwner()
     });
     try {
-      const entry = await runtime.getOrCreateServer("rollback", "environment");
+      await runtime.getOrCreateServer("rollback", "environment");
       await vi.waitFor(() =>
         expect(report).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -432,14 +432,8 @@ describe("production environment owner HTTP binding", () => {
           })
         )
       );
-      expect(fetcher).toHaveBeenCalledWith(
-        `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            "X-Radius-Server-Owned": expect.any(String)
-          })
-        })
-      );
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(op.control.commands).toEqual([]);
       expect(runtime.getLastWebviewActivityAt()).toBe(0);
       expect(op.state).toBe("failed");
     } finally {
