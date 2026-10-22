@@ -15,8 +15,11 @@ import * as core from "./index.js";
 const EXPECTED_FUNCTIONS = [
   "admitDeployment",
   "classifyDeploymentDispatchFailure",
+  "collectDeploymentOutcome",
   "coordinateDeploymentDispatch",
+  "discoverDeploymentRun",
   "ensureDeploymentSecret",
+  "monitorDeploymentRun",
   "startDeployment",
   "admitSetupCommand",
   "resumeSetupInput",

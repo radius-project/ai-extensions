@@ -23,6 +23,45 @@ export default defineConfig({
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
+        "packages/core/src/deployment-{monitor,outcome}.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-canvas/src/runtime/{deployment-attempt,deployment-execution-owner,production-deployment-execution-owner,production-deployment-monitor}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/canvas-graph-resources.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-canvas/src/server/services/{deployment-reservations,deploy-outcome}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/server/services/deployment-presentation.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 93.75,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/server/services/deploy-monitor.ts": {
+          statements: 100,
+          branches: 99.32,
+          functions: 100,
+          lines: 100
+        },
         "packages/core/src/deployment-{admission,azure-preflight,branch,commands,dispatch,publication,secret,start}.ts":
           {
             statements: 100,
