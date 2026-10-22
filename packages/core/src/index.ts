@@ -14,6 +14,15 @@ export { redactCredentials } from "./credential-redaction.js";
 export { ensureDeploymentSecret } from "./deployment-secret.js";
 export { startDeployment } from "./deployment-start.js";
 export {
+  collectDeploymentOutcome,
+  type DeploymentGraphRead
+} from "./deployment-outcome.js";
+export {
+  discoverDeploymentRun,
+  monitorDeploymentRun,
+  type DeploymentRunDetail
+} from "./deployment-monitor.js";
+export {
   admitDeployment,
   type DeploymentAdmission,
   type DeploymentAdmissionPorts,

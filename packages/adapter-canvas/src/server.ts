@@ -69,7 +69,6 @@ import {
   recordGraphBuildEvent
 } from "./shared.js";
 import type {
-  CanvasGraphResource,
   CanvasState,
   DeployErrorKind,
   GraphBuildEvent,
@@ -372,6 +371,7 @@ import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import type { EnvironmentsDependencies } from "./server/routes/environments-types.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
+import { canvasGraphResources } from "./canvas-graph-resources.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 import { shouldRetryWithKeyringCredential } from "./server/services/workflow-credential-fallback.js";
@@ -678,31 +678,6 @@ async function runGitHubJsonRequest(
 
 function optionalString(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
-  return values.map((value) => {
-    const item = record(value);
-    const connections =
-      Array.isArray(item.connections) ?
-        item.connections.map((connection) => {
-          const fields = record(connection);
-          return {
-            ...fields,
-            id: optionalString(fields.id),
-            name: optionalString(fields.name),
-            direction: optionalString(fields.direction)
-          };
-        })
-      : undefined;
-    return {
-      ...item,
-      id: optionalString(item.id),
-      name: optionalString(item.name),
-      type: optionalString(item.type),
-      ...(connections ? { connections } : {})
-    };
-  });
 }
 
 // Composition root for the cooperative controls in the same `operations-status`
