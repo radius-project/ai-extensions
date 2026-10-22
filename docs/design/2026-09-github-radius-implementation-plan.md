@@ -191,6 +191,8 @@ A partial provider migration is acceptable between PRs if each provider has exac
 
 ## Stage 3: extract deployment and explicit repair coordination
 
+**Explicit-target preparation and dispatch (new PR 5/8):** The [preparation ownership record](./2026-09-github-radius-migration-inventory.md#stage-3-explicit-target-preparation-and-dispatch) introduces the coherent branch, Azure preflight, command, secret, publication, admission and dispatch policies together. The existing Canvas dispatch service consumes `startDeployment` and `ensureDeploymentSecret`; it records accepted, refused or uncertain evidence and does not blindly retry an ambiguous dispatch. Selected repository readers/writers, executor binding, template generation, workflow preparation and repository-wide run baselines are tested prerequisites for PR 6's selected-account monitor. They do not yet give Canvas immutable account ownership. Canvas retains matching-worktree source reads, legacy account fallback and panel lifetime, and all existing tool contracts remain unchanged. Two narrow legacy repair guards reject the newly produced `dispatch-refused` kind so this intermediate head cannot automatically repair or redeploy a preparation refusal; full controller, notification and repair adoption remains PR 7.
+
 **Outcome:** Deploy, observe, and repair are separate shared calls; existing deploy/status tools call them directly rather than fetching Canvas routes.
 
 Extract request validation, allowed command construction, workflow preparation/dispatch, execution correlation, and monitoring decisions from the current deployment services. Reuse stage 1 evidence interpretation. Keep planned-graph recovery behind a narrow port until stage 4 migrates its implementation.

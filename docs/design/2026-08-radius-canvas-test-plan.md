@@ -63,6 +63,8 @@ GitHub authentication follows the same approach rather than becoming a separate 
 
 ## Standard local check
 
+The explicit-target preparation/dispatch slice (new PR 5/8) adds core policy and selected-I/O unit suites plus `test/integration/runtime/deployment-preparation.test.ts`. That boundary composes real executor, workflow/file/secret preparation, run-baseline and dispatch helpers with fake external I/O; it does not claim selected-account Canvas ownership or SDK lifecycle adoption. RF-07 HTTP cases retain main's registration-delay and OIDC coverage, adopt explicit dispatch commands/refusal evidence, and reject repair of a confirmed refusal. Existing Chromium deployment/account workflows protect the unchanged UI and panel lifetime. New module coverage targets 100% in every metric, inherited floors remain enforced, and scheduled reliability includes the owning suites. PRs 6-7 retain ownership, monitor, controller and lifetime work; no direct deployment tool changes land here.
+
 Run the affected focused tests while working. Before completing a source change, run:
 
 ```console
