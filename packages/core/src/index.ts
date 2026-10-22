@@ -11,6 +11,23 @@
 // exported from their own module and out of this file.
 
 export { redactCredentials } from "./credential-redaction.js";
+export { ensureDeploymentSecret } from "./deployment-secret.js";
+export { startDeployment } from "./deployment-start.js";
+export {
+  admitDeployment,
+  type DeploymentAdmission,
+  type DeploymentAdmissionPorts,
+  type DeploymentAdmissionTarget
+} from "./deployment-admission.js";
+export {
+  coordinateDeploymentDispatch,
+  classifyDeploymentDispatchFailure,
+  type DeploymentWorkflowTarget,
+  type DeploymentWorkflowReference,
+  type DeploymentDispatchCommand,
+  type DeploymentDispatchEvidence,
+  type DeploymentDispatchPorts
+} from "./deployment-dispatch.js";
 export {
   selectGitHubAccount,
   type GitHubAccountSelection,

@@ -13,6 +13,11 @@ import * as core from "./index.js";
 // than as a settled contract; if that work does not land, they should be removed
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
+  "admitDeployment",
+  "classifyDeploymentDispatchFailure",
+  "coordinateDeploymentDispatch",
+  "ensureDeploymentSecret",
+  "startDeployment",
   "admitSetupCommand",
   "resumeSetupInput",
   "runSetupCoordinator",
@@ -182,6 +187,10 @@ const EXPECTED_VALUES = [
 // Helpers that live inside core and are deliberately not part of the package's
 // public contract. Re-exporting one is a surface regression, not a convenience.
 const MODULE_INTERNAL_NAMES = [
+  "checkDeploymentBranch",
+  "prepareDeploymentCommands",
+  "prepareDeploymentWorkflows",
+  "validateDeploymentAzureIdentity",
   "addInboundConnections",
   "stripAPIVersion",
   "azure",
