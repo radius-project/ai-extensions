@@ -339,6 +339,17 @@ describe("P0-C built Radius extension artifact", () => {
       ])
     );
   });
+  it("registers flat object tool parameters without provider-rejected root unions", () => {
+    for (const tool of smoke.registration.tools) {
+      expect(tool.parameters).toMatchObject({
+        type: "object",
+        properties: expect.any(Object)
+      });
+      expect(tool.parameters.properties).not.toEqual({});
+      for (const keyword of ["oneOf", "anyOf", "allOf", "enum", "not"])
+        expect(tool.parameters).not.toHaveProperty(keyword);
+    }
+  });
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {
     assertCurrentArtifact();
