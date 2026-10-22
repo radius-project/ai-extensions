@@ -3,6 +3,7 @@ import {
   providerMutationId,
   providerMutationRecord,
   providerMutationsByKind,
+  providerRecoveryManualGuidance,
   settleProviderMutation,
   unresolvedProviderMutations
 } from "../../operations.js";
@@ -30,7 +31,10 @@ export function createSetupWorkflowRecoveryPort(
     rollbackPending: () =>
       operation.providerRecovery?.state === "rollback_pending",
     markRollbackPending: () => {
-      if (operation.providerRecovery)
+      if (
+        operation.providerRecovery &&
+        !providerRecoveryManualGuidance(operation)
+      )
         operation.providerRecovery.state = "rollback_pending";
     },
     settleManual: (kind, target, guidance) => {
