@@ -205,6 +205,28 @@ jobs:
             exit 1
           }
 
+      # WebView2 150+ ignores debugging environment variables in elevated
+      # processes. Hosted Windows runners need an app-scoped machine policy.
+      - name: Enable Copilot app browser debugging
+        id: copilot-cdp
+        if: steps.fixture.outputs.configured == 'true' && env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'copilot-app'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+            throw 'The browser debugging policy is only allowed on disposable GitHub-hosted Windows runners.'
+          }
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          if (Test-Path -LiteralPath $policy) {
+            if ((Get-Item -LiteralPath $policy).GetValueNames().Contains('github.exe')) {
+              throw 'A browser debugging policy for github.exe already exists. Refusing to replace it.'
+            }
+          } else {
+            New-Item -Path $policy -Force | Out-Null
+          }
+          New-ItemProperty -LiteralPath $policy -Name 'github.exe' -Value '--remote-debugging-port=9222' -PropertyType String | Out-Null
+          'configured=true' >> $env:GITHUB_OUTPUT
+
       # No stored Azure secret exists. The runner's OIDC token is exchanged for
       # an Azure token scoped to the dedicated bootstrap identity, which holds
       # subscription Contributor, RBAC administration, and Graph
@@ -263,6 +285,14 @@ jobs:
           CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
           CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
         run: pnpm run test:cloud
+
+      - name: Remove Copilot app browser debugging policy
+        if: always() && steps.fixture.outputs.configured == 'true' && steps.copilot-cdp.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          Remove-ItemProperty -LiteralPath $policy -Name 'github.exe'
 
       - name: Create a fresh read-only GitHub App token for diagnostics
         id: diagnostics-token
