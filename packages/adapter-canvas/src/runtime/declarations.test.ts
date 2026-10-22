@@ -247,14 +247,23 @@ describe("RU-03: tool declarations", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
         "Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-bicep skill, or a delegated agent."
       );
-      expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "After opening, end the current turn so the Canvas-owned handoff can run, unless checking an already-ready graph for missing source references."
-      );
       expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
         "First, check whether"
       );
       expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
         "Only AFTER the skill has written"
+      );
+    });
+
+    it("allows remaining work such as deployment after opening the graph without waiting for a model", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "After opening, do not wait for the model. Continue with any other part of the user's request, or end the turn."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "After opening, end the current turn"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        'When the user asks to "deploy my app", "create environment": open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<current-repo>" } }).'
       );
     });
 
@@ -266,7 +275,7 @@ describe("RU-03: tool declarations", () => {
 
     it("preserves source-reference repair without polling an unready graph", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "For that check, call get_graph_resources at most once; if ready is false, end the turn without waiting or retrying."
+        "For that check, call get_graph_resources at most once; if ready is false, stop the reference check without waiting or retrying."
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
         "Repair missing source references on a ready graph through the radius-app-graph skill's radius-app-bicep repair workflow."
