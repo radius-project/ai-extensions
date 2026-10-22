@@ -114,7 +114,7 @@ The current workspace lookup tries `.radius/app.bicep`, then `app.bicep`. If nei
 
 Graph diffs apply this lookup independently to the explicit base and head selections. A missing model on one side contributes an empty graph, so the other side can still show additions or removals. If both models are unavailable, the Canvas comparison workflow can request authoring; the `radius_generate_pr_diff_markdown` tool instead reports that the diff is unavailable.
 
-Keep the graph, planned, or graph-diff view open while the Canvas is generating a missing model. All three views retry automatically and update once the saved model is available to the selected repository and branch; no manual Refresh or reopen is needed during generation. Use Refresh or reopen after manual model edits. For a remote selection, the model must be available on GitHub.
+Keep the graph, planned, or graph-diff view open while the Canvas is generating a missing model. All three views retry automatically and update once the saved model is available to the selected repository and branch, while the automatic wait remains active. The wait ends after 5 minutes if no modeling run has been observed for that selection, or after 30 minutes total. If either limit is reached, check the Copilot conversation for the modeling status, then reload to try again. Use Refresh or reopen after manual model edits. For a remote selection, the model must be available on GitHub.
 
 ## Prerequisites
 
