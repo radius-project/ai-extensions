@@ -735,7 +735,7 @@ jobs:
               continue
             fi
             deleted=$((deleted + 1))
-          done < <(jq -r '.[] | [.id, .name, .type] | @tsv' "$reclaimable")
+          done < <(jq --binary -r '.[] | [.id, .name, .type] | @tsv' "$reclaimable")
 
           echo "- Azure resources reclaimed from $RESOURCE_GROUP: $deleted" >>"$GITHUB_STEP_SUMMARY"
           if (( ${#failures[@]} > 0 )); then

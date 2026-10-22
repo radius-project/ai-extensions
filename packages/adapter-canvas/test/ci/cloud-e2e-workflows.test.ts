@@ -1155,6 +1155,8 @@ describe("cloud-e2e-cleanup.yml", () => {
           passing
         ]);
         const summaryText = await readFile(summary, "utf8");
+        expect(result.stderr).not.toContain("\r");
+        expect(summaryText).not.toContain("\r");
         if (scenario === "all deletes succeed") {
           expect(result.status).toBe(0);
           expect(summaryText).toContain("reclaimed from synthetic-group: 2");
