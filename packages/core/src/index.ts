@@ -12,6 +12,31 @@
 
 export { redactCredentials } from "./credential-redaction.js";
 export { runSetupCoordinator } from "./setup-coordinator.js";
+export { monitorSetupVerification } from "./setup-verification-monitor.js";
+export {
+  readSetupVerificationStatus,
+  isAzureRbacVerificationFailure,
+  type SetupVerificationStatusInput,
+  type SetupVerificationRunDetail,
+  type SetupVerificationReadRequest,
+  type SetupVerificationStatusOperation,
+  type SetupVerificationStatus,
+  type SetupVerificationStatusPorts
+} from "./setup-verification-status.js";
+export {
+  classifyVerifyFailure,
+  extractMissingPermissions,
+  type VerifyFailureCategory,
+  type VerifyUnreachableComponent,
+  type VerifyFailureStep,
+  type VerifyFailureInput,
+  type VerifyFailureClassification
+} from "./verify-failure-classification.js";
+export type {
+  SetupVerificationObservation,
+  SetupVerificationMonitorOperation,
+  SetupVerificationMonitorPorts
+} from "./setup-verification-monitor.js";
 export type {
   SetupCoordinatorTarget,
   SetupCoordinatorOperation,
@@ -313,3 +338,5 @@ export * from "./setup-environment-contracts.js";
 
 export * from "./setup-verification-policy.js";
 export * from "./setup-verification-plan.js";
+export * from "./setup-command-admission.js";
+export * from "./setup-input-resume.js";
