@@ -236,16 +236,19 @@ describe("RU-03: tool declarations", () => {
   describe("RU-19: session start guidance", () => {
     it("opens the graph first and leaves missing-model authoring to the Canvas handoff", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "without explicitly requesting model creation or updates"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
         '1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).'
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "let the Canvas queue its automatic radius-app-bicep authoring handoff"
+        "Let the Canvas detect a missing app.bicep and queue its automatic radius-app-bicep authoring handoff."
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "After opening, do not inspect the workspace for app.bicep, poll for a missing model, call radius_generate_app or the radius-app-bicep skill, or delegate model generation independently."
+        "Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-bicep skill, or a delegated agent."
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
-        "End the current turn so the Canvas-owned handoff can run."
+        "After opening, end the current turn so the Canvas-owned handoff can run, unless checking an already-ready graph for missing source references."
       );
       expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
         "First, check whether"
@@ -258,6 +261,24 @@ describe("RU-03: tool declarations", () => {
     it("keeps explicitly requested model authoring available", () => {
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
         "When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion."
+      );
+    });
+
+    it("preserves source-reference repair without polling an unready graph", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "For that check, call get_graph_resources at most once; if ready is false, end the turn without waiting or retrying."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Repair missing source references on a ready graph through the radius-app-graph skill's radius-app-bicep repair workflow."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "poll for a missing model, call radius_generate_app or the radius-app-bicep skill"
+      );
+    });
+
+    it("finishes explicit model authoring before a combined request's graph open", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        'For a combined request such as "generate the model and show me the graph", this explicit-authoring instruction takes precedence over the graph-only flow below: complete authoring successfully, then open the requested graph.'
       );
     });
 

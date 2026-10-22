@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Align application graph guidance to open the Canvas first and leave missing-model generation to its automatic handoff.
+**Fixed:** Open the application graph view before generating a missing model when you ask to see the graph.

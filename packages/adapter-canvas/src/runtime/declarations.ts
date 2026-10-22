@@ -170,12 +170,12 @@ export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (can
 3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 In every example below, "<radius-instance>" means the existing Radius Canvas instanceId when one is open, or "${RADIUS_CANVAS_INSTANCE_ID}" only when none is open.
 
-When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
-1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).
-2. If app.bicep is missing, let the Canvas queue its automatic radius-app-bicep authoring handoff. After opening, do not inspect the workspace for app.bicep, poll for a missing model, call radius_generate_app or the radius-app-bicep skill, or delegate model generation independently.
-3. End the current turn so the Canvas-owned handoff can run.
+When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion. For a combined request such as "generate the model and show me the graph", this explicit-authoring instruction takes precedence over the graph-only flow below: complete authoring successfully, then open the requested graph.
 
-When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion.
+When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases, without explicitly requesting model creation or updates:
+1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).
+2. Let the Canvas detect a missing app.bicep and queue its automatic radius-app-bicep authoring handoff. Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-bicep skill, or a delegated agent.
+3. After opening, end the current turn so the Canvas-owned handoff can run, unless checking an already-ready graph for missing source references. For that check, call get_graph_resources at most once; if ready is false, end the turn without waiting or retrying. Repair missing source references on a ready graph through the radius-app-graph skill's radius-app-bicep repair workflow.
 
 For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
 
