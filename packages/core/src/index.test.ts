@@ -14,6 +14,7 @@ import * as core from "./index.js";
 // along with these entries.
 const EXPECTED_FUNCTIONS = [
   "admitDeployment",
+  "claimDeploymentRepairHandoff",
   "classifyDeploymentDispatchFailure",
   "collectDeploymentOutcome",
   "coordinateDeploymentDispatch",
@@ -21,6 +22,8 @@ const EXPECTED_FUNCTIONS = [
   "deploymentApplicationPaths",
   "ensureDeploymentSecret",
   "monitorDeploymentRun",
+  "resolveDeploymentRepairLoop",
+  "settleDeploymentRepairHandoff",
   "startDeployment",
   "admitSetupCommand",
   "resumeSetupInput",
@@ -145,6 +148,9 @@ const EXPECTED_FUNCTIONS = [
 ] as const;
 
 const EXPECTED_VALUES = [
+  "DEPLOY_HANDOFF_MAX_ATTEMPTS",
+  "DEPLOY_HANDOFF_RETRY_DELAY_MS",
+  "DEPLOY_REPAIR_ATTEMPT_CAP",
   "VERIFY_OPERATION_INPUT",
   "AZURE_APP_CREATE_CONTINUATION_SCHEMA_VERSION",
   "AZURE_SERVICE_MANAGEMENT_REFERENCE_PROMPT",

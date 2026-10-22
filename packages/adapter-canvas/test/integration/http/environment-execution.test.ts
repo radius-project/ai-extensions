@@ -587,25 +587,23 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 
-  it("refuses construction without the shared owner", () => {
+  it.each([
+    "executionOwner",
+    "accountContext",
+    "deploymentOwner",
+    "deploymentAccount"
+  ] as const)("refuses construction without %s", (dependency) => {
     const options = {
+      deploymentOwner: createProductionDeploymentExecutionOwner(),
+      deploymentAccount: async (): Promise<never> => {
+        throw new Error("Unexpected deployment account selection.");
+      },
       executionOwner: createEnvironmentExecutionOwner(),
       accountContext: createProductionGitHubAccountContext()
     };
-    Reflect.deleteProperty(options, "executionOwner");
+    Reflect.deleteProperty(options, dependency);
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
-      "Missing canvas server dependency: executionOwner"
-    );
-  });
-
-  it("refuses construction without the shared account context", () => {
-    const options = {
-      executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createProductionGitHubAccountContext()
-    };
-    Reflect.deleteProperty(options, "accountContext");
-    expect(() => createProductionCanvasServerRuntime(options)).toThrow(
-      "Missing canvas server dependency: accountContext"
+      `Missing canvas server dependency: ${dependency}`
     );
   });
 
@@ -785,3 +783,4 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 });
+import { createProductionDeploymentExecutionOwner } from "../../../src/runtime/production-deployment-execution-owner.js";

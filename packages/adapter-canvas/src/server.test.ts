@@ -5228,6 +5228,116 @@ describe("planned graph request generations", () => {
   });
 });
 
+describe.each(["repair", "notice"] as const)(
+  "owned deployment %s delivery",
+  (kind) => {
+    afterEach(() => {
+      setDeployRepairHandoff(null);
+      setDeployFailureNotice(null);
+    });
+    const trigger =
+      kind === "repair" ?
+        triggerDeployRepairHandoff
+      : triggerDeployFailureNotice;
+    const register =
+      kind === "repair" ? setDeployRepairHandoff : setDeployFailureNotice;
+    const deliveryField =
+      kind === "repair" ? "deployHandoffState" : "deployNoticeState";
+    const attemptsField =
+      kind === "repair" ? "deployHandoffAttempts" : "deployNoticeAttempts";
+    const entry = (): { state: CanvasState } => ({
+      state: {
+        deployStatus: "failed",
+        deployAttempt: { id: "owned" },
+        deployGeneration: 1,
+        ...(kind === "notice" ?
+          { deployErrorKind: DEPLOY_RUN_UNCONFIRMED_KIND }
+        : {})
+      }
+    });
+
+    it.each(["resolve", "reject"] as const)(
+      "fences late %s delivery for the same attempt's replaced generation",
+      async (settle) => {
+        let current = true;
+        let resolve: (() => void) | undefined;
+        let reject: ((error: Error) => void) | undefined;
+        const delivery = new Promise<void>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        });
+        const handler = vi.fn(() => delivery);
+        register(handler);
+        const publish = vi.fn();
+        const retry = vi.fn();
+        const lifetime = { isCurrent: () => current, publish, retry };
+        const state = entry();
+        expect(trigger(state, "panel", lifetime)).toBe(true);
+        expect(state.state[deliveryField]).toBe("pending");
+        current = false;
+        if (settle === "resolve") resolve?.();
+        else reject?.(new Error("delivery failed"));
+        await delivery.catch(() => {});
+        expect(state.state[deliveryField]).toBe("pending");
+        expect(publish).not.toHaveBeenCalled();
+        expect(retry).not.toHaveBeenCalled();
+        expect(trigger(state, "panel", lifetime)).toBe(false);
+        expect(handler).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it.each([false, true])(
+      "schedules retries through the owner and fences a stopped retry: %s",
+      async (stopped) => {
+        let current = true;
+        let callback: (() => void) | undefined;
+        let calls = 0;
+        register(() =>
+          ++calls === 1 ?
+            Promise.reject(new Error("delivery failed"))
+          : Promise.resolve()
+        );
+        const state = entry();
+        const publish = vi.fn();
+        const retry = vi.fn((work: () => void, _milliseconds: number) => {
+          callback = work;
+        });
+        const lifetime = { isCurrent: () => current, publish, retry };
+        expect(trigger(state, "panel", lifetime)).toBe(true);
+        await Promise.resolve();
+        expect(state.state[deliveryField]).toBe("retryable");
+        expect(retry).toHaveBeenCalledWith(
+          expect.any(Function),
+          DEPLOY_HANDOFF_RETRY_DELAY_MS
+        );
+        current = !stopped;
+        callback?.();
+        await Promise.resolve();
+        expect(calls).toBe(stopped ? 1 : 2);
+        expect(state.state[deliveryField]).toBe(
+          stopped ? "retryable" : "delivered"
+        );
+        expect(publish).toHaveBeenCalledTimes(stopped ? 1 : 2);
+      }
+    );
+
+    it("publishes exhausted delivery without scheduling another retry", async () => {
+      register(() => Promise.reject(new Error("delivery failed")));
+      const state = entry();
+      state.state[attemptsField] = DEPLOY_HANDOFF_MAX_ATTEMPTS - 1;
+      const publish = vi.fn();
+      const retry = vi.fn();
+      expect(
+        trigger(state, "panel", { isCurrent: () => true, publish, retry })
+      ).toBe(true);
+      await Promise.resolve();
+      expect(state.state[deliveryField]).toBe("failed");
+      expect(publish).toHaveBeenCalledTimes(1);
+      expect(retry).not.toHaveBeenCalled();
+    });
+  }
+);
+
 describe("triggerDeployRepairHandoff", () => {
   afterEach(() => {
     setDeployRepairHandoff(null);
@@ -5400,6 +5510,25 @@ describe("triggerDeployRepairHandoff", () => {
       throw new Error("session gone");
     });
     expect(() => triggerDeployRepairHandoff(failedEntry())).not.toThrow();
+  });
+
+  it("redacts retained account diagnostics before the repair handoff", async () => {
+    const send = vi.fn(async () => {});
+    setDeployRepairHandoff(send);
+    const entry = failedEntry({ deployError: "opaque-account-value" });
+    expect(
+      triggerDeployRepairHandoff(entry, "", {
+        isCurrent: () => true,
+        redactDiagnostic: (value) =>
+          value.replaceAll("opaque-account-value", "[REDACTED]"),
+        publish: () => {},
+        retry: () => {}
+      })
+    ).toBe(true);
+    await Promise.resolve();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ error: "[REDACTED]" })
+    );
   });
 
   it("retries delivery on the next status poll when the first send rejects", async () => {
@@ -5904,18 +6033,31 @@ describe("triggerDeployRepairHandoff", () => {
       );
     });
 
-    it("still repairs a confirmed failure that carries an unrelated error kind", () => {
-      expect(
-        resolveDeployRepairLoop(
-          {
-            deployAttempt: { id: "attempt-A" },
-            deployStatus: "failed",
-            deployErrorKind: "branch-not-pushed"
-          } as CanvasState,
-          "attempt-A"
-        )
-      ).toEqual({ repairLoop: true, attemptId: "attempt-A", repairAttempt: 1 });
-    });
+    it.each([
+      "branch-not-pushed",
+      "oidc-subject-missing",
+      "oidc-subject-case-mismatch",
+      "cloud-auth-drift"
+    ] as const)(
+      "refuses attempt-bound model repair for %s",
+      (deployErrorKind) => {
+        expect(
+          resolveDeployRepairLoop(
+            {
+              deployAttempt: { id: "attempt-A" },
+              deployStatus: "failed",
+              deployErrorKind
+            } as CanvasState,
+            "attempt-A"
+          )
+        ).toMatchObject({
+          repairLoop: false,
+          attemptId: "",
+          repairAttempt: 0,
+          error: expect.stringContaining("not model repair")
+        });
+      }
+    );
 
     it("refuses a redeploy on an attempt that already succeeded", () => {
       // The attempt stays current after it settles and the agent keeps passing
@@ -6018,6 +6160,36 @@ describe("triggerDeployFailureNotice", () => {
       } satisfies CanvasState
     };
   }
+
+  it("reports preparation refusal without a model-repair handoff or an in-flight claim", () => {
+    const entry = unconfirmedEntry({
+      deployErrorKind: "dispatch-refused",
+      deployError: "Deployment was not dispatched: run list unavailable",
+      deployRunUrl: ""
+    });
+    const notice = vi.fn();
+    const repair = vi.fn();
+    setDeployFailureNotice(notice);
+    setDeployRepairHandoff(repair);
+    try {
+      expect(triggerDeployRepairHandoff(entry)).toBe(false);
+      expect(repair).not.toHaveBeenCalled();
+      expect(triggerDeployFailureNotice(entry, "panel")).toBe(true);
+      expect(notice).toHaveBeenCalledExactlyOnceWith({
+        repo: "octo/app",
+        branch: "feat",
+        error: "Deployment was not dispatched: run list unavailable",
+        deployRunUrl: "",
+        instanceId: "panel",
+        dispatchRefused: true
+      });
+      const refusal = resolveDeployRepairLoop(entry.state, "attempt-A");
+      expect(refusal.error).toContain("No new workflow was started.");
+      expect(refusal.error).not.toMatch(/may still be in flight|second run/);
+    } finally {
+      setDeployRepairHandoff(null);
+    }
+  });
 
   it("reports a run-unconfirmed failure to the agent with repo, branch, error, run URL, and instance", () => {
     const calls: DeployFailureNoticeInput[] = [];
@@ -6752,7 +6924,7 @@ describe("deploy failures that may leave a run in flight", () => {
   it("treats an unresolved ref as proof that no run was created", () => {
     for (const stderr of [
       "No ref found for: feature-branch",
-      "could not resolve to a Repository",
+      "could not resolve to a Commit with the SHA of feature-branch",
       "no commit found for the ref feature-branch"
     ])
       expect(classifyDeployDispatchFailure(stderr)).toBe(

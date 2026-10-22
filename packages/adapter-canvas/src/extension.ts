@@ -112,6 +112,7 @@ import type { SessionPort } from "./runtime/session.js";
 import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
+import { createProductionDeploymentExecutionOwner } from "./runtime/production-deployment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
 import { githubAccountChoice } from "./runtime/github-account-choice.js";
 import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
@@ -127,6 +128,7 @@ const execFileAsync = promisify(execFile);
 // ─── Production dependency wiring ────────────────────────────────────────────
 const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
+const deploymentOwner = createProductionDeploymentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
 const deploymentAccount = createDeploymentAccountResolver({
@@ -151,8 +153,14 @@ const {
   stopServer,
   getLastWebviewActivityAt,
   environmentServices
-} = createProductionCanvasServerRuntime({ executionOwner, accountContext });
+} = createProductionCanvasServerRuntime({
+  executionOwner,
+  accountContext,
+  deploymentOwner,
+  deploymentAccount
+});
 const dependencies: RadiusExtensionDependencies = {
+  deployment: deploymentOwner,
   logError: (message) => console.error(message),
   session: sessionHolder,
   executionOwner,

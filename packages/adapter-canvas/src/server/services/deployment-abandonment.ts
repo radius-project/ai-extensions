@@ -23,7 +23,8 @@ export interface DeploymentAbandonmentDependencies {
   isValidRepoSlug(value: unknown): boolean;
   readInstanceState(instanceId: string): CanvasState | undefined;
   activeDeploymentMutation(
-    state: CanvasState
+    state: CanvasState,
+    target: { repo: string; environment: string }
   ): DeploymentAbandonmentReservation | undefined;
   localDeploymentBlocksMutation(state: CanvasState): boolean;
   reserveDeploymentMutation(
@@ -165,7 +166,10 @@ export function createDeploymentAbandonmentService(
           body: { error: "Canvas server state is unavailable." }
         };
       }
-      const active = dependencies.activeDeploymentMutation(state);
+      const active = dependencies.activeDeploymentMutation(state, {
+        repo,
+        environment
+      });
       if (dependencies.localDeploymentBlocksMutation(state) || active) {
         const conflict =
           active ?
@@ -185,7 +189,10 @@ export function createDeploymentAbandonmentService(
         kind: "abandon"
       });
       if (!reservation) {
-        const conflict = dependencies.activeDeploymentMutation(state);
+        const conflict = dependencies.activeDeploymentMutation(state, {
+          repo,
+          environment
+        });
         return {
           status: 409,
           body: {
