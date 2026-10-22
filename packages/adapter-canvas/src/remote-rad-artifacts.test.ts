@@ -113,6 +113,31 @@ test("returns null when the branch has no committed bicepconfig.json", async () 
   assert.deepEqual(gh.calls.getContentBytes, []);
 });
 
+test("stages configuration and binary artifacts from the exact branch with query delimiters", async () => {
+  const ref = "feature%2Fmodel%26review%3D1";
+  const configPath = `/repos/acme/app/contents/.radius/bicepconfig.json?ref=${ref}`;
+  const artifactPath = `/repos/acme/app/contents/.radius/custom-types.tgz?ref=${ref}`;
+  const bytes = Buffer.from([0, 255, 42]);
+  const gh = mockGithub({ [configPath]: CONFIG }, { [artifactPath]: bytes });
+  const dir = await stageRemoteRadArtifacts(
+    gh,
+    "acme/app",
+    "feature/model&review=1",
+    ".radius/app.bicep"
+  );
+  try {
+    assert.ok(dir);
+    assert.deepEqual(gh.calls.getContent, [configPath]);
+    assert.deepEqual(gh.calls.getContentBytes, [artifactPath]);
+    assert.deepEqual(
+      fs.readFileSync(path.join(dir, "custom-types.tgz")),
+      bytes
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test("stages config but copies no artifact for OCI-only extensions", async () => {
   const config = JSON.stringify({
     extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }

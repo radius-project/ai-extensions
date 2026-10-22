@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { parseDocument } from "yaml";
 import { automaticBranchVerificationPolicy } from "./verification-plan.js";
+import type { WorkflowSyncPorts } from "./infra.js";
 
 interface RecordedCommit {
   path: string;
@@ -116,6 +117,7 @@ vi.mock("./gh.js", () => ({
 }));
 
 const {
+  createWorkflowTemplateReader,
   syncRepoWorkflows,
   generateVerifyWorkflow,
   generateDeployWorkflow,
@@ -127,6 +129,178 @@ const { hasVerificationOperationMarker } =
   await import("./verification-run-identity.js");
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
+
+describe("scoped workflow template reads", () => {
+  it.each([null, "", " \n "])(
+    "rejects an empty template (%j) without caching it",
+    async (content) => {
+      const read = vi.fn(async () => ({ content, error: null }));
+      const reader = createWorkflowTemplateReader(read);
+      await expect(reader("verify-azure.yml")).rejects.toThrow("is empty");
+      read.mockResolvedValueOnce({ content: "recovered", error: null });
+      await expect(reader("verify-azure.yml")).resolves.toBe("recovered");
+      expect(read).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  it("isolates readers and expires their own cached template at the exact TTL", async () => {
+    let now = 0;
+    const firstRead = vi.fn(async () => ({
+      content: "first identity",
+      error: null
+    }));
+    const secondRead = vi.fn(async () => ({
+      content: "second identity",
+      error: null
+    }));
+    const first = createWorkflowTemplateReader(firstRead, () => now);
+    const second = createWorkflowTemplateReader(secondRead, () => now);
+    expect(await first("verify-azure.yml")).toBe("first identity");
+    expect(await second("verify-azure.yml")).toBe("second identity");
+    now = 59_999;
+    expect(await first("verify-azure.yml")).toBe("first identity");
+    expect(firstRead).toHaveBeenCalledOnce();
+    now = 60_000;
+    expect(await first("verify-azure.yml")).toBe("first identity");
+    expect(firstRead).toHaveBeenCalledTimes(2);
+    await first("verify-azure.yml", "different-ref");
+    expect(firstRead).toHaveBeenCalledTimes(3);
+    expect(secondRead).toHaveBeenCalledOnce();
+  });
+
+  describe("injected workflow synchronization failures", () => {
+    function fixture() {
+      const ports: WorkflowSyncPorts = {
+        getDefaultBranch: vi.fn(async () => "trunk"),
+        getBranchHeadSha: vi.fn(async () => "a".repeat(40)),
+        fetchFileFromRepo: vi.fn(async () => "drifted"),
+        commitFileToRepo: vi.fn(async () => true),
+        generateVerifyWorkflow: vi.fn(async () => "verify"),
+        generateDeployWorkflow: vi.fn(async () => ({
+          "run-rad-commands.yml": "deploy"
+        })),
+        generateDeleteWorkflow: vi.fn(async () => ({
+          "delete-application.yml": "delete"
+        }))
+      };
+      const log = vi.fn();
+      return { ports, log };
+    }
+
+    it.each([
+      "generateVerifyWorkflow",
+      "generateDeployWorkflow",
+      "generateDeleteWorkflow"
+    ] as const)(
+      "logs rejected %s templates and never publishes their file",
+      async (generator) => {
+        const { ports, log } = fixture();
+        vi.mocked(ports[generator]).mockRejectedValue(new Error("unavailable"));
+        const result = await syncRepoWorkflows(
+          "fixture/app",
+          [{ name: "dev", provider: "azure" }],
+          { log },
+          ports
+        );
+        expect(log).toHaveBeenCalledWith(
+          expect.stringMatching(/skipped .*unavailable/)
+        );
+        expect(result.updated).toHaveLength(2);
+        expect(ports.commitFileToRepo).toHaveBeenCalledTimes(2);
+        expect(result.failed).toEqual([]);
+      }
+    );
+
+    it.each(["fetchFileFromRepo", "getBranchHeadSha"] as const)(
+      "propagates rejected %s evidence without writing",
+      async (reader) => {
+        const { ports, log } = fixture();
+        vi.mocked(ports.fetchFileFromRepo).mockResolvedValue(null);
+        const error = new Error("repository unavailable");
+        vi.mocked(ports[reader]).mockRejectedValue(error);
+        await expect(
+          syncRepoWorkflows(
+            "fixture/app",
+            [{ name: "dev", provider: "azure" }],
+            { log, create: true, only: ["run-rad-commands.yml"] },
+            ports
+          )
+        ).rejects.toBe(error);
+        expect(ports.commitFileToRepo).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each([null, "drifted"])(
+      "reports a rejected write for %j content with the exact branch and path",
+      async (content) => {
+        const { ports, log } = fixture();
+        vi.mocked(ports.fetchFileFromRepo).mockResolvedValue(content);
+        vi.mocked(ports.commitFileToRepo).mockRejectedValue(
+          new Error("protected branch")
+        );
+        const result = await syncRepoWorkflows(
+          "fixture/app",
+          [{ name: "dev", provider: "azure" }],
+          { log, create: true, only: ["run-rad-commands.yml"] },
+          ports
+        );
+        expect(result.failed).toEqual([
+          { path: ".github/workflows/run-rad-commands.yml", branch: "trunk" }
+        ]);
+        expect(result.created).toEqual([]);
+        expect(result.updated).toEqual([]);
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining("protected branch")
+        );
+      }
+    );
+
+    it("does not report a drift update already completed by another writer", async () => {
+      const { ports, log } = fixture();
+      vi.mocked(ports.commitFileToRepo).mockResolvedValue(false);
+      const result = await syncRepoWorkflows(
+        "fixture/app",
+        [{ name: "dev", provider: "azure" }],
+        { log, only: ["run-rad-commands.yml"] },
+        ports
+      );
+      expect(result.updated).toEqual([]);
+      expect(result.failed).toEqual([]);
+      expect(ports.commitFileToRepo).toHaveBeenCalledOnce();
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    it("retains the legacy main fallback when a caller cannot resolve the default branch", async () => {
+      const { ports } = fixture();
+      vi.mocked(ports.getDefaultBranch).mockResolvedValue(null);
+      const result = await syncRepoWorkflows(
+        "fixture/app",
+        [{ name: "dev", provider: "azure" }],
+        { only: ["run-rad-commands.yml"] },
+        ports
+      );
+      expect(result.updated).toEqual([
+        ".github/workflows/run-rad-commands.yml"
+      ]);
+      expect(ports.commitFileToRepo).toHaveBeenCalledWith(
+        "fixture/app",
+        ".github/workflows/run-rad-commands.yml",
+        "deploy",
+        "main",
+        expect.any(String)
+      );
+    });
+  });
+
+  it("propagates the injected reader failure without sharing cached evidence", async () => {
+    const reader = createWorkflowTemplateReader(async () => {
+      throw new Error("selected account unavailable");
+    });
+    await expect(reader("verify-azure.yml")).rejects.toThrow(
+      "selected account unavailable"
+    );
+  });
+});
 
 describe("verification operation marker", () => {
   it("adds the dispatch input and run title exposed by GitHub run metadata", () => {
@@ -831,6 +1005,89 @@ describe("syncRepoWorkflows", () => {
     expect(res.updated).toEqual([VERIFY_PATH]);
     expect(h.commits[0].content).toBe(
       await generateVerifyWorkflow("dev", "azure")
+    );
+  });
+
+  it.each(["azure", "aws"])(
+    "uses the injected reader for an exact %s setup verification variant",
+    async (provider) => {
+      const options = { setupPushOperationMarker: "op_123" };
+      const workflow = await generateVerifyWorkflow(
+        "dev",
+        provider,
+        undefined,
+        options
+      );
+      const verify = vi.fn(generateVerifyWorkflow);
+      const write = vi.fn(async () => {
+        throw new Error("An exact setup workflow must not be rewritten.");
+      });
+      const result = await syncRepoWorkflows(
+        "acme/app",
+        [{ name: "dev", provider }],
+        { only: ["radius-verify-credentials.yml"] },
+        {
+          getDefaultBranch: async () => "main",
+          getBranchHeadSha: async () => {
+            throw new Error("Unexpected branch lookup.");
+          },
+          fetchFileFromRepo: async () => workflow,
+          commitFileToRepo: write,
+          generateVerifyWorkflow: verify,
+          generateDeployWorkflow,
+          generateDeleteWorkflow
+        }
+      );
+      expect(result.updated).toEqual([]);
+      expect(result.failed).toEqual([]);
+      expect(write).not.toHaveBeenCalled();
+      expect(verify).toHaveBeenCalledTimes(2);
+      expect(verify).toHaveBeenLastCalledWith(
+        "dev",
+        provider,
+        expect.any(String),
+        options
+      );
+    }
+  );
+
+  it("logs an injected setup-variant failure before applying the ordinary verify candidate", async () => {
+    const workflow = await generateVerifyWorkflow("dev", "azure", undefined, {
+      setupPushOperationMarker: "op_123"
+    });
+    const ordinary = await generateVerifyWorkflow("dev", "azure");
+    const verify = vi.fn(generateVerifyWorkflow);
+    verify
+      .mockResolvedValueOnce(ordinary)
+      .mockRejectedValueOnce(new Error("variant unavailable"));
+    const write = vi.fn(async () => true);
+    const log = vi.fn();
+    const result = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { only: ["radius-verify-credentials.yml"], log },
+      {
+        getDefaultBranch: async () => "main",
+        getBranchHeadSha: async () => {
+          throw new Error("Unexpected branch lookup.");
+        },
+        fetchFileFromRepo: async () => workflow,
+        commitFileToRepo: write,
+        generateVerifyWorkflow: verify,
+        generateDeployWorkflow,
+        generateDeleteWorkflow
+      }
+    );
+    expect(result.updated).toEqual([VERIFY_PATH]);
+    expect(log).toHaveBeenCalledWith(
+      'skipped setup verify variant for "dev" (azure): variant unavailable'
+    );
+    expect(write).toHaveBeenCalledWith(
+      "acme/app",
+      VERIFY_PATH,
+      ordinary,
+      "main",
+      expect.any(String)
     );
   });
 

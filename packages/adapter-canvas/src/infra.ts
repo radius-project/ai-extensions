@@ -53,6 +53,34 @@ interface SyncWorkflowOptions {
   create?: boolean;
 }
 
+export interface WorkflowSyncPorts {
+  getDefaultBranch(repo: string): Promise<string | null>;
+  getBranchHeadSha(repo: string, branch: string): Promise<string | null>;
+  fetchFileFromRepo(
+    repo: string,
+    path: string,
+    branch: string
+  ): Promise<string | null>;
+  commitFileToRepo(
+    repo: string,
+    path: string,
+    content: string,
+    branch: string,
+    message: string
+  ): Promise<boolean>;
+  generateVerifyWorkflow(
+    environment: string,
+    provider: string,
+    ref?: string,
+    options?: { setupPushOperationMarker?: string }
+  ): Promise<string>;
+  generateDeployWorkflow(
+    environment: string,
+    appFile: string
+  ): Promise<Record<string, string>>;
+  generateDeleteWorkflow(environment: string): Promise<Record<string, string>>;
+}
+
 interface WorkflowCandidate {
   content: string;
   provider: string | null;
@@ -318,41 +346,55 @@ export {
  * (gh stderr, 404, decode error) is surfaced in the thrown message.
  */
 const TEMPLATE_CACHE_TTL_MS = 60_000;
-const templateCache = new Map<string, TemplateCacheEntry>();
 
-async function fetchRadiusTemplate(
-  fileName: string,
-  ref = RADIUS_REF
-): Promise<string> {
-  // Cache decoded template bodies briefly so a single drift-sync pass (which
-  // regenerates workflows for every managed environment) fetches each upstream
-  // template once instead of once per environment.
-  const cacheKey = `${ref}\u0000${fileName}`;
-  const cached = templateCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < TEMPLATE_CACHE_TTL_MS) {
-    return cached.body;
-  }
-  const source = `${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR}/${fileName} at "${ref}"`;
-  const { content, error } = await fetchFileFromRepoResult(
-    RADIUS_WORKFLOW_REPO,
-    `${RADIUS_WORKFLOW_DIR}/${fileName}`,
-    ref
-  );
-  if (error) {
-    throw new Error(`Failed to fetch workflow template ${source}: ${error}`);
-  }
-  if (!content || !content.trim()) {
-    throw new Error(`Workflow template ${source} is empty.`);
-  }
-  templateCache.set(cacheKey, { at: Date.now(), body: content });
-  return content;
+export function createWorkflowTemplateReader(
+  readFile: (
+    repo: string,
+    path: string,
+    ref: string
+  ) => Promise<{ content: string | null; error: string | null }>,
+  now: () => number = () => Date.now()
+) {
+  const templateCache = new Map<string, TemplateCacheEntry>();
+  return async function readTemplate(
+    fileName: string,
+    ref = RADIUS_REF
+  ): Promise<string> {
+    // Cache decoded template bodies briefly so a single drift-sync pass (which
+    // regenerates workflows for every managed environment) fetches each upstream
+    // template once instead of once per environment.
+    const cacheKey = `${ref}\u0000${fileName}`;
+    const cached = templateCache.get(cacheKey);
+    if (cached && now() - cached.at < TEMPLATE_CACHE_TTL_MS) {
+      return cached.body;
+    }
+    const source = `${RADIUS_WORKFLOW_REPO}/${RADIUS_WORKFLOW_DIR}/${fileName} at "${ref}"`;
+    const { content, error } = await readFile(
+      RADIUS_WORKFLOW_REPO,
+      `${RADIUS_WORKFLOW_DIR}/${fileName}`,
+      ref
+    );
+    if (error) {
+      throw new Error(`Failed to fetch workflow template ${source}: ${error}`);
+    }
+    if (!content || !content.trim()) {
+      throw new Error(`Workflow template ${source} is empty.`);
+    }
+    templateCache.set(cacheKey, { at: now(), body: content });
+    return content;
+  };
 }
+
+const fetchRadiusTemplate = createWorkflowTemplateReader(
+  fetchFileFromRepoResult
+);
 
 export async function generateVerifyWorkflow(
   env: string,
   provider: string,
   ref: string = RADIUS_REF,
-  options: { setupPushOperationMarker?: string } = {}
+  options: { setupPushOperationMarker?: string } = {},
+  readTemplate = fetchRadiusTemplate
 ): Promise<string> {
   const platform = getPlatform(provider);
   if (!platform)
@@ -363,7 +405,7 @@ export async function generateVerifyWorkflow(
   const fileName = verifyTemplateFile(platform);
   if (!fileName)
     throw new Error(`No verify template for provider "${provider}".`);
-  const upstream = await fetchRadiusTemplate(fileName, ref);
+  const upstream = await readTemplate(fileName, ref);
   const rendered = coreGenerateVerifyWorkflow(env, platform, upstream);
   const pushMarker = options.setupPushOperationMarker?.trim() || "";
   if (pushMarker && !/^  push:\s*$/mu.test(rendered)) {
@@ -522,14 +564,15 @@ ${indent}    echo "✅ GHCR accepted a non-mutating upload-session probe."`;
 export async function generateDeployWorkflow(
   env: string,
   appFile: string,
-  options: DeployWorkflowOptions = {}
+  options: DeployWorkflowOptions = {},
+  readTemplate = fetchRadiusTemplate
 ): Promise<Record<string, string>> {
   // Only the dispatcher + the Azure provider workflow are fetched and committed;
   // the AWS provider workflow is intentionally never fetched or committed. The
   // dispatcher's `aws:` job (which `uses:` the absent AWS provider file) is
   // stripped below so GitHub can still parse the committed workflow.
   const files = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
-  const bodies = await Promise.all(files.map((f) => fetchRadiusTemplate(f)));
+  const bodies = await Promise.all(files.map((f) => readTemplate(f)));
   const templates: Record<string, string> = {};
   files.forEach((f, i) => {
     templates[f] = bodies[i];
@@ -580,7 +623,8 @@ export async function generateDeployWorkflow(
  * with the source commit pinned into first-party composite-action references.
  */
 export async function generateDeleteWorkflow(
-  env: string
+  env: string,
+  readTemplate = fetchRadiusTemplate
 ): Promise<Record<string, string>> {
   const fetched = [
     DELETE_APP_DISPATCHER_FILE,
@@ -589,7 +633,7 @@ export async function generateDeleteWorkflow(
     DELETE_ENV_AZURE_FILE
   ];
   const fetchedBodies = await Promise.all(
-    fetched.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
+    fetched.map((f) => readTemplate(f, DELETE_RADIUS_REF))
   );
   const templates: Record<string, string> = {};
   fetched.forEach((f, i) => {
@@ -741,7 +785,16 @@ export function generatePortalUrl(
 export async function syncRepoWorkflows(
   repo: string,
   environments: ManagedEnvironment[],
-  opts: SyncWorkflowOptions = {}
+  opts: SyncWorkflowOptions = {},
+  ports: WorkflowSyncPorts = {
+    getDefaultBranch,
+    getBranchHeadSha,
+    fetchFileFromRepo,
+    commitFileToRepo,
+    generateVerifyWorkflow,
+    generateDeployWorkflow,
+    generateDeleteWorkflow
+  }
 ): Promise<SyncWorkflowResult> {
   const log = typeof opts.log === "function" ? opts.log : () => {};
   const envs = (environments || []).filter((e) => e && e.name);
@@ -755,7 +808,7 @@ export async function syncRepoWorkflows(
       new Set(opts.only.map((f) => String(f).split("/").pop()))
     : null;
 
-  const defaultBranch = (await getDefaultBranch(repo)) || "main";
+  const defaultBranch = (await ports.getDefaultBranch(repo)) || "main";
   // Sync the default branch (Actions run from it) plus the working branch a
   // worktree-consistent deploy would check out. Dedupe so we never commit the
   // same branch twice when the working branch IS the default branch.
@@ -797,7 +850,7 @@ export async function syncRepoWorkflows(
       try {
         add(
           VERIFY_WORKFLOW_PATH,
-          await generateVerifyWorkflow(env.name, provider),
+          await ports.generateVerifyWorkflow(env.name, provider),
           provider,
           env.name
         );
@@ -811,7 +864,7 @@ export async function syncRepoWorkflows(
     // file is committed and the content doesn't vary by env provider), so
     // generate them once per environment with a null provider tag.
     try {
-      const deploy = await generateDeployWorkflow(
+      const deploy = await ports.generateDeployWorkflow(
         env.name,
         ".radius/app.bicep"
       );
@@ -821,7 +874,7 @@ export async function syncRepoWorkflows(
       log(`skipped deploy templates for "${env.name}": ${errorMessage(e)}`);
     }
     try {
-      const del = await generateDeleteWorkflow(env.name);
+      const del = await ports.generateDeleteWorkflow(env.name);
       for (const [file, content] of Object.entries(del))
         add(wf(file), content, null);
     } catch (e) {
@@ -839,7 +892,7 @@ export async function syncRepoWorkflows(
   const branchExists = new Map<string, boolean>();
   const remoteHasBranch = async (branch: string): Promise<boolean> => {
     if (branchExists.has(branch)) return branchExists.get(branch) as boolean;
-    const exists = !!(await getBranchHeadSha(repo, branch));
+    const exists = !!(await ports.getBranchHeadSha(repo, branch));
     branchExists.set(branch, exists);
     return exists;
   };
@@ -856,7 +909,7 @@ export async function syncRepoWorkflows(
     let envDeleteDispatcherPresent = false;
     for (const [path, candidates] of byPath.entries()) {
       const fileName = path.split("/").pop();
-      const committed = await fetchFileFromRepo(repo, path, branch);
+      const committed = await ports.fetchFileFromRepo(repo, path, branch);
       const missing = committed == null || committed === "";
       if (missing) {
         // By default don't author missing files here (environment creation owns
@@ -878,7 +931,7 @@ export async function syncRepoWorkflows(
         }
         const choice = candidates[0];
         try {
-          const changed = await commitFileToRepo(
+          const changed = await ports.commitFileToRepo(
             repo,
             path,
             choice.content,
@@ -913,7 +966,7 @@ export async function syncRepoWorkflows(
         for (const candidate of candidates) {
           if (!candidate.provider || !candidate.environment) continue;
           try {
-            const setupVariant = await generateVerifyWorkflow(
+            const setupVariant = await ports.generateVerifyWorkflow(
               candidate.environment,
               candidate.provider,
               RADIUS_REF,
@@ -945,7 +998,7 @@ export async function syncRepoWorkflows(
           candidates.find((c) => c.provider === committedProvider)) ||
         candidates[0];
       try {
-        const changed = await commitFileToRepo(
+        const changed = await ports.commitFileToRepo(
           repo,
           path,
           choice.content,

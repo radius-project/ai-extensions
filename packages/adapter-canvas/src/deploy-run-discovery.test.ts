@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { ExecFileException } from "node:child_process";
+import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
+import { coordinateDeploymentDispatch } from "@radius-project/core";
 
 // The ./gh.ts stub records the args each `gh` invocation would run and replies
 // with whatever the active handler returns, so ghJson, findWorkflowRun, and
@@ -320,6 +322,137 @@ describe("findWorkflowRun time-window fallback", () => {
 });
 
 describe("latestWorkflowRunId", () => {
+  it("captures a repository baseline before a newly published workflow is registered", async () => {
+    const calls: string[][] = [];
+    let dispatches = 0;
+    const executor = successfulSelectedGhExecutor({
+      login: "fixture",
+      run: async (args) => {
+        calls.push(args);
+        if (args[0] === "run") {
+          if (args.some((arg) => arg.startsWith("--workflow"))) {
+            return {
+              code: 1,
+              stdout: "",
+              stderr: "could not find any workflows named deploy.yml"
+            };
+          }
+          return { code: 0, stdout: '[{"databaseId":41}]', stderr: "" };
+        }
+        if (args[0] !== "workflow")
+          throw new Error("Unexpected selected operation");
+        dispatches++;
+        return dispatches === 1 ?
+            { code: 1, stdout: "", stderr: "HTTP 404: workflow not found" }
+          : { code: 0, stdout: "", stderr: "" };
+      }
+    });
+    const result = await coordinateDeploymentDispatch(
+      {
+        repo: "acme/widgets",
+        branch: "feat",
+        environment: "dev",
+        workflowFile: "deploy.yml"
+      },
+      true,
+      {
+        isCurrent: () => true,
+        latestRunId: () =>
+          latestWorkflowRunId("acme/widgets", "deploy.yml", executor),
+        dispatch: async () => ({
+          result: await executor.run([
+            "workflow",
+            "run",
+            "deploy.yml",
+            "--repo",
+            "acme/widgets",
+            "--ref",
+            "feat"
+          ]),
+          credentialSource: executor.credentialSource
+        }),
+        sleep: async () => {},
+        now: () => 123,
+        errorMessage: executor.errorMessage
+      }
+    );
+    expect(result).toMatchObject({
+      kind: "accepted",
+      reference: { baselineRunId: 41 }
+    });
+    expect(calls.map((args) => args[0])).toEqual([
+      "run",
+      "workflow",
+      "run",
+      "workflow"
+    ]);
+    expect(
+      calls
+        .filter((args) => args[0] === "run")
+        .every((args) => args.every((arg) => !arg.startsWith("--workflow")))
+    ).toBe(true);
+    expect(ghMock.calls).toEqual([]);
+  });
+
+  it.each([
+    { stdout: '[{"databaseId":17},{"databaseId":21}]', code: 0, expected: 21 },
+    { stdout: "[]", code: 0, expected: null }
+  ])(
+    "reads the selected account baseline without ambient fallback: %j",
+    async ({ stdout, code, expected }) => {
+      const run = vi.fn(async () => ({
+        code,
+        stdout,
+        stderr: code ? "temporary read failure" : ""
+      }));
+      const executor = successfulSelectedGhExecutor({ login: "fixture", run });
+      expect(
+        await latestWorkflowRunId("acme/widgets", "run.yml", executor)
+      ).toBe(expected);
+      expect(run).toHaveBeenCalledExactlyOnceWith(
+        [
+          "run",
+          "list",
+          "--limit",
+          "20",
+          "--json",
+          "databaseId,createdAt",
+          "--repo",
+          "acme/widgets"
+        ],
+        { timeout: 15000 }
+      );
+      expect(ghMock.calls).toEqual([]);
+    }
+  );
+
+  it.each([
+    { stdout: '{"unexpected":true}', code: 0 },
+    { stdout: "not-json", code: 0 },
+    { stdout: "", code: 1 },
+    { stdout: '[{"databaseId":17},{}]', code: 0 },
+    { stdout: "[null]", code: 0 },
+    { stdout: '[{"databaseId":0}]', code: 0 },
+    { stdout: '[{"databaseId":-2}]', code: 0 },
+    { stdout: '[{"databaseId":1.5}]', code: 0 },
+    { stdout: '[{"databaseId":9007199254740992}]', code: 0 }
+  ])(
+    "refuses unavailable or malformed selected baselines: %j",
+    async ({ stdout, code }) => {
+      const run = vi.fn(async () => ({
+        stdout,
+        code,
+        stderr: "read unavailable"
+      }));
+      const executor = successfulSelectedGhExecutor({ login: "fixture", run });
+      await expect(
+        latestWorkflowRunId("acme/widgets", "run.yml", executor)
+      ).rejects.toThrow(/baseline/);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(ghMock.calls).toEqual([]);
+    }
+  );
+
   it("returns the greatest run id regardless of list order", async () => {
     replyWith([
       { databaseId: 100, createdAt: "2026-08-19T00:00:00Z" },
