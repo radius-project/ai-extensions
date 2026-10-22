@@ -215,17 +215,26 @@ jobs:
               --event workflow_dispatch \
               --limit 100 \
               --json databaseId >"$before"
-            if ! gh workflow run delete-application.yml \
+            if ! dispatch_output="$(gh workflow run delete-application.yml \
                 --repo "$FIXTURE_REPOSITORY" \
                 --ref "$DEFAULT_BRANCH" \
                 -f "environment=$environment" \
-                -f "application=$FIXTURE_APPLICATION"; then
+                -f "application=$FIXTURE_APPLICATION")"; then
               failures+=("dispatch Radius application delete for $environment")
               continue
             fi
 
-            run_id=""
+            run_id="$(
+              node --input-type=module - "$dispatch_output" "$FIXTURE_REPOSITORY" <<'NODE'
+              const [output, repository] = process.argv.slice(2);
+              const { readWorkflowDispatchRunId } = await import(
+                "./packages/adapter-canvas/test/e2e-cloud/support/workflow-run-discovery.ts"
+              );
+              process.stdout.write(readWorkflowDispatchRunId(output, repository) ?? "");
+          NODE
+            )"
             for _ in {1..24}; do
+              [[ -n "$run_id" ]] && break
               gh run list \
                 --repo "$FIXTURE_REPOSITORY" \
                 --workflow delete-application.yml \

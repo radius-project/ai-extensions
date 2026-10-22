@@ -1,3 +1,30 @@
+/** Extracts an owned Actions run id without accepting another repository. */
+export function requireWorkflowRunId(
+  runUrl: string,
+  repository: string
+): string {
+  const expectedPrefix = `https://github.com/${repository}/actions/runs/`;
+  if (!runUrl.startsWith(expectedPrefix))
+    throw new Error(
+      `The lifecycle operation did not report a workflow run in ${repository}.`
+    );
+  const runId = runUrl.slice(expectedPrefix.length);
+  if (!/^[1-9][0-9]*$/.test(runId))
+    throw new Error(
+      `The lifecycle operation reported an invalid workflow run URL: ${runUrl}`
+    );
+  return runId;
+}
+
+/** Older gh versions emit no dispatch URL and need snapshot discovery. */
+export function readWorkflowDispatchRunId(
+  output: string,
+  repository: string
+): string | undefined {
+  const runUrl = output.trim();
+  return runUrl ? requireWorkflowRunId(runUrl, repository) : undefined;
+}
+
 /** Narrows `gh run list --json databaseId` for exact pre-dispatch snapshots. */
 export function readWorkflowRunIds(payload: unknown): ReadonlySet<string> {
   if (!Array.isArray(payload))

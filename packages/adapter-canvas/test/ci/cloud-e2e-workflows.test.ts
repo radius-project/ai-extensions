@@ -777,6 +777,104 @@ ${remove}
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
+  it.each([
+    "returned URL",
+    "empty output",
+    "foreign URL",
+    "failed dispatch",
+    "failed run"
+  ] as const)(
+    "tracks the cleanup dispatch safely with %s",
+    async (scenario) => {
+      const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+      const cleanup = steps(workflow.jobs?.purge).find(
+        (step) => step.id === "radius-app-cleanup"
+      );
+      expect(cleanup?.run).toBeDefined();
+      const directory = await mkdtemp(path.join(tmpdir(), "dispatch-cleanup-"));
+      const calls = path.join(directory, "calls.txt").replaceAll("\\", "/");
+      const node = process.execPath
+        .replaceAll("\\", "/")
+        .replaceAll("'", "'\\''");
+      const output =
+        scenario === "returned URL" || scenario === "failed run" ?
+          "https://github.com/fixture-owner/fixture-repo/actions/runs/99"
+        : scenario === "foreign URL" ?
+          "https://github.com/another/repository/actions/runs/99"
+        : "";
+      try {
+        const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+          cwd: REPOSITORY_ROOT,
+          encoding: "utf8",
+          env: {
+            PATH: process.env.PATH,
+            RUNNER_TEMP: directory.replaceAll("\\", "/"),
+            GITHUB_STEP_SUMMARY: path
+              .join(directory, "summary.md")
+              .replaceAll("\\", "/"),
+            MAX_AGE_HOURS: "6",
+            FIXTURE_APPLICATION: "demo",
+            FIXTURE_REPOSITORY: "fixture-owner/fixture-repo",
+            DEFAULT_BRANCH: "main",
+            ENVIRONMENT_PREFIX: "radtest-"
+          },
+          input: `
+            node() { '${node}' "$@"; }
+            jq() { command jq "$@" | tr -d '\\r'; }
+            gh() {
+              printf '%s\\n' "$*" >>'${calls}'
+              case "$1 \${2:-}" in
+                "api --paginate")
+                  printf '%s\\n' '[{"environments":[{"name":"radtest-old","created_at":"2020-01-01T00:00:00Z"}]}]' ;;
+                "run list")
+                  if [[ -f "$RUNNER_TEMP/dispatched" ]]; then
+                    printf '%s\\n' '[{"databaseId":99},{"databaseId":10}]'
+                  else
+                    printf '%s\\n' '[{"databaseId":10}]'
+                  fi ;;
+                "workflow run")
+                  touch "$RUNNER_TEMP/dispatched"
+                  if [[ '${scenario}' == "failed dispatch" ]]; then return 1; fi
+                  printf '%s\\n' '${output}' ;;
+                "run watch")
+                  [[ "$3" == "99" && '${scenario}' != "failed run" ]] ;;
+                *) return 99 ;;
+              esac
+            }
+            ${cleanup?.run}
+          `
+        });
+        expect(result.error).toBeUndefined();
+        const commands = (await readFile(calls, "utf8")).trim().split("\n");
+        const succeeded =
+          scenario === "returned URL" || scenario === "empty output";
+        expect(result.status).toBe(succeeded ? 0 : 1);
+        expect(
+          commands.filter((line) => line.startsWith("run list "))
+        ).toHaveLength(scenario === "empty output" ? 2 : 1);
+        expect(
+          commands.filter((line) => line.startsWith("run watch "))
+        ).toEqual(
+          succeeded || scenario === "failed run" ?
+            [
+              "run watch 99 --repo fixture-owner/fixture-repo --exit-status --interval 10"
+            ]
+          : []
+        );
+        if (scenario === "foreign URL")
+          expect(result.stderr).toContain(
+            "did not report a workflow run in fixture-owner/fixture-repo"
+          );
+        if (scenario === "failed dispatch")
+          expect(result.stderr).toContain(
+            "dispatch Radius application delete for radtest-old"
+          );
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("requests Actions write access for Radius cleanup dispatch without package write", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const token = steps(workflow.jobs?.purge).find((step) =>

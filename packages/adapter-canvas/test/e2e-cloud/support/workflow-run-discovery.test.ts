@@ -2,10 +2,45 @@ import { describe, expect, it } from "vitest";
 
 import {
   findNewWorkflowRunId,
+  readWorkflowDispatchRunId,
   readWorkflowRunIds
 } from "./workflow-run-discovery.js";
 
 describe("workflow run discovery", () => {
+  it("uses the exact workflow run URL returned by gh dispatch", () => {
+    expect(
+      readWorkflowDispatchRunId(
+        "https://github.com/fixture-owner/fixture-repo/actions/runs/42\r\n",
+        "fixture-owner/fixture-repo"
+      )
+    ).toBe("42");
+  });
+
+  it.each(["", " \r\n"])(
+    "allows discovery when gh emits no URL %#",
+    (output) => {
+      expect(
+        readWorkflowDispatchRunId(output, "fixture-owner/fixture-repo")
+      ).toBeUndefined();
+    }
+  );
+
+  it.each([
+    "https://github.com/another/repository/actions/runs/42",
+    "https://example.com/fixture-owner/fixture-repo/actions/runs/42",
+    "https://github.com/fixture-owner/fixture-repo/actions/runs/0",
+    "https://github.com/fixture-owner/fixture-repo/actions/runs/42/jobs/1",
+    "https://github.com/fixture-owner/fixture-repo/actions/runs/42\nhttps://github.com/fixture-owner/fixture-repo/actions/runs/43",
+    "Created workflow dispatch"
+  ])(
+    "rejects an untrusted dispatch result instead of guessing %#",
+    (output) => {
+      expect(() =>
+        readWorkflowDispatchRunId(output, "fixture-owner/fixture-repo")
+      ).toThrow();
+    }
+  );
+
   it("reads exact positive workflow run database ids", () => {
     expect(
       readWorkflowRunIds([{ databaseId: 11 }, { databaseId: 12 }])

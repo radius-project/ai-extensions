@@ -3410,6 +3410,123 @@ describe("createCloudFixture", () => {
       );
     });
 
+    it.each(["success", "failure"] as const)(
+      "waits for the returned cleanup run when historical listings change (%s)",
+      async (conclusion) => {
+        const { fixture, fake } = await createHarness([
+          {
+            tool: "gh",
+            match: DELETE_RUN_LIST,
+            respond: { stdout: "[]" },
+            times: 1
+          },
+          {
+            tool: "gh",
+            match: DELETE_RUN_LIST,
+            respond: {
+              stdout: JSON.stringify(
+                Array.from({ length: 61 }, (_, index) => ({
+                  databaseId: index + 1
+                }))
+              )
+            }
+          },
+          {
+            tool: "gh",
+            match: ["workflow", "run", "delete-application.yml"],
+            respond: {
+              stdout: `https://github.com/${REPOSITORY}/actions/runs/99\n`
+            }
+          },
+          {
+            tool: "gh",
+            match: ["run", "view", "99"],
+            respond: {
+              stdout: '{"status":"in_progress","conclusion":""}'
+            },
+            times: 1
+          },
+          {
+            tool: "gh",
+            match: ["run", "view", "99"],
+            respond: {
+              stdout: JSON.stringify({ status: "completed", conclusion })
+            }
+          },
+          {
+            tool: "az",
+            match: ["aks", "get-credentials"],
+            respond: {}
+          },
+          {
+            tool: "kubectl",
+            match: ["delete", RADIUS_WORKLOAD_RESOURCES],
+            respond: {
+              code: 1,
+              stderr:
+                'Error from server (NotFound): namespaces "default-demo" not found'
+            }
+          }
+        ]);
+        fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+        if (conclusion === "success") {
+          await expect(
+            fixture.reclaimLeakedProductArtifacts()
+          ).resolves.toContain(`Radius application demo in ${ENVIRONMENT}`);
+        } else {
+          await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+            'gh run view 99 completed with conclusion "failure"'
+          );
+          expect(fake.commands.commandLines("gh")).not.toContain(
+            `api ${ENVIRONMENT_PATH}`
+          );
+        }
+        const gh = fake.commands.commandLines("gh");
+        expect(gh.filter((line) => line.startsWith("run list "))).toHaveLength(
+          1
+        );
+        expect(gh.filter((line) => line.startsWith("run view "))).toEqual([
+          `run view 99 --repo ${REPOSITORY} --json status,conclusion`,
+          `run view 99 --repo ${REPOSITORY} --json status,conclusion`
+        ]);
+      }
+    );
+
+    it("preserves recovery inputs when dispatch reports another repository", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: ["workflow", "run", "delete-application.yml"],
+          respond: {
+            stdout: "https://github.com/another/repository/actions/runs/99"
+          }
+        },
+        {
+          tool: "az",
+          match: ["aks", "get-credentials"],
+          respond: {}
+        },
+        {
+          tool: "kubectl",
+          match: ["delete", RADIUS_WORKLOAD_RESOURCES],
+          respond: {
+            code: 1,
+            stderr:
+              'Error from server (NotFound): namespaces "default-demo" not found'
+          }
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        `did not report a workflow run in ${REPOSITORY}`
+      );
+      const gh = fake.commands.commandLines("gh");
+      expect(gh.some((line) => line.startsWith("run view "))).toBe(false);
+      expect(gh).not.toContain(`api ${ENVIRONMENT_PATH}`);
+    });
+
     it("treats an already-missing application namespace as reclaimed", async () => {
       const { fixture } = await createHarness([
         {

@@ -58,6 +58,7 @@ import {
 import { DELETE_OPERATION_TIMEOUT_MS } from "./cloud-timeout-budget.js";
 import {
   findNewWorkflowRunId,
+  readWorkflowDispatchRunId,
   readWorkflowRunIds
 } from "./workflow-run-discovery.js";
 
@@ -711,7 +712,7 @@ export async function createCloudFixture(
     application: string
   ): Promise<void> => {
     const before = await listDeleteWorkflowRunIds();
-    expectSuccess(
+    const dispatched = expectSuccess(
       await commands.runGh([
         "workflow",
         "run",
@@ -727,16 +728,18 @@ export async function createCloudFixture(
       ]),
       `gh workflow run ${DELETE_APP_DISPATCHER_FILE}`
     );
-    const runId = await pollForValue({
-      ports,
-      timeoutMs: DELETE_OPERATION_TIMEOUT_MS,
-      intervalMs: assertionPollIntervalMs,
-      probe: async () =>
-        findNewWorkflowRunId(before, await listDeleteWorkflowRunIds()),
-      timeoutMessage: () =>
-        `Timed out after ${DELETE_OPERATION_TIMEOUT_MS}ms waiting to identify the cleanup workflow run for ` +
-        `application "${application}" in environment "${environmentName}".`
-    });
+    const runId =
+      readWorkflowDispatchRunId(dispatched.stdout, repository) ??
+      (await pollForValue({
+        ports,
+        timeoutMs: DELETE_OPERATION_TIMEOUT_MS,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () =>
+          findNewWorkflowRunId(before, await listDeleteWorkflowRunIds()),
+        timeoutMessage: () =>
+          `Timed out after ${DELETE_OPERATION_TIMEOUT_MS}ms waiting to identify the cleanup workflow run for ` +
+          `application "${application}" in environment "${environmentName}".`
+      }));
     let conclusion = "";
     await pollForValue({
       ports,

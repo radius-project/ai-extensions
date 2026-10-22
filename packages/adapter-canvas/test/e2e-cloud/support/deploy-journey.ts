@@ -26,6 +26,9 @@ import {
 } from "../../../src/infra.js";
 import { DELETE_FAILED_STATUS } from "../../../src/server/services/delete-conflict.js";
 import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
+import { requireWorkflowRunId } from "./workflow-run-discovery.js";
+
+export { requireWorkflowRunId } from "./workflow-run-discovery.js";
 
 /**
  * Workflow files `/api/deploy` must publish before it can dispatch.
@@ -274,24 +277,6 @@ export type DeploymentPresence =
       readonly status: string;
       readonly runUrl: string;
     };
-
-/** Extracts an owned Actions run id without accepting another repository. */
-export function requireWorkflowRunId(
-  runUrl: string,
-  repository: string
-): string {
-  const expectedPrefix = `https://github.com/${repository}/actions/runs/`;
-  if (!runUrl.startsWith(expectedPrefix))
-    throw new Error(
-      `The lifecycle operation did not report a workflow run in ${repository}.`
-    );
-  const runId = runUrl.slice(expectedPrefix.length);
-  if (!/^[1-9][0-9]*$/.test(runId))
-    throw new Error(
-      `The lifecycle operation reported an invalid workflow run URL: ${runUrl}`
-    );
-  return runId;
-}
 
 /** Reads the route's best-effort run URL without weakening malformed-value checks. */
 export function readOptionalDispatchedWorkflowRunId(
