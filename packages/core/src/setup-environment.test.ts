@@ -4,6 +4,33 @@ import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
 import { setupEnvironmentHarness } from "../test/support/setup-environment.js";
 
 describe("configureSetupEnvironment", () => {
+  it.each(["RADIUS_STATE_BACKEND", "AZURE_TENANT_ID"] as const)(
+    "stops between individual writes after shutdown during %s",
+    async (heldVariable) => {
+      const h = setupEnvironmentHarness();
+      let stopped = false;
+      h.ports.isExecutionStopped = () => stopped;
+      const bind = h.ports.bindEnvironment;
+      const written: string[] = [];
+      h.ports.bindEnvironment = (target) => ({
+        ...bind(target),
+        setEnvironmentVariable: async (name) => {
+          written.push(name);
+          if (name === heldVariable) {
+            stopped = true;
+            h.stop();
+          }
+          return true;
+        }
+      });
+      await expect(
+        configureSetupEnvironment(h.input, h.ports)
+      ).resolves.toEqual({ kind: "stopped" });
+      expect(written.at(-1)).toBe(heldVariable);
+      expect(h.failures).toEqual([]);
+    }
+  );
+
   it.each(["azure", "aws"])(
     "configures %s without a panel, ignores optional false writes, and persists before projection",
     async (provider) => {

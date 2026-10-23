@@ -35,6 +35,7 @@ export type AzureMutationInput<T> = {
   providerIdempotencyKey?: string | null;
   intent?: Record<string, string | number | boolean | null> | null;
   beforeMutation?(): Promise<boolean>;
+  assertActive?(): void;
   /**
    * Revalidate provider identity after intent is durable but before the request
    * is sent. A rejection proves the provider mutation was not attempted.

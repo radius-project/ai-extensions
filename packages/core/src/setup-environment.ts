@@ -3,7 +3,10 @@ import {
   GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError
 } from "./setup-github-environment.js";
-import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import {
+  assertSetupExecutionActive,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 import { createWorkflowFileCommitter } from "./setup-workflow-committer.js";
 import { publishSetupWorkflowFiles } from "./setup-workflow-publication.js";
 import {
@@ -96,13 +99,23 @@ export async function configureSetupEnvironment(
   envName = ensuredEnvironment.name;
   ports.setCanonicalEnvironment(envName);
 
-  const { runGh, setEnvironmentVariable, runGhWorkflow } =
-    ports.bindEnvironment({
-      targetRepo,
-      envName,
-      environmentProviderId: ensuredEnvironment.providerId,
-      journalVariables: provider === "azure"
-    });
+  const {
+    runGh,
+    setEnvironmentVariable: writeEnvironmentVariable,
+    runGhWorkflow
+  } = ports.bindEnvironment({
+    targetRepo,
+    envName,
+    environmentProviderId: ensuredEnvironment.providerId,
+    journalVariables: provider === "azure"
+  });
+  const setEnvironmentVariable = async (
+    name: string,
+    value: string | undefined
+  ) => {
+    assertSetupExecutionActive(ports.isExecutionStopped);
+    return writeEnvironmentVariable(name, value);
+  };
   ports.recordEnvironment({
     state: ensuredEnvironment.state,
     repo: targetRepo,

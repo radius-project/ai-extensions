@@ -11,6 +11,7 @@ import { planRecoveredSchedule } from "../server/services/recovered-cleanup-comm
 import type { CleanupCommandKind } from "../server/services/cleanup-commands.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import { errorMessage } from "./util.js";
+import { isSetupExecutionInterrupted } from "@radius-project/core";
 
 export interface SetupExecutionOperation {
   operationId: string;
@@ -134,7 +135,15 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
       cancelled,
       failed: async (error) => {
         const current = ports.getOperation(operationId);
-        if (ports.isShuttingDown(operationId)) return;
+        if (isSetupExecutionInterrupted(error)) return;
+        if (ports.isShuttingDown(operationId)) {
+          ports.report({
+            scope: "setup-task-shutdown",
+            operationId,
+            message: errorMessage(error)
+          });
+          return;
+        }
         if (current && reopenProviderReconciliation(current)) {
           if (
             !current.steps.some(

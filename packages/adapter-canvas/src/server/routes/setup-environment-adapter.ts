@@ -7,6 +7,7 @@ import type {
   CreateEnvironmentOperation,
   GhcrPreflightResult
 } from "./create-environment-types.js";
+import type { SetupFailureInput } from "../services/setup-outcome.js";
 import {
   shouldStop,
   terminalizeProviderManualRequired
@@ -44,7 +45,7 @@ export function createSetupEnvironmentPorts(input: {
     code: string,
     extra: Record<string, unknown>
   ): Promise<"failed" | "stopped">;
-  finalize(input: Record<string, unknown>): Promise<"failed" | "stopped">;
+  finalize(input: SetupFailureInput): Promise<"failed" | "stopped">;
 }): SetupEnvironmentPorts {
   const {
     dependencies: d,
@@ -64,6 +65,7 @@ export function createSetupEnvironmentPorts(input: {
       d.persistOperations()
     ),
     stopRequested: () => shouldStop(operation),
+    isExecutionStopped: d.isShuttingDown,
     stopBoundary: input.stopBoundary,
     checkpoint: input.checkpoint,
     preflightRepository: async (repo) => {
@@ -133,6 +135,7 @@ export function createSetupEnvironmentPorts(input: {
         d,
         {
           ...target,
+          isStopped: d.isShuttingDown,
           ...(journalVariables ?
             {
               mutationRecovery: {

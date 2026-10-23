@@ -191,6 +191,8 @@ export interface SetupVerificationPlan {
 
 export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
   recovery: SetupWorkflowRecoveryPort;
+  // Runtime shutdown is immediate; the user's Stop retains its batch boundaries.
+  isExecutionStopped(): boolean;
   stopRequested(): boolean;
   stopBoundary(boundary: string): Promise<boolean>;
   checkpoint(boundary: string): Promise<boolean>;

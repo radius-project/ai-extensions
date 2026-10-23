@@ -63,6 +63,82 @@ function prepareCleanup(
 }
 
 describe("GitHub environment variable rollback", () => {
+  it.each([
+    "identity",
+    "variable",
+    "prepared",
+    "validation",
+    "write",
+    "confirmation"
+  ] as const)(
+    "interrupts variable cleanup at %s before another variable is changed",
+    async (boundary) => {
+      let stopped = false;
+      let reads = 0;
+      let confirmed = false;
+      const calls: string[][] = [];
+      const saved: string[] = [];
+      const operation = { operationId: "variable-stop" };
+      const outcome = await rollbackVariables({
+        attempt: 1,
+        operation,
+        variables: [
+          artifact(),
+          artifact({ name: "SECOND", identity: "second" })
+        ],
+        isStopped: () => stopped,
+        onConfirmed: () => {
+          confirmed = true;
+        },
+        persist: async () => {
+          const status = providerMutationRecord(
+            operation,
+            "github_environment_variable.cleanup_delete",
+            artifact().identity
+          )?.status;
+          if (status) saved.push(status);
+          if (
+            (boundary === "prepared" && status === "prepared") ||
+            (boundary === "confirmation" && status === "confirmed")
+          )
+            stopped = true;
+        },
+        run: async (args) => {
+          calls.push(args);
+          if (args[0] === "variable") {
+            if (boundary === "write") stopped = true;
+            return command();
+          }
+          reads++;
+          if (
+            (boundary === "identity" && reads === 1) ||
+            (boundary === "variable" && reads === 2) ||
+            (boundary === "validation" && reads === 4)
+          )
+            stopped = true;
+          if (args[1] === ENVIRONMENT_PATH) return environment();
+          if (args[1] === VARIABLE_PATH)
+            return command({
+              stdout: '{"name":"AZURE_CLIENT_ID","value":"1"}'
+            });
+          throw new Error("Unexpected second variable read");
+        }
+      });
+      expect(outcome).toMatchObject({ interrupted: true, blocked: true });
+      const acknowledged = boundary === "write" || boundary === "confirmation";
+      expect(confirmed).toBe(acknowledged);
+      expect(calls.filter((args) => args[0] === "variable")).toHaveLength(
+        acknowledged ? 1 : 0
+      );
+      if (acknowledged) {
+        expect(saved.at(-1)).toBe("confirmed");
+        expect(outcome.results).toEqual([
+          expect.objectContaining({ outcome: "deleted" })
+        ]);
+      }
+    }
+  );
+
   it("deletes a variable that was absent before setup", async () => {
     const calls: string[][] = [];
     const outcome = await rollbackGitHubEnvironmentVariables({

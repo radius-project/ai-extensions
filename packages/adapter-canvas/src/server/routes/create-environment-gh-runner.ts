@@ -21,6 +21,7 @@ export interface WorkflowScopeGhRunnerPorts {
 }
 
 export interface WorkflowScopeGhRunnerTarget {
+  isStopped?(): boolean;
   targetRepo: string;
   envName: string;
   environmentProviderId?: string | null;
@@ -113,6 +114,7 @@ export function createWorkflowScopeGhRunner(
       run: runGh,
       runOrThrow: runGhOrThrow,
       digest: setupValueDigest,
+      isStopped: target.isStopped,
       recovery:
         target.mutationRecovery ?
           createSetupWorkflowRecoveryPort(
