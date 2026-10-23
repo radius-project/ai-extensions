@@ -44,12 +44,13 @@ export default defineConfig({
             functions: 100,
             lines: 100
           },
-        "packages/adapter-canvas/src/server/services/deploy-dispatch.ts": {
-          statements: 100,
-          branches: 100,
-          functions: 100,
-          lines: 100
-        },
+        "packages/adapter-canvas/src/server/services/{deploy-dispatch,workflow-presync}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
         "packages/adapter-canvas/src/runtime/environment-execution-owner.ts": {
           statements: 100,
           branches: 100,

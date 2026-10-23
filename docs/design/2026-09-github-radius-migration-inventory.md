@@ -336,6 +336,8 @@ The remediation's uncovered executor assertion at `server.ts:4957-4958` protects
 
 ## Deployment admission and dispatch
 
+**Layer-five synchronization remediation:** `server/services/workflow-presync.ts` separates the uncaught ambient synchronization call and result normalization from its two caller policies. The server keeps `ensureWorkflowsCurrent = workflowPresync.bestEffort` for existing delete/verification callers, including their independent failure/read-back checks. Only the existing dispatch service uses `ensureWorkflowsCurrent: ensureDeploymentWorkflowsCurrent`, bound to `workflowPresync.forDeployment`; exceptions and returned failed writes stop preparation before dispatch. Provider, environment, default/working branch behavior and registration-pending evidence are unchanged, with no selected account adoption, extra template-generation pass or optional workflow-port injection. When #1076 adopts the selected monitor/preparation factory, remove the interim `ensureDeploymentWorkflowsCurrent` alias, its legacy dispatch binding and the unused `forDeployment` policy; retain the shared normalization and unrelated best-effort wrapper. Carry the production HTTP stale-workflow refusal regression through that adoption so exactly one strict deployment path remains.
+
 The baseline inventory below is superseded only for preparation and dispatch by the PR 5 record that follows. Production attempt ownership, selected-account monitor adoption and controller/repair replacement remain PRs 6-7.
 
 ### Stage 3 explicit-target preparation and dispatch
