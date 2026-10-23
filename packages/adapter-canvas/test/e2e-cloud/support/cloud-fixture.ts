@@ -225,6 +225,8 @@ export interface CloudFixture {
   ): void;
   /** Registers a fixture-owned namespace that reclamation may remove. */
   registerNamespaceCleanupTarget(namespace: string): void;
+  /** Registers only an environment verified absent before a refusal probe submits. */
+  registerProbeEnvironmentCleanupTarget(name: string): Promise<void>;
   /** Records that the journey verified Radius removed the application. */
   recordApplicationDeletionSucceeded(
     application: string,
@@ -355,6 +357,7 @@ export async function createCloudFixture(
   const statePackage = stateRegistryForEnvironment(repository, environmentName);
 
   const unwind: UnwindStep[] = [];
+  const probeEnvironmentCleanupTargets = new Set<string>();
   let workspacePath = "";
 
   try {
@@ -1277,6 +1280,24 @@ export async function createCloudFixture(
       });
     },
 
+    async registerProbeEnvironmentCleanupTarget(name) {
+      if (!name.trim() || name === environmentName)
+        throw new Error(
+          "Probe cleanup needs a non-empty environment name distinct from the main environment."
+        );
+      const apiPath = `repos/${repository}/environments/${encodeURIComponent(name)}`;
+      const result = await commands.runGh(["api", apiPath]);
+      if (result.code === 0)
+        throw new Error(
+          `Refusing to register pre-existing probe environment "${name}" for cleanup.`
+        );
+      if (!isGitHubApiNotFound(result))
+        throw new Error(
+          `Could not verify probe environment "${name}" is absent: ${result.stderr || result.stdout}`
+        );
+      probeEnvironmentCleanupTargets.add(name);
+    },
+
     async reclaimLeakedProductArtifacts() {
       const reclaimed: string[] = [];
       const failures: string[] = [];
@@ -1292,6 +1313,89 @@ export async function createCloudFixture(
           failures.push(`${label}: ${describeError(error)}`);
         }
       };
+
+      const reclaimGitHubEnvironment = async (
+        name: string,
+        label: string
+      ): Promise<void> => {
+        // Deployment records outlive their environment. Clear them even when
+        // the environment is absent, and preserve it if any record step fails.
+        const failuresBeforeRecords = failures.length;
+        const records = await listDeploymentRecordIds(
+          commands,
+          repository,
+          name
+        ).catch((error: unknown) => {
+          failures.push(
+            `probe GitHub deployment records for ${name}: ${describeError(error)}`
+          );
+          return null;
+        });
+        if (records && records.length > 0)
+          await attempt(
+            `${records.length} GitHub deployment record(s) for ${name}`,
+            async () => {
+              for (const id of records) {
+                expectSuccess(
+                  await commands.runGh([
+                    "api",
+                    "--method",
+                    "POST",
+                    `repos/${repository}/deployments/${id}/statuses`,
+                    "-f",
+                    "state=inactive"
+                  ]),
+                  `gh api POST deployments/${id}/statuses`
+                );
+                expectSuccess(
+                  await commands.runGh([
+                    "api",
+                    "--method",
+                    "DELETE",
+                    `repos/${repository}/deployments/${id}`
+                  ]),
+                  `gh api DELETE deployments/${id}`
+                );
+              }
+            }
+          );
+        if (failures.length !== failuresBeforeRecords) {
+          failures.push(
+            `preserve GitHub environment ${name}: its deployment records could not be ` +
+              "reclaimed, and deleting the environment now would strand them behind a name nothing " +
+              "will match again"
+          );
+          return;
+        }
+        const apiPath = `repos/${repository}/environments/${encodeURIComponent(name)}`;
+        try {
+          const probe = await commands.runGh(["api", apiPath]);
+          if (isGitHubApiNotFound(probe)) return;
+          if (probe.code !== 0)
+            throw new Error(
+              `gh exited ${probe.code}: ${(probe.stderr || probe.stdout).trim()}`
+            );
+          await attempt(label, async () => {
+            const result = await commands.runGh([
+              "api",
+              "--method",
+              "DELETE",
+              apiPath
+            ]);
+            if (result.code !== 0 && !isGitHubApiNotFound(result))
+              expectSuccess(result, `gh api DELETE ${apiPath}`);
+          });
+        } catch (error) {
+          failures.push(
+            `probe GitHub environment ${name}: ${describeError(error)}`
+          );
+        }
+      };
+      for (const name of probeEnvironmentCleanupTargets)
+        await reclaimGitHubEnvironment(
+          name,
+          `probe GitHub environment ${name}`
+        );
 
       const applicationFailureStart = failures.length;
       for (const target of applicationCleanupTargets.values()) {
@@ -1654,84 +1758,10 @@ export async function createCloudFixture(
         });
       }
 
-      // A deployment record names the environment it deployed to, but outlives
-      // it. Deleting the environment while its records are still present
-      // strands them behind a name nothing will ever match again, so track
-      // whether this step actually cleared them and hold the environment back
-      // if it did not.
-      const failureCountBeforeDeploymentRecords = failures.length;
-      const deploymentRecords = await listDeploymentRecordIds(
-        commands,
-        repository,
-        environmentName
-      ).catch((error: unknown) => {
-        failures.push(
-          `probe GitHub deployment records for ${environmentName}: ${describeError(error)}`
-        );
-        return null;
-      });
-      if (deploymentRecords && deploymentRecords.length > 0)
-        await attempt(
-          `${deploymentRecords.length} GitHub deployment record(s) for ${environmentName}`,
-          async () => {
-            for (const id of deploymentRecords) {
-              // GitHub refuses to delete a deployment that is still active,
-              // and a record whose job never reported a status is active by
-              // default.
-              expectSuccess(
-                await commands.runGh([
-                  "api",
-                  "--method",
-                  "POST",
-                  `repos/${repository}/deployments/${id}/statuses`,
-                  "-f",
-                  "state=inactive"
-                ]),
-                `gh api POST deployments/${id}/statuses`
-              );
-              expectSuccess(
-                await commands.runGh([
-                  "api",
-                  "--method",
-                  "DELETE",
-                  `repos/${repository}/deployments/${id}`
-                ]),
-                `gh api DELETE deployments/${id}`
-              );
-            }
-          }
-        );
-
-      if (failures.length !== failureCountBeforeDeploymentRecords)
-        failures.push(
-          `preserve GitHub environment ${environmentName}: its deployment records could not be ` +
-            "reclaimed, and deleting the environment now would strand them behind a name nothing " +
-            "will match again"
-        );
-      else {
-        const environment = await commands.runGh([
-          "api",
-          `repos/${repository}/environments/${environmentName}`
-        ]);
-        if (environment.code === 0)
-          await attempt(`GitHub environment ${environmentName}`, async () => {
-            expectSuccess(
-              await commands.runGh([
-                "api",
-                "--method",
-                "DELETE",
-                `repos/${repository}/environments/${environmentName}`
-              ]),
-              `gh api DELETE environments/${environmentName}`
-            );
-          });
-        else if (!isGitHubApiNotFound(environment))
-          failures.push(
-            `probe GitHub environment ${environmentName}: gh exited ${environment.code}: ${(
-              environment.stderr || environment.stdout
-            ).trim()}`
-          );
-      }
+      await reclaimGitHubEnvironment(
+        environmentName,
+        `GitHub environment ${environmentName}`
+      );
 
       const packageRecord = await readStatePackage(
         commands,
@@ -2164,7 +2194,7 @@ async function listDeploymentRecordIds(
     "api",
     "--paginate",
     "--slurp",
-    `repos/${repository}/deployments?environment=${environmentName}&per_page=100`
+    `repos/${repository}/deployments?environment=${encodeURIComponent(environmentName)}&per_page=100`
   ]);
   expectSuccess(result, context);
   if (!result.stdout.trim())

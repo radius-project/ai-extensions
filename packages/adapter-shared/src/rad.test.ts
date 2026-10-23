@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import https from "node:https";
-import { IncomingMessage } from "node:http";
+import { ClientRequest, IncomingMessage } from "node:http";
 import { Socket } from "node:net";
 import {
   RADIUS_EXTENSION_REGISTRY,
@@ -120,7 +120,10 @@ function mockHttpsGet(
     if (!response) throw new Error(`Unexpected URL: ${key}`);
     if (!callback) throw new Error("mockHttpsGet requires a callback");
 
-    const req = https.request(url);
+    const req = new ClientRequest({
+      host: "fixture.invalid",
+      createConnection: () => new Socket()
+    });
     const resp = new IncomingMessage(new Socket());
     resp.statusCode = response.statusCode ?? 200;
     resp.headers = response.headers ?? {};
@@ -130,6 +133,7 @@ function mockHttpsGet(
         resp.emit("data", Buffer.from(response.body));
       }
       resp.emit("end");
+      req.destroy();
     });
     return req;
   };
@@ -872,6 +876,52 @@ describe("resolveRadForGraph", () => {
 
     expect(resolved).toBe(MANAGED_RAD_PATH);
     expect(calls).toContain(RELEASES_API);
+  });
+
+  it("rejects a missing pinned release with HTTP 404 and can retry after it becomes available", async () => {
+    delete process.env.RADIUS_RAD_BINARY;
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const calls: string[] = [];
+    const connect = vi
+      .spyOn(Socket.prototype, "connect")
+      .mockImplementation(() => {
+        throw new Error("Unexpected network connection");
+      });
+    const get = mockHttpsGet(
+      { [RELEASES_API]: { statusCode: 404, body: '{"message":"Not Found"}' } },
+      calls
+    );
+
+    await expect(mod.ensureRadBinary()).rejects.toThrow(
+      `GET ${RELEASES_API} failed: HTTP 404`
+    );
+    expect(calls).toEqual([RELEASES_API]);
+    expect(fs.existsSync(MANAGED_RAD_PATH)).toBe(false);
+    expect(fs.readdirSync(path.dirname(MANAGED_BICEP_PATH))).toEqual([BICEP]);
+
+    get.mockRestore();
+    const asset = mod.releaseAsset();
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`;
+    mockHttpsGet(
+      {
+        [RELEASES_API]: {
+          body: JSON.stringify({
+            tag_name: RADIUS_RELEASE_TAG,
+            assets: [{ name: asset, digest: "" }]
+          })
+        },
+        [downloadUrl]: { body: "fixture rad binary" }
+      },
+      calls
+    );
+
+    await expect(mod.ensureRadBinary()).resolves.toBe(MANAGED_RAD_PATH);
+    expect(calls).toEqual([RELEASES_API, RELEASES_API, downloadUrl]);
+    expect(fs.readFileSync(MANAGED_RAD_PATH, "utf8")).toBe(
+      "fixture rad binary"
+    );
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it("prefers the cached ensure result over a later on-disk override", async () => {
@@ -2463,17 +2513,23 @@ if (process.argv.includes("version")) {
     expect(calls).toEqual([]);
   });
 
-  it("keeps the installed binary when the pinned release cannot be downloaded", async () => {
+  it("keeps the installed binary and reports HTTP 404 when the pinned tag is missing", async () => {
     delete process.env.RADIUS_RAD_BINARY;
     writeFakeRad(MANAGED_RAD_PATH, "v0.1.0");
 
     const calls: string[] = [];
-    mockHttpsGet({}, calls);
+    mockHttpsGet(
+      { [RELEASES_API]: { statusCode: 404, body: '{"message":"Not Found"}' } },
+      calls
+    );
     const logs: string[] = [];
     const resolved = await freshEnsureRadBinary({ log: (m) => logs.push(m) });
 
     expect(resolved).toBe(MANAGED_RAD_PATH);
-    expect(logs.some((m) => m.includes(`Could not install rad`))).toBe(true);
+    expect(calls).toEqual([RELEASES_API]);
+    expect(logs).toContain(
+      `Could not install rad ${RADIUS_RELEASE_TAG} (GET ${RELEASES_API} failed: HTTP 404); using v0.1.0.`
+    );
     await expect(radBinaryRelease(MANAGED_RAD_PATH)).resolves.toBe("v0.1.0");
   });
 

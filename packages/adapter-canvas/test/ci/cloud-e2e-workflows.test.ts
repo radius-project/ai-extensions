@@ -502,6 +502,10 @@ ${remove}
         "${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}",
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
         "${{ steps.fixture.outputs.full-name }}",
+      AIEXT_CLOUD_E2E_FOREIGN_APP_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_FOREIGN_APP_NAME }}",
+      AIEXT_CLOUD_E2E_ORPHAN_APP_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_ORPHAN_APP_NAME }}",
       AIEXT_CLOUD_E2E_RESOURCE_GROUP:
         "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}",
       CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
@@ -1079,9 +1083,13 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).not.toContain("MAX_AGE_HOURS");
   });
 
-  it.each(["all deletes succeed", "one delete fails"] as const)(
-    "runs the shared resource group cleanup shell when %s",
-    async (scenario) => {
+  it.each(
+    ["all deletes succeed", "one delete fails"].flatMap((scenario) =>
+      ["LF", "CRLF"].map((lineEnding) => ({ scenario, lineEnding }))
+    )
+  )(
+    "runs the shared resource group cleanup shell when $scenario with $lineEnding rows",
+    async ({ scenario, lineEnding }) => {
       const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
       const groupCleanup = steps(workflow.jobs?.purge).find(
         (step) => step.id === "shared-resource-cleanup"
@@ -1126,8 +1134,13 @@ describe("cloud-e2e-cleanup.yml", () => {
           },
           // Match Linux jq output instead of adding CR to the last TSV field.
           input: `
-            node() { '${node}' "$@"; }
             ${process.platform === "win32" ? 'jq() { command jq --binary "$@"; }' : ""}
+            node() { '${node}' "$@"; }
+            jq() {
+              command jq "$@" | while IFS= read -r row; do
+                printf '%s${lineEnding === "CRLF" ? "\\r\\n" : "\\n"}' "\${row%$'\\r'}"
+              done
+            }
             az() {
               case "$1 \${2:-}" in
                 "version --output") printf '%s\\n' '{"azure-cli":"2.91.0"}' ;;
@@ -1153,6 +1166,8 @@ describe("cloud-e2e-cleanup.yml", () => {
           passing
         ]);
         const summaryText = await readFile(summary, "utf8");
+        expect(result.stderr).not.toContain("\r");
+        expect(summaryText).not.toContain("\r");
         if (scenario === "all deletes succeed") {
           expect(result.status).toBe(0);
           expect(summaryText).toContain("reclaimed from synthetic-group: 2");

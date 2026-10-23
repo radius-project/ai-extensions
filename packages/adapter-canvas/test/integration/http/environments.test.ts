@@ -262,6 +262,97 @@ function statuses(body: unknown): string[] {
   return (environments ?? []).map((environment) => environment.status);
 }
 
+describe("bounded verification history over HTTP", () => {
+  it("reads an older verification by id, rejects partial failure, and recovers on a fresh listing", async () => {
+    const script = listingScript("7\tdev");
+    const runPath =
+      "/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100";
+    const firstPage = Array.from(
+      { length: 100 },
+      (_, index) => `${200 - index}\tcompleted\tsuccess`
+    ).join("\n");
+    const runDetail = JSON.stringify({
+      path: ".github/workflows/radius-verify-credentials.yml",
+      status: "completed",
+      conclusion: "success"
+    });
+    let failLookup = true;
+    const runCalls: string[][] = [];
+    const statusCalls: string[][] = [];
+    const harness = await start(script, {
+      cliExec: (_command, args, _options, callback) => {
+        const path = args.find((arg) => arg.startsWith("/repos/")) ?? "";
+        if (path === runPath) {
+          runCalls.push(args);
+          callback(null, firstPage, "");
+          return;
+        }
+        if (path === "/repos/octo/app/actions/runs/42") {
+          runCalls.push(args);
+          if (failLookup) {
+            callback(
+              new Error("run lookup failed"),
+              runDetail,
+              "HTTP 403: API rate limit exceeded"
+            );
+          } else {
+            callback(null, runDetail, "");
+          }
+          return;
+        }
+        if (path.includes("/statuses?")) statusCalls.push(args);
+        const answer = script[path];
+        if (!answer) throw new Error(`Unexpected API path: ${path}`);
+        callback(
+          answer.error ?? null,
+          answer.stdout ?? "",
+          answer.stderr ?? ""
+        );
+      }
+    });
+
+    const failed = await harness.list();
+
+    expect(failed.status).toBe(200);
+    expect(failed.cacheControl).toBe("no-store");
+    expect(statuses(failed.body)).toEqual(["pending"]);
+    expect(statusCalls).toHaveLength(1);
+    expect(failed.rawBody).not.toContain("API rate limit");
+
+    failLookup = false;
+    harness.invalidate(REPO);
+    const recovered = await harness.list();
+
+    expect(recovered.status).toBe(200);
+    expect(statuses(recovered.body)).toEqual(["success"]);
+    expect(runCalls).toHaveLength(4);
+    expect(runCalls.every((args) => !args.includes("--paginate"))).toBe(true);
+    expect(statusCalls).toHaveLength(2);
+  });
+
+  it("does not treat a successful deployment run as credential verification", async () => {
+    const script = listingScript("7\tdev");
+    script[
+      "/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"
+    ] = {
+      stdout: "200\tcompleted\tsuccess"
+    };
+    script["/repos/octo/app/actions/runs/42"] = {
+      stdout: JSON.stringify({
+        path: ".github/workflows/run-rad-commands.yml",
+        status: "completed",
+        conclusion: "success"
+      })
+    };
+    const harness = await start(script);
+
+    const result = await harness.list();
+
+    expect(result.status).toBe(200);
+    expect(statuses(result.body)).toEqual(["unknown"]);
+  });
+});
+
 function rolledBackOperation() {
   const operation = createOperation({
     provider: "azure",
