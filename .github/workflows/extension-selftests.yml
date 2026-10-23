@@ -55,7 +55,8 @@ jobs:
               '.github/extension/**/*.sh' \
               'build/scripts/verify-contrib-consumers*.sh' \
               'build/scripts/update-radius-installer*.sh' \
-              'build/scripts/cloud-e2e-lease*.sh'
+              'build/scripts/cloud-e2e-lease*.sh' \
+              'build/scripts/cloud-e2e-cleanup-lib*.sh'
           )
           if [ "${#scripts[@]}" -eq 0 ]; then
             echo "::error::no extension shell scripts found to lint"
@@ -72,7 +73,8 @@ jobs:
             git ls-files \
               '.github/extension/**/*_test.sh' \
               'build/scripts/update-radius-installer_test.sh' \
-              'build/scripts/cloud-e2e-lease_test.sh'
+              'build/scripts/cloud-e2e-lease_test.sh' \
+              'build/scripts/cloud-e2e-cleanup-lib_test.sh'
           )
           if [ "${#tests[@]}" -eq 0 ]; then
             echo "::error::no extension shell tests found to run"

@@ -25,12 +25,24 @@ export const DEPLOYMENT_TEST_TIMEOUT_MS =
   DEPLOYMENT_OPERATION_TIMEOUT_MS + 5 * MINUTE_MS;
 export const DELETE_REFUSAL_TEST_TIMEOUT_MS = 10 * MINUTE_MS;
 
+// A create that the product must refuse before it changes anything: signed out
+// of Azure, a foreign application, or an orphaned Radius application. Each
+// stage runs one short operation, so one ceiling covers all three.
+export const PRE_MUTATION_REFUSAL_OPERATION_TIMEOUT_MS = 5 * MINUTE_MS;
+export const PRE_MUTATION_REFUSAL_TEST_TIMEOUT_MS =
+  PRE_MUTATION_REFUSAL_OPERATION_TIMEOUT_MS + 3 * MINUTE_MS;
+export const PRE_MUTATION_REFUSAL_TEST_COUNT = 3;
+// Re-creating the deleted environment runs the full create again.
+export const REUSE_TEST_TIMEOUT_MS = CREATE_TEST_TIMEOUT_MS;
+
 export const SERIAL_TEST_TIMEOUT_BUDGET_MS =
   CREATE_TEST_TIMEOUT_MS +
   DEPLOYMENT_TEST_TIMEOUT_MS +
   DELETE_REFUSAL_TEST_TIMEOUT_MS +
   DEPLOYMENT_TEST_TIMEOUT_MS +
-  DELETE_TEST_TIMEOUT_MS;
+  DELETE_TEST_TIMEOUT_MS +
+  PRE_MUTATION_REFUSAL_TEST_COUNT * PRE_MUTATION_REFUSAL_TEST_TIMEOUT_MS +
+  REUSE_TEST_TIMEOUT_MS;
 export const CLOUD_SUITE_TIMEOUT_MS =
   SERIAL_TEST_TIMEOUT_BUDGET_MS + CLOUD_HOOK_TEARDOWN_HEADROOM_MS;
 
