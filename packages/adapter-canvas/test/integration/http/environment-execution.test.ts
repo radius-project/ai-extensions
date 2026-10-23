@@ -33,6 +33,54 @@ afterEach(async () => {
 });
 
 describe("production environment owner HTTP binding", () => {
+  it("projects the latest saved operation without repository context through the production status route", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const unavailable = async (): Promise<never> => {
+      throw new Error("Unexpected account lookup");
+    };
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: createEnvironmentAccountContext("latest-status", {
+        createReadOnlyExecutor: unavailable,
+        withSelectedAccount: unavailable
+      })
+    });
+    const entry = await runtime.getOrCreateServer(
+      "latest-status",
+      "environment"
+    );
+    try {
+      const empty = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(empty.status).toBe(200);
+      expect(await empty.json()).toEqual({ operation: null });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      finish(op, "succeeded");
+      op.request = { private: "never-return-this" };
+      operations.put(op);
+      const response = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const result = await response.json();
+      expect(result).toMatchObject({
+        operation: {
+          operationId: op.operationId,
+          repo: op.repo,
+          environment: op.environment,
+          state: "succeeded"
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("never-return-this");
+      expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("latest-status", true);
+    }
+  });
+
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
