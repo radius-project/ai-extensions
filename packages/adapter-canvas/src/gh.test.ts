@@ -1831,6 +1831,36 @@ describe("selected GitHub executor", { concurrent: false }, () => {
     );
   });
 
+  it("encodes the exact branch on selected-account file reads", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser",
+      commandResult: { stdout: "bWFpbg==" }
+    });
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+    childProcess.execFile.mockClear();
+
+    await expect(
+      gh.selectedFetchFileFromRepoResult(
+        executor,
+        "octo/app",
+        "workflow.yml",
+        "feature/model&review=1"
+      )
+    ).resolves.toEqual({ content: "main", error: null, status: 200 });
+    expect(childProcess.execFile.mock.calls.map(([, args]) => args)).toEqual([
+      ["api", "user", "--jq", ".login"],
+      [
+        "api",
+        "/repos/octo/app/contents/workflow.yml?ref=feature%2Fmodel%26review%3D1",
+        "--jq",
+        ".content"
+      ]
+    ]);
+  });
+
   it("preserves bounded timeouts on selected-account repository reads", async () => {
     const gh = await loadGh("linux", {
       token: "selected-injected-token",

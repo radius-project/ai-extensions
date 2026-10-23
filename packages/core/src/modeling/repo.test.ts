@@ -54,4 +54,19 @@ describe("fetchBicepFromRepo", () => {
     const gh = fakeGitHub();
     expect(await fetchBicepFromRepo(gh, "acme/app")).toBeNull();
   });
+
+  it.each([".radius/app.bicep", "app.bicep"])(
+    "encodes the exact branch when reading %s",
+    async (file) => {
+      const gh = fakeGitHub({
+        content: {
+          [`/repos/acme/app/contents/${file}?ref=feature%2Fmodel%26review%3D1`]:
+            "selected branch"
+        }
+      });
+      expect(
+        await fetchBicepFromRepo(gh, "acme/app", "feature/model&review=1")
+      ).toBe("selected branch");
+    }
+  );
 });

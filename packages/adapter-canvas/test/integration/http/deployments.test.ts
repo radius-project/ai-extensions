@@ -2131,6 +2131,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         );
       };
       const dispatch = createDeployDispatchService({
+        isCurrent: () => true,
         deployWorkflowFile: "run-rad-commands.yml",
         deployWorkflowFiles: [
           "run-rad-commands.yml",
@@ -2161,7 +2162,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         runGitHubJson: unexpected,
         readProcessEnv: () => ({}),
         ghCredentialSource: () => "keyring",
-        fetchFileForSelection: () => Promise.resolve(null),
+        fetchFileForSelection: () => Promise.resolve("deployment source"),
         appParams: () => [],
         resolveDeployParams: () => ({}),
         partitionParams: () => ({ public: {}, secret: {} }),
@@ -2263,7 +2264,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       if (exhausted) {
         expect(body).toMatchObject({
           status: "failed",
-          errorKind: "run-unconfirmed",
+          errorKind: "dispatch-refused",
           error: expect.stringContaining("Radius already waited and retried")
         });
       } else {
@@ -2416,6 +2417,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
   function oidcRefusalHarness(subjects: string[]) {
     const workflowDispatches: string[][] = [];
     const dispatch = createDeployDispatchService({
+      isCurrent: () => true,
       deployWorkflowFile: "run-rad-commands.yml",
       deployWorkflowFiles: [
         "run-rad-commands.yml",
@@ -2684,6 +2686,11 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     ],
     ["still running", { deployStatus: "in_progress" }, /still running/],
     ["already complete", { deployStatus: "complete" }, /without an attemptId/],
+    [
+      "confirmed dispatch refusal",
+      { deployErrorKind: "dispatch-refused" } satisfies Partial<CanvasState>,
+      /was refused without starting a workflow/
+    ],
     [
       "unconfirmed run",
       {

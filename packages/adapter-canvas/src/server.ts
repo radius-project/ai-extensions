@@ -5,6 +5,9 @@ import {
   isSetupExecutionInterrupted
 } from "@radius-project/core";
 import { createAzureRecoveryPort } from "./server/services/azure-setup-recovery.js";
+import { fetchSelectedBicep } from "./selected-bicep-source.js";
+import type { SelectedRepositoryReader } from "./selected-repository-reader.js";
+import { createWorkflowPresync } from "./server/services/workflow-presync.js";
 // Canvas adapter — HTTP server host for the webview.
 //
 // Owns the local loopback server that backs each canvas instance: the declared
@@ -25,7 +28,6 @@ import {
   computeGraphDiff,
   DEPLOY_RAD_COMMANDS_STEP,
   deployStatusKeys,
-  fetchBicepFromRepo,
   fetchRecipePack,
   isKubernetesNamespace,
   mergeDeployedGraphDisplayMetadata,
@@ -246,7 +248,6 @@ import {
   DELETE_ENV_AZURE_FILE,
   LEGACY_DEPLOY_WORKFLOW_FILE
 } from "./infra.js";
-import type { WorkflowCommitFailure } from "./infra.js";
 import {
   findWorkflowRun,
   latestWorkflowRunId,
@@ -1176,7 +1177,7 @@ function kickoffWorkflowSync(
 // above for the eagerly-read value.
 
 // Awaited, best-effort pre-dispatch workflow sync. Before the extension runs a
-// committed workflow (deploy / delete / verify), ensure that workflow's files
+// committed workflow (delete / verify), ensure that workflow's files
 // are present on the branch it runs from AND in sync with the upstream Radius
 // templates, so the dispatch never 404s on a missing file or executes a drifted
 // copy. Unlike the throttled background pass (kickoffWorkflowSync), this is
@@ -1187,57 +1188,15 @@ function kickoffWorkflowSync(
 // provider-agnostic, so it only matters for verify. `workingBranch` (when it
 // matches the repo) is synced alongside the default branch so a
 // worktree-consistent run uses current files on both.
-async function ensureWorkflowsCurrent(
-  repo: string,
-  environment: string,
-  provider: string,
-  only: string[],
-  workingBranch = ""
-): Promise<{
-  created: string[];
-  updated: string[];
-  failed: WorkflowCommitFailure[];
-}> {
-  if (!repo || !environment || !only || only.length === 0)
-    return { created: [], updated: [], failed: [] };
-  try {
-    const r = await syncRepoWorkflows(
-      repo,
-      [{ name: environment, provider: provider || "" }],
-      {
-        workingBranch: workingBranch || "",
-        only,
-        // Author the workflow if it's missing on the branch it will run from,
-        // not just update drift. `gh workflow run` resolves the workflow from
-        // the default branch, so a never-committed (or wrongly-refed) file 404s;
-        // creating it here makes the dispatch self-healing.
-        create: true,
-        log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`)
-      }
-    );
-    if (
-      r &&
-      ((r.updated && r.updated.length) || (r.created && r.created.length))
-    ) {
-      const changed = [...(r.updated || []), ...(r.created || [])];
-      console.error(
-        `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
-      );
-    }
-    return {
-      // Downstream dispatchers use this list only to decide whether GitHub may
-      // still be registering a workflow, including one created concurrently.
-      created: [
-        ...new Set([...(r.created || []), ...(r.registrationPending || [])])
-      ],
-      updated: r.updated || [],
-      failed: r.failed || []
-    };
-  } catch (e) {
-    console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
-    return { created: [], updated: [], failed: [] };
-  }
-}
+// Deployment alone uses the strict sibling: stale workflows must not run when
+// synchronization throws or reports rejected writes.
+const workflowPresync = createWorkflowPresync({
+  synchronize: syncRepoWorkflows,
+  log: (message) => console.error(message),
+  errorMessage
+});
+const ensureWorkflowsCurrent = workflowPresync.bestEffort;
+const ensureDeploymentWorkflowsCurrent = workflowPresync.forDeployment;
 
 // no access to the SDK `session`, so when a graph/generate route finds no
 // app.bicep it delegates through this hook, which injects a user turn asking the
@@ -1567,9 +1526,15 @@ export function resolveDeployRepairLoop(
         : `Deploy attempt "${requested}" is not in a failed state, so there is nothing to repair and nothing was deployed. Its repair loop is over. To deploy again, call radius_deploy without an attemptId to start a new deploy.`
     };
   }
-  // "failed" covers two different things, and only one is safe to redeploy.
-  // A confirmed failure — GitHub refused the dispatch, or the run finished and
-  // reported failure — leaves nothing in flight. The rest do not: the dispatch
+  if (state.deployErrorKind === "dispatch-refused") {
+    return {
+      repairLoop: false,
+      attemptId: "",
+      repairAttempt: 0,
+      error: `Deploy attempt "${requested}" was refused without starting a workflow. No new workflow was started. Report the refusal to the user; do not repair the model or automatically redeploy. Once the blocker is resolved, the user can request a fresh deploy without an attemptId.`
+    };
+  }
+  // A confirmed run failure leaves nothing in flight. An uncertain dispatch
   // may have been accepted without us learning of it, or monitoring may have
   // stopped before the run reported, in which case a redeploy would race a
   // second run against the same target — exactly what the in_progress check
@@ -1686,6 +1651,7 @@ export function triggerDeployRepairHandoff(
     if (!state || state.deployStatus !== "failed") return false;
     if (
       state.deployErrorKind === DEPLOY_BRANCH_NOT_PUSHED_KIND ||
+      state.deployErrorKind === "dispatch-refused" ||
       // Refused before dispatch because no federated credential can match the
       // token GitHub would mint. Repairing the model cannot change that.
       state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
@@ -2179,8 +2145,9 @@ const deployDispatchService = createDeployDispatchService({
   buildDeployRadCommand,
   buildAppGraphRadCommand,
   ensureDeployWorkflowsOnBranch,
-  ensureWorkflowsCurrent,
+  ensureWorkflowsCurrent: ensureDeploymentWorkflowsCurrent,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  isCurrent: () => true,
   latestWorkflowRunId,
   classifyDeployDispatchFailure,
   uncommittedGeneratedPaths: (entry) =>
@@ -4167,31 +4134,15 @@ function repoMatchesWorkspace(state: CanvasState, repo: string): boolean {
 async function fetchBicepSelection(
   entry: { state: CanvasState },
   repo: string,
-  branch: string
+  branch: string,
+  reader: SelectedRepositoryReader = github
 ): Promise<{
   content: string | null;
   fromWorkspace: boolean;
   branch: string;
   bicepPath: string;
 }> {
-  const access = accessForSelection(entry, repo, branch);
-  if (access.useWorkspace) {
-    const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
-    if (local)
-      return {
-        content: local.content,
-        fromWorkspace: true,
-        branch: access.branch,
-        bicepPath: local.repoPath
-      };
-  }
-  const remote = await fetchBicepFromRepo(github, repo, access.branch);
-  return {
-    content: remote,
-    fromWorkspace: false,
-    branch: access.branch,
-    bicepPath: ""
-  };
+  return fetchSelectedBicep(entry.state, repo, branch, reader);
 }
 
 async function fetchFileForSelection(

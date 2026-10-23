@@ -1,0 +1,166 @@
+import * as childProcess from "node:child_process";
+import { readFileSync } from "node:fs";
+import { Writable } from "node:stream";
+import { afterEach, expect, it, vi } from "vitest";
+import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { configureOperationStore } from "../../../src/operations.js";
+import { disabledOperationStore } from "../../../src/operation-store.js";
+
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof childProcess>()),
+  execFile: vi.fn()
+}));
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+it("refuses production HTTP deployment when existing stale workflows cannot be updated", async () => {
+  await configureOperationStore(disabledOperationStore());
+  vi.stubEnv("GH_TOKEN", "");
+  vi.stubEnv("GITHUB_TOKEN", "");
+  const calls: string[][] = [];
+  const writes: Array<{ branch: string; content: string }> = [];
+  const unexpected: string[][] = [];
+  vi.mocked(childProcess.execFile).mockImplementation(
+    (file, args, _options, callback) => {
+      if (!Array.isArray(args) || typeof callback !== "function")
+        throw new Error("Unexpected process invocation shape.");
+      const argv = args.map(String);
+      calls.push([file, ...argv]);
+      const child = new childProcess.ChildProcess();
+      let input = "";
+      child.stdin = new Writable({
+        write(chunk, _encoding, done) {
+          input += String(chunk);
+          done();
+        }
+      });
+      queueMicrotask(() => {
+        let stdout = "";
+        let stderr = "";
+        const api = argv.find((arg) => arg.startsWith("/repos/"));
+        if (file !== "gh") {
+          unexpected.push([file, ...argv]);
+          stderr = "Unexpected non-GitHub command.";
+        } else if (argv[0] === "workflow") {
+          stderr =
+            "Dispatch must not be reached after workflow update failure.";
+        } else if (argv[0] === "run" && argv[1] === "list") {
+          stdout = "[]";
+        } else if (argv.includes("PUT")) {
+          writes.push(JSON.parse(input));
+          stderr = "HTTP 403: protected branch";
+        } else if (
+          api?.startsWith(
+            "/repos/radius-project/ai-extensions/contents/.github/extension/"
+          )
+        ) {
+          const name = api.split("/").pop()?.split("?")[0];
+          stdout = Buffer.from(
+            readFileSync(
+              new URL(
+                `../../../../../.github/extension/${name}`,
+                import.meta.url
+              )
+            )
+          ).toString("base64");
+        } else if (api === "/repos/fixture/app") {
+          stdout = "main";
+        } else if (api?.includes("/git/ref/heads/")) {
+          stdout = "a".repeat(40);
+        } else if (api?.includes("/contents/.github/workflows/")) {
+          stdout =
+            argv.includes(".sha") ?
+              "b".repeat(40)
+            : Buffer.from(
+                "name: stale\non: workflow_dispatch\njobs: {}\n"
+              ).toString("base64");
+        } else if (api?.includes("/contents/.radius/app.bicep")) {
+          stdout = Buffer.from("param location string = 'westus'\n").toString(
+            "base64"
+          );
+        } else if (
+          api?.includes("/deployments?") ||
+          api?.includes("/variables?")
+        ) {
+          stdout = "";
+        } else {
+          unexpected.push([file, ...argv]);
+          stderr = "Unspecified external operation.";
+        }
+        callback(
+          stderr ? Object.assign(new Error(stderr), { code: 1 }) : null,
+          stdout,
+          stderr
+        );
+      });
+      return child;
+    }
+  );
+  const owner = createEnvironmentExecutionOwner();
+  const runtime = createTestCanvasServerRuntime({ executionOwner: owner });
+  const entry = await runtime.getOrCreateServer("workflow-sync", "deploying");
+  Object.assign(entry.state, {
+    plannedResources: [{ id: "fixture", name: "fixture" }]
+  });
+  try {
+    const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: entry.baseUrl,
+        "Sec-Fetch-Site": "same-origin",
+        "X-Radius-Mutation-Nonce": String(entry.state.browserMutationNonce)
+      },
+      body: JSON.stringify({
+        targetRepo: "fixture/app",
+        environment: "Preview East",
+        branch: "feature/model&review=1",
+        provider: "aws"
+      })
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(entry.state.deployStatus).toBe("failed");
+      expect(entry.state.deploymentMutation).toBeUndefined();
+    });
+    expect(unexpected).toEqual([]);
+    expect(writes.map(({ branch }) => branch)).toEqual([
+      "main",
+      "main",
+      "feature/model&review=1",
+      "feature/model&review=1"
+    ]);
+    expect(entry.state.deployError).toContain(
+      "Could not prepare deployment workflows"
+    );
+    expect(entry.state.deployDispatchEvidence).toBe("refused");
+    const status = await fetch(`${entry.baseUrl}/api/deploy-status`);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("Could not prepare deployment workflows")
+    });
+    expect(calls.filter(([, command]) => command === "workflow")).toEqual([]);
+    expect(calls.some(([, command]) => command === "auth")).toBe(false);
+    expect(
+      calls.filter(([, , target]) =>
+        target?.includes("/contents/.radius/app.bicep")
+      )
+    ).toEqual([
+      [
+        "gh",
+        "api",
+        "/repos/fixture/app/contents/.radius/app.bicep?ref=feature/model&review=1",
+        "--jq",
+        ".content"
+      ]
+    ]);
+  } finally {
+    owner.shutdown();
+    await runtime.stopServer("workflow-sync", true);
+  }
+});
