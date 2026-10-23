@@ -250,6 +250,83 @@ describe("production coordinator scheduling scopes", () => {
       await settled(owner, "replacement");
     }
   });
+  it.each(["failed", "changed_externally", "restored"] as const)(
+    "reports %s cleanup account restoration after a shutdown-held write settles",
+    async (restoration) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("cleanup-account-restoration");
+      op.context.githubLogin = "saved-account";
+      recordGitHubEnvironment(op, {
+        state: "created",
+        repo: op.repo,
+        name: op.environment,
+        providerId: "17"
+      });
+      const { command } = acceptCommand(op, {
+        kind: "rollback",
+        attempt: 1,
+        target: "cleanup"
+      });
+      let activeLogin = "original-account";
+      const run = vi.fn(async (args: string[]) => {
+        expect(args).toContain("/repos/fixture/app/environments/dev");
+        if (args.includes("DELETE")) {
+          owner.shutdown();
+          if (restoration === "changed_externally")
+            activeLogin = "external-account";
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        return { code: 0, stdout: '{"id":17}', stderr: "" };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext(
+        "runtime",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => activeLogin,
+          switchKeyringAccount: async (login) => {
+            if (login === "original-account" && restoration === "failed")
+              return { ok: false, error: "Restore unavailable" };
+            activeLogin = login;
+            return { ok: true };
+          },
+          resetIdentityCache: () => {}
+        })
+      );
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      const report = vi
+        .spyOn(operations, "report")
+        .mockImplementation(() => {});
+      coordinator(owner, "panel", undefined, account).scheduleCommandTask(
+        "rollback",
+        op,
+        command.commandId
+      );
+      await settled(owner, "panel");
+      if (restoration === "restored") {
+        expect(report).not.toHaveBeenCalled();
+        expect(activeLogin).toBe("original-account");
+      } else
+        expect(report).toHaveBeenCalledWith(
+          expect.objectContaining({
+            scope: "setup-cleanup-account-restoration",
+            operationId: op.operationId,
+            message: expect.stringContaining("GitHub")
+          })
+        );
+      expect(op.endedAt).toBeNull();
+      expect(op.failure).toBeNull();
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+      expect(
+        run.mock.calls.filter(([args]) => args.includes("DELETE"))
+      ).toHaveLength(1);
+    }
+  );
+
   it.each(["azure-only", "missing-account"] as const)(
     "runs concrete cleanup without a GitHub lease for %s",
     async (scenario) => {
