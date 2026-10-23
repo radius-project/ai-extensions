@@ -190,7 +190,9 @@ export function createProductionDeploymentMonitor(
     now: Date.now
   });
   const monitor = createDeployMonitorService({
-    plannedGraph,
+    plannedGraph: {
+      recover: (request) => plannedGraph.recover({ ...request, isCurrent })
+    },
     dispatch,
     outcome,
     deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
