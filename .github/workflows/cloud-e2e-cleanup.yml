@@ -273,10 +273,10 @@ jobs:
               # still existed, and no retry can bring the workflow back.
               cleanup_fail_if_terminal "$dispatch_error" \
                 "Dispatching delete-application.yml for $environment" \
-                "Check that delete-application.yml exists on $DEFAULT_BRANCH in $FIXTURE_REPOSITORY. If the branch was reset to the baseline, the delete workflow is gone and $environment must be removed by hand (see docs/eng/CLOUD_E2E_RUNBOOK.md)."
+                "Check that delete-application.yml exists on $DEFAULT_BRANCH in $FIXTURE_REPOSITORY. If the branch was reset to the baseline, the delete workflow is gone. The cluster and Azure sweeps in this run still run, and the later steps delete $environment if those sweeps pass. Do not delete it by hand. Run cleanup a second time to reset the branch (see docs/eng/CLOUD_E2E_RUNBOOK.md)."
               if grep -qi "could not find any workflows" "$dispatch_error"; then
                 cat "$dispatch_error" >&2
-                echo "::error::delete-application.yml does not exist in $FIXTURE_REPOSITORY. A retry cannot fix this, so cleanup stops now. Remove $environment by hand (see docs/eng/CLOUD_E2E_RUNBOOK.md)."
+                echo "::error::delete-application.yml does not exist in $FIXTURE_REPOSITORY. A retry cannot fix this, so this step stops now. The cluster and Azure sweeps in this run still run, and the later steps delete $environment if those sweeps pass. Do not delete it by hand. Run cleanup a second time to reset the branch (see docs/eng/CLOUD_E2E_RUNBOOK.md)."
                 exit 1
               fi
               cat "$dispatch_error" >&2

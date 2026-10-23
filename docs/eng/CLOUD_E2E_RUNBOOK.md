@@ -110,19 +110,20 @@ Cleanup verifies each delete:
 | `default-cloud-e2e` namespace           | The namespace is gone                              | 120 seconds |
 | Resources in the shared resource group  | Only the AKS cluster remains                       | 300 seconds |
 | Entra service principal                 | Microsoft Graph returns `Request_ResourceNotFound` | 60 seconds  |
-| Entra application                       | Microsoft Graph returns `Request_ResourceNotFound` | Existing    |
+| Entra application                       | Microsoft Graph returns `Request_ResourceNotFound` | 60 seconds  |
 | GitHub deployment record                | The REST API returns `404`                         | 60 seconds  |
 | Radius environment (GitHub Environment) | The REST API returns `404`                         | 60 seconds  |
-| GHCR state package                      | The package cannot be read                         | Existing    |
+| GHCR state package                      | The package cannot be read                         | 12 seconds  |
 | Fallback pull request and branch        | The pull request is closed and the branch is gone  | 60 seconds  |
 
 Each check call gets only the time that remains before its timeout. If a call stalls, cleanup stops it and its child processes, and the wait between calls never passes the timeout.
 
-A failure that a retry cannot fix stops the step at once. Examples are HTTP `400`, `401`, `403`, `405`, `409`, `410`, or `422` from GitHub (but not a rate limit), `Forbidden` from Kubernetes, `AuthorizationFailed` from Azure, and `Authorization_RequestDenied` from Microsoft Graph. A `422` from the `delete-application.yml` dispatch means that the workflow is not on the fixture default branch, for example after a reset. In that case, Radius cannot delete the application, so the independent Kubernetes and Azure sweeps must reclaim the resources.
+A failure that a retry cannot fix stops the step at once. Examples are HTTP `400`, `401`, `403`, `405`, `409`, `410`, or `422` from GitHub (but not a rate limit), `Forbidden` from Kubernetes, `AuthorizationFailed` from Azure, and `Authorization_RequestDenied` from Microsoft Graph. A `422` from the `delete-application.yml` dispatch means that the workflow is not on the fixture default branch, for example after a reset. In that case, Radius cannot delete the application, so the independent Kubernetes and Azure sweeps must reclaim the resources. Recovery takes two cleanup runs. In the first run, the dispatch fails, so the GHCR state step does not run and the branch is not reset. If the Kubernetes and Azure sweeps pass, the later steps still delete the environment, its Entra identity, and its deployment records. The second run finds no environment to dispatch for, so it can delete the remaining state and reset the branch. Do not delete the environment by hand.
 
 Before cleanup resets the fixture default branch, a final step checks for leaked state of any age: GitHub Environments with the test prefix, the Entra application, labelled cluster workloads, the `default-cloud-e2e` namespace, and GHCR state packages. It finds the Entra application by name, also when it has no Radius tags, and it finds a state package also when its update time cannot be read. If it finds any, cleanup does not reset the branch. A reset removes the generated `delete-application.yml`, so a reset while an environment remains makes that environment harder to delete. Run cleanup again with `max_age_hours=0` to clear recent state.
 
 The Cloud E2E run also stops at once on leaked state of any age. For example, if an earlier environment still owns the `default` namespace, the create wizard refuses the request, and the test fails at once instead of waiting for its timeout.
+
 If you must inspect first:
 
 ```bash
