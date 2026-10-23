@@ -258,7 +258,7 @@ interface HappyPathCapture {
   built: unknown[];
   started: OperationRecord[];
   persistCalls: number;
-  scheduled: Array<{ instanceId: string; op: OperationRecord }>;
+  scheduled: Array<{ instanceId: string | undefined; op: OperationRecord }>;
   finished: unknown[];
 }
 
@@ -1714,6 +1714,7 @@ describe("operation resume and abandon actions", () => {
 
   it("turns a malformed resume body into an empty object before the 409 check", async () => {
     const seen: unknown[] = [];
+    const operation = actionRecord({ operationId: "op/action" });
     const recording = await runAction(
       "/api/operations/op%2Faction/resume/app-selection-required",
       "{not json",
@@ -1721,7 +1722,7 @@ describe("operation resume and abandon actions", () => {
       actionDependencies({
         getOperation: (operationId) => {
           expect(operationId).toBe("op/action");
-          return actionRecord({ operationId });
+          return operation;
         },
         canResumeInput: (_operation, input) => {
           seen.push(input);

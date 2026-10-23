@@ -93,6 +93,9 @@ const productionHandlers = {
   // asserts table shape and ownership, and the control behavior is covered by
   // routes/operations-control.test.ts and the HTTP integration suite.
   ...createOperationsControlRoutes({
+    reportOperationDiagnostic: () => {
+      throw new Error("Unexpected operation diagnostic in route table test");
+    },
     get: () => null,
     acquireForRetry: () => ({ ok: true }),
     persistOperations: () => Promise.resolve(),
