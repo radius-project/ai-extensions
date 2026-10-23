@@ -942,6 +942,25 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         tool: "gh",
         args: [
           "api",
+          `/repos/${REPOSITORY}/deployments/dep-1/statuses?per_page=1`,
+          "--jq",
+          '.[0].log_url // .[0].target_url // ""'
+        ],
+        stdout: `https://github.com/${REPOSITORY}/actions/runs/1`
+      },
+      {
+        tool: "gh",
+        args: ["api", `/repos/${REPOSITORY}/actions/runs/1`],
+        stdout: JSON.stringify({
+          path: ".github/workflows/run-rad-commands.yml",
+          status: "completed",
+          conclusion: "success"
+        })
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
           `/repos/${REPOSITORY}/actions/runs/1`,
           "--jq",
           '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
