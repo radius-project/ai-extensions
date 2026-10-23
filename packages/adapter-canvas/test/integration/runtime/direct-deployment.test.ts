@@ -15,6 +15,9 @@ import { createTestCanvasServerRuntime } from "../../support/server/production-r
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createDeploymentAccountResolver } from "../../../src/runtime/deployment-account.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
+import { createGitHubAccountResolvers } from "../../../src/runtime/github-account-resolvers.js";
+import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
+import { createEnvironmentTools } from "../../../src/runtime/environment-tools.js";
 
 beforeEach(() => {
   vi.spyOn(globalThis, "fetch").mockRejectedValue(
@@ -28,6 +31,248 @@ afterEach(() => {
 });
 
 describe("registered direct deployment tools", () => {
+  it.each(["writer", "read-only", "installation-dispatch-denied"] as const)(
+    "uses real eligibility for %s through registered panel-free deployment tools",
+    async (scenario) => {
+      vi.useFakeTimers();
+      const sdk = await createRuntimeSdkHarness();
+      const pipeline = createDeploymentPipelineRunner("success", {
+        existingEnvironment: true
+      });
+      const login =
+        scenario === "installation-dispatch-denied" ? "fixture[bot]" : "writer";
+      const run = vi.fn(
+        async (...[args, options]: Parameters<typeof pipeline.run>) => {
+          if (args.join(" ") === "api repos/fixture/app")
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                permissions: { admin: false, push: scenario !== "read-only" }
+              }),
+              stderr: ""
+            };
+          const probes: Record<string, unknown> = {
+            "repos/fixture/app/contents": [],
+            "repos/fixture/app/actions/workflows?per_page=1": { workflows: [] },
+            "repos/fixture/app/environments?per_page=1": { environments: [] },
+            "repos/fixture/app/deployments?per_page=1": []
+          };
+          if (args[0] === "api" && args[1] in probes)
+            return {
+              code: 0,
+              stdout: JSON.stringify(probes[args[1]]),
+              stderr: ""
+            };
+          if (
+            args[0] === "workflow" &&
+            scenario === "installation-dispatch-denied"
+          )
+            return {
+              code: 1,
+              stdout: "",
+              stderr: "HTTP 403: Resource not accessible by integration"
+            };
+          return pipeline.run(args, options);
+        }
+      );
+      const executor = successfulSelectedGhExecutor({
+        login,
+        scopes: [],
+        credentialSource:
+          scenario === "installation-dispatch-denied" ? "injected" : "keyring",
+        requiresKeyringSwitch: true,
+        run
+      });
+      let setupAllowed = false;
+      const keyring = vi.fn(async () => {
+        if (!setupAllowed)
+          throw new Error("Deployment must not access keyring state");
+        return login;
+      });
+      const switchAccount = vi.fn(async (): Promise<never> => {
+        throw new Error("Unexpected keyring switch");
+      });
+      const createExecutor = vi.fn(async (selected: string) => {
+        expect(selected).toBe(login);
+        return executor;
+      });
+      const accounts = createGitHubAccountResolvers({
+        coordinator: createGitHubAccountCoordinator({
+          createExecutor,
+          getActiveKeyringLogin: keyring,
+          switchKeyringAccount: switchAccount,
+          resetIdentityCache: () => {}
+        }),
+        ownerKey: "direct-permission-boundary",
+        readIdentity: async () => ({
+          accounts: [
+            {
+              login,
+              hasWorkflow: false,
+              hasPackages: false,
+              switchable: true,
+              acting: false
+            }
+          ]
+        }),
+        redactDiagnostic: (value) => value
+      });
+      const owner = createProductionDeploymentExecutionOwner();
+      const executionOwner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner,
+        deploymentOwner: owner,
+        deploymentAccount: accounts.deployment
+      });
+      sdk.deps.deployment = createProductionDeploymentTools({
+        owner,
+        account: accounts.deployment,
+        session: sdk.deps.session,
+        ghCommandPresentation: BARE_GH_COMMAND_PRESENTATION,
+        runAz: async () => {
+          throw new Error("Unscripted Azure command");
+        },
+        buildGraph: async () => [],
+        readRadArtifacts: async () => ({
+          dir: "fixture-artifacts",
+          remote: true
+        }),
+        reportError: (error) => {
+          throw error;
+        },
+        redactDiagnostic: (value) => value,
+        reportWorkflowProgress: vi.fn(),
+        invalidateDeployListCache: runtime.invalidateDeploymentListCache
+      });
+      sdk.deps.environment = createEnvironmentTools({
+        ...runtime.environmentServices,
+        owner: executionOwner,
+        session: sdk.deps.session,
+        account: accounts.setup,
+        workspace: async () => ({
+          repo: "fixture/app",
+          branch: "feature/model"
+        }),
+        validateBranch: async () => {},
+        redact: (value) => value,
+        reportError: (error) => {
+          throw error;
+        }
+      });
+      const start = sdk.extension.tools.find(
+        ({ name }) => name === "radius_deploy"
+      );
+      const status = sdk.extension.tools.find(
+        ({ name }) => name === "radius_deploy_status"
+      );
+      const setup = sdk.extension.tools.find(
+        ({ name }) => name === "radius_setup_environment"
+      );
+      if (!start || !status || !setup)
+        throw new Error("Missing registered deployment or setup tools");
+      const target = { repo: "fixture/app", environment: "dev" };
+      try {
+        const result = await start.handler({
+          ...target,
+          branch: "feature/model",
+          provider: "aws",
+          appFile: "apps/custom.bicep"
+        });
+        if (scenario === "read-only") {
+          expect(result).toContain("verified access");
+          expect(owner.resolve()).toEqual({ kind: "missing" });
+        } else {
+          expect(result).toContain("started");
+          for (
+            let tick = 0;
+            tick < 100 && owner.activeReservation(target);
+            tick++
+          )
+            await vi.advanceTimersByTimeAsync(1000);
+          const current = owner.resolve();
+          if (current.kind !== "resolved") throw new Error(current.kind);
+          expect(current.invocation.target).toMatchObject({
+            ...target,
+            githubLogin: login,
+            branch: "feature/model"
+          });
+          expect(owner.execution(current.invocation)?.executor).toBe(executor);
+          expect(
+            JSON.parse(
+              String(
+                await status.handler({
+                  attemptId: current.invocation.attemptId
+                })
+              )
+            )
+          ).toMatchObject(
+            scenario === "writer" ?
+              { status: "success", errorKind: null }
+            : { status: "failed", errorKind: "dispatch-refused" }
+          );
+        }
+        expect(owner.activeReservation(target)).toBeUndefined();
+        const dispatches = run.mock.calls.filter(
+          ([args]) => args[0] === "workflow"
+        );
+        expect(dispatches).toHaveLength(scenario === "read-only" ? 0 : 1);
+        if (scenario !== "read-only")
+          expect(dispatches[0][0]).toEqual(
+            expect.arrayContaining([
+              "--repo",
+              "fixture/app",
+              "--ref",
+              "feature/model",
+              "environment=dev"
+            ])
+          );
+        expect(keyring).not.toHaveBeenCalled();
+        expect(switchAccount).not.toHaveBeenCalled();
+        expect(
+          run.mock.calls.some(
+            ([args]) =>
+              args.includes("PUT") ||
+              args[0] === "secret" ||
+              args.some((arg) =>
+                /\/secrets|actions\/permissions|actions\/variables|ghcr/.test(
+                  arg
+                )
+              )
+          )
+        ).toBe(false);
+        expect(pipeline.unexpected).toEqual([]);
+        if (scenario === "writer") {
+          setupAllowed = true;
+          expect(
+            JSON.parse(
+              String(
+                await setup.handler({
+                  ...target,
+                  provider: "aws",
+                  roleArn: "arn:aws:iam::123456789012:role/fixture",
+                  accountId: "123456789012",
+                  region: "us-west-2",
+                  cluster: "fixture-eks"
+                })
+              )
+            )
+          ).toMatchObject({
+            kind: "interaction_required",
+            code: "github-reauthorization-required"
+          });
+          expect(
+            run.mock.calls.filter(([args]) => args[0] === "workflow")
+          ).toHaveLength(1);
+        }
+        expect(runtime.servers.size).toBe(0);
+        expect(sdk.getOrCreateServer).not.toHaveBeenCalled();
+      } finally {
+        executionOwner.shutdown();
+        await sdk.extension.shutdown("test");
+      }
+    }
+  );
+
   it.each(["success", "uncertain"] as const)(
     "runs the registered production deployment pipeline to %s without a panel or local transport",
     async (conclusion) => {
