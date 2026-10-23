@@ -61,6 +61,7 @@ export default defineConfig({
       "src/server/services/discovery.test.ts",
       "src/server/services/workflow-observation-scope.test.ts",
       "src/server/services/deploy-{dispatch,monitor,outcome,request}.test.ts",
+      "src/server/services/workflow-presync.test.ts",
       "test/integration/runtime/runtime-contracts.test.ts",
       "src/server/services/github-environment-variable-rollback.test.ts",
       "src/browser/{heartbeat,lifecycle,repositories}.test.ts",
