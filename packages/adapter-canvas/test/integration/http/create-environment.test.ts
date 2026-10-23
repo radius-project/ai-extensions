@@ -4049,6 +4049,43 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.committedFiles).toEqual([]);
   });
 
+  it("fails with workflow permission guidance when a GitHub App cannot write workflows", async () => {
+    const diagnostic =
+      "HTTP 403: refusing to allow a GitHub App to create or update workflow `.github/workflows/radius-verify-credentials.yml` without `workflows` permission";
+    const harness = start({
+      gh: [
+        {
+          match: /^api --method PUT \/repos\/octo\/app\/contents\//,
+          result: { code: 1, stderr: diagnostic }
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const payload = (await response.json()) as { code: string; error: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.code).toBe("verify-workflow-commit-failed");
+    expect(payload.error).toContain(diagnostic);
+    expect(payload.error).toContain(
+      "Grant the GitHub App Workflows: write permission"
+    );
+    expect(payload.error).toContain("retry with a new installation token");
+    expect(payload.error).not.toContain("auth refresh -h");
+    expect(payload.error).not.toContain("fork the repository");
+    expect(payload.error).not.toContain("PR fallback failed");
+    expect(harness.committedFiles).toEqual([]);
+    expect(harness.operation.verification).toBeUndefined();
+    expect(
+      harness.ghCalls.filter((call) =>
+        call.startsWith("api --method PUT /repos/octo/app/contents/")
+      )
+    ).toHaveLength(1);
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toEqual([]);
+  });
+
   it("fails 400 with fork and access recovery for any other commit refusal", async () => {
     const harness = start({
       gh: [

@@ -2176,33 +2176,55 @@ describe("deploy dispatch workflow publication and dispatch", () => {
       expect(state.deployError).toContain("Radius already waited and retried");
     });
 
-    it("stops retrying immediately on a dispatch failure the registration wait cannot fix", async () => {
-      const { input, state } = request();
-      const gh = recordingGh([
-        { code: 1, stderr: "HTTP 403: Actions are disabled", stdout: "" }
-      ]);
-      const recorder = sleepRecorder();
-      const service = createDeployDispatchService(
-        dependencies({
-          ...gh,
-          ensureWorkflowsCurrent: () =>
-            Promise.resolve({
-              created: [".github/workflows/run-rad-commands.yml"],
-              updated: [],
-              failed: []
-            }),
-          sleep: recorder.sleep
-        })
-      );
+    it.each([
+      "HTTP 403: Actions are disabled",
+      "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/acme/widgets/actions/workflows/run-rad-commands.yml/dispatches)"
+    ])(
+      "does not retry a conclusive dispatch permission refusal: %s",
+      async (diagnostic) => {
+        const { input, state } = request();
+        const gh = recordingGh([{ code: 1, stderr: diagnostic, stdout: "" }]);
+        const recorder = sleepRecorder();
+        const evictions: string[] = [];
+        const service = createDeployDispatchService(
+          dependencies({
+            ...gh,
+            readProcessEnv: () => ({ GH_TOKEN: "fixture-actions-read-token" }),
+            invalidateDeployListCache: (repo) => evictions.push(repo),
+            ensureWorkflowsCurrent: () =>
+              Promise.resolve({
+                created: [".github/workflows/run-rad-commands.yml"],
+                updated: [],
+                failed: []
+              }),
+            sleep: recorder.sleep
+          })
+        );
 
-      expect(await service.prepareAndDispatch(input)).toEqual({
-        dispatched: false
-      });
-      expect(gh.calls).toHaveLength(1);
-      // Only the initial registration wait runs; no per-retry delay follows a
-      // failure that is not the not-found race.
-      expect(recorder.calls).toEqual([3000]);
-      expect(state.deployError).toContain("Actions are disabled");
-    });
+        expect(await service.prepareAndDispatch(input)).toEqual({
+          dispatched: false
+        });
+        expect(gh.calls).toHaveLength(1);
+        expect(gh.calls[0].args).toEqual([
+          "workflow",
+          "run",
+          "run-rad-commands.yml",
+          "--ref",
+          "feat",
+          "-f",
+          "environment=production",
+          "--repo",
+          "acme/widgets"
+        ]);
+        expect(gh.calls[0].env).toBeUndefined();
+        expect(evictions).toEqual([]);
+        // Only the initial registration wait runs; no per-retry delay follows a
+        // failure that is not the not-found race.
+        expect(recorder.calls).toEqual([3000]);
+        expect(state.deployStatus).toBe("failed");
+        expect(state.deployError).toContain(diagnostic);
+        expect(state.deployError).not.toContain("auth refresh");
+      }
+    );
   });
 });

@@ -2031,7 +2031,7 @@ describe("environments — list-environments", () => {
         {
           name: "dev",
           provider: "",
-          status: "unknown",
+          status: "pending",
           webUrl: "https://github.com/o/r/settings/environments",
           credentialProfile: "",
           config: {}
@@ -2246,6 +2246,13 @@ describe("environments — list-environments", () => {
       [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
       [ENV_PATH.statuses("o/r", "100")]: {
         stdout: "https://github.com/o/r/actions/runs/99"
+      },
+      ["/repos/o/r/actions/runs/99"]: {
+        stdout: JSON.stringify({
+          path: ".github/workflows/run-rad-commands.yml",
+          status: "completed",
+          conclusion: "success"
+        })
       }
     };
     const { recording, ctx } = context(
@@ -2269,6 +2276,281 @@ describe("environments — list-environments", () => {
 
     expect(JSON.parse(recording.body).environments[0].status).toBe("unknown");
   });
+
+  it.each([100, 101, 201])(
+    "finds verification at history position %i without paging the run list",
+    async (position) => {
+      const pages = Array.from(
+        { length: position },
+        (_, index) => `${1000 - index}\tcompleted\tsuccess`
+      );
+      const targetRunId = 1001 - position;
+      const script: CliScript = {
+        [ENV_PATH.verifyRuns("o/r")]: {
+          stdout: pages.slice(0, 100).join("\n")
+        },
+        [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+        [ENV_PATH.vars("o/r", "dev")]: { stdout: "RADIUS_MANAGED\ttrue" },
+        [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+        [ENV_PATH.statuses("o/r", "100")]: {
+          stdout: `https://github.com/o/r/actions/runs/${targetRunId}`
+        },
+        [`/repos/o/r/actions/runs/${targetRunId}`]: {
+          stdout: JSON.stringify({
+            path: ".github/workflows/radius-verify-credentials.yml",
+            status: "completed",
+            conclusion: "success"
+          })
+        }
+      };
+      const runCalls: string[][] = [];
+      const misses: string[] = [];
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+
+      await handleListEnvironments(
+        ctx,
+        deps({
+          envListCacheGet: () => undefined,
+          envListCacheGeneration: () => 0,
+          envListCacheSet: vi.fn(),
+          now: () => 0,
+          cliExec: (command, args, options, callback) => {
+            if (args.some((arg) => arg.includes("/actions/"))) {
+              runCalls.push(args);
+            }
+            cliFake(script, misses)(command, args, options, callback);
+          },
+          readInstanceEntry: () => undefined,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+
+      expect(JSON.parse(recording.body).environments[0].status).toBe("success");
+      expect(runCalls).toEqual([
+        [
+          "api",
+          ENV_PATH.verifyRuns("o/r"),
+          "--jq",
+          '.workflow_runs[] | (.id|tostring) + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
+        ],
+        ...(position > 100 ?
+          [["api", `/repos/o/r/actions/runs/${targetRunId}`]]
+        : [])
+      ]);
+      expect(misses).toEqual([]);
+    }
+  );
+
+  it.each([
+    [
+      "passed verification",
+      JSON.stringify({
+        path: ".github/workflows/radius-verify-credentials.yml",
+        status: "completed",
+        conclusion: "success"
+      }),
+      "success"
+    ],
+    [
+      "failed verification",
+      JSON.stringify({
+        path: ".github/workflows/radius-verify-credentials.yml",
+        status: "completed",
+        conclusion: "failure"
+      }),
+      "failed"
+    ],
+    [
+      "running verification",
+      JSON.stringify({
+        path: ".github/workflows/radius-verify-credentials.yml",
+        status: "in_progress",
+        conclusion: null
+      }),
+      "pending"
+    ],
+    [
+      "a deploy workflow",
+      JSON.stringify({
+        path: ".github/workflows/run-rad-commands.yml",
+        status: "completed",
+        conclusion: "success"
+      }),
+      "unknown"
+    ],
+    [
+      "a similar workflow path",
+      JSON.stringify({
+        path: ".github/workflows/radius-verify-credentials.yml.bak",
+        status: "completed",
+        conclusion: "success"
+      }),
+      "unknown"
+    ],
+    ["malformed JSON", "{", "pending"],
+    ["a null response", "null", "pending"],
+    ["a scalar response", "3", "pending"],
+    ["a missing path", "{}", "pending"],
+    ["a non-string path", '{"path":12}', "pending"],
+    [
+      "a missing status",
+      '{"path":".github/workflows/radius-verify-credentials.yml"}',
+      "pending"
+    ],
+    [
+      "a non-string status",
+      '{"path":".github/workflows/radius-verify-credentials.yml","status":3}',
+      "pending"
+    ],
+    [
+      "an empty status",
+      '{"path":".github/workflows/radius-verify-credentials.yml","status":""}',
+      "pending"
+    ],
+    [
+      "a missing conclusion",
+      '{"path":".github/workflows/radius-verify-credentials.yml","status":"completed"}',
+      "pending"
+    ],
+    [
+      "a non-string conclusion",
+      '{"path":".github/workflows/radius-verify-credentials.yml","status":"completed","conclusion":3}',
+      "pending"
+    ]
+  ])(
+    "handles %s in an older deployment run",
+    async (_name, stdout, expected) => {
+      const script: CliScript = {
+        [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+        [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+        [ENV_PATH.vars("o/r", "dev")]: { stdout: "RADIUS_MANAGED\ttrue" },
+        [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+        [ENV_PATH.statuses("o/r", "100")]: {
+          stdout: "https://github.com/o/r/actions/runs/99"
+        },
+        ["/repos/o/r/actions/runs/99"]: { stdout }
+      };
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      const misses: string[] = [];
+      await handleListEnvironments(
+        ctx,
+        deps({
+          envListCacheGet: () => undefined,
+          envListCacheGeneration: () => 0,
+          envListCacheSet: vi.fn(),
+          now: () => 0,
+          cliExec: cliFake(script, misses),
+          readInstanceEntry: () => undefined,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      expect(JSON.parse(recording.body).environments[0].status).toBe(expected);
+      expect(misses).toEqual([]);
+    }
+  );
+
+  it.each(["", "https://github.com/o/r/deployments/100"])(
+    "leaves verification unknown without a linked run: %s",
+    async (logUrl) => {
+      const script: CliScript = {
+        [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+        [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+        [ENV_PATH.vars("o/r", "dev")]: { stdout: "RADIUS_MANAGED\ttrue" },
+        [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+        [ENV_PATH.statuses("o/r", "100")]: { stdout: logUrl }
+      };
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      const misses: string[] = [];
+      await handleListEnvironments(
+        ctx,
+        deps({
+          envListCacheGet: () => undefined,
+          envListCacheGeneration: () => 0,
+          envListCacheSet: vi.fn(),
+          now: () => 0,
+          cliExec: cliFake(script, misses),
+          readInstanceEntry: () => undefined,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      expect(JSON.parse(recording.body).environments[0].status).toBe("unknown");
+      expect(misses).toEqual([]);
+    }
+  );
+
+  it.each([false, true])(
+    "deduplicates older run reads across environments when lookup fails: %s",
+    async (fails) => {
+      const script: CliScript = {
+        [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+        [ENV_PATH.names("o/r")]: { stdout: "7\tdev\n8\tprod" },
+        ...Object.fromEntries(
+          ["dev", "prod"].flatMap((name) => [
+            [ENV_PATH.vars("o/r", name), { stdout: "RADIUS_MANAGED\ttrue" }],
+            [ENV_PATH.deployments("o/r", name), { stdout: "100\n101" }]
+          ])
+        ),
+        [ENV_PATH.statuses("o/r", "100")]: {
+          stdout: "https://github.com/o/r/actions/runs/99"
+        },
+        [ENV_PATH.statuses("o/r", "101")]: {
+          stdout: "https://github.com/o/r/actions/runs/98"
+        },
+        ["/repos/o/r/actions/runs/99"]:
+          fails ?
+            {
+              error: new Error("HTTP 403"),
+              stdout:
+                '{"path":".github/workflows/radius-verify-credentials.yml","status":"completed","conclusion":"success"}'
+            }
+          : { stdout: '{"path":".github/workflows/run-rad-commands.yml"}' },
+        ["/repos/o/r/actions/runs/98"]: {
+          stdout:
+            '{"path":".github/workflows/radius-verify-credentials.yml","status":"completed","conclusion":"failure"}'
+        }
+      };
+      const calls: string[] = [];
+      const misses: string[] = [];
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      await handleListEnvironments(
+        ctx,
+        deps({
+          envListCacheGet: () => undefined,
+          envListCacheGeneration: () => 0,
+          envListCacheSet: vi.fn(),
+          now: () => 0,
+          cliExec: (command, args, options, callback) => {
+            const path = args.find((arg) => arg.startsWith("/repos/")) ?? "";
+            calls.push(path);
+            cliFake(script, misses)(command, args, options, callback);
+          },
+          readInstanceEntry: () => undefined,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      expect(
+        JSON.parse(recording.body).environments.map(
+          (env: { status: string }) => env.status
+        )
+      ).toEqual(fails ? ["pending", "pending"] : ["failed", "failed"]);
+      expect(
+        calls.filter((path) => /\/actions\/runs\/\d+$/.test(path))
+      ).toEqual(["/repos/o/r/actions/runs/99", "/repos/o/r/actions/runs/98"]);
+      expect(misses).toEqual([]);
+    }
+  );
 
   it.each([
     [
@@ -2464,7 +2746,7 @@ describe("environments — list-environments", () => {
       _options: { timeout: number },
       callback: (error: Error | null, stdout: string, stderr: string) => void
     ) => {
-      if (args.includes("--paginate")) {
+      if (args.includes(ENV_PATH.names("o/r"))) {
         throw new Error("spawn failed");
       }
       callback(null, "", "");
@@ -2495,7 +2777,7 @@ describe("environments — list-environments", () => {
       _options: { timeout: number },
       callback: (error: Error | null, stdout: string, stderr: string) => void
     ) => {
-      if (args.includes("--paginate")) throw new Error("sensitive");
+      if (args.includes(ENV_PATH.names("o/r"))) throw new Error("sensitive");
       callback(null, "", "");
     };
     await handleListEnvironments(
@@ -4068,6 +4350,9 @@ describe("environments — real loopback", () => {
       },
       ["/repos/octo/app/deployments/100/statuses?per_page=1"]: {
         stdout: "https://github.com/octo/app/actions/runs/99"
+      },
+      ["/repos/octo/app/actions/runs/99"]: {
+        stdout: '{"path":".github/workflows/run-rad-commands.yml"}'
       }
     };
     const container = createControlledEnvironmentServer({

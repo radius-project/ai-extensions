@@ -23,6 +23,7 @@ export default defineConfig({
       "src/server/services/{setup-checkpoint,operation-stop-boundary}.test.ts",
       "../adapter-shared/src/workflow-artifacts*.test.ts",
       "../adapter-shared/src/workflow-read*.test.ts",
+      "../adapter-shared/src/rad.test.ts",
       "../adapter-shared/src/workflow-run-response.test.ts",
       "../adapter-shared/src/workflow-observation.test.ts",
       "src/deploy.test.ts",

@@ -955,11 +955,59 @@ export async function handleListEnvironments(
       }
     }
     // Map a verify run's outcome to an environment status.
-    const verifyStatusOf = (run?: EnvironmentVerifyRun): string | null => {
-      if (!run) return null;
+    const verifyStatusOf = (run: EnvironmentVerifyRun): string => {
       if (run.status !== "completed") return "pending"; // queued / in_progress
       if (run.conclusion === "success") return "success";
       return "failed"; // failure / cancelled / timed_out / etc.
+    };
+    const runLookups = new Map<
+      string,
+      Promise<{ ok: boolean; run: EnvironmentVerifyRun | null }>
+    >();
+    const lookupVerificationRun = (
+      runId: string
+    ): Promise<{ ok: boolean; run: EnvironmentVerifyRun | null }> => {
+      const cached = runLookups.get(runId);
+      if (cached) return cached;
+      const lookup = ghResult([
+        "api",
+        `/repos/${repo}/actions/runs/${runId}`
+      ]).then((result) => {
+        const unavailable = { ok: false, run: null };
+        if (!result.ok) return unavailable;
+        let run: unknown;
+        try {
+          run = JSON.parse(result.stdout);
+        } catch {
+          return unavailable;
+        }
+        if (
+          !run ||
+          typeof run !== "object" ||
+          !("path" in run) ||
+          typeof run.path !== "string"
+        ) {
+          return unavailable;
+        }
+        if (run.path !== ".github/workflows/radius-verify-credentials.yml") {
+          return { ok: true, run: null };
+        }
+        if (
+          !("status" in run) ||
+          typeof run.status !== "string" ||
+          !run.status ||
+          !("conclusion" in run) ||
+          (run.conclusion !== null && typeof run.conclusion !== "string")
+        ) {
+          return unavailable;
+        }
+        return {
+          ok: true,
+          run: { status: run.status, conclusion: run.conclusion ?? "" }
+        };
+      });
+      runLookups.set(runId, lookup);
+      return lookup;
     };
 
     // 2) For each environment, derive provider (from stored variables) and a
@@ -1019,7 +1067,7 @@ export async function handleListEnvironments(
         // to the specific failed run it was granted for rather than overriding
         // any later or unrelated failure.
         let matchedRunId = "";
-        if (verifyRunsResult.ok && verifyRuns.size > 0) {
+        if (verifyRunsResult.ok) {
           // Resolve every deployment's originating-run URL in parallel
           // (deployments come back newest-first), then pick the newest one
           // created by a verify-credentials run. Doing this serially was the
@@ -1037,14 +1085,32 @@ export async function handleListEnvironments(
           if (logResults.some((result) => !result.ok)) {
             status = "pending";
           } else {
+            const runIds: string[] = [];
             for (const { stdout: logUrl } of logResults) {
               const m = /actions\/runs\/(\d+)/.exec(logUrl || "");
               if (!m) continue;
+              runIds.push(m[1]);
               const run = verifyRuns.get(m[1]);
               if (run) {
-                status = verifyStatusOf(run) || status;
+                status = verifyStatusOf(run);
                 matchedRunId = m[1];
                 break;
+              }
+            }
+            if (!matchedRunId) {
+              // Only these ten deployments can affect this environment. Read
+              // their runs in parallel instead of paging all repository history.
+              const runs = await Promise.all(runIds.map(lookupVerificationRun));
+              for (const [index, result] of runs.entries()) {
+                if (!result.ok) {
+                  status = "pending";
+                  break;
+                }
+                if (result.run) {
+                  status = verifyStatusOf(result.run);
+                  matchedRunId = runIds[index];
+                  break;
+                }
               }
             }
           }

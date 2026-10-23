@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import https from "node:https";
 import crypto from "node:crypto";
-import { IncomingMessage } from "node:http";
+import { ClientRequest, IncomingMessage } from "node:http";
 import { Socket } from "node:net";
 import {
   RADIUS_EXTENSION_REGISTRY,
@@ -125,7 +125,10 @@ function mockHttpsGet(
     if (!response) throw new Error(`Unexpected URL: ${key}`);
     if (!callback) throw new Error("mockHttpsGet requires a callback");
 
-    const req = https.request(url);
+    const req = new ClientRequest({
+      host: "fixture.invalid",
+      createConnection: () => new Socket()
+    });
     if (response.requestError) {
       process.nextTick(() => req.emit("error", response.requestError));
       return req;
@@ -143,6 +146,7 @@ function mockHttpsGet(
         return;
       }
       resp.emit("end");
+      req.destroy();
     });
     return req;
   };
@@ -869,7 +873,7 @@ it("rejects a managed edge binary before honoring a repository extension or invo
     vi.resetModules();
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
+}, 10000);
 
 describe("resolveRadForGraph", () => {
   const RELEASES_API = `https://api.github.com/repos/radius-project/radius/releases/tags/${RADIUS_RELEASE_TAG}`;
@@ -940,6 +944,52 @@ describe("resolveRadForGraph", () => {
 
     expect(resolved).toBe(MANAGED_RAD_PATH);
     expect(calls).toContain(RELEASES_API);
+  });
+
+  it("rejects a missing pinned release with HTTP 404 and can retry after it becomes available", async () => {
+    delete process.env.RADIUS_RAD_BINARY;
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const calls: string[] = [];
+    const connect = vi
+      .spyOn(Socket.prototype, "connect")
+      .mockImplementation(() => {
+        throw new Error("Unexpected network connection");
+      });
+    const get = mockHttpsGet(
+      { [RELEASES_API]: { statusCode: 404, body: '{"message":"Not Found"}' } },
+      calls
+    );
+
+    await expect(mod.ensureRadBinary()).rejects.toThrow(
+      `GET ${RELEASES_API} failed: HTTP 404`
+    );
+    expect(calls).toEqual([RELEASES_API]);
+    expect(fs.existsSync(MANAGED_RAD_PATH)).toBe(false);
+    expect(fs.readdirSync(path.dirname(MANAGED_BICEP_PATH))).toEqual([BICEP]);
+
+    get.mockRestore();
+    const asset = mod.releaseAsset();
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`;
+    mockHttpsGet(
+      {
+        [RELEASES_API]: {
+          body: JSON.stringify({
+            tag_name: RADIUS_RELEASE_TAG,
+            assets: [{ name: asset, digest: "" }]
+          })
+        },
+        [downloadUrl]: { body: "fixture rad binary" }
+      },
+      calls
+    );
+
+    await expect(mod.ensureRadBinary()).resolves.toBe(MANAGED_RAD_PATH);
+    expect(calls).toEqual([RELEASES_API, RELEASES_API, downloadUrl]);
+    expect(fs.readFileSync(MANAGED_RAD_PATH, "utf8")).toBe(
+      "fixture rad binary"
+    );
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it("prefers the cached ensure result over a later on-disk override", async () => {
@@ -1040,6 +1090,45 @@ describe("resolveInstalledRadiusVersion", () => {
   });
 
   const itPosix = process.platform === "win32" ? it.skip : it;
+  const itWindows = process.platform === "win32" ? it : it.skip;
+
+  itWindows(
+    "reads the pinned release through the Windows executable boundary",
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-version-win-"));
+      const preload = path.join(root, "fake-version.cjs");
+      const previousNodeOptions = process.env.NODE_OPTIONS;
+      try {
+        fs.writeFileSync(
+          preload,
+          [
+            'require("node:module").runMain = () => {',
+            `  process.stdout.write(JSON.stringify({ release: ${JSON.stringify(RADIUS_RELEASE_TAG)} }));`,
+            "};"
+          ].join("\n")
+        );
+        const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+        process.env.NODE_OPTIONS =
+          previousNodeOptions ?
+            `${previousNodeOptions} ${preloadOption}`
+          : preloadOption;
+        process.env.RADIUS_RAD_BINARY = process.execPath;
+        process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+        vi.resetModules();
+        const mod = await import("./rad.js");
+
+        await expect(mod.resolveInstalledRadiusVersion()).resolves.toBe(
+          radiusVersionFromExtensionRef(
+            radiusExtensionRefForRelease(RADIUS_RELEASE_TAG)
+          )
+        );
+      } finally {
+        if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+        else process.env.NODE_OPTIONS = previousNodeOptions;
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  );
 
   // The interleaving the extension produces: the session is attached, a graph
   // opens, and only then does the load-time warm-up start. The canvas keeps
@@ -3381,17 +3470,23 @@ if (process.argv.includes("version")) {
     expect(calls).toEqual([]);
   });
 
-  it("keeps the installed binary when the pinned release cannot be downloaded", async () => {
+  it("keeps the installed binary and reports HTTP 404 when the pinned tag is missing", async () => {
     delete process.env.RADIUS_RAD_BINARY;
     writeFakeRad(MANAGED_RAD_PATH, "v0.1.0");
 
     const calls: string[] = [];
-    mockHttpsGet({}, calls);
+    mockHttpsGet(
+      { [RELEASES_API]: { statusCode: 404, body: '{"message":"Not Found"}' } },
+      calls
+    );
     const logs: string[] = [];
     const resolved = await freshEnsureRadBinary({ log: (m) => logs.push(m) });
 
     expect(resolved).toBe(MANAGED_RAD_PATH);
-    expect(logs.some((m) => m.includes(`Could not install rad`))).toBe(true);
+    expect(calls).toEqual([RELEASES_API]);
+    expect(logs).toContain(
+      `Could not install rad ${RADIUS_RELEASE_TAG} (GET ${RELEASES_API} failed: HTTP 404); using v0.1.0.`
+    );
     await expect(radBinaryRelease(MANAGED_RAD_PATH)).resolves.toBe("v0.1.0");
   });
 
