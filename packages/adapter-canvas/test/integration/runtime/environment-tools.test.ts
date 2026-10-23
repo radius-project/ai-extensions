@@ -8,6 +8,7 @@ import { createEnvironmentTools } from "../../../src/runtime/environment-tools.j
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 import { createDeploymentAccountResolver } from "../../../src/runtime/deployment-account.js";
+import { createSetupAccountEligibility } from "../../../src/runtime/setup-account-eligibility.js";
 import { githubAccountChoice } from "../../../src/runtime/github-account-choice.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import {
@@ -152,7 +153,7 @@ async function composition(
         acting: false
       }))
     }),
-    readiness: {
+    check: createSetupAccountEligibility({
       check: async (input) => {
         const result = await ready(input);
         const check = { state: "ready" as const, detail: "Ready" };
@@ -167,7 +168,7 @@ async function composition(
           }
         };
       }
-    },
+    }),
     createExecutor: readExecutor,
     get choose() {
       return githubAccountChoice(fake.deps.session.tryGet());

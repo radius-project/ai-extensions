@@ -12,6 +12,7 @@ import type { CanvasState } from "../../../src/shared.js";
 import type { DeploymentAccountResolver } from "../../../src/runtime/deployment-account.js";
 import type { SelectedGhExecutor } from "../../../src/gh.js";
 import { successfulSelectedGhExecutor } from "../server/selected-gh.js";
+import { generateDeployWorkflow } from "../../../src/infra.js";
 
 export function createDeploymentControllerHarness(
   options: {
@@ -115,7 +116,8 @@ export function createDeploymentControllerHarness(
 }
 
 export function createDeploymentPipelineRunner(
-  conclusion: "success" | "failure" | "uncertain"
+  conclusion: "success" | "failure" | "uncertain",
+  options: { existingEnvironment?: boolean } = {}
 ) {
   const templates = new Map(
     [
@@ -147,7 +149,7 @@ export function createDeploymentPipelineRunner(
     stdout: `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(value)}`,
     stderr: ""
   });
-  const run = vi.fn<SelectedGhExecutor["run"]>(async (args, options) => {
+  const run = vi.fn<SelectedGhExecutor["run"]>(async (args, commandOptions) => {
     if (
       args[0] === "api" &&
       args[1].startsWith(
@@ -177,7 +179,11 @@ export function createDeploymentPipelineRunner(
       args[2] === "PUT" &&
       args[3].startsWith("/repos/fixture/app/contents/")
     )
-      return ok({});
+      if (options.existingEnvironment)
+        throw new Error(
+          "Existing-environment fixture forbids workflow writes."
+        );
+      else return ok({});
     const path = args[1];
     if (
       args[0] === "api" &&
@@ -191,14 +197,32 @@ export function createDeploymentPipelineRunner(
       if (path.includes("/contents/")) {
         const content =
           path.includes(".bicep?") ?
-            (conclusion === "success" ?
+            (conclusion === "success" && !options.existingEnvironment ?
               "@secure()\nparam password string\n"
             : "") +
             "param environment string\n" +
             (conclusion !== "failure" ?
               "resource app 'Radius.Core/applications@2025-08-01' = { name: 'app' }"
             : "")
+          : options.existingEnvironment ?
+            (
+              await generateDeployWorkflow(
+                "dev",
+                ".radius/app.bicep",
+                {},
+                async (name) => {
+                  const template = templates.get(name);
+                  if (!template) throw new Error(`Unscripted template ${name}`);
+                  return template;
+                }
+              )
+            )[
+              new URL(path, "https://fixture.invalid").pathname
+                .split("/")
+                .at(-1) ?? ""
+            ]
           : "name: Fixture workflow\non:\n  workflow_dispatch:\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: []\n";
+        if (!content) throw new Error(`Unscripted workflow ${path}`);
         return ok({
           type: "file",
           encoding: "base64",
@@ -206,10 +230,13 @@ export function createDeploymentPipelineRunner(
           sha: "b".repeat(40)
         });
       }
-      if (path.endsWith("/secrets"))
+      if (path.endsWith("/secrets")) {
+        if (options.existingEnvironment)
+          throw new Error("Existing-environment fixture forbids secret reads.");
         return ok([
           { secrets: secretWritten ? [{ name: "RADIUS_DEPLOY_PARAMS" }] : [] }
         ]);
+      }
       if (path.includes("/artifacts?"))
         return args.includes("--include") ?
             http({ artifacts: [] })
@@ -235,7 +262,11 @@ export function createDeploymentPipelineRunner(
         ]
       });
     if (args.includes("fixture/app")) {
-      if (args[0] === "secret" && args[1] === "set" && options?.stdin) {
+      if (args[0] === "secret" && args[1] === "set" && commandOptions?.stdin) {
+        if (options.existingEnvironment)
+          throw new Error(
+            "Existing-environment fixture forbids secret writes."
+          );
         secretWritten = true;
         return ok({});
       }

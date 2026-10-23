@@ -708,6 +708,15 @@ test.describe("Radius Canvas in Chromium", () => {
       "GET"
     ];
     const additions: FakeCliCommand[] = [
+      {
+        tool: "gh",
+        args: ["api", "user", "--jq", ".login"],
+        env: { GH_TOKEN: opaque },
+        stdout: "acting-user"
+      },
+      json(`repos/${REPOSITORY}`, {
+        permissions: { admin: false, push: true, pull: true }
+      }),
       json(
         `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${encodeURIComponent(WORKTREE_BRANCH)}`,
         {
@@ -825,7 +834,7 @@ test.describe("Radius Canvas in Chromium", () => {
       {
         tool: "gh",
         argsPrefix: dispatchPrefix,
-        env: { GH_TOKEN: "fixture-acting-token", GITHUB_TOKEN: "absent" },
+        env: { GH_TOKEN: opaque, GITHUB_TOKEN: "absent" },
         stdout: ""
       },
       included(`repos/${REPOSITORY}/actions/runs/${runId}`, {
@@ -951,6 +960,7 @@ test.describe("Radius Canvas in Chromium", () => {
       }
     }
     await canvas.setScenario(scenario);
+    await canvas.setGitHubKeyringScopes(["repo"]);
     const deliveries: DeployRepairHandoffInput[] = [];
     canvas.setDeployRepairHandoff(async (input) => {
       deliveries.push(input);
@@ -1076,6 +1086,17 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(deliveries).toHaveLength(2);
     const calls = await canvas.cliCalls();
     expect(calls.filter((call) => !call.matched)).toEqual([]);
+    expect(
+      calls.some(
+        (call) =>
+          call.args.includes("switch") ||
+          call.args.includes("PUT") ||
+          call.args[0] === "secret" ||
+          call.args.some((arg) =>
+            /\/secrets|actions\/permissions|actions\/variables/.test(arg)
+          )
+      )
+    ).toBe(false);
     expect(
       calls.filter(
         (call) => call.args.join(" ") === repositoryArtifactArgs.join(" ")
@@ -4861,6 +4882,37 @@ test.describe("Radius Canvas in Chromium", () => {
         appFile: ".radius/app.bicep"
       });
     await expect(page.locator("body")).toContainText(/could not verify/i);
+  });
+
+  test("surfaces read-only account deployment refusal by keyboard without dispatch @safety", async ({
+    page,
+    canvas
+  }) => {
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.unshift({
+      tool: "gh",
+      args: ["api", `repos/${REPOSITORY}`],
+      stdout: JSON.stringify({
+        permissions: { admin: false, push: false, pull: true }
+      })
+    });
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "deploying");
+    const deploy = page.locator("#deploy-now-btn:not([disabled])");
+    await expect(deploy).toHaveText("Deploy");
+    await deploy.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("body")).toContainText(
+      "No GitHub account has verified access"
+    );
+    expect(
+      (await canvas.cliCalls()).some((call) => call.args[0] === "workflow")
+    ).toBe(false);
+    const accessibility = await new AxeBuilder({ page })
+      .include("#deploy-inline-status")
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+      .analyze();
+    expect(accessibility.violations).toEqual([]);
   });
 
   test("disables Planned deployment for the selected app and environment while it is pending @safety", async ({

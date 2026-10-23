@@ -1453,23 +1453,15 @@ export class CanvasHarness {
       const accountContext = createProductionGitHubAccountContext();
       const deploymentAccountChoice: { login?: string } = {};
       const gh = await import("../../../src/gh.js");
-      const { createDeploymentAccountResolver } =
-        await import("../../../src/runtime/deployment-account.js");
-      const { createGitHubAccountReadinessService } =
-        await import("../../../src/server/services/github-account-readiness.js");
-      const deploymentAccount = createDeploymentAccountResolver({
+      const { createGitHubAccountResolvers } =
+        await import("../../../src/runtime/github-account-resolvers.js");
+      const { deployment: deploymentAccount } = createGitHubAccountResolvers({
         readIdentity: async () => {
           gh.resetGhIdentityCache();
           return gh.getGitHubIdentity();
         },
-        readiness: createGitHubAccountReadinessService(
-          accountContext.coordinator,
-          {
-            ownerKey: accountContext.ownerKey
-          }
-        ),
-        createExecutor: (login) =>
-          accountContext.coordinator.createReadOnlyExecutor(login),
+        coordinator: accountContext.coordinator,
+        ownerKey: accountContext.ownerKey,
         get choose() {
           const login = deploymentAccountChoice.login;
           return login ? async () => login : undefined;

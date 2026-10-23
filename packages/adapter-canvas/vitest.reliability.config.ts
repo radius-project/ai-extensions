@@ -59,6 +59,7 @@ export default defineConfig({
       "src/runtime/setup-execution.test.ts",
       "src/runtime/environment-tools.test.ts",
       "src/runtime/deployment-account.test.ts",
+      "src/runtime/{deployment-account-eligibility,setup-account-eligibility,github-account-resolvers}.test.ts",
       "../core/src/github-account-selection.test.ts",
       "src/server/services/setup-start.test.ts",
       "src/server/services/verification-bypass.test.ts",
