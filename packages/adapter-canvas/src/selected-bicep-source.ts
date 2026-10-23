@@ -1,4 +1,7 @@
-import { fetchBicepFromRepo } from "@radius-project/core";
+import {
+  deploymentApplicationPaths,
+  fetchBicepFromRepo
+} from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 import type { SelectedRepositoryReader } from "./selected-repository-reader.js";
 import {
@@ -6,6 +9,25 @@ import {
   isWorkspaceSelection,
   resolveWorkspaceBicep
 } from "./workspace.js";
+
+export async function fetchDeploymentBicep(
+  repo: string,
+  branch: string,
+  appFile: string,
+  reader: SelectedRepositoryReader
+) {
+  const paths = deploymentApplicationPaths(
+    appFile === ".radius/app.bicep" ? undefined : appFile
+  );
+  for (const bicepPath of paths) {
+    const content = await reader.getContent(
+      `/repos/${repo}/contents/${bicepPath}?ref=${encodeURIComponent(branch)}`
+    );
+    if (content !== null)
+      return { content, fromWorkspace: false, branch, bicepPath };
+  }
+  return { content: null, fromWorkspace: false, branch, bicepPath: paths[0] };
+}
 
 export async function fetchSelectedBicep(
   state: CanvasState,

@@ -1,6 +1,8 @@
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import {
   DEPLOY_RAD_COMMANDS_STEP,
+  WorkflowReadInterruptedError,
+  deploymentApplicationPaths,
   classifyDeploymentDispatchFailure,
   fetchRecipePack,
   projectSafeApplicationGraph,
@@ -37,7 +39,7 @@ import {
   syncRepoWorkflows
 } from "../infra.js";
 import { radArtifactsDirForSelection } from "../remote-rad-artifacts.js";
-import { fetchSelectedBicep } from "../selected-bicep-source.js";
+import { fetchDeploymentBicep } from "../selected-bicep-source.js";
 import { createSelectedRepositoryReader } from "../selected-repository-reader.js";
 import {
   prepareSourceRefResources,
@@ -48,7 +50,10 @@ import {
   createDeployDispatchService,
   type DeployCommandResult
 } from "../server/services/deploy-dispatch.js";
-import { createDeployMonitorService } from "../server/services/deploy-monitor.js";
+import {
+  createDeployMonitorService,
+  type DeployMonitorService
+} from "../server/services/deploy-monitor.js";
 import { createDeployOutcomeService } from "../server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "../server/services/deploy-planned-graph.js";
 import { bindDeploymentExecutor } from "./deployment-executor.js";
@@ -74,11 +79,20 @@ export function createProductionDeploymentMonitor(
   execution: DeploymentExecution,
   ports: ProductionDeploymentMonitorPorts
 ) {
+  const target = execution.invocation.target;
   const isCurrent = () =>
     ports.owner.execution(execution.invocation) === execution &&
     !execution.observation.stopped;
   const executor = bindDeploymentExecutor(execution.executor, isCurrent);
   const reader = createSelectedRepositoryReader(executor);
+  let applicationSource: ReturnType<typeof fetchDeploymentBicep> | undefined;
+  const readApplicationSource = () =>
+    (applicationSource ??= fetchDeploymentBicep(
+      target.repo,
+      target.branch,
+      target.appFile,
+      reader
+    ));
   const workflows = createDeploymentWorkflowPorts(executor);
   const preparation = createDeploymentWorkflowPreparation(workflows, {
     sync: syncRepoWorkflows,
@@ -91,8 +105,16 @@ export function createProductionDeploymentMonitor(
   const plannedGraph = createPlannedGraphRecoveryService({
     prepareSourceRefResources,
     setSourceRefResources,
-    fetchBicepSelection: (entry, repo, branch) =>
-      fetchSelectedBicep(entry.state, repo, branch, reader),
+    fetchBicepSelection: async () => {
+      const selection = await readApplicationSource();
+      if (selection.content !== null) {
+        execution.state.deployParams = {
+          ...execution.state.deployParams,
+          appFile: selection.bicepPath
+        };
+      }
+      return selection;
+    },
     radArtifactsDirForSelection: (input) =>
       readRadArtifacts({ ...input, github: reader }),
     buildGraphViaRad: ports.buildGraph ?? buildGraphViaRad,
@@ -134,8 +156,10 @@ export function createProductionDeploymentMonitor(
     },
     readProcessEnv: () => ({}),
     ghCredentialSource: () => executor.credentialSource,
-    fetchFileForSelection: (_entry, repo, branch, repoPath) =>
-      workflows.fetchFileFromRepo(repo, repoPath, branch),
+    fetchFileForSelection: async (_entry, _repo, _branch, repoPath) => {
+      const selection = await readApplicationSource();
+      return repoPath === selection.bicepPath ? selection.content : null;
+    },
     appParams,
     resolveDeployParams,
     partitionParams,
@@ -165,7 +189,7 @@ export function createProductionDeploymentMonitor(
     sleep,
     now: Date.now
   });
-  return createDeployMonitorService({
+  const monitor = createDeployMonitorService({
     plannedGraph,
     dispatch,
     outcome,
@@ -200,4 +224,37 @@ export function createProductionDeploymentMonitor(
     sleep,
     now: Date.now
   });
+  return {
+    async run(request) {
+      if (
+        request.entry !== execution ||
+        request.repo !== target.repo ||
+        request.branch !== target.branch ||
+        request.provider !== target.provider ||
+        request.requestedEnvironment !== target.environment
+      )
+        throw new Error(
+          "Monitor inputs must match the admitted deployment target."
+        );
+      if (!isCurrent()) throw new WorkflowReadInterruptedError("cancelled");
+      deploymentApplicationPaths(
+        target.appFile === ".radius/app.bicep" ? undefined : target.appFile
+      );
+      execution.state.envName = target.environment;
+      execution.state.appFile = target.appFile;
+      execution.state.deployParams = {
+        ...execution.state.deployParams,
+        targetRepo: target.repo,
+        environment: target.environment,
+        branch: target.branch,
+        provider: target.provider,
+        appFile: target.appFile
+      };
+      return monitor.run({
+        ...request,
+        resources: execution.state.deployingResources ?? [],
+        isCurrent
+      });
+    }
+  } satisfies DeployMonitorService;
 }

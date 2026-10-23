@@ -202,6 +202,21 @@ export function createDeploymentExecutionOwner(
         throw new Error("Deployment attempt identity must be unique.");
       }
       const state = structuredClone(input.state);
+      const target = input.target;
+      // Panel graphs do not carry committed application-file provenance.
+      // Rebuild rather than treating mutable panel selection as that evidence.
+      state.plannedResources = [];
+      state.deployingResources = [];
+      state.envName = target.environment;
+      state.appFile = target.appFile;
+      state.deployParams = {
+        ...state.deployParams,
+        targetRepo: target.repo,
+        environment: target.environment,
+        branch: target.branch,
+        provider: target.provider,
+        appFile: target.appFile
+      };
       const observation = ports.createObservation(input.executor);
       const invocation = Object.freeze({
         attemptId,

@@ -175,12 +175,14 @@ describe("optional deployment presentation", () => {
     const invocation = begin({
       deployStatus: "in_progress",
       deployLogs: ["started"],
-      deployingResources: [{ name: "api" }],
       workspacePath: "execution-workspace",
       setupOperationId: "setup-execution",
       envName: "not-presentation",
       deploymentMutation: { ...TARGET, kind: "deploy", expiresAt: 99 }
     });
+    const execution = owner.execution(invocation);
+    if (!execution) throw new Error("Expected execution");
+    execution.state.deployingResources = [{ name: "api" }];
     const state = {
       ...panel(),
       workspacePath: "view-workspace",

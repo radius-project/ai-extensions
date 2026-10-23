@@ -18,6 +18,7 @@ const EXPECTED_FUNCTIONS = [
   "collectDeploymentOutcome",
   "coordinateDeploymentDispatch",
   "discoverDeploymentRun",
+  "deploymentApplicationPaths",
   "ensureDeploymentSecret",
   "monitorDeploymentRun",
   "startDeployment",

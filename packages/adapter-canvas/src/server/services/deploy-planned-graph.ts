@@ -1,5 +1,7 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
+import { WorkflowReadInterruptedError } from "@radius-project/core";
+import { rmSync } from "node:fs";
 
 // First runtime stage of a background deploy: rebuild the planned application
 // graph when the deploy started before one was resolved, so the deploying page
@@ -86,6 +88,7 @@ export interface PlannedGraphRecoveryRequest {
   branch: string;
   provider: string;
   log(message: string): void;
+  isCurrent?(): boolean;
 }
 
 export interface PlannedGraphRecoveryService {
@@ -120,7 +123,12 @@ export function createPlannedGraphRecoveryService(
   );
 
   return {
-    async recover({ entry, repo, branch, provider, log }) {
+    async recover({ entry, repo, branch, provider, log, isCurrent }) {
+      const assertCurrent = () => {
+        if (isCurrent?.() === false)
+          throw new WorkflowReadInterruptedError("cancelled");
+      };
+      assertCurrent();
       log("Resolving planned application graph for " + repo + "...");
       const sourceRefContext = dependencies.prepareSourceRefResources(
         entry,
@@ -133,6 +141,7 @@ export function createPlannedGraphRecoveryService(
           repo,
           branch
         );
+        assertCurrent();
         const content = selection.content;
         if (!content) {
           log(
@@ -149,6 +158,13 @@ export function createPlannedGraphRecoveryService(
             bicepRepoPath: selection.bicepPath || ".radius/app.bicep",
             log
           });
+        try {
+          assertCurrent();
+        } catch (error) {
+          if (radArtifactsRemote && radArtifactsDir)
+            rmSync(radArtifactsDir, { recursive: true, force: true });
+          throw error;
+        }
         const parsed = dependencies.canvasGraphResources(
           await dependencies.buildGraphViaRad(
             content,
@@ -160,10 +176,13 @@ export function createPlannedGraphRecoveryService(
             }
           )
         );
+        assertCurrent();
         const recipes = await dependencies.fetchRecipePack(provider);
+        assertCurrent();
         const planned = dependencies.canvasGraphResources(
           await dependencies.resolveRecipeOutputs(parsed, recipes, provider)
         );
+        assertCurrent();
         planned.forEach((r) => {
           r.deployStatus = "pending";
           if (r.outputResources)
@@ -186,6 +205,8 @@ export function createPlannedGraphRecoveryService(
         log("Planned " + planned.length + " resource(s).");
         return planned;
       } catch (e) {
+        if (e instanceof WorkflowReadInterruptedError) throw e;
+        assertCurrent();
         log(
           "⚠ Could not resolve planned graph: " + dependencies.errorMessage(e)
         );
