@@ -114,6 +114,7 @@ export function setupEnvironmentHarness(
   };
   const ports: SetupEnvironmentPorts = {
     recovery,
+    isExecutionStopped: () => false,
     stopRequested: () => stopped,
     stopBoundary: async (boundary) => {
       transcript.push(["stop", boundary]);

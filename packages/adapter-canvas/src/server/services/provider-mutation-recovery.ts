@@ -469,6 +469,7 @@ type RecoverableMutationInput<T> = {
   intent?: Record<string, string | number | boolean | null> | null;
   persist(): Promise<void>;
   beforeMutation?(): Promise<boolean>;
+  assertActive?(): void;
   /**
    * Revalidate provider identity after intent is durable but before the request
    * is sent. A rejection proves the provider mutation was not attempted.
@@ -531,6 +532,7 @@ export function executeRecoverableMutation<T>(
 export async function executeRecoverableMutation<T>(
   input: RecoverableMutationInput<T>
 ): Promise<RecoverableMutationResult<T>> {
+  input.assertActive?.();
   const mutationId = providerMutationId(
     input.operation.operationId,
     input.kind,
@@ -614,9 +616,11 @@ export async function executeRecoverableMutation<T>(
       }
       return { state: "cancelled" };
     }
-    if (input.validateBeforeMutation) {
+    if (input.validateBeforeMutation || input.assertActive) {
       try {
-        await input.validateBeforeMutation();
+        input.assertActive?.();
+        await input.validateBeforeMutation?.();
+        input.assertActive?.();
       } catch (error) {
         settleProviderMutation(
           input.operation,

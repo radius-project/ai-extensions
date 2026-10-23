@@ -25,6 +25,7 @@ import { selectedEnvironmentReader } from "../services/github-environment.js";
 import type { WorkflowFileReadResult } from "../../verification-plan.js";
 import {
   setupHandlerFailure,
+  type SetupFailureInput,
   type SetupInput,
   type SetupOutcome
 } from "./setup-outcome.js";
@@ -38,6 +39,7 @@ export interface CreateEnvironmentInstanceEntry {
 
 export interface ConfigureEnvironmentDependencies
   extends AdmissionPorts, WorkflowScopeGhRunnerPorts {
+  isShuttingDown(): boolean;
   ghCommandPresentation?: GhCommandPresentation;
   // --- request scope ---
   getSelectedGitHubExecutor(
@@ -51,7 +53,7 @@ export interface ConfigureEnvironmentDependencies
   addLegacyStep(operation: CreateEnvironmentOperation, text: string): void;
   finalizeSetupFailure(
     operation: CreateEnvironmentOperation | null,
-    input: Record<string, unknown>
+    input: SetupFailureInput
   ): Promise<SetupFailureResponse>;
   persistMutationCheckpoint(input: {
     operation: CreateEnvironmentOperation | null;
@@ -285,6 +287,7 @@ const REQUIRED_BINDINGS = {
   persistMutationCheckpoint: "function",
   persistBestEffort: "function",
   guardStopBoundary: "function",
+  isShuttingDown: "function",
   runAzCommand: "function",
   preflightRepoAdmin: "function",
   preflightGhcrPackageWriteAccess: "function",
@@ -461,7 +464,7 @@ async function runConfigureEnvironmentService(
         respond: stopped
       });
     const finalize = async (
-      input: Record<string, unknown>
+      input: SetupFailureInput
     ): Promise<"failed" | "stopped"> => {
       if (!(await stopBoundary("before-setup-failure-cleanup")))
         return "stopped";

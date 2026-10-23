@@ -55,6 +55,7 @@ function fixture() {
     persistMutationCheckpoint: unexpected,
     persistBestEffort: unexpected,
     guardStopBoundary: async () => true,
+    isShuttingDown: () => false,
     runAzCommand: unexpected,
     preflightRepoAdmin: unexpected,
     preflightGhcrPackageWriteAccess: unexpected,

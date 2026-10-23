@@ -1,5 +1,11 @@
 import type { SetupCoordinatorStageResult } from "@radius-project/core";
 import { errorMessage } from "../../runtime/util.js";
+import type { AzureAutoSetupFailureInput } from "../routes/azure-auto-setup-types.js";
+import type { RemediationReference } from "./environment-operation.js";
+
+export interface SetupFailureInput extends AzureAutoSetupFailureInput {
+  remediation?: RemediationReference | null;
+}
 
 export type SetupInput<T> = { data: T } | { error: unknown };
 

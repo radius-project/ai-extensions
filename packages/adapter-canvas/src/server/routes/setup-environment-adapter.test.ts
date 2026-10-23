@@ -46,6 +46,7 @@ function harness(
     persistMutationCheckpoint: unexpected,
     persistBestEffort: unexpected,
     guardStopBoundary: unexpected,
+    isShuttingDown: () => false,
     runAzCommand: unexpected,
     preflightRepoAdmin: unexpected,
     preflightGhcrPackageWriteAccess: unexpected,
@@ -99,7 +100,7 @@ function harness(
     checkpoint: unexpected,
     fail: unexpected,
     finalize: async (input) => {
-      finalized.push(input);
+      finalized.push({ ...input });
       return "stopped";
     },
     ...bindings
@@ -157,7 +158,7 @@ describe("Canvas setup configuration adapter", () => {
         {
           provider,
           finalize: async (input) => {
-            finalized.push(input);
+            finalized.push({ ...input });
             if (provider === "azure") {
               if (typeof input.runAz !== "function")
                 throw new Error("Azure cleanup runner is missing.");

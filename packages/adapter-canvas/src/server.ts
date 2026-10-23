@@ -1,5 +1,9 @@
 import { workflowTempFile } from "@radius-project/adapter-shared";
-import { ensureAzureServicePrincipal } from "@radius-project/core";
+import {
+  ensureAzureServicePrincipal,
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted
+} from "@radius-project/core";
 import { createAzureRecoveryPort } from "./server/services/azure-setup-recovery.js";
 // Canvas adapter — HTTP server host for the webview.
 //
@@ -2029,12 +2033,14 @@ export async function resolveCleanupGitHubContext({
   targets,
   selectedLogin,
   createExecutor = createSelectedGhExecutor,
-  formatError = errorMessage
+  formatError = errorMessage,
+  isStopped
 }: {
   targets: readonly { artifactType: string }[];
   selectedLogin: string;
   createExecutor?: (login: string) => Promise<SelectedGhExecutor>;
   formatError?: (error: unknown) => string;
+  isStopped?: () => boolean;
 }): Promise<CleanupGitHubContext> {
   const needsGitHub = targets.some(
     (entry) =>
@@ -2051,8 +2057,11 @@ export async function resolveCleanupGitHubContext({
     } else {
       try {
         executor = await createExecutor(selectedLogin);
+        assertSetupExecutionActive(isStopped);
         await executor.verifyIdentity();
+        assertSetupExecutionActive(isStopped);
       } catch (error) {
+        if (isSetupExecutionInterrupted(error)) throw error;
         unavailable = formatError(error);
       }
     }
@@ -2344,11 +2353,12 @@ export function quarantineUnsettledCleanupDeletions(op: any): number {
 export async function cleanupAzureSetupArtifacts(
   op: any,
   {
-    runAz,
+    runAz: runAzCommand,
     steps,
     only,
     onResultRecorded,
-    persistJournal
+    persistJournal,
+    isStopped
   }: {
     runAz: (args: string[]) => Promise<Partial<CommandResult>>;
     steps?: string[];
@@ -2363,16 +2373,29 @@ export async function cleanupAzureSetupArtifacts(
     // exists, because a delete that is not written down before it is issued is
     // one a later attempt cannot tell from a delete that never happened.
     persistJournal?: () => Promise<void>;
+    isStopped?: () => boolean;
   }
 ): Promise<{
   attempt: number;
-  state: "not_needed" | "succeeded" | "succeeded_with_warnings";
+  state: "not_needed" | "succeeded" | "succeeded_with_warnings" | "interrupted";
   results: SetupCleanupResult[];
   warnings: string[];
   attemptedKeys: Set<string>;
 }> {
   const ledger = getSetupArtifactLedger(op);
   const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
+  if (isStopped?.())
+    return {
+      attempt,
+      state: "interrupted",
+      results: [],
+      warnings: [],
+      attemptedKeys: new Set()
+    };
+  const runAz = (args: string[]) => {
+    assertSetupExecutionActive(isStopped);
+    return runAzCommand(args);
+  };
   const priorResults =
     Array.isArray(ledger?.cleanup?.results) ? ledger.cleanup.results : [];
   if (!ledger) {
@@ -2628,6 +2651,14 @@ export async function cleanupAzureSetupArtifacts(
   };
 
   for (const deletion of selected) {
+    if (isStopped?.())
+      return {
+        attempt,
+        state: "interrupted",
+        results: attemptResults,
+        warnings,
+        attemptedKeys
+      };
     const label = cleanupTargetLabel(deletion.artifactType, deletion.artifact);
     const identity = cleanupArtifactIdentity(
       deletion.artifactType,
@@ -2723,6 +2754,12 @@ export async function cleanupAzureSetupArtifacts(
         label,
         ...(deletion.identityArgs ? { confirmRecordedIdentity } : {}),
         persist: persistJournal ?? (async () => {}),
+        isStopped,
+        onConfirmed: () =>
+          recordCleanupDeletion(op, {
+            artifactType: deletion.artifactType,
+            identity
+          }),
         runDelete: async () => {
           const result = await runAz(deletion.args || []);
           return {
@@ -2737,6 +2774,14 @@ export async function cleanupAzureSetupArtifacts(
         readExactIdentity
       });
     } catch (error) {
+      if (isSetupExecutionInterrupted(error))
+        return {
+          attempt,
+          state: "interrupted",
+          results: attemptResults,
+          warnings,
+          attemptedKeys
+        };
       if (!(error instanceof CleanupJournalPersistenceError)) throw error;
       // The journal did not reach disk. Radius stops here rather than deleting
       // anything else it could not account for afterwards.
@@ -2769,6 +2814,14 @@ export async function cleanupAzureSetupArtifacts(
     );
   }
 
+  if (isStopped?.())
+    return {
+      attempt,
+      state: "interrupted",
+      results: attemptResults,
+      warnings,
+      attemptedKeys
+    };
   const finalState = warnings.length ? "succeeded_with_warnings" : "succeeded";
   // Results from this attempt replace the ones it re-tried; anything an earlier
   // attempt recorded and this one did not touch survives untouched.
@@ -2801,19 +2854,22 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     run,
     persist,
     only,
-    steps
+    steps,
+    isStopped
   }: {
     attempt: number;
     run: GitHubVariableCommand;
     persist(): Promise<void>;
     only?: Set<string> | null;
     steps?: string[];
+    isStopped?: () => boolean;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   blocked: boolean;
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const variables = githubEnvironmentVariableRollbackTargets(op, only ?? null);
   if (variables.length === 0) {
@@ -2824,7 +2880,13 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     operation: op,
     persist,
     variables,
-    run
+    run,
+    isStopped,
+    onConfirmed: (variable) =>
+      recordCleanupDeletion(op, {
+        artifactType: "github_environment_variable",
+        identity: variable.identity
+      })
   });
   for (const entry of outcome.results) {
     if (
@@ -2843,6 +2905,7 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     results: outcome.results,
     warnings: outcome.warnings,
     blocked: outcome.blocked,
+    interrupted: outcome.interrupted,
     attempted: true
   };
 }
@@ -2871,18 +2934,23 @@ export async function rollbackCommittedWorkflowFiles(
     attempt,
     ports,
     only,
-    steps
+    steps,
+    isStopped,
+    persist
   }: {
     attempt: number;
     ports: WorkflowRollbackPorts;
     only?: Set<string> | null;
     steps?: string[];
+    isStopped?: () => boolean;
+    persist?: () => Promise<void>;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   blocked: boolean;
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const files = workflowRollbackTargets(op, only ?? null);
   if (files.length === 0) {
@@ -2895,7 +2963,17 @@ export async function rollbackCommittedWorkflowFiles(
       commit: workflowRollbackCommitState(op),
       files
     },
-    ports
+    {
+      ...ports,
+      isStopped,
+      onResultRecorded: async (entry) => {
+        recordCleanupDeletion(op, {
+          artifactType: "workflow_file",
+          identity: entry.identity ?? undefined
+        });
+        await persist?.();
+      }
+    }
   );
   for (const entry of outcome.results) {
     if (
@@ -2914,6 +2992,7 @@ export async function rollbackCommittedWorkflowFiles(
     results: outcome.results,
     warnings: outcome.warnings,
     blocked: outcome.blocked,
+    interrupted: outcome.interrupted,
     attempted: true
   };
 }
@@ -2923,10 +3002,11 @@ export async function cleanupGitHubEnvironmentArtifact(
   {
     attempt,
     runDeleteEnvironment,
-    readEnvironment,
+    readEnvironment: readEnvironmentCommand,
     persistJournal,
     invalidateEnvironmentListing,
-    steps
+    steps,
+    isStopped
   }: {
     attempt: number;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
@@ -2941,15 +3021,28 @@ export async function cleanupGitHubEnvironmentArtifact(
     // rolled-back environment under its last known status.
     invalidateEnvironmentListing?: ((repo: string) => void) | null;
     steps?: string[];
+    isStopped?: () => boolean;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const ledger = getSetupArtifactLedger(op);
   const results: SetupCleanupResult[] = [];
   const warnings: string[] = [];
+  if (isStopped?.())
+    return { results, warnings, attempted: false, interrupted: true };
+  const readEnvironment =
+    readEnvironmentCommand ?
+      async (args: string[]) => {
+        assertSetupExecutionActive(isStopped);
+        const result = await readEnvironmentCommand(args);
+        assertSetupExecutionActive(isStopped);
+        return result;
+      }
+    : undefined;
   if (!ledger) return { results, warnings, attempted: false };
   const artifact = ledger.githubEnvironment;
   if (artifact.state !== "created" && artifact.state !== "created_candidate") {
@@ -3015,6 +3108,12 @@ export async function cleanupGitHubEnvironmentArtifact(
       identity: identity || `${envRepo}:${envName}`,
       label: `GitHub environment "${target}"`,
       persist: persistJournal ?? (async () => {}),
+      isStopped,
+      onConfirmed: () =>
+        recordCleanupDeletion(op, {
+          artifactType: "github_environment",
+          identity
+        }),
       runDelete: async () => {
         try {
           await runDeleteEnvironment(deleteArgs);
@@ -3058,6 +3157,7 @@ export async function cleanupGitHubEnvironmentArtifact(
         try {
           current = await readEnvironment(["api", environmentPath]);
         } catch (error) {
+          if (isSetupExecutionInterrupted(error)) throw error;
           return {
             decision: "refuse",
             detail: `Radius could not read GitHub environment "${target}" to confirm its identity: ${errorMessage(error)}. It removed nothing.`
@@ -3134,6 +3234,8 @@ export async function cleanupGitHubEnvironmentArtifact(
       }
     });
   } catch (error) {
+    if (isSetupExecutionInterrupted(error))
+      return { results, warnings, attempted: true, interrupted: true };
     if (!(error instanceof CleanupJournalPersistenceError)) throw error;
     const detail = `Radius stopped before removing GitHub environment "${target}" because it could not save the record of what it was deleting: ${error.message}`;
     warnings.push(detail);
@@ -3174,7 +3276,8 @@ export async function finalizeSetupFailure(
     runAz,
     runGitHubVariable,
     runDeleteEnvironment,
-    readEnvironment
+    readEnvironment,
+    isStopped
   }: {
     status: number;
     error: string;
@@ -3189,8 +3292,10 @@ export async function finalizeSetupFailure(
     runGitHubVariable?: GitHubVariableCommand | null;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
     readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
+    isStopped?: () => boolean;
   }
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  assertSetupExecutionActive(isStopped);
   const safeExtra = sanitizeFailureExtra(extra || {});
   const body: Record<string, unknown> = {
     error,
@@ -3253,6 +3358,7 @@ export async function finalizeSetupFailure(
         op,
         {
           attempt,
+          isStopped,
           run:
             runGitHubVariable ??
             (async () => ({
@@ -3264,6 +3370,7 @@ export async function finalizeSetupFailure(
           steps
         }
       );
+      assertSetupExecutionActive(isStopped);
       warnings.push(...variableCleanup.warnings);
       results = [...results, ...variableCleanup.results];
       if (variableCleanup.results.length > 0) {
@@ -3274,9 +3381,11 @@ export async function finalizeSetupFailure(
       if (!variableCleanup.blocked && runAz) {
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
+          isStopped,
           steps,
           persistJournal: () => operations.persist()
         });
+        assertSetupExecutionActive(isStopped);
         warnings.push(...azureCleanup.warnings);
         results = [...results, ...azureCleanup.results];
         if (
@@ -3292,6 +3401,7 @@ export async function finalizeSetupFailure(
       if (!variableCleanup.blocked) {
         const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
           attempt,
+          isStopped,
           runDeleteEnvironment,
           readEnvironment,
           persistJournal: () => operations.persist(),
@@ -3300,6 +3410,7 @@ export async function finalizeSetupFailure(
           },
           steps
         });
+        assertSetupExecutionActive(isStopped);
         warnings.push(...environmentCleanup.warnings);
         results = [...results, ...environmentCleanup.results];
         if (environmentCleanup.warnings.length > 0) {
@@ -4286,6 +4397,7 @@ export function createEnvironmentOperationExecution(
                 report: (diagnostic) => operations.report?.(diagnostic),
                 fail: async (status, error, code) => {
                   await finalizeSetupFailure(operation, {
+                    isStopped: setupIsStopped(operation),
                     status,
                     error,
                     code,
@@ -4311,6 +4423,7 @@ export function createEnvironmentOperationExecution(
               selectedExecutor
             ) => {
               await finalizeSetupFailure(operation, {
+                isStopped: setupIsStopped(operation),
                 ...input,
                 stage: operation.currentStage,
                 classification:
@@ -4507,6 +4620,74 @@ export function createEnvironmentOperationExecution(
     }
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
+    const targets = CLEANUP_COMMANDS[kind].selectTargets(op);
+    const selectedLogin = optionalString(op.context?.githubLogin);
+    const needsGitHub = targets.some((entry: { artifactType: string }) =>
+      [
+        "workflow_file",
+        "github_environment_variable",
+        "github_environment"
+      ].includes(entry.artifactType)
+    );
+    try {
+      if (needsGitHub && selectedLogin) {
+        await githubAccountCoordinator.withSelectedAccount(
+          selectedLogin,
+          { ownerKey: accountContext.ownerKey, operationId },
+          async (executor) => {
+            if (isStopped()) return;
+            const release = accountContext.registerExecutor(
+              operationId,
+              executor
+            );
+            try {
+              await runCleanupPass(
+                kind,
+                operationId,
+                commandId,
+                isStopped,
+                executor
+              );
+            } finally {
+              release();
+            }
+          }
+        );
+      } else {
+        await runCleanupPass(kind, operationId, commandId, isStopped);
+      }
+    } catch (error) {
+      if (!isSetupExecutionInterrupted(error)) throw error;
+    }
+  }
+
+  function setupIsStopped(op: {
+    operationId: string;
+    repo?: unknown;
+    environment?: unknown;
+    endedAt?: unknown;
+  }): () => boolean {
+    const { operationId, repo, environment } = op;
+    return () =>
+      attachment.isShuttingDown() ||
+      operations.get(operationId) !== op ||
+      op.operationId !== operationId ||
+      op.repo !== repo ||
+      op.environment !== environment ||
+      Boolean(op.endedAt);
+  }
+
+  async function runCleanupPass(
+    kind: CleanupCommandKind,
+    operationId: string,
+    commandId: string,
+    isStopped: () => boolean,
+    executor?: SelectedGhExecutor
+  ): Promise<void> {
+    assertSetupExecutionActive(isStopped);
+    const op = operations.get(operationId);
     const recoveryBeforeCleanup = cleanupProviderRecoveryDisposition(op);
     if (!recoveryBeforeCleanup.mayStartDestructiveCleanup) {
       throw new Error(
@@ -4523,7 +4704,7 @@ export function createEnvironmentOperationExecution(
     const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
     const steps: string[] = [];
     const persist = async (): Promise<void> => {
-      await saveOperation(op);
+      await operations.persist();
     };
     const warnings: string[] = [];
     let results: SetupCleanupResult[] = [];
@@ -4533,8 +4714,16 @@ export function createEnvironmentOperationExecution(
     ];
     const cleanupGitHub = await resolveCleanupGitHubContext({
       targets: selected,
-      selectedLogin: optionalString(op.context?.githubLogin)
+      isStopped,
+      selectedLogin: optionalString(op.context?.githubLogin),
+      createExecutor: async () => {
+        assertSetupExecutionActive(isStopped);
+        if (!executor)
+          throw new Error("Cleanup has no selected GitHub executor.");
+        return executor;
+      }
     });
+    if (isStopped()) return;
 
     // The workflow files come first and gate everything after them. Removing
     // the GitHub environment or the cloud identity while an installed workflow
@@ -4543,6 +4732,8 @@ export function createEnvironmentOperationExecution(
     // cannot finish stops the whole rollback here.
     const workflowPass = await rollbackCommittedWorkflowFiles(op, {
       attempt,
+      isStopped,
+      persist: () => operations.persist(),
       ports: createWorkflowRollbackPorts(cleanupGitHub.rollbackCommand),
       only: new Set<string>(
         selected
@@ -4555,10 +4746,12 @@ export function createEnvironmentOperationExecution(
       steps
     });
     if (workflowPass.attempted) {
+      if (workflowPass.interrupted && workflowPass.results.length === 0) return;
       warnings.push(...workflowPass.warnings);
       results = [...results, ...workflowPass.results];
       recordCleanupState(op, { state: "running", results: carriedResults() });
       await persist();
+      if (workflowPass.interrupted || isStopped()) return;
       if (workflowPass.blocked) {
         for (const step of steps) addLegacyStep(op, step);
         recordCleanupState(op, {
@@ -4583,8 +4776,10 @@ export function createEnvironmentOperationExecution(
       }
     }
 
+    if (isStopped()) return;
     const variablePass = await rollbackGitHubEnvironmentVariableArtifacts(op, {
       attempt,
+      isStopped,
       run: async (args) => {
         const result = await cleanupGitHub.rollbackCommand({ args });
         return {
@@ -4605,10 +4800,12 @@ export function createEnvironmentOperationExecution(
       steps
     });
     if (variablePass.attempted) {
+      if (variablePass.interrupted && variablePass.results.length === 0) return;
       warnings.push(...variablePass.warnings);
       results = [...results, ...variablePass.results];
       recordCleanupState(op, { state: "running", results: carriedResults() });
       await persist();
+      if (variablePass.interrupted || isStopped()) return;
       if (variablePass.blocked) {
         for (const step of steps) addLegacyStep(op, step);
         recordCleanupState(op, {
@@ -4633,6 +4830,7 @@ export function createEnvironmentOperationExecution(
       }
     }
 
+    if (isStopped()) return;
     // A GitHub environment can be one of the selected targets, and skipping it
     // here would report a clean removal while the environment survived.
     if (
@@ -4643,6 +4841,7 @@ export function createEnvironmentOperationExecution(
     ) {
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
+        isStopped,
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
         readEnvironment: cleanupGitHub.readEnvironment,
         persistJournal: () => operations.persist(),
@@ -4659,12 +4858,15 @@ export function createEnvironmentOperationExecution(
         recordCleanupState(op, { state: "running", results: carriedResults() });
         await persist();
       }
+      if (environmentCleanup.interrupted || isStopped()) return;
     }
 
+    if (isStopped()) return;
     const runAz = (args: string[]): Promise<CommandResult> =>
       runCliCommand("az", args);
     const azureCleanup = await cleanupAzureSetupArtifacts(op, {
       runAz,
+      isStopped,
       steps,
       only: new Set<string>(
         selected
@@ -4680,6 +4882,7 @@ export function createEnvironmentOperationExecution(
     });
     warnings.push(...azureCleanup.warnings);
     results = [...results, ...azureCleanup.results];
+    if (azureCleanup.state === "interrupted" || isStopped()) return;
 
     for (const step of steps) addLegacyStep(op, step);
     // A deletion this pass issued and could not settle has nobody left to
@@ -4780,6 +4983,8 @@ export function createEnvironmentOperationExecution(
   async function runRecoveredBranchDelete(operationId: string): Promise<void> {
     const op = operations.get(operationId);
     if (!op) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
     const mutation = pendingBranchDelete(op);
     if (!mutation) return;
     // The branch belongs to the account that created it. An ambient `gh` here
@@ -4799,8 +5004,11 @@ export function createEnvironmentOperationExecution(
       }
       executor =
         await githubAccountCoordinator.createReadOnlyExecutor(selectedLogin);
+      if (isStopped()) return;
       await executor.verifyIdentity();
+      if (isStopped()) return;
     } catch (error) {
+      if (isStopped()) return;
       await failRecoveredBranchDelete(
         op,
         "setup-branch-delete-unresolved",
@@ -4812,6 +5020,7 @@ export function createEnvironmentOperationExecution(
     const outcome = await reconcileRecoveredBranchDelete({
       operation: op,
       mutation,
+      isStopped,
       readBranchRef: (repo, branch) =>
         executor.run(branchRefReadArgs(repo, branch)),
       // The same permission the 404 came from. Matching-refs answers with every
@@ -4821,6 +5030,7 @@ export function createEnvironmentOperationExecution(
       listBranchRefs: (repo, branch, page) =>
         executor.run(branchRefListingArgs(repo, branch, page))
     });
+    if (outcome.state === "interrupted" || isStopped()) return;
     if (outcome.state === "removed") {
       addLegacyStep(op, `✅ ${outcome.evidence}`);
       // `operations.persist` rather than the best-effort save: a command a
@@ -4830,6 +5040,7 @@ export function createEnvironmentOperationExecution(
         operation: op,
         persist: () => operations.persist()
       });
+      if (isStopped()) return;
       if (plan.state === "resume" || plan.state === "start") {
         if (plan.state === "start") {
           addLegacyStep(
@@ -4838,6 +5049,7 @@ export function createEnvironmentOperationExecution(
           );
         }
         await saveOperation(op);
+        if (isStopped()) return;
         await runCleanupCommand(plan.kind, operationId, plan.commandId);
         return;
       }
@@ -4923,7 +5135,11 @@ export function createEnvironmentOperationExecution(
    * reconcile branch — the delete is never issued a second time — so this
    * settles them from provider state alone.
    */
-  async function reconcileUnsettledCleanupDeletions(op: any): Promise<void> {
+  async function reconcileUnsettledCleanupDeletions(
+    op: any,
+    isStopped: () => boolean
+  ): Promise<void> {
+    if (isStopped()) return;
     const unsettled = new Set(
       unresolvedProviderMutations(op)
         .filter((mutation) => isCleanupDeletionKind(mutation.kind))
@@ -4949,8 +5165,12 @@ export function createEnvironmentOperationExecution(
     ) {
       const cleanupGitHub = await resolveCleanupGitHubContext({
         targets,
-        selectedLogin
+        selectedLogin,
+        createExecutor: (login) =>
+          githubAccountCoordinator.createReadOnlyExecutor(login),
+        isStopped
       });
+      if (isStopped()) return;
       await cleanupGitHubEnvironmentArtifact(op, {
         attempt: Number(getSetupArtifactLedger(op)?.cleanup?.attempts || 1),
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
@@ -4959,8 +5179,10 @@ export function createEnvironmentOperationExecution(
         invalidateEnvironmentListing: (repo) => {
           envListCache.invalidate(repo);
         },
-        steps
+        steps,
+        isStopped
       });
+      if (isStopped()) return;
     }
     const azureKeys = new Set<string>(
       targets
@@ -4972,8 +5194,10 @@ export function createEnvironmentOperationExecution(
         runAz: (args: string[]) => runCliCommand("az", args),
         steps,
         only: azureKeys,
-        persistJournal: () => operations.persist()
+        persistJournal: () => operations.persist(),
+        isStopped
       });
+      if (isStopped()) return;
     }
     for (const step of steps) addLegacyStep(op, step);
     await saveOperation(op);
@@ -4982,15 +5206,19 @@ export function createEnvironmentOperationExecution(
   async function runRecoveredCleanup(operationId: string): Promise<void> {
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
     // Settle the deletions this operation already issued before deciding
     // anything else. The executors reconcile a journaled entry by reading its
     // exact identity and never reissue it, so this is the reconciliation the
     // resume gate is waiting on rather than another pass over the ledger.
-    await reconcileUnsettledCleanupDeletions(op);
+    await reconcileUnsettledCleanupDeletions(op, isStopped);
+    if (isStopped()) return;
     const plan = await planRecoveredCleanup({
       operation: op,
       persist: () => operations.persist()
     });
+    if (isStopped()) return;
     if (plan.state === "resume" || plan.state === "start") {
       await runCleanupCommand(plan.kind, operationId, plan.commandId);
       return;
@@ -5043,6 +5271,8 @@ export function createEnvironmentOperationExecution(
     op: any,
     executor: SelectedGhExecutor
   ): Promise<boolean> {
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return false;
     const identity = readRecoveredVerificationIdentity(
       op,
       VERIFY_WORKFLOW_FILE
@@ -5078,17 +5308,20 @@ export function createEnvironmentOperationExecution(
         identity,
         listRuns: async () => {
           const listed = await executor.run(listArgs, { timeout: 30000 });
+          if (isStopped()) return listed;
           const authorizationError = await selectedCommandAuthorizationError(
             executor,
             identity.repo,
             listed
           );
+          if (isStopped()) return listed;
           if (authorizationError) throw authorizationError;
           return listed;
         },
         isAuthorizationError: isSelectedGhAuthorizationError
       });
     } catch (error) {
+      if (isStopped()) return false;
       if (!isSelectedGhAuthorizationError(error)) throw error;
       addLegacyStep(
         op,
@@ -5111,6 +5344,7 @@ export function createEnvironmentOperationExecution(
       await saveOperation(op);
       return false;
     }
+    if (isStopped()) return false;
     if (outcome.state === "monitor") return true;
     if (outcome.state === "hand_off") return handOff(outcome.guidance);
     op.verification = {
@@ -5124,7 +5358,7 @@ export function createEnvironmentOperationExecution(
       STAGE_VERIFY
     );
     await saveOperation(op);
-    return true;
+    return !isStopped();
   }
 
   return execution;
@@ -5844,7 +6078,11 @@ export function createProductionCanvasServerRuntime(
       }
     },
     ensureServicePrincipal,
-    finalizeSetupFailure,
+    finalizeSetupFailure: (operation, input) =>
+      finalizeSetupFailure(operation, {
+        ...input,
+        isStopped: () => executionOwner.isShuttingDown()
+      }),
     persistMutationCheckpoint,
     honorStopBoundary: (input) =>
       executionOwner.isShuttingDown() ?
@@ -6174,9 +6412,13 @@ export function createProductionCanvasServerRuntime(
       addLegacyStep(operation, text);
     },
     finalizeSetupFailure: (operation, input) =>
-      finalizeSetupFailure(operation, input as never),
+      finalizeSetupFailure(operation, {
+        ...input,
+        isStopped: () => executionOwner.isShuttingDown()
+      }),
     persistMutationCheckpoint,
     persistBestEffort,
+    isShuttingDown: () => executionOwner.isShuttingDown(),
     guardStopBoundary: async (input) => {
       if (executionOwner.isShuttingDown()) {
         input.respond(503, {
