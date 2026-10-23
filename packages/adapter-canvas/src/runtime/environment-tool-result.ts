@@ -1,4 +1,5 @@
 import { redactCredentials } from "@radius-project/core";
+import { isUuid } from "../azure-oidc.js";
 import {
   canResumeInput,
   isTerminalState,
@@ -52,6 +53,68 @@ export interface EnvironmentRequiredInteraction extends EnvironmentTarget {
   message: string;
   checkpoint?: string;
   code?: string;
+  appSelection?: EnvironmentApplicationChoices;
+}
+
+export interface EnvironmentApplicationChoices {
+  candidates: {
+    appId: string;
+    displayName: string;
+    createdDateTime?: string;
+  }[];
+  defaultAppId?: string;
+  truncated: boolean;
+}
+
+const APPLICATION_CHOICE_LIMIT = 20;
+const APPLICATION_NAME_LIMIT = 200;
+
+export function projectEnvironmentApplicationChoices(
+  metadata: unknown,
+  redact: (text: string) => string
+): EnvironmentApplicationChoices {
+  const saved = environmentRecord(metadata);
+  const candidates: EnvironmentApplicationChoices["candidates"] = [];
+  const seen = new Set<string>();
+  const defaultId = environmentString(saved?.defaultAppId).trim().toLowerCase();
+  let defaultCandidate:
+    EnvironmentApplicationChoices["candidates"][number] | undefined;
+  let truncated = false;
+  const values = Array.isArray(saved?.candidates) ? saved.candidates : [];
+  for (const value of values) {
+    const record = environmentRecord(value);
+    const appId = environmentString(record?.appId).trim().toLowerCase();
+    if (!isUuid(appId) || seen.has(appId)) continue;
+    seen.add(appId);
+    const name = environmentDiagnostic(
+      environmentString(record?.displayName),
+      redact
+    );
+    const date = environmentString(record?.createdDateTime);
+    const parsed = Date.parse(date);
+    const validDate =
+      /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?Z$/.test(date) &&
+      Number.isFinite(parsed) &&
+      new Date(parsed).toISOString().slice(0, 19) === date.slice(0, 19);
+    const candidate = {
+      appId,
+      displayName: name.slice(0, APPLICATION_NAME_LIMIT),
+      ...(validDate ? { createdDateTime: date } : {})
+    };
+    if (name.length > APPLICATION_NAME_LIMIT) truncated = true;
+    if (appId === defaultId) defaultCandidate = candidate;
+    if (candidates.length < APPLICATION_CHOICE_LIMIT)
+      candidates.push(candidate);
+    else truncated = true;
+  }
+  // Keep the saved default selectable even when it falls beyond the visible prefix.
+  if (defaultCandidate && !candidates.includes(defaultCandidate))
+    candidates[candidates.length - 1] = defaultCandidate;
+  return {
+    candidates,
+    ...(defaultCandidate ? { defaultAppId: defaultCandidate.appId } : {}),
+    truncated
+  };
 }
 
 export type EnvironmentToolResult =

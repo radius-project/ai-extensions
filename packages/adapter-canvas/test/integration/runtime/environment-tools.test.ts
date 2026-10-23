@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChildProcess } from "node:child_process";
+import { createHarness } from "@radius-project/adapter-shared/test-support/ghcr-bootstrap";
+import * as gh from "../../../src/gh.js";
+import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
 import { bootstrapRadiusExtension } from "../../../src/runtime/bootstrap.js";
 import { createEnvironmentTools } from "../../../src/runtime/environment-tools.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
@@ -11,6 +15,7 @@ import {
   createFakeSession
 } from "../../support/runtime/fakes.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
+import { mergeHandoff } from "../../support/server/operation-fixtures.js";
 import {
   createOperation,
   operations,
@@ -22,9 +27,17 @@ import type { EnvironmentToolResult } from "../../../src/runtime/environment-too
 afterEach(() => {
   operations.clear();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const target = { repo: "fixture/app", environment: "dev" };
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 async function composition(
   options: {
     logins?: string[];
@@ -32,6 +45,7 @@ async function composition(
     confirm?: (message: string) => Promise<boolean>;
     permissionsFailure?: boolean;
     beforeResume?: () => Promise<void>;
+    realSetup?: boolean;
   } = {}
 ) {
   const fake = createFakeDependencies();
@@ -93,17 +107,29 @@ async function composition(
     if (login !== executor.login) throw new Error("Wrong saved account");
     return executor;
   });
-  const accountContext = createEnvironmentAccountContext("tools-runtime", {
-    createReadOnlyExecutor: readExecutor,
-    withSelectedAccount: async () => {
-      throw new Error("Unexpected account lease");
-    }
-  });
+  const accountContext = createEnvironmentAccountContext(
+    "tools-runtime",
+    options.realSetup ?
+      createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache: () => {}
+      })
+    : {
+        createReadOnlyExecutor: readExecutor,
+        withSelectedAccount: async () => {
+          throw new Error("Unexpected account lease");
+        }
+      }
+  );
   const runner = vi.fn(async () => {});
   const runtime = createTestCanvasServerRuntime({
     executionOwner: owner,
     accountContext,
-    environmentOperationRunner: runner
+    ...(options.realSetup ? {} : { environmentOperationRunner: runner })
   });
   const ready = vi.fn(async ({ login }: { login: string }) => ({
     ready: true,
@@ -164,7 +190,7 @@ async function composition(
       account,
       workspace: async () => ({ repo: target.repo, branch: "feature/current" }),
       validateBranch: async () => {},
-      redact: (value) => value,
+      redact: (value) => value.replaceAll("opaque-private-value", "[redacted]"),
       reportError
     })
   };
@@ -220,6 +246,365 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it.each(["malformed", "empty", "oversized"] as const)(
+    "serializes safe %s application guidance through the registered status handler",
+    async (shape) => {
+      const h = await composition();
+      const id = (n: number) =>
+        `11111111-1111-4111-8111-${String(n).padStart(12, "0")}`;
+      const candidates = Array.from({ length: 21 }, (_, n) => ({
+        appId: id(n),
+        displayName: `opaque-private-value${"x".repeat(201)}`,
+        credentials: "never-return-this"
+      }));
+      const op = createOperation({ ...target, provider: "azure" });
+      op.context.githubLogin = h.executor.login;
+      op.request = { azure: {} };
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "azure-app-selection",
+        metadata: {
+          candidates:
+            shape === "malformed" ? [null, { appId: "bad" }]
+            : shape === "empty" ? []
+            : candidates,
+          defaultAppId: id(20)
+        }
+      });
+      operations.put(op);
+      try {
+        const result = await h.invoke("radius_environment_status", {
+          ...target,
+          operationId: op.operationId
+        });
+        if (!("interaction" in result) || !result.interaction?.appSelection)
+          throw new Error("Expected application guidance");
+        const choices = result.interaction.appSelection;
+        expect(choices.candidates).toHaveLength(shape === "oversized" ? 20 : 0);
+        expect(choices.truncated).toBe(shape === "oversized");
+        expect(choices.defaultAppId).toBe(
+          shape === "oversized" ? id(20) : undefined
+        );
+        if (shape === "oversized") {
+          expect(choices.candidates.at(-1)?.appId).toBe(id(20));
+          expect(
+            choices.candidates.every(
+              (choice) => choice.displayName.length <= 200
+            )
+          ).toBe(true);
+        }
+        expect(JSON.stringify(result)).not.toContain("opaque-private-value");
+        expect(JSON.stringify(result)).not.toContain("never-return-this");
+        expect(h.run).not.toHaveBeenCalled();
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
+  it.each(["candidate", "explicit"] as const)(
+    "refreshes a real multi-app prompt after settlement and resumes the %s ID without another dialog",
+    async (selection) => {
+      const h = await composition({ realSetup: true });
+      const firstId = "11111111-1111-4111-8111-111111111111";
+      const secondId = "22222222-2222-4222-8222-222222222222";
+      const explicitId = "55555555-5555-4555-8555-555555555555";
+      const tenantId = "33333333-3333-4333-8333-333333333333";
+      const callerId = "44444444-4444-4444-8444-444444444444";
+      const candidates = [
+        {
+          appId: firstId,
+          displayName: "Radius fixture-app",
+          createdDateTime: "2026-10-01T12:00:00Z"
+        },
+        {
+          appId: secondId,
+          displayName: "Radius fixture-app",
+          createdDateTime: "2026-09-30T12:00:00Z"
+        }
+      ];
+      const saving = deferred();
+      const saved = deferred();
+      const readingApp = deferred();
+      const appRead = deferred();
+      const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+      h.run.mockImplementation(async (args) => {
+        const endpoint = args[1]?.replace(/^\//, "");
+        if (args[0] === "api") {
+          if (endpoint === "user") return success('{"login":"saved-account"}');
+          if (endpoint === "repos/fixture/app")
+            return success(
+              '{"id":23,"name":"app","full_name":"fixture/app","default_branch":"main","owner":{"id":11,"login":"fixture","type":"User"},"permissions":{"admin":true}}'
+            );
+          if (endpoint === "repos/fixture/app/environments/dev")
+            return success('{"name":"dev","id":17}');
+          if (endpoint === "repos/fixture/app/actions/oidc/customization/sub")
+            return success(
+              '{"use_default":true,"use_immutable_subject":false}'
+            );
+          if (
+            endpoint ===
+            "repos/fixture/app/environments/dev/variables/AZURE_CLIENT_ID"
+          )
+            return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        }
+        throw new Error(`Unexpected GitHub command: ${args.join(" ")}`);
+      });
+      const runAz = vi.fn(async (args: string[]) => {
+        const command = args.slice(0, 3).join(" ");
+        if (args.slice(0, 2).join(" ") === "account set") return success();
+        if (args.slice(0, 2).join(" ") === "account show")
+          return success(
+            JSON.stringify({
+              id: firstId,
+              tenantId,
+              user: { type: "user", name: "fixture@example.test" }
+            })
+          );
+        if (command === "ad signed-in-user show" || command === "ad app owner")
+          return success(callerId);
+        if (command === "ad app list")
+          return success(JSON.stringify(candidates));
+        if (args.includes("federated-credential"))
+          return { code: 1, stdout: "", stderr: "No matching credential" };
+        if (command === "ad app show") {
+          readingApp.resolve();
+          await appRead.promise;
+          return success("app-object");
+        }
+        if (command === "ad sp show")
+          return { code: 1, stdout: "", stderr: "Service principal not found" };
+        throw new Error(`Unexpected Azure command: ${args.join(" ")}`);
+      });
+      vi.spyOn(gh, "cliExec").mockImplementation(
+        (command, args, _options, callback) => {
+          expect(command).toBe("az");
+          void runAz(args).then(
+            (result) => callback(null, result.stdout, result.stderr),
+            (error: unknown) =>
+              callback(
+                error instanceof Error ? error : new Error(String(error)),
+                "",
+                ""
+              )
+          );
+          return new ChildProcess();
+        }
+      );
+      const ghcr = createHarness({ finalRepository: target.repo });
+      vi.stubGlobal(
+        "fetch",
+        async (
+          input: string,
+          options?: Parameters<typeof ghcr.fetchImpl>[1]
+        ) => {
+          const url = new URL(input);
+          if (url.origin === "https://api.github.com") {
+            url.host = "api.test";
+            if (url.pathname === "/users/fixture") url.pathname = "/users/acme";
+          } else if (url.origin === "https://ghcr.io")
+            url.host = "registry.test";
+          else throw new Error(`Unexpected fetch: ${url.href}`);
+          const response = await ghcr.fetchImpl(url.href, options);
+          return {
+            ...response,
+            headers: {
+              get: (name: string) =>
+                response.headers
+                  .get(name)
+                  ?.replaceAll("registry.test", "ghcr.io") ?? null
+            }
+          };
+        }
+      );
+      h.persist.mockImplementation(async () => {
+        if (operations.latest(target.repo)?.state === "input_required") {
+          saving.resolve();
+          await saved.promise;
+        }
+      });
+      try {
+        const started = await h.invoke("radius_setup_environment", {
+          ...target,
+          provider: "azure",
+          subscriptionId: firstId,
+          tenantId,
+          resourceGroup: "fixture-group",
+          cluster: "fixture-cluster"
+        });
+        if (started.kind !== "accepted")
+          throw new Error(JSON.stringify(started));
+        const identity = {
+          ...target,
+          operationId: started.operation.operationId
+        };
+        await Promise.race([saving.promise, readingApp.promise, h.settled()]);
+        const op = operations.get(identity.operationId);
+        expect(
+          op?.state,
+          JSON.stringify({
+            failure: op?.failure,
+            az: runAz.mock.calls,
+            gh: h.run.mock.calls
+          })
+        ).toBe("input_required");
+        expect(op.executionActive).toBe(true);
+        const active = await h.invoke("radius_environment_status", identity);
+        expect(active).toMatchObject({ interaction: { supported: false } });
+        saved.resolve();
+        await h.settled();
+        const status = await h.invoke("radius_environment_status", identity);
+        expect(status).toMatchObject({
+          interaction: {
+            supported: true,
+            appSelection: {
+              candidates,
+              defaultAppId: secondId,
+              truncated: false
+            }
+          }
+        });
+        if (!("interaction" in status) || !status.interaction?.appSelection)
+          throw new Error("Expected application choices");
+        if (!("interaction" in active) || !active.interaction)
+          throw new Error("Expected active prompt");
+        expect(status.interaction.interactionId).not.toBe(
+          active.interaction.interactionId
+        );
+        const answer = {
+          ...identity,
+          action: "resume",
+          provider: "azure",
+          checkpoint: status.interaction.checkpoint,
+          interactionId: status.interaction.interactionId,
+          answer: {
+            code: status.interaction.code,
+            createNew: false,
+            appId:
+              selection === "candidate" ?
+                status.interaction.appSelection.defaultAppId
+              : explicitId
+          }
+        };
+        expect(
+          await h.invoke("radius_environment_control", {
+            ...answer,
+            interactionId: active.interaction.interactionId
+          })
+        ).toMatchObject({ code: "operation-resume-mismatch" });
+        expect(
+          await h.invoke("radius_environment_control", answer)
+        ).toMatchObject({ kind: "accepted" });
+        await Promise.race([readingApp.promise, h.settled()]);
+        expect(runAz.mock.calls).toEqual(
+          expect.arrayContaining([
+            [
+              expect.arrayContaining([
+                "ad",
+                "app",
+                "show",
+                "--id",
+                answer.answer.appId
+              ])
+            ]
+          ])
+        );
+        expect(op.request.azure.appId).toBe(answer.answer.appId);
+        expect(op.request.azure.createNew).not.toBe(true);
+        expect(
+          await h.invoke("radius_environment_control", answer)
+        ).toMatchObject({ kind: "refused" });
+        expect(h.reportError).not.toHaveBeenCalled();
+        expect(h.runtime.servers.size).toBe(0);
+        const callsBeforeShutdown = {
+          gh: h.run.mock.calls.length,
+          az: runAz.mock.calls.length
+        };
+        const closing = h.extension.shutdown();
+        appRead.resolve();
+        await closing;
+        await h.settled();
+        expect(op.endedAt).toBeNull();
+        expect(op.failure).toBeNull();
+        expect(h.run).toHaveBeenCalledTimes(callsBeforeShutdown.gh);
+        expect(runAz.mock.calls.slice(callsBeforeShutdown.az)).toEqual([
+          [
+            [
+              "ad",
+              "sp",
+              "show",
+              "--id",
+              answer.answer.appId,
+              "--query",
+              "id",
+              "-o",
+              "tsv"
+            ]
+          ]
+        ]);
+        expect(
+          await h.invoke("radius_environment_status", identity)
+        ).toMatchObject({
+          kind: "unavailable",
+          code: "operation-shutting-down"
+        });
+      } finally {
+        saved.resolve();
+        const closing = h.extension.shutdown();
+        appRead.resolve();
+        await closing;
+        await h.settled();
+      }
+    }
+  );
+  it.each(["open", "unavailable"] as const)(
+    "distinguishes an %s merge check without dispatching verification",
+    async (state) => {
+      const h = await composition();
+      const op = mergeHandoff({
+        repo: target.repo,
+        pullRequestUrl: "https://github.com/fixture/app/pull/12"
+      });
+      op.context = { githubLogin: h.executor.login };
+      operations.put(op);
+      h.run.mockImplementation(async (args) => {
+        expect(args[0]).toBe("api");
+        expect(args[1]).toBe("repos/fixture/app/pulls/12");
+        return state === "open" ?
+            {
+              code: 0,
+              stdout: JSON.stringify({ merged: false, state: "open" }),
+              stderr: ""
+            }
+          : { code: 1, stdout: "", stderr: "Account unavailable" };
+      });
+      try {
+        expect(
+          await h.invoke("radius_environment_control", {
+            ...target,
+            operationId: op.operationId,
+            action: "verify"
+          })
+        ).toMatchObject(
+          state === "open" ?
+            {
+              kind: "interaction_required",
+              code: "verification-retry-pull-request-open",
+              interaction: { kind: "pull-request-merge", supported: false }
+            }
+          : {
+              kind: "refused",
+              code: "verification-retry-github-account-unavailable"
+            }
+        );
+        expect(h.run).toHaveBeenCalledOnce();
+        expect(h.runner).not.toHaveBeenCalled();
+        expect(op.verification).toMatchObject({ runId: null });
+        expect(h.runtime.servers.size).toBe(0);
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
   it("registers flat provider schemas while retaining a nested answer union", async () => {
     const h = await composition();
     try {
