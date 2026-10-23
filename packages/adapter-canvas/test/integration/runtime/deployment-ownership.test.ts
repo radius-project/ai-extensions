@@ -14,12 +14,275 @@ import {
 } from "../../support/runtime/fakes.js";
 import { createDeferred } from "../../support/browser/fakes.js";
 import { createDeploymentPipelineRunner } from "../../support/runtime/deployment.js";
+import { createGitHubAccountResolvers } from "../../../src/runtime/github-account-resolvers.js";
+import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
+import { createEnvironmentTools } from "../../../src/runtime/environment-tools.js";
 import {
   setDeployRepairHandoff,
   setDeployFailureNotice
 } from "../../../src/server.js";
 
 describe("production deployment owner runtime binding", () => {
+  it.each([
+    "writer",
+    "read-only",
+    "installation-dispatch-denied",
+    "workflow-write-denied",
+    "secret-list-denied",
+    "secret-write-denied"
+  ] as const)(
+    "uses production deployment eligibility through SDK and HTTP for %s",
+    async (scenario) => {
+      const conditionalWrite =
+        scenario === "workflow-write-denied" ||
+        scenario === "secret-list-denied" ||
+        scenario === "secret-write-denied";
+      const pipeline = createDeploymentPipelineRunner("success", {
+        existingEnvironment: !conditionalWrite
+      });
+      const login =
+        scenario === "installation-dispatch-denied" ? "fixture[bot]" : "writer";
+      const dispatchEntered = createDeferred<void>();
+      const dispatchReleased = createDeferred<void>();
+      const denied = (args: string[]) =>
+        (scenario === "workflow-write-denied" && args.includes("PUT")) ||
+        (scenario === "secret-list-denied" && args[1]?.endsWith("/secrets")) ||
+        (scenario === "secret-write-denied" && args[0] === "secret");
+      const run = vi.fn(
+        async (...[args, options]: Parameters<typeof pipeline.run>) => {
+          if (args.join(" ") === "api repos/fixture/app")
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                permissions: { admin: false, push: scenario !== "read-only" }
+              }),
+              stderr: ""
+            };
+          const probes: Record<string, unknown> = {
+            "repos/fixture/app/contents": [],
+            "repos/fixture/app/actions/workflows?per_page=1": { workflows: [] },
+            "repos/fixture/app/environments?per_page=1": { environments: [] },
+            "repos/fixture/app/deployments?per_page=1": []
+          };
+          if (args[0] === "api" && args[1] in probes)
+            return {
+              code: 0,
+              stdout: JSON.stringify(probes[args[1]]),
+              stderr: ""
+            };
+          if (args[0] === "workflow") {
+            dispatchEntered.resolve();
+            await dispatchReleased.promise;
+          }
+          if (
+            denied(args) ||
+            (args[0] === "workflow" &&
+              scenario === "installation-dispatch-denied")
+          )
+            return {
+              code: 1,
+              stdout: "",
+              stderr: "HTTP 403: Resource not accessible by integration"
+            };
+          return pipeline.run(args, options);
+        }
+      );
+      const executor = successfulSelectedGhExecutor({
+        login,
+        credentialSource:
+          scenario === "installation-dispatch-denied" ? "injected" : "keyring",
+        scopes: [],
+        requiresKeyringSwitch: true,
+        run
+      });
+      let setupAllowed = false;
+      const keyring = vi.fn(async () => {
+        if (!setupAllowed)
+          throw new Error("Deployment must not access keyring state");
+        return "writer";
+      });
+      const switchAccount = vi.fn(async (): Promise<never> => {
+        throw new Error("Unexpected keyring switch");
+      });
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: keyring,
+        switchKeyringAccount: switchAccount,
+        resetIdentityCache: () => {}
+      });
+      const accounts = createGitHubAccountResolvers({
+        coordinator,
+        ownerKey: "permission-boundary",
+        readIdentity: async () => ({
+          accounts: [
+            {
+              login,
+              hasWorkflow: false,
+              hasPackages: false,
+              switchable: true,
+              acting: false
+            }
+          ]
+        }),
+        redactDiagnostic: (value) => value
+      });
+      const executionOwner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner,
+        deploymentAccount: accounts.deployment,
+        serverDependencies: {
+          createState: () => ({
+            contextRepo: "fixture/app",
+            contextBranch: "feature/model",
+            envName: "dev",
+            plannedResources: [{ id: "app", name: "app", type: "application" }]
+          })
+        }
+      });
+      const fake = createFakeDependencies();
+      const extension = await bootstrapRadiusExtension(
+        {
+          ...fake.deps,
+          ...runtime,
+          executionOwner,
+          deployment: runtime.deploymentOwner,
+          environment: createEnvironmentTools({
+            ...runtime.environmentServices,
+            owner: executionOwner,
+            session: fake.deps.session,
+            account: accounts.setup,
+            workspace: async () => ({
+              repo: "fixture/app",
+              branch: "feature/model"
+            }),
+            validateBranch: async () => {},
+            redact: (value) => value,
+            reportError: (error) => {
+              throw error;
+            }
+          })
+        },
+        {
+          createCanvas: (value) => value,
+          joinSession: async () => createFakeSession()
+        }
+      );
+      const target = { repo: "fixture/app", environment: "dev" };
+      try {
+        const panel = await runtime.getOrCreateServer(
+          "permissions",
+          "deploying"
+        );
+        const response = await fetch(`${panel.baseUrl}/api/deploy`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Mutation-Nonce": String(panel.state.browserMutationNonce)
+          },
+          body: JSON.stringify({
+            targetRepo: target.repo,
+            environment: target.environment,
+            branch: "feature/model",
+            provider: "aws",
+            appFile: "apps/custom.bicep"
+          })
+        });
+        const body = await response.json();
+        if (scenario === "read-only") {
+          expect(response.status).toBe(400);
+          expect(body.error).toContain("verified access");
+        } else {
+          expect(response.status).toBe(200);
+          if (!conditionalWrite) {
+            await dispatchEntered.promise;
+            vi.useFakeTimers();
+            dispatchReleased.resolve();
+            await vi.runAllTimersAsync();
+            vi.useRealTimers();
+          }
+        }
+        await vi.waitFor(
+          () =>
+            expect(
+              runtime.deploymentOwner.activeReservation(target)
+            ).toBeUndefined(),
+          { timeout: 10000 }
+        );
+        const dispatches = run.mock.calls.filter(
+          ([args]) => args[0] === "workflow"
+        );
+        expect(dispatches).toHaveLength(
+          scenario === "read-only" || conditionalWrite ? 0 : 1
+        );
+        if (scenario !== "read-only") {
+          const current = runtime.deploymentOwner.resolve();
+          if (current.kind !== "resolved") throw new Error(current.kind);
+          expect(current.invocation.target).toMatchObject({
+            repo: target.repo,
+            environment: target.environment,
+            githubLogin: login,
+            branch: "feature/model"
+          });
+          expect(
+            runtime.deploymentOwner.execution(current.invocation)?.executor
+          ).toBe(executor);
+          expect(panel.state.deployStatus).toBe(
+            scenario === "writer" ? "complete" : "failed"
+          );
+          if (scenario === "installation-dispatch-denied")
+            expect(panel.state.deployErrorKind).toBe("dispatch-refused");
+        }
+        expect(keyring).not.toHaveBeenCalled();
+        expect(switchAccount).not.toHaveBeenCalled();
+        if (conditionalWrite) {
+          expect(denied(run.mock.calls.at(-1)?.[0] ?? [])).toBe(true);
+          expect(panel.state.deployError).toBeTruthy();
+        } else
+          expect(
+            run.mock.calls.some(
+              ([args]) =>
+                args.includes("PUT") ||
+                args[0] === "secret" ||
+                args.some((arg) =>
+                  /\/secrets|actions\/permissions|actions\/variables/.test(arg)
+                )
+            )
+          ).toBe(false);
+        expect(pipeline.unexpected).toEqual([]);
+        if (scenario === "writer") {
+          // Setup uses its lease and strict policy, unlike deployment.
+          setupAllowed = true;
+          const tool = extension.tools.find(
+            (entry) => entry.name === "radius_setup_environment"
+          );
+          if (!tool) throw new Error("Missing setup tool");
+          const result = JSON.parse(
+            String(
+              await tool.handler({
+                ...target,
+                provider: "aws",
+                roleArn: "arn:aws:iam::123456789012:role/fixture",
+                accountId: "123456789012",
+                region: "us-west-2",
+                cluster: "fixture-eks"
+              })
+            )
+          );
+          expect(result).toMatchObject({
+            kind: "interaction_required",
+            code: "github-reauthorization-required"
+          });
+          expect(
+            run.mock.calls.filter(([args]) => args[0] === "workflow")
+          ).toHaveLength(1);
+        }
+      } finally {
+        dispatchReleased.resolve();
+        vi.useRealTimers();
+        await extension.shutdown();
+      }
+    }
+  );
   it.each(["failure", "uncertain", "shutdown"] as const)(
     "retains a request-started selected write across SDK close and %s",
     async (outcome) => {

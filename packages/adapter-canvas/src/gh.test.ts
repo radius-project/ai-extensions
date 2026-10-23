@@ -1458,20 +1458,31 @@ describe("selected GitHub executor", { concurrent: false }, () => {
     );
   });
 
-  it("preserves the original identity failure for a non-App account", async () => {
-    const gh = await loadGh("linux", {
-      token: "installation-token",
-      withToken: `github.com
+  it.each([
+    ["gh: Resource not accessible by integration (HTTP 403)", true],
+    ["HTTP 401: Bad credentials", true],
+    ["HTTP 404: Not Found", true],
+    ["HTTP 503: Unavailable", false],
+    ["request timed out", false],
+    ["", false]
+  ])(
+    "preserves structured identity failure for a non-App account: %s",
+    async (detail, authorizationDenied) => {
+      const gh = await loadGh("linux", {
+        token: "installation-token",
+        withToken: `github.com
   ✓ Logged in to github.com account radius-cloud-e2e (GH_TOKEN)
     - Active account: true`,
-      apiUserError: "gh: Resource not accessible by integration (HTTP 403)"
-    });
-    const executor = await gh.createSelectedGhExecutor("radius-cloud-e2e");
+        apiUserError: detail || " "
+      });
+      const executor = await gh.createSelectedGhExecutor("radius-cloud-e2e");
 
-    await expect(executor.verifyIdentity()).rejects.toThrow(
-      "Resource not accessible by integration"
-    );
-  });
+      await expect(executor.verifyIdentity()).rejects.toMatchObject({
+        name: "SelectedGhIdentityError",
+        authorizationDenied
+      });
+    }
+  );
 
   it("uses an account-qualified keyring token without falling through to ambient credentials", async () => {
     process.env.GITHUB_TOKEN = "lower-priority-token";
@@ -1653,20 +1664,24 @@ describe("selected GitHub executor", { concurrent: false }, () => {
     );
   });
 
-  it("fails closed when the pinned command resolves to another login", async () => {
-    const gh = await loadGh("linux", {
-      token: "selected-injected-token",
-      withToken: STATUS.tokenWithWorkflow,
-      keyring: STATUS.keyringWithWorkflow,
-      apiLogin: "someone-else"
-    });
+  it.each(["someone-else", ""])(
+    "fails closed when the pinned command resolves to login %j",
+    async (apiLogin) => {
+      const gh = await loadGh("linux", {
+        token: "selected-injected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        keyring: STATUS.keyringWithWorkflow,
+        apiLogin
+      });
 
-    const executor = await gh.createSelectedGhExecutor("tokuser");
+      const executor = await gh.createSelectedGhExecutor("tokuser");
 
-    await expect(executor.verifyIdentity()).rejects.toThrow(
-      "expected @tokuser, received @someone-else"
-    );
-  });
+      await expect(executor.verifyIdentity()).rejects.toMatchObject({
+        name: "SelectedGhIdentityError",
+        authorizationDenied: apiLogin !== ""
+      });
+    }
+  );
 
   it("verifies the selected identity once before all executor commands", async () => {
     const gh = await loadGh("linux", {

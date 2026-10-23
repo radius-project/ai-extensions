@@ -816,6 +816,16 @@ function pinnedGhExec(
   });
 }
 
+export class SelectedGhIdentityError extends Error {
+  constructor(
+    message: string,
+    readonly authorizationDenied: boolean
+  ) {
+    super(message);
+    this.name = "SelectedGhIdentityError";
+  }
+}
+
 export async function createSelectedGhExecutor(
   selectedLogin: string,
   env: NodeJS.ProcessEnv = process.env
@@ -918,17 +928,20 @@ export async function createSelectedGhExecutor(
       const detail = (result.stderr || result.stdout).trim();
       if (isGitHubAppBotLogin(login) && isGitHubAppUserEndpointFailure(detail))
         return;
-      throw new Error(
+      const status = detail.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
+      throw new SelectedGhIdentityError(
         detail ?
           `GitHub identity verification failed for @${login}: ${detail}`
-        : `GitHub identity verification failed for @${login}.`
+        : `GitHub identity verification failed for @${login}.`,
+        status === "401" || status === "403" || status === "404"
       );
     }
     if (actingLogin !== login) {
-      throw new Error(
+      throw new SelectedGhIdentityError(
         `GitHub identity verification failed: expected @${login}, received @${
           actingLogin || "unknown"
-        }.`
+        }.`,
+        actingLogin !== ""
       );
     }
   };

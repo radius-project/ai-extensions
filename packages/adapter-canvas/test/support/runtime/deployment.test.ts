@@ -51,6 +51,49 @@ describe("deployment controller fixture", () => {
 });
 
 describe("selected deployment pipeline fixture", () => {
+  it("models current workflows and no secure parameters without accepting writes", async () => {
+    const fixture = createDeploymentPipelineRunner("success", {
+      existingEnvironment: true
+    });
+    const source = JSON.parse(
+      (
+        await fixture.run([
+          "api",
+          "/repos/fixture/app/contents/app.bicep?ref=trunk"
+        ])
+      ).stdout
+    );
+    expect(Buffer.from(source.content, "base64").toString()).not.toContain(
+      "@secure"
+    );
+    const workflow = JSON.parse(
+      (
+        await fixture.run([
+          "api",
+          "/repos/fixture/app/contents/.github/workflows/run-rad-commands.yml?ref=trunk"
+        ])
+      ).stdout
+    );
+    expect(Buffer.from(workflow.content, "base64").toString()).toContain(
+      "workflow_dispatch"
+    );
+    await expect(
+      fixture.run([
+        "api",
+        "--method",
+        "PUT",
+        "/repos/fixture/app/contents/workflow"
+      ])
+    ).rejects.toThrow("forbids workflow writes");
+    await expect(
+      fixture.run(["api", "/repos/fixture/app/environments/dev/secrets"])
+    ).rejects.toThrow("forbids secret reads");
+    await expect(
+      fixture.run(["secret", "set", "--repo", "fixture/app"], {
+        stdin: "value"
+      })
+    ).rejects.toThrow("forbids secret writes");
+  });
   it("fails and records commands outside the scripted repository", async () => {
     const fixture = createDeploymentPipelineRunner("success");
     const command = ["api", "/repos/another/app"];

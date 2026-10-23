@@ -6,11 +6,10 @@ import {
   type GitHubAccountSelectionTarget
 } from "@radius-project/core";
 import type { GitHubIdentity, SelectedGhExecutor } from "../gh.js";
-import type { GitHubAccountReadinessService } from "../server/services/github-account-readiness.js";
 
 export interface DeploymentAccountPorts {
   readIdentity(): Promise<Pick<GitHubIdentity, "accounts">>;
-  readiness: GitHubAccountReadinessService;
+  check: GitHubAccountSelectionPorts["check"];
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   choose?: GitHubAccountSelectionPorts["choose"];
   redactDiagnostic(value: string): string;
@@ -33,20 +32,10 @@ export function createDeploymentAccountResolver(ports: DeploymentAccountPorts) {
         listLogins: async () =>
           (await ports.readIdentity()).accounts.map(({ login }) => login),
         check: async (login, target) => {
-          const readiness = await ports.readiness.check({ ...target, login });
-          if (readiness.ready) return { state: "eligible" };
-          const failures = Object.values(readiness.checks).filter(
-            (check) => check.state !== "ready"
-          );
-          return {
-            state:
-              failures.some((check) => check.state === "error") ? "unavailable"
-              : "ineligible",
-            message: redact(
-              failures.map((check) => check.detail).join("\n") ||
-                readiness.summary
-            )
-          };
+          const result = await ports.check(login, target);
+          return result.state === "eligible" ?
+              result
+            : { ...result, message: redact(result.message) };
         },
         choose: ports.choose,
         isCurrent: input.isCurrent
