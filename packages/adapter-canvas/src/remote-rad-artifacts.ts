@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { workspaceRadArtifactsDir } from "./workspace.js";
+import { WorkflowReadInterruptedError } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
 interface GitHubArtifactReader {
@@ -159,6 +160,7 @@ export async function stageRemoteRadArtifacts(
       `/repos/${repo}/contents/${configRepoPath}?ref=${encodeURIComponent(branch)}`
     );
   } catch (err) {
+    if (err instanceof WorkflowReadInterruptedError) throw err;
     log(
       `Warning: could not fetch ${configRepoPath} on ${branch}: ${errorMessage(err)}`
     );
@@ -197,6 +199,7 @@ export async function stageRemoteRadArtifacts(
           `/repos/${repo}/contents/${artifactRepoPath}?ref=${encodeURIComponent(branch)}`
         );
       } catch (err) {
+        if (err instanceof WorkflowReadInterruptedError) throw err;
         log(
           `Warning: could not fetch extension artifact ${artifactRepoPath} on ${branch}: ${errorMessage(err)}`
         );
@@ -225,6 +228,7 @@ export async function stageRemoteRadArtifacts(
     } catch {
       /* best-effort */
     }
+    if (err instanceof WorkflowReadInterruptedError) throw err;
     log(
       `Warning: could not stage remote .radius artifacts for ${repo}@${branch}: ${errorMessage(err)}`
     );

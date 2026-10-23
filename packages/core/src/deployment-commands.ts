@@ -37,6 +37,19 @@ export type DeploymentCommandPreparation =
     }
   | { readonly kind: "refused" | "cancelled"; readonly message: string };
 
+export function deploymentApplicationPaths(appFile?: string): string[] {
+  if (
+    appFile !== undefined &&
+    (!/^[A-Za-z0-9_.][A-Za-z0-9_.\/-]*\.bicep$/.test(appFile) ||
+      appFile.split("/").some((part) => !part || part === "." || part === ".."))
+  ) {
+    throw new Error(
+      "The application file must be a repository-relative Bicep path without traversal or command delimiters."
+    );
+  }
+  return appFile === undefined ? [".radius/app.bicep", "app.bicep"] : [appFile];
+}
+
 export async function prepareDeploymentCommands(
   target: DeploymentCommandTarget,
   ports: DeploymentCommandPorts
@@ -57,23 +70,15 @@ export async function prepareDeploymentCommands(
       message: "A repository, branch and environment are required."
     };
   }
-  if (
-    selected.appFile !== undefined &&
-    (!/^[A-Za-z0-9_.][A-Za-z0-9_.\/-]*\.bicep$/.test(selected.appFile) ||
-      selected.appFile
-        .split("/")
-        .some((part) => !part || part === "." || part === ".."))
-  ) {
+  let paths: string[];
+  try {
+    paths = deploymentApplicationPaths(selected.appFile);
+  } catch (error) {
     return {
       kind: "refused",
-      message:
-        "The application file must be a repository-relative Bicep path without traversal or command delimiters."
+      message: ports.errorMessage(error)
     };
   }
-  const paths =
-    selected.appFile === undefined ?
-      [".radius/app.bicep", "app.bicep"]
-    : [selected.appFile];
   try {
     for (const path of paths) {
       const source = await ports.readFile(selected, path);
