@@ -4,6 +4,99 @@ import { successfulSelectedGhExecutor } from "../../test/support/server/selected
 import { createGitHubAccountResolvers } from "./github-account-resolvers.js";
 
 describe("production account policies", () => {
+  it.each(["wrong-identity", "unreadable-identity"] as const)(
+    "keeps setup blocked after %s restoration without blocking pinned writer deployment",
+    async (failure) => {
+      let activeLogin = "original";
+      let restorationAttempted = false;
+      const run = vi.fn(async (args: string[]) => {
+        if (args.join(" ") !== "api repos/fixture/app")
+          throw new Error(`Unexpected command: ${args.join(" ")}`);
+        return {
+          code: 0,
+          stdout: JSON.stringify({ permissions: { admin: false, push: true } }),
+          stderr: ""
+        };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "writer",
+        scopes: [],
+        requiresKeyringSwitch: true,
+        run
+      });
+      const createExecutor = vi.fn(async (login: string) => {
+        expect(login).toBe("writer");
+        return executor;
+      });
+      const keyringRead = vi.fn(async () => {
+        if (restorationAttempted && failure === "unreadable-identity")
+          throw new Error("Restored identity unavailable");
+        return activeLogin;
+      });
+      const switchAccount = vi.fn(async (login: string) => {
+        restorationAttempted = login === "original";
+        activeLogin = restorationAttempted ? "unexpected" : login;
+        return { ok: true as const };
+      });
+      const accounts = createGitHubAccountResolvers({
+        coordinator: createGitHubAccountCoordinator({
+          createExecutor,
+          getActiveKeyringLogin: keyringRead,
+          switchKeyringAccount: switchAccount,
+          resetIdentityCache: () => {}
+        }),
+        ownerKey: "split-policy-restoration",
+        readIdentity: async () => ({ accounts: [] }),
+        redactDiagnostic: (value) => value
+      });
+      const selection = {
+        target: { repo: "fixture/app", environment: "dev" },
+        savedLogin: "writer",
+        isCurrent: () => true
+      };
+      expect(await accounts.setup(selection)).toMatchObject({
+        state: "unavailable",
+        message: expect.stringContaining(
+          failure === "unreadable-identity" ?
+            "Restored identity unavailable"
+          : "auth switch"
+        )
+      });
+      expect(switchAccount.mock.calls).toEqual([["writer"], ["original"]]);
+      run.mockClear();
+      switchAccount.mockClear();
+
+      expect(await accounts.setup(selection)).toMatchObject({
+        state: "unavailable",
+        message: expect.stringContaining(
+          failure === "unreadable-identity" ?
+            "Restored identity unavailable"
+          : "cannot safely change GitHub CLI accounts"
+        )
+      });
+      expect(run).not.toHaveBeenCalled();
+      expect(switchAccount).not.toHaveBeenCalled();
+      keyringRead.mockClear();
+
+      expect(await accounts.deployment(selection)).toMatchObject({
+        state: "selected",
+        login: "writer",
+        executor
+      });
+      expect(run).toHaveBeenCalledExactlyOnceWith(
+        ["api", "repos/fixture/app"],
+        {
+          timeout: 15000
+        }
+      );
+      expect(keyringRead).not.toHaveBeenCalled();
+      expect(switchAccount).not.toHaveBeenCalled();
+      expect(
+        createExecutor.mock.calls.every(([login]) => login === "writer")
+      ).toBe(true);
+    }
+  );
+
   it.each(["administrator", "installation"] as const)(
     "does not weaken strict setup for %s lacking setup-only grants",
     async (kind) => {
