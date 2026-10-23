@@ -58,7 +58,7 @@ describe("production environment owner HTTP binding", () => {
         environment: "dev",
         provider: "azure"
       });
-      finish(op, "succeeded");
+      finish(op, "failed");
       op.request = { private: "never-return-this" };
       operations.put(op);
       const response = await fetch(`${entry.baseUrl}/api/operations`);
@@ -70,10 +70,25 @@ describe("production environment owner HTTP binding", () => {
           operationId: op.operationId,
           repo: op.repo,
           environment: op.environment,
-          state: "succeeded"
+          state: "failed"
         }
       });
       expect(JSON.stringify(result)).not.toContain("never-return-this");
+      const beforeExport = Date.now();
+      const diagnostic = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/diagnostics`
+      );
+      expect(diagnostic.status).toBe(200);
+      expect(diagnostic.headers.get("content-disposition")).toContain(
+        "attachment;"
+      );
+      expect(diagnostic.headers.get("cache-control")).toBe("no-store");
+      const exported = await diagnostic.json();
+      expect(Date.parse(exported.generatedAt)).toBeGreaterThanOrEqual(
+        beforeExport
+      );
+      expect(Date.parse(exported.generatedAt)).toBeLessThanOrEqual(Date.now());
+      expect(JSON.stringify(exported)).not.toContain("never-return-this");
       expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
     } finally {
       owner.shutdown();
