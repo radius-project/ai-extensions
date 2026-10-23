@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWorkflowFileCommitter } from "@radius-project/core";
+import { verificationRunTitle } from "./verification-run-identity.js";
+import { SelectedGhAuthorizationError } from "./deploy.js";
+import * as gh from "./gh.js";
+import { ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { bindWorkflowFileCommitterPorts } from "./server/routes/create-environment-workflow-committer.js";
 import {
   createEnvironmentAccountContext,
@@ -37,6 +42,11 @@ import {
   prepareProviderMutation,
   reconcileRestoredOperation,
   recordGitHubEnvironment,
+  recordAzureApp,
+  recordServicePrincipal,
+  recordCommittedWorkflowFile,
+  recordGitHubEnvironmentVariable,
+  cleanupArtifactIdentity,
   settleProviderMutation,
   requestStop,
   onOperationTerminal,
@@ -138,6 +148,50 @@ afterEach(() => {
 });
 
 describe("production coordinator scheduling scopes", () => {
+  it.each(["azure-only", "missing-account"] as const)(
+    "runs concrete cleanup without a GitHub lease for %s",
+    async (scenario) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("cleanup-without-lease");
+      if (scenario === "azure-only")
+        recordAzureApp(op, { state: "created", appId: "app-id" });
+      else
+        recordGitHubEnvironment(op, {
+          state: "created",
+          repo: op.repo,
+          name: op.environment,
+          providerId: "17"
+        });
+      const { command } = acceptCommand(op, {
+        kind: "rollback",
+        attempt: 1,
+        target: "cleanup"
+      });
+      const cli = vi
+        .spyOn(gh, "cliExec")
+        .mockImplementation((program, args, _options, callback) => {
+          expect(scenario).toBe("azure-only");
+          expect(program).toBe("az");
+          expect(args).toEqual(["ad", "app", "delete", "--id", "app-id"]);
+          callback(null, "", "");
+          return new ChildProcess();
+        });
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      coordinator(owner, "panel").scheduleCommandTask(
+        "rollback",
+        op,
+        command.commandId
+      );
+      await settled(owner, "panel");
+      expect(cli).toHaveBeenCalledTimes(scenario === "azure-only" ? 1 : 0);
+      expect(op.endedAt).not.toBeNull();
+      if (scenario === "azure-only")
+        expect(op.setupArtifacts.azureApp.state).toBe("deleted");
+      else expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      owner.shutdown();
+    }
+  );
+
   it.each([
     "not_applied",
     "cancelled",
@@ -919,6 +973,462 @@ describe("production coordinator scheduling scopes", () => {
   });
 
   it.each([
+    ["environment", "account"],
+    ["environment", "read"],
+    ["environment", "persistence"],
+    ["environment", "planning"],
+    ["environment", "complete"],
+    ["branch", "account"],
+    ["branch", "identity"],
+    ["branch", "identity-rejected"],
+    ["branch", "read"],
+    ["branch", "persistence"],
+    ["branch", "handoff"],
+    ["branch", "cleanup"],
+    ["branch", "complete"],
+    ["azure", "read"],
+    ["azure", "persistence"],
+    ["azure", "complete"]
+  ] as const)(
+    "fences recovered %s cleanup at %s without replaying the unknown delete",
+    async (resource, boundary) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("recovered-cleanup");
+      op.recoveryState = "provider_reconciliation_pending";
+      op.context.githubLogin = "saved-account";
+      if (resource === "azure")
+        recordAzureApp(op, { state: "created", appId: "app-id" });
+      else if (resource !== "branch" || boundary !== "complete")
+        recordGitHubEnvironment(op, {
+          state: "created",
+          repo: op.repo,
+          name: op.environment,
+          providerId: "17"
+        });
+      if (boundary === "planning")
+        recordAzureApp(op, { state: "created", appId: "remaining-app" });
+      const mutation = prepareProviderMutation(op, {
+        kind:
+          resource === "branch" ? "github_branch.delete"
+          : resource === "azure" ? "azure_app.cleanup_delete"
+          : "github_environment.cleanup_delete",
+        target:
+          resource === "branch" ? `${op.repo}\0radius/setup\0base`
+          : resource === "azure" ? "app-id"
+          : cleanupArtifactIdentity(
+              "github_environment",
+              op.setupArtifacts.githubEnvironment
+            )
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "outcome_unknown",
+        "Lost response"
+      );
+      const entered = deferred();
+      const gate = deferred();
+      let held = false;
+      const hold = async (point: string) => {
+        if (point !== boundary || held) return;
+        held = true;
+        entered.resolve();
+        await gate.promise;
+      };
+      const run = vi.fn(async (args: string[]) => {
+        expect(args.includes("DELETE")).toBe(false);
+        await hold("read");
+        const path = args[1];
+        if (path.includes("matching-refs"))
+          return { code: 0, stdout: "[]", stderr: "" };
+        if (path.includes("/environments?"))
+          return { code: 0, stdout: '{"environments":[]}', stderr: "" };
+        if (path.includes("git/ref/") || path.endsWith("/environments/dev"))
+          return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        throw new Error(`Unexpected recovery command ${args.join(" ")}`);
+      });
+      const cli = vi
+        .spyOn(gh, "cliExec")
+        .mockImplementation((program, args, _options, callback) => {
+          expect(program).toBe("az");
+          expect(args.slice(0, 3)).toEqual(["ad", "app", "show"]);
+          void hold("read").then(() =>
+            callback(
+              Object.assign(new Error("Request_ResourceNotFound"), { code: 1 }),
+              "",
+              "Request_ResourceNotFound"
+            )
+          );
+          return new ChildProcess();
+        });
+      let identityChecks = 0;
+      const executor = {
+        ...successfulSelectedGhExecutor({ login: "saved-account", run }),
+        verifyIdentity: async () => {
+          identityChecks++;
+          if (boundary.startsWith("identity") && identityChecks === 2) {
+            await hold(boundary);
+            if (boundary === "identity-rejected")
+              throw new Error("Identity no longer available");
+          }
+        }
+      };
+      const account = createEnvironmentAccountContext(
+        "runtime",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => {
+            await hold("account");
+            return executor;
+          },
+          getActiveKeyringLogin: async () => executor.login,
+          switchKeyringAccount: unavailable,
+          resetIdentityCache: () => {}
+        })
+      );
+      let checkpoints = 0;
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        checkpoints++;
+        await hold(
+          checkpoints === 3 && boundary === "planning" ? "planning"
+          : checkpoints === 2 && boundary === "handoff" ? "handoff"
+          : "persistence"
+        );
+      });
+      coordinator(owner, "panel", undefined, account).startRecoveredTasks();
+      const completed = settled(owner, "panel");
+      try {
+        await Promise.race([entered.promise, completed]);
+        if (boundary !== "complete" && boundary !== "cleanup") {
+          expect(held, JSON.stringify(op.failure)).toBe(true);
+          owner.shutdown();
+          const reads = run.mock.calls.length;
+          const azureReads = cli.mock.calls.length;
+          gate.resolve();
+          await completed;
+          expect(run).toHaveBeenCalledTimes(reads);
+          expect(cli).toHaveBeenCalledTimes(azureReads);
+          expect(op.endedAt).toBeNull();
+          expect(op.failure).toBeNull();
+        } else {
+          expect(op.providerRecovery.mutations[0].status).toBe("confirmed");
+        }
+      } finally {
+        gate.resolve();
+        await completed;
+        owner.shutdown();
+      }
+    }
+  );
+
+  it.each([
+    "complete",
+    "workflow-read",
+    "workflow-write",
+    "workflow-checkpoint",
+    "variable-read",
+    "variable-write",
+    "variable-checkpoint",
+    "azure-read",
+    "azure-write",
+    "azure-checkpoint",
+    "workflow-refused",
+    "variable-refused"
+  ] as const)(
+    "preserves cleanup pass ordering and shutdown provenance at %s",
+    async (boundary) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("cleanup-passes");
+      op.context.githubLogin = "saved-account";
+      recordAzureApp(op, { state: "created", appId: "app-id" });
+      recordServicePrincipal(op, {
+        state: "created",
+        appId: "app-id",
+        objectId: "sp-id"
+      });
+      recordGitHubEnvironmentVariable(op, {
+        repo: op.repo,
+        environment: op.environment,
+        environmentProviderId: "17",
+        name: "FIRST",
+        valueSha256: createHash("sha256").update("new").digest("hex"),
+        previousKnown: true,
+        previousValue: "old"
+      });
+      for (const path of [
+        ".github/workflows/first.yml",
+        ".github/workflows/second.yml"
+      ])
+        recordCommittedWorkflowFile(op, {
+          path,
+          branch: "main",
+          mode: "default_branch",
+          commitSha: "c".repeat(40),
+          blobSha: "b".repeat(40),
+          contentSha256: createHash("sha256").update("content").digest("hex"),
+          previousBlobKnown: true,
+          previousBlobSha: null
+        });
+      const { command } = acceptCommand(op, {
+        kind: "rollback",
+        attempt: 1,
+        target: "cleanup"
+      });
+      const gate = deferred();
+      const entered = deferred();
+      let held = false;
+      let lastWrite = "";
+      const trace: string[] = [];
+      const hold = async (point: string) => {
+        if (point !== boundary || held) return;
+        held = true;
+        entered.resolve();
+        await gate.promise;
+      };
+      const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+      const run = vi.fn(async (args: string[]) => {
+        trace.push(args.join(" "));
+        if (args[0] === "variable") {
+          expect(args.slice(0, 3)).toEqual(["variable", "set", "FIRST"]);
+          lastWrite = "variable";
+          await hold("variable-write");
+          return success();
+        }
+        if (args[0] !== "api") throw new Error("Unexpected GitHub command");
+        const path = args.find((arg) => arg.startsWith("/repos/"));
+        if (path === "/repos/fixture/app") return success('{"id":23}');
+        if (path?.includes("/contents/")) {
+          if (args.includes("DELETE")) {
+            lastWrite = "workflow";
+            await hold("workflow-write");
+            return success();
+          }
+          await hold("workflow-read");
+          return success(
+            JSON.stringify({
+              sha:
+                boundary === "workflow-refused" ? "different" : "b".repeat(40),
+              content: Buffer.from("content").toString("base64")
+            })
+          );
+        }
+        if (path === "/repos/fixture/app/environments/dev") {
+          await hold("variable-read");
+          return success('{"id":17}');
+        }
+        if (path?.endsWith("/variables/FIRST"))
+          return success(
+            JSON.stringify({
+              name: "FIRST",
+              value: boundary === "variable-refused" ? "customer-value" : "new"
+            })
+          );
+        throw new Error(`Unexpected GitHub command ${args.join(" ")}`);
+      });
+      vi.spyOn(gh, "cliExec").mockImplementation(
+        (program, args, _options, callback) => {
+          expect(program).toBe("az");
+          trace.push(`az ${args.join(" ")}`);
+          const work = async () => {
+            if (args.includes("show")) {
+              await hold("azure-read");
+              return success("sp-id");
+            }
+            if (args.includes("delete")) {
+              lastWrite = "azure";
+              await hold("azure-write");
+              return success();
+            }
+            throw new Error(`Unexpected Azure command ${args.join(" ")}`);
+          };
+          void work().then(
+            (value) => callback(null, value.stdout, value.stderr),
+            (error: unknown) =>
+              callback(
+                error instanceof Error ? error : new Error(String(error)),
+                "",
+                ""
+              )
+          );
+          return new ChildProcess();
+        }
+      );
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext(
+        "runtime",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => executor.login,
+          switchKeyringAccount: async () => {
+            throw new Error("Unexpected account switch");
+          },
+          resetIdentityCache: () => {}
+        })
+      );
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        await hold(`${lastWrite}-checkpoint`);
+      });
+      coordinator(owner, "panel", undefined, account).scheduleCommandTask(
+        "rollback",
+        op,
+        command.commandId
+      );
+      const completed = settled(owner, "panel");
+      try {
+        await Promise.race([entered.promise, completed]);
+        if (boundary === "complete" || boundary.endsWith("refused")) {
+          expect(op.state).toBe(
+            boundary === "complete" ? "cancelled" : "failed_partial"
+          );
+        } else {
+          expect(held, JSON.stringify({ trace, failure: op.failure })).toBe(
+            true
+          );
+          owner.shutdown();
+          const callsBeforeSettlement = trace.length;
+          gate.resolve();
+          await completed;
+          expect(trace).toHaveLength(callsBeforeSettlement);
+          expect(op.endedAt).toBeNull();
+          expect(op.failure).toBeNull();
+          expect(op.setupArtifacts.cleanup.state).not.toBe("succeeded");
+        }
+      } finally {
+        gate.resolve();
+        await completed;
+        owner.shutdown();
+      }
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+    }
+  );
+
+  it.each([
+    "account",
+    "verify",
+    "identity",
+    "prepared",
+    "write",
+    "acknowledgement",
+    "acknowledgement-rejected"
+  ] as const)(
+    "interrupts setup cleanup at %s while retaining acknowledged deletion provenance",
+    async (boundary) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("cleanup-shutdown");
+      op.context.githubLogin = "saved-account";
+      recordGitHubEnvironment(op, {
+        state: "created",
+        origin: "this_operation",
+        repo: op.repo,
+        name: op.environment,
+        providerId: "17"
+      });
+      recordAzureApp(op, {
+        state: "created",
+        origin: "this_operation",
+        appId: "fixture-app-id"
+      });
+      const { command } = acceptCommand(op, {
+        kind: "rollback",
+        attempt: 1,
+        target: "cleanup"
+      });
+      const entered = deferred();
+      const gate = deferred();
+      let acknowledged = false;
+      const hold = async () => {
+        entered.resolve();
+        await gate.promise;
+      };
+      const run = vi.fn(async (args: string[]) => {
+        if (
+          args[0] !== "api" ||
+          !args.includes("/repos/fixture/app/environments/dev")
+        )
+          throw new Error(`Unexpected command ${args.join(" ")}`);
+        if (args.includes("DELETE")) {
+          if (boundary === "write") await hold();
+          acknowledged = true;
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (boundary === "identity") await hold();
+        return { code: 0, stdout: '{"id":17}', stderr: "" };
+      });
+      let identityChecks = 0;
+      const executor = {
+        ...successfulSelectedGhExecutor({ login: "saved-account", run }),
+        verifyIdentity: async () => {
+          identityChecks++;
+          if (boundary === "verify" && identityChecks === 2) await hold();
+        }
+      };
+      const account = createEnvironmentAccountContext(
+        "runtime",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => {
+            if (boundary === "account") await hold();
+            return executor;
+          },
+          getActiveKeyringLogin: async () => executor.login,
+          switchKeyringAccount: async () => {
+            throw new Error("Unexpected account switch");
+          },
+          resetIdentityCache: () => {}
+        })
+      );
+      const cli = vi.spyOn(gh, "cliExec").mockImplementation(() => {
+        throw new Error("Unexpected later Azure cleanup");
+      });
+      const snapshots: string[] = [];
+      const report = vi
+        .spyOn(operations, "report")
+        .mockImplementation(() => {});
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        const state = op.providerRecovery.mutations[0]?.status;
+        if (state) snapshots.push(state);
+        if (boundary === "prepared" && state === "prepared") await hold();
+        if (boundary.startsWith("acknowledgement") && state === "confirmed") {
+          await hold();
+          if (boundary === "acknowledgement-rejected")
+            throw new Error("Acknowledgement storage unavailable");
+        }
+      });
+      coordinator(owner, "panel", undefined, account).scheduleCommandTask(
+        "rollback",
+        op,
+        command.commandId
+      );
+      const completed = settled(owner, "panel");
+      try {
+        await Promise.race([entered.promise, completed]);
+        expect(owner.hasActiveEnvironmentTasks("panel")).toBe(true);
+        owner.shutdown();
+        if (boundary !== "account")
+          expect(account.getExecutor(op.operationId)).toBe(executor);
+      } finally {
+        gate.resolve();
+        await completed;
+      }
+      expect(op.endedAt).toBeNull();
+      expect(op.failure).toBeNull();
+      expect(op.setupArtifacts.cleanup.state).not.toBe("succeeded");
+      expect(cli).not.toHaveBeenCalled();
+      expect(
+        run.mock.calls.filter(([args]) => args.includes("DELETE"))
+      ).toHaveLength(acknowledged ? 1 : 0);
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+      if (acknowledged) {
+        expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
+        expect(snapshots).toContain("confirmed");
+      }
+      if (boundary === "acknowledgement-rejected")
+        expect(report).toHaveBeenCalled();
+    }
+  );
+
+  it.each([
     "rollback",
     "cleanup_retry",
     "exit_setup",
@@ -1451,6 +1961,198 @@ describe("production coordinator scheduling scopes", () => {
         })
       ]);
       expect(op.verification.runId).toBe("17");
+    }
+  );
+
+  it("reports an active recovered-discovery authorization failure instead of suppressing it", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const op = operation("discovery-account-failure");
+    op.currentStage = STAGE_VERIFY;
+    op.recoveryState = "verification_pending";
+    op.context.githubLogin = "saved-account";
+    op.verification = {
+      runId: null,
+      operationMarker: op.operationId,
+      ref: "main",
+      dispatchedAt: Date.now()
+    };
+    const run = vi.fn(async () => {
+      throw new SelectedGhAuthorizationError(
+        "saved-account",
+        403,
+        "Account unavailable"
+      );
+    });
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      run
+    });
+    const account = createEnvironmentAccountContext("runtime", {
+      createReadOnlyExecutor: async () => executor,
+      withSelectedAccount: unavailable
+    });
+    const persist = vi
+      .spyOn(operations, "persist")
+      .mockResolvedValue(undefined);
+    coordinator(owner, "panel", undefined, account).startRecoveredTasks();
+    await settled(owner, "panel");
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure.code).toBe(
+      "verification-retry-github-account-unavailable"
+    );
+    expect(persist).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+    expect(account.getExecutor(op.operationId)).toBeUndefined();
+    owner.shutdown();
+  });
+
+  it.each([
+    "success",
+    "empty",
+    "failure",
+    "denied",
+    "rejected",
+    "authorization-success",
+    "authorization-denied",
+    "authorization-rejected",
+    "authorization-thrown",
+    "success-persist",
+    "success-monitor"
+  ] as const)(
+    "keeps recovered verification resumable after shutdown during %s discovery",
+    async (result) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("late-discovery");
+      op.currentStage = STAGE_VERIFY;
+      op.recoveryState = "verification_pending";
+      op.context.githubLogin = "saved-account";
+      const dispatchedAt = Date.now();
+      op.verification = {
+        runId: null,
+        operationMarker: op.operationId,
+        ref: "main",
+        dispatchedAt,
+        acquisitionDeadline: dispatchedAt + 60_000
+      };
+      const entered = deferred();
+      const gate = deferred();
+      const run = vi.fn(async (args: string[]) => {
+        if (
+          result.startsWith("authorization-") &&
+          result !== "authorization-thrown" &&
+          args[0] === "run"
+        ) {
+          return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        }
+        expect(args.slice(0, 2)).toEqual(
+          (
+            result.startsWith("authorization") &&
+              result !== "authorization-thrown"
+          ) ?
+            ["api", "repos/fixture/app"]
+          : ["run", "list"]
+        );
+        if (!result.startsWith("success-")) {
+          entered.resolve();
+          await gate.promise;
+        }
+        if (result === "authorization-thrown")
+          throw new SelectedGhAuthorizationError(
+            "saved-account",
+            403,
+            "Account unavailable"
+          );
+        if (result === "rejected" || result === "authorization-rejected")
+          throw new Error("Discovery unavailable");
+        if (result.startsWith("authorization"))
+          return {
+            code: result === "authorization-success" ? 0 : 1,
+            stdout: '{"id":23}',
+            stderr: "HTTP 403: Forbidden"
+          };
+        return {
+          code: result === "failure" || result === "denied" ? 1 : 0,
+          stdout: JSON.stringify(
+            result.startsWith("success") ?
+              [
+                {
+                  databaseId: 101,
+                  createdAt: new Date(dispatchedAt + 1000).toISOString(),
+                  displayTitle: verificationRunTitle(
+                    op.environment,
+                    op.operationId
+                  ),
+                  event: "workflow_dispatch",
+                  headBranch: "main"
+                }
+              ]
+            : []
+          ),
+          stderr:
+            result === "denied" ?
+              "HTTP 403: Resource not accessible by integration"
+            : ""
+        };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: async () => executor,
+        withSelectedAccount: unavailable
+      });
+      const monitor = vi.fn(async () => {
+        expect(result).toBe("success-monitor");
+        entered.resolve();
+        await gate.promise;
+        return { status: 200, body: { state: "success" } };
+      });
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockImplementation(async () => {
+          if (result === "success-persist") {
+            entered.resolve();
+            await gate.promise;
+          }
+        });
+      coordinator(
+        owner,
+        "panel",
+        undefined,
+        account,
+        undefined,
+        monitor
+      ).startRecoveredTasks();
+      try {
+        await entered.promise;
+        owner.shutdown();
+        expect(account.getExecutor(op.operationId)).toBe(executor);
+      } finally {
+        gate.resolve();
+        await settled(owner, "panel");
+      }
+      expect(op.endedAt).toBeNull();
+      expect(op.failure).toBeNull();
+      expect(op.recoveryState).toBe("verification_pending");
+      if (result.startsWith("success-"))
+        expect(op.verification.runId).toBe("101");
+      else expect(op.verification.runId).toBeNull();
+      expect(persist).toHaveBeenCalledTimes(
+        result.startsWith("success-") ? 1 : 0
+      );
+      expect(run).toHaveBeenCalledTimes(
+        (
+          result.startsWith("authorization") &&
+            result !== "authorization-thrown"
+        ) ?
+          2
+        : 1
+      );
+      expect(monitor).toHaveBeenCalledTimes(
+        result === "success-monitor" ? 1 : 0
+      );
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
     }
   );
 

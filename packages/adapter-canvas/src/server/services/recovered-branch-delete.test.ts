@@ -43,11 +43,49 @@ function refRead(
 // A removal carries no guidance by design, so asking for one is only valid once
 // the outcome has been shown not to be a removal.
 function guidanceOf(outcome: RecoveredBranchDeleteOutcome): string {
+  if (outcome.state === "interrupted")
+    throw new Error("Expected a refusal, not interrupted execution.");
   if (outcome.state === "removed") {
     throw new Error(`expected a refusal, got a removal: ${outcome.evidence}`);
   }
   return outcome.guidance;
 }
+
+describe("shutdown during branch recovery", () => {
+  it.each(["initial", "read", "rejected-read", "listing"] as const)(
+    "keeps the deletion unresolved after interrupted %s",
+    async (boundary) => {
+      const operation = operationWithPendingDelete();
+      const mutation = operation.providerRecovery.mutations[0];
+      let stopped = boundary === "initial";
+      let reads = 0;
+      let listings = 0;
+      const outcome = await reconcileRecoveredBranchDelete({
+        operation,
+        mutation,
+        isStopped: () => stopped,
+        readBranchRef: async () => {
+          reads++;
+          if (boundary === "read" || boundary === "rejected-read")
+            stopped = true;
+          if (boundary === "rejected-read") throw new Error("Read unavailable");
+          return refRead({ code: 1, stderr: "HTTP 404" });
+        },
+        listBranchRefs: async () => {
+          listings++;
+          stopped = true;
+          return refRead({ stdout: "[]" });
+        }
+      });
+      expect(outcome).toEqual({ state: "interrupted" });
+      expect(operation.providerRecovery.mutations[0].status).toBe(
+        "outcome_unknown"
+      );
+      expect(reads).toBe(boundary === "initial" ? 0 : 1);
+      expect(listings).toBe(boundary === "listing" ? 1 : 0);
+    }
+  );
+});
 
 describe("parsing a recovered delete's target", () => {
   it("splits the exact repository, branch, and base commit", () => {

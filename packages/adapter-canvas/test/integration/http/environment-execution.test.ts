@@ -9,6 +9,7 @@ import { createTestCanvasServerRuntime } from "../../support/server/production-r
 import {
   configureOperationStore,
   createOperation,
+  recordGitHubEnvironment,
   requireInput,
   finish,
   operations,
@@ -32,6 +33,100 @@ afterEach(async () => {
 });
 
 describe("production environment owner HTTP binding", () => {
+  it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = () => {};
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const run = vi.fn(async (): Promise<never> => {
+      throw new Error("Unexpected cleanup command after shutdown");
+    });
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      run
+    });
+    const account = createEnvironmentAccountContext(
+      "http-cleanup",
+      createGitHubAccountCoordinator({
+        createExecutor: async () => {
+          entered();
+          await gate;
+          return executor;
+        },
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected keyring switch");
+        },
+        resetIdentityCache: () => {}
+      })
+    );
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: account
+    });
+    const entry = await runtime.getOrCreateServer("cleanup", "environment");
+    const op = createOperation({
+      operationId: "http-cleanup",
+      repo: "fixture/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    op.context.githubLogin = executor.login;
+    recordGitHubEnvironment(op, {
+      state: "created",
+      origin: "this_operation",
+      repo: op.repo,
+      name: op.environment,
+      providerId: "17"
+    });
+    finish(op, "failed");
+    operations.put(op);
+    vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+    let done = Promise.resolve();
+    try {
+      const response = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
+        {
+          method: "POST",
+          headers: {
+            origin: entry.baseUrl,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+          }
+        }
+      );
+      expect(response.status).toBe(202);
+      expect(await response.json()).toMatchObject({
+        operationId: op.operationId
+      });
+      done = new Promise<void>((resolve) => {
+        const stop = owner.onEnvironmentTasksSettled("cleanup", () => {
+          stop();
+          resolve();
+        });
+      });
+      await waiting;
+      owner.shutdown();
+      release();
+      await done;
+      expect(run).not.toHaveBeenCalled();
+      expect(op.endedAt).toBeNull();
+      expect(op.control.commands.at(-1)?.state).toBe("running");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+    } finally {
+      release();
+      await done;
+      owner.shutdown();
+      await runtime.stopServer("cleanup", true);
+    }
+  });
+
   it.each(["open", "closed-before-account", "closed-during-read"] as const)(
     "keeps shared verification observation alive across panel closure (%s)",
     async (lifetime) => {
