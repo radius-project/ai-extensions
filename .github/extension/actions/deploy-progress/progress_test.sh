@@ -28,7 +28,7 @@ cat >"${TEST_ROOT}/bin/rad" <<'EOF'
 set -euo pipefail
 
 printf '%s\n' "$*" >>"${RAD_CALLS}"
-[[ "$*" == "resource list --preview --application todo --output json" ]]
+[[ "$*" == "resource list --application todo --output json" ]]
 [[ "${RAD_SHOULD_FAIL:-false}" != "true" ]]
 cat "${RAD_RESPONSE_FILE}"
 EOF
