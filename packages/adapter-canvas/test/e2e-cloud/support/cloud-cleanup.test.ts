@@ -12,6 +12,7 @@ import {
   selectLeakedClusterWorkloads,
   selectReclaimableGroupResources,
   selectOpenPullRequestHeadRefs,
+  selectPrefixedEnvironments,
   selectStaleStatePackages,
   selectTestResourceGroups
 } from "./cloud-cleanup.js";
@@ -278,6 +279,46 @@ describe("selectExpiredEnvironments", () => {
     );
     expect(() => selectExpiredEnvironments(null, "radtest-", CUTOFF)).toThrow(
       "did not return a JSON array"
+    );
+  });
+
+  it("refuses a blank prefix, which would select every environment", () => {
+    expect(() =>
+      selectExpiredEnvironments([{ environments: [] }], " ", CUTOFF)
+    ).toThrow("An environment prefix is required");
+  });
+});
+
+describe("selectPrefixedEnvironments", () => {
+  // A cleanup with max_age_hours=0 and the clean-slate check both need every
+  // leaked environment, so age and unreadable timestamps must not hide one.
+  it("selects every prefixed environment across pages, whatever its age", () => {
+    expect(
+      selectPrefixedEnvironments(
+        [
+          {
+            environments: [
+              { name: "radtest-old", created_at: OLD },
+              { name: "radtest-new", created_at: NEW },
+              { name: "production", created_at: OLD }
+            ]
+          },
+          { environments: [{ name: "radtest-undated" }, { name: 42 }, null] }
+        ],
+        "radtest-"
+      )
+    ).toEqual(["radtest-old", "radtest-new", "radtest-undated"]);
+  });
+
+  it("rejects malformed input and a blank prefix", () => {
+    expect(() => selectPrefixedEnvironments([{}], "radtest-")).toThrow(
+      "GitHub Environments page did not include an environments array"
+    );
+    expect(() => selectPrefixedEnvironments({}, "radtest-")).toThrow(
+      "did not return a JSON array"
+    );
+    expect(() => selectPrefixedEnvironments([], "")).toThrow(
+      "An environment prefix is required"
     );
   });
 });

@@ -265,13 +265,16 @@ export function selectAppIdsWithUnprocessedServicePrincipals(
   return [...blocked];
 }
 
-export function selectExpiredEnvironments(
+function prefixedEnvironmentEntries(
   payload: unknown,
-  prefix: string,
-  cutoff: string
-): string[] {
-  const cutoffMilliseconds = requireCutoff(cutoff);
-  const names: string[] = [];
+  prefix: string
+): Array<{ readonly name: string; readonly createdAt: unknown }> {
+  if (!prefix.trim())
+    throw new Error(
+      "An environment prefix is required to select environments."
+    );
+  const entries: Array<{ readonly name: string; readonly createdAt: unknown }> =
+    [];
   for (const page of requireArray(payload, "GitHub Environments")) {
     const environments = asRecord(page)?.environments;
     if (!Array.isArray(environments))
@@ -280,15 +283,37 @@ export function selectExpiredEnvironments(
       );
     for (const entry of environments) {
       const item = asRecord(entry);
-      if (
-        typeof item?.name === "string" &&
-        item.name.startsWith(prefix) &&
-        expired(item.created_at, cutoffMilliseconds)
-      )
-        names.push(item.name);
+      if (typeof item?.name === "string" && item.name.startsWith(prefix))
+        entries.push({ name: item.name, createdAt: item.created_at });
     }
   }
-  return names;
+  return entries;
+}
+
+export function selectExpiredEnvironments(
+  payload: unknown,
+  prefix: string,
+  cutoff: string
+): string[] {
+  const cutoffMilliseconds = requireCutoff(cutoff);
+  return prefixedEnvironmentEntries(payload, prefix)
+    .filter((entry) => expired(entry.createdAt, cutoffMilliseconds))
+    .map((entry) => entry.name);
+}
+
+/**
+ * Every GitHub Environment with the suite's prefix, whatever its age.
+ *
+ * The Canvas wizard refuses to create an environment in a namespace that a
+ * listed environment already owns. So one leaked `radtest-*` environment blocks
+ * every later run, and the clean-slate check and the cleanup's final
+ * verification must see all of them, not only expired ones.
+ */
+export function selectPrefixedEnvironments(
+  payload: unknown,
+  prefix: string
+): string[] {
+  return prefixedEnvironmentEntries(payload, prefix).map((entry) => entry.name);
 }
 
 // Deleting a GitHub Environment does not delete the deployment records that

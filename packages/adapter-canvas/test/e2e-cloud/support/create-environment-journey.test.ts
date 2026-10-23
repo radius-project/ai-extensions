@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TERMINAL_STATES } from "../../../src/operations.js";
 import {
+  awaitRequestOrRefusal,
   classifyWorkflowPublication,
   cloudCanvasState,
   describeWorkflowPublication,
@@ -903,6 +904,60 @@ describe("readOperationHttpResponse", () => {
     ).toThrow(
       /operation status request returned output that is not valid JSON/
     );
+  });
+});
+
+describe("awaitRequestOrRefusal", () => {
+  const pending = <T>(): Promise<T> => new Promise<T>(() => undefined);
+
+  it("returns the response when the request is sent", async () => {
+    await expect(
+      awaitRequestOrRefusal(
+        Promise.resolve("response"),
+        pending<string>(),
+        "Create Environment"
+      )
+    ).resolves.toBe("response");
+  });
+
+  // Run 39901220095 waited 30 minutes for a request the wizard never sent.
+  it("fails at once with the page's error when the click is refused", async () => {
+    await expect(
+      awaitRequestOrRefusal(
+        pending<string>(),
+        Promise.resolve(
+          '  Namespace "default" on cluster "aks" already belongs to environment "radtest-old".  '
+        ),
+        "Create Environment"
+      )
+    ).rejects.toThrow(
+      'Create Environment was refused before any request was sent: Namespace "default" on cluster "aks" already belongs to environment "radtest-old".'
+    );
+  });
+
+  it("describes an empty refusal message", async () => {
+    await expect(
+      awaitRequestOrRefusal(pending<string>(), Promise.resolve(" "), "Save")
+    ).rejects.toThrow(
+      "Save was refused before any request was sent: the page showed an empty error."
+    );
+  });
+
+  it("lets the response decide when the refusal cannot be read", async () => {
+    await expect(
+      awaitRequestOrRefusal(
+        Promise.resolve("response"),
+        Promise.reject(new Error("page closed")),
+        "Create Environment"
+      )
+    ).resolves.toBe("response");
+    await expect(
+      awaitRequestOrRefusal(
+        Promise.reject(new Error("request failed")),
+        Promise.reject(new Error("page closed")),
+        "Create Environment"
+      )
+    ).rejects.toThrow("request failed");
   });
 });
 
