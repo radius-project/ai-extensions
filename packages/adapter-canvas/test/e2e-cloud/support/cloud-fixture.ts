@@ -36,6 +36,7 @@ import {
   clusterName as buildClusterName,
   cloudE2ELeaseCommitMessage,
   CLOUD_E2E_LEASE_REF,
+  ENVIRONMENT_NAME_PREFIX,
   environmentName as buildEnvironmentName,
   FIXTURE_BASELINE_SHA,
   FIXTURE_RADIUS_ENVIRONMENT_NAMESPACE,
@@ -56,6 +57,7 @@ import {
   type KubernetesWorkload
 } from "./deploy-journey.js";
 import { DELETE_OPERATION_TIMEOUT_MS } from "./cloud-timeout-budget.js";
+import { selectPrefixedEnvironments } from "./cloud-cleanup.js";
 import {
   findNewWorkflowRunId,
   readWorkflowRunIds
@@ -2061,6 +2063,32 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
       `Could not probe GitHub environment "${input.environmentName}" in ${repository}: ` +
         `gh exited ${environment.code}: ${(environment.stderr || environment.stdout).trim()}`
     );
+
+  // The run's own name is unique, so the probe above never sees an environment
+  // an earlier run leaked. The wizard does: it refuses to create an environment
+  // in a namespace that any listed environment owns. One leaked `radtest-*`
+  // environment therefore blocks the create step, so it is leaked state here.
+  const listingContext = `Listing GitHub environments in ${repository}`;
+  const listing = await commands.runGh([
+    "api",
+    "--paginate",
+    "--slurp",
+    `repos/${repository}/environments?per_page=100`
+  ]);
+  expectSuccess(listing, listingContext);
+  if (!listing.stdout.trim())
+    throw new Error(
+      `${listingContext} returned an empty response instead of JSON.`
+    );
+  for (const name of selectPrefixedEnvironments(
+    parseJsonArray(listing, listingContext),
+    ENVIRONMENT_NAME_PREFIX
+  ))
+    if (name !== input.environmentName)
+      findings.push(
+        `GitHub environment "${name}" in ${repository} from an earlier run ` +
+          "(the product refuses to create an environment in a namespace another environment owns)"
+      );
 
   const statePackage = await readStatePackage(
     commands,
