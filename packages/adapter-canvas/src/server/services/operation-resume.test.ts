@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../test/support/browser/fakes.js";
 import {
   canResumeInput,
   createOperation,
@@ -57,6 +58,80 @@ function fixture(overrides: Partial<OperationResumeDependencies> = {}) {
 }
 
 describe("direct operation input continuation", () => {
+  describe.each(["input", "persist", "persist-rejection"] as const)(
+    "identity changes during %s",
+    (phase) => {
+      it.each([
+        "removed",
+        "replaced",
+        "id",
+        "repository",
+        "environment"
+      ] as const)(
+        "rejects a %s operation without publishing acceptance or touching the new target",
+        async (change) => {
+          const entered = createDeferred<void>();
+          const held = createDeferred<void>();
+          const { operation, dependencies, input, readInput } = fixture();
+          let current: OperationActionRecord | undefined = operation;
+          dependencies.getOperation = () => current;
+          dependencies.persistOperations = vi.fn(async () => {
+            if (phase !== "input") {
+              entered.resolve();
+              await held.promise;
+              if (phase === "persist-rejection")
+                throw new Error("store offline");
+            }
+          });
+          const publish = vi.fn();
+          const pending = createOperationResumeService(dependencies)(
+            input,
+            async () => {
+              if (phase === "input") {
+                entered.resolve();
+                await held.promise;
+              }
+              return readInput();
+            },
+            publish
+          );
+          try {
+            await entered.promise;
+            if (change === "removed") current = undefined;
+            else if (change === "replaced")
+              current = structuredClone(operation);
+            else if (change === "id") operation.operationId = "replacement-id";
+            else if (change === "repository") operation.repo = "other/repo";
+            else operation.environment = "production";
+            const originalBefore = structuredClone(operation);
+            const currentBefore = structuredClone(current);
+            held.resolve();
+            const result = await pending;
+            expect(result).toMatchObject({
+              status: 409,
+              body: {
+                code: "operation-resume-mismatch",
+                operationId: input.operationId
+              }
+            });
+            expect(publish).toHaveBeenCalledExactlyOnceWith(result);
+            expect(operation).toEqual(originalBefore);
+            expect(current).toEqual(currentBefore);
+            expect(dependencies.persistOperations).toHaveBeenCalledTimes(
+              phase === "input" ? 0 : 1
+            );
+            expect(
+              dependencies.scheduleEnvironmentOperation
+            ).not.toHaveBeenCalled();
+          } finally {
+            held.resolve();
+            await pending;
+          }
+        }
+      );
+    }
+  );
+
   it("reports shutdown without terminalizing a durably resumed operation", async () => {
     let shuttingDown = false;
     const { operation, dependencies, input, readInput } = fixture({
