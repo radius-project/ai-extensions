@@ -255,6 +255,25 @@ async function run(
   return recording;
 }
 
+async function runRegistered(
+  routeKey: string,
+  path: string,
+  body: string,
+  deps: IdentityAuthDependencies
+): Promise<Recording> {
+  const { recording, response } = recorder();
+  const context = createRequestContext(
+    request("POST", path, body),
+    response,
+    "panel-a",
+    new Map<string, CanvasServerEntry>()
+  );
+  const handler = createIdentityAuthRoutes(deps)[routeKey];
+  if (!handler) throw new Error(`missing registered route: ${routeKey}`);
+  await handler(context);
+  return recording;
+}
+
 const SET_THEN_WRITE = (status: number) => [
   "set:Content-Type=application/json",
   `writeHead:${status}`,
@@ -269,6 +288,33 @@ describe("identity-auth routes (SU-08)", () => {
       "POST /api/azure-cli-assist",
       "POST /api/verify-aws-login"
     ]);
+  });
+
+  it.each([
+    {
+      routeKey: "POST /api/verify-azure-login",
+      path: "/api/verify-azure-login",
+      body: "{}"
+    },
+    {
+      routeKey: "POST /api/azure-cli-assist",
+      path: "/api/azure-cli-assist",
+      body: "{}"
+    },
+    {
+      routeKey: "POST /api/verify-aws-login",
+      path: "/api/verify-aws-login",
+      body: "{}"
+    }
+  ])("serves $routeKey through its registered handler", async (testCase) => {
+    const recording = await runRegistered(
+      testCase.routeKey,
+      testCase.path,
+      testCase.body,
+      dependencies()
+    );
+    expect(recording.status).toBe(200);
+    expect(recording.headerSteps).toEqual(SET_THEN_WRITE(200));
   });
 
   // ── POST /api/verify-azure-login ──────────────────────────────────────────
@@ -430,6 +476,28 @@ describe("identity-auth routes (SU-08)", () => {
       deps
     );
     expect(JSON.parse(recording.body)).toHaveProperty("success", true);
+  });
+
+  it("uses an empty user when Azure omits the account user", async () => {
+    const recording = await run(
+      "/api/verify-azure-login",
+      "{}",
+      handleVerifyAzureLogin,
+      dependencies({
+        runCommand: () =>
+          Promise.resolve(
+            JSON.stringify({
+              tenantId: TENANT_A,
+              id: SUBSCRIPTION,
+              name: SUBSCRIPTION_NAME
+            })
+          )
+      })
+    );
+    expect(JSON.parse(recording.body)).toMatchObject({
+      success: true,
+      user: ""
+    });
   });
 
   it("answers a malformed body with 200 and the injected formatter", async () => {
@@ -596,6 +664,31 @@ describe("identity-auth routes (SU-08)", () => {
     expect(recording.body).toBe('{"error":"session gone"}');
   });
 
+  it.each([
+    {
+      reason: "session rejected",
+      expectedError: "session rejected"
+    },
+    {
+      reason: undefined,
+      expectedError: "Bad request."
+    }
+  ])(
+    "400s a session prompt rejection without an Error object",
+    async ({ reason, expectedError }) => {
+      const recording = await run(
+        "/api/azure-cli-assist",
+        "{}",
+        handleAzureCliAssist,
+        dependencies({
+          runSessionPrompt: () => Promise.reject(reason)
+        })
+      );
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({ error: expectedError });
+    }
+  );
+
   // ── POST /api/verify-aws-login ────────────────────────────────────────────
 
   it("reports the caller identity from an existing aws session", async () => {
@@ -638,6 +731,24 @@ describe("identity-auth routes (SU-08)", () => {
     expect(JSON.parse(recording.body)).toEqual({
       success: true,
       accountId: "submitted-account",
+      arn: "",
+      user: "",
+      region: ""
+    });
+  });
+
+  it("accepts an empty body and leaves an absent AWS account empty", async () => {
+    const recording = await run(
+      "/api/verify-aws-login",
+      "",
+      handleVerifyAwsLogin,
+      dependencies({
+        runCommand: () => Promise.resolve("{}")
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      success: true,
+      accountId: "",
       arn: "",
       user: "",
       region: ""

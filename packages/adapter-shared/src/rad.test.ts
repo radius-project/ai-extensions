@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import https from "node:https";
+import crypto from "node:crypto";
 import { ClientRequest, IncomingMessage } from "node:http";
 import { Socket } from "node:net";
 import {
@@ -79,10 +80,10 @@ function resetManagedBin(): void {
   fs.rmSync(path.dirname(MANAGED_RAD_PATH), { recursive: true, force: true });
 }
 
-function writeManagedBicepStub(): void {
-  fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
-  fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
-  if (process.platform !== "win32") fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+function writeManagedBicepStub(bicepPath: string = MANAGED_BICEP_PATH): void {
+  fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
+  fs.writeFileSync(bicepPath, "bicep");
+  if (process.platform !== "win32") fs.chmodSync(bicepPath, 0o755);
 }
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
@@ -92,6 +93,8 @@ interface FakeHttpResponse {
   statusCode?: number;
   headers?: Record<string, string>;
   body?: string;
+  requestError?: Error;
+  responseError?: Error;
 }
 
 /** Narrows `options.env.BICEP` to a string, asserting the invariant that
@@ -107,15 +110,17 @@ function requireBicepEnvPath(options: SpawnRadOptions): string {
 
 function mockHttpsGet(
   responses: Record<string, FakeHttpResponse>,
-  calls: string[]
+  calls: string[],
+  optionsCalls: https.RequestOptions[] = []
 ) {
   const implementation = (
     url: string | URL,
-    _options: https.RequestOptions,
+    options: https.RequestOptions,
     callback?: (res: IncomingMessage) => void
   ) => {
     const key = String(url);
     calls.push(key);
+    optionsCalls.push(options);
     const response = responses[key];
     if (!response) throw new Error(`Unexpected URL: ${key}`);
     if (!callback) throw new Error("mockHttpsGet requires a callback");
@@ -124,6 +129,10 @@ function mockHttpsGet(
       host: "fixture.invalid",
       createConnection: () => new Socket()
     });
+    if (response.requestError) {
+      process.nextTick(() => req.emit("error", response.requestError));
+      return req;
+    }
     const resp = new IncomingMessage(new Socket());
     resp.statusCode = response.statusCode ?? 200;
     resp.headers = response.headers ?? {};
@@ -131,6 +140,10 @@ function mockHttpsGet(
       callback(resp);
       if (response.body !== undefined) {
         resp.emit("data", Buffer.from(response.body));
+      }
+      if (response.responseError) {
+        resp.emit("error", response.responseError);
+        return;
       }
       resp.emit("end");
       req.destroy();
@@ -320,6 +333,61 @@ describe("managed Bicep", () => {
       ensureManagedBicep("managed-rad", { bicepPath, run })
     ).resolves.toBe(bicepPath);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts the completed binary published by another downloader", async () => {
+    const bicepPath = path.join(tmp, "bin", BICEP);
+    const lockPath = `${bicepPath}.download.lock`;
+    fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
+    fs.writeFileSync(lockPath, "peer");
+    const run = vi.fn();
+    setTimeout(() => {
+      fs.writeFileSync(bicepPath, "complete-bicep");
+      if (process.platform !== "win32") fs.chmodSync(bicepPath, 0o755);
+      fs.rmSync(lockPath, { force: true });
+    }, 20);
+
+    await expect(
+      ensureManagedBicep("managed-rad", { bicepPath, run })
+    ).resolves.toBe(bicepPath);
+    expect(run).not.toHaveBeenCalled();
+    expect(fs.readFileSync(bicepPath, "utf8")).toBe("complete-bicep");
+  });
+
+  it("times out when another Bicep downloader never releases its lock", async () => {
+    vi.useFakeTimers();
+    const bicepPath = path.join(tmp, "bin", BICEP);
+    const lockPath = `${bicepPath}.download.lock`;
+    fs.mkdirSync(path.dirname(bicepPath), { recursive: true });
+    fs.writeFileSync(lockPath, "peer");
+    const run = vi.fn();
+
+    try {
+      const pending = ensureManagedBicep("managed-rad", { bicepPath, run });
+      await vi.advanceTimersByTimeAsync(120000);
+      await expect(pending).rejects.toThrow(
+        `Timed out waiting for another process to create ${bicepPath}`
+      );
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans its temporary file and lock when the downloader rejects a non-Error value", async () => {
+    const bicepPath = path.join(tmp, "bin", BICEP);
+
+    await expect(
+      ensureManagedBicep("managed-rad", {
+        bicepPath,
+        run: async () => Promise.reject("download refused")
+      })
+    ).rejects.toBe("download refused");
+    expect(
+      fs
+        .readdirSync(path.dirname(bicepPath))
+        .filter((name) => name.includes(".download"))
+    ).toEqual([]);
   });
 });
 
@@ -805,7 +873,7 @@ it("rejects a managed edge binary before honoring a repository extension or invo
     vi.resetModules();
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
+}, 10000);
 
 describe("resolveRadForGraph", () => {
   const RELEASES_API = `https://api.github.com/repos/radius-project/radius/releases/tags/${RADIUS_RELEASE_TAG}`;
@@ -1022,6 +1090,45 @@ describe("resolveInstalledRadiusVersion", () => {
   });
 
   const itPosix = process.platform === "win32" ? it.skip : it;
+  const itWindows = process.platform === "win32" ? it : it.skip;
+
+  itWindows(
+    "reads the pinned release through the Windows executable boundary",
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-version-win-"));
+      const preload = path.join(root, "fake-version.cjs");
+      const previousNodeOptions = process.env.NODE_OPTIONS;
+      try {
+        fs.writeFileSync(
+          preload,
+          [
+            'require("node:module").runMain = () => {',
+            `  process.stdout.write(JSON.stringify({ release: ${JSON.stringify(RADIUS_RELEASE_TAG)} }));`,
+            "};"
+          ].join("\n")
+        );
+        const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+        process.env.NODE_OPTIONS =
+          previousNodeOptions ?
+            `${previousNodeOptions} ${preloadOption}`
+          : preloadOption;
+        process.env.RADIUS_RAD_BINARY = process.execPath;
+        process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+        vi.resetModules();
+        const mod = await import("./rad.js");
+
+        await expect(mod.resolveInstalledRadiusVersion()).resolves.toBe(
+          radiusVersionFromExtensionRef(
+            radiusExtensionRefForRelease(RADIUS_RELEASE_TAG)
+          )
+        );
+      } finally {
+        if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+        else process.env.NODE_OPTIONS = previousNodeOptions;
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  );
 
   // The interleaving the extension produces: the session is attached, a graph
   // opens, and only then does the load-time warm-up start. The canvas keeps
@@ -1179,11 +1286,7 @@ describe("buildGraphViaRad", () => {
       process.env.TMPDIR = root;
       vi.resetModules();
       mod = await import("./rad.js");
-      fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
-      fs.writeFileSync(mod.MANAGED_BICEP_PATH, "bicep");
-      if (process.platform !== "win32") {
-        fs.chmodSync(mod.MANAGED_BICEP_PATH, 0o755);
-      }
+      writeManagedBicepStub(mod.MANAGED_BICEP_PATH);
     });
 
     afterEach(() => {
@@ -1411,6 +1514,21 @@ describe("runRadAppGraph artifact completion", () => {
         'const { spawn } = require("node:child_process");',
         'fs.writeFileSync("app", "");',
         'if (process.argv[1]?.endsWith("app")) {',
+        '  if (process.env.FAKE_RAD_SCENARIO === "hang") {',
+        "    setInterval(() => {}, 5000);",
+        "    return;",
+        "  }",
+        '  if (process.env.FAKE_RAD_SCENARIO === "output-failure") {',
+        '    process.stdout.write("BCP204 from stdout");',
+        '    process.stderr.write("fatal stderr");',
+        "    process.exit(9);",
+        "    return;",
+        "  }",
+        '  if (process.env.FAKE_RAD_SCENARIO === "success-no-descendant") {',
+        '    fs.writeFileSync("app-graph.json", JSON.stringify({ resources: [] }));',
+        "    process.exit(0);",
+        "    return;",
+        "  }",
         '  fs.writeFileSync("app-graph.json", "{");',
         "  setTimeout(() => {",
         '    fs.writeFileSync("app-graph.json", process.env.FAKE_RAD_GRAPH || JSON.stringify({ resources: [] }));',
@@ -1418,7 +1536,8 @@ describe("runRadAppGraph artifact completion", () => {
         '      process.stderr.write("late graph diagnostic");',
         "      process.exit(3);",
         "    }",
-        '    spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "inherit" });',
+        '    const childOptions = process.env.FAKE_RAD_SCENARIO === "grace" ? { stdio: "inherit", env: { ...process.env, NODE_OPTIONS: "" } } : { stdio: "inherit" };',
+        '    spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], childOptions);',
         "    process.exit(0);",
         "  }, 300);",
         "}",
@@ -1637,6 +1756,106 @@ describe("runRadAppGraph artifact completion", () => {
     expect((failure as Error).message).not.toContain(sentinel);
     expect(fs.existsSync(saved)).toBe(false);
   }, 10000);
+
+  it("reports a spawn failure and removes the temporary graph directory", async () => {
+    const bicepFile = path.join(binDir, "app.bicep");
+    const missing = path.join(binDir, "missing-rad.exe");
+    fs.writeFileSync(bicepFile, "resource app {}");
+    const removed: string[] = [];
+    const originalRmSync = fs.rmSync;
+    const rmSpy = vi
+      .spyOn(fs, "rmSync")
+      .mockImplementation((target, options) => {
+        if (
+          typeof target === "string" &&
+          path.basename(target).startsWith("rad-graph-")
+        ) {
+          removed.push(target);
+        }
+        return originalRmSync(target, options);
+      });
+
+    try {
+      await expect(
+        runRadAppGraph(bicepFile, { radPath: missing, timeout: 1000 })
+      ).rejects.toThrow(/rad app graph failed/iu);
+      expect(removed).toHaveLength(1);
+      expect(fs.existsSync(removed[0])).toBe(false);
+    } finally {
+      rmSpy.mockRestore();
+    }
+  });
+
+  it("times out a non-responsive graph process and cleans its workspace", async () => {
+    process.env.FAKE_RAD_SCENARIO = "hang";
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(bicepFile, "resource app {}");
+
+    await expect(
+      runRadAppGraph(bicepFile, {
+        radPath: bin,
+        timeout: 100,
+        processPlatform: process.platform
+      })
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("timed out after 100ms"),
+      cause: expect.objectContaining({
+        message: expect.stringContaining("timed out after 100ms")
+      })
+    });
+  }, 10000);
+
+  it("preserves both streams while preferring stderr in a failed graph diagnostic", async () => {
+    process.env.FAKE_RAD_SCENARIO = "output-failure";
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(bicepFile, "resource app {}");
+
+    const failure = await runRadAppGraph(bicepFile, {
+      radPath: bin
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("fatal stderr");
+    expect((failure as Error).cause).toMatchObject({
+      stdout: "BCP204 from stdout",
+      stderr: "fatal stderr"
+    });
+  });
+
+  it("warns and ignores a relative artifact destination after a successful graph", async () => {
+    process.env.FAKE_RAD_SCENARIO = "success-no-descendant";
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(bicepFile, "resource app {}");
+    const log = vi.fn();
+
+    await expect(
+      runRadAppGraph(bicepFile, {
+        radPath: bin,
+        saveGraphJsonTo: path.join(".radius", "app-graph.json"),
+        log
+      })
+    ).resolves.toEqual({ resources: [] });
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "saveGraphJsonTo must be an absolute path; ignoring"
+      )
+    );
+  });
+
+  it("uses the bounded post-exit grace when inherited stdio delays close", async () => {
+    process.env.FAKE_RAD_SCENARIO = "grace";
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(bicepFile, "resource app {}");
+
+    await expect(
+      runRadAppGraph(bicepFile, {
+        radPath: bin,
+        processPlatform: "linux",
+        exitCloseGraceMs: 20,
+        timeout: 4000
+      })
+    ).resolves.toEqual({ resources: [] });
+  }, 10000);
 });
 
 describe("writeBicepCompileConfig", () => {
@@ -1715,6 +1934,51 @@ describe("writeBicepCompileConfig", () => {
     expect(cfg.extensions.customTypes).toBe("./custom-types.tgz");
     expect(fs.readFileSync(path.join(dir, "custom-types.tgz"), "utf8")).toBe(
       "TGZBYTES"
+    );
+  });
+
+  it("keeps a missing local extension alias while reporting that no artifact was copied", () => {
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({
+        extensions: {
+          radius: DERIVED,
+          customTypes: "./missing/custom-types.tgz"
+        }
+      })
+    );
+    const log = vi.fn();
+
+    writeBicepCompileConfig(dir, ws, log, DERIVED);
+
+    expect(readConfig().extensions.customTypes).toBe(
+      "./missing/custom-types.tgz"
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("extension artifact not found, skipping copy")
+    );
+  });
+
+  it("keeps a local extension alias when its destination cannot be created", () => {
+    const ref = "./nested/custom-types.tgz";
+    fs.mkdirSync(path.join(ws, "nested"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "nested", "custom-types.tgz"), "TGZBYTES");
+    fs.writeFileSync(path.join(dir, "nested"), "destination collision");
+    fs.writeFileSync(
+      path.join(ws, "bicepconfig.json"),
+      JSON.stringify({
+        extensions: {
+          radius: DERIVED,
+          customTypes: ref
+        }
+      })
+    );
+    const log = vi.fn();
+
+    expect(() => writeBicepCompileConfig(dir, ws, log, DERIVED)).not.toThrow();
+    expect(readConfig().extensions.customTypes).toBe(ref);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(`could not copy extension artifact ${ref}`)
     );
   });
 
@@ -2109,6 +2373,668 @@ describe("bicep publish arg builders", () => {
   });
 });
 
+describe("managed Bicep publishing", () => {
+  let root: string;
+  let preload: string;
+  let invocation: string;
+  let previousBinary: string | undefined;
+  let previousSkipCheck: string | undefined;
+  let previousNodeOptions: string | undefined;
+  let previousScenario: string | undefined;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-publish-"));
+    preload = path.join(root, "fake-rad.cjs");
+    invocation = path.join(root, "invocation.json");
+    previousBinary = process.env.RADIUS_RAD_BINARY;
+    previousSkipCheck = process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    previousNodeOptions = process.env.NODE_OPTIONS;
+    previousScenario = process.env.FAKE_RAD_PUBLISH_SCENARIO;
+    process.env.RADIUS_RAD_BINARY = process.execPath;
+    process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+    fs.writeFileSync(
+      preload,
+      [
+        'const fs = require("node:fs");',
+        'require("node:module").runMain = () => {',
+        `  fs.writeFileSync(${JSON.stringify(invocation)}, JSON.stringify({ argv: process.argv.slice(1), cwd: process.cwd(), bicep: process.env.BICEP, registryToken: process.env.REGISTRY_TOKEN }));`,
+        '  if (process.env.FAKE_RAD_PUBLISH_SCENARIO === "stderr") {',
+        '    process.stderr.write("registry denied");',
+        "    process.exitCode = 7;",
+        "  }",
+        '  if (process.env.FAKE_RAD_PUBLISH_SCENARIO === "stdout") {',
+        '    process.stdout.write("BCP192: invalid manifest");',
+        "    process.exitCode = 8;",
+        "  }",
+        '  if (process.env.FAKE_RAD_PUBLISH_SCENARIO === "silent") {',
+        "    process.exitCode = 9;",
+        "  }",
+        "};"
+      ].join("\n")
+    );
+    const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+    process.env.NODE_OPTIONS =
+      previousNodeOptions ?
+        `${previousNodeOptions} ${preloadOption}`
+      : preloadOption;
+    writeManagedBicepStub();
+  });
+
+  afterEach(() => {
+    if (previousBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+    else process.env.RADIUS_RAD_BINARY = previousBinary;
+    if (previousSkipCheck === undefined)
+      delete process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    else process.env.RADIUS_RAD_SKIP_VERSION_CHECK = previousSkipCheck;
+    if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previousNodeOptions;
+    if (previousScenario === undefined)
+      delete process.env.FAKE_RAD_PUBLISH_SCENARIO;
+    else process.env.FAKE_RAD_PUBLISH_SCENARIO = previousScenario;
+    vi.resetModules();
+    resetManagedBin();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("publishes a local extension with resolved paths and the managed Bicep environment", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    writeManagedBicepStub();
+    const fromFile = path.join(root, "types", "manifest.yaml");
+    const target = path.join(root, "artifacts", "custom-types.tgz");
+    fs.mkdirSync(path.dirname(fromFile), { recursive: true });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(fromFile, "namespace: Radius.Resources");
+
+    await expect(
+      mod.runRadBicepPublishExtension({
+        fromFile,
+        target,
+        timeout: 4321
+      })
+    ).resolves.toBe(path.resolve(target));
+
+    expect(JSON.parse(fs.readFileSync(invocation, "utf8"))).toEqual({
+      argv: [
+        path.join(path.dirname(path.resolve(target)), "bicep"),
+        "publish-extension",
+        "--from-file",
+        path.resolve(fromFile),
+        "--target",
+        path.resolve(target),
+        "--force"
+      ],
+      cwd: path.dirname(path.resolve(target)),
+      bicep: mod.MANAGED_BICEP_PATH
+    });
+  });
+
+  it("publishes a Bicep module with caller authentication isolated in the child environment", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    writeManagedBicepStub();
+    const file = path.join(root, "modules", "recipe.bicep");
+    const target = "br:registry.invalid/acme/recipe:v1";
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "param environment string");
+
+    await expect(
+      mod.runRadBicepPublish({
+        file,
+        target,
+        env: { REGISTRY_TOKEN: "fixture-token" }
+      })
+    ).resolves.toBe(target);
+
+    expect(JSON.parse(fs.readFileSync(invocation, "utf8"))).toEqual({
+      argv: [
+        path.join(path.dirname(path.resolve(file)), "bicep"),
+        "publish",
+        "--file",
+        path.resolve(file),
+        "--target",
+        target
+      ],
+      cwd: path.dirname(path.resolve(file)),
+      bicep: mod.MANAGED_BICEP_PATH,
+      registryToken: "fixture-token"
+    });
+  });
+
+  it.each([
+    [
+      "publish-extension",
+      "stdout",
+      "BCP192: invalid manifest",
+      async (mod: typeof import("./rad.js")) =>
+        mod.runRadBicepPublishExtension({
+          fromFile: path.join(root, "manifest.yaml"),
+          target: path.join(root, "extension.tgz")
+        })
+    ],
+    [
+      "publish",
+      "stderr",
+      "registry denied",
+      async (mod: typeof import("./rad.js")) =>
+        mod.runRadBicepPublish({
+          file: path.join(root, "recipe.bicep"),
+          target: "br:registry.invalid/acme/recipe:v1"
+        })
+    ],
+    [
+      "publish",
+      "silent",
+      "rad bicep publish exited with code 9",
+      async (mod: typeof import("./rad.js")) =>
+        mod.runRadBicepPublish({
+          file: path.join(root, "recipe.bicep"),
+          target: "br:registry.invalid/acme/recipe:v1"
+        })
+    ]
+  ])(
+    "surfaces %s diagnostics from %s",
+    async (_command, scenario, detail, invoke) => {
+      process.env.FAKE_RAD_PUBLISH_SCENARIO = scenario;
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      writeManagedBicepStub();
+
+      const failure = await invoke(mod).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(detail);
+      expect((failure as Error).cause).toMatchObject({
+        message: expect.stringMatching(/exited with code [789]/u)
+      });
+    }
+  );
+});
+
+describe("managed rad download and reconciliation boundaries", () => {
+  const RELEASES_API = `https://api.github.com/repos/radius-project/radius/releases/tags/${RADIUS_RELEASE_TAG}`;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of [
+      "RADIUS_RAD_BINARY",
+      "RADIUS_RAD_SKIP_VERSION_CHECK",
+      "RADIUS_RAD_SHA256",
+      "NODE_OPTIONS",
+      "GITHUB_TOKEN",
+      "GH_TOKEN"
+    ]) {
+      savedEnv[key] = process.env[key];
+    }
+    delete process.env.RADIUS_RAD_BINARY;
+    delete process.env.RADIUS_RAD_SKIP_VERSION_CHECK;
+    delete process.env.RADIUS_RAD_SHA256;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    resetManagedBin();
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    vi.resetModules();
+    vi.restoreAllMocks();
+    resetManagedBin();
+  });
+
+  it("downloads and installs bytes that match the pinned release digest", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const body = Buffer.from("offline rad fixture");
+    const digest = crypto.createHash("sha256").update(body).digest("hex");
+    const asset = mod.releaseAsset();
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`;
+    const calls: string[] = [];
+    mockHttpsGet(
+      {
+        [RELEASES_API]: {
+          body: JSON.stringify({
+            tag_name: RADIUS_RELEASE_TAG,
+            assets: [{ name: asset, digest: `sha256:${digest}` }]
+          })
+        },
+        [downloadUrl]: { body: body.toString("utf8") }
+      },
+      calls
+    );
+    writeManagedBicepStub();
+    const logs: string[] = [];
+
+    await expect(
+      mod.ensureRadBinary({ log: (message) => logs.push(message) })
+    ).resolves.toBe(mod.MANAGED_RAD_PATH);
+
+    expect(fs.readFileSync(mod.MANAGED_RAD_PATH)).toEqual(body);
+    expect(calls).toEqual([RELEASES_API, downloadUrl]);
+    expect(logs).toContain(
+      `Installed rad to ${mod.MANAGED_RAD_PATH} (verified against GitHub release digest)`
+    );
+  });
+
+  it("rejects a checksum mismatch without publishing or retaining download files", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const asset = mod.releaseAsset();
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`;
+    mockHttpsGet(
+      {
+        [RELEASES_API]: {
+          body: JSON.stringify({
+            tag_name: RADIUS_RELEASE_TAG,
+            assets: [{ name: asset, digest: `sha256:${"0".repeat(64)}` }]
+          })
+        },
+        [downloadUrl]: { body: "corrupted fixture" }
+      },
+      []
+    );
+
+    await expect(mod.ensureRadBinary()).rejects.toThrow(
+      /failed SHA-256 verification.*GitHub release digest/iu
+    );
+    const binDir = path.dirname(mod.MANAGED_RAD_PATH);
+    expect(fs.existsSync(mod.MANAGED_RAD_PATH)).toBe(false);
+    expect(
+      fs.existsSync(binDir) ?
+        fs.readdirSync(binDir).filter((name) => name.includes(".download"))
+      : []
+    ).toEqual([]);
+  });
+
+  it("follows release redirects and tolerates unrelated malformed assets", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const redirectedApi = "https://fixtures.invalid/releases/pinned";
+    const asset = mod.releaseAsset();
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`;
+    const calls: string[] = [];
+    mockHttpsGet(
+      {
+        [RELEASES_API]: {
+          statusCode: 302,
+          headers: { location: redirectedApi }
+        },
+        [redirectedApi]: {
+          body: JSON.stringify({
+            tag_name: RADIUS_RELEASE_TAG,
+            assets: [
+              null,
+              {},
+              { name: 42 },
+              { name: "unrelated", digest: 17 },
+              { name: asset }
+            ]
+          })
+        },
+        [downloadUrl]: { body: "unverified offline fixture" }
+      },
+      calls
+    );
+    writeManagedBicepStub();
+    const logs: string[] = [];
+
+    await expect(
+      mod.ensureRadBinary({ log: (message) => logs.push(message) })
+    ).resolves.toBe(mod.MANAGED_RAD_PATH);
+    expect(calls).toEqual([RELEASES_API, redirectedApi, downloadUrl]);
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("has no SHA-256 digest"),
+        expect.stringContaining("(unverified)")
+      ])
+    );
+  });
+
+  it("uses GH_TOKEN for release metadata when GITHUB_TOKEN is absent", async () => {
+    process.env.GH_TOKEN = "fixture-gh-token";
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const asset = mod.releaseAsset();
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`;
+    const optionsCalls: https.RequestOptions[] = [];
+    mockHttpsGet(
+      {
+        [RELEASES_API]: {
+          body: JSON.stringify({
+            tag_name: RADIUS_RELEASE_TAG,
+            assets: {}
+          })
+        },
+        [downloadUrl]: { body: "offline fixture" }
+      },
+      [],
+      optionsCalls
+    );
+    fs.mkdirSync(path.dirname(mod.MANAGED_BICEP_PATH), { recursive: true });
+    writeManagedBicepStub();
+
+    await expect(mod.ensureRadBinary()).resolves.toBe(mod.MANAGED_RAD_PATH);
+    expect(optionsCalls[0].headers).toMatchObject({
+      Authorization: `Bearer ${process.env.GH_TOKEN}`,
+      Accept: "application/vnd.github+json"
+    });
+    expect(optionsCalls[1].headers).not.toHaveProperty("Authorization");
+  });
+
+  it("falls back to its own download after a peer lock wait expires", async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const asset = mod.releaseAsset();
+    const downloadUrl = `https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`;
+    mockHttpsGet(
+      {
+        [RELEASES_API]: {
+          body: JSON.stringify({
+            tag_name: RADIUS_RELEASE_TAG,
+            assets: [{ name: asset }]
+          })
+        },
+        [downloadUrl]: { body: "fallback download" }
+      },
+      []
+    );
+    fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
+    fs.writeFileSync(`${mod.MANAGED_RAD_PATH}.download.lock`, "peer");
+    writeManagedBicepStub();
+    const logs: string[] = [];
+
+    try {
+      const pending = mod.ensureRadBinary({
+        log: (message) => logs.push(message)
+      });
+      await vi.advanceTimersByTimeAsync(120000);
+      await expect(pending).resolves.toBe(mod.MANAGED_RAD_PATH);
+      expect(fs.readFileSync(mod.MANAGED_RAD_PATH, "utf8")).toBe(
+        "fallback download"
+      );
+      expect(logs).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("Another process is downloading"),
+          expect.stringContaining("Downloading rad")
+        ])
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts a pinned peer binary when atomic publication loses a rename race", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-rename-race-"));
+    const preload = path.join(root, "fake-version.cjs");
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    const originalRenameSync = fs.renameSync;
+    try {
+      fs.writeFileSync(
+        preload,
+        [
+          'require("node:module").runMain = () => {',
+          `  process.stdout.write(JSON.stringify({ release: ${JSON.stringify(RADIUS_RELEASE_TAG)} }));`,
+          "};"
+        ].join("\n")
+      );
+      const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+      process.env.NODE_OPTIONS =
+        previousNodeOptions ?
+          `${previousNodeOptions} ${preloadOption}`
+        : preloadOption;
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      const asset = mod.releaseAsset();
+      const downloadUrl = `https://github.com/radius-project/radius/releases/download/${RADIUS_RELEASE_TAG}/${asset}`;
+      mockHttpsGet(
+        {
+          [RELEASES_API]: {
+            body: JSON.stringify({
+              tag_name: RADIUS_RELEASE_TAG,
+              assets: [{ name: asset }]
+            })
+          },
+          [downloadUrl]: { body: "losing writer" }
+        },
+        []
+      );
+      writeManagedBicepStub();
+      vi.spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+        if (destination === mod.MANAGED_RAD_PATH) {
+          fs.copyFileSync(process.execPath, mod.MANAGED_RAD_PATH);
+          throw new Error("destination already published");
+        }
+        return originalRenameSync(source, destination);
+      });
+
+      await expect(mod.ensureRadBinary()).resolves.toBe(mod.MANAGED_RAD_PATH);
+      expect(fs.statSync(mod.MANAGED_RAD_PATH).size).toBe(
+        fs.statSync(process.execPath).size
+      );
+      expect(
+        fs
+          .readdirSync(path.dirname(mod.MANAGED_RAD_PATH))
+          .filter((name) => name.endsWith(".download"))
+      ).toEqual([]);
+    } finally {
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["release HTTP failure", { statusCode: 503 }, /GET .* failed: HTTP 503/iu],
+    [
+      "request failure",
+      { requestError: new Error("offline request failed") },
+      /offline request failed/iu
+    ],
+    [
+      "response stream failure",
+      { responseError: new Error("truncated response") },
+      /truncated response/iu
+    ]
+  ])(
+    "propagates a %s without leaving a managed binary",
+    async (_label, response, expected) => {
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      mockHttpsGet({ [RELEASES_API]: response }, []);
+
+      await expect(mod.ensureRadBinary()).rejects.toThrow(expected);
+      expect(fs.existsSync(mod.MANAGED_RAD_PATH)).toBe(false);
+    }
+  );
+
+  it("waits for a peer download and accepts the binary it publishes", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-peer-download-"));
+    const preload = path.join(root, "fake-version.cjs");
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    try {
+      fs.writeFileSync(
+        preload,
+        [
+          'require("node:module").runMain = () => {',
+          `  process.stdout.write(JSON.stringify({ release: ${JSON.stringify(RADIUS_RELEASE_TAG)} }));`,
+          "};"
+        ].join("\n")
+      );
+      const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+      process.env.NODE_OPTIONS =
+        previousNodeOptions ?
+          `${previousNodeOptions} ${preloadOption}`
+        : preloadOption;
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
+      fs.writeFileSync(`${mod.MANAGED_RAD_PATH}.download.lock`, "peer");
+      writeManagedBicepStub();
+      const asset = mod.releaseAsset();
+      mockHttpsGet(
+        {
+          [RELEASES_API]: {
+            body: JSON.stringify({
+              tag_name: RADIUS_RELEASE_TAG,
+              assets: [{ name: asset }]
+            })
+          }
+        },
+        []
+      );
+      const logs: string[] = [];
+      const pending = mod.ensureRadBinary({
+        log: (message) => logs.push(message)
+      });
+      setTimeout(() => {
+        fs.copyFileSync(process.execPath, mod.MANAGED_RAD_PATH);
+      }, 20);
+
+      await expect(pending).resolves.toBe(mod.MANAGED_RAD_PATH);
+      expect(logs).toContain(
+        `Another process is downloading rad ${RADIUS_RELEASE_TAG}; waiting...`
+      );
+      expect(fs.statSync(mod.MANAGED_RAD_PATH).size).toBe(
+        fs.statSync(process.execPath).size
+      );
+    } finally {
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["non-object metadata", JSON.stringify([])],
+    ["metadata without a tag", JSON.stringify({ assets: [] })],
+    ["invalid JSON", "not-json"]
+  ])("rejects %s before requesting an asset", async (_label, body) => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const calls: string[] = [];
+    mockHttpsGet({ [RELEASES_API]: { body } }, calls);
+
+    await expect(mod.ensureRadBinary()).rejects.toBeInstanceOf(Error);
+    expect(calls).toEqual([RELEASES_API]);
+    expect(fs.existsSync(mod.MANAGED_RAD_PATH)).toBe(false);
+  });
+
+  it("keeps an installed binary whose release cannot be read", async () => {
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
+    fs.writeFileSync(mod.MANAGED_RAD_PATH, "not an executable image");
+    writeManagedBicepStub();
+    const logs: string[] = [];
+
+    await expect(
+      mod.ensureRadBinary({ log: (message) => logs.push(message) })
+    ).resolves.toBe(mod.MANAGED_RAD_PATH);
+    expect(logs).toContain(
+      `Could not determine the Radius release of ${mod.MANAGED_RAD_PATH}; using it as-is.`
+    );
+  });
+
+  it("replaces a mismatched managed binary but keeps it when the offline replacement fails", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-reconcile-win-"));
+    const preload = path.join(root, "fake-version.cjs");
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    try {
+      fs.writeFileSync(
+        preload,
+        [
+          'require("node:module").runMain = () => {',
+          '  process.stdout.write(JSON.stringify({ release: "v0.1.0" }));',
+          "};"
+        ].join("\n")
+      );
+      const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+      process.env.NODE_OPTIONS =
+        previousNodeOptions ?
+          `${previousNodeOptions} ${preloadOption}`
+        : preloadOption;
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
+      fs.copyFileSync(process.execPath, mod.MANAGED_RAD_PATH);
+      writeManagedBicepStub();
+      mockHttpsGet({}, []);
+      const logs: string[] = [];
+
+      await expect(
+        mod.ensureRadBinary({ log: (message) => logs.push(message) })
+      ).resolves.toBe(mod.MANAGED_RAD_PATH);
+      expect(logs).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("differs from the pinned release"),
+          expect.stringContaining("Could not install rad")
+        ])
+      );
+      expect(fs.statSync(mod.MANAGED_RAD_PATH).size).toBe(
+        fs.statSync(process.execPath).size
+      );
+    } finally {
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a managed binary that matches the pinned release", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-release-match-"));
+    const preload = path.join(root, "fake-version.cjs");
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    try {
+      fs.writeFileSync(
+        preload,
+        [
+          'require("node:module").runMain = () => {',
+          `  process.stdout.write(JSON.stringify({ release: ${JSON.stringify(RADIUS_RELEASE_TAG)} }));`,
+          "};"
+        ].join("\n")
+      );
+      const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+      process.env.NODE_OPTIONS =
+        previousNodeOptions ?
+          `${previousNodeOptions} ${preloadOption}`
+        : preloadOption;
+      vi.resetModules();
+      const mod = await import("./rad.js");
+      fs.mkdirSync(path.dirname(mod.MANAGED_RAD_PATH), { recursive: true });
+      fs.copyFileSync(process.execPath, mod.MANAGED_RAD_PATH);
+      writeManagedBicepStub();
+
+      await expect(mod.ensureRadBinary()).resolves.toBe(mod.MANAGED_RAD_PATH);
+      expect(fs.statSync(mod.MANAGED_RAD_PATH).size).toBe(
+        fs.statSync(process.execPath).size
+      );
+    } finally {
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("shares an in-flight resolution and reuses its cached binary on later calls", async () => {
+    process.env.RADIUS_RAD_BINARY = process.execPath;
+    process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    writeManagedBicepStub();
+
+    const first = mod.ensureRadBinary();
+    const second = mod.ensureRadBinary();
+    expect(second).toBe(first);
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      process.execPath,
+      process.execPath
+    ]);
+    await expect(mod.ensureRadBinary()).resolves.toBe(process.execPath);
+  });
+});
+
 // spawnRad drives a real child process, so the fake `rad` is an executable
 // shebang script; that only works on POSIX. Skip (don't drop) on Windows.
 const describeSpawn = process.platform === "win32" ? describe.skip : describe;
@@ -2388,6 +3314,37 @@ describe("radBinaryRelease", () => {
       await expect(
         radBinaryRelease(process.execPath, { timeout: 5000 })
       ).resolves.toBe("v0.60.0");
+    } finally {
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("terminates a version command that exceeds its timeout", async () => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "rad-version-hang-")
+    );
+    const preload = path.join(directory, "fake-rad.cjs");
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    fs.writeFileSync(
+      preload,
+      [
+        'require("node:module").runMain = () => {',
+        "  setInterval(() => {}, 5000);",
+        "};"
+      ].join("\n")
+    );
+    const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+    process.env.NODE_OPTIONS =
+      previousNodeOptions ?
+        `${previousNodeOptions} ${preloadOption}`
+      : preloadOption;
+
+    try {
+      await expect(
+        radBinaryRelease(process.execPath, { timeout: 50 })
+      ).resolves.toBeNull();
     } finally {
       if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
       else process.env.NODE_OPTIONS = previousNodeOptions;

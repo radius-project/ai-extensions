@@ -25,7 +25,13 @@ import {
   workspaceSourceChangedSince,
   workspaceModelRecoverable,
   currentWorkspaceBranch,
-  resolveGraphBranchForRequest
+  resolveGraphBranchForRequest,
+  workspaceRadArtifactsDir,
+  resolveWorkspaceBicep,
+  fetchWorkspaceBicep,
+  fetchWorkspaceFile,
+  createWorkspaceGitHub,
+  detectWorkspaceContext
 } from "./workspace.js";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
@@ -42,6 +48,186 @@ describe("resolveWorktreePath", () => {
     // Only the real worktree is inside a git work tree.
     const probe = async (p: string) => p === WORKTREE;
     expect(await resolveWorktreePath(session, metadata, probe)).toBe(WORKTREE);
+  });
+
+  describe("detectWorkspaceContext", () => {
+    it("reads quoted session metadata and prefers live git branch and remote values", async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "radius-context-"));
+      const home = path.join(root, "home");
+      const worktree = path.join(root, "worktree");
+      const sessionDir = path.join(
+        home,
+        ".copilot",
+        "session-state",
+        "session-1"
+      );
+      const priorHome = process.env.USERPROFILE;
+      const priorSession = process.env.COPILOT_AGENT_SESSION_ID;
+      try {
+        await fs.mkdir(sessionDir, { recursive: true });
+        await fs.mkdir(worktree, { recursive: true });
+        execFileSync("git", [
+          "init",
+          "--quiet",
+          "--initial-branch",
+          "live",
+          worktree
+        ]);
+        execFileSync("git", [
+          "-C",
+          worktree,
+          "-c",
+          "user.name=Radius Test",
+          "-c",
+          "user.email=radius@example.invalid",
+          "commit",
+          "--quiet",
+          "--allow-empty",
+          "-m",
+          "initial"
+        ]);
+        execFileSync("git", [
+          "-C",
+          worktree,
+          "remote",
+          "add",
+          "origin",
+          "git@github.com:owner/repo.git"
+        ]);
+        await fs.writeFile(
+          path.join(sessionDir, "workspace.yaml"),
+          [
+            "# ignored comment",
+            `git_root: "${worktree}"`,
+            "repository: fallback/repo",
+            "branch: fallback"
+          ].join("\n")
+        );
+        process.env.USERPROFILE = home;
+        process.env.COPILOT_AGENT_SESSION_ID = "session-1";
+
+        await expect(detectWorkspaceContext({})).resolves.toEqual({
+          workspacePath: worktree,
+          repo: "owner/repo",
+          branch: "live"
+        });
+      } finally {
+        if (priorHome === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = priorHome;
+        if (priorSession === undefined)
+          delete process.env.COPILOT_AGENT_SESSION_ID;
+        else process.env.COPILOT_AGENT_SESSION_ID = priorSession;
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("uses persisted repository and branch values when the workspace is not a git checkout", async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "radius-context-"));
+      const home = path.join(root, "home");
+      const worktree = path.join(root, "worktree");
+      const sessionDir = path.join(
+        home,
+        ".copilot",
+        "session-state",
+        "session-1"
+      );
+      const priorHome = process.env.USERPROFILE;
+      const priorAgentSession = process.env.COPILOT_AGENT_SESSION_ID;
+      const priorSession = process.env.SESSION_ID;
+      try {
+        await fs.mkdir(sessionDir, { recursive: true });
+        await fs.mkdir(worktree, { recursive: true });
+        await fs.writeFile(
+          path.join(sessionDir, "workspace.yaml"),
+          [
+            "not metadata",
+            `cwd: '${worktree}'`,
+            "repository: fallback/repo",
+            "branch: fallback"
+          ].join("\n")
+        );
+        process.env.USERPROFILE = home;
+        delete process.env.COPILOT_AGENT_SESSION_ID;
+        process.env.SESSION_ID = "session-1";
+
+        await expect(detectWorkspaceContext({})).resolves.toEqual({
+          workspacePath: worktree,
+          repo: "fallback/repo",
+          branch: "fallback"
+        });
+      } finally {
+        if (priorHome === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = priorHome;
+        if (priorAgentSession === undefined)
+          delete process.env.COPILOT_AGENT_SESSION_ID;
+        else process.env.COPILOT_AGENT_SESSION_ID = priorAgentSession;
+        if (priorSession === undefined) delete process.env.SESSION_ID;
+        else process.env.SESSION_ID = priorSession;
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("returns an empty context when neither persisted metadata nor session paths exist", async () => {
+      const home = await fs.mkdtemp(
+        path.join(os.tmpdir(), "radius-context-empty-")
+      );
+      const priorHome = process.env.USERPROFILE;
+      const priorAgentSession = process.env.COPILOT_AGENT_SESSION_ID;
+      const priorSession = process.env.SESSION_ID;
+      try {
+        process.env.USERPROFILE = home;
+        delete process.env.COPILOT_AGENT_SESSION_ID;
+        delete process.env.SESSION_ID;
+
+        await expect(detectWorkspaceContext({})).resolves.toEqual({
+          workspacePath: "",
+          repo: "",
+          branch: ""
+        });
+      } finally {
+        if (priorHome === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = priorHome;
+        if (priorAgentSession === undefined)
+          delete process.env.COPILOT_AGENT_SESSION_ID;
+        else process.env.COPILOT_AGENT_SESSION_ID = priorAgentSession;
+        if (priorSession === undefined) delete process.env.SESSION_ID;
+        else process.env.SESSION_ID = priorSession;
+        await fs.rm(home, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps repository and branch empty when only a non-git session directory is available", async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "radius-context-"));
+      const home = path.join(root, "home");
+      const worktree = path.join(root, "worktree");
+      const priorHome = process.env.USERPROFILE;
+      const priorAgentSession = process.env.COPILOT_AGENT_SESSION_ID;
+      const priorSession = process.env.SESSION_ID;
+      try {
+        await fs.mkdir(home, { recursive: true });
+        await fs.mkdir(worktree, { recursive: true });
+        process.env.USERPROFILE = home;
+        delete process.env.COPILOT_AGENT_SESSION_ID;
+        delete process.env.SESSION_ID;
+
+        await expect(
+          detectWorkspaceContext({ cwd: worktree })
+        ).resolves.toEqual({
+          workspacePath: worktree,
+          repo: "",
+          branch: ""
+        });
+      } finally {
+        if (priorHome === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = priorHome;
+        if (priorAgentSession === undefined)
+          delete process.env.COPILOT_AGENT_SESSION_ID;
+        else process.env.COPILOT_AGENT_SESSION_ID = priorAgentSession;
+        if (priorSession === undefined) delete process.env.SESSION_ID;
+        else process.env.SESSION_ID = priorSession;
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("resolveGraphBranchForRequest", () => {
@@ -224,6 +410,24 @@ describe("resolveWorktreePath", () => {
       ).resolves.toEqual({
         status: "resolved",
         branch: "old-name",
+        followsWorkspaceBranch: false
+      });
+    });
+
+    it("falls back to main when no branch context is available", async () => {
+      await expect(
+        resolveGraphBranchForRequest(
+          {},
+          "other/repo",
+          "",
+          undefined,
+          async () => {
+            throw new Error("The worktree branch must not be read.");
+          }
+        )
+      ).resolves.toEqual({
+        status: "resolved",
+        branch: "main",
         followsWorkspaceBranch: false
       });
     });
@@ -427,6 +631,134 @@ describe("workspaceGraphJsonPath", () => {
     expect(workspaceGraphJsonPath(state, ".radius/app.bicep")).toBe(expected);
   });
 
+  describe("workspace model paths and local GitHub adapter", () => {
+    it("resolves model and artifact paths for root and nested layouts", async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "radius-workspace-"));
+      const state = {
+        workspacePath: dir,
+        workspaceRepo: "owner/repo",
+        workspaceBranch: "main"
+      };
+      try {
+        await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+        await fs.writeFile(
+          path.join(dir, ".radius", "app.bicep"),
+          "extension radius"
+        );
+
+        await expect(
+          resolveWorkspaceBicep(state, "owner/repo", "main")
+        ).resolves.toEqual({
+          content: "extension radius",
+          repoPath: ".radius/app.bicep"
+        });
+        await expect(
+          fetchWorkspaceBicep(state, "owner/repo", "main")
+        ).resolves.toBe("extension radius");
+        await expect(
+          fetchWorkspaceFile(state, "owner/repo", "main", ".radius/app.bicep")
+        ).resolves.toBe("extension radius");
+        await expect(
+          resolveWorkspaceBicep(state, "other/repo", "main")
+        ).resolves.toBeNull();
+
+        expect(workspaceRadArtifactsDir(state, ".radius\\app.bicep")).toBe(
+          path.join(dir, ".radius")
+        );
+        expect(workspaceRadArtifactsDir(state, "app.bicep")).toBe(dir);
+        expect(
+          workspaceRadArtifactsDir({ workspacePath: "" }, "app.bicep")
+        ).toBe("");
+        expect(workspaceRadArtifactsDir(state, "../app.bicep")).toBe("");
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("falls back to a root model and reports missing or unsafe model paths", async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "radius-workspace-"));
+      const state = {
+        workspacePath: dir,
+        workspaceRepo: "owner/repo",
+        workspaceBranch: "main"
+      };
+      try {
+        await fs.writeFile(path.join(dir, "app.bicep"), "extension radius");
+
+        await expect(
+          resolveWorkspaceBicep(state, "owner/repo", "main")
+        ).resolves.toEqual({
+          content: "extension radius",
+          repoPath: "app.bicep"
+        });
+        await expect(
+          fetchWorkspaceBicep(state, "owner/repo", "main")
+        ).resolves.toBe("extension radius");
+        await expect(
+          fetchWorkspaceFile(state, "owner/repo", "other", "app.bicep")
+        ).resolves.toBeNull();
+        await expect(
+          fetchWorkspaceFile(state, "owner/repo", "main", "../outside.bicep")
+        ).resolves.toBeNull();
+
+        await fs.rm(path.join(dir, "app.bicep"));
+        await expect(
+          resolveWorkspaceBicep(state, "owner/repo", "main")
+        ).resolves.toBeNull();
+        await expect(
+          fetchWorkspaceBicep(state, "owner/repo", "main")
+        ).resolves.toBeNull();
+
+        expect(workspaceGraphJsonPath(state, "../app.bicep")).toBe("");
+        expect(workspaceRadArtifactsDir(state, "")).toBe("");
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("serves local content and tree paths through the workspace GitHub adapter", async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "radius-workspace-"));
+      const state = {
+        workspacePath: dir,
+        workspaceRepo: "owner/repo",
+        workspaceBranch: "main"
+      };
+      try {
+        await fs.writeFile(path.join(dir, "app.txt"), "content");
+        await fs.writeFile(path.join(dir, "space name.txt"), "encoded");
+        const github = createWorkspaceGitHub(state, "owner/repo", "main");
+
+        await expect(
+          github.getContent("/repos/owner/repo/contents/app.txt?ref=main")
+        ).resolves.toBe("content");
+        await expect(
+          github.getContent(
+            "/repos/owner/repo/contents/space%20name.txt?ref=main"
+          )
+        ).resolves.toBe("encoded");
+        await expect(
+          github.getContent("/repos/other/repo")
+        ).resolves.toBeNull();
+        await expect(github.listNames()).resolves.toEqual([]);
+        await expect(github.treePaths("other/repo")).resolves.toEqual([]);
+        await expect(github.treePaths("owner/repo")).resolves.toContain(
+          "app.txt"
+        );
+
+        const missingWorkspaceGitHub = createWorkspaceGitHub(
+          { ...state, workspacePath: path.join(dir, "missing") },
+          "owner/repo",
+          "main"
+        );
+        await expect(
+          missingWorkspaceGitHub.treePaths("owner/repo")
+        ).resolves.toEqual([]);
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("saves next to a root app.bicep", () => {
     const expected = path.resolve(WORKTREE, "app-graph.json");
     expect(workspaceGraphJsonPath(state, "app.bicep")).toBe(expected);
@@ -451,6 +783,8 @@ describe("parseRepoFromRemote", () => {
   it("returns empty for non-GitHub or empty remotes", () => {
     expect(parseRepoFromRemote("")).toBe("");
     expect(parseRepoFromRemote("https://example.com/foo/bar.git")).toBe("");
+    expect(parseRepoFromRemote(null)).toBe("");
+    expect(parseRepoFromRemote(42)).toBe("");
   });
 });
 
@@ -490,6 +824,7 @@ describe("toSafeRepoRelPath", () => {
     expect(() => toSafeRepoRelPath("a/../b")).toThrow();
     expect(() => toSafeRepoRelPath("")).toThrow();
     expect(() => toSafeRepoRelPath("src/db\0.js")).toThrow();
+    expect(() => toSafeRepoRelPath(null)).toThrow();
   });
 });
 
@@ -1559,7 +1894,16 @@ describe("fetchWorkspaceTree", () => {
       });
       await fs.mkdir(path.join(dir, "dist"), { recursive: true });
       await fs.mkdir(path.join(dir, ".cache"), { recursive: true });
+      await fs.mkdir(path.join(dir, ".github", "workflows"), {
+        recursive: true
+      });
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
       await fs.writeFile(path.join(dir, ".cache", "Dockerfile"), "FROM x\n");
+      await fs.writeFile(
+        path.join(dir, ".github", "workflows", "build.yml"),
+        "name: build\n"
+      );
+      await fs.writeFile(path.join(dir, ".radius", "app.bicep"), "// model\n");
       await fs.writeFile(path.join(dir, ".env"), "TOKEN=x\n");
       await fs.writeFile(path.join(dir, "Dockerfile"), "FROM scratch\n");
       await fs.writeFile(
@@ -1580,6 +1924,8 @@ describe("fetchWorkspaceTree", () => {
 
       expect(paths?.sort()).toEqual([
         ".env",
+        ".github/workflows/build.yml",
+        ".radius/app.bicep",
         "Dockerfile",
         "services/api/main.go"
       ]);

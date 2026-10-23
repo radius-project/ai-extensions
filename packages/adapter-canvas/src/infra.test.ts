@@ -120,11 +120,21 @@ const {
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
+  generatePortalUrl,
   configureVerifyGhcrProbe,
   configureVerifyOperationMarker
 } = await import("./infra.js");
 const { hasVerificationOperationMarker } =
   await import("./verification-run-identity.js");
+
+describe("generatePortalUrl", () => {
+  it("delegates supported providers and rejects unknown providers", () => {
+    expect(
+      generatePortalUrl("Microsoft.Storage/storageAccounts", "azure")
+    ).toContain("portal.azure.com");
+    expect(generatePortalUrl("resource", "unknown")).toBe("");
+  });
+});
 
 const VERIFY_PATH = ".github/workflows/radius-verify-credentials.yml";
 

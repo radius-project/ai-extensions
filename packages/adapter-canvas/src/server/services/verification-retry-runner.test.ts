@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SelectedGhExecutor } from "../../gh.js";
-import { providerMutationRecord } from "../../operations.js";
+import {
+  prepareProviderMutation,
+  providerMutationRecord,
+  settleProviderMutation
+} from "../../operations.js";
 import {
   isGitHubRateLimitError,
   isSelectedGhAuthorizationError,
@@ -402,6 +406,41 @@ describe("selected-account verification retry runner", () => {
     });
   });
 
+  it("honors Stop before resuming a known verification run", async () => {
+    const target = operation({
+      verification: {
+        workflow: "radius-verify-credentials.yml",
+        ref: "main",
+        environment: "dev",
+        runId: "41",
+        accountUnavailablePhase: "monitor",
+        acquisitionDeadline: NOW + 1000
+      }
+    });
+    const monitor = vi.fn();
+    const dependencies = runnerDependencies({
+      stopBoundary: async ({ boundary, beforePersist }) => {
+        dependencies.journal.boundaries.push(boundary);
+        beforePersist();
+        target.state = "cancelled";
+        target.endedAt = "finished";
+        return false;
+      },
+      monitor
+    });
+
+    await runVerificationRetry(target, "cmd-1", dependencies);
+
+    expect(dependencies.journal.boundaries).toEqual([
+      "after-verification-retry-dispatch"
+    ]);
+    expect(dependencies.journal.commands).toContainEqual({
+      state: "finished",
+      outcome: "cancelled"
+    });
+    expect(monitor).not.toHaveBeenCalled();
+  });
+
   it("fails retryably when the resumed-run checkpoint cannot be saved", async () => {
     const target = operation({
       verification: {
@@ -455,6 +494,69 @@ describe("selected-account verification retry runner", () => {
     });
   });
 
+  it("uses operation and service defaults when retry metadata is absent", async () => {
+    const target = operation({
+      repo: undefined,
+      verification: undefined
+    });
+    const dependencies = runnerDependencies({
+      run: async (args) => {
+        dependencies.journal.calls.push({ args });
+        if (args[0] === "workflow") {
+          return {
+            code: 0,
+            stdout: "https://github.com/contoso/store/actions/runs/41\n",
+            stderr: ""
+          };
+        }
+        const json = args[args.indexOf("--json") + 1];
+        return json === "databaseId" ?
+            { code: 0, stdout: '[{"databaseId":40}]', stderr: "" }
+          : {
+              code: 0,
+              stdout: JSON.stringify([
+                {
+                  databaseId: 41,
+                  createdAt: new Date(NOW).toISOString(),
+                  displayTitle: "Radius verify dev [op_retry]",
+                  event: "workflow_dispatch",
+                  headBranch: ""
+                }
+              ]),
+              stderr: ""
+            };
+      }
+    });
+
+    await runVerificationRetry(target, "cmd-1", dependencies);
+
+    expect(dependencies.journal.calls[1]?.args).toEqual([
+      "workflow",
+      "run",
+      "radius-verify-credentials.yml",
+      "--repo",
+      "",
+      "--ref",
+      "",
+      "-f",
+      "environment=dev",
+      "-f",
+      "radius_operation="
+    ]);
+    expect(target.verification).toMatchObject({
+      workflow: "radius-verify-credentials.yml",
+      ref: "",
+      environment: "dev",
+      operationMarker: null,
+      runId: null
+    });
+    expect(target).toMatchObject({
+      state: "failed_partial",
+      failure: { code: "provider-reconciliation-manual-required" }
+    });
+    expect(dependencies.journal.monitored).toEqual([]);
+  });
+
   it("fails without dispatching when the baseline is malformed", async () => {
     const target = operation();
     const dependencies = runnerDependencies({
@@ -471,6 +573,23 @@ describe("selected-account verification retry runner", () => {
       verification: { accountUnavailablePhase: "dispatch" }
     });
     expect(dependencies.journal.calls).toEqual([]);
+  });
+
+  it("distinguishes an unreadable baseline from a failed baseline read", async () => {
+    const target = operation();
+    const dependencies = runnerDependencies({
+      run: async () => ({ code: 0, stdout: "not-json", stderr: "" })
+    });
+
+    await runVerificationRetry(target, "cmd-1", dependencies);
+
+    expect(target).toMatchObject({
+      failure: {
+        code: "verify-dispatch-baseline-failed",
+        message:
+          "Radius could not establish a readable workflow-run baseline, so it did not dispatch verification."
+      }
+    });
   });
 
   it("maps baseline authorization failure to the selected account", async () => {
@@ -626,6 +745,90 @@ describe("selected-account verification retry runner", () => {
     });
   });
 
+  it("reuses a confirmed dispatch identity without sending another request", async () => {
+    const mutationTarget =
+      "contoso/store:radius-verify-credentials.yml:main:dev:cmd-1";
+    const target = operation({
+      verification: {
+        dispatchedAt: NOW - 1000,
+        workflow: "radius-verify-credentials.yml",
+        ref: "main",
+        environment: "dev",
+        event: "workflow_dispatch",
+        operationMarker: "op_retry",
+        runId: "41",
+        runUrl: "https://github.com/contoso/store/actions/runs/41",
+        dispatchMutationTarget: mutationTarget,
+        accountUnavailablePhase: "dispatch",
+        acquisitionDeadline: NOW + 1000
+      }
+    });
+    const mutation = prepareProviderMutation(target, {
+      kind: "github_workflow.dispatch_retry",
+      target: mutationTarget,
+      providerIdempotencyKey: "op_retry"
+    });
+    settleProviderMutation(
+      target,
+      mutation.mutationId,
+      "confirmed",
+      "Verification run 41 was confirmed.",
+      "41"
+    );
+    const dependencies = runnerDependencies();
+
+    await runVerificationRetry(target, "cmd-1", dependencies);
+
+    expect(dependencies.journal.calls).toEqual([]);
+    expect(dependencies.journal.steps).toContainEqual({
+      text: "✅ Resuming the previously identified verify workflow run.",
+      stage: "verify"
+    });
+    expect(dependencies.journal.monitored).toEqual(["op_retry"]);
+  });
+
+  it("uses safe fallback guidance when a manual disposition has no evidence", async () => {
+    const mutationTarget =
+      "contoso/store:radius-verify-credentials.yml:main:dev:cmd-1";
+    const target = operation({
+      verification: {
+        workflow: "radius-verify-credentials.yml",
+        ref: "main",
+        environment: "dev",
+        operationMarker: "op_retry",
+        runId: null,
+        runUrl: null,
+        dispatchMutationTarget: mutationTarget,
+        accountUnavailablePhase: "dispatch",
+        acquisitionDeadline: NOW + 1000
+      }
+    });
+    const mutation = prepareProviderMutation(target, {
+      kind: "github_workflow.dispatch_retry",
+      target: mutationTarget,
+      providerIdempotencyKey: "op_retry"
+    });
+    settleProviderMutation(
+      target,
+      mutation.mutationId,
+      "manual_required",
+      null
+    );
+    const dependencies = runnerDependencies({
+      persistJournal: () => Promise.reject(new Error("disk unavailable"))
+    });
+
+    await runVerificationRetry(target, "cmd-1", dependencies);
+
+    expect(target).toMatchObject({
+      failure: {
+        code: "provider-mutation-manual-required",
+        message:
+          "Radius found an existing verification dispatch without a safely reusable result. Inspect GitHub Actions before starting setup again; Radius will not dispatch another run."
+      }
+    });
+  });
+
   it("surfaces authorization failure during acknowledged-run discovery", async () => {
     const target = operation();
     const dependencies = runnerDependencies({
@@ -653,6 +856,20 @@ describe("selected-account verification retry runner", () => {
       },
       verification: { accountUnavailablePhase: "dispatch" }
     });
+  });
+
+  it("propagates an unexpected selected-account command error", async () => {
+    const target = operation();
+    const dependencies = runnerDependencies({
+      run: async () => {
+        throw new Error("selected command crashed");
+      }
+    });
+
+    await expect(
+      runVerificationRetry(target, "cmd-1", dependencies)
+    ).rejects.toThrow("selected command crashed");
+    expect(dependencies.journal.unregistered).toEqual(["op_retry"]);
   });
 
   it.each([

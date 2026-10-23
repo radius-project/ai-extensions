@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addLegacyStep,
+  announceOperationTerminal,
   onOperationTerminal,
   isStale,
   VERIFY_STALE_AFTER_MS,
@@ -45,6 +46,7 @@ import {
   reconcileRestoredOperation,
   fromPersistedOperation,
   sanitizeResumeTarget,
+  setContext,
   setCanonicalEnvironment,
   setCloudContext,
   setStageState,
@@ -74,6 +76,7 @@ import {
   settleProviderMutation,
   unresolvedProviderMutations,
   providerMutationRecord,
+  providerMutationsByKind,
   providerRecoveryManualGuidance,
   recordProviderMutationDiagnostics,
   terminalizeProviderManualRequired,
@@ -89,6 +92,8 @@ import {
   projectOperationActions,
   projectOperationHeadline,
   pauseForProviderRestart,
+  isProviderRestartDecision,
+  verificationWorkflowState,
   pendingWorkflowCommits,
   provenOwnedCleanupTargets,
   readOperationControl,
@@ -96,6 +101,8 @@ import {
   recordAttemptOutcome,
   reconcileOperationLifecycle,
   rollbackRetryAttempt,
+  applySetupResumePoint,
+  planSetupContinuation,
   setCommandState,
   setVerificationWorkflowState,
   rollbackArtifactIdentity,
@@ -113,7 +120,15 @@ import {
   hasSurvivingCreatedArtifacts,
   isSetupExited,
   hasPendingVerificationAcquisition,
+  hasReachedSetupCommitPoint,
   markVerificationRetryAcquisition,
+  ensureVerificationRetryAcquisitionDeadline,
+  markVerificationRetryPrecondition,
+  hasVerificationProvenance,
+  setupPullRequestUrl,
+  formatGitHubEnvironmentLabel,
+  cleanupTargetKey,
+  cleanupArtifactIdentity,
   setupExitState,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
@@ -300,6 +315,532 @@ describe("provider mutation recovery journal", () => {
       failure: {
         code: "provider-reconciliation-manual-required"
       }
+    });
+  });
+
+  describe("final public transition and recovery boundaries", () => {
+    afterEach(() => onOperationTerminal(null));
+
+    it("uses safe provider-recovery fallbacks for incomplete journal data", () => {
+      const op = newOp();
+      const mutation = prepareProviderMutation(op, {
+        kind: "azure.app.create",
+        target: "radius-dev"
+      });
+
+      expect(mutation).not.toHaveProperty("intent");
+      op.providerRecovery = {
+        state: "manual_required",
+        guidance: null,
+        mutations: []
+      };
+      expect(providerRecoveryManualGuidance(op)).toContain(
+        "could not prove the identity"
+      );
+
+      op.providerRecovery = {
+        state: "unrecoverable_legacy",
+        guidance: null,
+        mutations: []
+      };
+      expect(legacyRecoveryQuarantine(op)).toContain("older version of Radius");
+    });
+
+    it("terminalizes malformed recovery records without requiring stage arrays", () => {
+      const op = newOp();
+      delete op.stages;
+
+      terminalizeProviderManualRequired(op, "Review the provider resource.");
+
+      expect(op).toMatchObject({
+        state: "failed_partial",
+        recoveryState: "manual_required",
+        failure: { message: "Review the provider resource." }
+      });
+
+      const legacy = newOp();
+      legacy.restoredSchemaVersion = 4;
+      legacy.stages[0].state = "running";
+      legacy.stages[1].state = "pending";
+      expect(quarantineUnrecoverableLegacy(legacy)).toBe(true);
+      expect(legacy.stages.map((stage) => stage.state)).toEqual([
+        "failed",
+        "skipped",
+        "skipped"
+      ]);
+    });
+
+    it("dismisses completed operations", () => {
+      const succeeded = newOp();
+      finishSucceeded(succeeded);
+      expect(canDismissOperation(succeeded)).toBe(true);
+    });
+
+    it("rejects malformed resume targets and repairs a missing artifact ledger", () => {
+      expect(sanitizeResumeTarget({ page: 42 })).toBeNull();
+
+      const op = newOp();
+      delete op.setupArtifacts;
+      recordAzureApp(op, { state: "created", appId: "app-1" });
+
+      expect(op.setupArtifacts.azureApp).toMatchObject({
+        state: "created",
+        appId: "app-1"
+      });
+    });
+
+    it("accepts and clears Azure app continuation state through prompt recovery", () => {
+      const op = newOp();
+      const continuation = validAzureAppCreateContinuation(op.operationId);
+
+      expect(setAzureAppCreateContinuation(null, continuation)).toBeNull();
+      expect(setAzureAppCreateContinuation(op, continuation)).toEqual(
+        continuation
+      );
+      op.state = "input_required";
+      op.inputRequired = structuredClone(continuation.prompt);
+      resumeAfterInput(op);
+      expect(op.azureAppCreateContinuation).toBeDefined();
+
+      expect(setAzureAppCreateContinuation(op, { invalid: true })).toBeNull();
+      expect(op).not.toHaveProperty("azureAppCreateContinuation");
+    });
+
+    it("normalizes empty context and provenance patches without inventing data", () => {
+      const op = newOp({ environment: "" });
+      setCanonicalEnvironment(op, "canonical");
+      setCloudContext(op, "azure", null);
+
+      expect(op.context).toMatchObject({
+        requestedEnvironment: "",
+        canonicalEnvironment: "canonical",
+        cloud: { kind: "azure" }
+      });
+
+      expect(
+        reconcileArtifactProvenance("azure_app", null, null)
+      ).toMatchObject({
+        state: undefined,
+        origin: "unknown"
+      });
+      expect(
+        reconcileArtifactProvenance(
+          "azure_app",
+          { state: "created", origin: "this_operation", appId: "old" },
+          { state: "reused", appId: "new", displayName: undefined }
+        )
+      ).toMatchObject({
+        state: "reused",
+        origin: "unknown",
+        appId: "new"
+      });
+    });
+
+    it("normalizes sparse variable and commit records through public writers", () => {
+      const op = newOp();
+      recordGitHubEnvironmentVariable(op, {});
+      expect(op.setupArtifacts.githubEnvironmentVariables).toEqual([]);
+
+      recordCommitState(null, { branch: "main" });
+      recordCommitState(op, { branch: "main" });
+      recordCommittedWorkflowFile(op, {
+        ...provenWorkflowFile(),
+        branch: null
+      });
+      recordCommitState(op, { branch: "trunk" });
+
+      expect(op.setupArtifacts.commit.workflowFiles[0].branch).toBe("trunk");
+      expect(recordCleanupState(null, { state: "running" })).toBeNull();
+    });
+
+    it("uses identity and label fallbacks for malformed cleanup artifacts", () => {
+      expect(cleanupArtifactIdentity("azure_app", null)).toBe("");
+      expect(cleanupArtifactIdentity("unsupported", { id: "resource" })).toBe(
+        ""
+      );
+
+      const op = newOp();
+      op.state = "failed_partial";
+      op.setupArtifacts.federatedCredentials.push({
+        name: "",
+        subject: "",
+        providerId: null
+      });
+      op.setupArtifacts.roleAssignments.push({
+        assignmentId: null,
+        role: "",
+        scope: "",
+        principalObjectId: null
+      });
+      op.setupArtifacts.cleanup = {
+        state: "succeeded_with_warnings",
+        ownerAssignment: "assigned",
+        attempts: 1,
+        results: [
+          {
+            attempt: 1,
+            artifactType: "",
+            outcome: "not_found",
+            target: "already gone"
+          },
+          {
+            attempt: 1,
+            artifactType: "azure_app",
+            outcome: "warning",
+            target: "",
+            detail: ""
+          }
+        ]
+      };
+
+      expect(projectCleanupSummary(op).results).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ target: "already gone" }),
+          expect.objectContaining({ target: "", detail: null })
+        ])
+      );
+    });
+
+    it("classifies unknown retry verdicts and malformed ownership evidence safely", () => {
+      expect(
+        classifyVerificationRetry({
+          state: "action_required",
+          terminal: { reason: "unknown" }
+        })
+      ).toBeNull();
+      expect(
+        classifyVerificationRetry({
+          state: "failed_partial",
+          failure: { code: "unknown" }
+        })
+      ).toBeNull();
+
+      const ledger = readSetupArtifactLedger({
+        cleanup: {
+          results: [{ outcome: "skipped", detail: "" }]
+        }
+      });
+      expect(ambiguousSetupOwnership(ledger)).toContain(
+        "could not be identified"
+      );
+    });
+
+    it("falls back to safe continuation stages for malformed records", () => {
+      const missing = applySetupResumePoint(null, "unknown");
+      expect(missing).toMatchObject({
+        resumeFrom: "azure_app",
+        stage: STAGE_CONFIGURE_ENVIRONMENT
+      });
+
+      const op = newOp();
+      op.stages = "invalid";
+      expect(applySetupResumePoint(op, "verification")).toMatchObject({
+        stage: STAGE_CONFIGURE_ENVIRONMENT,
+        runEnvironment: true
+      });
+      expect(op.resumeFrom).toBe("verification");
+    });
+
+    it("projects retry and cancellation transitions through the public view", () => {
+      const retry = newOp();
+      retry.resumeFrom = "workflow_commit";
+      acceptCommand(retry, {
+        kind: "retry_setup",
+        attempt: 1,
+        target: "workflow_commit"
+      });
+      expect(projectOperationHeadline(retry)).toMatchObject({
+        code: "retrying-setup"
+      });
+      expect(projectNextTransition(retry)).toMatchObject({
+        code: "retrying-setup"
+      });
+
+      const cleanup = newOp();
+      acceptCommand(cleanup, {
+        kind: "retry_cleanup",
+        attempt: 1,
+        target: "artifacts"
+      });
+      expect(projectNextTransition(cleanup)).toMatchObject({
+        code: "retrying-rollback"
+      });
+    });
+
+    it("projects delete and workflow-cancellation fallback behavior", () => {
+      const deletion = newDeleteOp();
+      deletion.currentStage = "missing";
+      finish(deletion, "failed_partial");
+      expect(projectOperationHeadline(deletion)).toMatchObject({
+        code: "deletion-incomplete",
+        message: expect.stringContaining("an unfinished deletion stage")
+      });
+
+      const cancelled = newOp();
+      cancelled.context.githubLogin = "octocat";
+      cancelled.verification = { runId: "42", workflowState: "active" };
+      finish(cancelled, "cancelled");
+      expect(
+        projectOperationActions(cancelled).find(
+          (action) => action.kind === "cancel_workflow"
+        )
+      ).toMatchObject({
+        label: "Cancel workflow",
+        requiresConfirmation: true
+      });
+
+      setVerificationWorkflowState(cancelled, "cancelling");
+      expect(
+        projectOperationActions(cancelled).find(
+          (action) => action.kind === "cancel_workflow"
+        )
+      ).toMatchObject({
+        label: "Check workflow status",
+        requiresConfirmation: false
+      });
+    });
+
+    it("announces only eligible terminal records and honors deferred delivery", () => {
+      expect(announceOperationTerminal(null)).toBe(false);
+      expect(announceOperationTerminal(newOp())).toBe(false);
+
+      const op = newOp();
+      finish(op, "failed", { announce: false });
+      const seen = [];
+      onOperationTerminal((record) => seen.push(record.state));
+
+      expect(announceOperationTerminal(op)).toBe(true);
+      expect(announceOperationTerminal(op)).toBe(false);
+      expect(seen).toEqual(["failed"]);
+    });
+
+    it("finishes sparse records and preserves explicit command outcomes", () => {
+      expect(finish(null, "failed")).toBeNull();
+
+      const op = newOp();
+      const accepted = acceptCommand(op, {
+        kind: "continue_setup",
+        attempt: 1,
+        target: "environment"
+      });
+      setCommandState(
+        op,
+        accepted.command.commandId,
+        "running",
+        "executor-owned"
+      );
+      delete op.control;
+      op.control = {
+        ...createOperationControl(),
+        commands: [accepted.command]
+      };
+      finish(op, "failed", { announce: false });
+
+      expect(op.control.commands[0]).toMatchObject({
+        state: "finished",
+        outcome: "executor-owned"
+      });
+    });
+
+    it("uses cancellation and command identity fallbacks for empty input", () => {
+      expect(requestStop(null)).toBe(false);
+
+      const op = newOp();
+      requestStop(op);
+      stopAtBoundary(op, "");
+      expect(op.control.stop.boundary).toBe("unknown");
+
+      expect(
+        buildCommandId({
+          operationId: "",
+          kind: "",
+          attempt: -1,
+          target: ""
+        })
+      ).toBe("::0:operation");
+      expect(
+        acceptCommand(newOp(), {
+          kind: "continue_setup",
+          attempt: -1,
+          target: ""
+        }).command
+      ).toMatchObject({ attempt: 0, target: "operation" });
+      expect(
+        recordAttemptOutcome(newOp(), {
+          kind: "invalid",
+          state: ""
+        })
+      ).toBeNull();
+    });
+
+    it("snapshots and summarizes malformed optional operation state", () => {
+      const sparse = {
+        ...newOp(),
+        terminal: null,
+        stages: undefined,
+        lastActivityAt: undefined
+      };
+      const snapshot = snapshotRetryState(sparse);
+      expect(snapshot).toMatchObject({
+        terminal: null,
+        stages: [],
+        lastActivityAt: null
+      });
+
+      const input = newOp();
+      input.state = "input_required";
+      input.inputRequired = null;
+      expect(summarize(input)).toContain("needs information");
+
+      const warnings = newOp();
+      addStep(warnings, { label: "warning", warning: {} });
+      addStep(warnings, { label: "warning", warning: {} });
+      finishSucceeded(warnings);
+      expect(summarize(warnings)).toContain("2 warnings");
+
+      const action = newOp();
+      finish(action, "action_required");
+      expect(summarize(action)).toContain("needs one more step");
+    });
+
+    it("uses activity fallbacks when stale records omit optional timestamps", () => {
+      const input = newOp();
+      input.state = "input_required";
+      input.inputRequired = {};
+      input.lastActivityAt = "2020-01-01T00:00:00.000Z";
+      expect(isStale(input, Date.parse("2020-01-01T02:00:00.000Z"))).toBe(true);
+
+      const running = newOp({
+        startedAt: "2020-01-01T00:00:00.000Z"
+      });
+      running.lastActivityAt = null;
+      expect(isStale(running, Date.parse("2020-01-01T01:00:00.000Z"))).toBe(
+        true
+      );
+    });
+
+    it("persists only valid delete recovery scalars and normalizes failures", () => {
+      const op = newDeleteOp({
+        repo: 42,
+        environment: null,
+        provider: "azure",
+        clientId: "",
+        tenantId: undefined,
+        repoId: Number.NaN,
+        credentialConsumerRetirementReady: true
+      });
+      op.failure = {
+        code: null,
+        stage: 42,
+        stepSeq: "invalid",
+        message: null,
+        classification: null
+      };
+
+      const persisted = toPersistedOperation(op);
+
+      expect(persisted.deleteRecovery).toEqual({
+        provider: "azure",
+        clientId: "",
+        credentialConsumerRetirementReady: true
+      });
+      expect(persisted.failure).toEqual({
+        code: "",
+        stage: "42",
+        stepSeq: null,
+        message: "",
+        classification: ""
+      });
+
+      op.request = {};
+      expect(toPersistedOperation(op).deleteRecovery).toBeUndefined();
+    });
+
+    it("upgrades old delete stages and numeric verification run identities", () => {
+      const op = newDeleteOp();
+      const persisted = toPersistedOperation(op);
+      persisted.schemaVersion = 6;
+      persisted.stages = persisted.stages.filter(
+        (stage) => stage.id !== STAGE_DELETE_STATE_PACKAGE
+      );
+      persisted.verification = { runId: 42 };
+
+      const restored = fromPersistedOperation(persisted);
+
+      expect(restored.verification.runId).toBe("42");
+      expect(restored.stages.map((stage) => stage.id)).toContain(
+        STAGE_DELETE_STATE_PACKAGE
+      );
+      expect(restored.requiresDurableRewrite).toBe(true);
+    });
+
+    it("reconciles sparse records without fabricating provider work", () => {
+      expect(reconcileRestoredOperation(null)).toBeNull();
+
+      const deletion = newDeleteOp();
+      deletion.stages[0].state = "running";
+      delete deletion.request;
+      delete deletion.deleteRecovery;
+      reconcileRestoredOperation(deletion);
+
+      expect(deletion).toMatchObject({
+        state: "failed_partial",
+        recoveryState: "interrupted",
+        failure: { code: "operation-interrupted" }
+      });
+      expect(deletion.stages[0].state).toBe("failed");
+    });
+
+    it("hydrates empty and invalid stores through diagnostic fallbacks", async () => {
+      const empty = createRegistry({
+        store: {
+          async load() {
+            return null;
+          },
+          async save() {}
+        }
+      });
+      await expect(empty.hydrate()).resolves.toEqual([]);
+
+      const diagnostics = [];
+      let saved;
+      const invalid = createRegistry({
+        store: {
+          async load() {
+            return { schemaVersion: 1, operations: [null] };
+          },
+          async save(value) {
+            saved = value;
+          },
+          report(value) {
+            diagnostics.push(value);
+          }
+        }
+      });
+      await expect(invalid.hydrate()).resolves.toEqual([]);
+      expect(diagnostics[0]).toMatchObject({
+        code: "operation-store-invalid-record",
+        message: expect.stringContaining("index 0")
+      });
+      expect(saved.operations).toEqual([]);
+    });
+
+    it("projects malformed client-view optionals without exposing evidence", () => {
+      const op = newOp();
+      delete op.control;
+      op.verification = { dispatchedAt: "not-a-number" };
+      op.failure = {
+        code: "failed",
+        message: "safe",
+        evidence: "private diagnostic"
+      };
+
+      const view = toClientView(op);
+
+      expect(view.kind).toBe(OPERATION_KIND_CREATE);
+      expect(view.verification.dispatchedAt).toBeNull();
+      expect(view.command).toBeNull();
+      expect(view.failure).not.toHaveProperty("evidence");
     });
   });
 
@@ -8298,5 +8839,1503 @@ describe("a finished cleanup verdict across a later interruption", () => {
     reconcileRestoredOperation(op);
 
     expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
+  });
+});
+
+describe("persisted operation normalization boundaries", () => {
+  it("fails closed when provider diagnostics or outcomes do not name a journal entry", () => {
+    const op = newOp();
+
+    expect(
+      recordProviderMutationDiagnostics(op, "missing", {
+        initial: "diagnostic",
+        final: "final"
+      })
+    ).toBe(false);
+    expect(settleProviderMutation(op, "missing", "confirmed")).toBe(false);
+    expect(settleProviderMutation(op, "missing", "not-a-status")).toBe(false);
+  });
+
+  it("preserves rollback recovery while settling a provider mutation", () => {
+    const op = newOp();
+    const mutation = prepareProviderMutation(op, {
+      kind: "azure.app.delete",
+      target: "app-1"
+    });
+    op.providerRecovery.state = "rollback_pending";
+    op.providerRecovery.guidance = "old guidance";
+
+    expect(
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "confirmed",
+        " deleted ",
+        " app-1 ",
+        true
+      )
+    ).toBe(true);
+    expect(op.providerRecovery).toMatchObject({
+      state: "rollback_pending",
+      guidance: null,
+      mutations: [
+        {
+          status: "confirmed",
+          evidence: "deleted",
+          providerId: "app-1",
+          createdByOperation: true
+        }
+      ]
+    });
+  });
+
+  it("keeps recovery active until every prepared provider mutation is settled", () => {
+    const op = newOp();
+    const first = prepareProviderMutation(op, {
+      kind: "azure.app.create",
+      target: "app-1"
+    });
+    const second = prepareProviderMutation(op, {
+      kind: "github.environment.create",
+      target: "contoso/store:dev"
+    });
+
+    settleProviderMutation(op, first.mutationId, "confirmed");
+    expect(op.providerRecovery.state).toBe("reconciling");
+
+    settleProviderMutation(
+      op,
+      second.mutationId,
+      "manual_required",
+      "Review the environment."
+    );
+    expect(op.providerRecovery).toMatchObject({
+      state: "manual_required",
+      guidance: "Review the environment."
+    });
+  });
+
+  it("reuses mutation identity and keeps quarantined recovery states intact", () => {
+    const op = newOp();
+    op.providerRecovery = {
+      state: "unrecoverable_legacy",
+      guidance: "Review legacy resources.",
+      mutations: []
+    };
+    const first = prepareProviderMutation(op, {
+      kind: "azure.app.create",
+      target: "app-1"
+    });
+    const duplicate = prepareProviderMutation(op, {
+      kind: "azure.app.create",
+      target: "app-1"
+    });
+
+    expect(duplicate.mutationId).toBe(first.mutationId);
+    expect(op.providerRecovery.mutations).toHaveLength(1);
+    expect(op.providerRecovery).toMatchObject({
+      state: "unrecoverable_legacy",
+      guidance: "Review legacy resources."
+    });
+    expect(
+      providerMutationRecord(null, "azure.app.create", "app-1")
+    ).toBeNull();
+    expect(providerMutationRecord(op, "other", "missing")).toBeNull();
+    expect(unresolvedProviderMutations(op, [])).toEqual([]);
+
+    expect(
+      recordProviderMutationDiagnostics(op, first.mutationId, {
+        initial: "prepared",
+        final: ""
+      })
+    ).toBe(true);
+
+    const rollback = newOp();
+    rollback.providerRecovery = {
+      state: "rollback_pending",
+      guidance: "Delete proven resources.",
+      mutations: []
+    };
+    prepareProviderMutation(rollback, {
+      kind: "azure.app.delete",
+      target: "app-1"
+    });
+    expect(rollback.providerRecovery.state).toBe("rollback_pending");
+  });
+
+  it("retains manual recovery when the final non-manual mutation settles", () => {
+    const op = newOp();
+    const manual = prepareProviderMutation(op, {
+      kind: "azure.app.create",
+      target: "app-1"
+    });
+    const confirmed = prepareProviderMutation(op, {
+      kind: "github.environment.create",
+      target: "contoso/store:dev"
+    });
+
+    settleProviderMutation(
+      op,
+      manual.mutationId,
+      "manual_required",
+      "Review the app."
+    );
+    settleProviderMutation(op, confirmed.mutationId, "confirmed");
+
+    expect(op.providerRecovery.state).toBe("manual_required");
+  });
+
+  it("keeps only complete provider mutations and normalizes their optional evidence", () => {
+    const persisted = toPersistedOperation(newOp());
+    persisted.providerRecovery = {
+      state: "not-a-state",
+      guidance: "",
+      mutations: [
+        null,
+        {},
+        { mutationId: "missing-kind" },
+        { mutationId: "missing-target", kind: "azure.app.create" },
+        {
+          mutationId: "invalid-status",
+          kind: "azure.app.create",
+          target: "app",
+          status: "done"
+        },
+        {
+          mutationId: "rich",
+          kind: "azure.app.create",
+          target: "app",
+          status: "confirmed",
+          preparedAt: null,
+          updatedAt: "",
+          providerIdempotencyKey: "provider-key",
+          providerId: 1234,
+          createdByOperation: true,
+          intent: {
+            name: "radius-app",
+            retries: 2,
+            enabled: true,
+            optional: null,
+            nested: { ignored: true },
+            "": "ignored"
+          },
+          reconcileAttempts: "2.9",
+          initialDiagnostic: " initial ",
+          finalDiagnostic: " final ",
+          evidence: "created"
+        }
+      ]
+    };
+
+    const restored = fromPersistedOperation(persisted);
+
+    expect(restored.providerRecovery).toMatchObject({
+      state: "idle",
+      guidance: null,
+      mutations: [
+        {
+          mutationId: "rich",
+          providerIdempotencyKey: "provider-key",
+          providerId: "1234",
+          createdByOperation: true,
+          intent: {
+            name: "radius-app",
+            retries: 2,
+            enabled: true,
+            optional: null
+          },
+          reconcileAttempts: 2,
+          initialDiagnostic: "initial",
+          finalDiagnostic: "final",
+          evidence: "created"
+        }
+      ]
+    });
+    expect(restored.providerRecovery.mutations[0].preparedAt).toBeTruthy();
+    expect(restored.providerRecovery.mutations[0].updatedAt).toBeTruthy();
+    expect(providerMutationsByKind(restored, "azure.app.create")).toHaveLength(
+      1
+    );
+    expect(providerMutationsByKind(restored, "other")).toEqual([]);
+  });
+
+  it.each([
+    ["missing provider key", { providerIdempotencyKey: null }],
+    ["empty provider key", { providerIdempotencyKey: "" }],
+    ["missing ownership", { createdByOperation: "yes" }],
+    ["missing intent", { intent: null }],
+    ["zero reconcile attempts", { reconcileAttempts: 0 }],
+    ["invalid diagnostics", { initialDiagnostic: 42, finalDiagnostic: " " }],
+    ["missing evidence", { evidence: 42 }]
+  ])("defaults optional mutation data for %s", (_label, patch) => {
+    const persisted = toPersistedOperation(newOp());
+    persisted.providerRecovery = {
+      state: "manual_required",
+      guidance: "Review the provider.",
+      mutations: [
+        {
+          mutationId: "minimal",
+          kind: "github.environment.create",
+          target: "contoso/store:dev",
+          status: "manual_required",
+          preparedAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+          ...patch
+        }
+      ]
+    };
+
+    const mutation =
+      fromPersistedOperation(persisted).providerRecovery.mutations[0];
+
+    expect(mutation).toMatchObject({
+      mutationId: "minimal",
+      providerIdempotencyKey: null,
+      providerId: null,
+      evidence: null
+    });
+  });
+
+  it.each([
+    ["primitive", "invalid"],
+    ["arrays instead of collections", { commands: {}, outcomes: {} }],
+    [
+      "invalid stop and attempts",
+      { stop: "requested", attempts: "once", commands: [], outcomes: [] }
+    ]
+  ])("restores safe control defaults from %s", (_label, saved) => {
+    expect(readOperationControl(saved)).toEqual(createOperationControl());
+  });
+
+  it("normalizes command and outcome scalar fields without trusting invalid counters", () => {
+    const control = readOperationControl({
+      stop: {
+        requestedAt: "",
+        acknowledgedAt: 42,
+        boundary: "safe-boundary"
+      },
+      attempts: {
+        setup: 2.9,
+        verification: -1,
+        cleanup: Number.POSITIVE_INFINITY,
+        deletion: "3"
+      },
+      commands: [
+        {
+          kind: "continue_setup",
+          commandId: "command-1",
+          state: "finished",
+          attempt: -4,
+          target: "",
+          acceptedAt: null,
+          completedAt: "2026-01-01T00:00:00.000Z",
+          outcome: 42
+        }
+      ],
+      outcomes: [
+        null,
+        {
+          kind: "cleanup",
+          attempt: "4.8",
+          state: "failed_partial",
+          code: "",
+          recordedAt: null
+        }
+      ]
+    });
+
+    expect(control).toMatchObject({
+      stop: {
+        requestedAt: null,
+        acknowledgedAt: null,
+        boundary: "safe-boundary"
+      },
+      attempts: { setup: 2, verification: 0, cleanup: 0, deletion: 3 },
+      commands: [
+        {
+          attempt: 0,
+          target: "operation",
+          completedAt: "2026-01-01T00:00:00.000Z",
+          outcome: null
+        }
+      ],
+      outcomes: [
+        {
+          kind: "cleanup",
+          attempt: 4,
+          code: null
+        }
+      ]
+    });
+    expect(control.commands[0].acceptedAt).toBeTruthy();
+    expect(control.outcomes[0].recordedAt).toBeTruthy();
+  });
+});
+
+describe("artifact ledger normalization boundaries", () => {
+  it("normalizes complete legacy collections without inventing ownership proof", () => {
+    const hash = "a".repeat(64);
+    const ledger = readSetupArtifactLedger({
+      azureApp: { state: "created", origin: "invalid", displayName: "app" },
+      servicePrincipal: {
+        state: "created",
+        origin: "this_operation",
+        objectId: "sp-1"
+      },
+      federatedCredentials: [
+        null,
+        { name: 42, subject: false, providerId: " credential-1 " }
+      ],
+      roleAssignments: [
+        null,
+        {
+          assignmentId: 17,
+          role: "Contributor",
+          scope: "/subscriptions/sub",
+          principalObjectId: ""
+        }
+      ],
+      githubEnvironment: {
+        state: "created",
+        origin: "preexisting",
+        repo: "contoso/store",
+        name: "dev",
+        providerId: 123
+      },
+      githubEnvironmentVariables: [
+        null,
+        {
+          repo: "contoso/store",
+          environment: "dev",
+          environmentProviderId: "env-1",
+          name: "AZURE_CLIENT_ID",
+          valueSha256: hash,
+          state: "deleted",
+          previousKnown: true,
+          previousValue: null
+        }
+      ],
+      commit: {
+        headSha: 123,
+        workflowFiles: [
+          {
+            path: ".github/workflows/verify.yml",
+            branch: 17,
+            mode: "something-else",
+            state: "something-else",
+            previousBlobSha: "previous"
+          }
+        ]
+      },
+      cleanup: { attempts: 2 }
+    });
+
+    expect(ledger.azureApp.origin).toBe("unknown");
+    expect(ledger.servicePrincipal.origin).toBe("this_operation");
+    expect(ledger.federatedCredentials).toEqual([
+      { name: "", subject: "", providerId: null },
+      { name: "42", subject: "", providerId: "credential-1" }
+    ]);
+    expect(ledger.roleAssignments).toEqual([
+      {
+        assignmentId: null,
+        role: "",
+        scope: "",
+        principalObjectId: null
+      },
+      {
+        assignmentId: "17",
+        role: "Contributor",
+        scope: "/subscriptions/sub",
+        principalObjectId: null
+      }
+    ]);
+    expect(ledger.githubEnvironment.providerId).toBe("123");
+    expect(ledger.githubEnvironmentVariables).toEqual([
+      expect.objectContaining({
+        state: "deleted",
+        previousKnown: true,
+        previousValue: null
+      })
+    ]);
+    expect(ledger.commit).toMatchObject({
+      headSha: "123",
+      workflowFiles: [
+        {
+          branch: "17",
+          mode: "default_branch",
+          state: "committed",
+          previousBlobKnown: true
+        }
+      ]
+    });
+    expect(ledger.cleanup.attempts).toBe(2);
+  });
+
+  it.each([
+    ["missing repository", { repo: "" }],
+    ["missing environment", { environment: "" }],
+    ["missing name", { name: "" }],
+    ["invalid digest", { valueSha256: "not-a-digest" }]
+  ])("drops a GitHub variable with %s", (_label, patch) => {
+    const ledger = readSetupArtifactLedger({
+      githubEnvironmentVariables: [
+        {
+          repo: "contoso/store",
+          environment: "dev",
+          environmentProviderId: "env-1",
+          name: "AZURE_CLIENT_ID",
+          valueSha256: "b".repeat(64),
+          previousKnown: true,
+          previousValue: "old",
+          ...patch
+        }
+      ]
+    });
+
+    expect(ledger.githubEnvironmentVariables).toEqual([]);
+  });
+
+  it.each([
+    ["credentials", { federatedCredentials: {} }, "federatedCredentials"],
+    ["roles", { roleAssignments: {} }, "roleAssignments"],
+    [
+      "variables",
+      { githubEnvironmentVariables: {} },
+      "githubEnvironmentVariables"
+    ]
+  ])("defaults a non-array %s collection", (_label, saved, field) => {
+    expect(readSetupArtifactLedger(saved)[field]).toEqual([]);
+  });
+});
+
+describe("setup continuation planning", () => {
+  function continuationOp({
+    identity = true,
+    verification = null
+  }: {
+    identity?: boolean;
+    verification?: any;
+  } = {}) {
+    const op = newOp();
+    op.stages = buildStages({ includeIdentity: identity });
+    op.verification = verification;
+    return op;
+  }
+
+  it.each([
+    [
+      "invalid resume point",
+      continuationOp(),
+      "not-a-step",
+      "azure_app",
+      STAGE_AUTHORIZE_IDENTITY,
+      true,
+      true
+    ],
+    [
+      "identity work",
+      continuationOp(),
+      "service_principal",
+      "service_principal",
+      STAGE_AUTHORIZE_IDENTITY,
+      true,
+      true
+    ],
+    [
+      "pre-existing credentials",
+      continuationOp({ identity: false }),
+      "azure_app",
+      "azure_app",
+      STAGE_CONFIGURE_ENVIRONMENT,
+      false,
+      true
+    ],
+    [
+      "verification without a run",
+      continuationOp(),
+      "verification",
+      "verification",
+      STAGE_CONFIGURE_ENVIRONMENT,
+      false,
+      true
+    ],
+    [
+      "verification with incomplete run identity",
+      continuationOp({
+        verification: {
+          dispatchedAt: 1,
+          workflow: ".github/workflows/verify.yml",
+          ref: ""
+        }
+      }),
+      "verification",
+      "verification",
+      STAGE_CONFIGURE_ENVIRONMENT,
+      false,
+      true
+    ],
+    [
+      "verification monitor",
+      continuationOp({
+        verification: {
+          dispatchedAt: 1,
+          workflow: ".github/workflows/verify.yml",
+          ref: "refs/heads/main"
+        }
+      }),
+      "verification",
+      "verification",
+      STAGE_VERIFY,
+      false,
+      false
+    ]
+  ])(
+    "plans %s through the public continuation seam",
+    (_label, op, requested, resumeFrom, stage, runIdentity, runEnvironment) => {
+      expect(planSetupContinuation(op, requested)).toEqual({
+        resumeFrom,
+        stage,
+        runIdentity,
+        runEnvironment
+      });
+    }
+  );
+
+  it("repositions stage state around the selected continuation point", () => {
+    const op = continuationOp({
+      verification: {
+        dispatchedAt: 1,
+        workflow: ".github/workflows/verify.yml",
+        ref: "refs/heads/main"
+      }
+    });
+    op.stages.forEach((stage) => {
+      stage.state = "failed";
+    });
+
+    expect(applySetupResumePoint(op, "verification")).toMatchObject({
+      stage: STAGE_VERIFY,
+      runEnvironment: false
+    });
+    expect(op.stages.map((stage) => stage.state)).toEqual([
+      "succeeded",
+      "succeeded",
+      "running"
+    ]);
+    expect(op.resumeFrom).toBe("verification");
+  });
+
+  it("returns a safe plan when no operation or matching stage is available", () => {
+    expect(applySetupResumePoint(null, "verification")).toMatchObject({
+      stage: STAGE_CONFIGURE_ENVIRONMENT,
+      runEnvironment: true
+    });
+
+    const op = continuationOp({ identity: false });
+    op.stages = [{ id: "custom", label: "Custom", state: "failed" }];
+    expect(applySetupResumePoint(op, "azure_app")).toMatchObject({
+      stage: "custom"
+    });
+    expect(op.stages[0].state).toBe("running");
+  });
+});
+
+describe("cleanup deletion selection boundaries", () => {
+  function cleanupCandidate(artifactType) {
+    const op = stoppedWithCreatedResources();
+    recordGitHubEnvironmentVariable(op, {
+      repo: "contoso/store",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256: "c".repeat(64),
+      previousKnown: false
+    });
+    recordCommittedWorkflowFile(op, provenWorkflowFile());
+    return {
+      op,
+      target: provenOwnedCleanupTargets(op).find(
+        (entry) => entry.artifactType === artifactType
+      )
+    };
+  }
+
+  it.each([
+    "azure_app",
+    "service_principal",
+    "github_environment",
+    "github_environment_variable",
+    "federated_credential",
+    "role_assignment",
+    "workflow_file"
+  ])("refuses to remove a different %s identity", (artifactType) => {
+    const { op, target } = cleanupCandidate(artifactType);
+
+    expect(target).toBeTruthy();
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType,
+        identity: `different:${target.identity}`
+      })
+    ).toBe(false);
+    expect(
+      provenOwnedCleanupTargets(op).some(
+        (entry) =>
+          entry.artifactType === artifactType &&
+          entry.identity === target.identity
+      )
+    ).toBe(true);
+  });
+
+  it.each([
+    ["azure_app", (op) => (op.setupArtifacts.azureApp.state = "reused")],
+    [
+      "service_principal",
+      (op) => (op.setupArtifacts.servicePrincipal.state = "reused")
+    ],
+    [
+      "github_environment",
+      (op) => (op.setupArtifacts.githubEnvironment.state = "reused")
+    ],
+    [
+      "github_environment_variable",
+      (op) =>
+        (op.setupArtifacts.githubEnvironmentVariables[0].state = "deleted")
+    ],
+    [
+      "federated_credential",
+      (op) => (op.setupArtifacts.federatedCredentials = [])
+    ],
+    ["role_assignment", (op) => (op.setupArtifacts.roleAssignments = [])],
+    [
+      "workflow_file",
+      (op) => (op.setupArtifacts.commit.workflowFiles[0].state = "removed")
+    ]
+  ])("does not remove an already absent %s", (artifactType, makeAbsent) => {
+    const { op, target } = cleanupCandidate(artifactType);
+    makeAbsent(op);
+
+    expect(
+      recordCleanupDeletion(op, {
+        artifactType,
+        identity: target.identity
+      })
+    ).toBe(false);
+  });
+
+  it("fails closed for a missing operation or unknown artifact type", () => {
+    expect(
+      recordCleanupDeletion(null, {
+        artifactType: "azure_app",
+        identity: "app-1"
+      })
+    ).toBe(false);
+    expect(
+      recordCleanupDeletion(newOp(), {
+        artifactType: "unknown",
+        identity: "resource"
+      })
+    ).toBe(false);
+  });
+});
+
+describe("retry snapshot restoration boundaries", () => {
+  it("removes transient fields that did not exist in the saved retry snapshot", () => {
+    const op = newOp();
+    delete op.resumeFrom;
+    delete op.inputRequired;
+    delete op.verification;
+    delete op.setupArtifacts;
+    delete op.journey;
+    const snapshot = snapshotRetryState(op);
+
+    op.resumeFrom = "verification";
+    op.inputRequired = { code: "choose-app" };
+    op.verification = { runId: "123" };
+    op.setupArtifacts = { cleanup: { state: "running" } };
+
+    rollbackRetryAttempt(op, snapshot);
+
+    expect(op).not.toHaveProperty("resumeFrom");
+    expect(op).not.toHaveProperty("inputRequired");
+    expect(op).not.toHaveProperty("verification");
+    expect(op.setupArtifacts.cleanup.state).toBe("running");
+  });
+
+  it("restores every customer-visible retry field from an isolated snapshot", () => {
+    const op = newOp();
+    op.resumeFrom = "verification";
+    op.inputRequired = { code: "choose-app", metadata: { count: 2 } };
+    op.verification = { runId: "123", workflowState: "active" };
+    op.executionActive = true;
+    op.journey.notifiedAt = "2026-01-01T00:00:00.000Z";
+    op.setupArtifacts.cleanup = {
+      state: "failed",
+      ownerAssignment: "assigned",
+      attempts: 2,
+      results: []
+    };
+    const snapshot = snapshotRetryState(op);
+
+    op.resumeFrom = "azure_app";
+    op.inputRequired = { code: "changed", metadata: { count: 99 } };
+    op.verification.runId = "changed";
+    op.executionActive = false;
+    op.journey.notifiedAt = null;
+    op.setupArtifacts.cleanup.state = "running";
+
+    rollbackRetryAttempt(op, snapshot);
+
+    expect(op).toMatchObject({
+      resumeFrom: "verification",
+      inputRequired: { metadata: { count: 2 } },
+      verification: { runId: "123", workflowState: "active" },
+      executionActive: true,
+      journey: { notifiedAt: "2026-01-01T00:00:00.000Z" },
+      setupArtifacts: { cleanup: { state: "failed", attempts: 2 } }
+    });
+  });
+
+  describe("verification workflow control boundaries", () => {
+    it("returns no workflow state when verification is absent", () => {
+      expect(verificationWorkflowState(null)).toBeNull();
+      expect(verificationWorkflowState({})).toBeNull();
+    });
+
+    it.each([
+      ["active", "active"],
+      ["inactive", "inactive"],
+      ["cancelling", "cancelling"],
+      ["unknown", "unknown"],
+      ["unsupported", null],
+      [null, null]
+    ])("projects workflow state %s", (workflowState, expected) => {
+      expect(
+        verificationWorkflowState({ verification: { workflowState } })
+      ).toBe(expected);
+    });
+
+    it("sets workflow state on both new and existing verification records", () => {
+      expect(setVerificationWorkflowState(null, "active")).toBeNull();
+
+      const fresh = newOp();
+      setVerificationWorkflowState(fresh, "active");
+      expect(fresh.verification).toEqual({ workflowState: "active" });
+
+      const existing = newOp();
+      existing.verification = { runId: "123" };
+      setVerificationWorkflowState(existing, "cancelling");
+      expect(existing.verification).toEqual({
+        runId: "123",
+        workflowState: "cancelling"
+      });
+    });
+
+    it.each([
+      ["missing operation", null],
+      ["already terminal", { state: "failed" }]
+    ])("does not pause %s", (_label, candidate) => {
+      const op = candidate ? { ...newOp(), ...candidate } : candidate;
+      expect(pauseForProviderRestart(op)).toBe(op);
+    });
+
+    it("pauses verification and marks an already dispatched run unknown", () => {
+      const op = newOp();
+      enterStage(op, STAGE_VERIFY);
+      op.verification = { dispatchedAt: "123", workflowState: "active" };
+
+      pauseForProviderRestart(op);
+
+      expect(isProviderRestartDecision(op)).toBe(true);
+      expect(op).toMatchObject({
+        state: "action_required",
+        executionActive: false,
+        terminal: {
+          reason: "provider-restart-decision",
+          interruptedStage: STAGE_VERIFY
+        },
+        verification: { workflowState: "unknown" },
+        recoveryState: "provider_restart_decision"
+      });
+    });
+
+    it("pauses outside verification without inventing a workflow state", () => {
+      const op = newOp();
+      op.currentStage = null;
+      op.verification = { dispatchedAt: "not-a-number" };
+
+      pauseForProviderRestart(op);
+
+      expect(op.terminal.interruptedStage).toBeNull();
+      expect(op.verification).not.toHaveProperty("workflowState");
+    });
+
+    it("preserves an existing stop acknowledgement while ending restart recovery", () => {
+      const op = newOp();
+      pauseForProviderRestart(op);
+      op.control.stop = {
+        requestedAt: "2026-01-01T00:00:00.000Z",
+        acknowledgedAt: "2026-01-01T00:00:01.000Z",
+        boundary: "existing"
+      };
+      op.stages[0].state = "running";
+      op.stages[1].state = "pending";
+
+      expect(stopProviderRestartDecision(op)).toBe(true);
+      expect(op.control.stop).toEqual({
+        requestedAt: "2026-01-01T00:00:00.000Z",
+        acknowledgedAt: "2026-01-01T00:00:01.000Z",
+        boundary: "existing"
+      });
+      expect(op.stages.map((stage) => stage.state)).toEqual([
+        "warning",
+        "pending",
+        "pending"
+      ]);
+      expect(stopProviderRestartDecision(newOp())).toBe(false);
+    });
+
+    it("stops a minimal restart decision without requiring stage history", () => {
+      const op = {
+        state: "action_required",
+        terminal: { reason: "provider-restart-decision" }
+      };
+
+      expect(stopProviderRestartDecision(op)).toBe(true);
+      expect(op).toMatchObject({
+        state: "cancelled",
+        stopRequested: true,
+        recoveryState: "stopped"
+      });
+    });
+
+    it("refuses dismissal for missing and active operations", () => {
+      expect(canDismissOperation(null)).toBe(false);
+      expect(canDismissOperation(newOp())).toBe(false);
+    });
+  });
+
+  describe("artifact recording input boundaries", () => {
+    it("ignores incomplete federated credentials and upgrades only a matching record", () => {
+      const op = newOp();
+
+      expect(recordCreatedFederatedCredential(null, {})).toBeNull();
+      expect(recordCreatedFederatedCredential(op, null)).toBe(op);
+      recordCreatedFederatedCredential(op, { name: "", subject: "subject" });
+      recordCreatedFederatedCredential(op, { name: "name", subject: "" });
+      expect(op.setupArtifacts.federatedCredentials).toEqual([]);
+
+      recordCreatedFederatedCredential(op, {
+        name: "radius-dev",
+        subject: "repo:contoso/store:environment:dev"
+      });
+      recordCreatedFederatedCredential(op, {
+        name: "radius-dev",
+        subject: "repo:contoso/store:environment:dev",
+        providerId: null
+      });
+      recordCreatedFederatedCredential(op, {
+        name: "radius-dev",
+        subject: "repo:contoso/store:environment:dev",
+        providerId: "credential-1"
+      });
+
+      expect(op.setupArtifacts.federatedCredentials).toEqual([
+        {
+          name: "radius-dev",
+          subject: "repo:contoso/store:environment:dev",
+          providerId: "credential-1"
+        }
+      ]);
+    });
+
+    it("deduplicates role assignments only when their provider identities are compatible", () => {
+      const op = newOp();
+
+      expect(recordCreatedRoleAssignment(null, {})).toBeNull();
+      expect(recordCreatedRoleAssignment(op, null)).toBe(op);
+      recordCreatedRoleAssignment(op, {
+        role: "",
+        scope: "/subscriptions/sub"
+      });
+      recordCreatedRoleAssignment(op, { role: "Contributor", scope: "" });
+      expect(op.setupArtifacts.roleAssignments).toEqual([]);
+
+      recordCreatedRoleAssignment(op, {
+        assignmentId: "assignment-1",
+        role: "Contributor",
+        scope: "/subscriptions/sub",
+        principalObjectId: "principal-1"
+      });
+      recordCreatedRoleAssignment(op, {
+        assignmentId: "assignment-1",
+        role: "Contributor",
+        scope: "/subscriptions/sub",
+        principalObjectId: "principal-1"
+      });
+      recordCreatedRoleAssignment(op, {
+        assignmentId: "assignment-2",
+        role: "Contributor",
+        scope: "/subscriptions/sub",
+        principalObjectId: "principal-1"
+      });
+
+      expect(op.setupArtifacts.roleAssignments).toHaveLength(2);
+    });
+
+    it("preserves a GitHub variable predecessor across repeated observations", () => {
+      const op = newOp();
+      const base = {
+        repo: "contoso/store",
+        environment: "dev",
+        environmentProviderId: "env-1",
+        name: "AZURE_CLIENT_ID",
+        valueSha256: "d".repeat(64)
+      };
+
+      expect(recordGitHubEnvironmentVariable(null, base)).toBeNull();
+      expect(recordGitHubEnvironmentVariable(op, null)).toBe(op);
+      recordGitHubEnvironmentVariable(op, {
+        ...base,
+        previousKnown: true,
+        previousValue: 42
+      });
+      expect(op.setupArtifacts.githubEnvironmentVariables[0]).toMatchObject({
+        previousKnown: false,
+        previousValue: null
+      });
+
+      op.setupArtifacts.githubEnvironmentVariables = [];
+      recordGitHubEnvironmentVariable(op, {
+        ...base,
+        previousKnown: true,
+        previousValue: "old"
+      });
+      recordGitHubEnvironmentVariable(op, {
+        ...base,
+        valueSha256: "e".repeat(64),
+        previousKnown: false
+      });
+
+      expect(op.setupArtifacts.githubEnvironmentVariables[0]).toMatchObject({
+        valueSha256: "e".repeat(64),
+        previousKnown: true,
+        previousValue: "old"
+      });
+    });
+  });
+
+  describe("verification acquisition timing boundaries", () => {
+    it("ignores acquisition requests without an operation", () => {
+      expect(
+        markVerificationRetryAcquisition(null, "command", "classification")
+      ).toBeNull();
+      expect(hasReachedSetupCommitPoint(null)).toBe(false);
+    });
+
+    it("reuses a matching provisional deadline and replaces every other deadline", () => {
+      const op = newOp();
+      op.verification = {
+        acquisitionDeadline: 123,
+        acquisitionProvisional: true,
+        acquisitionProvisionalToken: "token"
+      };
+
+      markVerificationRetryAcquisition(op, "command-1", "", "token");
+      expect(op.verification).toMatchObject({
+        acquisitionDeadline: 123,
+        acquisitionPending: true,
+        retryCommandId: "command-1",
+        retryClassification: null
+      });
+      expect(op.verification).not.toHaveProperty("acquisitionProvisional");
+
+      op.verification.acquisitionDeadline = 0;
+      const renewed = ensureVerificationRetryAcquisitionDeadline(op);
+      expect(renewed).toBeGreaterThan(0);
+      expect(ensureVerificationRetryAcquisitionDeadline(op)).toBe(renewed);
+      expect(ensureVerificationRetryAcquisitionDeadline(null)).toBe(0);
+      expect(markVerificationRetryPrecondition(null, "token")).toBe(0);
+    });
+
+    it("forces a new deadline when the provisional token does not match", () => {
+      const op = newOp();
+      op.verification = {
+        acquisitionDeadline: 1,
+        acquisitionProvisional: true,
+        acquisitionProvisionalToken: "old-token"
+      };
+
+      markVerificationRetryAcquisition(
+        op,
+        "command-2",
+        "verification-failed",
+        "new-token"
+      );
+
+      expect(op.verification.acquisitionDeadline).toBeGreaterThan(1);
+      expect(op.verification.retryClassification).toBe("verification-failed");
+    });
+  });
+
+  describe("tracked artifact summary boundaries", () => {
+    function quietOperation() {
+      const op = newOp();
+      op.state = "running";
+      op.setupArtifacts.cleanup.state = "not_started";
+      return op;
+    }
+
+    it("omits a summary for an active operation with no tracked artifacts", () => {
+      expect(projectCleanupSummary(quietOperation())).toBeNull();
+      expect(projectCleanupSummary(null)).toBeNull();
+    });
+
+    it.each([
+      ["Azure app", (op) => (op.setupArtifacts.azureApp.state = "created")],
+      [
+        "service principal",
+        (op) => (op.setupArtifacts.servicePrincipal.state = "created")
+      ],
+      [
+        "candidate service principal",
+        (op) => (op.setupArtifacts.servicePrincipal.state = "created_candidate")
+      ],
+      [
+        "federated credential",
+        (op) =>
+          op.setupArtifacts.federatedCredentials.push({
+            name: "credential",
+            subject: "subject",
+            providerId: null
+          })
+      ],
+      [
+        "role assignment",
+        (op) =>
+          op.setupArtifacts.roleAssignments.push({
+            assignmentId: null,
+            role: "Contributor",
+            scope: "/subscriptions/sub",
+            principalObjectId: null
+          })
+      ],
+      [
+        "GitHub environment",
+        (op) => (op.setupArtifacts.githubEnvironment.state = "created")
+      ],
+      [
+        "candidate GitHub environment",
+        (op) =>
+          (op.setupArtifacts.githubEnvironment.state = "created_candidate")
+      ],
+      [
+        "GitHub variable",
+        (op) =>
+          op.setupArtifacts.githubEnvironmentVariables.push({
+            state: "created",
+            repo: "contoso/store",
+            environment: "dev",
+            environmentProviderId: "env-1",
+            name: "AZURE_CLIENT_ID",
+            valueSha256: "f".repeat(64),
+            previousValue: null,
+            previousKnown: false
+          })
+      ],
+      [
+        "workflow file",
+        (op) =>
+          op.setupArtifacts.commit.workflowFiles.push(provenWorkflowFile())
+      ]
+    ])("reports an active operation that tracks a %s", (_label, arrange) => {
+      const op = quietOperation();
+      arrange(op);
+
+      expect(projectCleanupSummary(op)).not.toBeNull();
+    });
+
+    it.each([
+      [null, "GitHub environment"],
+      [{ repo: "contoso/store" }, "contoso/store"],
+      [{ name: "dev" }, "dev"],
+      [{ repo: "contoso/store", name: "dev" }, "contoso/store:dev"]
+    ])("formats GitHub environment identity %#", (environment, expected) => {
+      expect(formatGitHubEnvironmentLabel(environment)).toBe(expected);
+    });
+
+    it.each([
+      [null, "#"],
+      [{ artifactType: "azure_app" }, "azure_app#"],
+      [
+        { artifactType: "azure_app", identity: " App-1 ", target: "ignored" },
+        "azure_app#app-1"
+      ],
+      [
+        { artifactType: "azure_app", identity: "", target: " App-2 " },
+        "azure_app#app-2"
+      ]
+    ])("builds stable cleanup keys %#", (entry, expected) => {
+      expect(cleanupTargetKey(entry)).toBe(expected);
+    });
+
+    it("projects sparse artifact labels without claiming missing identity", () => {
+      const op = quietOperation();
+      op.state = "failed_partial";
+      op.setupArtifacts.servicePrincipal = {
+        state: "created",
+        origin: "this_operation",
+        appId: null,
+        objectId: "sp-1"
+      };
+      op.setupArtifacts.commit.workflowFiles = [
+        {
+          ...provenWorkflowFile(),
+          path: "",
+          branch: null
+        }
+      ];
+      op.setupArtifacts.githubEnvironmentVariables = [
+        {
+          state: "created",
+          repo: "",
+          environment: "",
+          environmentProviderId: "env-1",
+          name: "",
+          valueSha256: "f".repeat(64),
+          previousValue: null,
+          previousKnown: false
+        }
+      ];
+
+      const summary = projectCleanupSummary(op);
+
+      expect(summary.retainedArtifacts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "service_principal",
+            target: "Service Principal for App Registration"
+          })
+        ])
+      );
+    });
+
+    it("uses only the current cleanup attempt and normalizes sparse results", () => {
+      const op = quietOperation();
+      op.state = "failed_partial";
+      op.setupArtifacts.cleanup = {
+        state: "failed",
+        ownerAssignment: "assigned",
+        attempts: 2,
+        results: [
+          null,
+          {
+            attempt: 1,
+            artifactType: "azure_app",
+            outcome: "deleted",
+            target: "old"
+          },
+          {
+            attempt: 2,
+            artifactType: "azure_app",
+            outcome: "warning",
+            target: null,
+            detail: ""
+          },
+          {
+            attempt: 2,
+            artifactType: "service_principal",
+            outcome: "not_found",
+            target: "Service Principal"
+          }
+        ]
+      };
+
+      const summary = projectCleanupSummary(op);
+
+      expect(summary.results).toEqual([
+        {
+          artifactType: "azure_app",
+          outcome: "warning",
+          target: "",
+          detail: null
+        },
+        {
+          artifactType: "service_principal",
+          outcome: "not_found",
+          target: "Service Principal",
+          detail: null
+        }
+      ]);
+    });
+
+    it.each([
+      null,
+      { attempts: 0, results: [] },
+      { attempts: 1, results: "invalid" }
+    ])("treats malformed cleanup history %# as empty", (cleanup) => {
+      const op = quietOperation();
+      op.state = "failed_partial";
+      op.setupArtifacts.cleanup = cleanup;
+
+      const summary = projectCleanupSummary(op);
+
+      expect(summary.results).toEqual([]);
+    });
+  });
+
+  describe("verification provenance boundaries", () => {
+    function verifiedOperation() {
+      const op = newOp();
+      op.provider = "azure";
+      op.context.githubLogin = "alice";
+      op.verification = {
+        workflow: ".github/workflows/verify.yml",
+        ref: "refs/heads/main",
+        environment: "dev"
+      };
+      op.setupArtifacts.commit.mode = "default_branch";
+      op.setupArtifacts.azureApp.appId = "app-1";
+      return op;
+    }
+
+    it.each([
+      ["repository", (op) => (op.repo = "")],
+      ["environment", (op) => (op.environment = "")],
+      ["GitHub login type", (op) => (op.context.githubLogin = 42)],
+      ["GitHub login value", (op) => (op.context.githubLogin = " ")],
+      ["workflow type", (op) => (op.verification.workflow = 42)],
+      ["workflow value", (op) => (op.verification.workflow = "")],
+      ["ref type", (op) => (op.verification.ref = 42)],
+      ["ref value", (op) => (op.verification.ref = "")],
+      [
+        "verification environment type",
+        (op) => (op.verification.environment = 42)
+      ],
+      [
+        "verification environment value",
+        (op) => (op.verification.environment = "")
+      ],
+      [
+        "commit point",
+        (op) => {
+          op.setupArtifacts.commit.mode = "not_started";
+          op.setupArtifacts.commit.workflowFiles = [];
+        }
+      ],
+      [
+        "Azure identity",
+        (op) => {
+          op.setupArtifacts.azureApp.appId = null;
+          op.setupArtifacts.servicePrincipal.appId = null;
+        }
+      ]
+    ])("rejects missing %s provenance", (_label, removeProof) => {
+      const op = verifiedOperation();
+      removeProof(op);
+      expect(hasVerificationProvenance(op)).toBe(false);
+    });
+
+    it("accepts workflow-file and provider-specific cloud provenance", () => {
+      const azure = verifiedOperation();
+      azure.setupArtifacts.commit.mode = "not_started";
+      azure.setupArtifacts.commit.workflowFiles = [provenWorkflowFile()];
+      azure.setupArtifacts.azureApp.appId = null;
+      azure.setupArtifacts.servicePrincipal.appId = "sp-app";
+      expect(hasVerificationProvenance(azure)).toBe(true);
+
+      const aws = verifiedOperation();
+      aws.provider = "aws";
+      aws.context.cloud = { kind: "aws", region: "us-west-2" };
+      aws.setupArtifacts.azureApp.appId = null;
+      expect(hasVerificationProvenance(aws)).toBe(true);
+
+      delete aws.context.cloud;
+      expect(hasVerificationProvenance(aws)).toBe(false);
+    });
+
+    it("prefers a terminal pull request URL and falls back to the ledger", () => {
+      const op = newOp();
+      op.setupArtifacts.commit.pullRequestUrl = "https://example.test/ledger";
+      expect(setupPullRequestUrl(op)).toBe("https://example.test/ledger");
+
+      op.terminal = { pullRequestUrl: "https://example.test/terminal" };
+      expect(setupPullRequestUrl(op)).toBe("https://example.test/terminal");
+
+      op.terminal.pullRequestUrl = 42;
+      op.setupArtifacts.commit.pullRequestUrl = 42;
+      expect(setupPullRequestUrl(op)).toBeNull();
+    });
+  });
+
+  describe("operation state helper boundaries", () => {
+    it("leaves a record unchanged when a requested stage does not exist", () => {
+      const op = newOp();
+      op.stages[0].state = "failed";
+      op.stages[1].state = "warning";
+      const before = op.stages.map((stage) => stage.state);
+
+      expect(enterStage(null, STAGE_VERIFY)).toBeNull();
+      enterStage(op, "missing-stage");
+
+      expect(op.currentStage).toBeNull();
+      expect(op.stages.map((stage) => stage.state)).toEqual([
+        ...before.slice(0, 2),
+        "succeeded"
+      ]);
+      expect(setStageState(null, STAGE_VERIFY, "failed")).toBeNull();
+      expect(setStageState(op, "missing-stage", "failed")).toBe(op);
+    });
+
+    it("uses safe prompt defaults and ignores terminal prompt requests", () => {
+      const op = newOp();
+
+      requireInput(op);
+
+      expect(op.inputRequired).toMatchObject({
+        code: "input-required",
+        message: "",
+        checkpoint: "input-required",
+        metadata: null
+      });
+      finish(op, "failed");
+      const prompt = op.inputRequired;
+      expect(requireInput(op, { code: "ignored" })).toBe(op);
+      expect(op.inputRequired).toBe(prompt);
+      expect(requireInput(null, { code: "ignored" })).toBeNull();
+    });
+
+    it.each([
+      ["non-string checkpoint", { checkpoint: 42 }],
+      ["empty checkpoint", { checkpoint: "" }],
+      ["primitive metadata", { metadata: "invalid" }],
+      ["array metadata", { metadata: ["allowed", "object"] }]
+    ])("normalizes %s at the prompt boundary", (_label, input) => {
+      const op = newOp();
+
+      requireInput(op, { code: "choose-app", ...input });
+
+      expect(op.inputRequired.checkpoint).toBe("choose-app");
+      expect(op.inputRequired.metadata).toEqual(
+        Array.isArray(input.metadata) ? input.metadata : null
+      );
+    });
+
+    it("normalizes step fields and warning details through the public recorder", () => {
+      const op = newOp();
+
+      expect(addStep(null, { label: "ignored" })).toBeNull();
+      const step = addStep(op, {
+        stage: "",
+        kind: "not-a-kind",
+        label: null,
+        state: "not-a-state",
+        warning: {}
+      });
+
+      expect(step).toMatchObject({
+        stage: null,
+        kind: "observation",
+        label: "",
+        state: "warning",
+        warning: {
+          code: "unknown",
+          message: "",
+          impact: "",
+          remediationCommand: "",
+          blocksFutureStep: ""
+        }
+      });
+    });
+
+    it.each([
+      ["⏭️ Skipped", "skipped", "observation"],
+      ["ℹ️ Informational", "succeeded", "observation"],
+      ["plain text", "succeeded", "observation"],
+      [null, "succeeded", "observation"]
+    ])("maps legacy step %s to structured behavior", (text, state, kind) => {
+      expect(addLegacyStep(newOp(), text)).toMatchObject({ state, kind });
+    });
+
+    it("filters empty cloud context fields and rejects incomplete updates", () => {
+      const op = newOp();
+
+      expect(setContext(null, { login: "alice" })).toBeNull();
+      expect(setContext(op, null)).toBe(op);
+      expect(setCloudContext(null, "azure", {})).toBeNull();
+      expect(setCloudContext(op, "", {})).toBe(op);
+      setCloudContext(op, "azure", {
+        subscriptionId: "sub-1",
+        tenantId: "",
+        clientId: null,
+        location: undefined,
+        retries: 0
+      });
+
+      expect(op.context.cloud).toEqual({
+        kind: "azure",
+        subscriptionId: "sub-1",
+        retries: 0
+      });
+    });
+
+    it("does not reactivate or touch terminal operations", () => {
+      const op = newOp();
+      finish(op, "failed");
+      const lastActivityAt = op.lastActivityAt;
+
+      expect(setExecutionActive(null, true)).toBeNull();
+      setExecutionActive(op, true);
+      touchOperation(op, "2030-01-01T00:00:00.000Z");
+
+      expect(op.executionActive).toBeUndefined();
+      expect(op.lastActivityAt).toBe(lastActivityAt);
+      expect(touchOperation(null)).toBeNull();
+    });
+
+    it("updates only structured request environments with a canonical name", () => {
+      const op = newOp();
+      op.context.requestedEnvironment = "requested-dev";
+      op.request = { environment: { environment: "old" } };
+      op.resumeRequest = { environment: { environment: "old-resume" } };
+
+      expect(setCanonicalEnvironment(null, "canonical")).toBeNull();
+      expect(setCanonicalEnvironment(op, null)).toBe(op);
+      expect(setCanonicalEnvironment(op, "   ")).toBe(op);
+      setCanonicalEnvironment(op, " canonical-dev ");
+
+      expect(op.context).toMatchObject({
+        requestedEnvironment: "requested-dev",
+        canonicalEnvironment: "canonical-dev"
+      });
+      expect(op.request.environment.environment).toBe("canonical-dev");
+      expect(op.resumeRequest.environment.environment).toBe("canonical-dev");
+    });
+
+    it.each([
+      ["missing request", undefined],
+      ["primitive request", "invalid"],
+      ["missing environment", {}],
+      ["primitive environment", { environment: "invalid" }],
+      ["empty environment", { environment: {} }]
+    ])("ignores a %s while canonicalizing", (_label, request) => {
+      const op = newOp();
+      op.request = request;
+      op.resumeRequest = request;
+
+      setCanonicalEnvironment(op, "canonical-dev");
+
+      expect(op.context.canonicalEnvironment).toBe("canonical-dev");
+    });
+
+    it("uses the original operation environment when no requested name was recorded", () => {
+      const op = newOp();
+      delete op.context.requestedEnvironment;
+
+      setCanonicalEnvironment(op, "canonical-dev");
+
+      expect(op.context.requestedEnvironment).toBe("dev");
+    });
   });
 });

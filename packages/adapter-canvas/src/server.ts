@@ -16,6 +16,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleepMs } from "node:timers/promises";
 import {
   buildRemediation,
   computeGraphDiff,
@@ -2098,15 +2099,9 @@ async function deleteGitHubEnvironmentIdempotent(
   });
 }
 
-function sleepMs(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
 const deployPlannedGraphService = createPlannedGraphRecoveryService({
-  prepareSourceRefResources: (entry, view, context) =>
-    prepareSourceRefResources(entry, view, context),
-  setSourceRefResources: (entry, view, resources, context, expectedToken) =>
-    setSourceRefResources(entry, view, resources, context, expectedToken),
+  prepareSourceRefResources,
+  setSourceRefResources,
   fetchBicepSelection: (entry, repo, branch) =>
     fetchBicepSelection(entry as CanvasServerEntry, repo, branch),
   radArtifactsDirForSelection: ({
@@ -2126,11 +2121,9 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
       bicepRepoPath,
       log
     }),
-  buildGraphViaRad: (content, bicepPath, options) =>
-    buildGraphViaRad(content, bicepPath, options),
-  fetchRecipePack: (provider) => fetchRecipePack(github, provider),
-  resolveRecipeOutputs: (parsed, recipes, provider) =>
-    resolveRecipeOutputs(github, parsed, recipes, provider),
+  buildGraphViaRad,
+  fetchRecipePack: fetchRecipePack.bind(null, github),
+  resolveRecipeOutputs: resolveRecipeOutputs.bind(null, github),
   canvasGraphResources,
   errorMessage
 });
@@ -2158,20 +2151,20 @@ const deployDispatchService = createDeployDispatchService({
       stderr: result.stderr ?? ""
     };
   },
-  runGitHubJson: (apiPath) => runGitHubJsonRequest(apiPath),
+  runGitHubJson: runGitHubJsonRequest,
   readProcessEnv: () => process.env,
   ghCredentialSource: ghCommandCredentialSource,
   fetchFileForSelection: (entry, repo, branch, repoPath) =>
     fetchFileForSelection(entry as CanvasServerEntry, repo, branch, repoPath),
   appParams,
-  resolveDeployParams: (params) => resolveDeployParams(params),
+  resolveDeployParams,
   partitionParams,
   extractAppName,
   buildDeployRadCommand,
   buildAppGraphRadCommand,
   ensureDeployWorkflowsOnBranch,
   ensureWorkflowsCurrent,
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep: sleepMs,
   latestWorkflowRunId,
   classifyDeployDispatchFailure,
   uncommittedGeneratedPaths: (entry) =>
@@ -2182,7 +2175,7 @@ const deployDispatchService = createDeployDispatchService({
     deployListCache.delete(repo);
   },
   errorMessage,
-  now: () => Date.now()
+  now: Date.now
 });
 
 const deployOutcomeService = createDeployOutcomeService({
@@ -2193,9 +2186,8 @@ const deployOutcomeService = createDeployOutcomeService({
     fetchRunLog(repo, runId, undefined, request),
   redactDiagnostic: redactGhCredentials,
   cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
-  sleep: (milliseconds) =>
-    new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  now: () => Date.now()
+  sleep: sleepMs,
+  now: Date.now
 });
 
 // gh runner that REJECTS on failure, so callers can fail closed instead of
@@ -3468,7 +3460,7 @@ export async function finalizeSetupFailure(
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
           steps,
-          persistJournal: () => operations.persist()
+          persistJournal: operations.persist.bind(operations)
         });
         warnings.push(...azureCleanup.warnings);
         results = [...results, ...azureCleanup.results];
@@ -3487,7 +3479,7 @@ export async function finalizeSetupFailure(
           attempt,
           runDeleteEnvironment,
           readEnvironment,
-          persistJournal: () => operations.persist(),
+          persistJournal: operations.persist.bind(operations),
           invalidateEnvironmentListing: (repo) => {
             envListCache.invalidate(repo);
           },
@@ -4480,7 +4472,7 @@ export function createInstanceRequestCoordinator(
         });
         await saveOperation(operation);
       },
-      isRateLimitError: (error) => isGitHubRateLimitError(error),
+      isRateLimitError: isGitHubRateLimitError,
       now: Date.now,
       sleep: (milliseconds) =>
         new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -4554,17 +4546,10 @@ export function createInstanceRequestCoordinator(
               ),
             readGitHubJson: (apiPath, selectedExecutor) =>
               runGitHubJsonRequest(apiPath, selectedExecutor),
-            setCanonicalEnvironment: (operation, environment) => {
-              setCanonicalEnvironment(operation, environment);
-            },
-            recordGitHubEnvironment: (operation, patch) => {
-              recordGitHubEnvironment(operation, patch);
-            },
-            promoteCreatedGitHubEnvironment: (operation, identity) =>
-              promoteCreatedGitHubEnvironment(operation, identity),
-            addLegacyStep: (operation, text) => {
-              addLegacyStep(operation, text);
-            },
+            setCanonicalEnvironment,
+            recordGitHubEnvironment,
+            promoteCreatedGitHubEnvironment,
+            addLegacyStep,
             persistEnvironmentResolution: (operation) =>
               persistMutationCheckpoint({
                 operation,
@@ -4590,7 +4575,7 @@ export function createInstanceRequestCoordinator(
                   });
                 }
               }),
-            persistProviderMutation: () => operations.persist(),
+            persistProviderMutation: operations.persist.bind(operations),
             finalizeEnvironmentResolutionFailure: async (
               operation,
               input,
@@ -4723,11 +4708,11 @@ export function createInstanceRequestCoordinator(
         new Promise((resolve) => setTimeout(resolve, milliseconds)),
       verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
       stageVerify: STAGE_VERIFY,
-      addStep: (target, text, stage) => addLegacyStep(target, text, stage),
+      addStep: addLegacyStep,
       setCommandState,
       finish,
       persist: saveOperation,
-      persistJournal: () => operations.persist(),
+      persistJournal: operations.persist.bind(operations),
       monitor: monitorVerification,
       currentState: (id) => operations.get(id)?.state || null,
       errorMessage
@@ -4915,7 +4900,7 @@ export function createInstanceRequestCoordinator(
         attempt,
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
         readEnvironment: cleanupGitHub.readEnvironment,
-        persistJournal: () => operations.persist(),
+        persistJournal: operations.persist.bind(operations),
         invalidateEnvironmentListing: (repo) => {
           envListCache.invalidate(repo);
         },
@@ -4946,7 +4931,7 @@ export function createInstanceRequestCoordinator(
           .map((entry: { key: string }) => entry.key)
       ),
       onResultRecorded: persist,
-      persistJournal: () => operations.persist()
+      persistJournal: operations.persist.bind(operations)
     });
     warnings.push(...azureCleanup.warnings);
     results = [...results, ...azureCleanup.results];
@@ -5225,7 +5210,7 @@ export function createInstanceRequestCoordinator(
         attempt: Number(getSetupArtifactLedger(op)?.cleanup?.attempts || 1),
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
         readEnvironment: cleanupGitHub.readEnvironment,
-        persistJournal: () => operations.persist(),
+        persistJournal: operations.persist.bind(operations),
         invalidateEnvironmentListing: (repo) => {
           envListCache.invalidate(repo);
         },
@@ -5242,7 +5227,7 @@ export function createInstanceRequestCoordinator(
         runAz: (args: string[]) => runCliCommand("az", args),
         steps,
         only: azureKeys,
-        persistJournal: () => operations.persist()
+        persistJournal: operations.persist.bind(operations)
       });
     }
     for (const step of steps) addLegacyStep(op, step);
@@ -5695,10 +5680,52 @@ export function createProductionCanvasServerRuntime(
   // Composition root for the migrated `liveness-source` family. The handlers
   // receive only the three seams they use; the open handler is read through a
   // getter so the SDK entry can still register it after construction.
+  const readCanvasInstance = (instanceId: string) =>
+    canvasServer.instances.get(instanceId);
+  const readCanvasState = (instanceId: string) =>
+    readCanvasInstance(instanceId)?.state;
+  const runSelectedGhRequest = (executor: SelectedGhExecutor, args: string[]) =>
+    executor.run(args, { timeout: 30000 });
+  const readProcessEnvironment = () => process.env;
+  const runAzCommand = runCliCommand.bind(null, "az");
+  const preflightSelectedRepoAdmin = (
+    repo: string,
+    executor?: SelectedGhExecutor
+  ) => preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION);
+  const preflightSelectedGhcrPackageWriteAccess = (
+    executor?: SelectedGhExecutor
+  ) =>
+    preflightGhcrPackageWriteAccess(
+      getGhPackageCredentials,
+      getGitHubIdentity,
+      executor,
+      GH_COMMAND_PRESENTATION
+    );
+  const resolveGraphBranch = (
+    entry: CanvasServerEntry,
+    repo: string,
+    requestedBranch: string,
+    followWorkspaceBranch?: boolean
+  ) =>
+    resolveGraphBranchForRequest(
+      entry.state,
+      repo,
+      requestedBranch,
+      followWorkspaceBranch,
+      currentWorkspaceBranch
+    );
+  const commitGraphBranch = (
+    entry: CanvasServerEntry,
+    repo: string,
+    resolution: Parameters<typeof commitWorkspaceBranchResolution>[2]
+  ) => commitWorkspaceBranchResolution(entry.state, repo, resolution);
+  const resolveRadArtifactsDirectory = (
+    options: Omit<Parameters<typeof radArtifactsDirForSelection>[0], "github">
+  ) => radArtifactsDirForSelection({ ...options, github });
+
   const livenessSourceRoutes = createLivenessSourceRoutes({
     getOpenSourceHandler: () => openSourceHandler,
-    readInstanceState: (instanceId) =>
-      canvasServer.instances.get(instanceId)?.state,
+    readInstanceState: readCanvasState,
     getWorkspaceModelRevision: async (instanceId) => {
       const state = canvasServer.instances.get(instanceId)?.state;
       if (
@@ -5755,12 +5782,12 @@ export function createProductionCanvasServerRuntime(
   // projection, and per-instance scheduling seams they invoke.
   const operationsStatusRoutes = createOperationsStatusRoutes(
     {
-      latest: (repo) => operations.latest(repo),
-      latestAny: () => operations.latestAny(),
-      get: (operationId) => operations.get(operationId),
+      latest: operations.latest.bind(operations),
+      latestAny: operations.latestAny.bind(operations),
+      get: operations.get.bind(operations),
       toClientView,
       productVersion: resolveGeneratorVersion,
-      now: () => Date.now()
+      now: Date.now
     },
     {
       isValidRepoSlug,
@@ -5770,16 +5797,18 @@ export function createProductionCanvasServerRuntime(
       isUuid,
       buildStages,
       createOperation,
-      claimSelectionHandle: (input) => githubSelectionHandles.claim(input),
-      startConflict: (repo) => operations.startConflict(repo),
-      startOperation: (op) => operations.start(op),
-      persistOperations: () => operations.persist(),
+      claimSelectionHandle: githubSelectionHandles.claim.bind(
+        githubSelectionHandles
+      ),
+      startConflict: operations.startConflict.bind(operations),
+      startOperation: operations.start.bind(operations),
+      persistOperations: operations.persist.bind(operations),
       finish,
       scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
       errorMessage
     },
     {
-      getOperation: (operationId) => operations.get(operationId),
+      getOperation: operations.get.bind(operations),
       canResumeInput,
       resumeAfterInput,
       requireInput,
@@ -5787,7 +5816,7 @@ export function createProductionCanvasServerRuntime(
       isTerminalState,
       canDismissOperation,
       dismissOperation,
-      persistOperations: () => operations.persist(),
+      persistOperations: operations.persist.bind(operations),
       toClientView,
       scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
       errorMessage,
@@ -5796,9 +5825,9 @@ export function createProductionCanvasServerRuntime(
   );
 
   const operationsControlRoutes = createOperationsControlRoutes({
-    get: (operationId) => operations.get(operationId),
-    acquireForRetry: (op) => operations.acquireForRetry(op),
-    persistOperations: () => operations.persist(),
+    get: operations.get.bind(operations),
+    acquireForRetry: operations.acquireForRetry.bind(operations),
+    persistOperations: operations.persist.bind(operations),
     checkPullRequestMerge: (op, pullRequestUrl) =>
       checkSetupPullRequestMergeForOperation(op, pullRequestUrl, {
         createExecutor: (login) =>
@@ -5816,7 +5845,7 @@ export function createProductionCanvasServerRuntime(
         { ownerKey: accountContext.ownerKey, operationId: op.operationId },
         (executor) =>
           readVerificationWorkflowState(executor, identity, {
-            run: (selected, args) => selected.run(args, { timeout: 30000 })
+            run: runSelectedGhRequest
           }),
         30000
       );
@@ -5832,7 +5861,7 @@ export function createProductionCanvasServerRuntime(
         { ownerKey: accountContext.ownerKey, operationId: op.operationId },
         (executor) =>
           cancelVerificationWorkflow(executor, identity, {
-            run: (selected, args) => selected.run(args, { timeout: 30000 })
+            run: runSelectedGhRequest
           }),
         30000
       );
@@ -5855,9 +5884,7 @@ export function createProductionCanvasServerRuntime(
     // closes a setup has to drop it here: the browser reloads the table straight
     // after, and a cached payload would answer with the environment the abandoned
     // attempt left behind.
-    invalidateEnvironmentListing: (repo) => {
-      envListCache.invalidate(repo);
-    }
+    invalidateEnvironmentListing: envListCache.invalidate.bind(envListCache)
   });
 
   // Composition root for the migrated `repositories` family. Three seams: the
@@ -5865,11 +5892,8 @@ export function createProductionCanvasServerRuntime(
   // written to, and the workspace-repo predicate, which stays defined here and is
   // injected rather than copied.
   const repositoriesRoutes = createRepositoriesRoutes({
-    cliExec: (command, args, options, callback) => {
-      cliExec(command, args, options, callback);
-    },
-    readInstanceState: (instanceId) =>
-      canvasServer.instances.get(instanceId)?.state,
+    cliExec,
+    readInstanceState: readCanvasState,
     repoMatchesWorkspace
   });
 
@@ -5884,31 +5908,26 @@ export function createProductionCanvasServerRuntime(
   const deploymentsRoutes = createDeploymentsRoutes({
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     isValidRepoSlug,
-    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    readInstanceEntry: readCanvasInstance,
     triggerDeployRepairHandoff,
     triggerDeployFailureNotice,
     deployHandoffStatus,
     resolveRepoAppName,
     resolveEnvDeployment,
-    ghOrThrow: (args) => ghOrThrow(args),
-    resetDeploymentViewState: (state, attemptId) => {
-      resetDeploymentViewState(state, attemptId);
-    },
+    ghOrThrow,
+    resetDeploymentViewState,
     get deployListCache() {
       return deployListCache;
     },
     get deployListTtlMs() {
       return DEPLOY_LIST_TTL_MS;
     },
-    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-    reserveDeploymentMutation: (state, reservation) =>
-      reserveDeploymentMutation(state, reservation),
+    activeDeploymentMutation,
+    reserveDeploymentMutation,
     releaseDeploymentMutation,
     deploymentStatusBlocksMutation,
-    localDeploymentBlocksMutation: (state) =>
-      localDeploymentBlocksMutation(state),
-    ensureWorkflowsCurrent: (repo, environment, provider, only) =>
-      ensureWorkflowsCurrent(repo, environment, provider, only),
+    localDeploymentBlocksMutation,
+    ensureWorkflowsCurrent,
     findWorkflowRun,
     runGh: (args, timeout = 20000, extraEnv) =>
       new Promise((resolve) => {
@@ -5918,8 +5937,8 @@ export function createProductionCanvasServerRuntime(
           resolve(toGhCommandResult(err, stdout, stderr, { trimStdout: true }));
         });
       }),
-    readProcessEnv: () => process.env,
-    setTimer: (callback, ms) => setTimeout(callback, ms),
+    readProcessEnv: readProcessEnvironment,
+    setTimer: setTimeout,
     // Declared as a getter for the same temporal-dead-zone reason as the cache
     // above: the deploy services are composed further down, after the workflow
     // file names and the instance container they narrow over exist.
@@ -6066,17 +6085,9 @@ export function createProductionCanvasServerRuntime(
   );
 
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
-    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-    resolveBranchForRequest: (entry, repo, requestedBranch) =>
-      resolveGraphBranchForRequest(
-        entry.state,
-        repo,
-        requestedBranch,
-        undefined,
-        currentWorkspaceBranch
-      ),
-    commitBranchResolution: (entry, repo, resolution) =>
-      commitWorkspaceBranchResolution(entry.state, repo, resolution),
+    readInstanceEntry: readCanvasInstance,
+    resolveBranchForRequest: resolveGraphBranch,
+    commitBranchResolution: commitGraphBranch,
     prepareSourceRef: (entry, context) =>
       prepareSourceRefResources(entry, "graph", context),
     commitSourceRef: (entry, resources, context, expectedToken) =>
@@ -6085,50 +6096,28 @@ export function createProductionCanvasServerRuntime(
       isCurrentSourceRefToken(entry.state, "graph", expectedToken),
     triggerAppBicepHandoff: (entry, repo, branch) =>
       triggerAppBicepHandoff(entry, repo, branch, "graph"),
-    triggerGraphRepairHandoff: (entry, request) =>
-      triggerGraphRepairHandoff(entry, request),
+    triggerGraphRepairHandoff,
     clearGraphRepairAttempt: (entry) =>
       clearGraphRepairAttempt(entry.state, "graph"),
-    fetchBicepSelection: (entry, repo, branch) =>
-      fetchBicepSelection(entry, repo, branch),
-    listBranchPaths: (entry, repo, branch) =>
-      listBranchPaths(entry, repo, branch),
-    workspaceGraphJsonPath: (state, bicepRepoPath) =>
-      workspaceGraphJsonPath(state, bicepRepoPath),
-    radArtifactsDirForSelection: (options) =>
-      radArtifactsDirForSelection({ ...options, github }),
-    buildGraphViaRad: (content, bicepPath, options) =>
-      buildGraphViaRad(content, bicepPath, options),
+    fetchBicepSelection,
+    listBranchPaths,
+    workspaceGraphJsonPath,
+    radArtifactsDirForSelection: resolveRadArtifactsDirectory,
+    buildGraphViaRad,
     canvasGraphResources,
     errorMessage,
-    logError: (message) => console.error(message)
+    logError: console.error.bind(console)
   });
 
   const graphPlanningWorkflows =
     createGraphPlanningWorkflows<CanvasServerEntry>({
-      readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-      resolveBranchForRequest: (
-        entry,
-        repo,
-        requestedBranch,
-        followWorkspaceBranch
-      ) =>
-        resolveGraphBranchForRequest(
-          entry.state,
-          repo,
-          requestedBranch,
-          followWorkspaceBranch,
-          currentWorkspaceBranch
-        ),
-      commitBranchResolution: (entry, repo, resolution) =>
-        commitWorkspaceBranchResolution(entry.state, repo, resolution),
+      readInstanceEntry: readCanvasInstance,
+      resolveBranchForRequest: resolveGraphBranch,
+      commitBranchResolution: commitGraphBranch,
       pipeline: createGraphPipeline<CanvasServerEntry>({
-        fetchBicepSelection: (entry, repo, branch) =>
-          fetchBicepSelection(entry, repo, branch),
-        resolveRadArtifactsDir: (request) =>
-          radArtifactsDirForSelection({ ...request, github }),
-        buildGraphViaRad: (content, definitionFile, options) =>
-          buildGraphViaRad(content, definitionFile, options),
+        fetchBicepSelection,
+        resolveRadArtifactsDir: resolveRadArtifactsDirectory,
+        buildGraphViaRad,
         canvasGraphResources,
         workspaceGraphJsonPath,
         graphDefinitionHash,
@@ -6138,28 +6127,22 @@ export function createProductionCanvasServerRuntime(
         }
       }),
       triggerAppBicepHandoff,
-      triggerGraphRepairHandoff: (entry, request) =>
-        triggerGraphRepairHandoff(entry, request),
+      triggerGraphRepairHandoff,
       clearGraphRepairAttempt: (entry, view) => {
         clearGraphRepairAttempt(entry.state, view);
         if (view === "diff") delete entry.state.diffModelingFailed;
       },
-      listBranchPaths: (entry, repo, branch) =>
-        listBranchPaths(entry, repo, branch),
-      prepareSourceRefResources: (entry, view, sourceRefInput) =>
-        prepareSourceRefResources(entry, view, sourceRefInput),
-      setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
-        setSourceRefResources(entry, view, resources, sourceRefInput, token),
+      listBranchPaths,
+      prepareSourceRefResources,
+      setSourceRefResources,
       isCurrentSourceRefToken,
       canReuseModeledGraph,
       addGraphProgress,
       beginPlannedGraphRequest,
       isCurrentPlannedGraphRequest,
-      fetchRecipePack: (provider) => fetchRecipePack(github, provider),
-      resolveRecipeOutputs: (resources, recipes, provider) =>
-        resolveRecipeOutputs(github, resources, recipes, provider),
-      computeGraphDiff: (baseResources, headResources) =>
-        computeGraphDiff(baseResources, headResources),
+      fetchRecipePack: fetchRecipePack.bind(null, github),
+      resolveRecipeOutputs: resolveRecipeOutputs.bind(null, github),
+      computeGraphDiff,
       observeModelingRun: observeServerWorkspaceModelingRun,
       readBranchSourceRevision: (entry, repo, branch) =>
         readSelectedSourceRevision(entry.state, repo, branch, {
@@ -6170,8 +6153,8 @@ export function createProductionCanvasServerRuntime(
       record,
       optionalString,
       errorMessage,
-      logError: (message) => console.error(message),
-      now: () => Date.now()
+      logError: console.error.bind(console),
+      now: Date.now
     });
 
   // Composition root for the read-only half of the `graphs-planning` family. The
@@ -6179,7 +6162,7 @@ export function createProductionCanvasServerRuntime(
   // fixed topology through the same modeled-graph workflow and cache as the Graph
   // route. It never parses Bicep or invokes rad through a second path.
   const graphsPlanningRoutes = createGraphsPlanningRoutes({
-    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    readInstanceEntry: readCanvasInstance,
     createDeployStatusReader: (options, instanceId) => {
       const scope = canvasServer.instances.get(instanceId)?.observation;
       if (!scope)
@@ -6215,7 +6198,7 @@ export function createProductionCanvasServerRuntime(
     errorMessage,
     repoMatchesWorkspace,
     observeModelingRun: observeServerWorkspaceModelingRun,
-    now: () => Date.now()
+    now: Date.now
   });
 
   // The route layer sees exactly one seam: the workflow service above. Parsing
@@ -6237,19 +6220,16 @@ export function createProductionCanvasServerRuntime(
   // reads no module-level mutable state.
   const environmentsRoutes = createEnvironmentsRoutes({
     errorMessage,
-    redactDiagnostic: (value) => redactGhCredentials(value),
+    redactDiagnostic: redactGhCredentials,
     repoMatchesWorkspace,
-    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-    runCommand: (command, args, options) => runCommand(command, args, options),
-    fetchFileFromRepo: (repo, path, branch) =>
-      fetchFileFromRepo(repo, path, branch),
+    readInstanceEntry: readCanvasInstance,
+    runCommand,
+    fetchFileFromRepo,
     appParams,
-    resolveRepoAppName: (repo, branch) => resolveRepoAppName(repo, branch),
-    resolveEnvDeployment: (repo, environment, appName) =>
-      resolveEnvDeployment(repo, environment, appName),
-    logError: (message) => console.error(message),
-    discoverEnvironmentTarget: (repo, environment) =>
-      discoverEnvironmentTarget(repo, environment),
+    resolveRepoAppName,
+    resolveEnvDeployment,
+    logError: console.error.bind(console),
+    discoverEnvironmentTarget,
     activeDeleteOperation: (repo, environment) => {
       return matchDeleteOperationEnvironment(
         operations.running(repo),
@@ -6257,13 +6237,11 @@ export function createProductionCanvasServerRuntime(
       );
     },
     createOperation,
-    buildDeleteStages: (options) => buildDeleteStages(options),
-    startOperation: (op) => operations.start(op),
+    buildDeleteStages,
+    startOperation: operations.start.bind(operations),
     toClientView,
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-    cliExec: (command, args, options, callback) => {
-      cliExec(command, args, options, callback);
-    },
+    cliExec,
     activeDeleteEnvironment: (repo) => {
       const op = operations.latest(repo);
       if (
@@ -6276,14 +6254,10 @@ export function createProductionCanvasServerRuntime(
       }
       return "";
     },
-    envListCacheGet: (repo) => envListCache.get(repo),
-    envListCacheSet: (repo, entry) => {
-      envListCache.set(repo, entry);
-    },
-    envListCacheDelete: (repo) => {
-      envListCache.invalidate(repo);
-    },
-    envListCacheGeneration: (repo) => envListCache.generation(repo),
+    envListCacheGet: envListCache.get.bind(envListCache),
+    envListCacheSet: envListCache.set.bind(envListCache),
+    envListCacheDelete: envListCache.invalidate.bind(envListCache),
+    envListCacheGeneration: envListCache.generation.bind(envListCache),
     envListTtlMs: ENV_LIST_TTL_MS,
     kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
       kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
@@ -6331,17 +6305,17 @@ export function createProductionCanvasServerRuntime(
     },
     getRunDetail,
     fetchRunLog,
-    extractErrorLines: (logText, max) => extractErrorLines(logText, max),
+    extractErrorLines,
     extractGitHubActionsStepLog,
     explainOidcEnterpriseClaim,
     explainNoSubscriptions,
-    addLegacyStep: (operation, text) => addLegacyStep(operation, text),
+    addLegacyStep,
     isTerminalState,
     finish,
     finishSucceeded,
     persistBestEffort,
-    persistOperations: () => operations.persist(),
-    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
+    persistOperations: operations.persist.bind(operations),
+    reportOperationDiagnostic: operations.report?.bind(operations),
     verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
     stageVerify: STAGE_VERIFY
   });
@@ -6362,14 +6336,14 @@ export function createProductionCanvasServerRuntime(
       cliExec(command, args, options, callback),
     readProcessEnv: () => process.env,
     isValidRepoSlug,
-    getOperation: (operationId) => operations.get(operationId),
-    isStale: (operation) => isStale(operation),
-    isTerminalState: (state) => isTerminalState(state),
+    getOperation: operations.get.bind(operations),
+    isStale,
+    isTerminalState,
     createOperation,
     buildStages,
-    startOperation: (operation) => operations.start(operation),
-    persistOperations: () => operations.persist(),
-    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
+    startOperation: operations.start.bind(operations),
+    persistOperations: operations.persist.bind(operations),
+    reportOperationDiagnostic: operations.report?.bind(operations),
     finishFailed: (operation, failure) => {
       finish(operation, "failed", { failure });
     },
@@ -6389,16 +6363,9 @@ export function createProductionCanvasServerRuntime(
     persistMutationCheckpoint,
     persistBestEffort,
     guardStopBoundary,
-    runAzCommand: (args) => runCliCommand("az", args),
-    preflightRepoAdmin: (repo, executor) =>
-      preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
-    preflightGhcrPackageWriteAccess: (executor) =>
-      preflightGhcrPackageWriteAccess(
-        getGhPackageCredentials,
-        getGitHubIdentity,
-        executor,
-        GH_COMMAND_PRESENTATION
-      ),
+    runAzCommand,
+    preflightRepoAdmin: preflightSelectedRepoAdmin,
+    preflightGhcrPackageWriteAccess: preflightSelectedGhcrPackageWriteAccess,
     readGitHubJson: (apiPath, executor) =>
       runGitHubJsonRequest(apiPath, executor),
     bootstrapGHCRStatePackage: (input) =>
@@ -6422,20 +6389,11 @@ export function createProductionCanvasServerRuntime(
         selectedCreateBranchRef(executor, repo, branch, sha)
       : createBranchRef(repo, branch, sha),
     tempFile: workflowTempFile,
-    setCanonicalEnvironment: (operation, environment) => {
-      setCanonicalEnvironment(operation, environment);
-    },
-    recordGitHubEnvironment: (operation, patch) => {
-      recordGitHubEnvironment(operation, patch);
-    },
-    recordGitHubEnvironmentVariable: (operation, entry) => {
-      recordGitHubEnvironmentVariable(operation, entry);
-    },
-    promoteCreatedGitHubEnvironment: (operation, identity) =>
-      promoteCreatedGitHubEnvironment(operation, identity),
-    envListCacheDelete: (repo) => {
-      envListCache.invalidate(repo);
-    },
+    setCanonicalEnvironment,
+    recordGitHubEnvironment,
+    recordGitHubEnvironmentVariable,
+    promoteCreatedGitHubEnvironment,
+    envListCacheDelete: envListCache.invalidate.bind(envListCache),
     ociStateBackend: OCI_STATE_BACKEND,
     defaultStateArchive: DEFAULT_STATE_ARCHIVE,
     azureCredential: () => cloudCredential(sharedCredentials.azure),
@@ -6445,13 +6403,9 @@ export function createProductionCanvasServerRuntime(
       generateVerifyWorkflow(environment, provider, undefined, {
         setupPushOperationMarker
       }),
-    generateDeployWorkflow: (environment, appFile) =>
-      generateDeployWorkflow(environment, appFile),
-    generateDeleteWorkflow: (environment) =>
-      generateDeleteWorkflow(environment),
-    recordCommittedWorkflowFile: (operation, entry) => {
-      recordCommittedWorkflowFile(operation, entry);
-    },
+    generateDeployWorkflow,
+    generateDeleteWorkflow,
+    recordCommittedWorkflowFile,
     deleteLegacyDeployWorkflow,
     createPullRequestApi: (repo, head, base, title, body, executor) =>
       executor ?
@@ -6664,24 +6618,21 @@ export function createProductionCanvasServerRuntime(
     generatePortalUrl,
     optionalString,
     errorMessage,
-    sleep: (milliseconds) =>
-      new Promise((resolve) => setTimeout(resolve, milliseconds)),
-    now: () => Date.now()
+    sleep: sleepMs,
+    now: Date.now
   });
 
   const deployRequestService = createDeployRequestService({
-    readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+    readInstanceEntry: readCanvasInstance,
     resolveDeployRepairLoop,
     resolveDeploymentEnvironment,
-    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-    localDeploymentBlocksMutation: (state) =>
-      localDeploymentBlocksMutation(state),
-    reserveDeploymentMutation: (state, reservation) =>
-      reserveDeploymentMutation(state, reservation),
+    activeDeploymentMutation,
+    localDeploymentBlocksMutation,
+    reserveDeploymentMutation,
     releaseDeploymentMutation,
     deploymentStatusBlocksMutation,
     resolveEnvDeployment,
-    runCommand: (command, args) => runCommand(command, args),
+    runCommand,
     canvasGraphResources,
     beginDeployAttempt,
     triggerDeployRepairHandoff: (entry, instanceId) =>
@@ -6697,17 +6648,14 @@ export function createProductionCanvasServerRuntime(
   const deploymentAbandonmentService = createDeploymentAbandonmentService({
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     isValidRepoSlug,
-    readInstanceState: (instanceId) =>
-      canvasServer.instances.get(instanceId)?.state,
-    activeDeploymentMutation: (state) => activeDeploymentMutation(state),
-    localDeploymentBlocksMutation: (state) =>
-      localDeploymentBlocksMutation(state),
-    reserveDeploymentMutation: (state, reservation) =>
-      reserveDeploymentMutation(state, reservation),
+    readInstanceState: readCanvasState,
+    activeDeploymentMutation,
+    localDeploymentBlocksMutation,
+    reserveDeploymentMutation,
     releaseDeploymentMutation,
     deploymentStatusBlocksMutation,
     resolveEnvDeployment,
-    ghOrThrow: (args) => ghOrThrow(args),
+    ghOrThrow,
     invalidateDeployListCache: (repo) => {
       deployListCache.delete(repo);
     }
