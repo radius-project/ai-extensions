@@ -4,14 +4,14 @@
   },
   "aggregate": {
     "statements": 96.2,
-    "branches": 94.3,
+    "branches": 94.4,
     "functions": 93.3,
     "lines": 96.6
   },
   "packages": {
     "adapter-canvas": {
       "statements": 95.2,
-      "branches": 92.5,
+      "branches": 92.6,
       "functions": 91.8,
       "lines": 95.8
     },
