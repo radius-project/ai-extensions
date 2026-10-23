@@ -116,6 +116,7 @@ import {
   refreshProcessGitHubToken
 } from "./support/github-app-token.js";
 import {
+  awaitRequestOrRefusal,
   classifyWorkflowPublication,
   describeWorkflowPublication,
   environmentVariablesApiPath,
@@ -447,8 +448,19 @@ async function fillCreateEnvironmentForm(
         new URL(response.url()).pathname === "/api/operations" &&
         response.request().method() === "POST"
     );
+    // A form refusal (for example, a leaked environment that already owns
+    // the namespace) sends no request. Fail on it at once rather than wait
+    // for the whole test timeout.
+    const formError = page.locator("#deploy-status.error");
+    const refusal = formError
+      .waitFor({ state: "visible", timeout: CREATE_TEST_TIMEOUT_MS })
+      .then(() => formError.innerText());
     await createEnvironment.click();
-    const response = await operationResponse;
+    const response = await awaitRequestOrRefusal(
+      operationResponse,
+      refusal,
+      "Create Environment"
+    );
     return {
       ok: response.ok(),
       status: response.status(),

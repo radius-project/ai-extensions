@@ -792,9 +792,158 @@ describe("cloud-e2e-cleanup.yml", () => {
     // Deleting a deployment record is a write, and the records outlive the
     // environment that names them, so environment write alone is not enough.
     expect(token?.with?.["permission-deployments"]).toBe("write");
+    // Deleting a repository environment needs Administration write.
+    expect(token?.with?.["permission-administration"]).toBe("write");
     // cloud-e2e.yml mints its journey token with no permission inputs, so any
     // grant added to this installation widens that token too.
     expect(token?.with?.["permission-packages"]).toBeUndefined();
+  });
+
+  // GitHub expressions treat the number 0 as false, so a numeric input of 0
+  // would fall back to the default and never delete everything.
+  it("accepts max_age_hours as a string input that defaults to 6", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const text = await readWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const validate = purge.find(
+      (step) => step.name === "Validate max_age_hours"
+    );
+
+    expect(text).toMatch(
+      /max_age_hours:\n\s+description: >-[\s\S]*?\n\s+type: string\n\s+required: false\n\s+default: "6"\n/
+    );
+    expect(text).toContain("MAX_AGE_HOURS: ${{ inputs.max_age_hours || '6' }}");
+    expect(validate?.run).toContain("^[0-9]+$");
+  });
+
+  it.each([
+    ["6", 0],
+    ["0", 0],
+    ["720", 0],
+    ["721", 1],
+    ["-1", 1],
+    ["six", 1],
+    ["", 1]
+  ] as const)("validates max_age_hours=%j", async (value, status) => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const validate = steps(workflow.jobs?.purge).find(
+      (step) => step.name === "Validate max_age_hours"
+    );
+    const directory = await mkdtemp(path.join(tmpdir(), "max-age-"));
+    try {
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          MAX_AGE_HOURS: value,
+          GITHUB_STEP_SUMMARY: path.join(directory, "summary.md")
+        },
+        input: `set -euo pipefail\n${validate?.run}`
+      });
+      expect(result.status).toBe(status);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("gates the reset on a final check that ignores age", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const gateIndex = purge.findIndex(
+      (step) => step.id === "pre-reset-verification"
+    );
+    const resetIndex = purge.findIndex(
+      (step) =>
+        step.name === "Reset the fixture default branch under the shared lease"
+    );
+    const script = purge[gateIndex]?.run ?? "";
+
+    expect(gateIndex).toBeGreaterThanOrEqual(0);
+    expect(resetIndex).toBeGreaterThan(gateIndex);
+    for (const selector of [
+      "selectPrefixedEnvironments",
+      "selectNamedApplications",
+      "selectLeakedClusterWorkloads",
+      "selectStatePackages"
+    ])
+      expect(script).toContain(selector);
+    expect(script).toContain("cleanup_namespace_probe");
+    expect(script).toContain("max_age_hours=0");
+  });
+
+  // The gate deletes nothing, so it must report state that the delete steps
+  // safely skip: an application that setup did not tag, and a state package
+  // with no readable timestamp.
+  it.each([
+    {
+      case: "untagged application and undated package",
+      leaked: true,
+      status: 1
+    },
+    { case: "clean fixture", leaked: false, status: 0 }
+  ])("runs the reset gate: $case", async ({ leaked, status }) => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const gate = steps(workflow.jobs?.purge).find(
+      (step) => step.id === "pre-reset-verification"
+    );
+    const directory = await mkdtemp(path.join(tmpdir(), "reset-gate-"));
+    const application = JSON.stringify(
+      leaked ?
+        [
+          {
+            id: "untagged-object",
+            appId: "untagged-app",
+            displayName: "radius-deploy-owner-fixture-repo",
+            tags: []
+          }
+        ]
+      : []
+    );
+    const packages = JSON.stringify([
+      leaked ?
+        [{ name: "fixture-repo-radius-state-radtest-abc-0123456789ab" }]
+      : [{ name: "radius-project-canvas" }]
+    ]);
+    const stubs = [
+      'timeout() { shift; "$@"; }',
+      `gh() { case "$*" in *environments*) echo '[{"environments":[]}]' ;; *packages*) echo '${packages}' ;; *) return 99 ;; esac; }`,
+      `az() { echo '${application}'; }`,
+      'kubectl() { case "$1 $2" in "get namespace") ;; *) echo \'{"items":[]}\' ;; esac; }'
+    ].join("\n");
+    try {
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          RUNNER_TEMP: directory,
+          GITHUB_STEP_SUMMARY: path.join(directory, "summary.md"),
+          GH_PACKAGES_TOKEN: "packages-token",
+          APPLICATION_NAME: "radius-deploy-owner-fixture-repo",
+          ENVIRONMENT_PREFIX: "radtest-",
+          FIXTURE_APPLICATION: "fixture",
+          FIXTURE_OWNER: "owner",
+          FIXTURE_REPOSITORY: "owner/fixture-repo",
+          RADIUS_ENVIRONMENT_NAMESPACE: "default"
+        },
+        input: `${stubs}\n${gate?.run}`
+      });
+      expect(result.stderr).not.toMatch(/error|unbound/i);
+      expect(result.status).toBe(status);
+      if (leaked) {
+        expect(result.stdout).toContain(
+          "Entra application untagged-object (appId untagged-app)"
+        );
+        expect(result.stdout).toContain(
+          "GHCR state package fixture-repo-radius-state-radtest-abc-0123456789ab"
+        );
+      } else {
+        expect(result.stdout).not.toContain("Leaked state remains");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("deletes legacy resource groups only after the Radius applications on them", async () => {
@@ -826,7 +975,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       [
         "Purge leaked Entra service principals and applications",
         "Purge stale GitHub deployment records",
-        "Purge stale GitHub Environments",
+        "List and delete Radius environments",
         "Purge stale workflow fallback pull requests and branches"
       ].includes(step.name ?? "")
     );
@@ -881,7 +1030,8 @@ describe("cloud-e2e-cleanup.yml", () => {
       "environment-cleanup",
       "stale-ghcr-state-cleanup",
       "ghcr-state-cleanup",
-      "fallback-ref-cleanup"
+      "fallback-ref-cleanup",
+      "pre-reset-verification"
     ])
       expect(reset?.if).toContain(`steps.${prerequisite}.outcome == 'success'`);
   });
@@ -897,7 +1047,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       (step) => step.name === "Purge stale GitHub deployment records"
     );
     const environmentsIndex = purge.findIndex(
-      (step) => step.name === "Purge stale GitHub Environments"
+      (step) => step.name === "List and delete Radius environments"
     );
     const script = purge[deploymentsIndex]?.run ?? "";
 
@@ -918,7 +1068,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       (step) => step.name === "Purge stale GitHub deployment records"
     );
     const environments = purge.find(
-      (step) => step.name === "Purge stale GitHub Environments"
+      (step) => step.name === "List and delete Radius environments"
     );
 
     expect(deployments?.id).toBe("deployment-records-cleanup");
@@ -1100,12 +1250,14 @@ describe("cloud-e2e-cleanup.yml", () => {
       const group = `/subscriptions/${subscription}/resourceGroups/synthetic-group/providers`;
       const failing = `${group}/Microsoft.DBforPostgreSQL/flexibleServers/pgsql-first`;
       const passing = `${group}/Microsoft.DBforPostgreSQL/flexibleServers/pgsql-second`;
+      const cluster = {
+        id: `${group}/Microsoft.ContainerService/managedClusters/synthetic-cluster`,
+        name: "synthetic-cluster",
+        type: "Microsoft.ContainerService/managedClusters"
+      };
+      const remaining = JSON.stringify([cluster]);
       const resources = JSON.stringify([
-        {
-          id: `${group}/Microsoft.ContainerService/managedClusters/synthetic-cluster`,
-          name: "synthetic-cluster",
-          type: "Microsoft.ContainerService/managedClusters"
-        },
+        cluster,
         {
           id: failing,
           name: "pgsql-first",
@@ -1141,10 +1293,17 @@ describe("cloud-e2e-cleanup.yml", () => {
                 printf '%s${lineEnding === "CRLF" ? "\\r\\n" : "\\n"}' "\${row%$'\\r'}"
               done
             }
+            sleep() { :; }
             az() {
               case "$1 \${2:-}" in
                 "version --output") printf '%s\\n' '{"azure-cli":"2.91.0"}' ;;
-                "resource list") printf '%s\\n' '${resources}' ;;
+                "resource list")
+                  # The verify pass sees the group after the deletes.
+                  if [[ -s '${deletes}' ]]; then
+                    printf '%s\\n' '${remaining}'
+                  else
+                    printf '%s\\n' '${resources}'
+                  fi ;;
                 "resource delete")
                   printf '%s\\n' "$4" >>'${deletes}'
                   if [[ "$4" == '${failing}' && '${scenario}' == "one delete fails" ]]; then
@@ -1425,7 +1584,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     // progress, and the shared concurrency group is only half that guarantee.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const job = workflow.jobs?.purge;
-    expect(job?.env?.MAX_AGE_HOURS).toBe("6");
+    expect(job?.env?.MAX_AGE_HOURS).toBe("${{ inputs.max_age_hours || '6' }}");
 
     const ageGatedDestructiveSteps = steps(job).filter(
       (candidate) =>
