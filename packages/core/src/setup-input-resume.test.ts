@@ -7,6 +7,14 @@ import {
 
 const selectionCode = "app-selection-required";
 
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function fixture(
   overrides: Partial<SetupInputResumePorts<SetupResumeOperation>> = {}
 ) {
@@ -16,6 +24,7 @@ function fixture(
     request: { azure: {} }
   };
   const ports: SetupInputResumePorts<SetupResumeOperation> = {
+    isCurrent: () => true,
     readInput: vi.fn(async () => ({
       checkpoint: "saved-checkpoint",
       repo: "fixture/repo",
@@ -43,6 +52,48 @@ function fixture(
 }
 
 describe("setup input continuation", () => {
+  it.each(["input", "persist", "persist-rejection"] as const)(
+    "refuses stale work after %s without later mutation, restoration or scheduling",
+    async (phase) => {
+      const entered = deferred();
+      const held = deferred();
+      let current = true;
+      const { operation, ports } = fixture({ isCurrent: () => current });
+      const readInput = ports.readInput;
+      ports.readInput = async () => {
+        if (phase === "input") {
+          entered.resolve();
+          await held.promise;
+        }
+        return readInput();
+      };
+      ports.persist = vi.fn(async () => {
+        if (phase !== "input") {
+          entered.resolve();
+          await held.promise;
+          if (phase === "persist-rejection") throw new Error("store offline");
+        }
+      });
+      const pending = resumeSetupInput(operation, selectionCode, ports);
+      try {
+        await entered.promise;
+        current = false;
+        const before = structuredClone(operation);
+        held.resolve();
+        expect(await pending).toEqual({ state: "mismatch" });
+        expect(operation).toEqual(before);
+        expect(ports.requireInput).not.toHaveBeenCalled();
+        expect(ports.accepted).not.toHaveBeenCalled();
+        expect(ports.schedule).not.toHaveBeenCalled();
+        expect(ports.schedulingFailed).not.toHaveBeenCalled();
+        expect(ports.persist).toHaveBeenCalledTimes(phase === "input" ? 0 : 1);
+      } finally {
+        held.resolve();
+        await pending;
+      }
+    }
+  );
+
   it.each(["before", "input", "persist"] as const)(
     "does not fail the operation when shutdown occurs during %s",
     async (phase) => {

@@ -80,6 +80,8 @@ export function createOperationResumeService(
   return async (input, readInput, publish) => {
     const { operationId, instanceId, code } = input;
     const operation = dependencies.getOperation(operationId);
+    const repo = operation?.repo;
+    const environment = operation?.environment;
     const accepted = {
       status: 202,
       body: {
@@ -89,6 +91,11 @@ export function createOperationResumeService(
     };
     const outcome = await resumeSetupInput(operation, code, {
       isStopped: dependencies.isShuttingDown,
+      isCurrent: (current) =>
+        dependencies.getOperation(operationId) === current &&
+        current.operationId === operationId &&
+        current.repo === repo &&
+        current.environment === environment,
       readInput,
       canResumeInput: dependencies.canResumeInput,
       resumeAfterInput: dependencies.resumeAfterInput,
