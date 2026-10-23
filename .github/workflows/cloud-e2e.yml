@@ -97,7 +97,7 @@ jobs:
     # dependency install, browser download, teardown, and artifact upload.
     # One value covers both canvas hosts; the Copilot app host has the longer
     # suite budget, because it adds the app start and modeling stages.
-    timeout-minutes: 290
+    timeout-minutes: 340
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
@@ -230,7 +230,9 @@ jobs:
       # No stored Azure secret exists. The runner's OIDC token is exchanged for
       # an Azure token scoped to the dedicated bootstrap identity, which holds
       # subscription Contributor, RBAC administration, and Graph
-      # `Application.ReadWrite.OwnedBy` - and is federated on this repository's
+      # `Application.ReadWrite.OwnedBy` (plus `Application.Read.All` with admin
+      # consent before enabling seeded-app probes; see CLOUD_E2E_RUNBOOK.md).
+      # It is federated on this repository's
       # default branch only, so no pull request can mint a token for it.
       - name: Sign in to Azure
         if: steps.fixture.outputs.configured == 'true'
@@ -250,7 +252,7 @@ jobs:
       - name: Create a GitHub App token for the fixture repository
         id: app-token
         if: steps.fixture.outputs.configured == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
@@ -274,6 +276,11 @@ jobs:
           AIEXT_CLOUD_E2E_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
+          # Optional. Each names an Entra application an administrator seeded
+          # once and that the CI identity does not own. Without a value, the
+          # matching refusal probe skips and says why.
+          AIEXT_CLOUD_E2E_FOREIGN_APP_NAME: ${{ vars.AIEXT_CLOUD_E2E_FOREIGN_APP_NAME }}
+          AIEXT_CLOUD_E2E_ORPHAN_APP_NAME: ${{ vars.AIEXT_CLOUD_E2E_ORPHAN_APP_NAME }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment
           # before starting Canvas or any CLI child command. With the Copilot
@@ -298,7 +305,7 @@ jobs:
         id: diagnostics-token
         if: always() && steps.fixture.outputs.configured == 'true'
         continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}

@@ -25,11 +25,22 @@
 // the deployment, then delete the environment. A failure skips every dependent
 // destructive stage rather than acting on state the run never proved exists.
 //
-// The final stage proves the inverse of stage one, which is the only reason either
+// The delete stage proves the inverse of stage one, which is the only reason either
 // means much: the same Environment the product created is the one it removes.
 // Absence on its own would prove nothing — a product that never created the
 // Environment would satisfy it just as readily — so the fixture refuses to make
 // an absence assertion until this run has observed the artifact present.
+//
+// After the delete, four edge-case stages run (issue #1036). Three are creates
+// the product must refuse before it changes anything: the Azure CLI is signed
+// out (harness host only), the named app registration belongs to someone else,
+// and the named app registration is an orphan of an earlier Radius setup. The
+// last re-creates the deleted environment and proves the product reuses the
+// app registration it made in stage one. The refusals run after the main
+// journey, so a failed probe cannot skip it, and before the reuse stage, whose
+// environment would otherwise own the namespace they ask for. The two app
+// probes need applications an administrator seeds once; without them, each
+// probe skips and says why.
 //
 // `RADIUS_CLOUD_E2E_CANVAS_HOST` selects where the canvas runs. The default,
 // "harness", serves this checkout's canvas in headless Chromium and uses the
@@ -38,6 +49,8 @@
 // `.radius/` model in the clean fixture, the spec publishes the new model to
 // the default branch (cleanup resets it to the baseline), and the later stages
 // drive the Radius canvas inside the app.
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { createFileCredentialProvenanceStore } from "../../src/credential-provenance-store.js";
 import { configureCredentialProvenanceStore } from "../../src/credential-provenance.js";
@@ -69,7 +82,10 @@ import {
   DEPLOYMENT_OPERATION_TIMEOUT_MS,
   DEPLOYMENT_TEST_TIMEOUT_MS,
   MODEL_GENERATION_TIMEOUT_MS,
-  MODELING_TEST_TIMEOUT_MS
+  MODELING_TEST_TIMEOUT_MS,
+  PRE_MUTATION_REFUSAL_OPERATION_TIMEOUT_MS,
+  PRE_MUTATION_REFUSAL_TEST_TIMEOUT_MS,
+  REUSE_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
   classifyModelReadiness,
@@ -100,12 +116,14 @@ import {
   refreshProcessGitHubToken
 } from "./support/github-app-token.js";
 import {
+  awaitRequestOrRefusal,
   classifyWorkflowPublication,
   describeWorkflowPublication,
   environmentVariablesApiPath,
   evaluateCreateEnvironmentGate,
   expectedFederatedCredentialSubjects,
   findEnvironmentIdentityProblems,
+  type OperationHttpResponse,
   parseJsonPayload,
   readAzureAccount,
   readEnvironmentVariables,
@@ -164,11 +182,48 @@ import {
   resolveFixtureLocation
 } from "./support/fixture-repository.js";
 import {
+  callerObjectIdArgs,
+  classifyGitHubEnvironmentProbe,
+  evaluateSeededAppGate,
+  findAppReuseProblems,
+  findRefusalProblems,
+  findSeededAppMutationProblems,
+  findSeededAppPreconditionProblems,
+  FOREIGN_APP_FAILURE_CODES,
+  FOREIGN_APP_NAME_VARIABLE,
+  ORPHAN_APP_FAILURE_CODES,
+  ORPHAN_APP_NAME_VARIABLE,
+  probeEnvironmentName,
+  readCallerObjectId,
+  readDirectoryObjectIds,
+  readFederatedCredentials,
+  readOperationFailureCode,
+  readOrphanEnvironmentName,
+  readSingleAppRegistration,
+  SIGNED_OUT_FAILURE_CODES,
+  type SeededAppSnapshot,
+  withEnvironmentOverride
+} from "./support/environment-edge-cases.js";
+import {
   findNewWorkflowRunId,
   readWorkflowRunIds
 } from "./support/workflow-run-discovery.js";
 
 const PROFILE_NAME = "cloud-e2e";
+// The main create selects its profile by matching PROFILE_NAME, so these names
+// must not contain it.
+const SIGNED_OUT_PROFILE_NAME = "radius-signed-out-check";
+const FOREIGN_APP_PROFILE_NAME = "radius-foreign-app-check";
+const ORPHAN_APP_PROFILE_NAME = "radius-orphan-app-check";
+const REUSE_PROFILE_NAME = "radius-reuse-check";
+const foreignAppGate = evaluateSeededAppGate(
+  FOREIGN_APP_NAME_VARIABLE,
+  process.env[FOREIGN_APP_NAME_VARIABLE]
+);
+const orphanAppGate = evaluateSeededAppGate(
+  ORPHAN_APP_NAME_VARIABLE,
+  process.env[ORPHAN_APP_NAME_VARIABLE]
+);
 const WORKFLOW_DIRECTORY = ".github/workflows";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
@@ -323,12 +378,13 @@ async function discoverNewWorkflowRunId(
  */
 async function createCredentialProfile(
   canvas: CloudCanvasSession,
-  account: { tenantId: string; subscriptionId: string }
+  account: { tenantId: string; subscriptionId: string },
+  profileName: string
 ): Promise<void> {
   const page = canvas.target;
   await canvas.goto("credentials");
   await page.getByRole("button", { name: "New Credential Profile" }).click();
-  await page.getByLabel("Profile Name").fill(PROFILE_NAME);
+  await page.getByLabel("Profile Name").fill(profileName);
   await page.getByLabel("Tenant ID").fill(account.tenantId);
   await page.getByLabel("Subscription ID").fill(account.subscriptionId);
   await page.getByRole("button", { name: "Verify Credentials" }).click();
@@ -343,6 +399,195 @@ async function createCredentialProfile(
   await expect(page.locator("#cred-landing")).toBeVisible();
 }
 
+/**
+ * Fills the create-environment form the way a person would and submits it.
+ *
+ * The form is completed while Azure is reachable, because the resource group,
+ * cluster, and namespace options come from the product's own discovery. The
+ * returned `submit` clicks Create and answers with the raw HTTP response, so a
+ * stage can change the CLI's environment around only that click.
+ */
+async function fillCreateEnvironmentForm(
+  canvas: CloudCanvasSession,
+  cloud: CloudFixture,
+  options: { profileName: string; environmentName: string; appName?: string }
+): Promise<() => Promise<OperationHttpResponse>> {
+  const page = canvas.target;
+  await canvas.goto("environment");
+  await page.locator("#new-env-btn").click();
+  await expect(page.locator("#env-form")).toBeVisible();
+  await page.locator("#env-profile-button").click();
+  await page
+    .locator("#env-profile-menu")
+    .getByRole("option", { name: new RegExp(options.profileName) })
+    .click();
+  await page.locator("#env-step1-next").click();
+  await expect(page.locator("#env-step-details")).toBeVisible();
+
+  await page.getByLabel("Environment name").fill(options.environmentName);
+  // Selecting by value rather than typing a custom name is deliberate: the
+  // option only exists if the product's own `az group list` and `az aks
+  // list` discovery found the group and cluster the fixture created.
+  await page
+    .getByLabel("Resource Group", { exact: true })
+    .selectOption(cloud.resourceGroup);
+  await page
+    .getByLabel("Cluster", { exact: true })
+    .selectOption(cloud.clusterName);
+  await page
+    .locator("#azure-namespace-select")
+    .selectOption(FIXTURE_KUBERNETES_NAMESPACE);
+  if (options.appName !== undefined)
+    await page.locator("#az-app-name-input").fill(options.appName);
+
+  const createEnvironment = page.locator("#deploy-btn:not([disabled])");
+  await expect(createEnvironment).toHaveText("Create Environment");
+  return async () => {
+    const operationResponse = pageOf(page).waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/operations" &&
+        response.request().method() === "POST"
+    );
+    // A form refusal (for example, a leaked environment that already owns
+    // the namespace) sends no request. Fail on it at once rather than wait
+    // for the whole test timeout.
+    const formError = page.locator("#deploy-status.error");
+    const refusal = formError
+      .waitFor({ state: "visible", timeout: CREATE_TEST_TIMEOUT_MS })
+      .then(() => formError.innerText());
+    await createEnvironment.click();
+    const response = await awaitRequestOrRefusal(
+      operationResponse,
+      refusal,
+      "Create Environment"
+    );
+    return {
+      ok: response.ok(),
+      status: response.status(),
+      statusText: response.statusText(),
+      body: await response.text()
+    };
+  };
+}
+
+/**
+ * The operation id from a create response, success or refusal.
+ *
+ * A refusal answers the POST with a 4xx status, but it still names the
+ * operation it recorded, and that record is the evidence a probe reads.
+ */
+function readSubmittedOperationId(response: OperationHttpResponse): string {
+  return readOperationId(
+    parseJsonPayload(response.body, "the create operation response")
+  );
+}
+
+/** Polls `/api/operations/:id` until it is terminal and returns that payload. */
+async function waitForTerminalOperation(
+  page: CanvasTarget,
+  operationId: string,
+  timeoutMs: number
+): Promise<unknown> {
+  const read = async (): Promise<unknown> =>
+    readOperationHttpResponse(
+      await page.evaluate(async (id) => {
+        const response = await fetch(`/api/operations/${id}`);
+        return {
+          ok: response.ok,
+          status: response.status,
+          statusText: response.statusText,
+          body: await response.text()
+        };
+      }, operationId)
+    );
+  await expect
+    .poll(async () => readOperationSnapshot(await read()).terminal, {
+      timeout: timeoutMs,
+      intervals: [5_000]
+    })
+    .toBe(true);
+  return read();
+}
+
+async function readGitHubEnvironmentPresence(
+  commands: CloudCommandPort,
+  repository: string,
+  environmentName: string
+): Promise<"present" | "absent"> {
+  return classifyGitHubEnvironmentProbe(
+    await commands.runGh([
+      "api",
+      `repos/${repository}/environments/${encodeURIComponent(environmentName)}`
+    ]),
+    environmentName
+  );
+}
+
+async function readCallerObjectIdFor(
+  commands: CloudCommandPort,
+  account: ReturnType<typeof readAzureAccount>
+): Promise<string> {
+  return readCallerObjectId(
+    expectSuccess(
+      await commands.runAz(callerObjectIdArgs(account)),
+      "az read the caller's object id"
+    ).stdout
+  );
+}
+
+/** Reads everything a refusal must leave unchanged on a seeded application. */
+async function readSeededAppSnapshot(
+  commands: CloudCommandPort,
+  appName: string
+): Promise<SeededAppSnapshot> {
+  const app = readSingleAppRegistration(
+    await runAz(
+      commands,
+      [
+        "ad",
+        "app",
+        "list",
+        "--filter",
+        `displayName eq '${appName}'`,
+        "-o",
+        "json"
+      ],
+      `az ad app list ${appName}`
+    ),
+    appName
+  );
+  const ownersContext = `az ad app owner list ${appName}`;
+  const credentialsContext = `az ad app federated-credential list ${appName}`;
+  return {
+    ...app,
+    ownerIds: readDirectoryObjectIds(
+      await runAz(
+        commands,
+        ["ad", "app", "owner", "list", "--id", app.objectId, "-o", "json"],
+        ownersContext
+      ),
+      ownersContext
+    ),
+    federatedCredentials: readFederatedCredentials(
+      await runAz(
+        commands,
+        [
+          "ad",
+          "app",
+          "federated-credential",
+          "list",
+          "--id",
+          app.objectId,
+          "-o",
+          "json"
+        ],
+        credentialsContext
+      ),
+      credentialsContext
+    )
+  };
+}
+
 async function readCanvasJson(
   target: CanvasTarget,
   requestPath: string
@@ -351,6 +596,82 @@ async function readCanvasJson(
     const response = await fetch(path);
     return (await response.json()) as unknown;
   }, requestPath);
+}
+
+async function readSignedInAccount(
+  commands: CloudCommandPort
+): Promise<ReturnType<typeof readAzureAccount>> {
+  return readAzureAccount(
+    await runAz(commands, ["account", "show", "-o", "json"], "az account show")
+  );
+}
+
+/**
+ * Submits a create the product must refuse, and proves it refused safely.
+ *
+ * The GitHub Environment is absent before and after: the refusal comes before
+ * the product writes anything, so a probe that leaves one behind has found a
+ * regression. `around` wraps only the submit and the wait, so a stage can
+ * change the CLI's environment for exactly the product's own commands.
+ */
+async function assertCreateRefused(input: {
+  canvas: CloudCanvasSession;
+  cloud: CloudFixture;
+  account: ReturnType<typeof readAzureAccount>;
+  profileName: string;
+  environmentName: string;
+  appName?: string;
+  expectedCodes: readonly string[];
+  around?: (run: () => Promise<unknown>) => Promise<unknown>;
+  onOperationStarted: () => void;
+}): Promise<void> {
+  const { canvas, cloud } = input;
+  const presence = (): Promise<"present" | "absent"> =>
+    readGitHubEnvironmentPresence(
+      ports.commands,
+      cloud.repository,
+      input.environmentName
+    );
+  expect(
+    await presence(),
+    `GitHub Environment "${input.environmentName}" must not exist before the probe.`
+  ).toBe("absent");
+
+  await createCredentialProfile(canvas, input.account, input.profileName);
+  const submit = await fillCreateEnvironmentForm(canvas, cloud, {
+    profileName: input.profileName,
+    environmentName: input.environmentName,
+    appName: input.appName
+  });
+  const around = input.around ?? ((run) => run());
+  await cloud.registerProbeEnvironmentCleanupTarget(input.environmentName);
+  input.onOperationStarted();
+  const payload = await around(async () => {
+    const operationId = readSubmittedOperationId(await submit());
+    return waitForTerminalOperation(
+      canvas.target,
+      operationId,
+      PRE_MUTATION_REFUSAL_OPERATION_TIMEOUT_MS
+    );
+  });
+
+  const finished = readOperationSnapshot(payload);
+  const problems = findRefusalProblems({
+    state: finished.state,
+    failureCode: readOperationFailureCode(payload),
+    expectedCodes: input.expectedCodes
+  });
+  expect(
+    problems,
+    describeProblems(
+      problems,
+      `The product did not refuse the create safely (${finished.error || "no error was reported"}):`
+    )
+  ).toEqual([]);
+  expect(
+    await presence(),
+    `The refused create left GitHub Environment "${input.environmentName}" behind.`
+  ).toBe("absent");
 }
 
 test.describe("Radius Canvas manages an environment's lifecycle against real cloud", () => {
@@ -627,77 +948,25 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
     let primaryError: unknown;
     try {
-      await createCredentialProfile(canvas, account);
+      await createCredentialProfile(canvas, account, PROFILE_NAME);
 
-      await canvas.goto("environment");
-      await page.locator("#new-env-btn").click();
-      await expect(page.locator("#env-form")).toBeVisible();
-      await page.locator("#env-profile-button").click();
-      await page
-        .locator("#env-profile-menu")
-        .getByRole("option", { name: new RegExp(PROFILE_NAME) })
-        .click();
-      await page.locator("#env-step1-next").click();
-      await expect(page.locator("#env-step-details")).toBeVisible();
-
-      await page.getByLabel("Environment name").fill(cloud.environmentName);
-      // Selecting by value rather than typing a custom name is deliberate: the
-      // option only exists if the product's own `az group list` and `az aks
-      // list` discovery found the group and cluster the fixture created.
-      await page
-        .getByLabel("Resource Group", { exact: true })
-        .selectOption(cloud.resourceGroup);
-      await page
-        .getByLabel("Cluster", { exact: true })
-        .selectOption(cloud.clusterName);
-      await page
-        .locator("#azure-namespace-select")
-        .selectOption(FIXTURE_KUBERNETES_NAMESPACE);
-
-      const operationResponse = pageOf(page).waitForResponse(
-        (response) =>
-          new URL(response.url()).pathname === "/api/operations" &&
-          response.request().method() === "POST"
-      );
-      const createEnvironment = page.locator("#deploy-btn:not([disabled])");
-      await expect(createEnvironment).toHaveText("Create Environment");
-      await createEnvironment.click();
-      const createResponse = await operationResponse;
+      const submit = await fillCreateEnvironmentForm(canvas, cloud, {
+        profileName: PROFILE_NAME,
+        environmentName: cloud.environmentName
+      });
       const operationId = readOperationId(
-        readOperationHttpResponse({
-          ok: createResponse.ok(),
-          status: createResponse.status(),
-          statusText: createResponse.statusText(),
-          body: await createResponse.text()
-        })
+        readOperationHttpResponse(await submit())
       );
       expect(operationId).toMatch(/^op_/);
       productOperationStarted = true;
 
-      const snapshot = async (): Promise<
-        ReturnType<typeof readOperationSnapshot>
-      > =>
-        readOperationSnapshot(
-          readOperationHttpResponse(
-            await page.evaluate(async (id) => {
-              const response = await fetch(`/api/operations/${id}`);
-              return {
-                ok: response.ok,
-                status: response.status,
-                statusText: response.statusText,
-                body: await response.text()
-              };
-            }, operationId)
-          )
-        );
-
-      await expect
-        .poll(async () => (await snapshot()).terminal, {
-          timeout: CREATE_OPERATION_TIMEOUT_MS,
-          intervals: [5_000]
-        })
-        .toBe(true);
-      const finished = await snapshot();
+      const finished = readOperationSnapshot(
+        await waitForTerminalOperation(
+          page,
+          operationId,
+          CREATE_OPERATION_TIMEOUT_MS
+        )
+      );
       expect(
         finished.state,
         `The create-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
@@ -1415,6 +1684,267 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         expectedRoleAssignments: roleAssignments,
         federatedSubjects
       });
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up the Radius canvas", run: () => canvas.cleanup() }],
+        primaryError
+      );
+    }
+  });
+
+  test("refuses to create an environment while the Azure CLI is signed out", async ({
+    cloudCanvas
+  }, testInfo) => {
+    test.skip(
+      cloudCanvasHost !== "harness",
+      "Only the harness host runs the product's Azure CLI in this process, so only it can sign the CLI out for one create."
+    );
+    testInfo.setTimeout(PRE_MUTATION_REFUSAL_TEST_TIMEOUT_MS);
+    const cloud = fixture;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+    const account = await readSignedInAccount(ports.commands);
+
+    const canvas = await cloudCanvas.open({
+      title: "cloud-signed-out-refusal",
+      initialPage: "credentials",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
+    });
+    // An empty configuration directory is a CLI with no sign-in. The profile
+    // and the form are completed first, while the CLI is still signed in.
+    const signedOutConfig = await mkdtemp(
+      path.join(tmpdir(), "radius-cloud-e2e-signed-out-")
+    );
+
+    let primaryError: unknown;
+    try {
+      await assertCreateRefused({
+        canvas,
+        cloud,
+        account,
+        profileName: SIGNED_OUT_PROFILE_NAME,
+        environmentName: probeEnvironmentName(
+          cloud.environmentName,
+          "signed-out"
+        ),
+        expectedCodes: SIGNED_OUT_FAILURE_CODES,
+        around: (run) =>
+          withEnvironmentOverride("AZURE_CONFIG_DIR", signedOutConfig, run),
+        onOperationStarted: () => {
+          productOperationStarted = true;
+        }
+      });
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [
+          { label: "clean up the Radius canvas", run: () => canvas.cleanup() },
+          {
+            label: "remove the signed-out Azure CLI directory",
+            run: () => rm(signedOutConfig, { recursive: true, force: true })
+          }
+        ],
+        primaryError
+      );
+    }
+  });
+
+  const seededAppProbes = [
+    {
+      kind: "foreign" as const,
+      gate: foreignAppGate,
+      title:
+        "refuses to reuse an app registration that the CI identity does not own",
+      canvasTitle: "cloud-foreign-app-refusal",
+      profileName: FOREIGN_APP_PROFILE_NAME,
+      expectedCodes: FOREIGN_APP_FAILURE_CODES
+    },
+    {
+      kind: "orphan" as const,
+      gate: orphanAppGate,
+      title:
+        "refuses to reclaim an orphaned Radius app registration that the CI identity does not own",
+      canvasTitle: "cloud-orphan-app-refusal",
+      profileName: ORPHAN_APP_PROFILE_NAME,
+      expectedCodes: ORPHAN_APP_FAILURE_CODES
+    }
+  ];
+  for (const probe of seededAppProbes)
+    test(probe.title, async ({ cloudCanvas }, testInfo) => {
+      test.skip(
+        !probe.gate.enabled,
+        probe.gate.enabled ? "" : probe.gate.reason
+      );
+      if (!probe.gate.enabled) return;
+      testInfo.setTimeout(PRE_MUTATION_REFUSAL_TEST_TIMEOUT_MS);
+      const cloud = fixture;
+      if (!cloud) throw new Error("The cloud fixture was not created.");
+      const { appName } = probe.gate;
+      const account = await readSignedInAccount(ports.commands);
+
+      // The seed must be able to prove this guard: owned by someone else, and
+      // tagged (or not) so the product takes the path under test.
+      const before = await readSeededAppSnapshot(ports.commands, appName);
+      const preconditions = findSeededAppPreconditionProblems({
+        kind: probe.kind,
+        snapshot: before,
+        callerObjectId: await readCallerObjectIdFor(ports.commands, account),
+        repository: cloud.repository
+      });
+      expect(
+        preconditions,
+        describeProblems(
+          preconditions,
+          `The seeded ${probe.kind} application "${appName}" cannot prove this guard. See docs/eng/CLOUD_E2E_RUNBOOK.md:`
+        )
+      ).toEqual([]);
+      // The product reports an orphan only for the environment its tag names.
+      const environmentName =
+        probe.kind === "orphan" ?
+          readOrphanEnvironmentName(before.tags)
+        : probeEnvironmentName(cloud.environmentName, "foreign-app");
+
+      const canvas = await cloudCanvas.open({
+        title: probe.canvasTitle,
+        initialPage: "credentials",
+        repository: cloud.repository,
+        branch: cloud.defaultBranch,
+        workspacePath: cloud.workspacePath
+      });
+      let primaryError: unknown;
+      try {
+        await assertCreateRefused({
+          canvas,
+          cloud,
+          account,
+          profileName: probe.profileName,
+          environmentName,
+          appName,
+          expectedCodes: probe.expectedCodes,
+          onOperationStarted: () => {
+            productOperationStarted = true;
+          }
+        });
+        const mutations = findSeededAppMutationProblems(
+          before,
+          await readSeededAppSnapshot(ports.commands, appName)
+        );
+        expect(
+          mutations,
+          describeProblems(
+            mutations,
+            `The product changed the seeded ${probe.kind} application "${appName}" while refusing it:`
+          )
+        ).toEqual([]);
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        await runCleanupSteps(
+          [
+            {
+              label: "clean up the Radius canvas",
+              run: () => canvas.cleanup()
+            }
+          ],
+          primaryError
+        );
+      }
+    });
+
+  test("re-creates the deleted environment and reuses its app registration", async ({
+    cloudCanvas
+  }, testInfo) => {
+    testInfo.setTimeout(REUSE_TEST_TIMEOUT_MS);
+    const cloud = fixture;
+    const created = appRegistration;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+    if (!created)
+      throw new Error("The product-created application was not observed.");
+    const account = await readSignedInAccount(ports.commands);
+
+    const canvas = await cloudCanvas.open({
+      title: "cloud-reuse-app-registration",
+      initialPage: "credentials",
+      repository: cloud.repository,
+      branch: cloud.defaultBranch,
+      workspacePath: cloud.workspacePath
+    });
+    const page = canvas.target;
+
+    let primaryError: unknown;
+    try {
+      await createCredentialProfile(canvas, account, REUSE_PROFILE_NAME);
+      const submit = await fillCreateEnvironmentForm(canvas, cloud, {
+        profileName: REUSE_PROFILE_NAME,
+        environmentName: cloud.environmentName
+      });
+      const operationId = readOperationId(
+        readOperationHttpResponse(await submit())
+      );
+      productOperationStarted = true;
+      const finished = readOperationSnapshot(
+        await waitForTerminalOperation(
+          page,
+          operationId,
+          CREATE_OPERATION_TIMEOUT_MS
+        )
+      );
+      expect(
+        finished.state,
+        `The second create-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
+      ).toBe("succeeded");
+
+      // The fixture fails when more than one application has the product's
+      // name, so one match that is the first create's is the reuse proof.
+      const reused = await cloud.assertAppRegistrationExists();
+      const reuseProblems = findAppReuseProblems(created, reused);
+      expect(
+        reuseProblems,
+        describeProblems(
+          reuseProblems,
+          "The product did not reuse its app registration:"
+        )
+      ).toEqual([]);
+      // The delete removed this environment's federated credentials, so the
+      // second create must have added them back to the same application.
+      for (const subject of federatedSubjects)
+        await cloud.assertFederatedCredentialExists(subject);
+
+      await cloud.assertGitHubEnvironmentExists();
+      const variables = readEnvironmentVariables(
+        await runGh(
+          ports.commands,
+          [
+            "api",
+            "--paginate",
+            "--slurp",
+            environmentVariablesApiPath(cloud.repository, cloud.environmentName)
+          ],
+          "gh api the re-created environment's variables"
+        )
+      );
+      expect(
+        findEnvironmentIdentityProblems({
+          variables,
+          createdAppId: created.appId,
+          bootstrapClientId: process.env.AZURE_CLIENT_ID,
+          expected: {
+            tenantId: account.tenantId,
+            subscriptionId: cloud.subscriptionId,
+            resourceGroup: cloud.resourceGroup,
+            clusterResourceGroup: cloud.resourceGroup,
+            cluster: cloud.clusterName,
+            namespace: FIXTURE_KUBERNETES_NAMESPACE
+          }
+        })
+      ).toEqual([]);
     } catch (error) {
       primaryError = error;
       throw error;

@@ -20,9 +20,14 @@ name: Cloud E2E Cleanup
 #
 # Resource groups are deleted as soon as this workflow sees the fixture prefix
 # and tag, because those identify the groups the tests created. Other leaked
-# state still waits for the age threshold. The shared concurrency group with
-# cloud-e2e.yml is what prevents either path from racing a run that is still
-# using its own state.
+# state still waits for the age threshold, which is 6 hours by default. A
+# manual run can set `max_age_hours`; 0 deletes all leaked state, whatever its
+# age. The shared concurrency group with cloud-e2e.yml is what prevents either
+# path from racing a run that is still using its own state.
+#
+# Each delete is verified with a bounded wait. A failure that a retry cannot
+# fix, such as a missing permission, stops the step at once. The fixture
+# branch is reset only after a final gate finds no leaked state of any age.
 #
 # See docs/eng/CLOUD_E2E_RUNBOOK.md. Like cloud-e2e.yml, this has never
 # executed. The fixture repository and source pin now exist, but the
@@ -37,6 +42,16 @@ on:
     # leaked state is reclaimed before that run starts.
     - cron: "23 2 * * *"
   workflow_dispatch:
+    inputs:
+      # A string, not a number: GitHub treats the number 0 as false, so
+      # `inputs.max_age_hours || '6'` would turn an explicit 0 back into 6.
+      max_age_hours:
+        description: >-
+          Delete leaked state older than this many hours. 0 deletes all leaked
+          state, whatever its age.
+        type: string
+        required: false
+        default: "6"
 
 permissions: {}
 
@@ -57,20 +72,40 @@ jobs:
     # job at our subscription and our fixture repository.
     if: github.repository == 'radius-project/ai-extensions'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Each delete type now waits until it can verify the object is gone, so
+    # the budget is larger than the sum of the delete steps alone.
+    timeout-minutes: 45
     permissions:
       actions: read # gh run view for CI-owned resource-group terminal checks
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
     env:
-      # Matches the safety-net Radius purge threshold, and is comfortably longer
-      # than the 90-minute ceiling a Cloud E2E run can occupy.
-      MAX_AGE_HOURS: "6"
+      # The default matches the safety-net Radius purge threshold, and is
+      # comfortably longer than the 90-minute ceiling a Cloud E2E run can
+      # occupy. A scheduled run has no inputs, so it always uses the default.
+      # 0 is safe only because the shared concurrency group keeps this job
+      # from running beside a Cloud E2E run.
+      MAX_AGE_HOURS: ${{ inputs.max_age_hours || '6' }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # A value such as "6h" or "-1" would make `date -d` compute a cutoff
+      # nobody asked for, and the cutoff decides what is deleted.
+      - name: Validate max_age_hours
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$MAX_AGE_HOURS" =~ ^[0-9]+$ ]] || (( 10#$MAX_AGE_HOURS > 720 )); then
+            echo "::error::max_age_hours must be a whole number from 0 to 720. It is \"$MAX_AGE_HOURS\"."
+            exit 1
+          fi
+          if (( 10#$MAX_AGE_HOURS == 0 )); then
+            echo "::notice::max_age_hours is 0. Cleanup deletes all leaked state, whatever its age."
+          fi
+          echo "- Maximum age of kept state: $MAX_AGE_HOURS hours" >>"$GITHUB_STEP_SUMMARY"
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -157,13 +192,17 @@ jobs:
       - name: Create a GitHub App token for the fixture repository
         id: app-token
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
           owner: ${{ steps.pin.outputs.owner }}
           repositories: ${{ steps.pin.outputs.name }}
           permission-actions: write
+          # `DELETE /repos/{owner}/{repo}/environments/{name}` needs
+          # Administration write. Environments write alone answers 403. The
+          # GitHub App installation must grant it, or this token step fails.
+          permission-administration: write
           permission-contents: write
           # Deleting a deployment record is a write. The records are linked to
           # their environment by name, so deleting the environment strands them
@@ -184,10 +223,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           environments="$RUNNER_TEMP/radius-cleanup-environments.json"
           expired_environments="$RUNNER_TEMP/radius-cleanup-expired-environments.json"
-          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
+          list_error="$RUNNER_TEMP/radius-cleanup-environments.stderr"
+          if ! gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments" 2>"$list_error"; then
+            cleanup_fail_if_terminal "$list_error" "Listing environments in $FIXTURE_REPOSITORY"
+            cat "$list_error" >&2
+            exit 1
+          fi
 
           node --input-type=module - \
             "$environments" "$ENVIRONMENT_PREFIX" "$cutoff" "$expired_environments" <<'NODE'
@@ -215,11 +261,25 @@ jobs:
               --event workflow_dispatch \
               --limit 100 \
               --json databaseId >"$before"
+            dispatch_error="$RUNNER_TEMP/delete-dispatch-$environment.stderr"
             if ! gh workflow run delete-application.yml \
                 --repo "$FIXTURE_REPOSITORY" \
                 --ref "$DEFAULT_BRANCH" \
                 -f "environment=$environment" \
-                -f "application=$FIXTURE_APPLICATION"; then
+                -f "application=$FIXTURE_APPLICATION" 2>"$dispatch_error"; then
+              # 422 here means delete-application.yml is missing from the
+              # default branch or has no workflow_dispatch trigger. That
+              # happens when the branch was reset while this environment
+              # still existed, and no retry can bring the workflow back.
+              cleanup_fail_if_terminal "$dispatch_error" \
+                "Dispatching delete-application.yml for $environment" \
+                "Check that delete-application.yml exists on $DEFAULT_BRANCH in $FIXTURE_REPOSITORY. If the branch was reset to the baseline, the delete workflow is gone. The cluster and Azure sweeps in this run still run, and the later steps delete $environment if those sweeps pass. Do not delete it by hand. Run cleanup a second time to reset the branch (see docs/eng/CLOUD_E2E_RUNBOOK.md)."
+              if grep -qi "could not find any workflows" "$dispatch_error"; then
+                cat "$dispatch_error" >&2
+                echo "::error::delete-application.yml does not exist in $FIXTURE_REPOSITORY. A retry cannot fix this, so this step stops now. The cluster and Azure sweeps in this run still run, and the later steps delete $environment if those sweeps pass. Do not delete it by hand. Run cleanup a second time to reset the branch (see docs/eng/CLOUD_E2E_RUNBOOK.md)."
+                exit 1
+              fi
+              cat "$dispatch_error" >&2
               failures+=("dispatch Radius application delete for $environment")
               continue
             fi
@@ -362,6 +422,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           environments="$RUNNER_TEMP/state-cleanup-environments.json"
           expired_environments="$RUNNER_TEMP/state-cleanup-expired-environments.json"
@@ -420,6 +482,8 @@ jobs:
             delete_stderr="$package.stderr"
             if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path" 2>"$delete_stderr" &&
               ! grep -q "HTTP 404" "$delete_stderr"; then
+              cleanup_fail_if_terminal "$delete_stderr" "Deleting GHCR package $package_name for $environment" \
+                "Check that GH_RAD_CI_BOT_PAT can delete packages in $FIXTURE_OWNER."
               failures+=("delete GHCR package $package_name for $environment")
               continue
             fi
@@ -480,6 +544,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           packages="$RUNNER_TEMP/orphan-state-packages.json"
           orphans="$RUNNER_TEMP/orphan-state-orphans.json"
@@ -531,6 +597,8 @@ jobs:
             delete_stderr="$package.stderr"
             if ! GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --method DELETE "$package_path" 2>"$delete_stderr" &&
               ! grep -q "HTTP 404" "$delete_stderr"; then
+              cleanup_fail_if_terminal "$delete_stderr" "Deleting orphaned GHCR package $package_name" \
+                "Check that GH_RAD_CI_BOT_PAT can delete packages in $FIXTURE_OWNER."
               failures+=("delete orphaned GHCR package $package_name")
               continue
             fi
@@ -596,6 +664,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           objects="$RUNNER_TEMP/cluster-cleanup-objects.json"
           leaked="$RUNNER_TEMP/cluster-cleanup-leaked.json"
@@ -610,6 +680,7 @@ jobs:
             deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
             --all-namespaces \
             --selector radapp.io/environment \
+            --request-timeout=60s \
             --output json >"$objects"
 
           node --input-type=module - \
@@ -633,20 +704,100 @@ jobs:
           failures=()
           while IFS=$'\t' read -r kind name namespace environment; do
             [[ -n "$kind" ]] || continue
+            delete_error="$RUNNER_TEMP/cluster-delete-$kind-$name.stderr"
             if ! kubectl delete "${kind,,}/$name" \
                 --namespace "$namespace" \
-                --ignore-not-found; then
+                --ignore-not-found 2>"$delete_error"; then
+              cat "$delete_error" >&2
+              if grep -qiE 'forbidden|unauthorized' "$delete_error"; then
+                echo "::error::Deleting $kind $namespace/$name was refused by the cluster. A retry cannot fix this, so cleanup stops now. Check the cleanup identity's AKS RBAC role."
+                exit 1
+              fi
               failures+=("delete $kind $namespace/$name leaked by $environment")
               continue
             fi
             deleted=$((deleted + 1))
           done < <(jq -r '.[] | [.kind, .name, .namespace, .environment] | @tsv' "$leaked")
 
+          # Probe 0 = present, 1 = gone, 2 = terminal, 3 = transient. A workload
+          # counts only when the same selector would still delete it.
+          leaked_workloads_probe() {
+            local remaining="$RUNNER_TEMP/cluster-cleanup-remaining.json"
+            local output
+            if ! output="$(kubectl get \
+                deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
+                --all-namespaces \
+                --selector radapp.io/environment \
+                --request-timeout=30s \
+                --output json 2>&1)"; then
+              printf '%s\n' "$output" >&2
+              if grep -qiE 'forbidden|unauthorized' <<<"$output"; then
+                return 2
+              fi
+              return 3
+            fi
+            printf '%s' "$output" >"$objects"
+            node --input-type=module - \
+              "$objects" "$ENVIRONMENT_PREFIX" "$FIXTURE_APPLICATION" "$cutoff" "$remaining" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [objectsFile, prefix, application, cutoff, outputFile] =
+            process.argv.slice(2);
+          const { selectLeakedClusterWorkloads } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const objects = JSON.parse(await readFile(objectsFile, "utf8"));
+          await writeFile(
+            outputFile,
+            JSON.stringify(
+              selectLeakedClusterWorkloads(objects, prefix, application, cutoff)
+            )
+          );
+          NODE
+            # Remove a CR, as the other jq reads in this workflow do.
+            local remaining_count
+            remaining_count="$(jq 'length' "$remaining")"
+            if [[ "${remaining_count%$'\r'}" == "0" ]]; then
+              return 1
+            fi
+            jq -r '.[] | "  still present: \(.kind) \(.namespace)/\(.name)"' "$remaining"
+            return 0
+          }
+
+          if (( deleted > 0 )); then
+            verify_status=0
+            cleanup_wait_until_absent "every leaked Radius workload" 180 10 \
+              leaked_workloads_probe || verify_status=$?
+            if (( verify_status == 2 )); then
+              exit 1
+            fi
+            if (( verify_status != 0 )); then
+              failures+=("verify leaked Radius workloads are gone")
+            fi
+          fi
+
+          namespace_error="$RUNNER_TEMP/cluster-delete-namespace.stderr"
           if ! kubectl delete namespace "$RADIUS_ENVIRONMENT_NAMESPACE" \
               --ignore-not-found=true \
               --wait=true \
-              --timeout=5m; then
+              --timeout=5m 2>"$namespace_error"; then
+            cat "$namespace_error" >&2
+            if grep -qiE 'forbidden|unauthorized' "$namespace_error"; then
+              echo "::error::Deleting namespace $RADIUS_ENVIRONMENT_NAMESPACE was refused by the cluster. A retry cannot fix this, so cleanup stops now."
+              exit 1
+            fi
             failures+=("delete fixture namespace $RADIUS_ENVIRONMENT_NAMESPACE")
+          fi
+          # `--wait` returns when the API accepts the delete. Confirm the
+          # namespace is really gone, because a finalizer can hold it in
+          # Terminating, and the next run cannot create its environment there.
+          verify_status=0
+          cleanup_wait_until_absent "namespace $RADIUS_ENVIRONMENT_NAMESPACE" 120 10 \
+            cleanup_namespace_probe "$RADIUS_ENVIRONMENT_NAMESPACE" || verify_status=$?
+          if (( verify_status == 2 )); then
+            exit 1
+          fi
+          if (( verify_status != 0 )); then
+            failures+=("verify fixture namespace $RADIUS_ENVIRONMENT_NAMESPACE is gone")
           fi
 
           echo "- Leaked cluster workloads reclaimed: $deleted" >>"$GITHUB_STEP_SUMMARY"
@@ -679,6 +830,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           resources="$RUNNER_TEMP/group-cleanup-resources.json"
           reclaimable="$RUNNER_TEMP/group-cleanup-reclaimable.json"
 
@@ -716,6 +869,7 @@ jobs:
           failures=()
           delete_log="$RUNNER_TEMP/group-cleanup-delete.log"
           while IFS=$'\t' read -r id name type; do
+            type="${type%$'\r'}"
             [[ -n "$id" ]] || continue
             delete_status=0
             az resource delete --ids "$id" --verbose 2>"$delete_log" || delete_status=$?
@@ -732,10 +886,69 @@ jobs:
                 echo
                 echo "</details>"
               } >>"$GITHUB_STEP_SUMMARY"
+              if grep -qE 'AuthorizationFailed|LinkedAuthorizationFailed' "$delete_log"; then
+                echo "::error::Azure refused to delete $type $name. A retry cannot fix this, so cleanup stops now. Check the cleanup identity's role on $RESOURCE_GROUP."
+                exit 1
+              fi
               continue
             fi
             deleted=$((deleted + 1))
           done < <(jq -r '.[] | [.id, .name, .type] | @tsv' "$reclaimable")
+
+          # `az resource delete` waits for the delete, but a resource can stay
+          # listed while Azure finishes it. Confirm the group holds nothing that
+          # the selector would reclaim again.
+          remaining_resources_probe() {
+            local listed="$RUNNER_TEMP/group-cleanup-remaining-list.json"
+            local remaining="$RUNNER_TEMP/group-cleanup-remaining.json"
+            local list_error="$RUNNER_TEMP/group-cleanup-remaining.stderr"
+            if ! az resource list \
+                --subscription "$SUBSCRIPTION_ID" \
+                --resource-group "$RESOURCE_GROUP" \
+                --only-show-errors \
+                --output json >"$listed" 2>"$list_error"; then
+              cat "$list_error" >&2
+              if grep -qE 'AuthorizationFailed|ResourceGroupNotFound' "$list_error"; then
+                return 2
+              fi
+              return 3
+            fi
+            node --input-type=module - \
+              "$listed" "$AKS_CLUSTER_NAME" "$remaining" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [resourcesFile, clusterName, outputFile] = process.argv.slice(2);
+          const { selectReclaimableGroupResources } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const resources = JSON.parse(await readFile(resourcesFile, "utf8"));
+          await writeFile(
+            outputFile,
+            JSON.stringify(
+              selectReclaimableGroupResources(resources, clusterName)
+            )
+          );
+          NODE
+            # Remove a CR, as the other jq reads in this workflow do.
+            local remaining_count
+            remaining_count="$(jq 'length' "$remaining")"
+            if [[ "${remaining_count%$'\r'}" == "0" ]]; then
+              return 1
+            fi
+            jq -r '.[] | "  still present: \(.type) \(.name)"' "$remaining"
+            return 0
+          }
+
+          if (( deleted > 0 && ${#failures[@]} == 0 )); then
+            verify_status=0
+            cleanup_wait_until_absent "every reclaimed resource in $RESOURCE_GROUP" 300 15 \
+              remaining_resources_probe || verify_status=$?
+            if (( verify_status == 2 )); then
+              exit 1
+            fi
+            if (( verify_status != 0 )); then
+              failures+=("verify reclaimed resources are gone from $RESOURCE_GROUP")
+            fi
+          fi
 
           echo "- Azure resources reclaimed from $RESOURCE_GROUP: $deleted" >>"$GITHUB_STEP_SUMMARY"
           if (( ${#failures[@]} > 0 )); then
@@ -761,6 +974,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           principals="$RUNNER_TEMP/service-principals.json"
           applications="$RUNNER_TEMP/applications.json"
@@ -823,6 +1038,24 @@ jobs:
           principals_purged=0
           assignments_purged=0
           failures=()
+
+          # Probe 0 = present, 1 = gone, 2 = terminal, 3 = transient.
+          service_principal_probe() {
+            local lookup_error="$RUNNER_TEMP/get-service-principal-$1.stderr"
+            if az rest --method GET \
+                --url "https://graph.microsoft.com/v1.0/servicePrincipals/$1" \
+                --output none 2>"$lookup_error"; then
+              return 0
+            fi
+            if grep -qE 'Request_ResourceNotFound' "$lookup_error"; then
+              return 1
+            fi
+            cat "$lookup_error" >&2
+            if grep -qE 'Authorization_RequestDenied|Insufficient privileges' "$lookup_error"; then
+              return 2
+            fi
+            return 3
+          }
           blocked_app_ids="$RUNNER_TEMP/blocked-application-ids.txt"
           # Deleting an application cascade-deletes its service principal, so an
           # application whose principal was never a deletion candidate starts
@@ -894,8 +1127,25 @@ jobs:
               continue
             fi
             echo "Deleting leaked service principal $APPLICATION_NAME ($id), created before $cutoff."
-            if ! az ad sp delete --id "$id"; then
+            sp_delete_error="$RUNNER_TEMP/delete-service-principal-$id.stderr"
+            if ! az ad sp delete --id "$id" 2>"$sp_delete_error"; then
+              cat "$sp_delete_error" >&2
+              if grep -qE 'Authorization_RequestDenied|Insufficient privileges' "$sp_delete_error"; then
+                echo "::error::Microsoft Graph refused to delete service principal $id. A retry cannot fix this, so cleanup stops now. Check that the cleanup identity owns the application."
+                exit 1
+              fi
               failures+=("delete service principal $id")
+              echo "$app_id" >>"$blocked_app_ids"
+              continue
+            fi
+            verify_status=0
+            cleanup_wait_until_absent "service principal $id" 60 5 \
+              service_principal_probe "$id" || verify_status=$?
+            if (( verify_status == 2 )); then
+              exit 1
+            fi
+            if (( verify_status != 0 )); then
+              failures+=("verify deletion of service principal $id")
               echo "$app_id" >>"$blocked_app_ids"
               continue
             fi
@@ -984,6 +1234,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           deployments="$RUNNER_TEMP/deployments.json"
           expired_deployments="$RUNNER_TEMP/expired-deployments.json"
@@ -1008,16 +1260,33 @@ jobs:
           while read -r id; do
             [[ -n "$id" ]] || continue
             echo "Deleting stale deployment record $id, created before $cutoff."
+            deployment_error="$RUNNER_TEMP/deployment-$id.stderr"
             # GitHub refuses to delete a deployment that is still active, and a
             # record whose job never reported a status is active by default.
             if ! gh api --method POST \
                 "repos/$FIXTURE_REPOSITORY/deployments/$id/statuses" \
-                -f state=inactive >/dev/null; then
+                -f state=inactive >/dev/null 2>"$deployment_error"; then
+              cleanup_fail_if_terminal "$deployment_error" "Deactivating deployment $id" \
+                "Check that the cleanup token has Deployments write on $FIXTURE_REPOSITORY."
+              cat "$deployment_error" >&2
               failures+=("deactivate deployment $id")
               continue
             fi
-            if ! gh api --method DELETE "repos/$FIXTURE_REPOSITORY/deployments/$id"; then
+            if ! gh api --method DELETE "repos/$FIXTURE_REPOSITORY/deployments/$id" 2>"$deployment_error"; then
+              cleanup_fail_if_terminal "$deployment_error" "Deleting deployment $id" \
+                "Check that the cleanup token has Deployments write on $FIXTURE_REPOSITORY."
+              cat "$deployment_error" >&2
               failures+=("delete deployment $id")
+              continue
+            fi
+            verify_status=0
+            cleanup_wait_until_absent "deployment record $id" 60 5 \
+              cleanup_gh_probe "repos/$FIXTURE_REPOSITORY/deployments/$id" || verify_status=$?
+            if (( verify_status == 2 )); then
+              exit 1
+            fi
+            if (( verify_status != 0 )); then
+              failures+=("verify deletion of deployment $id")
               continue
             fi
             purged=$((purged + 1))
@@ -1030,17 +1299,24 @@ jobs:
             exit 1
           fi
 
-      # Environments are per-run (`radtest-<uid>`), so unlike the application
-      # there is more than one candidate. Still matched by the suite's own
-      # prefix and still age-gated, so a live run's environment is never a
-      # candidate.
+      # A Radius environment that the product creates is a `radtest-<uid>`
+      # GitHub Environment plus its GHCR state package. The Radius control
+      # plane runs on each workflow runner and is gone after the run, so the
+      # GitHub Environment is the record that a later run sees: Canvas lists
+      # it, and it keeps its claim on the fixture namespace. A leaked one makes
+      # the next run's Create Environment refuse. The GHCR state is reclaimed
+      # by the steps above.
+      #
+      # This lists every fixture environment, deletes the ones older than the
+      # age threshold, and verifies each delete. Matched by the suite's own
+      # prefix, so a live run's environment is never a candidate.
       #
       # Gated on the deployment-record purge as well: a deployment record names
       # the environment it deployed to but outlives it, so deleting the
       # environment while its records are still present strands them behind a
       # name nothing will match again. Leaving the environment in place instead
       # lets the next sweep retry both.
-      - name: Purge stale GitHub Environments
+      - name: List and delete Radius environments
         id: environment-cleanup
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && (steps.radius-app-cleanup.outcome == 'success' || (steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success')) && steps.deployment-records-cleanup.outcome == 'success'
         env:
@@ -1050,40 +1326,76 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           environments="$RUNNER_TEMP/environments.json"
+          all_environments="$RUNNER_TEMP/radius-environments.json"
           expired_environments="$RUNNER_TEMP/expired-environments.json"
-          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
+          list_error="$RUNNER_TEMP/environments.stderr"
+          if ! gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments?per_page=100" >"$environments" 2>"$list_error"; then
+            cleanup_fail_if_terminal "$list_error" "Listing environments in $FIXTURE_REPOSITORY"
+            cat "$list_error" >&2
+            exit 1
+          fi
 
           node --input-type=module - \
-            "$environments" "$ENVIRONMENT_PREFIX" "$cutoff" "$expired_environments" <<'NODE'
+            "$environments" "$ENVIRONMENT_PREFIX" "$cutoff" "$all_environments" "$expired_environments" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [environmentsFile, prefix, cutoff, outputFile] = process.argv.slice(2);
-          const { selectExpiredEnvironments } = await import(
+          const [environmentsFile, prefix, cutoff, allFile, expiredFile] = process.argv.slice(2);
+          const { selectExpiredEnvironments, selectPrefixedEnvironments } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
           );
           const environments = JSON.parse(await readFile(environmentsFile, "utf8"));
-          await writeFile(
-            outputFile,
-            JSON.stringify(selectExpiredEnvironments(environments, prefix, cutoff))
-          );
+          await Promise.all([
+            writeFile(
+              allFile,
+              JSON.stringify(selectPrefixedEnvironments(environments, prefix))
+            ),
+            writeFile(
+              expiredFile,
+              JSON.stringify(selectExpiredEnvironments(environments, prefix, cutoff))
+            )
+          ]);
           NODE
+
+          echo "Radius environments in $FIXTURE_REPOSITORY:"
+          jq -r 'if length == 0 then "  (none)" else .[] | "  \(.)" end' "$all_environments"
+          echo "Environments created before $cutoff will be deleted:"
+          jq -r 'if length == 0 then "  (none)" else .[] | "  \(.)" end' "$expired_environments"
 
           purged=0
           failures=()
           while read -r name; do
             [[ -n "$name" ]] || continue
             echo "Deleting stale environment $name, created before $cutoff."
-            if ! gh api -X DELETE "repos/$FIXTURE_REPOSITORY/environments/$name"; then
-              failures+=("delete environment $name")
+            delete_error="$RUNNER_TEMP/delete-environment-$name.stderr"
+            if ! gh api -X DELETE "repos/$FIXTURE_REPOSITORY/environments/$name" 2>"$delete_error"; then
+              if [[ "$(cleanup_http_status "$delete_error")" != "404" ]]; then
+                cleanup_fail_if_terminal "$delete_error" "Deleting environment $name" \
+                  "Deleting an environment needs the Administration write permission. Check that the GitHub App installation grants it."
+                cat "$delete_error" >&2
+                failures+=("delete environment $name")
+                continue
+              fi
+            fi
+            verify_status=0
+            cleanup_wait_until_absent "environment $name" 60 5 \
+              cleanup_gh_probe "repos/$FIXTURE_REPOSITORY/environments/$name" || verify_status=$?
+            if (( verify_status == 2 )); then
+              exit 1
+            fi
+            if (( verify_status != 0 )); then
+              failures+=("verify deletion of environment $name")
               continue
             fi
             purged=$((purged + 1))
           done < <(jq -r '.[]' "$expired_environments")
 
-          echo "- GitHub Environments purged: $purged" >>"$GITHUB_STEP_SUMMARY"
+          echo "- Radius environments found: $(jq 'length' "$all_environments")" >>"$GITHUB_STEP_SUMMARY"
+          echo "- Radius environments deleted: $purged" >>"$GITHUB_STEP_SUMMARY"
           if (( ${#failures[@]} > 0 )); then
-            printf 'GitHub Environment cleanup failures:\n' >&2
+            printf 'Radius environment cleanup failures:\n' >&2
             printf '  - %s\n' "${failures[@]}" >&2
             exit 1
           fi
@@ -1104,6 +1416,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           pulls="$RUNNER_TEMP/fallback-pulls.json"
           refs="$RUNNER_TEMP/fallback-refs.json"
@@ -1180,9 +1494,22 @@ jobs:
           while read -r number; do
             [[ -n "$number" ]] || continue
             echo "Closing stale workflow fallback pull request #$number."
+            pull_error="$RUNNER_TEMP/close-pull-$number.stderr"
             if ! gh api -X PATCH "repos/$FIXTURE_REPOSITORY/pulls/$number" \
-                -f state=closed >/dev/null; then
+                -f state=closed >/dev/null 2>"$pull_error"; then
+              cleanup_fail_if_terminal "$pull_error" "Closing pull request #$number"
+              cat "$pull_error" >&2
               failures+=("close pull request #$number")
+              continue
+            fi
+            if ! state="$(gh api "repos/$FIXTURE_REPOSITORY/pulls/$number" --jq .state 2>"$pull_error")"; then
+              cleanup_fail_if_terminal "$pull_error" "Reading pull request #$number"
+              cat "$pull_error" >&2
+              failures+=("verify pull request #$number is closed")
+              continue
+            fi
+            if [[ "$state" != "closed" ]]; then
+              failures+=("pull request #$number is $state after it was closed")
               continue
             fi
             pulls_purged=$((pulls_purged + 1))
@@ -1192,8 +1519,21 @@ jobs:
           while read -r branch; do
             [[ -n "$branch" ]] || continue
             echo "Deleting stale workflow fallback branch $branch."
-            if ! gh api -X DELETE "repos/$FIXTURE_REPOSITORY/git/refs/heads/$branch"; then
+            branch_error="$RUNNER_TEMP/delete-branch.stderr"
+            if ! gh api -X DELETE "repos/$FIXTURE_REPOSITORY/git/refs/heads/$branch" 2>"$branch_error"; then
+              cleanup_fail_if_terminal "$branch_error" "Deleting branch $branch"
+              cat "$branch_error" >&2
               failures+=("delete branch $branch")
+              continue
+            fi
+            verify_status=0
+            cleanup_wait_until_absent "branch $branch" 60 5 \
+              cleanup_gh_probe "repos/$FIXTURE_REPOSITORY/git/ref/heads/$branch" || verify_status=$?
+            if (( verify_status == 2 )); then
+              exit 1
+            fi
+            if (( verify_status != 0 )); then
+              failures+=("verify deletion of branch $branch")
               continue
             fi
             branches_purged=$((branches_purged + 1))
@@ -1207,6 +1547,124 @@ jobs:
             exit 1
           fi
 
+      # The age threshold lets a recent leak survive a sweep. Resetting the
+      # fixture branch while that leak exists removes delete-application.yml,
+      # and then nothing can delete the leaked environment's application. A
+      # leaked environment also keeps its claim on the fixture namespace, so
+      # the next Cloud E2E run's Create Environment refuses. This gate checks,
+      # whatever the age, that nothing the suite creates is left before the
+      # reset can run. Any check that cannot complete counts as a failure.
+      - name: Verify no leaked state remains before the reset
+        id: pre-reset-verification
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.azure-login.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
+          APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
+          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+          FIXTURE_APPLICATION: ${{ steps.pin.outputs.fixture-application }}
+          FIXTURE_OWNER: ${{ steps.pin.outputs.owner }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          RADIUS_ENVIRONMENT_NAMESPACE: ${{ steps.pin.outputs.radius-environment-namespace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
+          source build/scripts/cloud-e2e-cleanup-lib.sh
+          environments="$RUNNER_TEMP/gate-environments.json"
+          applications="$RUNNER_TEMP/gate-applications.json"
+          objects="$RUNNER_TEMP/gate-cluster-objects.json"
+          packages="$RUNNER_TEMP/gate-packages.json"
+          findings="$RUNNER_TEMP/gate-findings.txt"
+          : >"$findings"
+
+          # Each call has a time limit, so a stalled call cannot use the job budget.
+          timeout 120 gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments?per_page=100" >"$environments"
+          timeout 120 az ad app list \
+            --filter "displayName eq '$APPLICATION_NAME'" \
+            --query '[].{id:id,appId:appId,displayName:displayName,createdDateTime:createdDateTime,tags:tags}' \
+            -o json >"$applications"
+          kubectl get \
+            deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
+            --all-namespaces \
+            --selector radapp.io/environment \
+            --request-timeout=60s \
+            --output json >"$objects"
+          repository_name="${FIXTURE_REPOSITORY##*/}"
+          package_prefix="${repository_name,,}-radius-state-"
+          GH_TOKEN="$GH_PACKAGES_TOKEN" timeout 120 gh api --paginate --slurp \
+            "orgs/$FIXTURE_OWNER/packages?package_type=container" >"$packages"
+          # A cutoff in the future selects every workload, whatever its age.
+          any_age="$(date -u -d "1 day" +%Y-%m-%dT%H:%M:%SZ)"
+
+          node --input-type=module - \
+            "$environments" "$applications" "$objects" "$packages" \
+            "$ENVIRONMENT_PREFIX" "$APPLICATION_NAME" "$FIXTURE_APPLICATION" \
+            "$package_prefix" "$any_age" "$findings" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [environmentsFile, applicationsFile, objectsFile, packagesFile, environmentPrefix, displayName, application, packagePrefix, anyAge, findingsFile] =
+            process.argv.slice(2);
+          // The gate deletes nothing, so it reports all state by name. It does
+          // not need the age, tag, or timestamp checks that make a delete safe.
+          const {
+            selectLeakedClusterWorkloads,
+            selectNamedApplications,
+            selectPrefixedEnvironments,
+            selectStatePackages
+          } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const [environments, applications, objects, packages] = await Promise.all(
+            [environmentsFile, applicationsFile, objectsFile, packagesFile].map(
+              async (file) => JSON.parse(await readFile(file, "utf8"))
+            )
+          );
+          const findings = [
+            ...selectPrefixedEnvironments(environments, environmentPrefix).map(
+              (name) => `Radius environment (GitHub Environment) ${name}`
+            ),
+            ...selectNamedApplications(applications, displayName).map(
+              (entry) => `Entra application ${entry.id} (appId ${entry.appId})`
+            ),
+            ...selectLeakedClusterWorkloads(
+              objects,
+              environmentPrefix,
+              application,
+              anyAge
+            ).map(
+              (entry) => `cluster ${entry.kind} ${entry.namespace}/${entry.name}`
+            ),
+            ...selectStatePackages(packages, packagePrefix).map(
+              (name) => `GHCR state package ${name}`
+            )
+          ];
+          await writeFile(findingsFile, findings.map((line) => `${line}\n`).join(""));
+          NODE
+
+          namespace_status=0
+          cleanup_namespace_probe "$RADIUS_ENVIRONMENT_NAMESPACE" || namespace_status=$?
+          case "$namespace_status" in
+            1) ;;
+            0) echo "cluster namespace $RADIUS_ENVIRONMENT_NAMESPACE" >>"$findings" ;;
+            *)
+              echo "::error::Could not check namespace $RADIUS_ENVIRONMENT_NAMESPACE. The fixture branch is not reset."
+              exit 1
+              ;;
+          esac
+
+          if [[ -s "$findings" ]]; then
+            echo "::error::Leaked state remains, so the fixture branch is not reset. Its delete workflows are still needed to remove this state. To delete it whatever its age, run this workflow with max_age_hours=0."
+            echo "Leaked state that remains:"
+            sed 's/^/  - /' "$findings"
+            {
+              echo "### Leaked state blocks the fixture reset"
+              echo
+              sed 's/^/- /' "$findings"
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "- Verified: no Radius environment, Entra application, cluster workload, namespace, or GHCR state package remains" >>"$GITHUB_STEP_SUMMARY"
+
       # The lease is the repository-scoped mutex used by both CI and local runs.
       # Cleanup may use an abandoned lease only after its recorded Actions owner
       # is provably complete. A local or malformed owner is unverifiable and is
@@ -1214,7 +1672,7 @@ jobs:
       # before touching the mutable default branch. Recovery workflows remain
       # in place unless every preceding sweep completed successfully.
       - name: Reset the fixture default branch under the shared lease
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success' && steps.entra-identity-cleanup.outcome == 'success' && steps.deployment-records-cleanup.outcome == 'success' && steps.environment-cleanup.outcome == 'success' && steps.stale-ghcr-state-cleanup.outcome == 'success' && steps.ghcr-state-cleanup.outcome == 'success' && steps.fallback-ref-cleanup.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.cluster-workload-cleanup.outcome == 'success' && steps.shared-resource-cleanup.outcome == 'success' && steps.entra-identity-cleanup.outcome == 'success' && steps.deployment-records-cleanup.outcome == 'success' && steps.environment-cleanup.outcome == 'success' && steps.stale-ghcr-state-cleanup.outcome == 'success' && steps.ghcr-state-cleanup.outcome == 'success' && steps.fallback-ref-cleanup.outcome == 'success' && steps.pre-reset-verification.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOURCE_GH_TOKEN: ${{ github.token }}
