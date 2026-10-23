@@ -670,12 +670,24 @@ export function providerRecoveryManualGuidance(op: any): string | null {
   const manualMutation = recovery.mutations.find(
     (entry) => entry.status === "manual_required"
   );
-  if (recovery.state !== "manual_required" && !manualMutation) return null;
-  return (
-    recovery.guidance ||
-    manualMutation?.evidence ||
-    "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+  if (recovery.state === "manual_required" || manualMutation) {
+    return (
+      recovery.guidance ||
+      manualMutation?.evidence ||
+      "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+    );
+  }
+  const unappliedBranchDeletion = recovery.mutations.find(
+    (entry) =>
+      entry.kind === "github_branch.delete" && entry.status === "not_applied"
   );
+  if (unappliedBranchDeletion) {
+    return (
+      unappliedBranchDeletion.evidence ||
+      "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again."
+    );
+  }
+  return null;
 }
 
 export function terminalizeProviderManualRequired(

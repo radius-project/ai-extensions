@@ -1,5 +1,4 @@
-import { createServer } from "node:http";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildRadiusAppProvenanceTags } from "../../azure-oidc.js";
 import {
   createOperation,
@@ -10,18 +9,18 @@ import {
   setAzureAppCreateContinuation
 } from "../../operations.js";
 import type { AzureAppCreateContinuation } from "../../azure-app-create-continuation.js";
-import { createRequestContext } from "../request-context.js";
-import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
+import { ENTRA_APP_RETENTION_NOTICE } from "../routes/azure-auto-setup-application.js";
 import {
-  createAzureAutoSetupRoutes,
-  handleAzureAutoSetup
-} from "./azure-auto-setup.js";
+  createAzureSetupService,
+  type AzureSetupRequest
+} from "./azure-setup.js";
+import type { SetupInput } from "./setup-outcome.js";
 import type {
   AzureAutoSetupCommandResult,
   AzureAutoSetupDependencies,
   AzureAutoSetupFailureInput,
   AzureAutoSetupOperation
-} from "./azure-auto-setup-types.js";
+} from "../routes/azure-auto-setup-types.js";
 import { createAzureAutoSetupTestDependencies } from "../../../test/support/server/azure-auto-setup.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import type { SelectedGhExecutor } from "../../gh.js";
@@ -46,50 +45,14 @@ type LiveContextDrift =
   | "oidc"
   | "oidc-error";
 
-const servers = new Set<ReturnType<typeof createServer>>();
-
-afterEach(async () => {
-  await Promise.all(
-    [...servers].map(
-      (server) =>
-        new Promise<void>((resolve) => {
-          server.close(() => resolve());
-        })
-    )
-  );
-  servers.clear();
-});
-
-async function invoke(
-  body: string,
-  dependencies: AzureAutoSetupDependencies,
-  headers: Record<string, string> = {
-    "X-Radius-Server-Owned": "test-token"
+async function invoke(body: string, dependencies: AzureAutoSetupDependencies) {
+  let input: SetupInput<AzureSetupRequest>;
+  try {
+    input = { data: JSON.parse(body) };
+  } catch (error) {
+    input = { error };
   }
-) {
-  const server = createServer(async (request, response) => {
-    const context = createRequestContext(
-      request,
-      response,
-      "panel-a",
-      new Map()
-    );
-    await handleAzureAutoSetup(context, dependencies);
-  });
-  servers.add(server);
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Azure auto-setup test server did not bind.");
-  }
-  return fetch(`http://127.0.0.1:${address.port}/api/azure-auto-setup`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
-    body
-  });
+  return createAzureSetupService(dependencies)(input);
 }
 
 function finalizingDependencies() {
@@ -119,7 +82,7 @@ const VALID_SETUP = {
   subscriptionId: SUBSCRIPTION
 };
 
-it("reports a failing finalizer without retrying cleanup or hanging HTTP", async () => {
+it("reports a failing finalizer without retrying cleanup or leaving the service pending", async () => {
   const test = finalizingDependencies();
   let finalizations = 0;
   const diagnostics: unknown[] = [];
@@ -132,7 +95,7 @@ it("reports a failing finalizer without retrying cleanup or hanging HTTP", async
   };
   const response = await invoke("{}", test.dependencies);
   expect(response.status).toBe(500);
-  expect(await response.json()).toMatchObject({ code: "setup-handler-failed" });
+  expect(response.body).toMatchObject({ code: "setup-handler-failed" });
   expect(finalizations).toBe(1);
   expect(diagnostics).toEqual([
     {
@@ -140,27 +103,6 @@ it("reports a failing finalizer without retrying cleanup or hanging HTTP", async
       message: "private cleanup detail"
     }
   ]);
-});
-
-it("reports a rejected authorization gate without reading input or invoking setup", async () => {
-  const test = finalizingDependencies();
-  const report = vi.fn();
-  test.dependencies.operations.report = report;
-  test.dependencies.isServerOwnedRequest = () => {
-    throw new Error("private authorization failure");
-  };
-  const response = await invoke("not-json", test.dependencies);
-  expect(response.status).toBe(500);
-  expect(await response.json()).toEqual({
-    code: "setup-handler-failed",
-    error:
-      "Setup could not finish reporting its outcome. Inspect the operation before retrying."
-  });
-  expect(report).toHaveBeenCalledExactlyOnceWith({
-    code: "setup-handler-failed",
-    message: "private authorization failure"
-  });
-  expect(test.calls).toEqual([]);
 });
 
 function orchestrationHarness(
@@ -375,7 +317,7 @@ function orchestrationHarness(
   return { dependencies, events, failures, operation };
 }
 
-describe("POST /api/azure-auto-setup construction (SU-01)", () => {
+describe("Azure setup service construction (SU-01)", () => {
   it("reports a non-array application lookup finalizer rejection once without leaking details", async () => {
     const harness = orchestrationHarness();
     const runAz = harness.dependencies.external.runAz;
@@ -393,10 +335,10 @@ describe("POST /api/azure-auto-setup construction (SU-01)", () => {
       harness.dependencies
     );
     expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       code: "setup-handler-failed",
       error:
-        "Setup could not finish reporting its outcome. Inspect the operation before retrying."
+        "Setup could not finish reporting its outcome. In the Environments panel, open Show details and select Download diagnostic snapshot to review the recorded status before deciding whether to retry."
     });
     expect(finalizations).toHaveLength(1);
     expect(finalizations[0].code).toBe("app-lookup-parse");
@@ -493,16 +435,7 @@ describe("POST /api/azure-auto-setup construction (SU-01)", () => {
     expect(harness.failures[0].runGitHubVariable).toBeUndefined();
   });
 
-  it("declares exactly its one route", () => {
-    expect(
-      Object.keys(
-        createAzureAutoSetupRoutes(createAzureAutoSetupTestDependencies())
-      )
-    ).toEqual(["POST /api/azure-auto-setup"]);
-  });
-
   it.each([
-    ["isServerOwnedRequest"],
     ["ensureServicePrincipal"],
     ["finalizeSetupFailure"],
     ["persistMutationCheckpoint"],
@@ -510,7 +443,7 @@ describe("POST /api/azure-auto-setup construction (SU-01)", () => {
   ])("rejects a missing %s dependency during construction", (name) => {
     const dependencies = createAzureAutoSetupTestDependencies();
     Reflect.set(dependencies, name, undefined);
-    expect(() => createAzureAutoSetupRoutes(dependencies)).toThrow(
+    expect(() => createAzureSetupService(dependencies)).toThrow(
       `Missing Azure auto-setup dependency: ${name}`
     );
   });
@@ -527,7 +460,7 @@ describe("POST /api/azure-auto-setup construction (SU-01)", () => {
       const dependencies = createAzureAutoSetupTestDependencies();
       const target = Reflect.get(dependencies, group);
       Reflect.set(target, name, undefined);
-      expect(() => createAzureAutoSetupRoutes(dependencies)).toThrow(
+      expect(() => createAzureSetupService(dependencies)).toThrow(
         `Missing Azure auto-setup dependency: ${group}.${name}`
       );
     }
@@ -537,28 +470,13 @@ describe("POST /api/azure-auto-setup construction (SU-01)", () => {
     const dependencies = createAzureAutoSetupTestDependencies({
       stageAuthorizeIdentity: ""
     });
-    expect(() => createAzureAutoSetupRoutes(dependencies)).toThrow(
+    expect(() => createAzureSetupService(dependencies)).toThrow(
       "Missing Azure auto-setup dependency: stageAuthorizeIdentity"
     );
   });
 });
 
-describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
-  it("refuses a browser-owned request before reading or finalizing its body", async () => {
-    const response = await invoke(
-      "{not-json",
-      createAzureAutoSetupTestDependencies({
-        isServerOwnedRequest: () => false
-      }),
-      {}
-    );
-    expect(response.status).toBe(403);
-    expect(response.headers.get("content-type")).toBe("application/json");
-    expect(await response.text()).toBe(
-      '{"error":"This endpoint is reserved for server-owned operations.","code":"server-owned-operation-required"}'
-    );
-  });
-
+describe("Azure setup service admission and validation (SU-08)", () => {
   it.each([
     ["missing parameters", {}, "missing-params"],
     [
@@ -605,7 +523,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
     const harness = finalizingDependencies();
     const response = await invoke(JSON.stringify(body), harness.dependencies);
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ code });
+    expect(response.body).toMatchObject({ code });
     expect(harness.calls).toHaveLength(1);
   });
 
@@ -613,7 +531,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
     const harness = finalizingDependencies();
     const response = await invoke("{oops", harness.dependencies);
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ code: "setup-unhandled" });
+    expect(response.body).toMatchObject({ code: "setup-unhandled" });
     expect(harness.calls[0]).toMatchObject({
       status: 400,
       code: "setup-unhandled",
@@ -629,7 +547,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
       harness.dependencies
     );
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "operation-continuation-mismatch"
     });
   });
@@ -693,7 +611,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
       })
     );
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error: "Setup is already running for octo/app.",
       code: "operation-in-progress",
       operationId: "op-running"
@@ -723,7 +641,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
     );
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error:
         "An earlier setup for octo/app must finish deletion before a new setup can start.",
       code: "previous-cleanup-required",
@@ -754,7 +672,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
       })
     );
     expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       error:
         "Radius changed no cloud resources because it could not save the setup recovery record.",
       code: "operation-persistence-failed",
@@ -767,7 +685,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
   });
 });
 
-describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
+describe("Azure setup service orchestration (SU-08)", () => {
   it.each([
     [
       "repository admin preflight",
@@ -798,7 +716,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       );
 
       expect(response.status).toBe(status);
-      expect(await response.json()).toMatchObject({ code });
+      expect(response.body).toMatchObject({ code });
       expect(test.events.some((event) => event.startsWith("az:"))).toBe(false);
     }
   );
@@ -819,7 +737,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       test.dependencies
     );
 
-    const body = await response.clone().json();
+    const body = response.body;
     expect(response.status, JSON.stringify(body)).toBe(200);
   });
 
@@ -836,7 +754,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "repo-admin-required"
     });
   });
@@ -937,7 +855,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       );
 
       expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ code });
+      expect(response.body).toMatchObject({ code });
     }
   );
 
@@ -1123,7 +1041,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       tenantId: TENANT
     };
     const first = await invoke(JSON.stringify(setup), test.dependencies);
-    const firstBody = await first.json();
+    const firstBody = first.body;
     const continuation = getAzureAppCreateContinuation(operation);
     if (!continuation) {
       throw new Error("The first SMR prompt did not save its continuation.");
@@ -1143,7 +1061,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       first,
       firstBody,
       second,
-      secondBody: await second.json(),
+      secondBody: second.body,
       azCalls,
       githubCalls,
       verifyCalls,
@@ -1519,7 +1437,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       );
 
       expect(response.status).toBe(409);
-      expect(await response.json()).toMatchObject({
+      expect(response.body).toMatchObject({
         code: "operation-continuation-mismatch"
       });
     }
@@ -1616,7 +1534,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ code: "sp-failed" });
+    expect(response.body).toMatchObject({ code: "sp-failed" });
     expect(test.events.some((event) => event.startsWith("stage:"))).toBe(false);
   });
 
@@ -1647,7 +1565,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ code: "setup-unhandled" });
+    expect(response.body).toMatchObject({ code: "setup-unhandled" });
     expect(test.failures[0]?.runAz).toEqual(expect.any(Function));
     await expect(
       test.failures[0]?.runAz?.(["account", "show", "--output", "json"])
@@ -1669,7 +1587,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "oidc-metadata-unavailable",
       error: "OIDC metadata unavailable"
     });
@@ -1692,7 +1610,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(500);
-    expect(await response.json()).toMatchObject({ code: "checkpoint-failed" });
+    expect(response.body).toMatchObject({ code: "checkpoint-failed" });
     expect(test.events).toContain("report:checkpoint-report");
     expect(test.failures[0]?.runAz).toEqual(expect.any(Function));
     await expect(
@@ -1714,7 +1632,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(500);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "operation-persistence-failed",
       operationId: "op-route"
     });
@@ -1772,7 +1690,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "app-selection-required",
       inputRequired: true,
       operationId: "op-route"
@@ -1836,7 +1754,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       cancelled: true,
       code: "operation-stopped",
       boundary: "input_prompt",
@@ -1863,7 +1781,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
+    expect(response.body).toMatchObject({
       code: "operation-stopped",
       boundary: "before-azure-subscription-selection"
     });
@@ -1911,7 +1829,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(response.body).toEqual({
       cancelled: true,
       code: "operation-stopped",
       boundary: "after-app-registration-create",
@@ -2066,8 +1984,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toBe("application/json");
-    const payload = await response.json();
+    const payload = response.body;
     expect(payload).toMatchObject({
       success: true,
       operationId: "op-success",
