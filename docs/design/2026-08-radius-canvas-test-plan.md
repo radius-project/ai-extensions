@@ -157,17 +157,24 @@ The full plan is complete when every requirement in the appendices has a passing
 
 #### Accepted tools
 
-| ID    | Tool                                   | Required contract                                                                                        |
-|-------|----------------------------------------|----------------------------------------------------------------------------------------------------------|
-| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery      |
-| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection |
-| TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                            |
-| TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                    |
-| TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                      |
-| TL-09 | `radius_deploy`                        | Attempt identity, environment/repository/branch/provider mapping, dispatch, repeat-last behavior, errors |
-| TL-10 | `radius_deploy_status`                 | In-progress/success/failure, log bounds, workflow URL, diagnostics                                       |
+| ID    | Tool                                   | Required contract                                                                                                                  |
+|-------|----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery                                |
+| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection                           |
+| TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                                                      |
+| TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                                              |
+| TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                                                |
+| TL-09 | `radius_deploy`                        | Attempt identity, environment/repository/branch/provider mapping, dispatch, repeat-last behavior, errors                           |
+| TL-10 | `radius_deploy_status`                 | In-progress/success/failure, log bounds, workflow URL, diagnostics                                                                 |
+| TL-12 | `radius_setup_environment`             | Panel-free verify-only Azure/AWS admission, strict provider schemas, explicit branch/account target, durable operation identity    |
+| TL-13 | `radius_environment_status`            | Saved operation/repository/environment/account binding, read-only observation, bounded redacted results, live interaction identity |
+| TL-14 | `radius_environment_control`           | Eligible saved-operation controls, trusted host confirmation, typed resume with stale/replay rejection, permissions-only bypass    |
 
 Every retained action/tool has unit or runtime-integration coverage. Tools reaching a loopback API also have HTTP integration. Path confinement and error propagation are mandatory for both publish tools.
+
+The environment-tool slice (new PR 4/8) adds TL-12 through TL-14 without changing the seven preceding declarations or the existing deploy/status implementations. RU-03 and built-extension smoke require flat root object schemas with nested answer `anyOf`; handlers retain exclusive provider/resume validation. Runtime integration invokes the registered handlers with real setup-start, status, control, resume and bypass services and no listening server. It covers canonical setup names, exact status/control targets, typed answers without another dialog, replaced/consumed prompts, informational requirement IDs, account selection and host-confirmed permissions-only bypass. Held Azure and GitHub writes exercise SDK shutdown and local Stop while the real account coordinator holds its keyring lease; persistence and acknowledged provenance precede executor release. The parent five-state deferred-recovery identity fence and main verification-history lookup tests remain. RF-06/RF-08 retain HTTP admission and bypass behavior through the same services; existing Chromium workflows protect the unchanged wizard. No new browser control or visual state is introduced. Native Windows process, canonical-container/visual, live-cloud and real-host qualification remain distinct from local WSL evidence.
+
+The PR 4 reviewer remediation adds real Azure multi-application prompt creation through the registered setup handler, holding prompt persistence while polling before and after executor settlement. The returned IDs, identical display names, creation dates and saved default drive a typed resume through the real service and back into selected Azure application lookup; a separately supplied application ID remains supported. Registered status tests cover malformed, empty and oversized projections, and unit tests enforce 20-choice/200-character boundaries, date validation, default retention and redaction. Unsupported, replaced and consumed handles cannot authorize continuation. The actual control service returns `verification-retry-pull-request-open` as merge guidance, while unavailable account proof remains a separate refusal and neither dispatches verification. The inherited held-write matrix keeps all service cases and adds registered shutdown at `RADIUS_MANAGED`, `RADIUS_STATE_BACKEND` and `AZURE_TENANT_ID`, preserving acknowledgements before executor release; resumed Azure lookup also proves shutdown prevents the next identity write. Parent cleanup/recovery rejection and missing-run discovery tests remain required lower-level evidence, not claims that every recovery branch is driven by a tool.
 
 #### Historical Phase 0 removals
 

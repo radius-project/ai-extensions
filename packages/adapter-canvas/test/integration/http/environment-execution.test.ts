@@ -33,6 +33,69 @@ afterEach(async () => {
 });
 
 describe("production environment owner HTTP binding", () => {
+  it("projects the latest saved operation without repository context through the production status route", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const unavailable = async (): Promise<never> => {
+      throw new Error("Unexpected account lookup");
+    };
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: createEnvironmentAccountContext("latest-status", {
+        createReadOnlyExecutor: unavailable,
+        withSelectedAccount: unavailable
+      })
+    });
+    const entry = await runtime.getOrCreateServer(
+      "latest-status",
+      "environment"
+    );
+    try {
+      const empty = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(empty.status).toBe(200);
+      expect(await empty.json()).toEqual({ operation: null });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      finish(op, "failed");
+      op.request = { private: "never-return-this" };
+      operations.put(op);
+      const response = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const result = await response.json();
+      expect(result).toMatchObject({
+        operation: {
+          operationId: op.operationId,
+          repo: op.repo,
+          environment: op.environment,
+          state: "failed"
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("never-return-this");
+      const beforeExport = Date.now();
+      const diagnostic = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/diagnostics`
+      );
+      expect(diagnostic.status).toBe(200);
+      expect(diagnostic.headers.get("content-disposition")).toContain(
+        "attachment;"
+      );
+      expect(diagnostic.headers.get("cache-control")).toBe("no-store");
+      const exported = await diagnostic.json();
+      expect(Date.parse(exported.generatedAt)).toBeGreaterThanOrEqual(
+        beforeExport
+      );
+      expect(Date.parse(exported.generatedAt)).toBeLessThanOrEqual(Date.now());
+      expect(JSON.stringify(exported)).not.toContain("never-return-this");
+      expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("latest-status", true);
+    }
+  });
+
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {

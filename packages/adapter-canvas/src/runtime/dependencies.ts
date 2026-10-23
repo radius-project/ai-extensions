@@ -23,6 +23,7 @@ import type {
 } from "../deploy-tools.js";
 import type { SessionHolder } from "./session.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
+import type { EnvironmentTools } from "./environment-tools.js";
 
 export interface WorkspaceContext {
   workspacePath: string;
@@ -352,6 +353,7 @@ export interface RadiusExtensionDependencies {
   logError(message: string): void;
   session: SessionHolder;
   executionOwner: EnvironmentExecutionOwner;
+  environment: EnvironmentTools;
   clock: ClockDependencies;
   servers: Map<string, CanvasServerEntry>;
   getOrCreateServer(
