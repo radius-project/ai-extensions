@@ -4857,7 +4857,7 @@ export function createEnvironmentOperationExecution(
     );
     try {
       if (needsGitHub && selectedLogin) {
-        await githubAccountCoordinator.withSelectedAccount(
+        const lease = await githubAccountCoordinator.withSelectedAccount(
           selectedLogin,
           { ownerKey: accountContext.ownerKey, operationId },
           async (executor) => {
@@ -4879,6 +4879,18 @@ export function createEnvironmentOperationExecution(
             }
           }
         );
+        if (
+          lease.restoration.state === "failed" ||
+          lease.restoration.state === "changed_externally"
+        ) {
+          operations.report({
+            scope: "setup-cleanup-account-restoration",
+            operationId,
+            message:
+              lease.restoration.guidance ||
+              "GitHub CLI account restoration needs attention."
+          });
+        }
       } else {
         await runCleanupPass(kind, operationId, commandId, isStopped);
       }
