@@ -40,6 +40,7 @@ export type SetupInputResumeResult<
 
 export interface SetupInputResumePorts<Operation extends SetupResumeOperation> {
   isStopped?(): boolean;
+  isCurrent(operation: Operation): boolean;
   readInput(): Promise<SetupResumeInput>;
   canResumeInput(
     operation: Operation,
@@ -80,6 +81,7 @@ export async function resumeSetupInput<Operation extends SetupResumeOperation>(
     return { state: "expired", operation, message: operation.failure.message };
   const data = await ports.readInput();
   if (ports.isStopped?.()) return { state: "stopped" };
+  if (!ports.isCurrent(operation)) return { state: "mismatch" };
   if (
     !ports.canResumeInput(operation, {
       code,
@@ -126,6 +128,7 @@ export async function resumeSetupInput<Operation extends SetupResumeOperation>(
   try {
     await ports.persist();
   } catch (error) {
+    if (!ports.isCurrent(operation)) return { state: "mismatch" };
     operation.request = snapshot.request;
     if (snapshot.resumeRequest === undefined) delete operation.resumeRequest;
     else operation.resumeRequest = snapshot.resumeRequest;
@@ -133,6 +136,7 @@ export async function resumeSetupInput<Operation extends SetupResumeOperation>(
     return { state: "persist-failed", error };
   }
   if (ports.isStopped?.()) return { state: "stopped" };
+  if (!ports.isCurrent(operation)) return { state: "mismatch" };
   ports.accepted();
   if (!ports.schedule(operation)) await ports.schedulingFailed(operation);
   return { state: "accepted" };
