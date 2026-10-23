@@ -35,6 +35,8 @@ const EXPECTED_FUNCTIONS = [
   "readWorkflowCommitProvenance",
   "needsWorkflowScope",
   "ProviderMutationRecoveryError",
+  "assertSetupExecutionActive",
+  "isSetupExecutionInterrupted",
   "publishSetupWorkflowFiles",
   "setSetupEnvironmentVariable",
   "setupAutomaticBranchVerificationPolicy",

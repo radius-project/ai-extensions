@@ -890,9 +890,14 @@ describe("real server and fake SDK runtime ownership", () => {
     }
   );
 
-  it.each(["azure", "configuration"] as const)(
-    "stops the real %s service at its safe boundary without starting failure cleanup",
-    async (stage) => {
+  it.each([
+    ["azure", "before-cleanup"],
+    ["configuration", "before-cleanup"],
+    ["azure", "cleanup-delete"],
+    ["configuration", "cleanup-delete"]
+  ] as const)(
+    "stops the real %s service at %s without publishing a terminal cleanup result",
+    async (stage, boundary) => {
       const owner = createEnvironmentExecutionOwner();
       let repositoryReads = 0;
       const run = vi.fn(async (args: string[]) => {
@@ -907,7 +912,7 @@ describe("real server and fake SDK runtime ownership", () => {
         ) {
           repositoryReads++;
           if (repositoryReads === 2) {
-            owner.shutdown();
+            if (boundary === "before-cleanup") owner.shutdown();
             return {
               code: 1,
               stdout: "",
@@ -919,6 +924,11 @@ describe("real server and fake SDK runtime ownership", () => {
             stdout: '{"full_name":"fixture/app","permissions":{"admin":true}}',
             stderr: ""
           };
+        }
+        if (args.includes("DELETE")) {
+          expect(boundary).toBe("cleanup-delete");
+          owner.shutdown();
+          return { code: 0, stdout: "", stderr: "" };
         }
         if (endpoint === "/repos/fixture/app/environments/dev")
           return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
@@ -953,6 +963,13 @@ describe("real server and fake SDK runtime ownership", () => {
         provider: "azure"
       });
       op.context.githubLogin = "saved-account";
+      if (boundary === "cleanup-delete")
+        recordGitHubEnvironment(op, {
+          state: "created",
+          repo: op.repo,
+          name: op.environment,
+          providerId: "17"
+        });
       op.currentStage =
         stage === "azure" ?
           STAGE_AUTHORIZE_IDENTITY
@@ -984,19 +1001,28 @@ describe("real server and fake SDK runtime ownership", () => {
       expect(
         repositoryReads,
         JSON.stringify({ failure: op.failure, calls: run.mock.calls })
-      ).toBe(2);
+      ).toBe(
+        stage === "configuration" && boundary === "cleanup-delete" ? 3 : 2
+      );
       expect(op.endedAt).toBeNull();
       expect(op.failure).toBeNull();
-      expect(op.executionActive).toBe(false);
+      expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
       expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
-      expect(run.mock.calls.every(([args]) => !args.includes("--method"))).toBe(
-        true
-      );
+      expect(
+        run.mock.calls.filter(([args]) => args.includes("DELETE"))
+      ).toHaveLength(boundary === "cleanup-delete" ? 1 : 0);
+      if (boundary === "cleanup-delete")
+        expect(op.setupArtifacts.githubEnvironment.state).toBe("deleted");
       expect(runtime.servers.size).toBe(0);
     }
   );
 
-  it.each(["azure", "configuration"] as const)(
+  it.each([
+    "azure",
+    "RADIUS_MANAGED",
+    "RADIUS_STATE_BACKEND",
+    "AZURE_TENANT_ID"
+  ] as const)(
     "persists an acknowledged %s write during shutdown before releasing its selected executor",
     async (stage) => {
       const owner = createEnvironmentExecutionOwner();
@@ -1006,15 +1032,30 @@ describe("real server and fake SDK runtime ownership", () => {
       const persistGate = deferred();
       const appId = "22222222-2222-4222-8222-222222222222";
       const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+      const variableValues = new Map<string, string>();
       let acknowledged = false;
       const run = vi.fn(async (args: string[]) => {
         if (
-          stage === "configuration" &&
-          args.slice(0, 3).join(" ") === "variable set RADIUS_MANAGED"
+          stage !== "azure" &&
+          args.slice(0, 3).join(" ") === `variable set ${stage}`
         ) {
           entered.resolve();
           await writeGate.promise;
           acknowledged = true;
+          return success();
+        }
+        if (
+          args[0] === "variable" &&
+          args[1] === "set" &&
+          [
+            "RADIUS_MANAGED",
+            "RADIUS_STATE_BACKEND",
+            "RADIUS_STATE_REGISTRY",
+            "RADIUS_STATE_ARCHIVE",
+            "AZURE_CLIENT_ID"
+          ].includes(args[2])
+        ) {
+          variableValues.set(args[2], args[4]);
           return success();
         }
         if (args[0] !== "api")
@@ -1032,14 +1073,15 @@ describe("real server and fake SDK runtime ownership", () => {
         if (endpoint === "repos/fixture/app/actions/oidc/customization/sub")
           return success('{"use_default":true,"use_immutable_subject":false}');
         if (
-          endpoint ===
-            "repos/fixture/app/environments/dev/variables/AZURE_CLIENT_ID" ||
-          endpoint ===
-            "repos/fixture/app/environments/dev/variables/RADIUS_MANAGED"
-        )
-          return acknowledged ?
-              success('{"name":"RADIUS_MANAGED","value":"true"}')
+          endpoint?.startsWith("repos/fixture/app/environments/dev/variables/")
+        ) {
+          const name = endpoint.slice(
+            "repos/fixture/app/environments/dev/variables/".length
+          );
+          return variableValues.has(name) ?
+              success(JSON.stringify({ name, value: variableValues.get(name) }))
             : { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        }
         throw new Error(`Unexpected GitHub command: ${args.join(" ")}`);
       });
       const runAz = vi.fn(async (args: string[]) => {
@@ -1148,7 +1190,10 @@ describe("real server and fake SDK runtime ownership", () => {
         environment: {
           repo: op.repo,
           environment: op.environment,
-          provider: "azure"
+          provider: "azure",
+          clientId: appId,
+          tenantId: "33333333-3333-4333-8333-333333333333",
+          subscriptionId: "11111111-1111-4111-8111-111111111111"
         }
       };
       operations.put(op);
@@ -1206,7 +1251,6 @@ describe("real server and fake SDK runtime ownership", () => {
         persistGate.resolve();
         await completed;
         expect(op.endedAt).toBeNull();
-        expect(op.executionActive).toBe(false);
         expect(op.failure).toBeNull();
         expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
         expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
@@ -1234,13 +1278,13 @@ describe("real server and fake SDK runtime ownership", () => {
               azureApp: { state: "created", origin: "this_operation", appId }
             }
           : {
-              githubEnvironmentVariables: [
-                {
-                  name: "RADIUS_MANAGED",
+              githubEnvironmentVariables: expect.arrayContaining([
+                expect.objectContaining({
+                  name: stage,
                   previousKnown: true,
                   previousValue: null
-                }
-              ]
+                })
+              ])
             }
         );
         expect(runtime.servers.size).toBe(0);
