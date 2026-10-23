@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   selectExpiredApplications,
+  selectNamedApplications,
   selectExpiredDirectoryObjects,
   selectExpiredDeployments,
   selectExpiredEnvironments,
@@ -14,6 +15,7 @@ import {
   selectOpenPullRequestHeadRefs,
   selectPrefixedEnvironments,
   selectStaleStatePackages,
+  selectStatePackages,
   selectTestResourceGroups
 } from "./cloud-cleanup.js";
 
@@ -910,7 +912,10 @@ describe("selectLeakedClusterWorkloads", () => {
     const payload = {
       items: [
         workload("Deployment", "someone-else", "default", "prod-environment"),
-        { kind: "Deployment", metadata: { name: "bare", namespace: "default" } }
+        {
+          kind: "Deployment",
+          metadata: { name: "bare", namespace: "default" }
+        }
       ]
     };
 
@@ -1111,5 +1116,89 @@ describe("selectReclaimableGroupResources", () => {
     expect(() =>
       selectReclaimableGroupResources([clusterResource], name)
     ).toThrow(/A cluster name is required/);
+  });
+});
+
+describe("selectNamedApplications", () => {
+  it("reports every application with the name, with or without tags", () => {
+    // Setup can stop before it tags the application. The gate must still see it.
+    expect(
+      selectNamedApplications(
+        [
+          { id: "tagged", appId: "a1", displayName: APP, tags: APP_TAGS },
+          { id: "untagged", appId: "a2", displayName: APP, tags: [] },
+          { id: "bare", displayName: APP },
+          { id: "other", appId: "a3", displayName: "unrelated" },
+          "not an object"
+        ],
+        APP
+      )
+    ).toEqual([
+      { id: "tagged", appId: "a1" },
+      { id: "untagged", appId: "a2" },
+      { id: "bare", appId: "(no appId)" }
+    ]);
+  });
+
+  it("names an entry that has no id", () => {
+    expect(selectNamedApplications([{ displayName: APP }], APP)).toEqual([
+      { id: "(no id)", appId: "(no appId)" }
+    ]);
+  });
+
+  it("requires a display name and an array", () => {
+    expect(() => selectNamedApplications([], " ")).toThrow(
+      /display name is required/
+    );
+    expect(() => selectNamedApplications({}, APP)).toThrow();
+  });
+});
+
+describe("selectStatePackages", () => {
+  const prefix = "ai-extensions-fixture-radius-state-";
+
+  it("reports every state package, whatever its age or timestamp", () => {
+    // A package without a readable `updated_at` is state that remains.
+    expect(
+      selectStatePackages(
+        [
+          [
+            {
+              name: `${prefix}radtest-6fe9780807f4-53cf5e9d4628`,
+              updated_at: "2026-09-17T17:30:33Z"
+            },
+            { name: `${prefix}radtest-f471e24d92f0-181627bff61c` },
+            {
+              name: `${prefix}radtest-0123456789ab-aaaaaaaaaaaa`,
+              updated_at: "not a date"
+            }
+          ]
+        ],
+        prefix
+      )
+    ).toEqual([
+      `${prefix}radtest-6fe9780807f4-53cf5e9d4628`,
+      `${prefix}radtest-f471e24d92f0-181627bff61c`,
+      `${prefix}radtest-0123456789ab-aaaaaaaaaaaa`
+    ]);
+  });
+
+  it("ignores packages outside the fixture's state prefix", () => {
+    expect(
+      selectStatePackages(
+        [
+          [
+            { name: "radius-project-canvas" },
+            { name: `${prefix}not-a-state-package` },
+            { name: "some-other-repo-radius-state-radtest-1-aaaaaaaaaaaa" }
+          ]
+        ],
+        prefix
+      )
+    ).toEqual([]);
+  });
+
+  it("requires a prefix", () => {
+    expect(() => selectStatePackages([[]], " ")).toThrow(/prefix is required/);
   });
 });

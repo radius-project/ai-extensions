@@ -680,6 +680,7 @@ jobs:
             deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
             --all-namespaces \
             --selector radapp.io/environment \
+            --request-timeout=60s \
             --output json >"$objects"
 
           node --input-type=module - \
@@ -727,6 +728,7 @@ jobs:
                 deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
                 --all-namespaces \
                 --selector radapp.io/environment \
+                --request-timeout=30s \
                 --output json 2>&1)"; then
               printf '%s\n' "$output" >&2
               if grep -qiE 'forbidden|unauthorized' <<<"$output"; then
@@ -751,7 +753,10 @@ jobs:
             )
           );
           NODE
-            if [[ "$(jq 'length' "$remaining")" == "0" ]]; then
+            # Remove a CR, as the other jq reads in this workflow do.
+            local remaining_count
+            remaining_count="$(jq 'length' "$remaining")"
+            if [[ "${remaining_count%$'\r'}" == "0" ]]; then
               return 1
             fi
             jq -r '.[] | "  still present: \(.kind) \(.namespace)/\(.name)"' "$remaining"
@@ -923,7 +928,10 @@ jobs:
             )
           );
           NODE
-            if [[ "$(jq 'length' "$remaining")" == "0" ]]; then
+            # Remove a CR, as the other jq reads in this workflow do.
+            local remaining_count
+            remaining_count="$(jq 'length' "$remaining")"
+            if [[ "${remaining_count%$'\r'}" == "0" ]]; then
               return 1
             fi
             jq -r '.[] | "  still present: \(.type) \(.name)"' "$remaining"
@@ -1563,8 +1571,6 @@ jobs:
           set -euo pipefail
           # shellcheck source=build/scripts/cloud-e2e-cleanup-lib.sh
           source build/scripts/cloud-e2e-cleanup-lib.sh
-          # A cutoff in the future selects every match, whatever its age.
-          any_age="$(date -u -d "1 day" +%Y-%m-%dT%H:%M:%SZ)"
           environments="$RUNNER_TEMP/gate-environments.json"
           applications="$RUNNER_TEMP/gate-applications.json"
           objects="$RUNNER_TEMP/gate-cluster-objects.json"
@@ -1572,8 +1578,9 @@ jobs:
           findings="$RUNNER_TEMP/gate-findings.txt"
           : >"$findings"
 
-          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments?per_page=100" >"$environments"
-          az ad app list \
+          # Each call has a time limit, so a stalled call cannot use the job budget.
+          timeout 120 gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments?per_page=100" >"$environments"
+          timeout 120 az ad app list \
             --filter "displayName eq '$APPLICATION_NAME'" \
             --query '[].{id:id,appId:appId,displayName:displayName,createdDateTime:createdDateTime,tags:tags}' \
             -o json >"$applications"
@@ -1581,24 +1588,29 @@ jobs:
             deployments,statefulsets,daemonsets,services,horizontalpodautoscalers \
             --all-namespaces \
             --selector radapp.io/environment \
+            --request-timeout=60s \
             --output json >"$objects"
           repository_name="${FIXTURE_REPOSITORY##*/}"
           package_prefix="${repository_name,,}-radius-state-"
-          GH_TOKEN="$GH_PACKAGES_TOKEN" gh api --paginate --slurp \
+          GH_TOKEN="$GH_PACKAGES_TOKEN" timeout 120 gh api --paginate --slurp \
             "orgs/$FIXTURE_OWNER/packages?package_type=container" >"$packages"
+          # A cutoff in the future selects every workload, whatever its age.
+          any_age="$(date -u -d "1 day" +%Y-%m-%dT%H:%M:%SZ)"
 
           node --input-type=module - \
             "$environments" "$applications" "$objects" "$packages" \
-            "$ENVIRONMENT_PREFIX" "$APPLICATION_NAME" "$FIXTURE_REPOSITORY" "$FIXTURE_APPLICATION" \
+            "$ENVIRONMENT_PREFIX" "$APPLICATION_NAME" "$FIXTURE_APPLICATION" \
             "$package_prefix" "$any_age" "$findings" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [environmentsFile, applicationsFile, objectsFile, packagesFile, environmentPrefix, displayName, repository, application, packagePrefix, anyAge, findingsFile] =
+          const [environmentsFile, applicationsFile, objectsFile, packagesFile, environmentPrefix, displayName, application, packagePrefix, anyAge, findingsFile] =
             process.argv.slice(2);
+          // The gate deletes nothing, so it reports all state by name. It does
+          // not need the age, tag, or timestamp checks that make a delete safe.
           const {
-            selectExpiredApplications,
             selectLeakedClusterWorkloads,
+            selectNamedApplications,
             selectPrefixedEnvironments,
-            selectStaleStatePackages
+            selectStatePackages
           } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
           );
@@ -1611,13 +1623,9 @@ jobs:
             ...selectPrefixedEnvironments(environments, environmentPrefix).map(
               (name) => `Radius environment (GitHub Environment) ${name}`
             ),
-            ...selectExpiredApplications(
-              applications,
-              displayName,
-              repository,
-              environmentPrefix,
-              anyAge
-            ).map((entry) => `Entra application ${entry.id} (appId ${entry.appId})`),
+            ...selectNamedApplications(applications, displayName).map(
+              (entry) => `Entra application ${entry.id} (appId ${entry.appId})`
+            ),
             ...selectLeakedClusterWorkloads(
               objects,
               environmentPrefix,
@@ -1626,7 +1634,7 @@ jobs:
             ).map(
               (entry) => `cluster ${entry.kind} ${entry.namespace}/${entry.name}`
             ),
-            ...selectStaleStatePackages(packages, packagePrefix, anyAge).map(
+            ...selectStatePackages(packages, packagePrefix).map(
               (name) => `GHCR state package ${name}`
             )
           ];

@@ -863,13 +863,87 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(resetIndex).toBeGreaterThan(gateIndex);
     for (const selector of [
       "selectPrefixedEnvironments",
-      "selectExpiredApplications",
+      "selectNamedApplications",
       "selectLeakedClusterWorkloads",
-      "selectStaleStatePackages"
+      "selectStatePackages"
     ])
       expect(script).toContain(selector);
     expect(script).toContain("cleanup_namespace_probe");
     expect(script).toContain("max_age_hours=0");
+  });
+
+  // The gate deletes nothing, so it must report state that the delete steps
+  // safely skip: an application that setup did not tag, and a state package
+  // with no readable timestamp.
+  it.each([
+    {
+      case: "untagged application and undated package",
+      leaked: true,
+      status: 1
+    },
+    { case: "clean fixture", leaked: false, status: 0 }
+  ])("runs the reset gate: $case", async ({ leaked, status }) => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const gate = steps(workflow.jobs?.purge).find(
+      (step) => step.id === "pre-reset-verification"
+    );
+    const directory = await mkdtemp(path.join(tmpdir(), "reset-gate-"));
+    const application = JSON.stringify(
+      leaked ?
+        [
+          {
+            id: "untagged-object",
+            appId: "untagged-app",
+            displayName: "radius-deploy-owner-fixture-repo",
+            tags: []
+          }
+        ]
+      : []
+    );
+    const packages = JSON.stringify([
+      leaked ?
+        [{ name: "fixture-repo-radius-state-radtest-abc-0123456789ab" }]
+      : [{ name: "radius-project-canvas" }]
+    ]);
+    const stubs = [
+      'timeout() { shift; "$@"; }',
+      `gh() { case "$*" in *environments*) echo '[{"environments":[]}]' ;; *packages*) echo '${packages}' ;; *) return 99 ;; esac; }`,
+      `az() { echo '${application}'; }`,
+      'kubectl() { case "$1 $2" in "get namespace") ;; *) echo \'{"items":[]}\' ;; esac; }'
+    ].join("\n");
+    try {
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          RUNNER_TEMP: directory,
+          GITHUB_STEP_SUMMARY: path.join(directory, "summary.md"),
+          GH_PACKAGES_TOKEN: "packages-token",
+          APPLICATION_NAME: "radius-deploy-owner-fixture-repo",
+          ENVIRONMENT_PREFIX: "radtest-",
+          FIXTURE_APPLICATION: "fixture",
+          FIXTURE_OWNER: "owner",
+          FIXTURE_REPOSITORY: "owner/fixture-repo",
+          RADIUS_ENVIRONMENT_NAMESPACE: "default"
+        },
+        input: `${stubs}\n${gate?.run}`
+      });
+      expect(result.stderr).not.toMatch(/error|unbound/i);
+      expect(result.status).toBe(status);
+      if (leaked) {
+        expect(result.stdout).toContain(
+          "Entra application untagged-object (appId untagged-app)"
+        );
+        expect(result.stdout).toContain(
+          "GHCR state package fixture-repo-radius-state-radtest-abc-0123456789ab"
+        );
+      } else {
+        expect(result.stdout).not.toContain("Leaked state remains");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("deletes legacy resource groups only after the Radius applications on them", async () => {

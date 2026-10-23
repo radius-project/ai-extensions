@@ -203,4 +203,40 @@ assert_eq "$(wc -l <"${PROBE_CALLS}" | tr -d ' ')" "1" \
 assert_contains "${output}" "a retry cannot fix" "terminal message"
 pass "cleanup_wait_until_absent stops at once on a terminal error"
 
+# A probe that stalls longer than the timeout. Its child stands in for a hung
+# `kubectl` or `gh`, and it records its PID so the test can check it was killed.
+CHILD_PID="${TEST_ROOT}/child-pid"
+stalled_probe() {
+    command sleep 30 &
+    echo "$!" >"${CHILD_PID}"
+    wait
+    return "${CLEANUP_PROBE_ABSENT}"
+}
+
+status=0
+started="${SECONDS}"
+output="$(cleanup_wait_until_absent "thing" 2 1 stalled_probe 2>&1)" ||
+    status=$?
+assert_eq "${status}" "1" "a stalled probe ends in a timeout"
+(((SECONDS - started) < 15)) ||
+    fail "a stalled probe must stop at the timeout, not when it finishes"
+assert_contains "${output}" "did not finish in" "stalled probe warning"
+if kill -0 "$(cat "${CHILD_PID}")" 2>/dev/null; then
+    fail "the child of a stalled probe must be stopped"
+fi
+pass "cleanup_wait_until_absent stops a probe that passes the deadline"
+
+# The wait between calls never passes the deadline, even with a long interval.
+SLEEPS="${TEST_ROOT}/sleeps"
+sleep() { echo "$1" >>"${SLEEPS}"; }
+status=0
+output="$(cleanup_wait_until_absent "thing" 3 600 always_present)" ||
+    status=$?
+sleep() { :; }
+assert_eq "${status}" "1" "capped sleep still times out"
+while read -r seconds; do
+    ((seconds <= 3)) || fail "a sleep of ${seconds} seconds passes the deadline"
+done <"${SLEEPS}"
+pass "cleanup_wait_until_absent caps each wait at the time that remains"
+
 echo "all cloud-e2e-cleanup-lib tests passed"

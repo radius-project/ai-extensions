@@ -16,12 +16,14 @@
 #   1  the object is gone
 #   2  terminal error: a retry cannot fix it
 #   3  transient error: try again until the timeout
+#   4  the probe did not finish in its time budget
 # ============================================================================
 
 readonly CLEANUP_PROBE_PRESENT=0
 readonly CLEANUP_PROBE_ABSENT=1
 readonly CLEANUP_PROBE_TERMINAL=2
 readonly CLEANUP_PROBE_TRANSIENT=3
+readonly CLEANUP_PROBE_TIMED_OUT=4
 
 # Prints the last HTTP status that `gh api` wrote to the given stderr file, or
 # nothing when the file has no status.
@@ -98,7 +100,7 @@ cleanup_gh_probe() {
 cleanup_namespace_probe() {
     local namespace="$1" output
     if output="$(kubectl get namespace "${namespace}" \
-        --ignore-not-found --output name 2>&1)"; then
+        --ignore-not-found --request-timeout=30s --output name 2>&1)"; then
         if [[ -n "${output}" ]]; then
             return "${CLEANUP_PROBE_PRESENT}"
         fi
@@ -111,8 +113,53 @@ cleanup_namespace_probe() {
     return "${CLEANUP_PROBE_TRANSIENT}"
 }
 
+# Runs PROBE with its arguments for at most BUDGET_SECONDS. The probe runs in
+# its own process group, so a stalled `gh`, `az`, or `kubectl` that it starts
+# is stopped with it. The probe runs without `set -e`, as it did when callers
+# ran it on the left of `||`.
+#
+# Returns the probe's status, or CLEANUP_PROBE_TIMED_OUT when the budget ends
+# first.
+#
+# Usage: cleanup_run_bounded BUDGET_SECONDS PROBE [ARGS...]
+cleanup_run_bounded() {
+    local budget="$1"
+    shift
+    local marker probe watchdog status=0 monitor_was_on=0
+    marker="$(mktemp)"
+    rm -f "${marker}"
+    [[ "$-" == *m* ]] && monitor_was_on=1
+    set -m
+    (
+        set +e
+        "$@"
+    ) &
+    probe=$!
+    ((monitor_was_on)) || set +m
+    (
+        timer=""
+        trap '[[ -z "${timer}" ]] || kill "${timer}" 2>/dev/null; exit 0' TERM
+        command sleep "${budget}" >/dev/null 2>&1 &
+        timer=$!
+        wait "${timer}" || exit 0
+        : >"${marker}"
+        kill -TERM -- "-${probe}" 2>/dev/null || kill -TERM "${probe}" 2>/dev/null
+    ) &
+    watchdog=$!
+    wait "${probe}" || status=$?
+    kill -TERM "${watchdog}" 2>/dev/null || true
+    wait "${watchdog}" 2>/dev/null || true
+    if [[ -e "${marker}" ]]; then
+        rm -f "${marker}"
+        echo "::warning::The check did not finish in ${budget} seconds, so it was stopped." >&2
+        return "${CLEANUP_PROBE_TIMED_OUT}"
+    fi
+    return "${status}"
+}
+
 # Calls PROBE with its arguments until it reports the object is gone, the
-# timeout expires, or the probe reports a terminal error.
+# timeout expires, or the probe reports a terminal error. Each call gets only
+# the time that remains, and the wait between calls never passes the deadline.
 #
 # Returns 0 when the object is gone, 1 on timeout, and 2 on a terminal error.
 #
@@ -121,25 +168,28 @@ cleanup_namespace_probe() {
 cleanup_wait_until_absent() {
     local label="$1" timeout="$2" interval="$3"
     shift 3
-    local deadline=$((SECONDS + timeout)) status
+    local deadline=$((SECONDS + timeout)) remaining status
     while true; do
+        remaining=$((deadline - SECONDS))
+        ((remaining >= 1)) || remaining=1
         status=0
-        "$@" || status=$?
+        cleanup_run_bounded "${remaining}" "$@" || status=$?
         case "${status}" in
         "${CLEANUP_PROBE_ABSENT}")
             echo "Verified that ${label} is gone."
             return 0
             ;;
-        "${CLEANUP_PROBE_PRESENT}" | "${CLEANUP_PROBE_TRANSIENT}") ;;
+        "${CLEANUP_PROBE_PRESENT}" | "${CLEANUP_PROBE_TRANSIENT}" | "${CLEANUP_PROBE_TIMED_OUT}") ;;
         *)
             echo "::error::Could not verify that ${label} is gone. The check failed in a way that a retry cannot fix."
             return 2
             ;;
         esac
-        if ((SECONDS >= deadline)); then
+        remaining=$((deadline - SECONDS))
+        if ((remaining <= 0)); then
             echo "::error::${label} still exists ${timeout} seconds after its delete."
             return 1
         fi
-        sleep "${interval}"
+        sleep "$((interval < remaining ? interval : remaining))"
     done
 }
