@@ -169,6 +169,88 @@ function rollback(
   );
 }
 
+describe("workflow cleanup interruption", () => {
+  it("propagates rejected acknowledgement persistence before deleting another file", async () => {
+    const test = ports({
+      files: {
+        [`main:${VERIFY_PATH}`]: unchanged,
+        [`main:${DEPLOY_PATH}`]: unchanged
+      }
+    });
+    test.ports.onResultRecorded = async () => {
+      throw new Error("Journal unavailable");
+    };
+    await expect(
+      rollback(test.ports, { files: [file(), file({ path: DEPLOY_PATH })] })
+    ).rejects.toThrow("Journal unavailable");
+    expect(test.journal.deleted).toHaveLength(1);
+  });
+  it.each(["repository", "file", "delete", "persistence"] as const)(
+    "stops at %s without losing the first acknowledged file removal",
+    async (boundary) => {
+      let stopped = false;
+      const fixture = ports({
+        files: {
+          [`main:${VERIFY_PATH}`]: unchanged,
+          [`main:${DEPLOY_PATH}`]: unchanged
+        }
+      });
+      const saved: string[] = [];
+      const outcome = await rollback(
+        {
+          ...fixture.ports,
+          isStopped: () => stopped,
+          readRepository: async (input) => {
+            if (boundary === "repository") stopped = true;
+            return fixture.ports.readRepository(input);
+          },
+          readFile: async (input) => {
+            if (boundary === "file") stopped = true;
+            return fixture.ports.readFile(input);
+          },
+          deleteFile: async (input) => {
+            if (boundary === "delete") stopped = true;
+            return fixture.ports.deleteFile(input);
+          },
+          onResultRecorded: async (entry) => {
+            saved.push(entry.target);
+            if (boundary === "persistence") stopped = true;
+          }
+        },
+        { files: [file(), file({ path: DEPLOY_PATH })] }
+      );
+      expect(outcome).toMatchObject({ interrupted: true, blocked: true });
+      const deleted = boundary === "delete" || boundary === "persistence";
+      expect(fixture.journal.deleted).toHaveLength(deleted ? 1 : 0);
+      expect(saved).toHaveLength(deleted ? 1 : 0);
+      expect(
+        outcome.results.filter((entry) => entry.outcome === "deleted")
+      ).toHaveLength(deleted ? 1 : 0);
+    }
+  );
+
+  it("does not restore a file after shutdown during its predecessor blob read", async () => {
+    let stopped = false;
+    const fixture = ports({
+      files: { [`main:${VERIFY_PATH}`]: unchanged },
+      blobs: { previous: "YmxvYg==" }
+    });
+    const outcome = await rollback(
+      {
+        ...fixture.ports,
+        isStopped: () => stopped,
+        readBlob: async (input) => {
+          stopped = true;
+          return fixture.ports.readBlob(input);
+        }
+      },
+      { files: [file({ previousBlobSha: "previous" })] }
+    );
+    expect(outcome.interrupted).toBe(true);
+    expect(fixture.journal.restored).toEqual([]);
+  });
+});
+
 describe("selectWorkflowRollbackMode", () => {
   const prFile = file({ mode: "pull_request", branch: "radius/setup" });
   const prCommit = commit({

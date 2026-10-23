@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import {
   runEnvironmentOperationWorkflow,
   type EnvironmentOperationWorkflowDependencies
@@ -147,7 +148,11 @@ interface Harness {
   cleanupErrors: string[];
   /** Whether each finalizeSetupFailure was handed a pinned environment reader. */
   cleanupReaders: boolean[];
-  cleanupReads: Array<{ code: number; stdout: string; stderr: string }>;
+  cleanupReads: Array<{
+    code: number | string;
+    stdout: string;
+    stderr: string;
+  }>;
 }
 
 const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
@@ -320,8 +325,11 @@ function start(script: Script = {}): Harness {
   const failures: Array<Record<string, unknown>> = [];
   const cleanupErrors: string[] = [];
   const cleanupReaders: boolean[] = [];
-  const cleanupReads: Array<{ code: number; stdout: string; stderr: string }> =
-    [];
+  const cleanupReads: Array<{
+    code: number | string;
+    stdout: string;
+    stderr: string;
+  }> = [];
   let persistCalls = 0;
 
   // `stages` and `steps` are present because the real stop guard closes the
@@ -649,7 +657,7 @@ function start(script: Script = {}): Harness {
       script.trace?.(["step", text]);
     },
     finalizeSetupFailure: async (_operation, input) => {
-      failures.push(input);
+      failures.push({ ...input });
       journal.push(`finalizeSetupFailure:${String(input.code)}`);
       // The cleanup's identity gate cannot run without a reader, and a reader
       // that is not the operation's own account answers for the wrong login.
@@ -701,6 +709,7 @@ function start(script: Script = {}): Harness {
     // Also the real helper: whether a stop is honored, and what the record and
     // the response look like when it is, is production behavior this suite
     // exercises over the socket rather than restates.
+    isShuttingDown: () => false,
     guardStopBoundary: (input) => {
       journal.push(`stopBoundary:${input.boundary}`);
       return guardStopBoundary(input);
@@ -1539,9 +1548,11 @@ describe("matched headless and panel-bound setup service parity", () => {
   );
 
   it.each(["present", "closed", "replaced"] as const)(
-    "projects direct configuration lazily into its own current panel (%s)",
+    "projects direct configuration only into its current attachment generation (%s)",
     async (state) => {
       const harness = start({ direct: true });
+      const owner = createEnvironmentExecutionOwner();
+      const attachment = owner.attach("own");
       const original = { state: {} as CanvasState };
       const replacement = { state: {} as CanvasState };
       const other = { state: {} as CanvasState };
@@ -1559,21 +1570,19 @@ describe("matched headless and panel-bound setup service parity", () => {
           if (state === "closed") entries.delete("own");
           if (state === "replaced") {
             entries.set("own", replacement);
+            owner.attach("own");
           }
         }
       });
       const outcome = await createConfigureEnvironmentService(
         harness.dependencies
-      )({ data: { repo: "octo/app" } }, "own");
+      )({ data: { repo: "octo/app" } }, "own", attachment.isCurrent);
       expect(outcome).toMatchObject({ kind: "completed", status: 200 });
-      expect(reads).toEqual(["own"]);
+      expect(reads).toEqual(state === "replaced" ? [] : ["own"]);
       expect(other.state).toEqual({});
-      if (state === "closed") expect(original.state).toEqual({});
-      else
-        expect(
-          (state === "replaced" ? replacement : original).state.verifyRunId
-        ).toBe("4242");
-      if (state === "replaced") expect(original.state).toEqual({});
+      if (state === "present") expect(original.state.verifyRunId).toBe("4242");
+      else expect(original.state).toEqual({});
+      expect(replacement.state).toEqual({});
       expect(harness.operation).toMatchObject({
         verification: { runId: "4242" }
       });

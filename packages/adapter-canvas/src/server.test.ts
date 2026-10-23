@@ -2283,6 +2283,22 @@ function answersFederatedCredentialIdentity(
 }
 
 describe("cleanupAzureSetupArtifacts", () => {
+  it("refuses to start an Azure cleanup pass after shutdown", async () => {
+    const op = newAzureOp();
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    const before = JSON.stringify(op);
+    const runAz = vi.fn(async () => {
+      throw new Error("Unexpected Azure cleanup");
+    });
+    expect(
+      await cleanupAzureSetupArtifacts(op, { runAz, isStopped: () => true })
+    ).toMatchObject({
+      state: "interrupted",
+      results: []
+    });
+    expect(runAz).not.toHaveBeenCalled();
+    expect(JSON.stringify(op)).toBe(before);
+  });
   it("removes a Service Principal this operation added to somebody else's app", async () => {
     const op = newAzureOp();
     // The customer already had the App Registration; Radius only added the
@@ -3397,6 +3413,29 @@ describe("cleanupAzureSetupArtifacts", () => {
 });
 
 describe("cleanupGitHubEnvironmentArtifact", () => {
+  it("refuses to start an environment cleanup pass after shutdown", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+    const before = JSON.stringify(op);
+    const run = vi.fn(async () => {
+      throw new Error("Unexpected GitHub cleanup");
+    });
+    expect(
+      await cleanupGitHubEnvironmentArtifact(op, {
+        attempt: 1,
+        runDeleteEnvironment: run,
+        readEnvironment: run,
+        isStopped: () => true
+      })
+    ).toMatchObject({ interrupted: true, attempted: false, results: [] });
+    expect(run).not.toHaveBeenCalled();
+    expect(JSON.stringify(op)).toBe(before);
+  });
   it("deletes an environment this attempt proved it created and records it as gone", async () => {
     const op = newAzureOp();
     recordGitHubEnvironment(op, {

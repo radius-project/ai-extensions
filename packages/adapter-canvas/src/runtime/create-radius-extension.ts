@@ -324,6 +324,7 @@ export function createRadiusExtension(
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       shuttingDown = true;
+      deps.executionOwner.shutdown();
       try {
         console.error(
           `[radius] received ${signal}; shutting down ${deps.servers.size} canvas server(s)...`

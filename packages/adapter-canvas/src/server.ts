@@ -1,5 +1,9 @@
 import { workflowTempFile } from "@radius-project/adapter-shared";
-import { ensureAzureServicePrincipal } from "@radius-project/core";
+import {
+  ensureAzureServicePrincipal,
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted
+} from "@radius-project/core";
 import { createAzureRecoveryPort } from "./server/services/azure-setup-recovery.js";
 // Canvas adapter — HTTP server host for the webview.
 //
@@ -185,7 +189,6 @@ import {
   recordCommittedWorkflowFile,
   recordCleanupState,
   recordCleanupDeletion,
-  reconcileRestoredOperation,
   cleanupArtifactIdentity,
   cleanupTargetKey,
   formatGitHubEnvironmentLabel,
@@ -200,7 +203,6 @@ import {
   resumeAfterInput,
   getAzureAppCreateContinuation,
   setAzureAppCreateContinuation,
-  setExecutionActive,
   announceOperationTerminal,
   shouldStop,
   stopAtBoundary,
@@ -413,10 +415,7 @@ import {
   recoverVerificationRun,
   verificationActionsUrl
 } from "./server/services/recovered-verification-run.js";
-import {
-  planRecoveredCleanup,
-  planRecoveredSchedule
-} from "./server/services/recovered-cleanup-command.js";
+import { planRecoveredCleanup } from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import {
@@ -458,6 +457,8 @@ import {
 import type { CanvasServerEntry } from "./server/types.js";
 import type { CanvasServerDependencyOverrides } from "./server/dependencies.js";
 import type { EnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
+import { createSetupExecution } from "./runtime/setup-execution.js";
+export { reopenProviderReconciliation } from "./runtime/setup-execution.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
 export { resolveDeployStatus } from "./server/services/deployment-resolver.js";
@@ -904,16 +905,6 @@ export type EnvironmentOperationRunner = (
   operationId: string,
   commandId?: string
 ) => Promise<void>;
-
-export function reopenProviderReconciliation(operation: any): boolean {
-  if (!operation || unresolvedProviderMutations(operation).length === 0) {
-    return false;
-  }
-
-  reconcileRestoredOperation(operation);
-  setExecutionActive(operation, false);
-  return true;
-}
 
 export function cleanupProviderRecoveryDisposition(operation: any): {
   blockers: ReturnType<typeof unresolvedProviderMutations>;
@@ -2236,12 +2227,14 @@ export async function resolveCleanupGitHubContext({
   targets,
   selectedLogin,
   createExecutor = createSelectedGhExecutor,
-  formatError = errorMessage
+  formatError = errorMessage,
+  isStopped
 }: {
   targets: readonly { artifactType: string }[];
   selectedLogin: string;
   createExecutor?: (login: string) => Promise<SelectedGhExecutor>;
   formatError?: (error: unknown) => string;
+  isStopped?: () => boolean;
 }): Promise<CleanupGitHubContext> {
   const needsGitHub = targets.some(
     (entry) =>
@@ -2258,8 +2251,11 @@ export async function resolveCleanupGitHubContext({
     } else {
       try {
         executor = await createExecutor(selectedLogin);
+        assertSetupExecutionActive(isStopped);
         await executor.verifyIdentity();
+        assertSetupExecutionActive(isStopped);
       } catch (error) {
+        if (isSetupExecutionInterrupted(error)) throw error;
         unavailable = formatError(error);
       }
     }
@@ -2551,11 +2547,12 @@ export function quarantineUnsettledCleanupDeletions(op: any): number {
 export async function cleanupAzureSetupArtifacts(
   op: any,
   {
-    runAz,
+    runAz: runAzCommand,
     steps,
     only,
     onResultRecorded,
-    persistJournal
+    persistJournal,
+    isStopped
   }: {
     runAz: (args: string[]) => Promise<Partial<CommandResult>>;
     steps?: string[];
@@ -2570,16 +2567,29 @@ export async function cleanupAzureSetupArtifacts(
     // exists, because a delete that is not written down before it is issued is
     // one a later attempt cannot tell from a delete that never happened.
     persistJournal?: () => Promise<void>;
+    isStopped?: () => boolean;
   }
 ): Promise<{
   attempt: number;
-  state: "not_needed" | "succeeded" | "succeeded_with_warnings";
+  state: "not_needed" | "succeeded" | "succeeded_with_warnings" | "interrupted";
   results: SetupCleanupResult[];
   warnings: string[];
   attemptedKeys: Set<string>;
 }> {
   const ledger = getSetupArtifactLedger(op);
   const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
+  if (isStopped?.())
+    return {
+      attempt,
+      state: "interrupted",
+      results: [],
+      warnings: [],
+      attemptedKeys: new Set()
+    };
+  const runAz = (args: string[]) => {
+    assertSetupExecutionActive(isStopped);
+    return runAzCommand(args);
+  };
   const priorResults =
     Array.isArray(ledger?.cleanup?.results) ? ledger.cleanup.results : [];
   if (!ledger) {
@@ -2835,6 +2845,14 @@ export async function cleanupAzureSetupArtifacts(
   };
 
   for (const deletion of selected) {
+    if (isStopped?.())
+      return {
+        attempt,
+        state: "interrupted",
+        results: attemptResults,
+        warnings,
+        attemptedKeys
+      };
     const label = cleanupTargetLabel(deletion.artifactType, deletion.artifact);
     const identity = cleanupArtifactIdentity(
       deletion.artifactType,
@@ -2930,6 +2948,12 @@ export async function cleanupAzureSetupArtifacts(
         label,
         ...(deletion.identityArgs ? { confirmRecordedIdentity } : {}),
         persist: persistJournal ?? (async () => {}),
+        isStopped,
+        onConfirmed: () =>
+          recordCleanupDeletion(op, {
+            artifactType: deletion.artifactType,
+            identity
+          }),
         runDelete: async () => {
           const result = await runAz(deletion.args || []);
           return {
@@ -2944,6 +2968,14 @@ export async function cleanupAzureSetupArtifacts(
         readExactIdentity
       });
     } catch (error) {
+      if (isSetupExecutionInterrupted(error))
+        return {
+          attempt,
+          state: "interrupted",
+          results: attemptResults,
+          warnings,
+          attemptedKeys
+        };
       if (!(error instanceof CleanupJournalPersistenceError)) throw error;
       // The journal did not reach disk. Radius stops here rather than deleting
       // anything else it could not account for afterwards.
@@ -2976,6 +3008,14 @@ export async function cleanupAzureSetupArtifacts(
     );
   }
 
+  if (isStopped?.())
+    return {
+      attempt,
+      state: "interrupted",
+      results: attemptResults,
+      warnings,
+      attemptedKeys
+    };
   const finalState = warnings.length ? "succeeded_with_warnings" : "succeeded";
   // Results from this attempt replace the ones it re-tried; anything an earlier
   // attempt recorded and this one did not touch survives untouched.
@@ -3008,19 +3048,22 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     run,
     persist,
     only,
-    steps
+    steps,
+    isStopped
   }: {
     attempt: number;
     run: GitHubVariableCommand;
     persist(): Promise<void>;
     only?: Set<string> | null;
     steps?: string[];
+    isStopped?: () => boolean;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   blocked: boolean;
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const variables = githubEnvironmentVariableRollbackTargets(op, only ?? null);
   if (variables.length === 0) {
@@ -3031,7 +3074,13 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     operation: op,
     persist,
     variables,
-    run
+    run,
+    isStopped,
+    onConfirmed: (variable) =>
+      recordCleanupDeletion(op, {
+        artifactType: "github_environment_variable",
+        identity: variable.identity
+      })
   });
   for (const entry of outcome.results) {
     if (
@@ -3050,6 +3099,7 @@ export async function rollbackGitHubEnvironmentVariableArtifacts(
     results: outcome.results,
     warnings: outcome.warnings,
     blocked: outcome.blocked,
+    interrupted: outcome.interrupted,
     attempted: true
   };
 }
@@ -3078,18 +3128,23 @@ export async function rollbackCommittedWorkflowFiles(
     attempt,
     ports,
     only,
-    steps
+    steps,
+    isStopped,
+    persist
   }: {
     attempt: number;
     ports: WorkflowRollbackPorts;
     only?: Set<string> | null;
     steps?: string[];
+    isStopped?: () => boolean;
+    persist?: () => Promise<void>;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   blocked: boolean;
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const files = workflowRollbackTargets(op, only ?? null);
   if (files.length === 0) {
@@ -3102,7 +3157,17 @@ export async function rollbackCommittedWorkflowFiles(
       commit: workflowRollbackCommitState(op),
       files
     },
-    ports
+    {
+      ...ports,
+      isStopped,
+      onResultRecorded: async (entry) => {
+        recordCleanupDeletion(op, {
+          artifactType: "workflow_file",
+          identity: entry.identity ?? undefined
+        });
+        await persist?.();
+      }
+    }
   );
   for (const entry of outcome.results) {
     if (
@@ -3121,6 +3186,7 @@ export async function rollbackCommittedWorkflowFiles(
     results: outcome.results,
     warnings: outcome.warnings,
     blocked: outcome.blocked,
+    interrupted: outcome.interrupted,
     attempted: true
   };
 }
@@ -3130,10 +3196,11 @@ export async function cleanupGitHubEnvironmentArtifact(
   {
     attempt,
     runDeleteEnvironment,
-    readEnvironment,
+    readEnvironment: readEnvironmentCommand,
     persistJournal,
     invalidateEnvironmentListing,
-    steps
+    steps,
+    isStopped
   }: {
     attempt: number;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
@@ -3148,15 +3215,28 @@ export async function cleanupGitHubEnvironmentArtifact(
     // rolled-back environment under its last known status.
     invalidateEnvironmentListing?: ((repo: string) => void) | null;
     steps?: string[];
+    isStopped?: () => boolean;
   }
 ): Promise<{
   results: SetupCleanupResult[];
   warnings: string[];
   attempted: boolean;
+  interrupted?: boolean;
 }> {
   const ledger = getSetupArtifactLedger(op);
   const results: SetupCleanupResult[] = [];
   const warnings: string[] = [];
+  if (isStopped?.())
+    return { results, warnings, attempted: false, interrupted: true };
+  const readEnvironment =
+    readEnvironmentCommand ?
+      async (args: string[]) => {
+        assertSetupExecutionActive(isStopped);
+        const result = await readEnvironmentCommand(args);
+        assertSetupExecutionActive(isStopped);
+        return result;
+      }
+    : undefined;
   if (!ledger) return { results, warnings, attempted: false };
   const artifact = ledger.githubEnvironment;
   if (artifact.state !== "created" && artifact.state !== "created_candidate") {
@@ -3222,6 +3302,12 @@ export async function cleanupGitHubEnvironmentArtifact(
       identity: identity || `${envRepo}:${envName}`,
       label: `GitHub environment "${target}"`,
       persist: persistJournal ?? (async () => {}),
+      isStopped,
+      onConfirmed: () =>
+        recordCleanupDeletion(op, {
+          artifactType: "github_environment",
+          identity
+        }),
       runDelete: async () => {
         try {
           await runDeleteEnvironment(deleteArgs);
@@ -3265,6 +3351,7 @@ export async function cleanupGitHubEnvironmentArtifact(
         try {
           current = await readEnvironment(["api", environmentPath]);
         } catch (error) {
+          if (isSetupExecutionInterrupted(error)) throw error;
           return {
             decision: "refuse",
             detail: `Radius could not read GitHub environment "${target}" to confirm its identity: ${errorMessage(error)}. It removed nothing.`
@@ -3341,6 +3428,8 @@ export async function cleanupGitHubEnvironmentArtifact(
       }
     });
   } catch (error) {
+    if (isSetupExecutionInterrupted(error))
+      return { results, warnings, attempted: true, interrupted: true };
     if (!(error instanceof CleanupJournalPersistenceError)) throw error;
     const detail = `Radius stopped before removing GitHub environment "${target}" because it could not save the record of what it was deleting: ${error.message}`;
     warnings.push(detail);
@@ -3381,7 +3470,8 @@ export async function finalizeSetupFailure(
     runAz,
     runGitHubVariable,
     runDeleteEnvironment,
-    readEnvironment
+    readEnvironment,
+    isStopped
   }: {
     status: number;
     error: string;
@@ -3396,8 +3486,10 @@ export async function finalizeSetupFailure(
     runGitHubVariable?: GitHubVariableCommand | null;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
     readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
+    isStopped?: () => boolean;
   }
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  assertSetupExecutionActive(isStopped);
   const safeExtra = sanitizeFailureExtra(extra || {});
   const body: Record<string, unknown> = {
     error,
@@ -3460,6 +3552,7 @@ export async function finalizeSetupFailure(
         op,
         {
           attempt,
+          isStopped,
           run:
             runGitHubVariable ??
             (async () => ({
@@ -3471,6 +3564,7 @@ export async function finalizeSetupFailure(
           steps
         }
       );
+      assertSetupExecutionActive(isStopped);
       warnings.push(...variableCleanup.warnings);
       results = [...results, ...variableCleanup.results];
       if (variableCleanup.results.length > 0) {
@@ -3481,9 +3575,11 @@ export async function finalizeSetupFailure(
       if (!variableCleanup.blocked && runAz) {
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
+          isStopped,
           steps,
           persistJournal: () => operations.persist()
         });
+        assertSetupExecutionActive(isStopped);
         warnings.push(...azureCleanup.warnings);
         results = [...results, ...azureCleanup.results];
         if (
@@ -3499,6 +3595,7 @@ export async function finalizeSetupFailure(
       if (!variableCleanup.blocked) {
         const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
           attempt,
+          isStopped,
           runDeleteEnvironment,
           readEnvironment,
           persistJournal: () => operations.persist(),
@@ -3507,6 +3604,7 @@ export async function finalizeSetupFailure(
           },
           steps
         });
+        assertSetupExecutionActive(isStopped);
         warnings.push(...environmentCleanup.warnings);
         results = [...results, ...environmentCleanup.results];
         if (environmentCleanup.warnings.length > 0) {
@@ -4211,32 +4309,58 @@ function productionEnvironmentDeletionPorts(): EnvironmentDeletionCoordinatorPor
   };
 }
 
-export function createInstanceRequestCoordinator(
-  instanceId: string,
-  resolveBaseUrl: () => string,
-  environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts,
-  dependencies: {
-    executionOwner: EnvironmentExecutionOwner;
-    accountContext: EnvironmentAccountContext;
-    setupServices: SetupServices;
-    verificationStatus(
-      input: VerificationStatusInput
-    ): Promise<VerificationStatusResult>;
-    operationControl: OperationControlService;
-    servers: ReadonlyMap<string, CanvasServerEntry>;
-    environmentOperationRunner?: EnvironmentOperationRunner;
+export interface EnvironmentOperationExecutionDependencies {
+  executionOwner: EnvironmentExecutionOwner;
+  scope: ReturnType<EnvironmentExecutionOwner["attachRuntime"]>;
+  accountContext: EnvironmentAccountContext;
+  setupServices: SetupServices;
+  verificationStatus(
+    input: VerificationStatusInput
+  ): Promise<VerificationStatusResult>;
+  admitRecoveryRollback(
+    operationId: string,
+    isCurrent: () => boolean
+  ): Promise<void>;
+  presentation?: { instanceId: string };
+  environmentOperationRunner?: EnvironmentOperationRunner;
+  runDeletion?(
+    operation: Parameters<typeof runEnvironmentDeletion>[0]
+  ): Promise<void>;
+}
+
+async function admitRecoveryRollback(
+  control: OperationControlService,
+  operationId: string,
+  isCurrent: () => boolean,
+  instanceId?: string
+): Promise<void> {
+  const result = await control({
+    instanceId,
+    operationId,
+    isCurrent,
+    command: "rollback"
+  });
+  if (result.status >= 400) {
+    throw new Error(
+      typeof result.body.error === "string" ?
+        result.body.error
+      : `Operation control failed with status ${result.status}.`
+    );
   }
+}
+
+export function createEnvironmentOperationExecution(
+  dependencies: EnvironmentOperationExecutionDependencies
 ) {
-  const { executionOwner, accountContext, servers, setupServices } =
-    dependencies;
+  const {
+    executionOwner,
+    accountContext,
+    setupServices,
+    scope: attachment
+  } = dependencies;
+  const instanceId = dependencies.presentation?.instanceId;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
-  if (typeof dependencies.verificationStatus !== "function")
-    throw new Error(
-      "Missing request coordinator dependency: verificationStatus"
-    );
-  if (typeof dependencies.operationControl !== "function")
-    throw new Error("Missing request coordinator dependency: operationControl");
   for (const name of ["authorizeAzure", "configureEnvironment"] as const) {
     if (typeof setupServices?.[name] !== "function") {
       throw new Error(
@@ -4244,10 +4368,12 @@ export function createInstanceRequestCoordinator(
       );
     }
   }
+  if (typeof dependencies.verificationStatus !== "function") {
+    throw new Error(
+      "Missing request coordinator dependency: verificationStatus"
+    );
+  }
   const githubAccountCoordinator = accountContext.coordinator;
-  const attachment = executionOwner.attach(instanceId);
-  const serverOwnedToken = randomUUID();
-  const browserMutationNonce = randomUUID();
 
   // Every server-owned runner saves through the same registry and reports
   // through the same diagnostic channel, so the wiring is bound once rather
@@ -4259,128 +4385,29 @@ export function createInstanceRequestCoordinator(
       report: (diagnostic) => operations.report?.(diagnostic)
     });
 
-  function scheduleServerOwnedTask(
-    operationId: string,
-    task: () => Promise<void>
-  ): void {
-    let reconciliationNeeded = false;
-    let currentAtSettlement: ReturnType<typeof operations.get>;
-    const op = operations.get(operationId);
-    if (op) setExecutionActive(op, true);
-    attachment.schedule(operationId, {
-      run: task,
-      failed: async (error) => {
-        const current = operations.get(operationId);
-        if (executionOwner.isShuttingDown(instanceId)) return;
-        if (reopenProviderReconciliation(current)) {
-          if (
-            !current.steps.some(
-              (step: { label?: string }) =>
-                step.label ===
-                "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
-            )
-          ) {
-            addLegacyStep(
-              current,
-              "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
-            );
-          }
-          reconciliationNeeded = true;
-          await operations.persist().catch(() => {});
-          return;
-        }
-        if (current && !current.endedAt) {
-          finish(current, "failed", {
-            failure: {
-              code: "server-owned-task-failed",
-              stage: current.currentStage,
-              stepSeq: null,
-              message: errorMessage(error),
-              classification: "unknown",
-              evidence: error instanceof Error ? error.stack || null : null
-            }
-          });
-          await operations.persist().catch(() => {});
-        }
-      },
-      settling: () => {
-        const current = (currentAtSettlement = operations.get(operationId));
-        if (current && !current.endedAt) setExecutionActive(current, false);
-      },
-      settled: () => {
-        const current = currentAtSettlement;
-        if (
-          current?.endedAt &&
-          current.providerRecovery?.state === "rollback_pending" &&
-          !providerRecoveryManualGuidance(current)
-        ) {
-          scheduleAutomaticRecoveryRollback(operationId);
-        } else if (
-          reconciliationNeeded &&
-          current &&
-          !current.endedAt &&
-          unresolvedProviderMutations(current).length > 0
-        ) {
-          scheduleProviderReconciliation(operationId);
-        }
-      }
-    });
-  }
-
-  function scheduleProviderReconciliation(operationId: string): void {
-    attachment.scheduleReconciliation(operationId, () => {
-      if (executionOwner.isShuttingDown(instanceId)) return;
-      const operation = operations.get(operationId);
-      if (
-        !operation ||
-        operation.endedAt ||
-        unresolvedProviderMutations(operation).length === 0
-      ) {
-        return;
-      }
-      scheduleRecoveredProviderMutation(operation);
-    });
-  }
-
-  function scheduleAutomaticRecoveryRollback(operationId: string): void {
-    if (!attachment.claimAutomaticRollback(operationId)) return;
-    const operation = operations.get(operationId);
-    const repo = operation?.repo;
-    const environment = operation?.environment;
-    queueMicrotask(() => {
-      void dependencies
-        .operationControl({
-          operationId,
-          instanceId,
-          command: "rollback",
-          isCurrent: () =>
-            Boolean(operation) &&
-            operations.get(operationId) === operation &&
-            operation.operationId === operationId &&
-            operation.repo === repo &&
-            operation.environment === environment
-        })
-        .then((result) => {
-          if (result.status < 200 || result.status >= 300) {
-            throw new Error(
-              typeof result.body.error === "string" ?
-                result.body.error
-              : `Operation control failed with status ${result.status}.`
-            );
-          }
-        })
-        .catch((error) => {
-          operations.report?.({
-            scope: "provider-recovery-auto-rollback",
-            operationId,
-            message: errorMessage(error)
-          });
-        })
-        .finally(() => {
-          attachment.releaseAutomaticRollback(operationId);
-        });
-    });
-  }
+  const execution = createSetupExecution({
+    scope: attachment,
+    getOperation: (operationId) => operations.get(operationId),
+    persist: () => operations.persist(),
+    report: (diagnostic) => operations.report?.(diagnostic),
+    isShuttingDown: (operationId) =>
+      attachment.isShuttingDown() ||
+      (operations.get(operationId)?.kind === "delete" &&
+        executionOwner.isShuttingDown(instanceId)),
+    deferRecovery: queueMicrotask,
+    admitRecoveryRollback: dependencies.admitRecoveryRollback,
+    claimVerificationMonitor: executionOwner.claimVerificationMonitor,
+    runOperation: runEnvironmentOperation,
+    runVerificationRetry,
+    runVerificationContinuation: runRecoveredVerificationContinuation,
+    observeRecoveredVerification: (operation) =>
+      monitorVerificationAsSelectedAccount(operation, (executor) =>
+        resolveRecoveredVerificationRun(operation, executor)
+      ),
+    runCleanup: runCleanupCommand,
+    recoverBranchDelete: runRecoveredBranchDelete,
+    recoverCleanup: runRecoveredCleanup
+  });
 
   async function monitorVerification(operationId: string): Promise<void> {
     const initialOperation = operations.get(operationId);
@@ -4388,124 +4415,139 @@ export function createInstanceRequestCoordinator(
       initialOperation || { operationId },
       Date.now
     );
-    await monitorSetupVerification(deadline, {
-      current: () => {
-        const op = operations.get(operationId);
-        return op ?
-            {
-              active: !op.endedAt && op.currentStage === STAGE_VERIFY,
-              stopRequested: shouldStop(op)
-            }
-          : undefined;
-      },
-      observe: async () => {
-        const op = operations.get(operationId);
-        const outcome = await dependencies.verificationStatus({
-          repo: op?.repo || "",
-          environment: op?.environment,
-          operationId
-        });
-        if (outcome.status < 200 || outcome.status >= 300) {
-          throw new Error(
-            outcome.body.error ||
-              `Verification status failed with HTTP ${outcome.status}.`
-          );
-        }
-        return outcome.body;
-      },
-      stop: async () => {
-        const op = operations.get(operationId);
-        if (!op) return;
-        stopAtBoundary(op, "verification-observation", { announce: false });
-        const saved = await saveOperation(op);
-        if (saved) announceOperationTerminal(op);
-      },
-      expire: async (message) => {
-        const op = operations.get(operationId);
-        if (!op || op.endedAt) return;
-        finish(op, "failed_partial", {
-          failure: {
-            code: "verification-tracking-expired",
-            stage: op.currentStage,
-            stepSeq: null,
-            message,
-            classification: "user-fixable",
-            evidence: null
+    const observation = createWorkflowObservationScope(
+      createDeployStatusReader
+    );
+    const stopListening = executionOwner.onShutdown(() => observation.stop());
+    try {
+      await monitorSetupVerification(deadline, {
+        current: () => {
+          if (attachment.isShuttingDown()) return undefined;
+          const op = operations.get(operationId);
+          return op ?
+              {
+                active: !op.endedAt && op.currentStage === STAGE_VERIFY,
+                stopRequested: shouldStop(op)
+              }
+            : undefined;
+        },
+        observe: async () => {
+          const op = operations.get(operationId);
+          const outcome = await dependencies.verificationStatus({
+            repo: op?.repo || "",
+            environment: op?.environment,
+            operationId,
+            observation
+          });
+          if (outcome.status < 200 || outcome.status >= 300) {
+            throw new Error(
+              outcome.body.error ||
+                `Verification status failed with HTTP ${outcome.status}.`
+            );
           }
-        });
-        await saveOperation(op);
-      },
-      now: Date.now,
-      sleep: (milliseconds) =>
-        new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      jitter: () => Math.floor(Math.random() * 1000)
-    });
+          return outcome.body;
+        },
+        stop: async () => {
+          const op = operations.get(operationId);
+          if (!op) return;
+          stopAtBoundary(op, "verification-observation", { announce: false });
+          const saved = await saveOperation(op);
+          if (saved) announceOperationTerminal(op);
+        },
+        expire: async (message) => {
+          const op = operations.get(operationId);
+          if (!op || op.endedAt) return;
+          finish(op, "failed_partial", {
+            failure: {
+              code: "verification-tracking-expired",
+              stage: op.currentStage,
+              stepSeq: null,
+              message,
+              classification: "user-fixable",
+              evidence: null
+            }
+          });
+          await saveOperation(op);
+        },
+        now: Date.now,
+        sleep: (milliseconds) => observation.delay(milliseconds),
+        jitter: () => Math.floor(Math.random() * 1000)
+      });
+    } finally {
+      stopListening();
+      observation.stop();
+    }
   }
 
   async function monitorVerificationAsSelectedAccount(
     op: any,
     beforeMonitor?: (executor: SelectedGhExecutor) => Promise<boolean>
   ): Promise<void> {
-    await monitorVerificationWithSelectedAccount(op, {
-      createExecutor: (login) =>
-        githubAccountCoordinator.createReadOnlyExecutor(login),
-      registerExecutor: (operationId, executor) => {
-        accountContext.registerExecutor(operationId, executor);
-      },
-      unregisterExecutor: (operationId) => {
-        accountContext.unregisterExecutor(operationId);
-      },
-      beforeMonitor,
-      monitor: monitorVerification,
-      accountUnavailable: async (operation, login, detail) => {
-        operation.verification = {
-          ...(operation.verification || {}),
-          accountUnavailablePhase:
-            operation.verification?.runId ? "monitor" : "dispatch"
-        };
-        const account = login ? `@${login}` : "the saved GitHub account";
-        addLegacyStep(
-          operation,
-          `❌ Could not use ${account} to resume credential verification.`
-        );
-        finish(operation, "failed_partial", {
-          failure: {
-            code:
-              login ?
-                "verification-retry-github-account-unavailable"
-              : "verification-retry-github-account-missing",
-            stage: STAGE_VERIFY,
-            stepSeq: null,
-            message:
-              login ?
-                `Radius could not use @${login} to resume credential verification. Re-check that account and retry verification.`
-              : "Radius cannot resume credential verification because this operation has no saved GitHub account. Start a new environment setup.",
-            classification: "user-fixable",
-            evidence: detail
-          }
-        });
-        await saveOperation(operation);
-      },
-      trackingExpired: async (operation, expiration) => {
-        const copy = verificationAcquisitionExpiredCopy("resume", expiration);
-        finish(operation, "failed_partial", {
-          failure: {
-            code: "verification-tracking-expired",
-            stage: STAGE_VERIFY,
-            stepSeq: null,
-            message: copy.message,
-            classification: "user-fixable",
-            evidence: expiration.detail
-          }
-        });
-        await saveOperation(operation);
-      },
-      isRateLimitError: (error) => isGitHubRateLimitError(error),
-      now: Date.now,
-      sleep: (milliseconds) =>
-        new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      errorMessage
-    });
+    const observation = createWorkflowObservationScope(
+      createDeployStatusReader
+    );
+    const stopListening = executionOwner.onShutdown(() => observation.stop());
+    try {
+      await monitorVerificationWithSelectedAccount(op, {
+        isStopped: attachment.isShuttingDown,
+        createExecutor: (login) =>
+          githubAccountCoordinator.createReadOnlyExecutor(login),
+        registerExecutor: (operationId, executor) =>
+          accountContext.registerExecutor(operationId, executor),
+        beforeMonitor,
+        monitor: monitorVerification,
+        accountUnavailable: async (operation, login, detail) => {
+          operation.verification = {
+            ...(operation.verification || {}),
+            accountUnavailablePhase:
+              operation.verification?.runId ? "monitor" : "dispatch"
+          };
+          const account = login ? `@${login}` : "the saved GitHub account";
+          addLegacyStep(
+            operation,
+            `❌ Could not use ${account} to resume credential verification.`
+          );
+          finish(operation, "failed_partial", {
+            failure: {
+              code:
+                login ?
+                  "verification-retry-github-account-unavailable"
+                : "verification-retry-github-account-missing",
+              stage: STAGE_VERIFY,
+              stepSeq: null,
+              message:
+                login ?
+                  `Radius could not use @${login} to resume credential verification. Re-check that account and retry verification.`
+                : "Radius cannot resume credential verification because this operation has no saved GitHub account. Start a new environment setup.",
+              classification: "user-fixable",
+              evidence: detail
+            }
+          });
+          await saveOperation(operation);
+        },
+        trackingExpired: async (operation, expiration) => {
+          const copy = verificationAcquisitionExpiredCopy("resume", expiration);
+          finish(operation, "failed_partial", {
+            failure: {
+              code: "verification-tracking-expired",
+              stage: STAGE_VERIFY,
+              stepSeq: null,
+              message: copy.message,
+              classification: "user-fixable",
+              evidence: expiration.detail
+            }
+          });
+          await saveOperation(operation);
+        },
+        isRateLimitError: (error) => isGitHubRateLimitError(error),
+        now: Date.now,
+        sleep: (milliseconds) => observation.delay(milliseconds),
+        errorMessage
+      });
+    } finally {
+      stopListening();
+      observation.stop();
+    }
   }
 
   async function runEnvironmentOperation(operationId: string): Promise<void> {
@@ -4516,21 +4558,12 @@ export function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
-      await runEnvironmentDeletion(op, {
-        ...environmentDeletionPorts,
-        reportStatePackageDeletionFailure: async (input) => {
-          const result = await invokeSessionPrompt(
-            sessionPromptHandler,
-            statePackageDeletionFailureMessage(input)
-          );
-          if (result.status >= 400) {
-            throw new Error(
-              result.error ||
-                "Could not report the GHCR package deletion failure to Copilot chat."
-            );
-          }
-        }
-      });
+      if (!dependencies.runDeletion) {
+        throw new Error(
+          "Environment deletion requires the server-ready deletion runner."
+        );
+      }
+      await dependencies.runDeletion(op);
       return;
     }
     const request = op.request || op.resumeRequest || {};
@@ -4543,14 +4576,17 @@ export function createInstanceRequestCoordinator(
         "The environment operation does not have a pinned GitHub account."
       );
     }
-    let executorRegistered = false;
+    let releaseExecutor: (() => void) | undefined;
     try {
       const setup = await githubAccountCoordinator.withSelectedAccount(
         selectedLogin,
         { ownerKey: accountContext.ownerKey, operationId },
         async (executor) => {
-          accountContext.registerExecutor(operationId, executor);
-          executorRegistered = true;
+          releaseExecutor = accountContext.registerExecutor(
+            operationId,
+            executor
+          );
+          if (attachment.isShuttingDown()) return { shouldMonitor: false };
           return runEnvironmentOperationWorkflow(op, executor, {
             preflightRepoAdmin: (repo, selectedExecutor) =>
               preflightRepoAdmin(
@@ -4559,12 +4595,14 @@ export function createInstanceRequestCoordinator(
                 GH_COMMAND_PRESENTATION
               ),
             guardStopBoundary: (operation, boundary) =>
-              honorStopBoundary({
-                operation,
-                boundary,
-                persist: () => operations.persist(),
-                report: (diagnostic) => operations.report?.(diagnostic)
-              }),
+              attachment.isShuttingDown() ?
+                Promise.resolve(false)
+              : honorStopBoundary({
+                  operation,
+                  boundary,
+                  persist: () => operations.persist(),
+                  report: (diagnostic) => operations.report?.(diagnostic)
+                }),
             preflightGhcrPackageWriteAccess: (selectedExecutor) =>
               preflightGhcrPackageWriteAccess(
                 getGhPackageCredentials,
@@ -4592,6 +4630,7 @@ export function createInstanceRequestCoordinator(
                 report: (diagnostic) => operations.report?.(diagnostic),
                 fail: async (status, error, code) => {
                   await finalizeSetupFailure(operation, {
+                    isStopped: setupIsStopped(operation),
                     status,
                     error,
                     code,
@@ -4617,6 +4656,7 @@ export function createInstanceRequestCoordinator(
               selectedExecutor
             ) => {
               await finalizeSetupFailure(operation, {
+                isStopped: setupIsStopped(operation),
                 ...input,
                 stage: operation.currentStage,
                 classification:
@@ -4639,16 +4679,17 @@ export function createInstanceRequestCoordinator(
             instanceId,
             setupServices: {
               authorizeAzure: (request) => {
-                if (executionOwner.isShuttingDown(instanceId))
+                if (attachment.isShuttingDown())
                   throw new Error("Setup execution is shutting down.");
                 return setupServices.authorizeAzure(request);
               },
               configureEnvironment: (request, projectionInstanceId) => {
-                if (executionOwner.isShuttingDown(instanceId))
+                if (attachment.isShuttingDown())
                   throw new Error("Setup execution is shutting down.");
                 return setupServices.configureEnvironment(
                   request,
-                  projectionInstanceId
+                  projectionInstanceId,
+                  attachment.isCurrent
                 );
               }
             },
@@ -4691,9 +4732,7 @@ export function createInstanceRequestCoordinator(
       }
       throw error;
     } finally {
-      if (executorRegistered) {
-        accountContext.unregisterExecutor(operationId);
-      }
+      releaseExecutor?.();
     }
   }
 
@@ -4717,41 +4756,48 @@ export function createInstanceRequestCoordinator(
 
     const operation = operations.get(operationId);
     if (!operation) return;
-    await runSelectedVerificationRetry(operation, commandId, {
-      createExecutor: (login) =>
-        githubAccountCoordinator.createReadOnlyExecutor(login),
-      registerExecutor: (id, executor) => {
-        accountContext.registerExecutor(id, executor);
-      },
-      unregisterExecutor: (id) => {
-        accountContext.unregisterExecutor(id);
-      },
-      stopBoundary: ({ operation: target, boundary, beforePersist }) =>
-        honorStopBoundary({
-          operation: target,
-          boundary,
-          persist: () => operations.persist(),
-          report: (diagnostic) => operations.report?.(diagnostic),
-          beforePersist
-        }),
-      buildDispatchArgs: buildVerifyWorkflowDispatchArgs,
-      selectedCommandAuthorizationError,
-      isAuthorizationError: isSelectedGhAuthorizationError,
-      isRateLimitError: isGitHubRateLimitError,
-      now: Date.now,
-      sleep: (milliseconds) =>
-        new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
-      stageVerify: STAGE_VERIFY,
-      addStep: (target, text, stage) => addLegacyStep(target, text, stage),
-      setCommandState,
-      finish,
-      persist: saveOperation,
-      persistJournal: () => operations.persist(),
-      monitor: monitorVerification,
-      currentState: (id) => operations.get(id)?.state || null,
-      errorMessage
-    });
+    const observation = createWorkflowObservationScope(
+      createDeployStatusReader
+    );
+    const stopListening = executionOwner.onShutdown(() => observation.stop());
+    try {
+      await runSelectedVerificationRetry(operation, commandId, {
+        isStopped: attachment.isShuttingDown,
+        createExecutor: (login) =>
+          githubAccountCoordinator.createReadOnlyExecutor(login),
+        registerExecutor: (id, executor) =>
+          accountContext.registerExecutor(id, executor),
+        stopBoundary: ({ operation: target, boundary, beforePersist }) =>
+          attachment.isShuttingDown() ?
+            Promise.resolve(false)
+          : honorStopBoundary({
+              operation: target,
+              boundary,
+              persist: () => operations.persist(),
+              report: (diagnostic) => operations.report?.(diagnostic),
+              beforePersist
+            }),
+        buildDispatchArgs: buildVerifyWorkflowDispatchArgs,
+        selectedCommandAuthorizationError,
+        isAuthorizationError: isSelectedGhAuthorizationError,
+        isRateLimitError: isGitHubRateLimitError,
+        now: Date.now,
+        sleep: (milliseconds) => observation.delay(milliseconds),
+        verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
+        stageVerify: STAGE_VERIFY,
+        addStep: (target, text, stage) => addLegacyStep(target, text, stage),
+        setCommandState,
+        finish,
+        persist: saveOperation,
+        persistJournal: () => operations.persist(),
+        monitor: monitorVerification,
+        currentState: (id) => operations.get(id)?.state || null,
+        errorMessage
+      });
+    } finally {
+      stopListening();
+      observation.stop();
+    }
     return;
   }
 
@@ -4768,6 +4814,7 @@ export function createInstanceRequestCoordinator(
     await monitorVerificationAsSelectedAccount(operation, (executor) =>
       resolveRecoveredVerificationRun(operation, executor)
     );
+    if (attachment.isShuttingDown()) return;
     setCommandState(
       operation,
       commandId,
@@ -4797,6 +4844,86 @@ export function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
+    const targets = CLEANUP_COMMANDS[kind].selectTargets(op);
+    const selectedLogin = optionalString(op.context?.githubLogin);
+    const needsGitHub = targets.some((entry: { artifactType: string }) =>
+      [
+        "workflow_file",
+        "github_environment_variable",
+        "github_environment"
+      ].includes(entry.artifactType)
+    );
+    try {
+      if (needsGitHub && selectedLogin) {
+        const lease = await githubAccountCoordinator.withSelectedAccount(
+          selectedLogin,
+          { ownerKey: accountContext.ownerKey, operationId },
+          async (executor) => {
+            if (isStopped()) return;
+            const release = accountContext.registerExecutor(
+              operationId,
+              executor
+            );
+            try {
+              await runCleanupPass(
+                kind,
+                operationId,
+                commandId,
+                isStopped,
+                executor
+              );
+            } finally {
+              release();
+            }
+          }
+        );
+        if (
+          lease.restoration.state === "failed" ||
+          lease.restoration.state === "changed_externally"
+        ) {
+          operations.report({
+            scope: "setup-cleanup-account-restoration",
+            operationId,
+            message:
+              lease.restoration.guidance ||
+              "GitHub CLI account restoration needs attention."
+          });
+        }
+      } else {
+        await runCleanupPass(kind, operationId, commandId, isStopped);
+      }
+    } catch (error) {
+      if (!isSetupExecutionInterrupted(error)) throw error;
+    }
+  }
+
+  function setupIsStopped(op: {
+    operationId: string;
+    repo?: unknown;
+    environment?: unknown;
+    endedAt?: unknown;
+  }): () => boolean {
+    const { operationId, repo, environment } = op;
+    return () =>
+      attachment.isShuttingDown() ||
+      operations.get(operationId) !== op ||
+      op.operationId !== operationId ||
+      op.repo !== repo ||
+      op.environment !== environment ||
+      Boolean(op.endedAt);
+  }
+
+  async function runCleanupPass(
+    kind: CleanupCommandKind,
+    operationId: string,
+    commandId: string,
+    isStopped: () => boolean,
+    executor?: SelectedGhExecutor
+  ): Promise<void> {
+    assertSetupExecutionActive(isStopped);
+    const op = operations.get(operationId);
     const recoveryBeforeCleanup = cleanupProviderRecoveryDisposition(op);
     if (!recoveryBeforeCleanup.mayStartDestructiveCleanup) {
       throw new Error(
@@ -4813,7 +4940,7 @@ export function createInstanceRequestCoordinator(
     const attempt = Number(ledger?.cleanup?.attempts || 0) + 1;
     const steps: string[] = [];
     const persist = async (): Promise<void> => {
-      await saveOperation(op);
+      await operations.persist();
     };
     const warnings: string[] = [];
     let results: SetupCleanupResult[] = [];
@@ -4823,8 +4950,16 @@ export function createInstanceRequestCoordinator(
     ];
     const cleanupGitHub = await resolveCleanupGitHubContext({
       targets: selected,
-      selectedLogin: optionalString(op.context?.githubLogin)
+      isStopped,
+      selectedLogin: optionalString(op.context?.githubLogin),
+      createExecutor: async () => {
+        assertSetupExecutionActive(isStopped);
+        if (!executor)
+          throw new Error("Cleanup has no selected GitHub executor.");
+        return executor;
+      }
     });
+    if (isStopped()) return;
 
     // The workflow files come first and gate everything after them. Removing
     // the GitHub environment or the cloud identity while an installed workflow
@@ -4833,6 +4968,8 @@ export function createInstanceRequestCoordinator(
     // cannot finish stops the whole rollback here.
     const workflowPass = await rollbackCommittedWorkflowFiles(op, {
       attempt,
+      isStopped,
+      persist: () => operations.persist(),
       ports: createWorkflowRollbackPorts(cleanupGitHub.rollbackCommand),
       only: new Set<string>(
         selected
@@ -4845,10 +4982,12 @@ export function createInstanceRequestCoordinator(
       steps
     });
     if (workflowPass.attempted) {
+      if (workflowPass.interrupted && workflowPass.results.length === 0) return;
       warnings.push(...workflowPass.warnings);
       results = [...results, ...workflowPass.results];
       recordCleanupState(op, { state: "running", results: carriedResults() });
       await persist();
+      if (workflowPass.interrupted || isStopped()) return;
       if (workflowPass.blocked) {
         for (const step of steps) addLegacyStep(op, step);
         recordCleanupState(op, {
@@ -4873,8 +5012,10 @@ export function createInstanceRequestCoordinator(
       }
     }
 
+    if (isStopped()) return;
     const variablePass = await rollbackGitHubEnvironmentVariableArtifacts(op, {
       attempt,
+      isStopped,
       run: async (args) => {
         const result = await cleanupGitHub.rollbackCommand({ args });
         return {
@@ -4895,10 +5036,12 @@ export function createInstanceRequestCoordinator(
       steps
     });
     if (variablePass.attempted) {
+      if (variablePass.interrupted && variablePass.results.length === 0) return;
       warnings.push(...variablePass.warnings);
       results = [...results, ...variablePass.results];
       recordCleanupState(op, { state: "running", results: carriedResults() });
       await persist();
+      if (variablePass.interrupted || isStopped()) return;
       if (variablePass.blocked) {
         for (const step of steps) addLegacyStep(op, step);
         recordCleanupState(op, {
@@ -4923,6 +5066,7 @@ export function createInstanceRequestCoordinator(
       }
     }
 
+    if (isStopped()) return;
     // A GitHub environment can be one of the selected targets, and skipping it
     // here would report a clean removal while the environment survived.
     if (
@@ -4933,6 +5077,7 @@ export function createInstanceRequestCoordinator(
     ) {
       const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
         attempt,
+        isStopped,
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
         readEnvironment: cleanupGitHub.readEnvironment,
         persistJournal: () => operations.persist(),
@@ -4949,12 +5094,15 @@ export function createInstanceRequestCoordinator(
         recordCleanupState(op, { state: "running", results: carriedResults() });
         await persist();
       }
+      if (environmentCleanup.interrupted || isStopped()) return;
     }
 
+    if (isStopped()) return;
     const runAz = (args: string[]): Promise<CommandResult> =>
       runCliCommand("az", args);
     const azureCleanup = await cleanupAzureSetupArtifacts(op, {
       runAz,
+      isStopped,
       steps,
       only: new Set<string>(
         selected
@@ -4970,6 +5118,7 @@ export function createInstanceRequestCoordinator(
     });
     warnings.push(...azureCleanup.warnings);
     results = [...results, ...azureCleanup.results];
+    if (azureCleanup.state === "interrupted" || isStopped()) return;
 
     for (const step of steps) addLegacyStep(op, step);
     // A deletion this pass issued and could not settle has nobody left to
@@ -5070,6 +5219,8 @@ export function createInstanceRequestCoordinator(
   async function runRecoveredBranchDelete(operationId: string): Promise<void> {
     const op = operations.get(operationId);
     if (!op) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
     const mutation = pendingBranchDelete(op);
     if (!mutation) return;
     // The branch belongs to the account that created it. An ambient `gh` here
@@ -5089,8 +5240,11 @@ export function createInstanceRequestCoordinator(
       }
       executor =
         await githubAccountCoordinator.createReadOnlyExecutor(selectedLogin);
+      if (isStopped()) return;
       await executor.verifyIdentity();
+      if (isStopped()) return;
     } catch (error) {
+      if (isStopped()) return;
       await failRecoveredBranchDelete(
         op,
         "setup-branch-delete-unresolved",
@@ -5102,6 +5256,7 @@ export function createInstanceRequestCoordinator(
     const outcome = await reconcileRecoveredBranchDelete({
       operation: op,
       mutation,
+      isStopped,
       readBranchRef: (repo, branch) =>
         executor.run(branchRefReadArgs(repo, branch)),
       // The same permission the 404 came from. Matching-refs answers with every
@@ -5111,6 +5266,7 @@ export function createInstanceRequestCoordinator(
       listBranchRefs: (repo, branch, page) =>
         executor.run(branchRefListingArgs(repo, branch, page))
     });
+    if (outcome.state === "interrupted" || isStopped()) return;
     if (outcome.state === "removed") {
       addLegacyStep(op, `✅ ${outcome.evidence}`);
       // `operations.persist` rather than the best-effort save: a command a
@@ -5120,6 +5276,7 @@ export function createInstanceRequestCoordinator(
         operation: op,
         persist: () => operations.persist()
       });
+      if (isStopped()) return;
       if (plan.state === "resume" || plan.state === "start") {
         if (plan.state === "start") {
           addLegacyStep(
@@ -5128,6 +5285,7 @@ export function createInstanceRequestCoordinator(
           );
         }
         await saveOperation(op);
+        if (isStopped()) return;
         await runCleanupCommand(plan.kind, operationId, plan.commandId);
         return;
       }
@@ -5213,7 +5371,11 @@ export function createInstanceRequestCoordinator(
    * reconcile branch — the delete is never issued a second time — so this
    * settles them from provider state alone.
    */
-  async function reconcileUnsettledCleanupDeletions(op: any): Promise<void> {
+  async function reconcileUnsettledCleanupDeletions(
+    op: any,
+    isStopped: () => boolean
+  ): Promise<void> {
+    if (isStopped()) return;
     const unsettled = new Set(
       unresolvedProviderMutations(op)
         .filter((mutation) => isCleanupDeletionKind(mutation.kind))
@@ -5239,8 +5401,12 @@ export function createInstanceRequestCoordinator(
     ) {
       const cleanupGitHub = await resolveCleanupGitHubContext({
         targets,
-        selectedLogin
+        selectedLogin,
+        createExecutor: (login) =>
+          githubAccountCoordinator.createReadOnlyExecutor(login),
+        isStopped
       });
+      if (isStopped()) return;
       await cleanupGitHubEnvironmentArtifact(op, {
         attempt: Number(getSetupArtifactLedger(op)?.cleanup?.attempts || 1),
         runDeleteEnvironment: cleanupGitHub.deleteEnvironment,
@@ -5249,8 +5415,10 @@ export function createInstanceRequestCoordinator(
         invalidateEnvironmentListing: (repo) => {
           envListCache.invalidate(repo);
         },
-        steps
+        steps,
+        isStopped
       });
+      if (isStopped()) return;
     }
     const azureKeys = new Set<string>(
       targets
@@ -5262,8 +5430,10 @@ export function createInstanceRequestCoordinator(
         runAz: (args: string[]) => runCliCommand("az", args),
         steps,
         only: azureKeys,
-        persistJournal: () => operations.persist()
+        persistJournal: () => operations.persist(),
+        isStopped
       });
+      if (isStopped()) return;
     }
     for (const step of steps) addLegacyStep(op, step);
     await saveOperation(op);
@@ -5272,15 +5442,19 @@ export function createInstanceRequestCoordinator(
   async function runRecoveredCleanup(operationId: string): Promise<void> {
     const op = operations.get(operationId);
     if (!op || op.endedAt) return;
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return;
     // Settle the deletions this operation already issued before deciding
     // anything else. The executors reconcile a journaled entry by reading its
     // exact identity and never reissue it, so this is the reconciliation the
     // resume gate is waiting on rather than another pass over the ledger.
-    await reconcileUnsettledCleanupDeletions(op);
+    await reconcileUnsettledCleanupDeletions(op, isStopped);
+    if (isStopped()) return;
     const plan = await planRecoveredCleanup({
       operation: op,
       persist: () => operations.persist()
     });
+    if (isStopped()) return;
     if (plan.state === "resume" || plan.state === "start") {
       await runCleanupCommand(plan.kind, operationId, plan.commandId);
       return;
@@ -5316,94 +5490,6 @@ export function createInstanceRequestCoordinator(
     await saveOperation(op);
   }
 
-  function scheduleRecoveredProviderMutation(op: {
-    operationId: string;
-    providerRecovery?: { state?: string };
-    control?: {
-      commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
-    };
-  }): void {
-    const next = planRecoveredSchedule(op);
-    if (next.kind === "branch_delete") {
-      scheduleServerOwnedTask(op.operationId, () =>
-        runRecoveredBranchDelete(op.operationId)
-      );
-      return;
-    }
-    if (next.kind === "cleanup") {
-      scheduleServerOwnedTask(op.operationId, () =>
-        runRecoveredCleanup(op.operationId)
-      );
-      return;
-    }
-    if (next.kind === "verification_retry") {
-      const commandId = next.commandId;
-      scheduleServerOwnedTask(op.operationId, () =>
-        runVerificationRetry(op.operationId, commandId)
-      );
-      return;
-    }
-    scheduleEnvironmentOperation(op);
-  }
-
-  function startRecoveredTasks(): void {
-    for (const op of operations.all()) {
-      // Resume a delete operation that was mid-flight when the process
-      // restarted. The runner is resume-safe (each stage re-runs only while
-      // pending/running), so re-scheduling converges. Delete operations never
-      // enter input_required, so there is no prompt state to skip here.
-      if (
-        op.kind === "delete" &&
-        !op.endedAt &&
-        !attachment.hasTask(op.operationId)
-      ) {
-        scheduleServerOwnedTask(op.operationId, () =>
-          runEnvironmentOperation(op.operationId)
-        );
-        continue;
-      }
-      if (
-        op.endedAt &&
-        op.providerRecovery?.state === "rollback_pending" &&
-        !providerRecoveryManualGuidance(op)
-      ) {
-        scheduleAutomaticRecoveryRollback(op.operationId);
-        continue;
-      }
-      if (
-        op.recoveryState === "provider_reconciliation_pending" &&
-        !op.endedAt
-      ) {
-        scheduleRecoveredProviderMutation(op);
-        continue;
-      }
-      if (
-        (op.recoveryState !== "verification_pending" &&
-          op.recoveryState !== "verification_acquisition_pending") ||
-        op.currentStage !== STAGE_VERIFY ||
-        op.endedAt ||
-        !executionOwner.claimVerificationMonitor(op.operationId)
-      )
-        continue;
-      scheduleServerOwnedTask(op.operationId, async () => {
-        try {
-          if (op.recoveryState === "verification_acquisition_pending") {
-            await runVerificationRetry(
-              op.operationId,
-              String(op.verification?.retryCommandId || "")
-            );
-          } else {
-            await monitorVerificationAsSelectedAccount(op, (executor) =>
-              resolveRecoveredVerificationRun(op, executor)
-            );
-          }
-        } finally {
-          executionOwner.releaseVerificationMonitor(op.operationId);
-        }
-      });
-    }
-  }
-
   /**
    * Give a restarted verification the run identity its dispatch never recorded.
    *
@@ -5421,6 +5507,8 @@ export function createInstanceRequestCoordinator(
     op: any,
     executor: SelectedGhExecutor
   ): Promise<boolean> {
+    const isStopped = setupIsStopped(op);
+    if (isStopped()) return false;
     const identity = readRecoveredVerificationIdentity(
       op,
       VERIFY_WORKFLOW_FILE
@@ -5456,17 +5544,20 @@ export function createInstanceRequestCoordinator(
         identity,
         listRuns: async () => {
           const listed = await executor.run(listArgs, { timeout: 30000 });
+          if (isStopped()) return listed;
           const authorizationError = await selectedCommandAuthorizationError(
             executor,
             identity.repo,
             listed
           );
+          if (isStopped()) return listed;
           if (authorizationError) throw authorizationError;
           return listed;
         },
         isAuthorizationError: isSelectedGhAuthorizationError
       });
     } catch (error) {
+      if (isStopped()) return false;
       if (!isSelectedGhAuthorizationError(error)) throw error;
       addLegacyStep(
         op,
@@ -5489,6 +5580,7 @@ export function createInstanceRequestCoordinator(
       await saveOperation(op);
       return false;
     }
+    if (isStopped()) return false;
     if (outcome.state === "monitor") return true;
     if (outcome.state === "hand_off") return handOff(outcome.guidance);
     op.verification = {
@@ -5502,7 +5594,95 @@ export function createInstanceRequestCoordinator(
       STAGE_VERIFY
     );
     await saveOperation(op);
-    return true;
+    return !isStopped();
+  }
+
+  return execution;
+}
+
+export function createInstanceRequestCoordinator(
+  instanceId: string,
+  resolveBaseUrl: () => string,
+  environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts,
+  dependencies: {
+    executionOwner: EnvironmentExecutionOwner;
+    accountContext: EnvironmentAccountContext;
+    setupServices: SetupServices;
+    verificationStatus(
+      input: VerificationStatusInput
+    ): Promise<VerificationStatusResult>;
+    operationControl: OperationControlService;
+    servers: ReadonlyMap<string, CanvasServerEntry>;
+    environmentOperationRunner?: EnvironmentOperationRunner;
+  }
+) {
+  if (typeof dependencies.operationControl !== "function") {
+    throw new Error("Missing request coordinator dependency: operationControl");
+  }
+  const attachment = dependencies.executionOwner.attach(instanceId);
+  const deletionAttachment =
+    dependencies.executionOwner.attachDeletion(instanceId);
+  const scope: typeof attachment = {
+    ...attachment,
+    schedule(operationId, task) {
+      const owner =
+        operations.get(operationId)?.kind === "delete" ?
+          deletionAttachment
+        : attachment;
+      owner.schedule(operationId, task);
+    }
+  };
+  const execution = createEnvironmentOperationExecution({
+    executionOwner: dependencies.executionOwner,
+    accountContext: dependencies.accountContext,
+    setupServices: dependencies.setupServices,
+    get verificationStatus() {
+      return dependencies.verificationStatus;
+    },
+    get environmentOperationRunner() {
+      return dependencies.environmentOperationRunner;
+    },
+    scope,
+    presentation: { instanceId },
+    admitRecoveryRollback: (operationId, isCurrent) =>
+      admitRecoveryRollback(
+        dependencies.operationControl,
+        operationId,
+        isCurrent,
+        instanceId
+      ),
+    runDeletion: (operation) =>
+      runEnvironmentDeletion(operation, {
+        ...environmentDeletionPorts,
+        reportStatePackageDeletionFailure: async (input) => {
+          const result = await invokeSessionPrompt(
+            sessionPromptHandler,
+            statePackageDeletionFailureMessage(input)
+          );
+          if (result.status >= 400) {
+            throw new Error(
+              result.error ||
+                "Could not report the GHCR package deletion failure to Copilot chat."
+            );
+          }
+        }
+      })
+  });
+  const serverOwnedToken = randomUUID();
+  const browserMutationNonce = randomUUID();
+
+  function startRecoveredTasks(): void {
+    for (const op of operations.all()) {
+      if (
+        op.kind === "delete" &&
+        !op.endedAt &&
+        !deletionAttachment.hasTask(op.operationId)
+      ) {
+        execution.scheduleEnvironmentOperation(op);
+      } else {
+        execution.recoverOperation(op);
+      }
+    }
   }
 
   const handleUnmatchedRequest = async (
@@ -5519,7 +5699,7 @@ export function createInstanceRequestCoordinator(
 
     // Default: serve the page HTML based on state
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    const entry = servers.get(instanceId);
+    const entry = dependencies.servers.get(instanceId);
     let page = requestedPage || entry?.page || DEFAULT_CANVAS_PAGE;
     const state = entry?.state || {};
     // While a deployment is actively in progress, an IMPLICIT landing on the
@@ -5563,44 +5743,15 @@ export function createInstanceRequestCoordinator(
       nonce: browserMutationNonce
     });
   };
-  // Exposed so the migrated `POST /api/operations` route, which is composed once
-  // per runtime, can reach this instance's server-owned task runner. The
-  // route registers and persists the operation itself and then hands the record
-  // back here to preserve the established scheduling order.
-  const scheduleEnvironmentOperation = (op: { operationId: string }): void => {
-    scheduleServerOwnedTask(op.operationId, () =>
-      runEnvironmentOperation(op.operationId)
-    );
-  };
-  // The three cooperative-control runners, exposed for the same reason: the
-  // control routes are composed once per runtime and hand the accepted
-  // command back to the instance that received the request.
-  const scheduleCommandTask = (
-    kind:
-      | "verification_monitor"
-      | "verification_retry"
-      | "cleanup_retry"
-      | "rollback"
-      | "exit_setup",
-    op: { operationId: string },
-    commandId: string
-  ): void => {
-    scheduleServerOwnedTask(op.operationId, () =>
-      kind === "verification_monitor" ?
-        runRecoveredVerificationContinuation(op.operationId, commandId)
-      : kind === "verification_retry" ?
-        runVerificationRetry(op.operationId, commandId)
-      : runCleanupCommand(kind, op.operationId, commandId)
-    );
-  };
   return {
     browserMutationNonce,
     handleUnmatchedRequest,
     startRecoveredTasks,
     isServerOwned,
     validateBrowserMutation,
-    scheduleEnvironmentOperation,
-    scheduleCommandTask
+    detach: attachment.detach,
+    scheduleEnvironmentOperation: execution.scheduleEnvironmentOperation,
+    scheduleCommandTask: execution.scheduleCommandTask
   };
 }
 
@@ -5740,17 +5891,17 @@ export function createProductionCanvasServerRuntime(
     toSafeRepoRelPath
   });
 
-  // Server-owned work is scheduled on the instance that received the request, so
-  // an instance that is gone reports a miss instead of silently dropping accepted
-  // work. Every route that schedules resolves its runner through here.
+  // A missing presentation uses the runtime setup runner. An explicitly named
+  // attachment that disappeared must still report a miss, never fall back.
   function resolveInstanceRunner(
     instanceId: string | undefined,
     operationId: string
-  ): ReturnType<typeof createInstanceRequestCoordinator> | null {
-    const coordinator =
-      instanceId === undefined ? undefined : (
-        instanceRequestCoordinators.get(instanceId)
-      );
+  ): Pick<
+    ReturnType<typeof createInstanceRequestCoordinator>,
+    "scheduleEnvironmentOperation" | "scheduleCommandTask"
+  > | null {
+    if (instanceId === undefined) return setupExecution;
+    const coordinator = instanceRequestCoordinators.get(instanceId);
     if (!coordinator) {
       console.error(
         `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operationId}.`
@@ -5769,10 +5920,12 @@ export function createProductionCanvasServerRuntime(
       operation.operationId
     );
     if (!coordinator) return false;
-    coordinator.scheduleEnvironmentOperation(operation);
-    return true;
+    return coordinator.scheduleEnvironmentOperation(operation);
   }
 
+  // Composition root for the migrated `operations-status` family. Reads, creates,
+  // and resumable actions each receive only the registry, mutation, persistence,
+  // projection, and per-instance scheduling seams they invoke.
   const operationActionDependencies: OperationActionDependencies = {
     getOperation: (operationId) => operations.get(operationId),
     canResumeInput,
@@ -5788,9 +5941,10 @@ export function createProductionCanvasServerRuntime(
     errorMessage,
     inputRequiredState: INPUT_REQUIRED_STATE
   };
-  const operationResume = createOperationResumeService(
-    operationActionDependencies
-  );
+  const operationResume = createOperationResumeService({
+    ...operationActionDependencies,
+    isShuttingDown: () => executionOwner.isShuttingDown()
+  });
 
   // Composition root for the migrated `operations-status` family. Reads, creates,
   // and resumable actions each receive only the registry, mutation, persistence,
@@ -5825,6 +5979,7 @@ export function createProductionCanvasServerRuntime(
   );
 
   const operationsControlDependencies: OperationsControlDependencies = {
+    isShuttingDown: () => executionOwner.isShuttingDown(),
     get: (operationId) => operations.get(operationId),
     acquireForRetry: (op) => operations.acquireForRetry(op),
     persistOperations: () => operations.persist(),
@@ -5869,17 +6024,17 @@ export function createProductionCanvasServerRuntime(
       return result.value;
     },
     schedule: ({ kind, instanceId, operation, commandId }) => {
+      if (instanceId === undefined && operation.kind === "delete") return false;
       const coordinator = resolveInstanceRunner(
         instanceId,
         operation.operationId
       );
       if (!coordinator) return false;
       if (kind === "setup_continuation" || kind === "deletion_retry") {
-        coordinator.scheduleEnvironmentOperation(operation);
+        return coordinator.scheduleEnvironmentOperation(operation);
       } else {
-        coordinator.scheduleCommandTask(kind, operation, commandId);
+        return coordinator.scheduleCommandTask(kind, operation, commandId);
       }
-      return true;
     },
     // The environments picker reads a repo-scoped cached listing, so an exit that
     // closes a setup has to drop it here: the browser reloads the table straight
@@ -6084,9 +6239,16 @@ export function createProductionCanvasServerRuntime(
       }
     },
     ensureServicePrincipal,
-    finalizeSetupFailure,
+    finalizeSetupFailure: (operation, input) =>
+      finalizeSetupFailure(operation, {
+        ...input,
+        isStopped: () => executionOwner.isShuttingDown()
+      }),
     persistMutationCheckpoint,
-    honorStopBoundary,
+    honorStopBoundary: (input) =>
+      executionOwner.isShuttingDown() ?
+        Promise.resolve(false)
+      : honorStopBoundary(input),
     sleep: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
@@ -6412,10 +6574,25 @@ export function createProductionCanvasServerRuntime(
       addLegacyStep(operation, text);
     },
     finalizeSetupFailure: (operation, input) =>
-      finalizeSetupFailure(operation, input as never),
+      finalizeSetupFailure(operation, {
+        ...input,
+        isStopped: () => executionOwner.isShuttingDown()
+      }),
     persistMutationCheckpoint,
     persistBestEffort,
-    guardStopBoundary,
+    isShuttingDown: () => executionOwner.isShuttingDown(),
+    guardStopBoundary: async (input) => {
+      if (executionOwner.isShuttingDown()) {
+        input.respond(503, {
+          code: "setup-shutting-down",
+          error:
+            "The session is shutting down; no further setup work was started.",
+          operationId: input.operation?.operationId
+        });
+        return false;
+      }
+      return guardStopBoundary(input);
+    },
     runAzCommand: (args) => runCliCommand("az", args),
     preflightRepoAdmin: (repo, executor) =>
       preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
@@ -6517,9 +6694,21 @@ export function createProductionCanvasServerRuntime(
   );
   const setupServices: SetupServices = {
     authorizeAzure: (data) => authorizeAzure({ data }),
-    configureEnvironment: (data, instanceId) =>
-      configureEnvironment({ data }, instanceId)
+    configureEnvironment: (data, instanceId, isCurrentPresentation) =>
+      configureEnvironment({ data }, instanceId, isCurrentPresentation)
   };
+  const setupExecution = createEnvironmentOperationExecution({
+    executionOwner,
+    scope: executionOwner.attachRuntime(),
+    accountContext,
+    setupServices,
+    verificationStatus,
+    admitRecoveryRollback: (operationId, isCurrent) =>
+      admitRecoveryRollback(operationControl, operationId, isCurrent),
+    get environmentOperationRunner() {
+      return options.environmentOperationRunner;
+    }
+  });
 
   // Built once per runtime so validation fails before opening any server.
   const serverRoutes = createServerRouteTable({
@@ -6538,8 +6727,7 @@ export function createProductionCanvasServerRuntime(
     ...environmentsRoutes
   });
 
-  // Coordinators retain transport and provider behavior. Task/claim storage lives
-  // in the runtime owner, preserving the scope of each attachment.
+  // Panels project shared setup; deletion retains its server-ready runner.
   const instanceRequestCoordinators = new Map<
     string,
     ReturnType<typeof createInstanceRequestCoordinator> & {
@@ -6552,7 +6740,9 @@ export function createProductionCanvasServerRuntime(
       {
         createRequestHandler: ({ instanceId, instances, markActivity }) => {
           let baseUrl = "";
-          const coordinator = createInstanceRequestCoordinator(
+          const coordinator: ReturnType<
+            typeof createInstanceRequestCoordinator
+          > = createInstanceRequestCoordinator(
             instanceId,
             () => baseUrl,
             environmentDeletionPorts ?? productionEnvironmentDeletionPorts(),
@@ -6560,26 +6750,9 @@ export function createProductionCanvasServerRuntime(
               executionOwner,
               accountContext,
               setupServices,
-              verificationStatus: (input) => {
-                const observation = instances.get(instanceId)?.observation;
-                if (!observation)
-                  throw new Error(
-                    "Workflow observation instance is unavailable."
-                  );
-                return verificationStatus({ ...input, observation });
-              },
+              verificationStatus,
               operationControl: (input, publish) =>
-                operationControl(
-                  {
-                    ...input,
-                    isCurrent: () =>
-                      instanceRequestCoordinators.get(instanceId)
-                        ?.scheduleCommandTask ===
-                        coordinator.scheduleCommandTask &&
-                      (input.isCurrent?.() ?? true)
-                  },
-                  publish
-                ),
+                operationControl({ ...input, instanceId: undefined }, publish),
               servers: instances,
               get environmentOperationRunner() {
                 return options.environmentOperationRunner;
@@ -6621,6 +6794,7 @@ export function createProductionCanvasServerRuntime(
           }
         },
         onStopped: (instanceId) => {
+          instanceRequestCoordinators.get(instanceId)?.detach();
           instanceRequestCoordinators.delete(instanceId);
         },
         defaultPage: DEFAULT_CANVAS_PAGE,
@@ -6787,6 +6961,7 @@ export function createProductionCanvasServerRuntime(
 
   return {
     servers: canvasServer.instances,
+    setupExecution,
     verificationStatus,
     operationControl,
     operationResume,
