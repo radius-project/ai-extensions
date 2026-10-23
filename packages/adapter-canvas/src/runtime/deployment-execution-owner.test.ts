@@ -75,6 +75,44 @@ function fixture() {
 }
 
 describe("runtime deployment ownership", () => {
+  it("normalizes only owned target state and invalidates a graph remembered from another source", () => {
+    const { owner, reserve } = fixture();
+    const state = {
+      envName: "staging",
+      appFile: "old.bicep",
+      plannedRepo: "fixture/other",
+      plannedBranch: "old",
+      plannedResources: [{ id: "wrong" }],
+      deployingResources: [{ id: "wrong" }],
+      deployParams: { environment: "staging", appFile: "old.bicep" }
+    };
+    const begun = owner.begin({
+      target: TARGET,
+      reservation: reserve(),
+      executor: EXECUTOR,
+      state
+    });
+    if (begun.kind !== "resolved") throw new Error(begun.kind);
+    expect(owner.snapshot(begun.invocation)).toMatchObject({
+      envName: TARGET.environment,
+      appFile: TARGET.appFile,
+      deployParams: {
+        targetRepo: TARGET.repo,
+        branch: TARGET.branch,
+        environment: TARGET.environment,
+        provider: TARGET.provider,
+        appFile: TARGET.appFile
+      },
+      plannedResources: [],
+      deployingResources: []
+    });
+    expect(state.envName).toBe("staging");
+    expect(state.deployParams.appFile).toBe("old.bicep");
+    state.envName = "retargeted";
+    expect(owner.execution(begun.invocation)?.state.envName).toBe("dev");
+    owner.shutdown();
+  });
+
   it.each(["", "another-login"])(
     "refuses an executor that is not authorized for account %j without consuming the reservation",
     (githubLogin) => {

@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WorkflowReadInterruptedError } from "@radius-project/core";
 import {
   createPlannedGraphRecoveryService,
   type PlannedGraphRecoveryDependencies
@@ -66,6 +70,108 @@ describe("planned graph recovery construction", () => {
 });
 
 describe("planned graph recovery", () => {
+  it.each([
+    "before",
+    "source",
+    "compile",
+    "recipes",
+    "outputs",
+    "failure"
+  ] as const)(
+    "stops retired work at the %s boundary without publishing",
+    async (boundary) => {
+      let current = boundary !== "before";
+      const source = vi.fn(async () => {
+        if (boundary === "source") current = false;
+        if (boundary === "failure") {
+          current = false;
+          throw new Error("Late source failure");
+        }
+        return {
+          content: "model",
+          fromWorkspace: false,
+          branch: "feat",
+          bicepPath: "app.bicep"
+        };
+      });
+      const compile = vi.fn(async () => {
+        if (boundary === "compile") current = false;
+        return [];
+      });
+      const recipes = vi.fn(async () => {
+        if (boundary === "recipes") current = false;
+        return {};
+      });
+      const outputs = vi.fn(async () => {
+        if (boundary === "outputs") current = false;
+        return [];
+      });
+      const publish = vi.fn(() => true);
+      const service = createPlannedGraphRecoveryService(
+        dependencies({
+          fetchBicepSelection: source,
+          radArtifactsDirForSelection: async () => ({ dir: "", remote: false }),
+          buildGraphViaRad: compile,
+          fetchRecipePack: recipes,
+          resolveRecipeOutputs: outputs,
+          setSourceRefResources: publish
+        })
+      );
+      const { input, state } = request();
+      await expect(
+        service.recover({ ...input, isCurrent: () => current })
+      ).rejects.toBeInstanceOf(WorkflowReadInterruptedError);
+      expect(publish).not.toHaveBeenCalled();
+      expect(state.deployingResources).toBeUndefined();
+      if (boundary === "before") expect(source).not.toHaveBeenCalled();
+      if (["before", "source", "failure"].includes(boundary))
+        expect(compile).not.toHaveBeenCalled();
+      if (["before", "source", "failure", "compile"].includes(boundary))
+        expect(recipes).not.toHaveBeenCalled();
+      if (boundary !== "outputs") expect(outputs).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([true, false])(
+    "cleans only remote staging when cancellation skips compilation (remote=%s)",
+    async (remote) => {
+      const dir = mkdtempSync(join(tmpdir(), "graph-cancel-"));
+      writeFileSync(join(dir, "bicepconfig.json"), "{}");
+      let current = true;
+      const compile = vi.fn(async () => []);
+      const service = createPlannedGraphRecoveryService(
+        dependencies({
+          radArtifactsDirForSelection: async () => {
+            current = false;
+            return { dir, remote };
+          },
+          buildGraphViaRad: compile
+        })
+      );
+      try {
+        await expect(
+          service.recover({ ...request().input, isCurrent: () => current })
+        ).rejects.toMatchObject({ reason: "cancelled" });
+        expect(compile).not.toHaveBeenCalled();
+        expect(existsSync(join(dir, "bicepconfig.json"))).toBe(!remote);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("propagates an interrupted read unchanged", async () => {
+    const error = new WorkflowReadInterruptedError("cancelled");
+    const service = createPlannedGraphRecoveryService(
+      dependencies({
+        fetchBicepSelection: async () => {
+          throw error;
+        }
+      })
+    );
+    await expect(service.recover(request().input)).rejects.toBe(error);
+  });
+
   it("rebuilds the graph, marks every node pending, and commits it to the panel", async () => {
     const { input, logs, state } = request();
     const calls: Record<string, unknown[]> = {

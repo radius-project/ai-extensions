@@ -238,7 +238,8 @@ export function createDeployMonitorService(
           repo,
           branch,
           provider,
-          log
+          log,
+          isCurrent: request.isCurrent
         });
         assertCurrent();
         if (planned) resources = planned;

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { test } from "vitest";
+import { syncBuiltinESMExports } from "node:module";
+import { test, expect, vi } from "vitest";
+import { WorkflowReadInterruptedError } from "@radius-project/core";
 import {
   stageRemoteRadArtifacts,
   radArtifactsDirForSelection,
@@ -37,6 +39,123 @@ const CONFIG = JSON.stringify({
   extensions: {
     radius: "br:biceptypes.azurecr.io/radius:latest",
     customTypes: "./custom-types.tgz"
+  }
+});
+
+test("propagates cancelled config reads instead of treating them as absent configuration", async () => {
+  const error = new WorkflowReadInterruptedError("cancelled");
+  const github = mockGithub();
+  github.getContent = async () => {
+    throw error;
+  };
+  await expect(
+    stageRemoteRadArtifacts(github, "acme/app", "dev", ".radius/app.bicep")
+  ).rejects.toBe(error);
+  expect(github.calls.getContentBytes).toEqual([]);
+});
+
+test("logs an ordinary config read failure and preserves the missing-config fallback", async () => {
+  const github = mockGithub();
+  github.getContent = async () => {
+    throw new Error("config unavailable");
+  };
+  const log = vi.fn();
+  expect(
+    await stageRemoteRadArtifacts(
+      github,
+      "acme/app",
+      "dev",
+      ".radius/app.bicep",
+      { log }
+    )
+  ).toBeNull();
+  expect(log).toHaveBeenCalledWith(
+    expect.stringContaining("config unavailable")
+  );
+});
+
+test("logs an ordinary artifact read failure without treating it as cancellation", async () => {
+  const github = mockGithub({ [CONFIG_API]: CONFIG });
+  github.getContentBytes = async () => {
+    throw new Error("artifact unavailable");
+  };
+  const log = vi.fn();
+  const dir = await stageRemoteRadArtifacts(
+    github,
+    "acme/app",
+    "dev",
+    ".radius/app.bicep",
+    { log }
+  );
+  try {
+    expect(dir).not.toBeNull();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("artifact unavailable")
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("cleans and reports an unwritable staged artifact instead of returning a partial directory", async () => {
+  const file = "x".repeat(300) + ".tgz";
+  const github = mockGithub(
+    {
+      [CONFIG_API]: JSON.stringify({ extensions: { custom: "./" + file } })
+    },
+    {
+      [`/repos/acme/app/contents/.radius/${file}?ref=dev`]:
+        Buffer.from("fixture bytes")
+    }
+  );
+  const log = vi.fn();
+  expect(
+    await stageRemoteRadArtifacts(
+      github,
+      "acme/app",
+      "dev",
+      ".radius/app.bicep",
+      { log }
+    )
+  ).toBeNull();
+  expect(log).toHaveBeenCalledWith(
+    expect.stringContaining("could not stage remote")
+  );
+});
+
+test("cleans its temporary directory exactly once when an artifact read is interrupted", async () => {
+  const created = vi.spyOn(fs, "mkdtempSync");
+  const removed = vi.spyOn(fs, "rmSync");
+  syncBuiltinESMExports();
+  const error = new WorkflowReadInterruptedError("cancelled");
+  const github = mockGithub({ [CONFIG_API]: CONFIG });
+  github.getContentBytes = async () => {
+    expect(created).toHaveBeenCalledOnce();
+    const dir = created.mock.results[0].value;
+    expect(fs.existsSync(dir)).toBe(true);
+    throw error;
+  };
+  try {
+    await expect(
+      stageRemoteRadArtifacts(github, "acme/app", "dev", ".radius/app.bicep")
+    ).rejects.toBe(error);
+    const dir = created.mock.results[0].value;
+    expect(removed).toHaveBeenCalledExactlyOnceWith(dir, {
+      recursive: true,
+      force: true
+    });
+    expect(fs.existsSync(dir)).toBe(false);
+  } finally {
+    for (const result of created.mock.results) {
+      if (
+        result.type === "return" &&
+        typeof result.value === "string" &&
+        fs.existsSync(result.value)
+      )
+        fs.rmSync(result.value, { recursive: true, force: true });
+    }
+    vi.restoreAllMocks();
+    syncBuiltinESMExports();
   }
 });
 

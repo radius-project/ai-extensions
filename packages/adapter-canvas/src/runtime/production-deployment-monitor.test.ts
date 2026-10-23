@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { existsSync } from "node:fs";
+import type { CanvasState } from "../shared.js";
+import { radArtifactsDirForSelection } from "../remote-rad-artifacts.js";
 import { createDeploymentPipelineRunner } from "../../test/support/runtime/deployment.js";
 import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 import { createDeferred } from "../../test/support/browser/fakes.js";
@@ -18,7 +21,9 @@ function fixture(
   run: SelectedGhExecutor["run"],
   recoverGraph = false,
   ports: Partial<ProductionDeploymentMonitorPorts> = {},
-  provider = "aws"
+  provider = "aws",
+  state: CanvasState = {},
+  appFile = "apps/custom.bicep"
 ) {
   const owner = ports.owner ?? createProductionDeploymentExecutionOwner();
   const executor = successfulSelectedGhExecutor({ login: "fixture-user", run });
@@ -27,7 +32,7 @@ function fixture(
     environment: "dev",
     branch: "feature/model",
     provider,
-    appFile: "apps/custom.bicep",
+    appFile,
     githubLogin: executor.login
   };
   const reservation = owner.reserve(target, "deploy");
@@ -39,13 +44,24 @@ function fixture(
     state: {
       envName: "dev",
       appFile: target.appFile,
+      plannedRepo: target.repo,
+      plannedBranch: target.branch,
+      plannedEnvironment: target.environment,
+      plannedProvider: target.provider,
+      deployingResources:
+        recoverGraph ? [] : [{ id: "app", name: "app", type: "application" }],
       deployParams: { appFile: target.appFile },
-      deployStatus: "in_progress"
+      deployStatus: "in_progress",
+      ...state
     }
   });
   if (begun.kind !== "resolved") throw new Error(begun.kind);
   const execution = owner.execution(begun.invocation);
   if (!execution) throw new Error("Missing execution");
+  if (!recoverGraph)
+    execution.state.deployingResources = [
+      { id: "app", name: "app", type: "application" }
+    ];
   const runAz = vi.fn(async (): Promise<never> => {
     throw new Error("Unexpected Azure command");
   });
@@ -61,11 +77,13 @@ function fixture(
   });
   return {
     owner,
+    target,
+    reservation,
     execution,
     runAz,
     invalidateDeployListCache,
     log,
-    run: () =>
+    run: (overrides: Partial<Parameters<typeof monitor.run>[0]> = {}) =>
       monitor.run({
         entry: execution,
         repo: target.repo,
@@ -77,7 +95,8 @@ function fixture(
         log,
         isCurrent: () =>
           owner.execution(begun.invocation) === execution &&
-          !execution.observation.stopped
+          !execution.observation.stopped,
+        ...overrides
       }),
     dispose: () => {
       owner.shutdown();
@@ -87,6 +106,368 @@ function fixture(
 }
 
 describe("server-independent production deployment monitor", () => {
+  it("rejects a retired execution before any source read", async () => {
+    const run = vi.fn<SelectedGhExecutor["run"]>(async () => {
+      throw new Error("Unexpected read");
+    });
+    const f = fixture(run, true);
+    try {
+      f.owner.shutdown();
+      await expect(f.run()).rejects.toMatchObject({ reason: "cancelled" });
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it("rejects an invalid admitted file even when a graph was already supplied", async () => {
+    const run = vi.fn<SelectedGhExecutor["run"]>(async () => {
+      throw new Error("Unexpected read");
+    });
+    const f = fixture(run, false, {}, "aws", {}, "../outside.bicep");
+    try {
+      await expect(f.run()).rejects.toThrow("repository-relative");
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it.each([
+    "custom-and-default",
+    "custom-only",
+    "root-only",
+    "default-first"
+  ] as const)(
+    "graphs and dispatches the same admitted committed source in a %s repository",
+    async (layout) => {
+      vi.useFakeTimers();
+      const pipeline = createDeploymentPipelineRunner("success");
+      const custom =
+        "@secure()\nparam password string\nparam environment string\nresource app 'Radius.Core/applications@2025-08-01' = { name: 'custom' }";
+      const modelPath =
+        layout === "root-only" ? "app.bicep"
+        : layout === "default-first" ? ".radius/app.bicep"
+        : "apps/custom.bicep";
+      const run = vi.fn<SelectedGhExecutor["run"]>(async (args, options) => {
+        if (
+          args[0] === "api" &&
+          args[1].includes("/contents/") &&
+          args[1].includes(".bicep?")
+        )
+          return (
+            args[1].includes(`/contents/${modelPath}?`) ?
+              {
+                code: 0,
+                stdout: JSON.stringify({
+                  type: "file",
+                  encoding: "base64",
+                  content: Buffer.from(custom).toString("base64")
+                }),
+                stderr: ""
+              }
+            : layout === "custom-and-default" ?
+              {
+                code: 0,
+                stdout: JSON.stringify({
+                  type: "file",
+                  encoding: "base64",
+                  content: Buffer.from("wrong default model").toString("base64")
+                }),
+                stderr: ""
+              }
+            : { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+          );
+        if (args[0] === "api" && args[1].includes("bicepconfig.json"))
+          return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        return pipeline.run(args, options);
+      });
+      const buildGraph = vi.fn(async () => [
+        { id: "custom", name: "custom", type: "Radius.Core/applications" }
+      ]);
+      const state: CanvasState = {
+        envName: "staging",
+        appFile: "wrong.bicep",
+        deployParams: { environment: "staging", appFile: "wrong.bicep" },
+        workspaceRepo: "fixture/app",
+        workspaceBranch: "feature/model",
+        workspacePath: "/synthetic/matching-workspace",
+        plannedResources: [{ id: "wrong" }],
+        deployingResources: [{ id: "wrong" }]
+      };
+      const f = fixture(
+        run,
+        true,
+        { buildGraph },
+        "aws",
+        state,
+        layout === "root-only" ? ".radius/app.bicep" : modelPath
+      );
+      try {
+        state.envName = "retargeted";
+        const result = f.run();
+        await vi.runAllTimersAsync();
+        await result;
+        expect(buildGraph).toHaveBeenCalledExactlyOnceWith(
+          custom,
+          modelPath,
+          expect.objectContaining({
+            radArtifactsDir: "",
+            cleanupRadArtifactsDir: false
+          })
+        );
+        expect(f.execution.state.deployStatus).toBe("complete");
+        expect(f.execution.state.deployEnvName).toBe("dev");
+        expect(f.execution.state.deployParams?.appFile).toBe(modelPath);
+        expect(f.execution.state.deployingResources?.[0].id).toBe("custom");
+        const commands = run.mock.calls.map(([args]) => args);
+        const dispatch = commands.find((args) => args[0] === "workflow");
+        expect(dispatch).toEqual(
+          expect.arrayContaining([
+            "--repo",
+            "fixture/app",
+            "--ref",
+            "feature/model"
+          ])
+        );
+        expect(dispatch?.join(" ")).toContain(modelPath);
+        expect(dispatch?.join(" ")).toContain("dev");
+        expect(
+          commands.find((args) => args[0] === "secret")?.join(" ")
+        ).toContain("dev");
+        expect(
+          commands.some((args) => args.join(" ").includes("staging"))
+        ).toBe(false);
+        expect(state.deployParams?.appFile).toBe("wrong.bicep");
+        expect(
+          commands.filter((args) =>
+            args[1]?.includes(`/contents/${modelPath}?`)
+          )
+        ).toHaveLength(1);
+        expect(pipeline.unexpected).toEqual([]);
+      } finally {
+        f.dispose();
+      }
+    }
+  );
+
+  it("refuses a missing custom application without falling back to an existing default", async () => {
+    const pipeline = createDeploymentPipelineRunner("success");
+    const run = vi.fn<SelectedGhExecutor["run"]>(async (args, options) =>
+      args[1]?.includes("/contents/apps/custom.bicep?") ?
+        { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+      : pipeline.run(args, options)
+    );
+    const buildGraph = vi.fn(async () => []);
+    const f = fixture(run, true, { buildGraph });
+    try {
+      await f.run();
+      expect(f.execution.state.deployErrorKind).toBe("dispatch-refused");
+      expect(f.execution.state.deployError).toContain("apps/custom.bicep");
+      expect(buildGraph).not.toHaveBeenCalled();
+      expect(
+        run.mock.calls
+          .filter(([args]) => args[1]?.includes(".bicep?"))
+          .map(([args]) => args[1])
+      ).toEqual([
+        "/repos/fixture/app/contents/apps/custom.bicep?ref=feature%2Fmodel"
+      ]);
+      expect(
+        run.mock.calls.some(
+          ([args]) => args[0] === "workflow" || args[0] === "secret"
+        )
+      ).toBe(false);
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it("uses the resolved root default even when graph recovery was already completed", async () => {
+    vi.useFakeTimers();
+    const pipeline = createDeploymentPipelineRunner("success");
+    const run = vi.fn<SelectedGhExecutor["run"]>(async (args, options) =>
+      args[1]?.includes("/contents/.radius/app.bicep?") ?
+        { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+      : pipeline.run(args, options)
+    );
+    const f = fixture(run, false, {}, "aws", {}, ".radius/app.bicep");
+    try {
+      const work = f.run();
+      await vi.runAllTimersAsync();
+      await work;
+      expect(f.execution.state.deployStatus).toBe("complete");
+      expect(
+        run.mock.calls
+          .filter(([args]) => args[1]?.includes(".bicep?"))
+          .map(([args]) => args[1])
+      ).toEqual([
+        "/repos/fixture/app/contents/.radius/app.bicep?ref=feature%2Fmodel",
+        "/repos/fixture/app/contents/app.bicep?ref=feature%2Fmodel"
+      ]);
+      expect(
+        run.mock.calls.find(([args]) => args[0] === "workflow")?.[0].join(" ")
+      ).toContain("app.bicep");
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it.each(["shutdown", "replacement"] as const)(
+    "does not compile or publish after %s during remote config staging",
+    async (retirement) => {
+      const held = createDeferred<{
+        code: number;
+        stdout: string;
+        stderr: string;
+      }>();
+      const started = createDeferred<void>();
+      const buildGraph = vi.fn(async () => []);
+      const run = vi.fn<SelectedGhExecutor["run"]>(async (args) => {
+        if (args[1].includes("apps/custom.bicep?"))
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              type: "file",
+              encoding: "base64",
+              content: Buffer.from("model").toString("base64")
+            }),
+            stderr: ""
+          };
+        if (args[1].includes("apps/bicepconfig.json?")) {
+          started.resolve();
+          return held.promise;
+        }
+        throw new Error("Unexpected follow-up " + args.join(" "));
+      });
+      const f = fixture(run, true, { buildGraph });
+      const work = f.run();
+      const rejected = expect(work).rejects.toMatchObject({
+        reason: "cancelled"
+      });
+      try {
+        await started.promise;
+        if (retirement === "shutdown") f.owner.shutdown();
+        else {
+          f.owner.release(f.reservation);
+          const reservation = f.owner.reserve(f.target, "deploy");
+          if (!reservation) throw new Error("Missing replacement");
+          f.owner.begin({
+            reservation,
+            target: f.target,
+            executor: f.execution.executor,
+            state: { deployLogs: ["replacement"] }
+          });
+        }
+        held.resolve({ code: 1, stdout: "", stderr: "HTTP 404: Not Found" });
+        await rejected;
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(buildGraph).not.toHaveBeenCalled();
+        expect(f.execution.state.deployingResources).toEqual([]);
+        expect(f.invalidateDeployListCache).not.toHaveBeenCalled();
+      } finally {
+        f.dispose();
+      }
+    }
+  );
+
+  it.each(["shutdown", "replacement"] as const)(
+    "cleans staged artifacts without compiling when %s wins the stage-return race",
+    async (retirement) => {
+      const staged = createDeferred<string>();
+      const resume = createDeferred<void>();
+      const buildGraph = vi.fn(async () => []);
+      const run = vi.fn<SelectedGhExecutor["run"]>(async (args) => {
+        const content =
+          args[1].includes("custom.bicep?") ? "model"
+          : args[1].includes("bicepconfig.json?") ?
+            JSON.stringify({ extensions: {} })
+          : null;
+        if (content === null)
+          throw new Error("Unexpected follow-up " + args.join(" "));
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            type: "file",
+            encoding: "base64",
+            content: Buffer.from(content).toString("base64")
+          }),
+          stderr: ""
+        };
+      });
+      const f = fixture(run, true, {
+        buildGraph,
+        readRadArtifacts: async (input) => {
+          const result = await ("github" in input ?
+            radArtifactsDirForSelection(input)
+          : radArtifactsDirForSelection(input));
+          staged.resolve(result.dir);
+          await resume.promise;
+          return result;
+        }
+      });
+      const work = f.run();
+      const rejected = expect(work).rejects.toMatchObject({
+        reason: "cancelled"
+      });
+      try {
+        const directory = await staged.promise;
+        expect(existsSync(directory)).toBe(true);
+        if (retirement === "shutdown") f.owner.shutdown();
+        else {
+          f.owner.release(f.reservation);
+          const reservation = f.owner.reserve(f.target, "deploy");
+          if (!reservation) throw new Error("Missing replacement");
+          const replacement = f.owner.begin({
+            reservation,
+            target: f.target,
+            executor: f.execution.executor,
+            state: { deployLogs: ["replacement"] }
+          });
+          if (replacement.kind !== "resolved")
+            throw new Error(replacement.kind);
+          expect(
+            f.owner.execution(replacement.invocation)?.state.deployLogs
+          ).toEqual(["replacement"]);
+        }
+        resume.resolve();
+        await rejected;
+        expect(existsSync(directory)).toBe(false);
+        expect(buildGraph).not.toHaveBeenCalled();
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(f.invalidateDeployListCache).not.toHaveBeenCalled();
+      } finally {
+        resume.resolve();
+        f.dispose();
+      }
+    }
+  );
+
+  it.each([
+    "repo",
+    "branch",
+    "provider",
+    "requestedEnvironment",
+    "entry"
+  ] as const)(
+    "rejects a conflicting independent %s before I/O",
+    async (field) => {
+      const run = vi.fn<SelectedGhExecutor["run"]>(async () => {
+        throw new Error("Must not run");
+      });
+      const f = fixture(run);
+      try {
+        await expect(
+          f.run(
+            field === "entry" ? { entry: { state: {} } } : { [field]: "other" }
+          )
+        ).rejects.toThrow("admitted deployment");
+        expect(run).not.toHaveBeenCalled();
+      } finally {
+        f.dispose();
+      }
+    }
+  );
+
   it.each([null, false, [], {}])(
     "does not mistake malformed Azure metadata %j for verified credentials",
     async (metadata) => {
@@ -175,7 +556,7 @@ describe("server-independent production deployment monitor", () => {
     const source =
       "resource app 'Radius.Core/applications@2025-08-01' = { name: 'app' }";
     const run = vi.fn<SelectedGhExecutor["run"]>(async (args) => {
-      if (args[1].includes("/contents/.radius/app.bicep?"))
+      if (args[1].includes("/contents/apps/custom.bicep?"))
         return {
           code: 0,
           stdout: JSON.stringify({
@@ -204,7 +585,7 @@ describe("server-independent production deployment monitor", () => {
       expect(
         buildGraph,
         JSON.stringify(f.log.mock.calls)
-      ).toHaveBeenCalledExactlyOnceWith(source, ".radius/app.bicep", {
+      ).toHaveBeenCalledExactlyOnceWith(source, "apps/custom.bicep", {
         log: expect.any(Function),
         radArtifactsDir: "fixture-artifacts",
         cleanupRadArtifactsDir: true
@@ -255,7 +636,11 @@ describe("server-independent production deployment monitor", () => {
                   status: "ok",
                   artifact: null,
                   graph: [
-                    { id: "app", name: "app", type: "Radius.Core/applications" }
+                    {
+                      id: "app",
+                      name: "app",
+                      type: "Radius.Core/applications"
+                    }
                   ]
                 }),
                 controlPlaneLog: async () => null
@@ -342,10 +727,10 @@ describe("server-independent production deployment monitor", () => {
     });
     const f = fixture(run, true);
     try {
+      delete f.execution.state.deployingResources;
       await f.run();
       expect(run.mock.calls.map(([args]) => args[1])).toEqual([
-        "/repos/fixture/app/contents/.radius/app.bicep?ref=feature%2Fmodel",
-        "/repos/fixture/app/contents/app.bicep?ref=feature%2Fmodel",
+        "/repos/fixture/app/contents/apps/custom.bicep?ref=feature%2Fmodel",
         "/repos/fixture/app/git/ref/heads/feature%2Fmodel"
       ]);
       expect(f.log).toHaveBeenCalledWith(
