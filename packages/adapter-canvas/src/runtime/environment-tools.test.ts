@@ -23,6 +23,7 @@ import {
 import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 import { createFakeSession } from "../../test/support/runtime/fakes.js";
 import { createSetupStartService } from "../server/services/setup-start.js";
+import { createOperationsControlService } from "../server/services/operation-control.js";
 import { createSessionHolder } from "./session.js";
 import { createEnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import {
@@ -609,6 +610,71 @@ describe("environment tool handlers", () => {
     });
     expect(h.ports.resume).toHaveBeenCalledOnce();
   });
+  it("refreshes eligibility without reviving an older interaction handle", async () => {
+    const h = harness();
+    h.prompt();
+    h.op.executionActive = true;
+    const active = await h.tools.status(h.identity);
+    expect(active).toMatchObject({ interaction: { supported: false } });
+    h.op.executionActive = false;
+    expect(
+      await h.tools.control({
+        ...h.identity,
+        action: "resume",
+        provider: "azure",
+        checkpoint: "selection",
+        interactionId: interactionId(active),
+        answer: { code: "app-selection-required", createNew: true }
+      })
+    ).toMatchObject({ code: "operation-resume-mismatch" });
+    const settled = await h.tools.status(h.identity);
+    expect(settled).toMatchObject({ interaction: { supported: true } });
+    expect(interactionId(settled)).not.toBe(interactionId(active));
+    const answer = {
+      ...h.identity,
+      action: "resume",
+      provider: "azure",
+      checkpoint: "selection",
+      answer: { code: "app-selection-required", createNew: true }
+    };
+    expect(
+      await h.tools.control({ ...answer, interactionId: interactionId(active) })
+    ).toMatchObject({ code: "operation-resume-mismatch" });
+    h.op.executionActive = true;
+    const ineligible = await h.tools.status(h.identity);
+    expect(ineligible).toMatchObject({ interaction: { supported: false } });
+    expect(interactionId(ineligible)).not.toBe(interactionId(settled));
+    h.op.executionActive = false;
+    expect(
+      await h.tools.control({
+        ...answer,
+        interactionId: interactionId(settled)
+      })
+    ).toMatchObject({ code: "operation-resume-mismatch" });
+    expect(h.ports.resume).not.toHaveBeenCalled();
+  });
+  it("returns saved application choices with a supported input handle", async () => {
+    const h = harness();
+    h.op.request = { azure: {} };
+    requireInput(h.op, {
+      code: "app-selection-required",
+      checkpoint: "azure-app-selection",
+      metadata: {
+        candidates: [{ appId: setup.tenantId, displayName: "Radius" }],
+        defaultAppId: setup.tenantId
+      }
+    });
+    expect(await h.tools.status(h.identity)).toMatchObject({
+      interaction: {
+        supported: true,
+        appSelection: {
+          candidates: [{ appId: setup.tenantId, displayName: "Radius" }],
+          defaultAppId: setup.tenantId,
+          truncated: false
+        }
+      }
+    });
+  });
   it("rejects a replaced prompt even with the same code and checkpoint", async () => {
     const h = harness();
     h.prompt();
@@ -768,19 +834,30 @@ describe("environment tool handlers", () => {
     op.operationId = h.op.operationId;
     op.context = { githubLogin: h.executor.login };
     h.registry.put(op);
-    vi.mocked(h.ports.control).mockResolvedValue({
-      status: 409,
-      body: {
-        code: "verification-merge-required",
-        error: "Merge the recorded PR."
-      }
+    const schedule = vi.fn(() => true);
+    h.ports.control = createOperationsControlService({
+      get: (id) => h.registry.get(id),
+      acquireForRetry: (operation) => h.registry.acquireForRetry(operation),
+      persistOperations: h.persist,
+      reportOperationDiagnostic: vi.fn(),
+      checkPullRequestMerge: async () => ({ state: "open" }),
+      inspectVerificationWorkflow: async () => {
+        throw new Error("Unexpected inspection");
+      },
+      cancelVerificationWorkflow: async () => {
+        throw new Error("Unexpected cancellation");
+      },
+      schedule,
+      invalidateEnvironmentListing: vi.fn()
     });
     expect(
       await h.tools.control({ ...h.identity, action: "verify" })
     ).toMatchObject({
       kind: "interaction_required",
+      code: "verification-retry-pull-request-open",
       interaction: { kind: "pull-request-merge", supported: false }
     });
+    expect(schedule).not.toHaveBeenCalled();
   });
   it("surfaces and redacts thrown service failures", async () => {
     const h = harness();

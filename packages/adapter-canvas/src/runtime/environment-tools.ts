@@ -24,6 +24,7 @@ import {
 import {
   environmentActions,
   environmentDiagnostic,
+  projectEnvironmentApplicationChoices,
   projectEnvironmentOperation,
   projectEnvironmentVerification,
   type EnvironmentTarget,
@@ -175,10 +176,12 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
     if (!prompt || operation.state !== "input_required") return undefined;
     const snapshot = fingerprint(operation);
     const previous = prompts.get(operation);
+    const supported = environmentActions(operation).includes("resume");
     if (
       previous?.prompt === prompt &&
       previous.fingerprint === snapshot &&
-      !previous.consumed
+      !previous.consumed &&
+      previous.interaction.supported === supported
     ) {
       return previous.interaction;
     }
@@ -188,7 +191,6 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
       : code.includes("login") || code.includes("authentication") ?
         "azure-login"
       : "setup-input";
-    const supported = environmentActions(operation).includes("resume");
     const issued: EnvironmentRequiredInteraction = {
       operationId: operation.operationId,
       repo: text(operation.repo),
@@ -198,6 +200,14 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
       code,
       checkpoint: text(prompt.checkpoint),
       supported,
+      ...(code === "app-selection-required" ?
+        {
+          appSelection: projectEnvironmentApplicationChoices(
+            prompt.metadata,
+            ports.redact
+          )
+        }
+      : {}),
       message: diagnostic(
         text(prompt.message) ||
           "Review the saved setup prompt before continuing."
@@ -286,7 +296,7 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
       const message =
         text(result.body.error) ||
         "The environment service refused the operation.";
-      if (code.includes("merge"))
+      if (code === "verification-retry-pull-request-open")
         return interaction(target, "pull-request-merge", code, message);
       return result.status >= 500 ?
           unavailable(code || "environment-service-unavailable", message)
@@ -489,6 +499,7 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
             const answer = environmentRecord(args.answer);
             if (
               !issued ||
+              !issued.interaction.supported ||
               issued.consumed ||
               issued.fingerprint !== snapshot ||
               issued.prompt !== operation.inputRequired ||
