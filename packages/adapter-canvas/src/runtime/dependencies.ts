@@ -355,7 +355,8 @@ export interface RadiusExtensionDependencies {
   logError(message: string): void;
   session: SessionHolder;
   executionOwner: EnvironmentExecutionOwner;
-  deployment: Pick<DeploymentExecutionOwner, "shutdown">;
+  deployment: Pick<DeploymentExecutionOwner, "shutdown" | "hasPendingWork">;
+  restoreDeploymentPresentation(instanceId: string): void;
   environment: EnvironmentTools;
   clock: ClockDependencies;
   servers: Map<string, CanvasServerEntry>;

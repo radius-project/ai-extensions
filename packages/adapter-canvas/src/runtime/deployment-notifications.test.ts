@@ -68,11 +68,13 @@ describe("owned deployment notification composition", () => {
     });
     try {
       notify(execution);
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
       expect(execution.state.deployHandoffState).toBe("retryable");
+      expect(f.owner.hasPendingWork()).toBe(true);
       await vi.advanceTimersByTimeAsync(2000);
       expect(repair).toHaveBeenCalledTimes(2);
       f.owner.shutdown();
+      expect(f.owner.hasPendingWork()).toBe(false);
       await vi.runAllTimersAsync();
       expect(repair).toHaveBeenCalledTimes(2);
       expect(vi.getTimerCount()).toBe(0);

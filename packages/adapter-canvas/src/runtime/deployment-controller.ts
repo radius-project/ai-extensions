@@ -364,13 +364,24 @@ export function createDeploymentController(
           throw new Error("The deployment context changed during admission.");
         const entry = { state: structuredClone(sourceState) };
         delete entry.state.deploymentMutation;
-        entry.state.deployParams = { ...data, environment };
+        const provider =
+          data.provider || previous?.invocation.target.provider || "azure";
+        const appFile =
+          data.appFile ||
+          previous?.invocation.target.appFile ||
+          ".radius/app.bicep";
+        entry.state.deployParams = {
+          ...data,
+          targetRepo: repo,
+          branch,
+          provider,
+          environment,
+          appFile
+        };
         entry.state.envName = environment;
-        entry.state.deployProvider =
-          data.provider || previous?.invocation.target.provider;
+        entry.state.deployProvider = provider;
         entry.state.deployingRepo = repo;
-        entry.state.appFile =
-          data.appFile || previous?.invocation.target.appFile;
+        entry.state.appFile = appFile;
 
         // Snapshot the planned graph (nodes start as pending). If the planned
         // graph has not been resolved yet, it is built on the fly inside the
@@ -391,12 +402,6 @@ export function createDeploymentController(
         entry.state.deployingResources = resources;
         entry.state.deployLogs = [];
         entry.state.deployLogBase = 0;
-        const provider =
-          data.provider || previous?.invocation.target.provider || "azure";
-        const appFile =
-          data.appFile ||
-          previous?.invocation.target.appFile ||
-          ".radius/app.bicep";
         dependencies.beginDeployAttempt(entry.state, {
           repo,
           branch,
@@ -428,7 +433,7 @@ export function createDeploymentController(
         const execution = dependencies.owner.execution(begun.invocation);
         if (!execution)
           throw new Error("The deployment runtime stopped during admission.");
-        resources = execution.state.deployingResources || [];
+        resources = execution.state.deployingResources;
         lease.attemptId = begun.invocation.attemptId;
         const isCurrent = () =>
           dependencies.owner.execution(begun.invocation) === execution &&
@@ -459,7 +464,7 @@ export function createDeploymentController(
                   repo,
                   branch,
                   provider,
-                  requestedEnvironment: data.environment,
+                  requestedEnvironment: environment,
                   resources,
                   log: addLog,
                   isCurrent

@@ -56,18 +56,6 @@ export function createWorkflowPresync(ports: {
         );
         return { created: [], updated: [], failed: [] };
       }
-    },
-    async forDeployment(...args: Parameters<typeof synchronize>) {
-      const result = await synchronize(...args);
-      if (result.failed.length) {
-        throw new Error(
-          "Could not prepare deployment workflows: " +
-            result.failed
-              .map(({ path, branch }) => `${path} on ${branch}`)
-              .join(", ")
-        );
-      }
-      return result;
     }
   };
 }

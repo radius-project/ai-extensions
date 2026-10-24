@@ -727,7 +727,7 @@ describe("server-independent production deployment monitor", () => {
     });
     const f = fixture(run, true);
     try {
-      delete f.execution.state.deployingResources;
+      expect(f.execution.state.deployingResources).toEqual([]);
       await f.run();
       expect(run.mock.calls.map(([args]) => args[1])).toEqual([
         "/repos/fixture/app/contents/apps/custom.bicep?ref=feature%2Fmodel",

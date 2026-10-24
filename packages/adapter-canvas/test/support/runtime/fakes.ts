@@ -305,7 +305,8 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         remote: false
       }))
     },
-    deployment: { shutdown: vi.fn() },
+    deployment: { shutdown: vi.fn(), hasPendingWork: vi.fn(() => false) },
+    restoreDeploymentPresentation: vi.fn(),
     deployTools: {
       selectDeployEntry,
       buildDeployPayload,

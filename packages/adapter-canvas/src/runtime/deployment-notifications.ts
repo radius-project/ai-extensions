@@ -28,12 +28,14 @@ export function createDeploymentNotifications(ports: {
       publish: () => ports.owner.publish(execution.invocation),
       reportError: ports.reportError,
       retry: (callback: () => void, milliseconds: number) => {
-        void retryDeploymentDelivery(callback, milliseconds, {
-          delay: (delay) => execution.observation.delay(delay),
-          isCurrent,
-          errorMessage: execution.executor.errorMessage,
-          reportError: (message) => ports.reportError(new Error(message))
-        });
+        void ports.owner.trackWork(
+          retryDeploymentDelivery(callback, milliseconds, {
+            delay: (delay) => execution.observation.delay(delay),
+            isCurrent,
+            errorMessage: execution.executor.errorMessage,
+            reportError: (message) => ports.reportError(new Error(message))
+          })
+        );
       }
     };
     const input = {
@@ -45,7 +47,8 @@ export function createDeploymentNotifications(ports: {
     };
     deliverDeploymentRepair(execution.state, input, {
       ...delivery,
-      send: ports.repair
+      send: (handoff) =>
+        ports.owner.trackWork(Promise.resolve(ports.repair(handoff)))
     });
     deliverDeploymentNotice(
       execution.state,
@@ -55,7 +58,11 @@ export function createDeploymentNotifications(ports: {
           { dispatchRefused: true }
         : {})
       },
-      { ...delivery, send: ports.notice }
+      {
+        ...delivery,
+        send: (notice) =>
+          ports.owner.trackWork(Promise.resolve(ports.notice(notice)))
+      }
     );
     if (isCurrent()) delivery.publish();
   };

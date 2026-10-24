@@ -5270,7 +5270,12 @@ describe.each(["repair", "notice"] as const)(
         register(handler);
         const publish = vi.fn();
         const retry = vi.fn();
-        const lifetime = { isCurrent: () => current, publish, retry };
+        const lifetime = {
+          isCurrent: () => current,
+          publish,
+          retry,
+          trackWork: <T>(work: Promise<T>) => work
+        };
         const state = entry();
         expect(trigger(state, "panel", lifetime)).toBe(true);
         expect(state.state[deliveryField]).toBe("pending");
@@ -5302,7 +5307,12 @@ describe.each(["repair", "notice"] as const)(
         const retry = vi.fn((work: () => void, _milliseconds: number) => {
           callback = work;
         });
-        const lifetime = { isCurrent: () => current, publish, retry };
+        const lifetime = {
+          isCurrent: () => current,
+          publish,
+          retry,
+          trackWork: <T>(work: Promise<T>) => work
+        };
         expect(trigger(state, "panel", lifetime)).toBe(true);
         await Promise.resolve();
         expect(state.state[deliveryField]).toBe("retryable");
@@ -5328,7 +5338,12 @@ describe.each(["repair", "notice"] as const)(
       const publish = vi.fn();
       const retry = vi.fn();
       expect(
-        trigger(state, "panel", { isCurrent: () => true, publish, retry })
+        trigger(state, "panel", {
+          isCurrent: () => true,
+          publish,
+          retry,
+          trackWork: (work) => work
+        })
       ).toBe(true);
       await Promise.resolve();
       expect(state.state[deliveryField]).toBe("failed");
@@ -5519,6 +5534,7 @@ describe("triggerDeployRepairHandoff", () => {
     expect(
       triggerDeployRepairHandoff(entry, "", {
         isCurrent: () => true,
+        trackWork: (work) => work,
         redactDiagnostic: (value) =>
           value.replaceAll("opaque-account-value", "[REDACTED]"),
         publish: () => {},

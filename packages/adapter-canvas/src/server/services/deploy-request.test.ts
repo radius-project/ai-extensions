@@ -985,17 +985,9 @@ describe("deploy request attempt setup", () => {
     expect(control.calls[0].resources).not.toBe(state.deployingResources);
     expect(state.deployLogs).toEqual([]);
     expect(state.deployLogBase).toBe(0);
-    // A clone, not the planned array itself, with every node reset to pending.
+    // Unproven panel graph caches are not execution source evidence.
     expect(state.deployingResources).not.toBe(state.plannedResources);
-    expect(state.deployingResources).toEqual([
-      {
-        id: "r1",
-        name: "db",
-        deployStatus: "pending",
-        outputResources: [{ id: "o1", deployStatus: "pending" }]
-      },
-      { id: "r2", name: "api", deployStatus: "pending" }
-    ]);
+    expect(state.deployingResources).toEqual([]);
     expect(state.plannedResources?.[0].deployStatus).toBe("success");
     await control.settle();
   });

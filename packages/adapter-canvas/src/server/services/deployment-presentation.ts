@@ -79,11 +79,20 @@ function stillProjected(attachment: Attachment): boolean {
 
 export function createDeploymentPresentation(owner: DeploymentExecutionOwner) {
   const attachments = new Map<string, Attachment>();
+  const bindings = new Map<
+    string,
+    {
+      invocation: DeploymentInvocation;
+      repo: string;
+      branch: string;
+    }
+  >();
   const detach = (instanceId: string): void => {
     attachments.get(instanceId)?.detach();
     attachments.delete(instanceId);
   };
   const clearSelection = (instanceId: string): void => {
+    bindings.delete(instanceId);
     const attachment = attachments.get(instanceId);
     if (attachment && stillProjected(attachment)) {
       for (const field of FIELDS) delete attachment.state[field];
@@ -131,6 +140,12 @@ export function createDeploymentPresentation(owner: DeploymentExecutionOwner) {
     detach(instanceId);
     const snapshot = owner.snapshot(invocation);
     if (!snapshot || !owner.execution(invocation)) return;
+    const binding = {
+      invocation,
+      repo: state.contextRepo || invocation.target.repo,
+      branch: state.contextBranch || invocation.target.branch
+    };
+    bindings.set(instanceId, binding);
     project(state, snapshot);
     const attachment: Attachment = {
       state,
@@ -141,7 +156,7 @@ export function createDeploymentPresentation(owner: DeploymentExecutionOwner) {
     attachments.set(instanceId, attachment);
     attachment.detach = owner.subscribe(invocation, (snapshot) => {
       if (!stillProjected(attachment)) {
-        detach(instanceId);
+        clearSelection(instanceId);
         return;
       }
       const current = selected(state, attachment);
@@ -154,6 +169,7 @@ export function createDeploymentPresentation(owner: DeploymentExecutionOwner) {
         return;
       }
       attachment.invocation = current;
+      binding.invocation = current;
       project(state, snapshot);
     });
   };
@@ -174,11 +190,43 @@ export function createDeploymentPresentation(owner: DeploymentExecutionOwner) {
     },
     dispose(): void {
       for (const instanceId of attachments.keys()) detach(instanceId);
+      bindings.clear();
+    },
+    restore(instanceId: string, state: CanvasState): void {
+      const binding = bindings.get(instanceId);
+      if (!binding) return;
+      const target = binding.invocation.target;
+      const resolved = owner.resolve({
+        ...target,
+        attemptId: binding.invocation.attemptId
+      });
+      if (
+        state.contextRepo !== binding.repo ||
+        state.contextBranch !== binding.branch ||
+        (state.plannedRepo && state.plannedRepo !== target.repo) ||
+        (state.plannedBranch && state.plannedBranch !== target.branch) ||
+        ((state.plannedEnvironment || state.envName) &&
+          (state.plannedEnvironment || state.envName) !== target.environment) ||
+        (state.plannedProvider && state.plannedProvider !== target.provider) ||
+        (state.appFile && state.appFile !== target.appFile) ||
+        resolved.kind !== "resolved" ||
+        resolved.invocation.target.githubLogin !== target.githubLogin ||
+        resolved.invocation.generation < binding.invocation.generation ||
+        (state.deployAttempt &&
+          (state.deployAttempt.id !== resolved.invocation.attemptId ||
+            state.deployGeneration !== resolved.invocation.generation))
+      ) {
+        clearSelection(instanceId);
+        return;
+      }
+      state.envName = target.environment;
+      state.appFile = target.appFile;
+      attach(instanceId, state, resolved.invocation, true);
     },
     synchronize(instanceId: string, state: CanvasState): void {
       const existing = attachments.get(instanceId);
       if (existing?.state === state && !stillProjected(existing)) {
-        detach(instanceId);
+        clearSelection(instanceId);
         return;
       }
       const invocation = selected(state, existing);

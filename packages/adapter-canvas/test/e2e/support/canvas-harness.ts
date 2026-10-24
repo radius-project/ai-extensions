@@ -1618,6 +1618,8 @@ export class CanvasHarness {
 
   async reconnectPanel(whileClosed: () => Promise<void>): Promise<void> {
     this.assertFakeMode("reconnectPanel");
+    const contextRepo = this.entry.state.contextRepo;
+    const contextBranch = this.entry.state.contextBranch;
     await this.serverModule.stopServer(this.instanceId, true);
     try {
       await whileClosed();
@@ -1626,6 +1628,9 @@ export class CanvasHarness {
         this.instanceId,
         "deploying"
       );
+      expect(this.entry.state.envName).toBeUndefined();
+      Object.assign(this.entry.state, { contextRepo, contextBranch });
+      this.serverModule.restoreDeploymentPresentation(this.instanceId);
     }
   }
 

@@ -9,6 +9,82 @@ import {
 } from "../../../src/server.js";
 
 describe("production deployment reservation HTTP binding", () => {
+  it("fails closed on a selected default-branch lookup without admitting or dispatching", async () => {
+    const lookup = [
+      "repo",
+      "view",
+      "fixture/app",
+      "--json",
+      "defaultBranchRef",
+      "--jq",
+      ".defaultBranchRef.name"
+    ];
+    const run = vi.fn(async (args: string[]) => {
+      if (args[0] === "repo") {
+        expect(args).toEqual(lookup);
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "HTTP 503: branch lookup unavailable"
+        };
+      }
+      if (
+        args[0] === "api" &&
+        [
+          "/repos/fixture/app/environments/dev/variables?per_page=100",
+          "/repos/fixture/app/deployments?per_page=100&environment=dev"
+        ].includes(args[1])
+      )
+        return { code: 0, stdout: "", stderr: "" };
+      throw new Error(`Unexpected selected command: ${JSON.stringify(args)}`);
+    });
+    const executor = successfulSelectedGhExecutor({
+      login: "fixture-user",
+      run
+    });
+    const executionOwner = createEnvironmentExecutionOwner();
+    const account = vi.fn(async () => ({
+      state: "selected" as const,
+      login: executor.login,
+      executor
+    }));
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner,
+      deploymentAccount: account,
+      serverDependencies: { createState: () => ({}) }
+    });
+    try {
+      const panel = await runtime.getOrCreateServer("panel", "deploy");
+      const response = await fetch(`${panel.baseUrl}/api/deploy`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": String(panel.state.browserMutationNonce)
+        },
+        body: JSON.stringify({ targetRepo: "fixture/app", environment: "dev" })
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain(
+        "branch lookup unavailable"
+      );
+      expect(account).toHaveBeenCalledOnce();
+      expect(run.mock.calls.some(([args]) => args[0] === "repo")).toBe(true);
+      expect(run.mock.calls.some(([args]) => args[0] === "workflow")).toBe(
+        false
+      );
+      expect(runtime.deploymentOwner.resolve().kind).toBe("missing");
+      expect(
+        runtime.deploymentOwner.activeReservation({
+          repo: "fixture/app",
+          environment: "dev"
+        })
+      ).toBeUndefined();
+    } finally {
+      executionOwner.shutdown();
+      await runtime.stopServer("panel", true);
+    }
+  });
+
   it.each(["branch", "source", "secret"] as const)(
     "uses committed selected-account source and refuses unavailable %s before dispatch",
     async (failure) => {
@@ -68,6 +144,11 @@ describe("production deployment reservation HTTP binding", () => {
             stderr: "HTTP 403: secret listing unavailable"
           };
         }
+        if (
+          path ===
+          "/repos/fixture/app/contents/apps/bicepconfig.json?ref=feature%2Fmodel"
+        )
+          throw new Error("Fixture graph configuration is unavailable");
         throw new Error(`Unexpected selected command: ${JSON.stringify(args)}`);
       });
       const executor = successfulSelectedGhExecutor({
@@ -112,7 +193,9 @@ describe("production deployment reservation HTTP binding", () => {
           })
         });
         expect(response.status).toBe(200);
-        await expect.poll(() => panel.state.deployStatus).toBe("failed");
+        await expect
+          .poll(() => panel.state.deployStatus, { timeout: 10000 })
+          .toBe("failed");
         await expect
           .poll(() =>
             runtime.deploymentOwner.activeReservation({
@@ -130,16 +213,20 @@ describe("production deployment reservation HTTP binding", () => {
         );
         expect(
           commands.filter((args) => args[1]?.includes("/contents/"))
-        ).toEqual(
-          failure === "branch" ?
+        ).toEqual([
+          [
+            "api",
+            "/repos/fixture/app/contents/apps/custom.bicep?ref=feature%2Fmodel"
+          ],
+          ...(failure === "source" ?
             []
           : [
               [
                 "api",
-                "/repos/fixture/app/contents/apps/custom.bicep?ref=feature%2Fmodel"
+                "/repos/fixture/app/contents/apps/bicepconfig.json?ref=feature%2Fmodel"
               ]
-            ]
-        );
+            ])
+        ]);
         expect(commands.every((args) => args[0] === "api")).toBe(true);
         expect(commands.some((args) => args.includes("--method"))).toBe(false);
       } finally {
@@ -231,6 +318,15 @@ describe("production deployment reservation HTTP binding", () => {
             stdout: JSON.stringify({ default_branch: "trunk" }),
             stderr: ""
           };
+        if (
+          path ===
+          `/repos/fixture/app/contents/.radius/app.bicep?ref=${encodeURIComponent(branch)}`
+        )
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 403: graph source unavailable"
+          };
         throw new Error(`Unexpected command: ${JSON.stringify(args)}`);
       });
       const executor = successfulSelectedGhExecutor({
@@ -314,10 +410,10 @@ describe("production deployment reservation HTTP binding", () => {
             resolved.invocation.attemptId
           );
           expect(account).toHaveBeenCalledTimes(1);
-          expect(run).toHaveBeenCalledTimes(4);
+          expect(run).toHaveBeenCalledTimes(5);
         } else {
           expect(execution.state.deployStatus).toBe("in_progress");
-          expect(run).toHaveBeenCalledTimes(3);
+          expect(run).toHaveBeenCalledTimes(4);
         }
       } finally {
         finishBranch.resolve();

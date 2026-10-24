@@ -114,6 +114,13 @@ describe("selected deployment pipeline fixture", () => {
     expect(JSON.parse((await first.run(list)).stdout)).toEqual([
       expect.objectContaining({ databaseId: 42, conclusion: "success" })
     ]);
+    await first.run(["workflow", "run", "--repo", "fixture/app"]);
+    expect(JSON.parse((await first.run(list)).stdout)).toEqual([
+      expect.objectContaining({ databaseId: 43, conclusion: "success" })
+    ]);
+    expect(
+      (await first.run(["api", "repos/fixture/app/actions/runs/43"])).stdout
+    ).toContain('"id":43');
     expect(JSON.parse((await first.run(secrets)).stdout)).toEqual([
       { secrets: [{ name: "RADIUS_DEPLOY_PARAMS" }] }
     ]);

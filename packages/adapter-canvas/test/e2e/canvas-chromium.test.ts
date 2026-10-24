@@ -718,7 +718,7 @@ test.describe("Radius Canvas in Chromium", () => {
         permissions: { admin: false, push: true, pull: true }
       }),
       json(
-        `/repos/${REPOSITORY}/contents/.radius/app.bicep?ref=${encodeURIComponent(WORKTREE_BRANCH)}`,
+        `/repos/${REPOSITORY}/contents/apps/custom.bicep?ref=${encodeURIComponent(WORKTREE_BRANCH)}`,
         {
           type: "file",
           encoding: "base64",
@@ -727,6 +727,44 @@ test.describe("Radius Canvas in Chromium", () => {
           ).toString("base64"),
           sha: "c".repeat(40)
         }
+      ),
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/apps/bicepconfig.json?ref=${encodeURIComponent(WORKTREE_BRANCH)}`
+        ],
+        exitCode: 1,
+        stderr: "gh: Not Found (HTTP 404)"
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure-aks/azure-aks.bicep?ref=main"
+        ],
+        exitCode: 1,
+        stderr: "gh: Fixture recipe unavailable (HTTP 503)"
+      },
+      ...[".radius/app.bicep", "app.bicep"].map((file): FakeCliCommand => ({
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/${file}?ref=${encodeURIComponent(WORKTREE_BRANCH)}`,
+          "--jq",
+          ".content"
+        ],
+        exitCode: 1,
+        stderr: "gh: Not Found (HTTP 404)"
+      })),
+      command(
+        [
+          "api",
+          `/repos/${REPOSITORY}/git/trees/${WORKTREE_BRANCH}?recursive=1`,
+          "--jq",
+          '{truncated: (.truncated // false), paths: [.tree[] | select(.type == "blob") | .path]}'
+        ],
+        JSON.stringify({ truncated: false, paths: [] })
       ),
       {
         tool: "gh",
@@ -991,7 +1029,7 @@ test.describe("Radius Canvas in Chromium", () => {
         branch: WORKTREE_BRANCH,
         provider: "azure",
         environment,
-        appFile: ".radius/app.bicep"
+        appFile: "apps/custom.bicep"
       }
     });
     expect(admitted.status(), await admitted.text()).toBe(200);
@@ -1003,10 +1041,6 @@ test.describe("Radius Canvas in Chromium", () => {
       await expect.poll(() => deliveries.length, { timeout: 15_000 }).toBe(2);
       expect(deliveries[0].attemptId).toBe(attemptId);
       expect(deliveries[1].attemptId).toBe(attemptId);
-    });
-    await canvas.seedState({
-      ...baseCanvasState(canvas.workspacePath),
-      envName: environment
     });
     const restored = await page.request.get(
       `${canvas.baseUrl}/api/deploy-status`
@@ -1049,9 +1083,8 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(status.logs.join("\n")).not.toContain(
       "Could not verify Azure federated credential coverage"
     );
-    expect(status.resources[0].deployMessage).toContain(
-      "opaque-witness=[REDACTED]"
-    );
+    // Unavailable graph recovery cannot reuse the panel's unproven web node.
+    expect(status.resources).toEqual([]);
     expect(status.logs.join("\n")).toContain("opaque-witness=[REDACTED]");
     await expect
       .poll(() => canvas.entry.state.deployHandoffState)
@@ -1101,7 +1134,7 @@ test.describe("Radius Canvas in Chromium", () => {
       calls.filter(
         (call) => call.args.join(" ") === repositoryArtifactArgs.join(" ")
       )
-    ).toMatchObject([{ matched: true, exitCode: 1 }]);
+    ).toEqual([]);
     expect(
       calls.filter((call) =>
         call.args.includes(
@@ -1122,6 +1155,63 @@ test.describe("Radius Canvas in Chromium", () => {
           call.args.join(" ") === `run view ${runId} --log --repo ${REPOSITORY}`
       )
     ).toBe(true);
+    const repairRun = runId + 1;
+    for (const entry of scenario.commands) {
+      if (!entry.args) continue;
+      entry.args = entry.args.map((arg) =>
+        arg.replace(`/actions/runs/${runId}`, `/actions/runs/${repairRun}`)
+      );
+      if (entry.args[0] === "run" && entry.args[1] === "view")
+        entry.args[2] = String(repairRun);
+      if (entry.args[0] === "run" && entry.args[1] === "list")
+        entry.stdout = JSON.stringify([
+          {
+            databaseId:
+              entry.args.includes("--workflow=run-rad-commands.yml") ?
+                repairRun
+              : runId,
+            status: "completed",
+            createdAt: new Date().toISOString()
+          }
+        ]);
+    }
+    await canvas.setScenario(scenario);
+    await canvas.setGitHubKeyringScopes(["repo"]);
+    const repair = await page.request.post(`${canvas.baseUrl}/api/deploy`, {
+      headers: {
+        "x-radius-mutation-nonce": String(
+          canvas.entry.state.browserMutationNonce
+        )
+      },
+      data: { attemptId }
+    });
+    expect(repair.status(), await repair.text()).toBe(200);
+    await expect
+      .poll(
+        () => ({
+          status: canvas.entry.state.deployStatus,
+          runId: canvas.entry.state.deployRunId
+        }),
+        { timeout: 15000 }
+      )
+      .toEqual({ status: "failed", runId: repairRun });
+    expect(deliveries).toHaveLength(2);
+    const repairedCalls = await canvas.cliCalls();
+    const dispatches = repairedCalls.filter(
+      (call) => call.args.slice(0, 3).join(" ") === dispatchPrefix.join(" ")
+    );
+    expect(dispatches).toHaveLength(2);
+    expect(
+      dispatches.every((call) =>
+        call.args.some(
+          (arg) =>
+            arg.startsWith("rad_commands=") && arg.includes("apps/custom.bicep")
+        )
+      )
+    ).toBe(true);
+    expect(repairedCalls.filter((call) => !call.matched)).toEqual([]);
+    expect(canvas.entry.state.deployAttempt?.id).toBe(attemptId);
+    expect(canvas.entry.state.deployRunId).toBe(repairRun);
   });
 
   for (const fixture of pageStateCases()) {
