@@ -791,6 +791,17 @@ test.describe("Radius Canvas in Chromium", () => {
         ],
         JSON.stringify({ object: { sha: "a".repeat(40) } })
       ),
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/git/ref/heads/main`,
+          "--jq",
+          ".object.sha"
+        ],
+        exitCode: 1,
+        stderr: "gh: Graph source revision unavailable (HTTP 503)"
+      },
       json(
         `/repos/${REPOSITORY}/environments/${environment}/variables/AZURE_CLIENT_ID`,
         { value: "fixture-client" }
@@ -1211,6 +1222,7 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(true);
     expect(repairedCalls.filter((call) => !call.matched)).toEqual([]);
     expect(canvas.entry.state.deployAttempt?.id).toBe(attemptId);
+    expect(canvas.entry.state.deployParams?.branch).toBe(WORKTREE_BRANCH);
     expect(canvas.entry.state.deployRunId).toBe(repairRun);
   });
 
