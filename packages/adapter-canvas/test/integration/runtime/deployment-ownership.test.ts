@@ -60,7 +60,23 @@ describe("production deployment owner runtime binding", () => {
         ...fake.deps,
         ...runtime,
         executionOwner,
-        deployment: runtime.deploymentOwner
+        deployment: createProductionDeploymentTools({
+          owner: runtime.deploymentOwner,
+          account: runtime.deploymentAccount,
+          session: fake.deps.session,
+          ghCommandPresentation: BARE_GH_COMMAND_PRESENTATION,
+          runAz: async () => {
+            throw new Error("Unexpected Azure command.");
+          },
+          buildGraph: async () => [],
+          readRadArtifacts: async () => ({ dir: "", remote: false }),
+          reportError: (error) => {
+            throw error;
+          },
+          redactDiagnostic: (value) => value,
+          reportWorkflowProgress: () => {},
+          invalidateDeployListCache: runtime.invalidateDeploymentListCache
+        })
       },
       {
         createCanvas: (value) => value,

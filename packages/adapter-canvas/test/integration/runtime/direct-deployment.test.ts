@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { radArtifactsDirForSelection } from "../../../src/remote-rad-artifacts.js";
 import {
   createDeploymentToolHarness,
   createDeploymentPipelineRunner
@@ -27,10 +30,354 @@ beforeEach(() => {
 afterEach(() => {
   expect(globalThis.fetch).not.toHaveBeenCalled();
   vi.restoreAllMocks();
+  syncBuiltinESMExports();
   vi.useRealTimers();
 });
 
 describe("registered direct deployment tools", () => {
+  it.each(["zero-panel", "final-panel-close"] as const)(
+    "retains custom-file deployment, repair and keepalive through unsettled work after %s",
+    async (lifecycle) => {
+      vi.useFakeTimers();
+      const sdk = await createRuntimeSdkHarness();
+      const pipeline = createDeploymentPipelineRunner("failure", {
+        existingEnvironment: true
+      });
+      const dispatchEntered = createDeferred<void>();
+      const dispatchReleased = createDeferred<void>();
+      const sendReleased = createDeferred<void>();
+      const deployment = createDeploymentToolHarness({
+        owner: createProductionDeploymentExecutionOwner(),
+        run: async (args, options) => {
+          if (args[1]?.includes("/contents/") && args[1].includes(".bicep?"))
+            expect(args[1]).toBe(
+              "/repos/fixture/app/contents/apps/custom.bicep?ref=feature%2Fmodel"
+            );
+          if (args[0] === "workflow") {
+            dispatchEntered.resolve();
+            await dispatchReleased.promise;
+          }
+          return pipeline.run(args, options);
+        }
+      });
+      const executionOwner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner,
+        deploymentOwner: deployment.owner,
+        deploymentAccount: deployment.account
+      });
+      const invalidate = vi.spyOn(runtime, "invalidateDeploymentListCache");
+      const compile = vi.fn(async () => []);
+      sdk.deps.deployment = createProductionDeploymentTools({
+        owner: deployment.owner,
+        account: deployment.account,
+        session: sdk.deps.session,
+        ghCommandPresentation: BARE_GH_COMMAND_PRESENTATION,
+        runAz: async () => {
+          throw new Error("Unexpected Azure command.");
+        },
+        buildGraph: compile,
+        readRadArtifacts: async () => ({ dir: "", remote: false }),
+        reportError: deployment.reportError,
+        redactDiagnostic: (value) => value,
+        reportWorkflowProgress: vi.fn(),
+        invalidateDeployListCache: invalidate
+      });
+      const send = vi.mocked(sdk.session.send);
+      send
+        .mockRejectedValueOnce(new Error("Temporary host delivery failure"))
+        .mockImplementationOnce(() => sendReleased.promise);
+      const start = sdk.extension.tools.find(
+        ({ name }) => name === "radius_deploy"
+      );
+      const status = sdk.extension.tools.find(
+        ({ name }) => name === "radius_deploy_status"
+      );
+      if (!start || !status) throw new Error("Missing deployment tools.");
+      try {
+        if (lifecycle === "final-panel-close") await sdk.host.open("radius");
+        expect(
+          await start.handler({
+            repo: "fixture/app",
+            environment: "dev",
+            branch: "feature/model",
+            provider: "aws",
+            appFile: "apps/custom.bicep"
+          })
+        ).toContain("started");
+        await dispatchEntered.promise;
+        const first = deployment.owner.resolve();
+        if (first.kind !== "resolved") throw new Error(first.kind);
+        if (lifecycle === "final-panel-close") await sdk.host.close("radius");
+        expect(sdk.servers.size).toBe(0);
+        if (lifecycle === "zero-panel")
+          expect(sdk.getOrCreateServer).not.toHaveBeenCalled();
+        const snapshot = vi.mocked(sdk.session.metadata?.snapshot);
+        if (!snapshot) throw new Error("Missing metadata fixture.");
+        snapshot.mockClear();
+        await vi.advanceTimersByTimeAsync(240000);
+        expect(snapshot).toHaveBeenCalledTimes(2);
+        expect(sdk.deps.deployment.hasPendingWork()).toBe(true);
+        dispatchReleased.resolve();
+        for (let tick = 0; tick < 100 && send.mock.calls.length < 2; tick++)
+          await vi.advanceTimersByTimeAsync(1000);
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(
+          deployment.owner.activeReservation(deployment.target)
+        ).toBeUndefined();
+        expect(sdk.deps.deployment.hasPendingWork()).toBe(true);
+        snapshot.mockClear();
+        await vi.advanceTimersByTimeAsync(240000);
+        expect(snapshot).toHaveBeenCalledTimes(2);
+        sendReleased.resolve();
+        await vi.waitFor(() =>
+          expect(sdk.deps.deployment.hasPendingWork()).toBe(false)
+        );
+        expect(deployment.reportError).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: "Temporary host delivery failure"
+          })
+        );
+        snapshot.mockClear();
+        await vi.advanceTimersByTimeAsync(240000);
+        expect(snapshot).not.toHaveBeenCalled();
+
+        expect(
+          await start.handler({ attemptId: first.invocation.attemptId })
+        ).toContain("automatic repair attempt 1 of 5");
+        for (
+          let tick = 0;
+          tick < 100 && sdk.deps.deployment.hasPendingWork();
+          tick++
+        )
+          await vi.advanceTimersByTimeAsync(1000);
+        const repaired = deployment.owner.resolve({
+          attemptId: first.invocation.attemptId
+        });
+        if (repaired.kind !== "resolved") throw new Error(repaired.kind);
+        expect(repaired.invocation.target).toEqual(first.invocation.target);
+        expect(repaired.invocation.generation).toBeGreaterThan(
+          first.invocation.generation
+        );
+        expect(deployment.account.mock.calls[1][0].savedLogin).toBe(
+          "fixture-user"
+        );
+        expect(deployment.owner.execution(repaired.invocation)?.executor).toBe(
+          deployment.executor
+        );
+        expect(
+          JSON.parse(
+            String(
+              await status.handler({
+                attemptId: repaired.invocation.attemptId
+              })
+            )
+          )
+        ).toMatchObject({
+          status: "failed",
+          deployRunUrl: "https://github.com/fixture/app/actions/runs/43"
+        });
+        expect(compile).toHaveBeenCalledTimes(2);
+        for (const call of compile.mock.calls)
+          expect(call).toEqual([
+            expect.stringContaining("param environment string"),
+            "apps/custom.bicep",
+            expect.any(Object)
+          ]);
+        const commands = pipeline.run.mock.calls.map(([args]) => args);
+        expect(commands.filter((args) => args[0] === "workflow")).toHaveLength(
+          2
+        );
+        for (const args of commands.filter((args) => args[0] === "workflow")) {
+          expect(args).toEqual(
+            expect.arrayContaining([
+              "--repo",
+              "fixture/app",
+              "--ref",
+              "feature/model",
+              "environment=dev"
+            ])
+          );
+          expect(args.join(" ")).toContain("apps/custom.bicep");
+        }
+        expect(
+          commands
+            .filter((args) => args[1]?.includes("/artifacts?"))
+            .every((args) =>
+              /\/repos\/fixture\/app\/actions\/runs\/(42|43)\/artifacts\?/.test(
+                args[1]
+              )
+            )
+        ).toBe(true);
+        expect(invalidate).toHaveBeenCalledTimes(2);
+        expect(invalidate).toHaveBeenNthCalledWith(1, "fixture/app");
+        expect(invalidate).toHaveBeenNthCalledWith(2, "fixture/app");
+        expect(pipeline.unexpected).toEqual([]);
+        expect(
+          commands.some((args) => args.includes("PUT") || args[0] === "secret")
+        ).toBe(false);
+        await sdk.extension.shutdown("test");
+        snapshot.mockClear();
+        await vi.advanceTimersByTimeAsync(240000);
+        expect(snapshot).not.toHaveBeenCalled();
+      } finally {
+        dispatchReleased.resolve();
+        sendReleased.resolve();
+        executionOwner.shutdown();
+        await sdk.extension.shutdown("test");
+      }
+    }
+  );
+
+  it.each(["shutdown", "replacement"] as const)(
+    "cleans selected staged artifacts and prevents late registered-tool work after %s",
+    async (retirement) => {
+      const sdk = await createRuntimeSdkHarness();
+      const pipeline = createDeploymentPipelineRunner("success", {
+        existingEnvironment: true
+      });
+      const staged = createDeferred<void>();
+      const released = createDeferred<void>();
+      let stagedDir = "";
+      const removed = vi.spyOn(fs, "rmSync");
+      syncBuiltinESMExports();
+      const deployment = createDeploymentToolHarness({
+        owner: createProductionDeploymentExecutionOwner(),
+        run: async (args, options) => {
+          if (args[1]?.includes("/contents/apps/")) {
+            const content =
+              args[1].endsWith("/custom.bicep?ref=feature%2Fmodel") ?
+                "param environment string\nresource app 'Radius.Core/applications@2025-08-01' = { name: 'custom' }"
+              : args[1].endsWith("/bicepconfig.json?ref=feature%2Fmodel") ?
+                JSON.stringify({ extensions: { custom: "./custom-types.tgz" } })
+              : args[1].endsWith("/custom-types.tgz?ref=feature%2Fmodel") ?
+                "fixture types"
+              : undefined;
+            if (content === undefined)
+              throw new Error("Unexpected selected source");
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                type: "file",
+                encoding: "base64",
+                content: Buffer.from(content).toString("base64")
+              }),
+              stderr: ""
+            };
+          }
+          return pipeline.run(args, options);
+        }
+      });
+      const compile = vi.fn(async () => []);
+      sdk.deps.deployment = createProductionDeploymentTools({
+        owner: deployment.owner,
+        account: deployment.account,
+        session: sdk.deps.session,
+        ghCommandPresentation: BARE_GH_COMMAND_PRESENTATION,
+        runAz: async () => {
+          throw new Error("Unexpected Azure command.");
+        },
+        buildGraph: compile,
+        readRadArtifacts: async (input) => {
+          if (!("github" in input))
+            throw new Error("Expected selected remote artifacts.");
+          const result = await radArtifactsDirForSelection(input);
+          stagedDir = result.dir;
+          expect(result.remote).toBe(true);
+          staged.resolve();
+          await released.promise;
+          return result;
+        },
+        reportError: deployment.reportError,
+        redactDiagnostic: (value) => value,
+        reportWorkflowProgress: vi.fn(),
+        invalidateDeployListCache: vi.fn()
+      });
+      const start = sdk.extension.tools.find(
+        ({ name }) => name === "radius_deploy"
+      );
+      if (!start) throw new Error("Missing deployment tool.");
+      try {
+        await start.handler({
+          repo: "fixture/app",
+          environment: "dev",
+          branch: "feature/model",
+          provider: "aws",
+          appFile: "apps/custom.bicep"
+        });
+        await staged.promise;
+        const first = deployment.owner.resolve();
+        if (first.kind !== "resolved") throw new Error(first.kind);
+        const execution = deployment.owner.execution(first.invocation);
+        const lease = deployment.owner.activeReservation(
+          first.invocation.target
+        );
+        if (!execution || !lease)
+          throw new Error("Missing admitted execution.");
+        expect(fs.existsSync(stagedDir)).toBe(true);
+        const calls = deployment.run.mock.calls.length;
+        let replacement;
+        if (retirement === "shutdown") {
+          await sdk.extension.shutdown("test");
+          expect(
+            deployment.owner.activeReservation(first.invocation.target)
+          ).toBe(lease);
+        } else {
+          deployment.owner.release(lease);
+          replacement = deployment.owner.reserve(
+            first.invocation.target,
+            "deploy"
+          );
+          if (!replacement) throw new Error("Missing replacement lease.");
+          expect(
+            deployment.owner.begin({
+              target: first.invocation.target,
+              executor: deployment.executor,
+              reservation: replacement,
+              state: { deployLogs: ["replacement"] }
+            }).kind
+          ).toBe("resolved");
+        }
+        released.resolve();
+        await vi.waitFor(() => expect(fs.existsSync(stagedDir)).toBe(false));
+        expect(
+          removed.mock.calls.filter(([path]) => path === stagedDir)
+        ).toEqual([[stagedDir, { recursive: true, force: true }]]);
+        expect(compile).not.toHaveBeenCalled();
+        expect(deployment.run).toHaveBeenCalledTimes(calls);
+        expect(
+          pipeline.run.mock.calls.some(
+            ([args]) =>
+              args[0] === "workflow" || args.join(" ").includes("recipe")
+          )
+        ).toBe(false);
+        expect(execution.state.deployingResources).toEqual([]);
+        expect(execution.executor).toBe(deployment.executor);
+        expect(sdk.session.send).not.toHaveBeenCalled();
+        if (replacement) {
+          expect(
+            deployment.owner.activeReservation(first.invocation.target)
+          ).toBe(replacement);
+          const next = deployment.owner.resolve();
+          if (next.kind !== "resolved") throw new Error(next.kind);
+          expect(
+            deployment.owner.snapshot(next.invocation)?.deployLogs
+          ).toEqual(["replacement"]);
+          deployment.owner.release(replacement);
+        } else
+          await vi.waitFor(() =>
+            expect(
+              deployment.owner.activeReservation(first.invocation.target)
+            ).toBeUndefined()
+          );
+        expect(sdk.getOrCreateServer).not.toHaveBeenCalled();
+      } finally {
+        released.resolve();
+        await sdk.extension.shutdown("test");
+      }
+    }
+  );
+
   it.each(["writer", "read-only", "installation-dispatch-denied"] as const)(
     "uses real eligibility for %s through registered panel-free deployment tools",
     async (scenario) => {
