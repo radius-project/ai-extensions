@@ -486,6 +486,8 @@ describe("production deployment owner runtime binding", () => {
           canvasId: "radius"
         });
         await extension.canvases[0].onClose?.(context);
+        // A late SDK restore callback must not recreate the closed panel.
+        runtime.restoreDeploymentPresentation("panel");
         expect(runtime.servers.size).toBe(0);
         expect(execution.observation.stopped).toBe(false);
         expect(execution.executor).toBe(executor);
