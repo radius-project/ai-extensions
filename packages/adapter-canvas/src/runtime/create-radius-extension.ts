@@ -399,8 +399,10 @@ export function createRadiusExtension(
   let keepaliveBusy = false;
 
   function deployInFlight(): boolean {
-    for (const [, entry] of deps.servers) {
-      if (entry?.state?.deployStatus === "in_progress") return true;
+    try {
+      return deps.deployment.hasPendingWork();
+    } catch {
+      /* never let the predicate break the keepalive */
     }
     return false;
   }

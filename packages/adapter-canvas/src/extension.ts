@@ -147,6 +147,7 @@ const { setup: setupAccount, deployment: deploymentAccount } =
 const {
   servers,
   getOrCreateServer,
+  restoreDeploymentPresentation,
   stopServer,
   getLastWebviewActivityAt,
   environmentServices
@@ -190,6 +191,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   servers,
   getOrCreateServer,
+  restoreDeploymentPresentation,
   stopServer,
   getLastWebviewActivityAt,
   workspace: {

@@ -136,7 +136,7 @@ export function createDeploymentPipelineRunner(
       )
     ])
   );
-  let dispatched = false;
+  let dispatched = 0;
   let secretWritten = false;
   const unexpected: string[][] = [];
   const ok = (value: unknown) => ({
@@ -244,11 +244,15 @@ export function createDeploymentPipelineRunner(
     }
     if (args[0] === "api" && path === "/repos/fixture/app")
       return ok({ default_branch: "trunk" });
-    if (args[0] === "api" && path === "repos/fixture/app/actions/runs/42")
-      return http({ id: 42, status: "completed", conclusion });
     if (
       args[0] === "api" &&
-      path === "repos/fixture/app/actions/runs/42/jobs?per_page=100&page=1"
+      path === `repos/fixture/app/actions/runs/${41 + dispatched}`
+    )
+      return http({ id: 41 + dispatched, status: "completed", conclusion });
+    if (
+      args[0] === "api" &&
+      path ===
+        `repos/fixture/app/actions/runs/${41 + dispatched}/jobs?per_page=100&page=1`
     )
       return http({
         total_count: 1,
@@ -271,7 +275,7 @@ export function createDeploymentPipelineRunner(
         return ok({});
       }
       if (args[0] === "workflow" && args[1] === "run") {
-        dispatched = true;
+        dispatched++;
         return conclusion === "uncertain" ?
             { code: 1, stdout: "", stderr: "request timed out" }
           : ok({});
@@ -281,7 +285,7 @@ export function createDeploymentPipelineRunner(
           dispatched ?
             [
               {
-                databaseId: 42,
+                databaseId: 41 + dispatched,
                 status: "completed",
                 conclusion,
                 createdAt: new Date().toISOString()

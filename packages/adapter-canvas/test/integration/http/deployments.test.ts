@@ -2348,7 +2348,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
         now: () => 1_700_000_000_000
       });
       const monitor = createDeployMonitorService({
-        plannedGraph: { recover: unexpected },
+        plannedGraph: { recover: async () => [{ id: "r1", name: "db" }] },
         dispatch,
         outcome: {
           settle: async ({ entry, conclusion }) => {
@@ -2511,10 +2511,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
               expect(state.deployError).toContain(
                 "its outcome could not be confirmed"
               );
-              expect(state.deployingResources?.[0]).toMatchObject({
-                deployStatus: "failed",
-                deployMessage: DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE
-              });
+              expect(state.deployingResources).toEqual([]);
               expect(reservation.attemptId).toBe(state.deployAttempt?.id);
               releases++;
               releaseDeploymentMutation(state, reservation);
@@ -2707,9 +2704,7 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
     });
     const monitor = createDeployMonitorService({
       plannedGraph: {
-        recover: () => {
-          throw new Error("the request supplies planned resources");
-        }
+        recover: async () => [{ id: "r1", name: "db" }]
       },
       dispatch,
       outcome: {

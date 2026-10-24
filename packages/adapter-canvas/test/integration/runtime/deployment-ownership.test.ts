@@ -23,6 +23,92 @@ import {
 } from "../../../src/server.js";
 
 describe("production deployment owner runtime binding", () => {
+  it("stops selected committed-source recovery after SDK shutdown while retaining the admitted lease until settlement", async () => {
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    const pipeline = createDeploymentPipelineRunner("success", {
+      existingEnvironment: true
+    });
+    const run = vi.fn(
+      async (...[args, options]: Parameters<typeof pipeline.run>) => {
+        if (args[1]?.includes("/contents/apps/custom.bicep?")) {
+          entered.resolve();
+          await release.promise;
+        }
+        return pipeline.run(args, options);
+      }
+    );
+    const executor = successfulSelectedGhExecutor({ login: "writer", run });
+    const executionOwner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner,
+      deploymentAccount: async () => ({
+        state: "selected",
+        login: executor.login,
+        executor
+      })
+    });
+    const fake = createFakeDependencies();
+    const extension = await bootstrapRadiusExtension(
+      {
+        ...fake.deps,
+        ...runtime,
+        executionOwner,
+        deployment: runtime.deploymentOwner
+      },
+      {
+        createCanvas: (value) => value,
+        joinSession: async () => createFakeSession()
+      }
+    );
+    const target = { repo: "fixture/app", environment: "dev" };
+    try {
+      const entry = await runtime.getOrCreateServer(
+        "source-shutdown",
+        "deploying"
+      );
+      const response = await fetch(`${entry.baseUrl}/api/deploy`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": String(entry.state.browserMutationNonce)
+        },
+        body: JSON.stringify({
+          targetRepo: target.repo,
+          environment: target.environment,
+          branch: "feature/model",
+          provider: "aws",
+          appFile: "apps/custom.bicep"
+        })
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      await entered.promise;
+      const resolved = runtime.deploymentOwner.resolve();
+      if (resolved.kind !== "resolved") throw new Error(resolved.kind);
+      const execution = runtime.deploymentOwner.execution(resolved.invocation);
+      const lease = runtime.deploymentOwner.activeReservation(target);
+      const calls = run.mock.calls.length;
+      await extension.shutdown();
+      expect(runtime.deploymentOwner.activeReservation(target)).toBe(lease);
+      expect(runtime.deploymentOwner.hasPendingWork()).toBe(false);
+      release.resolve();
+      await vi.waitFor(() =>
+        expect(
+          runtime.deploymentOwner.activeReservation(target)
+        ).toBeUndefined()
+      );
+      expect(run).toHaveBeenCalledTimes(calls);
+      expect(execution?.state.deployingResources).toEqual([]);
+      expect(execution?.executor).toBe(executor);
+      expect(run.mock.calls.some(([args]) => args[0] === "workflow")).toBe(
+        false
+      );
+    } finally {
+      release.resolve();
+      await extension.shutdown();
+    }
+  });
   it.each([
     "writer",
     "read-only",
@@ -292,13 +378,29 @@ describe("production deployment owner runtime binding", () => {
       );
       const writing = createDeferred<void>();
       const written = createDeferred<void>();
+      const repairWriting = createDeferred<void>();
+      const repairWritten = createDeferred<void>();
+      let dispatchCount = 0;
       const executor = successfulSelectedGhExecutor({
         login: "fixture-user",
         requiresKeyringSwitch: true,
         run: async (args, options) => {
+          if (
+            args[0] === "api" &&
+            /\/contents\/.*\.bicep\?/.test(args[1]) &&
+            !args[1].includes("/contents/apps/custom.bicep?")
+          ) {
+            throw new Error(`Unexpected default application read: ${args[1]}`);
+          }
           if (args[0] === "workflow") {
-            writing.resolve();
-            await written.promise;
+            dispatchCount++;
+            if (dispatchCount === 1) {
+              writing.resolve();
+              await written.promise;
+            } else {
+              repairWriting.resolve();
+              await repairWritten.promise;
+            }
           }
           return pipeline.run(args, options);
         }
@@ -312,19 +414,17 @@ describe("production deployment owner runtime binding", () => {
         executionOwner,
         deploymentAccount: account,
         serverDependencies: {
-          createState: () => ({
-            contextRepo: "fixture/app",
-            contextBranch: "feature/model",
-            envName: "dev",
-            plannedResources: [{ id: "app", name: "app", type: "application" }]
-          })
+          createState: () => ({})
         }
       });
       const fake = createFakeDependencies();
       const session = createFakeSession();
-      vi.mocked(session.send).mockRejectedValueOnce(
-        new Error("Host unavailable")
-      );
+      const delivered = createDeferred<void>();
+      vi.mocked(session.send)
+        .mockRejectedValueOnce(new Error("Host unavailable"))
+        .mockImplementationOnce(async () => {
+          await delivered.promise;
+        });
       const extension = await bootstrapRadiusExtension(
         {
           ...fake.deps,
@@ -343,7 +443,14 @@ describe("production deployment owner runtime binding", () => {
         }
       );
       const target = { repo: "fixture/app", environment: "dev" };
+      const context = {
+        instanceId: "panel",
+        extensionId: "fixture:radius",
+        canvasId: "radius",
+        input: { repo: target.repo, branch: "feature/model", page: "deploying" }
+      };
       try {
+        await extension.canvases[0].open(context);
         const panel = await runtime.getOrCreateServer("panel", "deploying");
         const response = await fetch(`${panel.baseUrl}/api/deploy`, {
           method: "POST",
@@ -372,6 +479,7 @@ describe("production deployment owner runtime binding", () => {
           extensionId: "fixture:radius",
           canvasId: "radius"
         });
+        await extension.canvases[0].onClose?.(context);
         expect(runtime.servers.size).toBe(0);
         expect(execution.observation.stopped).toBe(false);
         expect(execution.executor).toBe(executor);
@@ -404,6 +512,8 @@ describe("production deployment owner runtime binding", () => {
           ).toBe(true);
           expect(pipeline.run.mock.calls.at(-1)?.[0][0]).toBe("workflow");
         } else {
+          expect(runtime.deploymentOwner.hasPendingWork()).toBe(true);
+          delivered.resolve();
           const field =
             outcome === "failure" ? "deployHandoffState" : "deployNoticeState";
           await vi.waitFor(
@@ -411,10 +521,32 @@ describe("production deployment owner runtime binding", () => {
             { timeout: 5000 }
           );
           expect(session.send).toHaveBeenCalledTimes(2);
-          const reopened = await runtime.getOrCreateServer(
-            "panel",
-            "deploying"
+          await vi.waitFor(() =>
+            expect(runtime.deploymentOwner.hasPendingWork()).toBe(false)
           );
+          const unrelatedTarget = {
+            ...current.invocation.target,
+            repo: "fixture/another",
+            environment: "other"
+          };
+          const unrelatedReservation = runtime.deploymentOwner.reserve(
+            unrelatedTarget,
+            "deploy"
+          );
+          if (!unrelatedReservation)
+            throw new Error("Missing unrelated reservation");
+          const unrelated = runtime.deploymentOwner.begin({
+            target: unrelatedTarget,
+            executor,
+            reservation: unrelatedReservation,
+            state: { deployStatus: "complete" }
+          });
+          runtime.deploymentOwner.release(unrelatedReservation);
+          if (unrelated.kind !== "resolved") throw new Error(unrelated.kind);
+          expect(runtime.deploymentOwner.resolve().kind).toBe("ambiguous");
+          await extension.canvases[0].open(context);
+          await extension.canvases[0].open(context);
+          let reopened = await runtime.getOrCreateServer("panel", "deploying");
           const status = await fetch(`${reopened.baseUrl}/api/deploy-status`);
           expect(await status.json()).toMatchObject({
             status: "failed",
@@ -423,10 +555,87 @@ describe("production deployment owner runtime binding", () => {
           expect(reopened.state[field]).toBe("delivered");
           expect(account).toHaveBeenCalledOnce();
           expect(session.send).toHaveBeenCalledTimes(2);
+          if (outcome === "failure") {
+            const repair = await fetch(`${reopened.baseUrl}/api/deploy`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Radius-Mutation-Nonce": String(
+                  reopened.state.browserMutationNonce
+                )
+              },
+              body: JSON.stringify({ attemptId: current.invocation.attemptId })
+            });
+            expect(repair.status, await repair.text()).toBe(200);
+            await repairWriting.promise;
+            vi.useFakeTimers();
+            repairWritten.resolve();
+            await vi.runAllTimersAsync();
+            vi.useRealTimers();
+            await vi.waitFor(() =>
+              expect(
+                runtime.deploymentOwner.activeReservation(target)
+              ).toBeUndefined()
+            );
+            expect(account).toHaveBeenLastCalledWith(
+              expect.objectContaining({ savedLogin: "fixture-user" })
+            );
+            const repaired = runtime.deploymentOwner.resolve({
+              attemptId: current.invocation.attemptId
+            });
+            if (repaired.kind !== "resolved") throw new Error(repaired.kind);
+            expect(repaired.invocation.target.appFile).toBe(
+              "apps/custom.bicep"
+            );
+            expect(repaired.invocation.generation).toBeGreaterThan(
+              current.invocation.generation
+            );
+            expect(
+              pipeline.run.mock.calls.some(([args]) =>
+                args[1]?.includes("/contents/apps/custom.bicep?")
+              )
+            ).toBe(true);
+            const sends = vi.mocked(session.send).mock.calls.length;
+            await extension.canvases[0].onClose?.(context);
+            await extension.canvases[0].open(context);
+            reopened = await runtime.getOrCreateServer("panel", "deploying");
+            expect(reopened.state.deployGeneration).toBe(
+              repaired.invocation.generation
+            );
+            expect(reopened.state.appFile).toBe("apps/custom.bicep");
+            expect(session.send).toHaveBeenCalledTimes(sends);
+            expect(account).toHaveBeenCalledTimes(2);
+          } else {
+            const staleGeneration = current.invocation.generation + 100;
+            reopened.state.deployGeneration = staleGeneration;
+            await extension.canvases[0].open(context);
+            expect(reopened.state.deployGeneration).toBe(staleGeneration);
+            const stale = await fetch(`${reopened.baseUrl}/api/deploy-status`);
+            expect(stale.status).toBe(200);
+            await stale.json();
+            expect(account).toHaveBeenCalledOnce();
+            expect(session.send).toHaveBeenCalledTimes(2);
+          }
+          await extension.canvases[0].open({
+            ...context,
+            input: {
+              ...context.input,
+              ...(outcome === "failure" ?
+                { repo: "fixture/retarget" }
+              : { branch: "explicit-retarget" })
+            }
+          });
+          if (outcome === "failure")
+            expect(reopened.state.deployAttempt).toBeUndefined();
+          expect(
+            runtime.deploymentOwner.snapshot(unrelated.invocation)?.deployStatus
+          ).toBe("complete");
         }
         expect(pipeline.unexpected).toEqual([]);
       } finally {
         written.resolve();
+        repairWritten.resolve();
+        delivered.resolve();
         vi.useRealTimers();
         await extension.shutdown();
         setDeployRepairHandoff(null);

@@ -1,5 +1,4 @@
 import {
-  assertDeploymentWorkflowsSynchronized,
   type syncRepoWorkflows,
   type SyncWorkflowResult,
   type WorkflowCommitFailure
@@ -72,11 +71,6 @@ export function createWorkflowPresync(ports: {
         );
         return { created: [], updated: [], failed: [] };
       }
-    },
-    async forDeployment(...args: Parameters<typeof synchronize>) {
-      const result = await synchronize(...args);
-      assertDeploymentWorkflowsSynchronized(result, args[3], args[4] ?? "");
-      return project(result);
     }
   };
 }

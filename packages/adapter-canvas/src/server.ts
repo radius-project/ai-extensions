@@ -1144,7 +1144,6 @@ const workflowPresync = createWorkflowPresync({
   errorMessage
 });
 const ensureWorkflowsCurrent = workflowPresync.bestEffort;
-const ensureDeploymentWorkflowsCurrent = workflowPresync.forDeployment;
 
 // no access to the SDK `session`, so when a graph/generate route finds no
 // app.bicep it delegates through this hook, which injects a user turn asking the
@@ -1428,6 +1427,7 @@ export {
 
 interface DeploymentDeliveryLifetime {
   isCurrent(): boolean;
+  trackWork<T>(work: Promise<T>): Promise<T>;
   redactDiagnostic?(value: string): string;
   retry(callback: () => void, milliseconds: number): void;
   publish(): void;
@@ -1458,7 +1458,8 @@ export function triggerDeployRepairHandoff(
         send: (input) => {
           if (typeof deployRepairHandoff !== "function")
             throw new Error("The host repair handoff is unavailable.");
-          return deployRepairHandoff(input);
+          const delivery = Promise.resolve(deployRepairHandoff(input));
+          return lifetime ? lifetime.trackWork(delivery) : delivery;
         },
         redactDiagnostic: lifetime?.redactDiagnostic ?? redactGhCredentials,
         publish: () => lifetime?.publish(),
@@ -1533,7 +1534,8 @@ export function triggerDeployFailureNotice(
         send: (input) => {
           if (!deployFailureNotice)
             throw new Error("Deployment notice delivery is unavailable.");
-          return deployFailureNotice(input);
+          const delivery = Promise.resolve(deployFailureNotice(input));
+          return lifetime ? lifetime.trackWork(delivery) : delivery;
         },
         publish: () => lifetime?.publish(),
         retry: (callback, milliseconds) => {
@@ -5347,16 +5349,22 @@ export function createProductionCanvasServerRuntime(
       !execution.observation.stopped;
     const result = notify(execution, instanceId, {
       isCurrent,
+      trackWork: deploymentOwner.trackWork,
       redactDiagnostic: execution.executor.redact,
       publish: () => deploymentOwner.publish(resolved.invocation),
       retry: (callback, milliseconds) => {
-        void retryDeploymentDelivery(callback, milliseconds, {
-          delay: (delay) => execution.observation.delay(delay),
-          isCurrent,
-          errorMessage: (error) => execution.executor.errorMessage(error),
-          reportError: (message) =>
-            console.error("[radius deployment] Delivery retry failed:", message)
-        });
+        void deploymentOwner.trackWork(
+          retryDeploymentDelivery(callback, milliseconds, {
+            delay: (delay) => execution.observation.delay(delay),
+            isCurrent,
+            errorMessage: (error) => execution.executor.errorMessage(error),
+            reportError: (message) =>
+              console.error(
+                "[radius deployment] Delivery retry failed:",
+                message
+              )
+          })
+        );
       }
     });
     deploymentOwner.publish(resolved.invocation);
@@ -6497,8 +6505,14 @@ export function createProductionCanvasServerRuntime(
     page?: string
   ): Promise<CanvasServerEntry> {
     const entry = await canvasServer.getOrCreate(instanceId, page);
-    deploymentPresentation.synchronize(instanceId, entry.state);
+    if (entry.state.plannedEnvironment || entry.state.envName)
+      deploymentPresentation.synchronize(instanceId, entry.state);
     return entry;
+  }
+
+  function restoreDeploymentPresentation(instanceId: string): void {
+    const entry = canvasServer.instances.get(instanceId);
+    if (entry) deploymentPresentation.restore(instanceId, entry.state);
   }
 
   async function stopServer(instanceId: string, force = false): Promise<void> {
@@ -6573,6 +6587,7 @@ export function createProductionCanvasServerRuntime(
     operationResume,
     environmentServices,
     getOrCreateServer,
+    restoreDeploymentPresentation,
     stopServer,
     getLastWebviewActivityAt,
     hasActiveEnvironmentTasks: executionOwner.hasActiveEnvironmentTasks,

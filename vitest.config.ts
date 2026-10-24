@@ -58,7 +58,7 @@ export default defineConfig({
         },
         "packages/adapter-canvas/src/runtime/deployment-controller.ts": {
           statements: 100,
-          branches: 99.21,
+          branches: 100,
           functions: 100,
           lines: 100
         },
@@ -92,7 +92,7 @@ export default defineConfig({
           {
             statements: 100,
             branches: 100,
-            functions: 93.75,
+            functions: 94.11,
             lines: 100
           },
         "packages/adapter-canvas/src/server/services/deploy-monitor.ts": {

@@ -8,6 +8,9 @@ import {
   KEEPALIVE_ACTIVE_WINDOW_MS
 } from "./create-radius-extension.js";
 import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
+import { createDeploymentControllerHarness } from "../../test/support/runtime/deployment.js";
+import { createDeferred } from "../../test/support/browser/fakes.js";
+import { createDeploymentNotifications } from "./deployment-notifications.js";
 import {
   createFakeDependencies,
   createFakeSession,
@@ -761,6 +764,127 @@ describe("RU-19: keepalive", () => {
     vi.useRealTimers();
   });
 
+  it.each(["no-panel", "closed-panel"] as const)(
+    "keeps genuinely owned work alive beyond the activity window with %s",
+    async (mode) => {
+      const fake = createFakeDependencies();
+      const harness = createDeploymentControllerHarness();
+      const ext = createRadiusExtension({
+        ...fake.deps,
+        deployment: harness.owner
+      });
+      const session = createFakeSession();
+      const snapshot = session.metadata?.snapshot;
+      if (!snapshot) throw new Error("Missing metadata fixture");
+      ext.attachSession(session);
+      fake.setLastWebviewActivityAt(Date.now());
+      if (mode === "closed-panel") {
+        await fake.deps.getOrCreateServer("radius-panel");
+        await ext.canvases[0].onClose?.({
+          extensionId: "radius",
+          canvasId: "radius",
+          instanceId: "radius-panel"
+        });
+      }
+      const first = harness.seed();
+      const second = harness.seed({}, { environment: "second" });
+      const observation = createDeferred<void>();
+      const delivery = createDeferred<void>();
+      const tasks = [
+        harness.owner.run(
+          first.invocation,
+          () => observation.promise,
+          () => {}
+        ),
+        harness.owner.run(
+          second.invocation,
+          () => delivery.promise,
+          () => {}
+        )
+      ];
+      const settled = Promise.allSettled(tasks);
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_ACTIVE_WINDOW_MS * 2);
+      vi.mocked(snapshot).mockClear();
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS);
+      expect(snapshot).toHaveBeenCalledOnce();
+      observation.resolve();
+      await tasks[0];
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS);
+      expect(snapshot).toHaveBeenCalledTimes(2);
+      delivery.reject(new Error("delivery failed"));
+      await settled;
+      await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS * 2);
+      expect(snapshot).toHaveBeenCalledTimes(2);
+      await ext.shutdown("test");
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
+  it.each(["settlement", "shutdown"] as const)(
+    "keeps detached notification sends and retries active until %s despite rejected metadata",
+    async (ending) => {
+      const fake = createFakeDependencies();
+      const harness = createDeploymentControllerHarness();
+      const ext = createRadiusExtension({
+        ...fake.deps,
+        deployment: harness.owner
+      });
+      const session = createFakeSession();
+      const snapshot = session.metadata?.snapshot;
+      if (!snapshot) throw new Error("Missing metadata fixture");
+      vi.mocked(snapshot).mockRejectedValueOnce(
+        new Error("Metadata unavailable")
+      );
+      const repair = createDeferred<void>();
+      const notice = createDeferred<void>();
+      const notify = createDeploymentNotifications({
+        owner: harness.owner,
+        repair: vi
+          .fn(async () => repair.promise)
+          .mockRejectedValueOnce(new Error("Host unavailable")),
+        notice: vi
+          .fn(async () => {})
+          .mockImplementationOnce(() => notice.promise),
+        reportError: harness.reportError
+      });
+      const first = harness.seed({ deployStatus: "failed" });
+      const second = harness.seed(
+        { deployStatus: "failed", deployErrorKind: "run-unconfirmed" },
+        { environment: "second" }
+      );
+      ext.attachSession(session);
+      fake.setLastWebviewActivityAt(
+        Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS * 2
+      );
+      try {
+        notify(first);
+        notify(second);
+        await vi.advanceTimersByTimeAsync(KEEPALIVE_ACTIVE_WINDOW_MS * 2);
+        expect(harness.owner.hasPendingWork()).toBe(true);
+        vi.mocked(snapshot).mockClear();
+        await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS);
+        expect(snapshot).toHaveBeenCalledOnce();
+        repair.resolve();
+        await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS);
+        expect(first.state.deployHandoffState).toBe("delivered");
+        expect(snapshot).toHaveBeenCalledTimes(2);
+        expect(harness.owner.hasPendingWork()).toBe(true);
+        if (ending === "shutdown") await ext.shutdown("test");
+        notice.reject(new Error("Notice unavailable"));
+        await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS * 2);
+        expect(harness.owner.hasPendingWork()).toBe(false);
+        expect(snapshot).toHaveBeenCalledTimes(2);
+        if (ending === "settlement")
+          expect(second.state.deployNoticeState).toBe("delivered");
+      } finally {
+        repair.resolve();
+        notice.resolve();
+        await ext.shutdown("test");
+      }
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  );
+
   it("pings session.metadata.snapshot when a canvas panel was recently active", async () => {
     const { ext, deps, setLastWebviewActivityAt } = setup();
     const session = createFakeSession();
@@ -782,7 +906,7 @@ describe("RU-19: keepalive", () => {
     expect(session.metadata!.snapshot).not.toHaveBeenCalled();
   });
 
-  it("pings when a deploy is in flight even if the panel is not recently active", async () => {
+  it("does not retain a stale in-progress panel snapshot without owned work", async () => {
     const { ext, deps, setLastWebviewActivityAt } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
@@ -796,7 +920,20 @@ describe("RU-19: keepalive", () => {
     });
 
     await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS + 10);
-    expect(session.metadata!.snapshot).toHaveBeenCalled();
+    expect(session.metadata!.snapshot).not.toHaveBeenCalled();
+  });
+
+  it("protects keepalive from a rejected deployment activity predicate", async () => {
+    const { ext, deps, setLastWebviewActivityAt } = setup();
+    const session = createFakeSession();
+    vi.mocked(deps.deployment.hasPendingWork).mockImplementation(() => {
+      throw new Error("unavailable");
+    });
+    ext.attachSession(session);
+    setLastWebviewActivityAt(Date.now() - KEEPALIVE_ACTIVE_WINDOW_MS - 1);
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_INTERVAL_MS);
+    expect(session.metadata!.snapshot).not.toHaveBeenCalled();
+    await ext.shutdown("test");
   });
 
   it("never throws even when session.metadata.snapshot rejects", async () => {

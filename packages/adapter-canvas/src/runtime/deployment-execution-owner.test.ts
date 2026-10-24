@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/support/browser/fakes.js";
 import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 import { createWorkflowObservationScope } from "../server/services/workflow-observation-scope.js";
 import {
@@ -75,6 +76,42 @@ function fixture() {
 }
 
 describe("runtime deployment ownership", () => {
+  it("counts unsettled work rather than saved tasks, snapshots, or current registrations", async () => {
+    const { owner, begin } = fixture();
+    const first = begin();
+    expect(owner.hasPendingWork()).toBe(false);
+    const hold = createDeferred<void>();
+    const settled = vi.fn();
+    const work = vi.fn(() => hold.promise);
+    const task = owner.run(first.invocation, work, settled);
+    const rejection = expect(task).rejects.toThrow("held failure");
+    expect(owner.run(first.invocation, work, settled)).toBe(task);
+    await Promise.resolve();
+    expect(owner.hasPendingWork()).toBe(true);
+    owner.release(first.reservation);
+    const replacement = begin();
+    expect(owner.hasPendingWork()).toBe(true);
+    hold.reject(new Error("held failure"));
+    await rejection;
+    expect(settled).toHaveBeenCalledOnce();
+    expect(owner.hasPendingWork()).toBe(false);
+    expect(owner.snapshot(replacement.invocation)?.deployStatus).toBe(
+      "in_progress"
+    );
+    const pending = createDeferred<void>();
+    const second = owner.run(
+      replacement.invocation,
+      () => pending.promise,
+      settled
+    );
+    await Promise.resolve();
+    expect(owner.hasPendingWork()).toBe(true);
+    owner.shutdown();
+    expect(owner.hasPendingWork()).toBe(false);
+    pending.resolve();
+    await second;
+    expect(settled).toHaveBeenCalledTimes(2);
+  });
   it("normalizes only owned target state and invalidates a graph remembered from another source", () => {
     const { owner, reserve } = fixture();
     const state = {

@@ -68,6 +68,81 @@ function fixture() {
 }
 
 describe("optional deployment presentation", () => {
+  it("restores only the remembered instance after context establishment, including its repair successor", () => {
+    const { owner, begin, panel, presentation } = fixture();
+    const invocation = begin({ deployLogs: ["original"] });
+    begin({}, { ...TARGET, environment: "other" });
+    const first = panel();
+    presentation.attach("panel", first, invocation);
+    presentation.detach("panel");
+    const repaired = begin({ deployLogs: ["repair"] }, TARGET, invocation);
+    const reopened: CanvasState = {
+      contextRepo: TARGET.repo,
+      contextBranch: TARGET.branch
+    };
+    presentation.restore("unrelated", reopened);
+    expect(reopened.deployAttempt).toBeUndefined();
+    presentation.restore("panel", reopened);
+    expect(reopened.deployAttempt?.id).toBe(invocation.attemptId);
+    expect(reopened.deployGeneration).toBe(repaired.generation);
+    expect(reopened.envName).toBe(TARGET.environment);
+    expect(reopened.appFile).toBe(TARGET.appFile);
+    expect(first.deployLogs).toEqual(["original"]);
+    presentation.restore("panel", reopened);
+    owner.appendLog(repaired, "next");
+    expect(reopened.deployLogs).toEqual(["repair", "next"]);
+    presentation.dispose();
+    presentation.restore("panel", { ...reopened });
+    expect(presentation.owns(reopened)).toBe(false);
+  });
+
+  it.each([
+    { contextRepo: "fixture/other" },
+    { contextBranch: "other" },
+    { plannedRepo: "fixture/other" },
+    { plannedBranch: "other" },
+    { plannedEnvironment: "other" },
+    { envName: "other" },
+    { plannedProvider: "aws" },
+    { appFile: "other.bicep" },
+    { deployAttempt: { id: "stale" }, deployGeneration: 1 },
+    { deployAttempt: { id: "attempt-1" }, deployGeneration: 99 }
+  ])(
+    "invalidates a remembered binding on explicit retarget or stale projection %j",
+    (change) => {
+      const { begin, panel, presentation } = fixture();
+      const invocation = begin();
+      presentation.attach("panel", panel(), invocation);
+      presentation.detach("panel");
+      const state: CanvasState = {
+        contextRepo: TARGET.repo,
+        contextBranch: TARGET.branch,
+        ...change
+      };
+      presentation.restore("panel", state);
+      const fresh = { contextRepo: TARGET.repo, contextBranch: TARGET.branch };
+      presentation.restore("panel", fresh);
+      expect(presentation.owns(fresh)).toBe(false);
+    }
+  );
+
+  it.each(["replacement", "shutdown"] as const)(
+    "does not restore a %s binding using another matching execution",
+    (mode) => {
+      const { owner, begin, panel, presentation } = fixture();
+      const invocation = begin();
+      presentation.attach("panel", panel(), invocation);
+      presentation.detach("panel");
+      if (mode === "replacement") begin();
+      else owner.shutdown();
+      const state: CanvasState = {
+        contextRepo: TARGET.repo,
+        contextBranch: TARGET.branch
+      };
+      presentation.restore("panel", state);
+      expect(state.deployAttempt).toBeUndefined();
+    }
+  );
   it("projects detached dispatch evidence without aliasing and clears it for the replacement invocation", () => {
     const { owner, begin, panel, presentation } = fixture();
     const invocation = begin({

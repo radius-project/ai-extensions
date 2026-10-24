@@ -1,6 +1,6 @@
 import { redactCredentials } from "@radius-project/core";
 import type { SelectedGhExecutor } from "../gh.js";
-import type { CanvasState } from "../shared.js";
+import type { CanvasGraphResource, CanvasState } from "../shared.js";
 import type { WorkflowObservationScope } from "../server/services/workflow-observation-scope.js";
 
 export interface DeploymentTarget {
@@ -29,7 +29,7 @@ export interface DeploymentReservation {
 export interface DeploymentExecution {
   readonly invocation: DeploymentInvocation;
   readonly executor: SelectedGhExecutor;
-  readonly state: CanvasState;
+  readonly state: CanvasState & { deployingResources: CanvasGraphResource[] };
   readonly observation: WorkflowObservationScope;
 }
 
@@ -79,6 +79,12 @@ export function createDeploymentExecutionOwner(
   const issuedIds = new Set<string>();
   let generation = 0;
   let stopped = false;
+  const pending = new Set<Promise<unknown>>();
+  const trackWork = <T>(work: Promise<T>): Promise<T> => {
+    const task = work.finally(() => pending.delete(task));
+    pending.add(task);
+    return task;
+  };
 
   const report = (error: unknown): void => {
     try {
@@ -136,6 +142,10 @@ export function createDeploymentExecutionOwner(
     get stopped() {
       return stopped;
     },
+    hasPendingWork(): boolean {
+      return !stopped && pending.size > 0;
+    },
+    trackWork,
     activeReservation,
     reserve(
       target: Pick<DeploymentTarget, "repo" | "environment">,
@@ -201,12 +211,14 @@ export function createDeploymentExecutionOwner(
       if (!attemptId || (!input.repair && issuedIds.has(attemptId))) {
         throw new Error("Deployment attempt identity must be unique.");
       }
-      const state = structuredClone(input.state);
+      const state: DeploymentExecution["state"] = {
+        ...structuredClone(input.state),
+        deployingResources: []
+      };
       const target = input.target;
       // Panel graphs do not carry committed application-file provenance.
       // Rebuild rather than treating mutable panel selection as that evidence.
       state.plannedResources = [];
-      state.deployingResources = [];
       state.envName = target.environment;
       state.appFile = target.appFile;
       state.deployParams = {
@@ -352,18 +364,18 @@ export function createDeploymentExecutionOwner(
           new Error("Deployment invocation is no longer active.")
         );
       }
-      execution.task = Promise.resolve()
-        .then(async () => {
+      execution.task = trackWork(
+        Promise.resolve().then(async () => {
           if (!stopped && current(invocation) === execution)
             await work(execution);
         })
-        .finally(() => {
-          try {
-            settled();
-          } catch (error) {
-            report(error);
-          }
-        });
+      ).finally(() => {
+        try {
+          settled();
+        } catch (error) {
+          report(error);
+        }
+      });
       return execution.task;
     },
     shutdown(): void {
