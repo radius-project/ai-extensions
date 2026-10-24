@@ -200,14 +200,26 @@ describe("registered direct deployment tools", () => {
           );
           expect(args.join(" ")).toContain("apps/custom.bicep");
         }
+        const artifactReads = commands.filter((args) =>
+          args[1]?.includes("/artifacts?")
+        );
+        for (const runId of [42, 43])
+          expect(artifactReads).toEqual(
+            expect.arrayContaining([
+              expect.arrayContaining([
+                "api",
+                expect.stringContaining(
+                  `/repos/fixture/app/actions/runs/${runId}/artifacts?`
+                )
+              ])
+            ])
+          );
         expect(
-          commands
-            .filter((args) => args[1]?.includes("/artifacts?"))
-            .every((args) =>
-              /\/repos\/fixture\/app\/actions\/runs\/(42|43)\/artifacts\?/.test(
-                args[1]
-              )
+          artifactReads.every((args) =>
+            /\/repos\/fixture\/app\/actions\/runs\/(42|43)\/artifacts\?/.test(
+              args[1]
             )
+          )
         ).toBe(true);
         expect(invalidate).toHaveBeenCalledTimes(2);
         expect(invalidate).toHaveBeenNthCalledWith(1, "fixture/app");
