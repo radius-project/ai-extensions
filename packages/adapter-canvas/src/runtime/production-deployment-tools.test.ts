@@ -123,7 +123,9 @@ describe("production deployment tool composition", () => {
     vi.mocked(f.host.send).mockRejectedValue(new Error("disconnected"));
     try {
       await f.tools.status({ attemptId: execution.invocation.attemptId });
-      expect(execution.state.deployHandoffState).toBe("retryable");
+      await vi.waitFor(() =>
+        expect(execution.state.deployHandoffState).toBe("retryable")
+      );
       const replacement = createFakeSession();
       f.session.set(replacement);
       await vi.advanceTimersByTimeAsync(2000);

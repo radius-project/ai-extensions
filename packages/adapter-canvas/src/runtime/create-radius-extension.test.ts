@@ -8,7 +8,7 @@ import {
   KEEPALIVE_ACTIVE_WINDOW_MS
 } from "./create-radius-extension.js";
 import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
-import { createDeploymentControllerHarness } from "../../test/support/runtime/deployment.js";
+import { createDeploymentToolHarness } from "../../test/support/runtime/deployment.js";
 import { createDeferred } from "../../test/support/browser/fakes.js";
 import { createDeploymentNotifications } from "./deployment-notifications.js";
 import {
@@ -768,10 +768,10 @@ describe("RU-19: keepalive", () => {
     "keeps genuinely owned work alive beyond the activity window with %s",
     async (mode) => {
       const fake = createFakeDependencies();
-      const harness = createDeploymentControllerHarness();
+      const harness = createDeploymentToolHarness();
       const ext = createRadiusExtension({
         ...fake.deps,
-        deployment: harness.owner
+        deployment: harness.tools
       });
       const session = createFakeSession();
       const snapshot = session.metadata?.snapshot;
@@ -824,10 +824,10 @@ describe("RU-19: keepalive", () => {
     "keeps detached notification sends and retries active until %s despite rejected metadata",
     async (ending) => {
       const fake = createFakeDependencies();
-      const harness = createDeploymentControllerHarness();
+      const harness = createDeploymentToolHarness();
       const ext = createRadiusExtension({
         ...fake.deps,
-        deployment: harness.owner
+        deployment: harness.tools
       });
       const session = createFakeSession();
       const snapshot = session.metadata?.snapshot;

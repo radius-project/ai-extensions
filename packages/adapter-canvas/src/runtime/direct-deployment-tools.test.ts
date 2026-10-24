@@ -230,11 +230,15 @@ describe("direct deployment tools", () => {
         branch: "feature/model"
       };
       expect(await f.tools.start(input)).toContain("started");
+      expect(f.tools.hasPendingWork()).toBe(true);
       expect(await f.tools.start(input)).toContain("already in progress");
       expect(f.monitor).toHaveBeenCalledOnce();
     } finally {
       gate.resolve();
     }
+    await vi.waitFor(() => expect(f.tools.hasPendingWork()).toBe(false));
+    f.tools.shutdown();
+    expect(f.tools.hasPendingWork()).toBe(false);
   });
 
   it.each([undefined, 1, 999])(
