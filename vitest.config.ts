@@ -23,6 +23,45 @@ export default defineConfig({
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
+        "packages/adapter-canvas/src/runtime/{deployment-account-eligibility,setup-account-eligibility,github-account-resolvers}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/core/src/deployment-repair.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-canvas/src/runtime/deployment-{delivery-retry,notice-delivery,notifications,repair-delivery}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/runtime/production-deployment-controller.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "packages/adapter-canvas/src/server/services/deploy-request.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
+        "packages/adapter-canvas/src/runtime/deployment-controller.ts": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
         "packages/core/src/deployment-{monitor,outcome}.ts": {
           statements: 100,
           branches: 100,
@@ -53,7 +92,7 @@ export default defineConfig({
           {
             statements: 100,
             branches: 100,
-            functions: 93.75,
+            functions: 94.11,
             lines: 100
           },
         "packages/adapter-canvas/src/server/services/deploy-monitor.ts": {

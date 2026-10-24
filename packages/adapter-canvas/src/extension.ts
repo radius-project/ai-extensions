@@ -112,10 +112,10 @@ import type { SessionPort } from "./runtime/session.js";
 import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
+import { createProductionDeploymentExecutionOwner } from "./runtime/production-deployment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
 import { githubAccountChoice } from "./runtime/github-account-choice.js";
-import { createDeploymentAccountResolver } from "./runtime/deployment-account.js";
-import { createGitHubAccountReadinessService } from "./server/services/github-account-readiness.js";
+import { createGitHubAccountResolvers } from "./runtime/github-account-resolvers.js";
 import { createEnvironmentTools } from "./runtime/environment-tools.js";
 
 function errorMessage(error: unknown): string {
@@ -127,32 +127,38 @@ const execFileAsync = promisify(execFile);
 // ─── Production dependency wiring ────────────────────────────────────────────
 const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
+const deploymentOwner = createProductionDeploymentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
 const ghCommandPresentation = resolveGhCommandPresentation();
-const deploymentAccount = createDeploymentAccountResolver({
-  readIdentity: async () => {
-    resetGhIdentityCache();
-    return getGitHubIdentity();
-  },
-  readiness: createGitHubAccountReadinessService(accountContext.coordinator, {
+const { setup: setupAccount, deployment: deploymentAccount } =
+  createGitHubAccountResolvers({
+    readIdentity: async () => {
+      resetGhIdentityCache();
+      return getGitHubIdentity();
+    },
+    coordinator: accountContext.coordinator,
     ownerKey: accountContext.ownerKey,
-    ghCommandPresentation
-  }),
-  createExecutor: (login) =>
-    accountContext.coordinator.createReadOnlyExecutor(login),
-  get choose() {
-    return githubAccountChoice(sessionHolder.tryGet());
-  },
-  redactDiagnostic: redactGhCredentials
-});
+    readinessOptions: { ghCommandPresentation },
+    get choose() {
+      return githubAccountChoice(sessionHolder.tryGet());
+    },
+    redactDiagnostic: redactGhCredentials
+  });
 const {
   servers,
   getOrCreateServer,
+  restoreDeploymentPresentation,
   stopServer,
   getLastWebviewActivityAt,
   environmentServices
-} = createProductionCanvasServerRuntime({ executionOwner, accountContext });
+} = createProductionCanvasServerRuntime({
+  executionOwner,
+  accountContext,
+  deploymentOwner,
+  deploymentAccount
+});
 const dependencies: RadiusExtensionDependencies = {
+  deployment: deploymentOwner,
   logError: (message) => console.error(message),
   session: sessionHolder,
   executionOwner,
@@ -160,7 +166,7 @@ const dependencies: RadiusExtensionDependencies = {
     ...environmentServices,
     owner: executionOwner,
     session: sessionHolder,
-    account: deploymentAccount,
+    account: setupAccount,
     workspace: () => detectWorkspaceContext(sessionHolder.get()),
     validateBranch: async (branch) => {
       await execFileAsync("git", ["check-ref-format", "--branch", branch], {
@@ -185,6 +191,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   servers,
   getOrCreateServer,
+  restoreDeploymentPresentation,
   stopServer,
   getLastWebviewActivityAt,
   workspace: {

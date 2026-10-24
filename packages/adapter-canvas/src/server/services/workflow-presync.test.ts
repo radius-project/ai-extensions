@@ -29,12 +29,10 @@ const target = [
   "aws",
   ["run-rad-commands.yml", "run-rad-commands-azure.yml"],
   "feature/model&review=1"
-] satisfies Parameters<
-  ReturnType<typeof createWorkflowPresync>["forDeployment"]
->;
+] satisfies Parameters<ReturnType<typeof createWorkflowPresync>["bestEffort"]>;
 
 describe("workflow presynchronization caller policies", () => {
-  it("rejects failed deployment updates but preserves delete's failure evidence", async () => {
+  it("preserves delete's independent failure evidence", async () => {
     const failed = [
       { path: ".github/workflows/run-rad-commands.yml", branch: "main" },
       {
@@ -43,9 +41,6 @@ describe("workflow presynchronization caller policies", () => {
       }
     ];
     const { service } = fixture({ failed });
-    await expect(service.forDeployment(...target)).rejects.toThrow(
-      "Could not prepare deployment workflows: .github/workflows/run-rad-commands.yml on main, .github/workflows/run-rad-commands-azure.yml on feature/model&review=1"
-    );
     expect(await service.bestEffort(...target)).toEqual({
       created: [],
       updated: [],
@@ -53,11 +48,10 @@ describe("workflow presynchronization caller policies", () => {
     });
   });
 
-  it("propagates a synchronization exception only for deployment", async () => {
+  it("reports legacy synchronization exceptions without throwing", async () => {
     const { service, synchronize, log } = fixture();
     const error = new Error("Workflow state unavailable");
     synchronize.mockRejectedValue(error);
-    await expect(service.forDeployment(...target)).rejects.toBe(error);
     expect(await service.bestEffort(...target)).toEqual({
       created: [],
       updated: [],
@@ -70,7 +64,7 @@ describe("workflow presynchronization caller policies", () => {
 
   it("accepts a no-op without changing ambient target or adding template generation", async () => {
     const { service, synchronize, log } = fixture();
-    expect(await service.forDeployment(...target)).toEqual({
+    expect(await service.bestEffort(...target)).toEqual({
       created: [],
       updated: [],
       failed: []
@@ -98,7 +92,7 @@ describe("workflow presynchronization caller policies", () => {
       updated: ["existing.yml"],
       registrationPending: ["new.yml", "concurrent.yml"]
     });
-    expect(await service.forDeployment(...target)).toEqual({
+    expect(await service.bestEffort(...target)).toEqual({
       created: ["new.yml", "concurrent.yml"],
       updated: ["existing.yml"],
       failed: []

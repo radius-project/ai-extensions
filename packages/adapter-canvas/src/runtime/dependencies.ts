@@ -23,6 +23,7 @@ import type {
 } from "../deploy-tools.js";
 import type { SessionHolder } from "./session.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
+import type { DeploymentExecutionOwner } from "./deployment-execution-owner.js";
 import type { EnvironmentTools } from "./environment-tools.js";
 
 export interface WorkspaceContext {
@@ -250,6 +251,7 @@ export interface HostCallbackDependencies {
           branch: string;
           error: string;
           deployRunUrl: string;
+          dispatchRefused?: boolean;
           instanceId: string;
         }) => unknown)
       | null
@@ -353,6 +355,8 @@ export interface RadiusExtensionDependencies {
   logError(message: string): void;
   session: SessionHolder;
   executionOwner: EnvironmentExecutionOwner;
+  deployment: Pick<DeploymentExecutionOwner, "shutdown" | "hasPendingWork">;
+  restoreDeploymentPresentation(instanceId: string): void;
   environment: EnvironmentTools;
   clock: ClockDependencies;
   servers: Map<string, CanvasServerEntry>;

@@ -1290,7 +1290,8 @@ export async function unwindHarnessConstruction(
 
 export class CanvasHarness {
   readonly accountContext: EnvironmentAccountContext;
-  readonly entry: CanvasServerEntry;
+  readonly deploymentAccountChoice: { login?: string };
+  entry: CanvasServerEntry;
   readonly instanceId: string;
   readonly rootDir: string;
   readonly fakeBin: string;
@@ -1311,6 +1312,7 @@ export class CanvasHarness {
 
   private constructor(input: {
     accountContext: EnvironmentAccountContext;
+    deploymentAccountChoice: { login?: string };
     page: Page;
     entry: CanvasServerEntry;
     instanceId: string;
@@ -1326,6 +1328,7 @@ export class CanvasHarness {
     ghModule: GhModule;
   }) {
     this.accountContext = input.accountContext;
+    this.deploymentAccountChoice = input.deploymentAccountChoice;
     this.page = input.page;
     this.entry = input.entry;
     this.instanceId = input.instanceId;
@@ -1448,6 +1451,23 @@ export class CanvasHarness {
       const { createProductionGitHubAccountContext } =
         await import("../../../src/runtime/production-github-account-context.js");
       const accountContext = createProductionGitHubAccountContext();
+      const deploymentAccountChoice: { login?: string } = {};
+      const gh = await import("../../../src/gh.js");
+      const { createGitHubAccountResolvers } =
+        await import("../../../src/runtime/github-account-resolvers.js");
+      const { deployment: deploymentAccount } = createGitHubAccountResolvers({
+        readIdentity: async () => {
+          gh.resetGhIdentityCache();
+          return gh.getGitHubIdentity();
+        },
+        coordinator: accountContext.coordinator,
+        ownerKey: accountContext.ownerKey,
+        get choose() {
+          const login = deploymentAccountChoice.login;
+          return login ? async () => login : undefined;
+        },
+        redactDiagnostic: gh.redactGhCredentials
+      });
       const { createTestCanvasServerRuntime } =
         await import("../../support/server/production-runtime.js");
       let environmentOperationRunner: EnvironmentOperationRunner | undefined;
@@ -1456,6 +1476,7 @@ export class CanvasHarness {
         ...createTestCanvasServerRuntime({
           executionOwner: createEnvironmentExecutionOwner(),
           accountContext,
+          deploymentAccount,
           get environmentOperationRunner() {
             return environmentOperationRunner;
           }
@@ -1537,6 +1558,7 @@ export class CanvasHarness {
 
       const harness = new CanvasHarness({
         accountContext,
+        deploymentAccountChoice,
         page: options.page,
         entry,
         instanceId,
@@ -1592,6 +1614,24 @@ export class CanvasHarness {
 
   get baseUrl(): string {
     return this.entry.baseUrl;
+  }
+
+  async reconnectPanel(whileClosed: () => Promise<void>): Promise<void> {
+    this.assertFakeMode("reconnectPanel");
+    const contextRepo = this.entry.state.contextRepo;
+    const contextBranch = this.entry.state.contextBranch;
+    await this.serverModule.stopServer(this.instanceId, true);
+    try {
+      await whileClosed();
+    } finally {
+      this.entry = await this.serverModule.getOrCreateServer(
+        this.instanceId,
+        "deploying"
+      );
+      expect(this.entry.state.envName).toBeUndefined();
+      Object.assign(this.entry.state, { contextRepo, contextBranch });
+      this.serverModule.restoreDeploymentPresentation(this.instanceId);
+    }
   }
 
   renameWorkspaceBranch(branch: string): void {
@@ -1931,6 +1971,13 @@ export class CanvasHarness {
       await operationModule.operations.persist();
     });
     await captureCleanupError(errors, () => closePage(this.page));
+    const deploymentOwner = this.serverModule.deploymentOwner;
+    const selected = deploymentOwner.resolve();
+    const ownedLease =
+      selected.kind === "resolved" ?
+        deploymentOwner.activeReservation(selected.invocation.target)
+      : undefined;
+    deploymentOwner.shutdown();
     const stop = () =>
       stopHarnessServer(this.entry, this.instanceId, this.serverModule);
     if (this.repairHandoffRegistered) {
@@ -1941,9 +1988,15 @@ export class CanvasHarness {
         stop,
         async () => {
           await expect
-            .poll(() => harnessDeploymentSettled(this.entry.state, lease), {
-              timeout: 5_000
-            })
+            .poll(
+              () =>
+                ownedLease ?
+                  deploymentOwner.activeReservation(ownedLease) !== ownedLease
+                : harnessDeploymentSettled(this.entry.state, lease),
+              {
+                timeout: 5_000
+              }
+            )
             .toBe(true);
         },
         () => this.setDeployRepairHandoff(null),
@@ -1979,13 +2032,13 @@ export class CanvasHarness {
   }
 
   private async installNetworkGuard(): Promise<void> {
-    const allowedOrigin = new URL(this.entry.baseUrl).origin;
     // Context routing also intercepts a popup's initial navigation. Page-level
     // routing starts too late for target="_blank" links and could allow a live
     // GitHub or cloud URL to escape the offline harness.
     await this.page.context().route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
+      const allowedOrigin = new URL(this.entry.baseUrl).origin;
       if (url.origin !== allowedOrigin) {
         this.externalRequests.push(request.url());
         await route.abort();

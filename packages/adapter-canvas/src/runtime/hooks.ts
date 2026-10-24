@@ -27,7 +27,11 @@ import {
   infrastructureFailureSummaryList,
   modelFailureSummaryList
 } from "../model-failure-policy.js";
-import { freshnessIdentity } from "@radius-project/core";
+import {
+  freshnessIdentity,
+  redactCredentials,
+  DEPLOY_REPAIR_ATTEMPT_CAP
+} from "@radius-project/core";
 import { RADIUS_CANVAS_INSTANCE_ID } from "./declarations.js";
 import type { AppModelStatus } from "./graph-context.js";
 
@@ -337,7 +341,7 @@ export function appModelRadiusCliOutdatedNotice(
 }
 
 // Maximum automatic repair-and-redeploy attempts before handing back to the user.
-export const DEPLOY_REPAIR_ATTEMPT_CAP = 5;
+export { DEPLOY_REPAIR_ATTEMPT_CAP } from "@radius-project/core";
 
 export { DEPLOY_DIAGNOSTIC_CHAR_CAP as DEPLOY_ERROR_CHAR_CAP } from "../deploy-diagnostics.js";
 
@@ -376,7 +380,7 @@ export function deployRepairHandoffPrompt(
     attemptId ?
       `Pass attemptId "${attemptId}" to both tools. It identifies this deploy attempt, so the call is rejected rather than acting on a different deploy if the user starts another one. Do not pass repo, environment, branch, provider, or appFile: the attempt already fixes those.`
     : "",
-    `Repeat that repair-and-redeploy cycle at most ${DEPLOY_REPAIR_ATTEMPT_CAP} times, stopping early once the deploy succeeds or there is no different fix left to try. The canvas enforces that limit and refuses a further redeploy on this attempt, and each radius_deploy call reports which attempt it is. After that, report the result to the user and only try again if they ask.`,
+    `Repeat that repair-and-redeploy cycle at most ${DEPLOY_REPAIR_ATTEMPT_CAP} times, stopping early once the deploy succeeds or there is no different fix left to try. The shared deployment runtime enforces that limit and refuses a further redeploy on this attempt, and each radius_deploy call reports which attempt it is. After that, report the result to the user and only try again if they ask.`,
     "",
     RECIPE_PACK_NOTE
   );
@@ -413,6 +417,7 @@ export function deployRepairHandoffMessage(
 interface DeployFailureNoticeDetails {
   error?: string;
   deployRunUrl?: string;
+  dispatchRefused?: boolean;
 }
 
 // Prompt sent to the agent when a canvas deploy failed WITHOUT confirming what
@@ -426,11 +431,24 @@ interface DeployFailureNoticeDetails {
 export function deployFailureNoticePrompt(
   repo: string,
   branch: string,
-  { error = "", deployRunUrl = "" }: DeployFailureNoticeDetails = {}
+  {
+    error = "",
+    deployRunUrl = "",
+    dispatchRefused = false
+  }: DeployFailureNoticeDetails = {}
 ): string {
   const where = repo ? ` of ${repo}` : "";
   const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
-  const fenced = fenceDeployDiagnostic(error);
+  const fenced = fenceDeployDiagnostic(redactCredentials(error));
+  if (dispatchRefused) {
+    return [
+      `The Radius deploy${where}${onPhrase} was refused. No new workflow was started.`,
+      fenced ?
+        `${DEPLOY_DIAGNOSTIC_NOTE}\n\n${fenced}`
+      : "The deployment prerequisites could not be verified.",
+      "Report the refusal to the user. Do not repair the model or automatically redeploy. Once the blocker is resolved, deploy again only if the user explicitly requests it, without an attemptId."
+    ].join("\n\n");
+  }
   const lines = [
     `The Radius deploy${where}${onPhrase} failed, and its workflow run could not be confirmed. Report this to the user; do not automatically redeploy.`,
     "",
@@ -456,10 +474,13 @@ export function deployFailureNoticePrompt(
 // that the failure is being reported, without the diagnostic dump or guidance.
 export function deployFailureNoticeDisplayPrompt(
   repo: string,
-  branch: string
+  branch: string,
+  dispatchRefused = false
 ): string {
   const where = repo ? ` of ${repo}` : "";
   const onPhrase = branch ? ` (branch \`${branch}\`)` : "";
+  if (dispatchRefused)
+    return `Reporting the refused Radius deploy${where}${onPhrase} (no new workflow was started).`;
   return `Reporting the failed Radius deploy${where}${onPhrase} (its workflow run could not be confirmed).`;
 }
 
@@ -472,6 +493,10 @@ export function deployFailureNoticeMessage(
 ): HandoffMessage {
   return {
     prompt: deployFailureNoticePrompt(repo, branch, details),
-    displayPrompt: deployFailureNoticeDisplayPrompt(repo, branch)
+    displayPrompt: deployFailureNoticeDisplayPrompt(
+      repo,
+      branch,
+      details.dispatchRefused
+    )
   };
 }

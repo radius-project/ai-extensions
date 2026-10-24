@@ -121,7 +121,8 @@ export interface DeploymentsDependencies {
   // than a bag of capabilities, so the blast radius of this family stays
   // readable at the composition root.
   activeDeploymentMutation(
-    state: CanvasState
+    state: CanvasState,
+    target: { repo: string; environment: string }
   ): DeploymentDispatchLease | undefined;
   reserveDeploymentMutation(
     state: CanvasState,
@@ -533,7 +534,10 @@ export async function handleDeleteDeployment(
     const attempt = entry.state.deployAttempt;
     const activeRepo = attempt?.targetRepo || entry.state.deployingRepo || "";
     const activeEnvironment = attempt?.environment || entry.state.envName || "";
-    const reserved = dependencies.activeDeploymentMutation(entry.state);
+    const reserved = dependencies.activeDeploymentMutation(entry.state, {
+      repo,
+      environment
+    });
     if (dependencies.localDeploymentBlocksMutation(entry.state) || reserved) {
       const operation = reserved?.kind || "deploy";
       const conflictRepo = reserved?.repo || activeRepo || repo;
@@ -552,7 +556,10 @@ export async function handleDeleteDeployment(
       kind: "delete"
     });
     if (!reservation) {
-      const conflict = dependencies.activeDeploymentMutation(entry.state);
+      const conflict = dependencies.activeDeploymentMutation(entry.state, {
+        repo,
+        environment
+      });
       respond(409, {
         error:
           conflict ?

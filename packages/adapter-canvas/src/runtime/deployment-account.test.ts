@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { successfulSelectedGhExecutor } from "../../test/support/server/selected-gh.js";
 import type { GitHubAccountReadiness } from "../server/services/github-account-readiness.js";
+import { createSetupAccountEligibility } from "./setup-account-eligibility.js";
 import {
   createDeploymentAccountResolver,
   type DeploymentAccountPorts
@@ -45,7 +46,7 @@ function fixture(overrides: Partial<DeploymentAccountPorts> = {}) {
   const createExecutor = vi.fn(async () => executor);
   const resolve = createDeploymentAccountResolver({
     readIdentity,
-    readiness: { check },
+    check: createSetupAccountEligibility({ check }),
     createExecutor,
     redactDiagnostic: (value) =>
       value.replaceAll("private-host-value", "[REDACTED]"),
@@ -55,6 +56,27 @@ function fixture(overrides: Partial<DeploymentAccountPorts> = {}) {
 }
 
 describe("deployment GitHub account binding", () => {
+  it.each([null, "unknown"] as const)(
+    "preserves declined or stale host choice %j without executor acquisition",
+    async (choice) => {
+      const f = fixture({
+        readIdentity: async () => ({
+          accounts: ["first", "saved"].map((login) => ({
+            login,
+            hasWorkflow: true,
+            hasPackages: true,
+            switchable: true,
+            acting: false
+          }))
+        }),
+        choose: async () => choice
+      });
+      expect(
+        await f.resolve({ target: TARGET, isCurrent: () => true })
+      ).toEqual({ state: choice === null ? "declined" : "stale-choice" });
+      expect(f.createExecutor).not.toHaveBeenCalled();
+    }
+  );
   it("returns the verified selected executor for an unambiguous target", async () => {
     const { resolve, executor, check, createExecutor } = fixture();
     expect(await resolve({ target: TARGET, isCurrent: () => true })).toEqual({
@@ -77,7 +99,7 @@ describe("deployment GitHub account binding", () => {
         detail: "private-host-value is unavailable."
       };
       const { resolve, readIdentity, createExecutor } = fixture({
-        readiness: { check: async () => readiness }
+        check: createSetupAccountEligibility({ check: async () => readiness })
       });
       expect(
         await resolve({
@@ -99,7 +121,7 @@ describe("deployment GitHub account binding", () => {
     readiness.ready = false;
     readiness.summary = "Additional GitHub access is required";
     const { resolve } = fixture({
-      readiness: { check: async () => readiness }
+      check: createSetupAccountEligibility({ check: async () => readiness })
     });
     expect(
       await resolve({

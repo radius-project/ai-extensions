@@ -254,7 +254,7 @@ export function createProductionDeploymentMonitor(
       };
       return monitor.run({
         ...request,
-        resources: execution.state.deployingResources ?? [],
+        resources: execution.state.deployingResources,
         isCurrent
       });
     }

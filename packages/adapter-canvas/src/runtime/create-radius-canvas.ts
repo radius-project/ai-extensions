@@ -270,6 +270,8 @@ export function createRadiusCanvas(
         }
       }
 
+      deps.restoreDeploymentPresentation(ctx.instanceId);
+
       if (page === "graph" || page === "planned") {
         deps.sourceRefs.prepareSourceRefResources(entry, page, {
           repo: entry.state.contextRepo || "",

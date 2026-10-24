@@ -40,6 +40,7 @@ type Scenario =
   | "success"
   | "source-unavailable"
   | "secret-list-malformed"
+  | "secret-list-refused"
   | "secret-write-refused"
   | "publication-refused"
   | "baseline-malformed"
@@ -90,7 +91,7 @@ function fixture(scenario: Scenario) {
     }
     if (args[0] === "workflow") {
       if (scenario === "dispatch-refused")
-        return refused("HTTP 403: refusing workflow without workflow scope");
+        return refused("HTTP 403: Resource not accessible by integration");
       if (scenario === "dispatch-timeout")
         return { ...refused("dispatch timed out"), timedOut: true };
       return ok();
@@ -128,6 +129,8 @@ function fixture(scenario: Scenario) {
     ) {
       expect(args.slice(2)).toEqual(["--paginate", "--slurp"]);
       if (scenario === "secret-list-malformed") return ok("[{}]");
+      if (scenario === "secret-list-refused")
+        return refused("HTTP 403: Resource not accessible by integration");
       return ok(
         JSON.stringify([
           { secrets: secretWritten ? [{ name: "RADIUS_DEPLOY_PARAMS" }] : [] }
@@ -304,6 +307,7 @@ describe("selected deployment preparation boundary", () => {
   it.each([
     "source-unavailable",
     "secret-list-malformed",
+    "secret-list-refused",
     "secret-write-refused",
     "publication-refused",
     "baseline-malformed",
@@ -323,7 +327,8 @@ describe("selected deployment preparation boundary", () => {
       ).toBe(true);
       if (
         scenario === "source-unavailable" ||
-        scenario === "secret-list-malformed"
+        scenario === "secret-list-malformed" ||
+        scenario === "secret-list-refused"
       ) {
         expect(
           f.run.mock.calls.filter(

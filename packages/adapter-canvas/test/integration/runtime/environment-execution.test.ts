@@ -8,6 +8,7 @@ import { createEnvironmentExecutionOwner } from "../../../src/runtime/environmen
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 import { createEnvironmentTools } from "../../../src/runtime/environment-tools.js";
 import { createDeploymentAccountResolver } from "../../../src/runtime/deployment-account.js";
+import { createSetupAccountEligibility } from "../../../src/runtime/setup-account-eligibility.js";
 import { createGitHubAccountReadinessService } from "../../../src/server/services/github-account-readiness.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import { createRadiusExtension } from "../../../src/runtime/create-radius-extension.js";
@@ -1006,7 +1007,7 @@ describe("real server and fake SDK runtime ownership", () => {
                   }
                 ]
               }),
-              readiness,
+              check: createSetupAccountEligibility(readiness),
               createExecutor: coordinator.createReadOnlyExecutor,
               redactDiagnostic: (value) => value
             }),
