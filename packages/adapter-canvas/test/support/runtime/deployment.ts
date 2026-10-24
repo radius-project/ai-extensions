@@ -6,6 +6,7 @@ import {
   type DeploymentExecutionOwner
 } from "../../../src/runtime/deployment-execution-owner.js";
 import { createProductionDeploymentController } from "../../../src/runtime/production-deployment-controller.js";
+import { createDirectDeploymentTools } from "../../../src/runtime/direct-deployment-tools.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
 import type { DeployMonitorRequest } from "../../../src/server/services/deploy-monitor.js";
 import type { CanvasState } from "../../../src/shared.js";
@@ -113,6 +114,20 @@ export function createDeploymentControllerHarness(
     target,
     seed
   };
+}
+
+export function createDeploymentToolHarness(
+  options: Parameters<typeof createDeploymentControllerHarness>[0] = {}
+) {
+  const fixture = createDeploymentControllerHarness(options);
+  const tools = createDirectDeploymentTools({
+    owner: fixture.owner,
+    controller: fixture.controller,
+    notifications: [fixture.notify],
+    reportError: fixture.reportError,
+    redactDiagnostic: (value) => value
+  });
+  return { ...fixture, tools };
 }
 
 export function createDeploymentPipelineRunner(

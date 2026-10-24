@@ -17,6 +17,8 @@ import { createDeploymentPipelineRunner } from "../../support/runtime/deployment
 import { createGitHubAccountResolvers } from "../../../src/runtime/github-account-resolvers.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
 import { createEnvironmentTools } from "../../../src/runtime/environment-tools.js";
+import { createProductionDeploymentTools } from "../../../src/runtime/production-deployment-tools.js";
+import { BARE_GH_COMMAND_PRESENTATION } from "../../../src/gh-command-display.js";
 import {
   setDeployRepairHandoff,
   setDeployFailureNotice
@@ -58,7 +60,23 @@ describe("production deployment owner runtime binding", () => {
         ...fake.deps,
         ...runtime,
         executionOwner,
-        deployment: runtime.deploymentOwner
+        deployment: createProductionDeploymentTools({
+          owner: runtime.deploymentOwner,
+          account: runtime.deploymentAccount,
+          session: fake.deps.session,
+          ghCommandPresentation: BARE_GH_COMMAND_PRESENTATION,
+          runAz: async () => {
+            throw new Error("Unexpected Azure command.");
+          },
+          buildGraph: async () => [],
+          readRadArtifacts: async () => ({ dir: "", remote: false }),
+          reportError: (error) => {
+            throw error;
+          },
+          redactDiagnostic: (value) => value,
+          reportWorkflowProgress: () => {},
+          invalidateDeployListCache: runtime.invalidateDeploymentListCache
+        })
       },
       {
         createCanvas: (value) => value,
@@ -235,7 +253,21 @@ describe("production deployment owner runtime binding", () => {
           ...fake.deps,
           ...runtime,
           executionOwner,
-          deployment: runtime.deploymentOwner,
+          deployment: createProductionDeploymentTools({
+            owner: runtime.deploymentOwner,
+            account: accounts.deployment,
+            session: fake.deps.session,
+            ghCommandPresentation: BARE_GH_COMMAND_PRESENTATION,
+            runAz: async () => {
+              throw new Error("Unscripted Azure command");
+            },
+            reportError: (error) => {
+              throw error;
+            },
+            redactDiagnostic: (value) => value,
+            reportWorkflowProgress: vi.fn(),
+            invalidateDeployListCache: vi.fn()
+          }),
           environment: createEnvironmentTools({
             ...runtime.environmentServices,
             owner: executionOwner,
@@ -373,12 +405,14 @@ describe("production deployment owner runtime binding", () => {
       }
     }
   );
-  it.each(["failure", "uncertain", "shutdown"] as const)(
+  it.each(["failure", "uncertain", "shutdown", "default-branch"] as const)(
     "retains a request-started selected write across SDK close and %s",
     async (outcome) => {
       const executionOwner = createEnvironmentExecutionOwner();
       const pipeline = createDeploymentPipelineRunner(
-        outcome === "failure" ? "failure" : "uncertain"
+        outcome === "failure" || outcome === "default-branch" ?
+          "failure"
+        : "uncertain"
       );
       const writing = createDeferred<void>();
       const written = createDeferred<void>();
@@ -396,6 +430,8 @@ describe("production deployment owner runtime binding", () => {
           ) {
             throw new Error(`Unexpected default application read: ${args[1]}`);
           }
+          if (args[0] === "repo" && args[1] === "view")
+            return { code: 0, stdout: "feature/model", stderr: "" };
           if (args[0] === "workflow") {
             dispatchCount++;
             if (dispatchCount === 1) {
@@ -436,7 +472,21 @@ describe("production deployment owner runtime binding", () => {
           ...fake.deps,
           ...runtime,
           executionOwner,
-          deployment: runtime.deploymentOwner,
+          deployment: createProductionDeploymentTools({
+            owner: runtime.deploymentOwner,
+            account,
+            session: fake.deps.session,
+            ghCommandPresentation: BARE_GH_COMMAND_PRESENTATION,
+            runAz: async () => {
+              throw new Error("Unscripted Azure command");
+            },
+            reportError: (error) => {
+              throw error;
+            },
+            redactDiagnostic: (value) => value,
+            reportWorkflowProgress: vi.fn(),
+            invalidateDeployListCache: vi.fn()
+          }),
           hostCallbacks: {
             ...fake.deps.hostCallbacks,
             setDeployRepairHandoff,
@@ -467,7 +517,7 @@ describe("production deployment owner runtime binding", () => {
           body: JSON.stringify({
             targetRepo: target.repo,
             environment: target.environment,
-            branch: "feature/model",
+            branch: outcome === "default-branch" ? undefined : "feature/model",
             provider: "aws",
             appFile: "apps/custom.bicep"
           })
@@ -491,6 +541,7 @@ describe("production deployment owner runtime binding", () => {
         expect(runtime.servers.size).toBe(0);
         expect(execution.observation.stopped).toBe(false);
         expect(execution.executor).toBe(executor);
+        expect(execution.invocation.target.branch).toBe("feature/model");
         expect(runtime.deploymentOwner.activeReservation(target)).toBe(
           reservation
         );
@@ -524,7 +575,9 @@ describe("production deployment owner runtime binding", () => {
           expect(runtime.deploymentOwner.hasPendingWork()).toBe(true);
           delivered.resolve();
           const field =
-            outcome === "failure" ? "deployHandoffState" : "deployNoticeState";
+            outcome === "failure" || outcome === "default-branch" ?
+              "deployHandoffState"
+            : "deployNoticeState";
           await vi.waitFor(
             () => expect(execution.state[field]).toBe("delivered"),
             { timeout: 5000 }

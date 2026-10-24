@@ -39,7 +39,8 @@ import {
   getBranchHeadSha,
   getGitHubIdentity,
   resetGhIdentityCache,
-  redactGhCredentials
+  redactGhCredentials,
+  runCommand
 } from "./gh.js";
 import {
   defaultBranchForState,
@@ -61,14 +62,6 @@ import {
   workspaceSourceChangedSince
 } from "./workspace.js";
 import { radArtifactsDirForSelection } from "./remote-rad-artifacts.js";
-import {
-  selectDeployEntry,
-  buildDeployPayload,
-  validateDeployPayload,
-  validateDeployAttempt,
-  summarizeDeployStatus,
-  describeDeployStarted
-} from "./deploy-tools.js";
 import {
   createProductionCanvasServerRuntime,
   setAppBicepHandoff,
@@ -112,10 +105,11 @@ import type { SessionPort } from "./runtime/session.js";
 import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
-import { createProductionDeploymentExecutionOwner } from "./runtime/production-deployment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
+import { createProductionDeploymentExecutionOwner } from "./runtime/production-deployment-execution-owner.js";
 import { githubAccountChoice } from "./runtime/github-account-choice.js";
 import { createGitHubAccountResolvers } from "./runtime/github-account-resolvers.js";
+import { createProductionDeploymentTools } from "./runtime/production-deployment-tools.js";
 import { createEnvironmentTools } from "./runtime/environment-tools.js";
 
 function errorMessage(error: unknown): string {
@@ -127,8 +121,8 @@ const execFileAsync = promisify(execFile);
 // ─── Production dependency wiring ────────────────────────────────────────────
 const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
-const deploymentOwner = createProductionDeploymentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
+const deploymentOwner = createProductionDeploymentExecutionOwner();
 const ghCommandPresentation = resolveGhCommandPresentation();
 const { setup: setupAccount, deployment: deploymentAccount } =
   createGitHubAccountResolvers({
@@ -150,6 +144,7 @@ const {
   restoreDeploymentPresentation,
   stopServer,
   getLastWebviewActivityAt,
+  invalidateDeploymentListCache,
   environmentServices
 } = createProductionCanvasServerRuntime({
   executionOwner,
@@ -157,8 +152,12 @@ const {
   deploymentOwner,
   deploymentAccount
 });
+const reportDeploymentError = (error: unknown) =>
+  console.error(
+    "[radius deployment]",
+    redactGhCredentials(errorMessage(error))
+  );
 const dependencies: RadiusExtensionDependencies = {
-  deployment: deploymentOwner,
   logError: (message) => console.error(message),
   session: sessionHolder,
   executionOwner,
@@ -179,6 +178,27 @@ const dependencies: RadiusExtensionDependencies = {
         "[radius environment]",
         redactGhCredentials(errorMessage(error))
       )
+  }),
+  deployment: createProductionDeploymentTools({
+    owner: deploymentOwner,
+    account: deploymentAccount,
+    session: sessionHolder,
+    reportError: reportDeploymentError,
+    redactDiagnostic: redactGhCredentials,
+    ghCommandPresentation,
+    invalidateDeployListCache: invalidateDeploymentListCache,
+    reportWorkflowProgress: (message) => console.error(message),
+    runAz: async (args, timeout) => {
+      try {
+        return {
+          code: 0,
+          stdout: await runCommand("az", args, { timeout, stdin: "" }),
+          stderr: ""
+        };
+      } catch (error) {
+        return { code: 1, stdout: "", stderr: errorMessage(error) };
+      }
+    }
   }),
   clock: {
     now: () => Date.now(),
@@ -222,14 +242,6 @@ const dependencies: RadiusExtensionDependencies = {
     runRadBicepPublish,
     radArtifactsDirForSelection
   },
-  deployTools: {
-    selectDeployEntry,
-    buildDeployPayload,
-    validateDeployPayload,
-    validateDeployAttempt,
-    summarizeDeployStatus,
-    describeDeployStarted
-  },
   sourceRefs: {
     getSourceRefResources,
     prepareSourceRefResources,
@@ -252,9 +264,6 @@ const dependencies: RadiusExtensionDependencies = {
   process: {
     existsSync,
     execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
-  },
-  deploy: {
-    fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
   },
   operations: {
     setupInFlight

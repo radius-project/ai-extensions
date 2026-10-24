@@ -1,137 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
-  selectDeployEntry,
   buildDeployPayload,
   validateDeployPayload,
-  validateDeployAttempt,
   summarizeDeployStatus,
   describeDeployStarted,
   DEPLOY_LOG_TAIL_DEFAULT,
   DEPLOY_LOG_TAIL_MAX
 } from "./deploy-tools.js";
 import { DEPLOY_DIAGNOSTIC_CHAR_CAP } from "./deploy-diagnostics.js";
-
-describe("selectDeployEntry", () => {
-  const older = {
-    baseUrl: "http://127.0.0.1:1",
-    state: {
-      deployStatus: "failed",
-      deployStartedAt: 10,
-      deployAttempt: { id: "attempt-A" }
-    }
-  };
-  const newer = {
-    baseUrl: "http://127.0.0.1:2",
-    state: {
-      deployStatus: "failed",
-      deployStartedAt: 20,
-      deployAttempt: { id: "attempt-B" }
-    }
-  };
-
-  it("finds the instance running the named attempt", () => {
-    const servers = new Map([
-      ["a", older],
-      ["b", newer]
-    ]);
-    expect(selectDeployEntry(servers, "attempt-A")).toBe(older);
-    expect(selectDeployEntry(servers, "attempt-B")).toBe(newer);
-  });
-
-  it("falls back to the most recently started deploy when no attempt is named", () => {
-    const servers = new Map([
-      ["a", older],
-      ["b", newer]
-    ]);
-    expect(selectDeployEntry(servers)).toBe(newer);
-  });
-
-  it("fails closed when the named attempt has been replaced in the same panel", () => {
-    // The panel is reused, so a stale repair must not act on the new deploy.
-    const panel = {
-      baseUrl: "http://127.0.0.1:1",
-      state: { deployAttempt: { id: "attempt-B" } }
-    };
-    expect(
-      selectDeployEntry(new Map([["radius-panel", panel]]), "attempt-A")
-    ).toBeNull();
-  });
-
-  it("fails closed when the named attempt is gone entirely", () => {
-    expect(selectDeployEntry(new Map([["b", newer]]), "missing")).toBeNull();
-    expect(selectDeployEntry(new Map(), "missing")).toBeNull();
-  });
-
-  it("uses any open instance when none has deploy state", () => {
-    const idle = { baseUrl: "http://127.0.0.1:3", state: {} };
-    expect(selectDeployEntry(new Map([["a", idle]]))).toBe(idle);
-  });
-
-  it("returns null when no canvas instance is usable", () => {
-    expect(selectDeployEntry(new Map())).toBeNull();
-    expect(selectDeployEntry(new Map([["a", { state: {} }]]))).toBeNull();
-  });
-});
-
-describe("validateDeployAttempt", () => {
-  const state = {
-    deployAttempt: {
-      id: "attempt-A",
-      targetRepo: "octo/app",
-      environment: "dev",
-      branch: "feat",
-      provider: "aws",
-      appFile: ".radius/app.bicep"
-    }
-  };
-
-  it("accepts a repair call that names the current attempt", () => {
-    expect(validateDeployAttempt({ attemptId: "attempt-A" }, state)).toBeNull();
-  });
-
-  it("ignores unbound manual calls", () => {
-    expect(validateDeployAttempt({}, state)).toBeNull();
-  });
-
-  it("rejects a stale attempt after a newer deploy replaced it", () => {
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A" },
-        { deployAttempt: { id: "attempt-B" } }
-      )
-    ).toMatch(/not the current attempt/);
-    expect(validateDeployAttempt({ attemptId: "attempt-A" }, {})).toMatch(
-      /not the current attempt/
-    );
-  });
-
-  it("refuses to retarget an attempt to a different repo, environment, or branch", () => {
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", repo: "octo/other" },
-        state
-      )
-    ).toMatch(/cannot be retargeted/);
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", environment: "prod" },
-        state
-      )
-    ).toMatch(/cannot be retargeted/);
-    expect(
-      validateDeployAttempt({ attemptId: "attempt-A", branch: "main" }, state)
-    ).toMatch(/cannot be retargeted/);
-  });
-
-  it("allows arguments that restate the attempt's own target", () => {
-    expect(
-      validateDeployAttempt(
-        { attemptId: "attempt-A", repo: "octo/app", branch: "feat" },
-        state
-      )
-    ).toBeNull();
-  });
-});
 
 describe("buildDeployPayload", () => {
   const state = {
@@ -256,25 +132,28 @@ describe("validateDeployPayload", () => {
 });
 
 describe("summarizeDeployStatus", () => {
-  it.each(["pending", "in_progress", "complete", "failed"])(
-    "passes through the Canvas attempt status %s without normalizing it",
-    (status) => {
-      expect(
-        summarizeDeployStatus({
-          status,
-          deployRunUrl: "https://github.com/octo/app/actions/runs/42",
-          startedAt: 1700000000000,
-          finishedAt: 1700000060000
-        })
-      ).toEqual({
+  it.each([
+    ["pending", "pending"],
+    ["in_progress", "in_progress"],
+    ["complete", "success"],
+    ["success", "success"],
+    ["failed", "failed"]
+  ])("serializes Canvas status %s as tool status %s", (status, expected) => {
+    expect(
+      summarizeDeployStatus({
         status,
-        errorKind: null,
         deployRunUrl: "https://github.com/octo/app/actions/runs/42",
         startedAt: 1700000000000,
         finishedAt: 1700000060000
-      });
-    }
-  );
+      })
+    ).toEqual({
+      status: expected,
+      errorKind: null,
+      deployRunUrl: "https://github.com/octo/app/actions/runs/42",
+      startedAt: 1700000000000,
+      finishedAt: 1700000060000
+    });
+  });
 
   const status = {
     status: "failed",
@@ -355,13 +234,30 @@ describe("summarizeDeployStatus", () => {
     );
   });
 
-  it("tolerates an empty or malformed status response", () => {
-    expect(summarizeDeployStatus({})).toMatchObject({ status: "pending" });
-    expect(summarizeDeployStatus({}).diagnostic).toBeUndefined();
+  it.each([undefined, "", "unexpected"])(
+    "refuses unavailable status %s rather than inventing pending",
+    (status) => {
+      expect(() => summarizeDeployStatus({ status })).toThrow(
+        "Deployment status is unavailable"
+      );
+    }
+  );
+
+  it("omits malformed logs while preserving a known outcome", () => {
     expect(
-      summarizeDeployStatus({ logs: "not-an-array" }).diagnostic
+      summarizeDeployStatus({ status: "complete", logs: "not-an-array" })
+        .diagnostic
     ).toBeUndefined();
   });
+
+  it.each(["run-unconfirmed", "dispatch-refused", "cloud-auth-drift"])(
+    "preserves failure classification %s without claiming confirmed execution failure",
+    (errorKind) => {
+      expect(
+        summarizeDeployStatus({ status: "failed", errorKind })
+      ).toMatchObject({ status: "failed", errorKind });
+    }
+  );
 });
 
 describe("describeDeployStarted", () => {
@@ -371,11 +267,23 @@ describe("describeDeployStarted", () => {
     environment: "dev"
   };
 
+  it("describes an unresolved branch without fabricating a branch name", () => {
+    const out = describeDeployStarted({
+      targetRepo: "octo/app",
+      environment: "dev"
+    });
+    expect(out).not.toContain("(branch");
+    expect(out).toContain("It deploys that branch as it exists on GitHub");
+  });
+
   it("says nothing about a budget for an ordinary deploy", () => {
     const out = describeDeployStarted(payload, {});
     expect(out).toContain("octo/app");
     expect(out).toContain("branch feat");
     expect(out).not.toMatch(/repair attempt/);
+    expect(out).toContain("while it reports pending or in_progress");
+    expect(out).toContain("stop on success or failed");
+    expect(out).toContain("report that uncertainty");
   });
 
   it("reports the loop position so the agent tracks its budget per call", () => {

@@ -47,6 +47,8 @@ export default defineConfig({
       "../core/src/deployment-repair.test.ts",
       "src/runtime/deployment-{controller,delivery-retry,notice-delivery,notifications,repair-delivery}.test.ts",
       "src/runtime/production-deployment-controller.test.ts",
+      "src/runtime/{direct-deployment-tools,production-deployment-tools}.test.ts",
+      "test/integration/runtime/direct-deployment.test.ts",
       "src/runtime/{hooks,create-radius-extension}.test.ts",
       "test/integration/runtime/deployment-ownership.test.ts",
       "test/support/runtime/deployment.test.ts",
