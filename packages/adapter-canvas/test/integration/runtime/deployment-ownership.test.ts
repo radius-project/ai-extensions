@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bootstrapRadiusExtension } from "../../../src/runtime/bootstrap.js";
 import { deliverDeploymentRepair } from "../../../src/runtime/deployment-repair-delivery.js";
 import {
@@ -23,6 +23,10 @@ import {
 } from "../../../src/server.js";
 
 describe("production deployment owner runtime binding", () => {
+  // Selected-source and lifecycle tests do not depend on an installed host rad.
+  beforeEach(() => vi.stubEnv("RADIUS_RAD_BINARY", process.execPath));
+  afterEach(() => vi.unstubAllEnvs());
+
   it("stops selected committed-source recovery after SDK shutdown while retaining the admitted lease until settlement", async () => {
     const entered = createDeferred<void>();
     const release = createDeferred<void>();
@@ -420,9 +424,11 @@ describe("production deployment owner runtime binding", () => {
       const fake = createFakeDependencies();
       const session = createFakeSession();
       const delivered = createDeferred<void>();
+      const deliveryEntered = createDeferred<void>();
       vi.mocked(session.send)
         .mockRejectedValueOnce(new Error("Host unavailable"))
         .mockImplementationOnce(async () => {
+          deliveryEntered.resolve();
           await delivered.promise;
         });
       const extension = await bootstrapRadiusExtension(
@@ -512,6 +518,7 @@ describe("production deployment owner runtime binding", () => {
           ).toBe(true);
           expect(pipeline.run.mock.calls.at(-1)?.[0][0]).toBe("workflow");
         } else {
+          await deliveryEntered.promise;
           expect(runtime.deploymentOwner.hasPendingWork()).toBe(true);
           delivered.resolve();
           const field =

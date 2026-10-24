@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../support/browser/fakes.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
@@ -9,6 +9,10 @@ import {
 } from "../../../src/server.js";
 
 describe("production deployment reservation HTTP binding", () => {
+  // Model unavailable local graph tooling without using or downloading host rad.
+  beforeEach(() => vi.stubEnv("RADIUS_RAD_BINARY", process.execPath));
+  afterEach(() => vi.unstubAllEnvs());
+
   it("fails closed on a selected default-branch lookup without admitting or dispatching", async () => {
     const lookup = [
       "repo",
