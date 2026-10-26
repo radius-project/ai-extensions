@@ -20,17 +20,23 @@ function fixture(
     >
   > = {}
 ) {
+  const verification: {
+    runId: string | null;
+    dispatchedAt: number;
+    dispatchMutationTarget: string;
+    retryCommandId: string;
+  } = {
+    runId: "17",
+    dispatchedAt: 100,
+    dispatchMutationTarget: "fixture/app:verify:topic:dev",
+    retryCommandId: "retry-1"
+  };
   const operation = {
     ...input,
     state: "running",
     currentStage: "verify",
     context: { githubLogin: "saved-account" },
-    verification: {
-      runId: "17",
-      dispatchedAt: 100,
-      dispatchMutationTarget: "fixture/app:verify:topic:dev",
-      retryCommandId: "retry-1"
-    }
+    verification
   };
   const executor = { login: "saved-account" };
   const request: SetupVerificationReadRequest = {};
@@ -80,7 +86,65 @@ function fixture(
   return { operation, executor, request, ports };
 }
 
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe("direct core verification observation", () => {
+  it.each(["detail", "log"] as const)(
+    "leaves a newly dispatched retry pending when the previous %s read settles",
+    async (stage) => {
+      const entered = deferred();
+      const held = deferred();
+      const { ports, operation } = fixture({
+        getRunDetail: vi.fn(async () => {
+          if (stage === "detail") {
+            entered.resolve();
+            await held.promise;
+          }
+          return {
+            status: "completed",
+            conclusion: stage === "detail" ? "success" : "failure"
+          };
+        }),
+        fetchRunLog: vi.fn(async () => {
+          entered.resolve();
+          await held.promise;
+          return "Previous run failed.";
+        })
+      });
+      const pending = readSetupVerificationStatus(input, ports);
+      try {
+        await entered.promise;
+        operation.verification = {
+          runId: null,
+          dispatchedAt: 101,
+          dispatchMutationTarget: "fixture/app:verify:topic:dev:retry",
+          retryCommandId: "retry-2"
+        };
+        const retry = structuredClone(operation);
+        held.resolve();
+        expect(await pending).toEqual({ state: "pending", runId: null });
+        expect(operation).toEqual(retry);
+        expect(ports.getRunDetail).toHaveBeenCalledOnce();
+        expect(ports.fetchRunLog).toHaveBeenCalledTimes(
+          stage === "log" ? 1 : 0
+        );
+        expect(ports.addLegacyStep).not.toHaveBeenCalled();
+        expect(ports.finishSucceeded).not.toHaveBeenCalled();
+        expect(ports.finish).not.toHaveBeenCalled();
+        expect(ports.persistOperations).not.toHaveBeenCalled();
+      } finally {
+        held.resolve();
+        await pending;
+      }
+    }
+  );
+
   it.each(["success", "failure", "authorization"] as const)(
     "reports checkpoint failure without losing %s observation evidence",
     async (outcome) => {
