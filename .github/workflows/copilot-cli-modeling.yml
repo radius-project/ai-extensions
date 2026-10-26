@@ -1,0 +1,187 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Copilot CLI Modeling
+
+# Runs Copilot CLI with the Radius plugin built from this checkout. The CLI
+# uses the version and the settings of the GitHub Copilot app. For each case
+# in scripts/copilot-cli-modeling/cases, the run sends the dataset prompt and
+# passes when the agent loads the radius-app-bicep skill and the skill
+# publishes .radius/app.bicep. See scripts/copilot-cli-modeling/README.md.
+#
+# Daily and by hand only, never on a push or a pull request. The agent runs in
+# Autopilot on third-party sample code, and every run uses Copilot requests.
+
+on:
+  # GitHub can disable scheduled workflows after 60 days without repository
+  # activity. A manual dispatch or repository update re-enables the schedule.
+  schedule:
+    # 05:53 UTC, once daily, offset from the other scheduled workflows.
+    - cron: "53 5 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Model ID for every case, such as gpt-6.1-sol. Leave blank to use each case's scheduled model.
+        type: string
+        default: ""
+      reasoning-effort:
+        description: Reasoning effort for every case.
+        type: choice
+        options:
+          - none
+          - minimal
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+        default: medium
+
+permissions: {}
+
+env:
+  # A scheduled run has no inputs. A pinned reasoning effort keeps a change of
+  # the CLI's default effort from changing the result.
+  REASONING_EFFORT: ${{ inputs.reasoning-effort || 'medium' }}
+
+jobs:
+  model:
+    name: Model ${{ matrix.case }} with ${{ inputs.model || matrix.model }}
+    # Scheduled workflows keep running in forks that enable Actions. Those
+    # runs would use the fork owner's Copilot requests.
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'radius-project/ai-extensions'
+    runs-on: ubuntu-24.04
+    # Longer than the step timeouts below, so the output upload still runs
+    # after a step times out.
+    timeout-minutes: 60
+    permissions:
+      contents: read # actions/checkout
+      # Lets Copilot CLI send Copilot requests with the workflow's token. The
+      # organization pays for the requests.
+      copilot-requests: write
+    env:
+      # A pinned model per case keeps a change of the CLI's default model from
+      # changing the result.
+      MODEL: ${{ inputs.model || matrix.model }}
+    strategy:
+      # Each case is its own result. One failure must not cancel the other.
+      fail-fast: false
+      matrix:
+        # Directories under scripts/copilot-cli-modeling/cases, each with the
+        # model that scheduled runs use. Two small apps keep the daily run
+        # short.
+        include:
+          - case: mongo-express-mongo-express
+            model: gpt-6.1-sol
+          - case: sosedoff-pgweb
+            model: gpt-6-astra
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the model input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]; then
+            echo "::error::model must be a model ID, such as gpt-6.1-sol."
+            exit 1
+          fi
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          # No dependency cache. The agent runs sample code with every
+          # permission, and other workflows restore the same cache.
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the Radius plugin
+        run: pnpm build
+
+      - name: Install Copilot CLI
+        # npm retries failed downloads. A stalled registry fails here, not at
+        # the job timeout.
+        timeout-minutes: 5
+        env:
+          # The CLI version that GitHub Copilot app 1.1.30 bundles. See "Update
+          # the Copilot CLI" in the README.
+          CLI_PACKAGE: "@github/copilot@1.0.99-2"
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global --no-audit --no-fund "$CLI_PACKAGE"
+          copilot --version
+
+      - name: Model the sample with Copilot CLI
+        # Longer than the harness's 30-minute session timeout, so the harness
+        # gives up first and writes its summary.
+        timeout-minutes: 40
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          CASE: ${{ matrix.case }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/copilot-cli-modeling/run-modeling.mjs \
+            --case "scripts/copilot-cli-modeling/cases/$CASE/case.yaml" \
+            --work-dir "$RUNNER_TEMP/copilot-cli-work" \
+            --output-dir "$RUNNER_TEMP/copilot-cli-output" \
+            --model "$MODEL" \
+            --reasoning-effort "$REASONING_EFFORT"
+
+      - name: Upload the run output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: copilot-cli-modeling-${{ matrix.case }}
+          path: ${{ runner.temp }}/copilot-cli-output
+          if-no-files-found: warn
+          retention-days: 14
+
+  notify-scheduled-result:
+    name: Scheduled modeling alert
+    # An overnight failure that nobody sees is the same as no test at all.
+    if: ${{ always() && github.event_name == 'schedule' && github.repository == 'radius-project/ai-extensions' }}
+    needs:
+      - model
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Report or clear scheduled failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: model=${{ needs.model.result }}
+          SCHEDULE_FAILED: ${{ needs.model.result != 'success' }}
+        shell: bash
+        run: |
+          title="Copilot CLI Modeling scheduled failure"
+          issue_number="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "\"$title\" in:title" \
+            --json number \
+            --jq '.[0].number // empty')"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          if [[ "$SCHEDULE_FAILED" == "true" ]]; then
+            body="The scheduled Copilot CLI Modeling workflow failed: $RESULT. Run: $run_url. Each case uploads summary.md and logs as an artifact. See scripts/copilot-cli-modeling/README.md."
+            if [[ -n "$issue_number" ]]; then
+              gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label test-failure
+            fi
+          elif [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "The scheduled Copilot CLI Modeling workflow recovered. Run: $run_url"
+          fi
