@@ -550,6 +550,12 @@ async function runConfigureEnvironmentService(
     });
   } catch (e) {
     if (finalizationStarted) throw e;
+    if (
+      dependencies.isShuttingDown() &&
+      e instanceof ProviderMutationRecoveryError &&
+      e.code === "provider-mutation-recovery-persistence-failed"
+    )
+      throw e;
     // Reconciliation still owns this operation and it is not terminal. A stop
     // recorded now is honored by the reconciling pass at its own boundary;
     // ending the operation here would strand the journal entry unreconciled.

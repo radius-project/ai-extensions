@@ -230,11 +230,19 @@ export function createSetupEnvironmentPorts(input: {
       d.planCredentialVerification(request),
     fetchFileFromRepo: (repo, path, branch) =>
       d.fetchFileFromRepo(repo, path, branch, executor),
-    discoverAutomaticVerificationRun,
+    discoverAutomaticVerificationRun: (request) =>
+      discoverAutomaticVerificationRun({
+        ...request,
+        isStopped: d.isShuttingDown
+      }),
     terminalizeManualRequired: (guidance) =>
       terminalizeProviderManualRequired(operation, guidance),
     runVerificationDispatch: (request) =>
-      runVerificationDispatch({ ...request, operation }),
+      runVerificationDispatch({
+        ...request,
+        operation,
+        ports: { ...request.ports, isStopped: d.isShuttingDown }
+      }),
     buildVerifyWorkflowDispatchArgs: (request) =>
       d.buildVerifyWorkflowDispatchArgs(request),
     enterVerifyStage: () => d.enterStage(operation, d.stageVerify),

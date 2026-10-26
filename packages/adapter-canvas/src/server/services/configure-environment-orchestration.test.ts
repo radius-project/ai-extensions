@@ -2337,6 +2337,63 @@ describe("environment configuration service: the refusal ladder", () => {
 });
 
 describe("environment configuration service: the seven-step workflow", () => {
+  it.each(["success", "timeout", "rejected", "persistence-error"] as const)(
+    "retains initial dispatch evidence without post-shutdown publication (%s)",
+    async (outcome) => {
+      const harness = start({
+        dispatchResults: [
+          {
+            code: outcome === "success" ? 0 : 1,
+            stdout:
+              outcome === "success" ?
+                "https://github.com/octo/app/actions/runs/4242"
+              : "",
+            stderr: outcome === "rejected" ? "HTTP 403" : "timeout",
+            timedOut: outcome === "timeout" || outcome === "persistence-error"
+          }
+        ]
+      });
+      let stopped = false;
+      harness.dependencies.isShuttingDown = () => stopped;
+      const guard = harness.dependencies.guardStopBoundary;
+      harness.dependencies.guardStopBoundary = async (input) => {
+        if (!stopped) return guard(input);
+        input.respond(503, { code: "setup-shutting-down" });
+        return false;
+      };
+      harness.setJournalHook((entry) => {
+        if (entry === "dispatchVerifyWorkflow") stopped = true;
+      });
+      const persist = harness.dependencies.persistOperations;
+      harness.dependencies.persistOperations = async () => {
+        await persist();
+        if (stopped && outcome === "persistence-error")
+          throw new Error("acknowledgement journal unavailable");
+      };
+      const result = await configure({ repo: "octo/app" });
+      expect(result).toMatchObject(
+        outcome === "persistence-error" ?
+          { kind: "failed", status: 500 }
+        : { kind: "stopped", status: 503 }
+      );
+      expect(
+        harness.ghCalls.filter((call) => call.startsWith("run list "))
+      ).toHaveLength(1);
+      expect(
+        harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+      ).toHaveLength(1);
+      expect(harness.failures).toEqual([]);
+      expect(harness.finished).toEqual([]);
+      expect(
+        harness.operation.providerRecovery?.mutations?.at(-1)?.status
+      ).toBe(
+        outcome === "success" ? "confirmed"
+        : outcome === "rejected" ? "not_applied"
+        : "outcome_unknown"
+      );
+      expect(harness.state.verifyRunId).toBeUndefined();
+    }
+  );
   it.each([false, true])(
     "keeps an optional template failure nonfatal only without a pending workflow PUT: pending=%s",
     async (pending) => {
@@ -3955,6 +4012,38 @@ describe("environment configuration service: the protected-branch path", () => {
       runId: "4242",
       recoveryMarker: "preserved"
     });
+  });
+
+  it("stops automatic setup-branch discovery without publishing its late result", async () => {
+    let stopped = false;
+    const harness = start({
+      ...protectedScript,
+      onGhCommand: (command) => {
+        if (command.startsWith("run list ")) stopped = true;
+      }
+    });
+    harness.dependencies.isShuttingDown = () => stopped;
+    const guard = harness.dependencies.guardStopBoundary;
+    harness.dependencies.guardStopBoundary = async (input) => {
+      if (!stopped) return guard(input);
+      input.respond(503, { code: "setup-shutting-down" });
+      return false;
+    };
+    const result = await configure({ repo: "octo/app" });
+    expect(result).toMatchObject({ kind: "stopped", status: 503 });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("run list "))
+    ).toHaveLength(1);
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("workflow run "))
+    ).toBe(false);
+    expect(harness.operation.verification).toMatchObject({
+      event: "push",
+      runId: null
+    });
+    expect(harness.state.verifyRunId).toBeUndefined();
+    expect(harness.failures).toEqual([]);
+    expect(harness.finished).toEqual([]);
   });
 
   it("keeps merge-required guidance when the default dispatcher has a legacy chain", async () => {

@@ -667,6 +667,7 @@ export async function configureSetupEnvironment(
     fetchFile: (repo, path, branch) =>
       ports.fetchFileFromRepo(repo, path, branch)
   });
+  assertSetupExecutionActive(ports.isExecutionStopped);
   if (verifyPlan.pullRequestUrl) pullRequestUrl = verifyPlan.pullRequestUrl;
   if (verifyPlan.trigger === "none") {
     verifySkipReason = { kind: "merge", reason: verifyPlan.skipReason };
@@ -688,6 +689,7 @@ export async function configureSetupEnvironment(
     dispatchedAt = automaticStartedAt;
     ports.report({ kind: "verification-discovering", ref: verificationRef });
     const automatic = await ports.discoverAutomaticVerificationRun({
+      isStopped: ports.isExecutionStopped,
       identity: {
         repo: targetRepo,
         workflow: ports.verifyWorkflowFile,
@@ -711,6 +713,7 @@ export async function configureSetupEnvironment(
       stopBoundary: ports.stopBoundary,
       sleep: (milliseconds) => ports.sleep(milliseconds)
     });
+    assertSetupExecutionActive(ports.isExecutionStopped);
     if (automatic.state === "cancelled") return { kind: "stopped" };
     if (automatic.state === "manual_required") {
       ports.terminalizeManualRequired(automatic.guidance);
@@ -766,6 +769,7 @@ export async function configureSetupEnvironment(
       operationMarker,
       allowRegistrationRetry: true,
       ports: {
+        isStopped: ports.isExecutionStopped,
         runGh: (args) => runGh(args),
         sendDispatch: () =>
           runGhWorkflow(
@@ -811,6 +815,7 @@ export async function configureSetupEnvironment(
         sleep: (milliseconds) => ports.sleep(milliseconds)
       }
     });
+    assertSetupExecutionActive(ports.isExecutionStopped);
     if (dispatch.state === "cancelled") return { kind: "stopped" };
     if (dispatch.state === "baseline_failed") {
       return {
