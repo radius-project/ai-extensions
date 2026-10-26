@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
 import {
@@ -16,6 +18,7 @@ import {
   defaultDeployTemplateVars,
   generateDeployWorkflow
 } from "./deploy.js";
+import { AWS_EKS_RECIPE_PACK_URL } from "../modeling/recipe-pack.js";
 
 const BASE_TEMPLATES = {
   [DEPLOY_DISPATCHER_FILE]: `name: deploy
@@ -114,6 +117,23 @@ describe("generateDeployWorkflow", () => {
     expect(files[DEPLOY_AZURE_FILE]).toContain('APP_FILE: ".radius/app.bicep"');
     expect(files[DEPLOY_AWS_FILE]).toContain(
       `radius-project/ai-extensions/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
+    );
+  });
+
+  it("fills the pinned aws-eks recipe pack URL and does not let callers override it", () => {
+    const files = generateDeployWorkflow(
+      "prod",
+      ".radius/app.bicep",
+      {
+        ...BASE_TEMPLATES,
+        [DEPLOY_AWS_FILE]:
+          "env:\n  RECIPE_PACK_URL: '{{AWS_EKS_RECIPE_PACK_URL}}'\n"
+      },
+      { templateVars: { AWS_EKS_RECIPE_PACK_URL: "https://example.com/pack" } }
+    );
+
+    expect(files[DEPLOY_AWS_FILE]).toBe(
+      `env:\n  RECIPE_PACK_URL: '${AWS_EKS_RECIPE_PACK_URL}'\n`
     );
   });
 
@@ -318,6 +338,28 @@ jobs:
       - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `
 };
+
+describe("the committed AWS deploy template", () => {
+  it("resolves every placeholder and reads the pinned aws-eks pack", () => {
+    const read = (file: string): string =>
+      readFileSync(
+        fileURLToPath(
+          new URL(`../../../../.github/extension/${file}`, import.meta.url)
+        ),
+        "utf8"
+      );
+    const files = generateDeployWorkflow("prod", ".radius/app.bicep", {
+      [DEPLOY_DISPATCHER_FILE]: read(DEPLOY_DISPATCHER_FILE),
+      [DEPLOY_AZURE_FILE]: read(DEPLOY_AZURE_FILE),
+      [DEPLOY_AWS_FILE]: read(DEPLOY_AWS_FILE)
+    });
+
+    expect(files[DEPLOY_AWS_FILE]).toContain(
+      `RECIPE_PACK_URL: '${AWS_EKS_RECIPE_PACK_URL}'`
+    );
+    expect(() => parseYaml(files[DEPLOY_AWS_FILE])).not.toThrow();
+  });
+});
 
 describe("generateDeployWorkflow YAML validity", () => {
   // Positive guard: with the real templates' quoting and the default arch vars

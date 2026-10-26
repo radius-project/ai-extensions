@@ -15,22 +15,48 @@
 export const RECIPE_PACK_REPO = "radius-project/resource-types-contrib";
 export const RECIPE_PACK_REF = "main";
 
-// Provider → committed recipe-pack file. Azure downloads the `azure-aks` pack;
-// AWS's real pack is generated inline at deploy time, so for modeling it (and any
-// plain Kubernetes environment) uses the committed kubernetes default pack.
-const PROVIDER_PACK_PATH: Record<string, string> = {
-  azure: "recipe-packs/azure-aks/azure-aks.bicep",
-  aws: "recipe-packs/kubernetes/default.bicep",
-  kubernetes: "recipe-packs/kubernetes/default.bicep"
+// The AWS `aws-eks` recipe pack is not in Radius's contrib catalog yet
+// (radius-project/radius#13495), so both the AWS deploy workflow and the planned
+// graph read it from this pinned resource-types-contrib commit. This is the one
+// place to move it: to the merge commit of
+// radius-project/resource-types-contrib#442, and later to the catalog.
+export const AWS_EKS_RECIPE_PACK = {
+  ref: "08e7182dbbc97a04e0eb73c7cf3fcd8f858f7236",
+  path: "recipe-packs/aws-eks/aws-eks.bicep"
+} as const;
+
+export const AWS_EKS_RECIPE_PACK_URL = `https://raw.githubusercontent.com/${RECIPE_PACK_REPO}/${AWS_EKS_RECIPE_PACK.ref}/${AWS_EKS_RECIPE_PACK.path}`;
+
+// Provider → committed recipe-pack file and the ref it is read at. Azure reads
+// the `azure-aks` pack and AWS the pinned `aws-eks` pack; any plain Kubernetes
+// environment uses the committed kubernetes default pack.
+const PROVIDER_PACK: Record<string, { path: string; ref: string }> = {
+  azure: {
+    path: "recipe-packs/azure-aks/azure-aks.bicep",
+    ref: RECIPE_PACK_REF
+  },
+  aws: AWS_EKS_RECIPE_PACK,
+  kubernetes: {
+    path: "recipe-packs/kubernetes/default.bicep",
+    ref: RECIPE_PACK_REF
+  }
 };
 
+function recipePackForProvider(provider: string): {
+  path: string;
+  ref: string;
+} {
+  return PROVIDER_PACK[provider] || PROVIDER_PACK.kubernetes;
+}
+
 export function recipePackPathForProvider(provider: string): string {
-  return PROVIDER_PACK_PATH[provider] || PROVIDER_PACK_PATH.kubernetes;
+  return recipePackForProvider(provider).path;
 }
 
 // GitHub contents API path for a provider's default recipe pack file.
 export function recipePackContentPath(provider: string): string {
-  return `/repos/${RECIPE_PACK_REPO}/contents/${recipePackPathForProvider(provider)}?ref=${RECIPE_PACK_REF}`;
+  const pack = recipePackForProvider(provider);
+  return `/repos/${RECIPE_PACK_REPO}/contents/${pack.path}?ref=${pack.ref}`;
 }
 
 // One concrete resource derived from a recipe-pack entry's source.
@@ -111,6 +137,12 @@ const SOURCE_CONCRETE_MAP: Record<
     displayType: "Azure Storage Account",
     provider: "azure"
   },
+  // AWS recipes (ghcr.io/radius-project/aws-eks-recipes/<name>) → AWS types.
+  "aws-eks-recipes/mysqldatabases": {
+    type: "AWS.RDS/DBInstance",
+    displayType: "Amazon RDS for MySQL",
+    provider: "aws"
+  },
   // Kubernetes recipes (ghcr.io/radius-project/kube-recipes/<name>) → primary K8s object.
   "kube-recipes/containers": {
     type: "apps/Deployment",
@@ -171,6 +203,13 @@ const PROVIDER_SOURCE_OVERRIDE: Record<
       displayType: "Azure Kubernetes Service",
       provider: "azure"
     }
+  },
+  aws: {
+    "kube-recipes/containers": {
+      type: "AWS.EKS/Cluster",
+      displayType: "Amazon EKS",
+      provider: "aws"
+    }
   }
 };
 
@@ -178,6 +217,7 @@ const PROVIDER_SOURCE_OVERRIDE: Record<
 // host, the leading `bicep/` module namespace Azure uses, and the `:version` tag.
 //   mcr.microsoft.com/bicep/avm/res/cache/redis-enterprise:0.5.1 -> avm/res/cache/redis-enterprise
 //   ghcr.io/radius-project/kube-recipes/containers:latest        -> kube-recipes/containers
+//   ghcr.io/radius-project/aws-eks-recipes/mysqldatabases:latest -> aws-eks-recipes/mysqldatabases
 export function normalizeRecipeSource(source: string): string {
   if (!source) return "";
   let s = source.trim();
@@ -192,6 +232,8 @@ export function normalizeRecipeSource(source: string): string {
   if (avmIdx !== -1) return s.slice(avmIdx);
   const kubeIdx = s.indexOf("kube-recipes/");
   if (kubeIdx !== -1) return s.slice(kubeIdx);
+  const awsIdx = s.indexOf("aws-eks-recipes/");
+  if (awsIdx !== -1) return s.slice(awsIdx);
   return s;
 }
 

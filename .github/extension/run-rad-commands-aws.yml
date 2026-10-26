@@ -263,70 +263,70 @@ jobs:
 
       - name: Create Radius environment and deploy provider recipe pack
         id: provider-setup
+        env:
+          # Read from the environment rather than interpolated into the shell
+          # source, so a crafted value cannot execute commands in this
+          # OIDC + write job. The defaults stay in the GitHub expression.
+          KUBERNETES_NAMESPACE: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
+          RADIUS_BUILD_REGISTRY: ${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository) }}
+          RADIUS_ROUTES_GATEWAY_NAME: ${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}
+          RADIUS_ROUTES_GATEWAY_NAMESPACE: ${{ vars.RADIUS_ROUTES_GATEWAY_NAMESPACE || 'radius-system' }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_EKS_CLUSTER_NAME: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+          RADIUS_SUBNET_IDS: ${{ vars.RADIUS_SUBNET_IDS }}
+          # The aws-eks recipe pack is not in defaults.yaml yet. The extension
+          # fills this URL from the commit it pins (AWS_EKS_RECIPE_PACK in its
+          # core package) until the catalog carries the pack.
+          RECIPE_PACK_URL: '{{AWS_EKS_RECIPE_PACK_URL}}'
         run: |
           # load-contrib-catalog exports the catalog and generic accessors from
           # the same Radius ref as this generated workflow.
           source "$RADIUS_CONTRIB_CATALOG_HELPER"
-          NAMESPACE="${{ vars.KUBERNETES_NAMESPACE || 'default' }}"
+          NAMESPACE="$KUBERNETES_NAMESPACE"
+
+          # These values are written into Bicep below, so refuse anything that is
+          # not the shape the environment setup records.
+          if ! [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+            echo "ERROR: AWS_ACCOUNT_ID must be a 12-digit AWS account ID." >&2
+            exit 1
+          fi
+          if ! [[ "$AWS_REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]]; then
+            echo "ERROR: AWS_REGION must be an AWS region such as us-west-2." >&2
+            exit 1
+          fi
+          if ! [[ "$AWS_EKS_CLUSTER_NAME" =~ ^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$ ]]; then
+            echo "ERROR: AWS_EKS_CLUSTER_NAME must be an EKS cluster name." >&2
+            exit 1
+          fi
+          # Environment setup records the subnets as a comma-separated list. The
+          # pack accepts that or a JSON array string; pass the list on.
+          if ! [[ "$RADIUS_SUBNET_IDS" =~ ^subnet-[0-9a-f]+(,subnet-[0-9a-f]+)*$ ]]; then
+            echo "ERROR: RADIUS_SUBNET_IDS must be a comma-separated list of subnet IDs." >&2
+            exit 1
+          fi
 
           # Registry and credentials for the Radius.Compute/containerImages recipe.
           # The recipe builds images with the in-pod BuildKit and pushes them to
           # $BUILD_REGISTRY, authenticating with the Kubernetes Secret named
           # $REGISTRY_SECRET_NAME. That Secret is created on the target cluster by
-          # the app's Radius.Security/secrets resource during `rad deploy` (fed by
-          # the registryUsername/registryPassword parameters conditionally injected
-          # by the run-rad-commands action when the app declares them). Only the secret
-          # NAME is wired here via the recipe pack's registrySecretName.
-          # $BUILD_REGISTRY is ghcr.io/<owner>/<repo> so images land under the
-          # repository's package namespace; it must be lowercase.
-          BUILD_REGISTRY=$(echo "${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository) }}" | tr '[:upper:]' '[:lower:]')
+          # the app's Radius.Security/secrets resource during `rad deploy`. Only the
+          # secret NAME is wired here via the recipe pack's
+          # containerImagesRegistrySecretName. $BUILD_REGISTRY is
+          # ghcr.io/<owner>/<repo> so images land under the repository's package
+          # namespace; it must be lowercase.
+          BUILD_REGISTRY=$(echo "$RADIUS_BUILD_REGISTRY" | tr '[:upper:]' '[:lower:]')
           REGISTRY_SECRET_NAME="radius-ghcr-registry-creds"
+          PACK_NAME="aws-eks"
 
-          # Resolve every Recipe source from deploy/manifest/defaults.yaml.
-          CONTAINERIMAGES_SOURCE="$(radius_contrib_kube_recipe_source Radius.Compute/containerImages containerimages)"
-          CONTAINERS_SOURCE="$(radius_contrib_resource_git_source Radius.Compute/containers recipes/kubernetes/terraform)"
-          PERSISTENTVOLUMES_SOURCE="$(radius_contrib_resource_git_source Radius.Compute/persistentVolumes recipes/kubernetes/terraform)"
-          ROUTES_SOURCE="$(radius_contrib_kube_recipe_source Radius.Compute/routes routes)"
-          POSTGRESQL_SOURCE="$(radius_contrib_resource_git_source Radius.Data/postgreSqlDatabases recipes/kubernetes/terraform)"
-          MYSQL_SOURCE="$(radius_contrib_resource_git_source Radius.Data/mySqlDatabases recipes/aws/terraform)"
-          SECRETS_SOURCE="$(radius_contrib_resource_git_source Radius.Security/secrets recipes/kubernetes/terraform)"
-
-          # Select the provider-specific recipe pack. Both provider packs share the
-          # Bicep containerImages recipe and the Kubernetes compute/data recipes,
-          # and differ only in the mySQL database recipe and cloud provider config.
-          PACK_NAME="aws-terraform"
-          MYSQL_RECIPE=$(cat <<EOF
-          'Radius.Data/mySqlDatabases': {
-            kind: 'terraform'
-            source: '$MYSQL_SOURCE'
-            parameters: {
-              vpcId: '${{ vars.RADIUS_VPC_ID }}'
-              subnetIds: '${{ vars.RADIUS_SUBNET_IDS }}'
-            }
-          }
-          EOF
-          )
-          CLOUD_PROVIDER=$(cat <<EOF
-          aws: {
-            accountId: '${{ vars.AWS_ACCOUNT_ID }}'
-            region: '${{ vars.AWS_REGION }}'
-          }
-          EOF
-          )
-          echo "Selected recipe pack: $PACK_NAME"
-
-          # Generate separate environment and recipe-pack Bicep files. Write both
-          # next to the app file so `rad deploy` resolves the repo's own
-          # bicepconfig.json (which declares the `radius` extension). bicep resolves
-          # the config nearest the .bicep file, so writing to $APP_DIR (e.g. .radius/)
-          # picks up .radius/bicepconfig.json instead of the workspace root.
+          # Place generated deployment inputs next to the app file so `rad deploy`
+          # resolves the repo's own bicepconfig.json (which declares the `radius`
+          # extension). Bicep resolves the config nearest the .bicep file.
           APP_DIR=$(dirname "$APP_FILE")
           ENV_BICEP="$APP_DIR/radius-environment.bicep"
           RECIPE_PACK_BICEP="$APP_DIR/radius-recipe-pack.bicep"
-          # Ensure the destination directory exists before writing. The checkout
-          # branch may not contain the app's directory (e.g. .radius/), in which
-          # case the redirect below would fail with "No such file or directory".
           mkdir -p "$APP_DIR"
+
           cat > "$ENV_BICEP" <<EOF
           extension radius
 
@@ -334,55 +334,13 @@ jobs:
             name: '$ENVIRONMENT'
             properties: {
               providers: {
+                aws: {
+                  accountId: '$AWS_ACCOUNT_ID'
+                  region: '$AWS_REGION'
+                }
                 kubernetes: {
                   namespace: '$NAMESPACE'
                 }
-          $CLOUD_PROVIDER
-              }
-            }
-          }
-          EOF
-
-          cat > "$RECIPE_PACK_BICEP" <<EOF
-          extension radius
-
-          resource recipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
-            name: '$PACK_NAME'
-            properties: {
-              recipes: {
-                'Radius.Compute/containerImages': {
-                  kind: 'bicep'
-                  source: '$CONTAINERIMAGES_SOURCE'
-                  parameters: {
-                    registry: '$BUILD_REGISTRY'
-                    registrySecretName: '$REGISTRY_SECRET_NAME'
-                  }
-                }
-                'Radius.Compute/containers': {
-                  kind: 'terraform'
-                  source: '$CONTAINERS_SOURCE'
-                }
-                'Radius.Compute/persistentVolumes': {
-                  kind: 'terraform'
-                  source: '$PERSISTENTVOLUMES_SOURCE'
-                }
-                'Radius.Compute/routes': {
-                  kind: 'bicep'
-                  source: '$ROUTES_SOURCE'
-                  parameters: {
-                    gatewayName: '${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}'
-                    gatewayNamespace: '${{ vars.RADIUS_ROUTES_GATEWAY_NAMESPACE || 'radius-system' }}'
-                  }
-                }
-                'Radius.Data/postgreSqlDatabases': {
-                  kind: 'terraform'
-                  source: '$POSTGRESQL_SOURCE'
-                }
-                'Radius.Security/secrets': {
-                  kind: 'terraform'
-                  source: '$SECRETS_SOURCE'
-                }
-          $MYSQL_RECIPE
               }
             }
           }
@@ -395,11 +353,82 @@ jobs:
           rad deploy "$ENV_BICEP"
           echo "✅ Environment '$ENVIRONMENT' created."
 
-          echo "Generated provider recipe pack file:"
+          echo "Downloading recipe pack from $RECIPE_PACK_URL"
+          curl -fsSL "$RECIPE_PACK_URL" -o "$RECIPE_PACK_BICEP"
+
+          # The pack uses the mutable `latest` aliases for Kubernetes recipes.
+          # Rewrite each one present to the namespace commit that defaults.yaml
+          # validated, the same way the Azure pack is pinned. The MySQL recipe
+          # stays on its `latest` tag until the contrib repository publishes a
+          # versioned aws-eks-recipes artifact.
+          pin_kube_recipe() {
+            local resource_type="$1" recipe="$2" pinned_source mutable_source
+            pinned_source="$(radius_contrib_kube_recipe_source "$resource_type" "$recipe")"
+            mutable_source="${pinned_source%:*}:latest"
+            if grep -Fq "source: '${pinned_source}'" "$RECIPE_PACK_BICEP"; then
+              return 0
+            fi
+            if ! grep -Fq "source: '${mutable_source}'" "$RECIPE_PACK_BICEP"; then
+              echo "WARNING: the AWS recipe pack has no ${resource_type} Recipe; continuing without it." >&2
+              return 0
+            fi
+            sed -i "s|${mutable_source}|${pinned_source}|g" "$RECIPE_PACK_BICEP"
+            if ! grep -Fq "source: '${pinned_source}'" "$RECIPE_PACK_BICEP"; then
+              echo "ERROR: expected ${recipe} source was not pinned in the AWS recipe pack." >&2
+              exit 1
+            fi
+          }
+          # Each recipe entry is keyed by its Radius resource type, so both the
+          # resource type (which selects the namespace commit in defaults.yaml)
+          # and the kube-recipe artifact come from the pack itself.
+          while read -r resource_type artifact; do
+            [ -n "$resource_type" ] || continue
+            pin_kube_recipe "$resource_type" "$artifact"
+          done < <(awk -v q="'" '
+            {
+              if (match($0, q "Radius\\.[^" q "]*" q)) {
+                rt = substr($0, RSTART + 1, RLENGTH - 2)
+              }
+              else if (match($0, /kube-recipes\/[a-z0-9._-]+:latest/)) {
+                s = substr($0, RSTART, RLENGTH)
+                sub(/^kube-recipes\//, "", s)
+                sub(/:latest$/, "", s)
+                if (rt != "") { print rt, s }
+              }
+            }
+          ' "$RECIPE_PACK_BICEP")
+          # grep exits 1 when there are no matches, which is the success case here.
+          offenders=$(grep -oE 'ghcr\.io/radius-project/kube-recipes/[a-z0-9._-]+:latest' "$RECIPE_PACK_BICEP") || {
+            grep_status=$?
+            if [ "$grep_status" -gt 1 ]; then
+              echo "ERROR: failed to scan ${RECIPE_PACK_BICEP} for unpinned kube recipes." >&2
+              exit "$grep_status"
+            fi
+          }
+          offenders=$(printf '%s' "$offenders" | sort -u)
+          if [ -n "$offenders" ]; then
+            echo "ERROR: unpinned kube recipes remain in the AWS recipe pack:" >&2
+            echo "$offenders" >&2
+            exit 1
+          fi
+
+          echo "Recipe pack file:"
           cat "$RECIPE_PACK_BICEP"
           echo ""
           echo "Deploying provider recipe pack..."
-          rad deploy "$RECIPE_PACK_BICEP" --environment "$ENVIRONMENT"
+          # Region and account come from the environment's AWS provider above.
+          PACK_PARAMETERS=(
+            --parameters eksClusterName="$AWS_EKS_CLUSTER_NAME"
+            --parameters subnetIds="$RADIUS_SUBNET_IDS"
+            --parameters routesGatewayName="$RADIUS_ROUTES_GATEWAY_NAME"
+            --parameters routesGatewayNamespace="$RADIUS_ROUTES_GATEWAY_NAMESPACE"
+            --parameters containerImagesRegistry="$BUILD_REGISTRY"
+            --parameters containerImagesRegistrySecretName="$REGISTRY_SECRET_NAME"
+          )
+
+          rad deploy "$RECIPE_PACK_BICEP" \
+            --environment "$ENVIRONMENT" \
+            "${PACK_PARAMETERS[@]}"
           echo "✅ Provider recipe pack deployed."
           echo "provider-pack=${PACK_NAME}" >> "$GITHUB_OUTPUT"
 
