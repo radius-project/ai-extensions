@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { assertSetupExecutionActive } from "@radius-project/core";
 import {
   createOperation,
   prepareProviderMutation,
@@ -17,6 +18,14 @@ import {
 const WORKFLOW = "radius-verify-credentials.yml";
 const WORKFLOW_PATH = `.github/workflows/${WORKFLOW}`;
 const MUTATION_TARGET = `octo/app:${WORKFLOW}:main:dev`;
+
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 function command(
   overrides: Partial<{
@@ -139,6 +148,281 @@ function harness(input: {
 }
 
 describe("verification dispatch", () => {
+  it.each(["baseline", "send-boundary"] as const)(
+    "fences shutdown queued between the %s observer and its caller continuation",
+    async (boundary) => {
+      const test = harness({ dispatches: [] });
+      let stopped = false;
+      test.ports.isStopped = () => stopped;
+      const shutdownAfterObservation = () => {
+        queueMicrotask(() =>
+          queueMicrotask(() => {
+            stopped = true;
+          })
+        );
+      };
+      if (boundary === "baseline") {
+        test.ports.runGh = async () => {
+          shutdownAfterObservation();
+          return command({ stdout: "[]" });
+        };
+      } else {
+        test.ports.stopBoundary = async () => {
+          shutdownAfterObservation();
+          return true;
+        };
+      }
+      await expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(test.sendDispatch).not.toHaveBeenCalled();
+      expect(test.op.endedAt).toBeNull();
+      if (boundary === "baseline") {
+        expect(test.op.verification).toBeUndefined();
+        expect(test.persisted).toEqual([]);
+      } else {
+        expect(test.persisted.at(-1)?.status).toBe("not_applied");
+      }
+    }
+  );
+  it("does not create an intent or observe GitHub when already shut down", async () => {
+    const test = harness({ dispatches: [] });
+    test.ports.isStopped = () => true;
+    await expect(test.run()).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    expect(test.runGh).not.toHaveBeenCalled();
+    expect(test.persisted).toEqual([]);
+    expect(test.op.providerRecovery.mutations).toEqual([]);
+  });
+
+  it.each(["valid", "empty", "malformed", "denied", "error"] as const)(
+    "discards a late %s baseline without preparing an intent",
+    async (result) => {
+      const test = harness({ dispatches: [] });
+      const gate = deferred();
+      const entered = deferred();
+      let stopped = false;
+      test.ports.isStopped = () => stopped;
+      test.runGh.mockImplementation(async () => {
+        entered.resolve();
+        await gate.promise;
+        if (result === "error") throw new Error("read failed");
+        return command({
+          code: result === "denied" ? 1 : 0,
+          stdout:
+            result === "valid" ? '[{"databaseId":1}]'
+            : result === "empty" ? "[]"
+            : "invalid"
+        });
+      });
+      const pending = test.run();
+      const assertion = expect(pending).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      await entered.promise;
+      stopped = true;
+      gate.resolve();
+      await assertion;
+      expect(test.sendDispatch).not.toHaveBeenCalled();
+      expect(test.persisted).toEqual([]);
+      expect(test.op.verification).toBeUndefined();
+    }
+  );
+
+  it.each(["intent", "boundary", "boundary-error"] as const)(
+    "settles the unsent intent when shutdown interrupts %s",
+    async (boundary) => {
+      const test = harness({ dispatches: [] });
+      let stopped = false;
+      test.ports.isStopped = () => stopped;
+      const persist = test.ports.persist;
+      test.ports.persist = async () => {
+        await persist();
+        if (boundary === "intent") stopped = true;
+      };
+      test.ports.stopBoundary = async () => {
+        stopped = true;
+        if (boundary === "boundary-error") throw new Error("late Stop read");
+        return true;
+      };
+      await expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(test.sendDispatch).not.toHaveBeenCalled();
+      expect(test.persisted.map((entry) => entry.status)).toEqual([
+        "prepared",
+        "not_applied"
+      ]);
+      expect(test.op.endedAt).toBeNull();
+    }
+  );
+
+  it.each(["success", "timeout", "throw", "malformed", "rejected"] as const)(
+    "persists the actual %s acknowledgement before interrupting",
+    async (outcome) => {
+      const test = harness({ dispatches: [] });
+      let stopped = false;
+      test.ports.isStopped = () => stopped;
+      test.sendDispatch.mockImplementation(async () => {
+        stopped = true;
+        if (outcome === "throw") throw new Error("connection reset");
+        return command({
+          code: outcome === "timeout" || outcome === "rejected" ? 1 : 0,
+          timedOut: outcome === "timeout",
+          stdout:
+            outcome === "success" ?
+              "https://github.com/octo/app/actions/runs/42"
+            : "unreadable",
+          stderr: outcome === "rejected" ? "HTTP 403" : ""
+        });
+      });
+      await expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      expect(test.runGh).toHaveBeenCalledOnce();
+      expect(test.sendDispatch).toHaveBeenCalledOnce();
+      expect(test.persisted.at(-1)?.status).toBe(
+        outcome === "success" ? "confirmed"
+        : outcome === "rejected" ? "not_applied"
+        : "outcome_unknown"
+      );
+      expect(test.op.endedAt).toBeNull();
+      expect(test.op.failure).toBeNull();
+    }
+  );
+
+  it.each([
+    "success",
+    "empty",
+    "malformed",
+    "denied",
+    "error",
+    "wait",
+    "registration-wait"
+  ] as const)(
+    "does not publish or read again after shutdown at reconciliation %s",
+    async (boundary) => {
+      const test = harness({
+        dispatches: [
+          command({
+            code: 1,
+            timedOut: boundary !== "registration-wait",
+            stderr:
+              boundary === "registration-wait" ?
+                "HTTP 404: workflow not found on branch main"
+              : "timeout"
+          })
+        ]
+      });
+      const entered = deferred();
+      const gate = deferred();
+      let stopped = false;
+      test.ports.isStopped = () => stopped;
+      const originalRead = test.ports.runGh;
+      test.ports.runGh = async (args) => {
+        if (args.includes("databaseId")) return originalRead(args);
+        if (boundary === "wait") return command({ stdout: "[]" });
+        entered.resolve();
+        await gate.promise;
+        if (boundary === "error") throw new Error("listing failed");
+        return command({
+          code: boundary === "denied" ? 1 : 0,
+          stdout:
+            boundary === "success" ? JSON.stringify([exactRun()])
+            : boundary === "empty" ? "[]"
+            : "invalid"
+        });
+      };
+      test.ports.sleep = async () => {
+        entered.resolve();
+        await gate.promise;
+      };
+      const identity = vi.spyOn(test.ports, "applyIdentity");
+      const pending = expect(test.run()).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      await entered.promise;
+      stopped = true;
+      gate.resolve();
+      await pending;
+      expect(test.sendDispatch).toHaveBeenCalledOnce();
+      expect(identity).toHaveBeenCalledOnce();
+      expect(test.persisted.at(-1)?.status).toBe(
+        boundary === "registration-wait" ? "not_applied" : "outcome_unknown"
+      );
+      expect(test.op.endedAt).toBeNull();
+    }
+  );
+
+  it.each(["intent", "unsent", "acknowledgement"] as const)(
+    "does not hide %s persistence rejection behind shutdown",
+    async (phase) => {
+      const test = harness({
+        dispatches: [command({ code: 1, timedOut: true })]
+      });
+      let stopped = false;
+      test.ports.isStopped = () => stopped;
+      let writes = 0;
+      test.ports.persist = async () => {
+        writes++;
+        if (phase === "unsent" && writes === 1) {
+          stopped = true;
+          return;
+        }
+        if (phase === "intent" || writes === 2) {
+          stopped = true;
+          throw new Error("journal offline");
+        }
+      };
+      await expect(test.run()).rejects.toMatchObject({
+        code: "provider-mutation-recovery-persistence-failed"
+      });
+      expect(test.sendDispatch).toHaveBeenCalledTimes(
+        phase === "acknowledgement" ? 1 : 0
+      );
+    }
+  );
+
+  it("preserves typed interruption from a persistence boundary", async () => {
+    const test = harness({ dispatches: [] });
+    const persist = test.ports.persist;
+    let interrupted = false;
+    test.ports.persist = async () => {
+      if (!interrupted) {
+        interrupted = true;
+        assertSetupExecutionActive(() => true);
+      }
+      await persist();
+    };
+    await expect(test.run()).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    expect(test.sendDispatch).not.toHaveBeenCalled();
+    expect(test.persisted.at(-1)?.status).toBe("not_applied");
+  });
+
+  it("refuses a new command target while a previous dispatch is unresolved", async () => {
+    const test = harness({ dispatches: [] });
+    const prior = prepareProviderMutation(test.op, {
+      kind: "github_workflow.dispatch_retry",
+      target: "previous-command",
+      intent: {}
+    });
+    settleProviderMutation(
+      test.op,
+      prior.mutationId,
+      "outcome_unknown",
+      "timeout"
+    );
+    await expect(test.run()).resolves.toMatchObject({
+      state: "manual_required"
+    });
+    expect(test.runGh).not.toHaveBeenCalled();
+    expect(test.sendDispatch).not.toHaveBeenCalled();
+    expect(test.op.providerRecovery.mutations).toHaveLength(1);
+  });
+
   it("persists the returned run identity with mutation confirmation", async () => {
     const test = harness({
       dispatches: [

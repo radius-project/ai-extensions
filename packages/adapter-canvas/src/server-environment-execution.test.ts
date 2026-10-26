@@ -1948,10 +1948,10 @@ describe("production coordinator scheduling scopes", () => {
     }
   );
 
-  it.each(["completed", "shutdown", "removed"] as const)(
+  it.each(["completed", "shutdown", "shutdown-timeout", "removed"] as const)(
     "settles an acknowledged retry dispatch before executor release when %s",
     async (state) => {
-      const shutdown = state === "shutdown";
+      const shutdown = state === "shutdown" || state === "shutdown-timeout";
       const owner = createEnvironmentExecutionOwner();
       const op = operation("retry-dispatch");
       op.currentStage = STAGE_VERIFY;
@@ -1977,6 +1977,8 @@ describe("production coordinator scheduling scopes", () => {
           throw new Error(`Unexpected command: ${args.join(" ")}`);
         entered.resolve();
         await gate.promise;
+        if (state === "shutdown-timeout")
+          return { code: 1, stdout: "", stderr: "timed out", timedOut: true };
         return {
           code: 0,
           stdout: "https://github.com/fixture/app/actions/runs/17",
@@ -2034,10 +2036,112 @@ describe("production coordinator scheduling scopes", () => {
       expect(snapshots.at(-1)?.providerRecovery.mutations).toEqual([
         expect.objectContaining({
           kind: "github_workflow.dispatch_retry",
-          status: "confirmed"
+          status: state === "shutdown-timeout" ? "outcome_unknown" : "confirmed"
         })
       ]);
-      expect(op.verification.runId).toBe("17");
+      expect(op.verification.runId).toBe(
+        state === "shutdown-timeout" ? null : "17"
+      );
+    }
+  );
+
+  it.each([false, true])(
+    "retains the retry executor until shutdown acknowledgement persistence settles (reject=%s)",
+    async (reject) => {
+      const owner = createEnvironmentExecutionOwner();
+      const op = operation("op_retry-acknowledgement");
+      op.currentStage = STAGE_VERIFY;
+      op.context.githubLogin = "saved-account";
+      op.verification = {
+        workflow: "radius-verify-credentials.yml",
+        ref: "topic",
+        environment: "dev",
+        operationMarker: op.operationId,
+        acquisitionDeadline: Date.now() + 60_000
+      };
+      const accepted = acceptCommand(op, {
+        kind: "retry_verification",
+        attempt: 1,
+        target: STAGE_VERIFY
+      });
+      const entered = deferred();
+      const gate = deferred();
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] === "run") return { code: 0, stdout: "[]", stderr: "" };
+        if (args[0] !== "workflow") throw new Error("Unexpected command");
+        owner.shutdown();
+        return { code: 1, stdout: "", stderr: "timeout", timedOut: true };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext("runtime", {
+        createReadOnlyExecutor: async () => executor,
+        withSelectedAccount: unavailable
+      });
+      const releases: ReturnType<typeof vi.fn>[] = [];
+      const originalRegister = account.registerExecutor.bind(account);
+      vi.spyOn(account, "registerExecutor").mockImplementation(
+        (id, selected) => {
+          const release = vi.fn(originalRegister(id, selected));
+          releases.push(release);
+          return release;
+        }
+      );
+      let held = false;
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        if (
+          !held &&
+          op.providerRecovery.mutations[0]?.status === "outcome_unknown"
+        ) {
+          held = true;
+          entered.resolve();
+          await gate.promise;
+          if (reject) throw new Error("acknowledgement journal unavailable");
+        }
+      });
+      const verify = vi.fn(unavailable);
+      coordinator(
+        owner,
+        "panel",
+        undefined,
+        account,
+        undefined,
+        verify
+      ).scheduleCommandTask(
+        "verification_retry",
+        op,
+        accepted.command.commandId
+      );
+      const done = settled(owner, "panel");
+      try {
+        await Promise.race([entered.promise, done]);
+        expect(held).toBe(true);
+        expect(account.getExecutor(op.operationId)).toBe(executor);
+        expect(releases[0]).not.toHaveBeenCalled();
+        expect(op.providerRecovery.mutations[0].status).toBe("outcome_unknown");
+      } finally {
+        gate.resolve();
+        await done;
+        owner.shutdown();
+      }
+      expect(releases[0]).toHaveBeenCalledOnce();
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(verify).not.toHaveBeenCalled();
+      if (reject)
+        expect(op.failure?.code).toBe("verification-retry-persist-failed");
+      else {
+        expect(op.endedAt).toBeNull();
+        expect(op.failure).toBeNull();
+        const restored = fromPersistedOperation(toPersistedOperation(op));
+        expect(restored).toBeTruthy();
+        reconcileRestoredOperation(restored);
+        expect(restored?.providerRecovery.mutations[0].status).toBe(
+          "manual_required"
+        );
+      }
     }
   );
 
