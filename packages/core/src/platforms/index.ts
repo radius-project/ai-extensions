@@ -17,6 +17,8 @@ export {
   KUBERNETES_NAMESPACE_PATTERN,
   isKubernetesNamespace
 } from "./kubernetes.js";
+export * from "./aws-identity.js";
+export * from "./aws-network.js";
 
 const REGISTRY: Record<string, ComputePlatform> = {
   [azure.id]: azure,
