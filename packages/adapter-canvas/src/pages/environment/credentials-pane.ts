@@ -10,7 +10,10 @@
 
 import { credentialFormMarkup } from "./credential-form.js";
 
-export function credentialsPaneMarkup(activeSubtab: string): string {
+export function credentialsPaneMarkup(
+  activeSubtab: string,
+  awsEnabled: boolean
+): string {
   return `<!-- ══════════════ CREDENTIALS SUBTAB ══════════════ -->
 <section id="pane-credentials" style="${
     activeSubtab === "credentials" ? "" : "display:none;"
@@ -38,7 +41,7 @@ export function credentialsPaneMarkup(activeSubtab: string): string {
      #env-cred-form-host and returns it here, so the form exists exactly once
      and its element IDs stay unique in the document. -->
 <div id="cred-form" style="display:none;">
-${credentialFormMarkup()}
+${credentialFormMarkup(awsEnabled)}
 </div>
 </section>`;
 }

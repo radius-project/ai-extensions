@@ -104,6 +104,14 @@ pnpm typecheck       # typecheck core + shared + canvas
 > (`@github/copilot-sdk`) at runtime, so the build intentionally leaves it
 > unbundled.
 
+### AWS developer switch
+
+AWS environments are hidden from users while they are being built. To work on
+them, start the Copilot app with `RADIUS_CANVAS_AWS=1` in its environment. The
+extension reads the switch once at startup. With it on, the canvas offers AWS
+credential profiles, creates and deletes AWS environments, and commits the AWS
+workflows to the repository. Any other value, or no value, keeps AWS hidden.
+
 ## Testing
 
 Tests live across the workspace packages and run together through the root [Vitest](https://vitest.dev/) projects configuration.

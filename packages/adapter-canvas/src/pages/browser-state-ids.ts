@@ -52,6 +52,7 @@ export interface PageStateById {
   };
   [ENVIRONMENT_PAGE_STATE_ID]: RepositoryPageState & {
     activeSubtab: "credentials" | "environments";
+    awsEnabled: boolean;
     ghCommandPresentation?: CanvasState["ghCommandPresentation"];
     mutationNonce: string;
   };

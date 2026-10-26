@@ -8,7 +8,8 @@
 // fragment unique in the document, so the credential client script can keep
 // addressing them by ID from either context.
 
-export function credentialFormMarkup(): string {
+// AWS stays "coming soon" until the developer-only AWS switch is on.
+export function credentialFormMarkup(awsEnabled: boolean): string {
   return `<div class="rad-card" id="cred-form-card">
     <div class="rad-card__title" id="cred-form-title" style="margin:0 0 8px;">Create Credential Profile</div>
     <div class="rad-section">
@@ -22,7 +23,11 @@ export function credentialFormMarkup(): string {
           <div class="rad-select-wrap" style="display:block;">
             <select id="cred-provider-select" style="width:100%; min-width:0;">
               <option value="azure">Azure</option>
-              <option value="aws" disabled>AWS (coming soon)</option>
+              ${
+                awsEnabled ?
+                  '<option value="aws">AWS</option>'
+                : '<option value="aws" disabled>AWS (coming soon)</option>'
+              }
             </select>
           </div>
         </div>
@@ -55,12 +60,11 @@ export function credentialFormMarkup(): string {
     <!-- AWS account -->
     <div id="cred-panel-aws" class="rad-section" style="display:none;">
       <div class="rad-section__title">Account</div>
-      <div class="rad-section__desc">Enter your AWS account details, then verify your CLI login to ensure you have the necessary credentials.</div>
+      <div class="rad-section__desc">Enter your AWS account and region, then verify your CLI login to ensure you have the necessary credentials. The profile carries no deploy identity; that is set up when you create an environment.</div>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px;">
         <div class="rad-field"><label for="aws-account-id">Account ID</label><input id="aws-account-id" type="text" placeholder="123456789012" /></div>
         <div class="rad-field"><label for="aws-region">Region</label><input id="aws-region" type="text" placeholder="us-east-1" /></div>
       </div>
-      <div class="rad-field" style="margin-top:14px;"><label for="aws-role-arn">Role ARN (optional)</label><input id="aws-role-arn" type="text" placeholder="arn:aws:iam::123456789012:role/radius-deploy" /></div>
       <button id="btn-verify-aws" class="rad-btn rad-btn--primary" style="margin-top:16px;">Verify Credentials</button>
     </div>
 

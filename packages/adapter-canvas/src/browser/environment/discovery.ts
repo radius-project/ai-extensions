@@ -15,6 +15,11 @@ import {
 } from "../../azure-oidc.js";
 import { remediationReference } from "../../remediation-reference.js";
 import { createCommandAction } from "../command-action.js";
+import {
+  initializeAwsInfrastructure,
+  parseAwsClusterInfo,
+  parseAwsSubnetInfo
+} from "./aws-infrastructure.js";
 import { beginEntry } from "../lifecycle.js";
 import { isRecord, readArray, readString, readStringArray } from "../json.js";
 import type { DiscoveryData } from "../../azure-oidc.js";
@@ -40,13 +45,8 @@ export const DEFAULT_NAMESPACES: readonly string[] = [
 
 export const COMBO_PAIRS: readonly (readonly [string, string])[] = [
   ["azure-namespace-select", "azure-namespace-custom"],
-  ["aws-cluster-select", "aws-cluster-custom"],
-  ["aws-namespace-select", "aws-namespace-custom"],
-  ["aws-vpc-select", "aws-vpc-custom"],
-  ["aws-subnets-select", "aws-subnets-custom"]
+  ["aws-namespace-select", "aws-namespace-custom"]
 ];
-
-const NONE_OPTION: DiscoveryOption = { id: "", name: "None (optional)" };
 
 export interface DiscoveryOption {
   readonly id: string;
@@ -68,6 +68,9 @@ export interface AppPickerOptions {
   readonly candidates: readonly AppRegistrationCandidate[];
   readonly defaultAppId?: string;
   readonly allowCreateNew?: boolean;
+  // False when candidates already carry their served repositories, so the
+  // picker must not look them up as Azure app registrations.
+  readonly lazyServes?: boolean;
 }
 
 export type AppPickerChoice =
@@ -92,11 +95,14 @@ export interface DiscoveryPanelHandle {
     provider: "azure" | "aws"
   ): void;
   currentInfraSelection(provider: "azure" | "aws"): EnvironmentInfrastructure;
+  // The AWS subnet or cluster problem that keeps Create Environment disabled.
+  awsInfrastructureError(): string;
   teardown(): void;
 }
 
 export interface DiscoveryPanelOptions {
   readonly mutationNonce: string;
+  readonly onInfrastructureChange?: () => void;
 }
 
 const MISSING_MUTATION_NONCE_REASON =
@@ -494,7 +500,11 @@ export function showAppPicker(
     const servesText = formatServesReposLabel(serves ?? null);
     if (servesText !== "") {
       appendServes(body, servesText);
-    } else if (value !== "" && value !== "__create__") {
+    } else if (
+      options.lazyServes !== false &&
+      value !== "" &&
+      value !== "__create__"
+    ) {
       // No server-provided label: remember the row so it can be filled lazily
       // once /api/azure-app-serves-repos resolves for this app.
       servesSlots.set(value, body);
@@ -600,6 +610,10 @@ export function initializeDiscoveryPanel(
   const scope = beginEntry(context, DISCOVERY_PANEL_ENTRY_KEY);
   if (!scope) return null;
 
+  const awsInfrastructure = initializeAwsInfrastructure(context, scope, () =>
+    options.onInfrastructureChange?.()
+  );
+  let awsClusterInfo: ReturnType<typeof parseAwsClusterInfo> = [];
   let azureClusters: DiscoveryOption[] = [];
   let renderedAzureClusters = new Map<string, DiscoveryOption>();
   let azureFilterWired = false;
@@ -1004,8 +1018,15 @@ export function initializeDiscoveryPanel(
     if (statusEl) statusEl.textContent = "Discovering resources…";
     if (provider === "azure") renderAzureRemediation(null);
     const payload: Record<string, string> = { provider };
-    if (subscriptionId !== "") payload.subscriptionId = subscriptionId;
-    if (tenantId !== "") payload.tenantId = tenantId;
+    // An AWS profile names an account and region where Azure names a
+    // subscription and tenant; they arrive in the same two positions.
+    if (provider === "aws") {
+      payload.accountId = subscriptionId;
+      payload.region = tenantId;
+    } else {
+      if (subscriptionId !== "") payload.subscriptionId = subscriptionId;
+      if (tenantId !== "") payload.tenantId = tenantId;
+    }
     if (clusterResourceGroup !== "") {
       payload.resourceGroup = clusterResourceGroup;
     }
@@ -1068,14 +1089,27 @@ export function initializeDiscoveryPanel(
         wireAzureInfraFilter();
       } else {
         if (statusEl) statusEl.textContent = discoverStatusText(data, "aws");
+        awsClusterInfo = parseAwsClusterInfo(readArray(raw, "clusters"));
         const awsClusters = sortDiscoveryOptions(
-          parseDiscoveryOptions(readArray(raw, "clusters"))
+          parseDiscoveryOptions(readArray(raw, "clusters")).map((option) =>
+            (
+              awsClusterInfo.some(
+                (cluster) => cluster.id === option.id && !cluster.usable
+              )
+            ) ?
+              {
+                ...option,
+                name: `${option.name} (CONFIG_MAP authentication, cannot be used)`
+              }
+            : option
+          )
         );
         renderSelect(
           context,
           "aws-cluster-select",
           awsClusters,
-          "Select EKS cluster…"
+          "Select EKS cluster…",
+          false
         );
         if (awsClusters.length === 1) {
           selectOfferedValue(context, "aws-cluster-select", awsClusters[0].id);
@@ -1094,14 +1128,13 @@ export function initializeDiscoveryPanel(
         renderSelect(
           context,
           "aws-vpc-select",
-          [NONE_OPTION, ...parseDiscoveryOptions(readArray(raw, "vpcs"))],
-          "Select VPC…"
+          parseDiscoveryOptions(readArray(raw, "vpcs")),
+          "Select VPC…",
+          false
         );
-        renderSelect(
-          context,
-          "aws-subnets-select",
-          [NONE_OPTION, ...parseDiscoveryOptions(readArray(raw, "subnets"))],
-          "Select subnets…"
+        awsInfrastructure.setDiscovered(
+          awsClusterInfo,
+          parseAwsSubnetInfo(readArray(raw, "subnets"))
         );
       }
       const restoredNamespace = applyPendingInfrastructure(provider);
@@ -1199,26 +1232,21 @@ export function initializeDiscoveryPanel(
       );
       return config.namespace ?? "";
     }
-    restoreInfrastructureValue(
-      "aws-cluster-select",
-      "aws-cluster-custom",
-      config.cluster ?? ""
-    );
+    // An empty saved value leaves what discovery selected in place.
+    if (config.cluster) {
+      selectOfferedValue(context, "aws-cluster-select", config.cluster);
+    }
     restoreInfrastructureValue(
       "aws-namespace-select",
       "aws-namespace-custom",
       config.namespace ?? ""
     );
-    restoreInfrastructureValue(
-      "aws-vpc-select",
-      "aws-vpc-custom",
-      config.vpcId ?? ""
-    );
-    restoreInfrastructureValue(
-      "aws-subnets-select",
-      "aws-subnets-custom",
-      config.subnetIds ?? ""
-    );
+    const savedSubnets = (config.subnetIds ?? "")
+      .split(",")
+      .filter((id) => id !== "");
+    if (config.vpcId || savedSubnets.length > 0) {
+      awsInfrastructure.restore(config.vpcId ?? "", savedSubnets);
+    }
     return "";
   };
 
@@ -1243,13 +1271,13 @@ export function initializeDiscoveryPanel(
     currentInfraSelection(provider) {
       return provider === "aws" ?
           {
-            cluster: comboValue("aws-cluster-select", "aws-cluster-custom"),
+            cluster: context.dom.selectById("aws-cluster-select")?.value ?? "",
             namespace: comboValue(
               "aws-namespace-select",
               "aws-namespace-custom"
             ),
-            vpcId: comboValue("aws-vpc-select", "aws-vpc-custom"),
-            subnetIds: comboValue("aws-subnets-select", "aws-subnets-custom")
+            vpcId: context.dom.selectById("aws-vpc-select")?.value ?? "",
+            subnetIds: awsInfrastructure.selectedSubnetIds().join(",")
           }
         : {
             resourceGroup:
@@ -1260,6 +1288,13 @@ export function initializeDiscoveryPanel(
               "azure-namespace-custom"
             )
           };
+    },
+    awsInfrastructureError() {
+      const cluster = context.dom.selectById("aws-cluster-select")?.value ?? "";
+      if (awsClusterInfo.some((item) => item.id === cluster && !item.usable)) {
+        return `Cluster ${cluster} uses CONFIG_MAP authentication, which does not support access entries, so Radius cannot grant the deploy role access to it.`;
+      }
+      return awsInfrastructure.validationError();
     },
     teardown() {
       remediationAction?.dispose();

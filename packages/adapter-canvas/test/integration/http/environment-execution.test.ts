@@ -321,7 +321,8 @@ describe("production environment owner HTTP binding", () => {
   it("refuses construction without the shared owner", () => {
     const options = {
       executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createProductionGitHubAccountContext()
+      accountContext: createProductionGitHubAccountContext(),
+      awsEnabled: false
     };
     Reflect.deleteProperty(options, "executionOwner");
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
@@ -332,11 +333,24 @@ describe("production environment owner HTTP binding", () => {
   it("refuses construction without the shared account context", () => {
     const options = {
       executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createProductionGitHubAccountContext()
+      accountContext: createProductionGitHubAccountContext(),
+      awsEnabled: false
     };
     Reflect.deleteProperty(options, "accountContext");
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
       "Missing canvas server dependency: accountContext"
+    );
+  });
+
+  it("refuses construction without the AWS switch", () => {
+    const options = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createProductionGitHubAccountContext(),
+      awsEnabled: false
+    };
+    Reflect.deleteProperty(options, "awsEnabled");
+    expect(() => createProductionCanvasServerRuntime(options)).toThrow(
+      "Missing canvas server dependency: awsEnabled"
     );
   });
 

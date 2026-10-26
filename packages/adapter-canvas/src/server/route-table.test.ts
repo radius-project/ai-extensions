@@ -53,6 +53,7 @@ const productionHandlers = {
       now: () => 0
     },
     {
+      awsEnabled: false,
       isValidRepoSlug: () => false,
       isResourceGroupName: () => false,
       isAksClusterName: () => false,
@@ -135,6 +136,7 @@ const productionHandlers = {
     deploymentStatusBlocksMutation: () => false,
     localDeploymentBlocksMutation: () => false,
     ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
+    deleteApplicationWorkflowFiles: [],
     findWorkflowRun: () => Promise.resolve(null),
     runGh: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     readProcessEnv: () => ({}),
@@ -345,6 +347,7 @@ const productionHandlers = {
     })
   }),
   ...createEnvironmentsRoutes({
+    awsEnabled: false,
     errorMessage: (error) => String(error),
     redactDiagnostic: (value) => value,
     repoMatchesWorkspace: () => false,

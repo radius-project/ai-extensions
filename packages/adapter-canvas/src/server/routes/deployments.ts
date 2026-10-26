@@ -11,7 +11,7 @@ import type {
 import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
 import { discardDeployedApplicationState } from "../services/deployed-view-state.js";
 import { DELETE_FAILED_STATUS } from "../services/delete-conflict.js";
-import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
+import { DELETE_APP_DISPATCHER_FILE } from "../../infra.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
@@ -143,6 +143,8 @@ export interface DeploymentsDependencies {
     provider: string,
     only: string[]
   ): Promise<WorkflowSyncResult>;
+  // The application-delete dispatcher plus the provider workflows it `uses:`.
+  deleteApplicationWorkflowFiles: readonly string[];
   findWorkflowRun(
     repo: string,
     workflowFile: string,
@@ -673,7 +675,7 @@ export async function handleDeleteDeployment(
       repo,
       environment,
       "",
-      [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE]
+      [...dependencies.deleteApplicationWorkflowFiles]
     );
     // If the sync couldn't commit the dispatcher to the default branch (e.g.
     // it's protected, or the token lacks write access), the dispatch below will

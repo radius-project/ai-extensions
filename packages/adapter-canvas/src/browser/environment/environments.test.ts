@@ -4,6 +4,7 @@ import {
   ENVIRONMENT_DELETE_PATH,
   ENVIRONMENT_LIST_PATH,
   ENVIRONMENT_POLL_MS,
+  deleteEnvironmentMessage,
   environmentRowsMarkup,
   environmentStatusMarkup,
   findNamespaceConflict,
@@ -1101,6 +1102,38 @@ describe("environment rows after a rollback", () => {
   });
 });
 
+describe("deleteEnvironmentMessage", () => {
+  const AZURE_MESSAGE =
+    'This deletes the GitHub environment "dev", removes the Radius environment from the cluster, and permanently deletes the environment\'s federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.';
+
+  it.each([
+    ["an Azure environment", { provider: "azure" }],
+    ["an environment with no provider", {}],
+    ["an unknown environment", undefined]
+  ])("keeps the Azure copy for %s", (_label, environment) => {
+    expect(deleteEnvironmentMessage("dev", environment)).toBe(AZURE_MESSAGE);
+  });
+
+  it("names the cluster and the IAM cleanup for an AWS environment", () => {
+    expect(
+      deleteEnvironmentMessage("dev", {
+        provider: "aws",
+        config: { cluster: "eks-1" }
+      })
+    ).toBe(
+      "This deletes the GitHub environment \"dev\" and removes the Radius environment from eks-1. It removes this environment's trust subject and its radius-deploy-dev policy from the deploy IAM role. The role itself and the account's GitHub identity provider are kept, because other environments in this repository may use them. Applications already deployed to it must be deleted first."
+    );
+  });
+
+  it("falls back to a generic cluster name when an AWS environment has none recorded", () => {
+    const message = deleteEnvironmentMessage("dev", { provider: "aws" });
+    expect(message).toContain(
+      "removes the Radius environment from its EKS cluster."
+    );
+    expect(message).not.toContain("federated credential");
+  });
+});
+
 describe("environment deletion", () => {
   async function readyDelete(name = "dev") {
     const page = renderPage();
@@ -1145,6 +1178,33 @@ describe("environment deletion", () => {
     expect(page.confirmDialog.show.mock.calls[0][0].message).toContain(
       "federated credential"
     );
+  });
+
+  it("confirms an AWS deletion with the AWS copy", async () => {
+    const page = renderPage();
+    const rows = addRowButtons(page.browser, "dev");
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [
+          {
+            name: "dev",
+            provider: "aws",
+            status: "success",
+            config: { cluster: "eks-1" }
+          }
+        ]
+      })
+    );
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+    page.confirmDialog.show.mockImplementation(() => {});
+
+    rows.remove.dispatch("click");
+
+    const message = page.confirmDialog.show.mock.calls[0][0].message;
+    expect(message).toContain("removes the Radius environment from eks-1");
+    expect(message).toContain("radius-deploy-dev policy");
+    expect(message).not.toContain("Azure app registration");
   });
 
   it("posts the exact target and follows the delete operation on success", async () => {

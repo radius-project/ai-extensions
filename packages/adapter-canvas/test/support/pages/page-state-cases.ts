@@ -147,6 +147,7 @@ export function pageStateCases(
       expected: {
         ...repository,
         activeSubtab: "environments",
+        awsEnabled: false,
         mutationNonce
       },
       marker: "env-subtabs"

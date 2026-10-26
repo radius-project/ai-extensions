@@ -24,9 +24,12 @@ export type SetupCoordinatorStageResult =
   | { kind: "completed" | "input-required"; clientId?: unknown }
   | { kind: "reconciling"; message?: unknown };
 
+export type SetupCoordinatorAwsResult =
+  { kind: "completed"; roleArn: string } | { kind: "failed"; error: unknown };
+
 export type SetupCoordinatorFailure =
   | { kind: "repository-access" | "package-access" }
-  | { kind: "environment-resolution"; error: unknown };
+  | { kind: "environment-resolution" | "aws-authorization"; error: unknown };
 
 export type SetupCoordinatorEvent =
   | { kind: "environment-owned" | "environment-resolved"; name: string }
@@ -69,6 +72,13 @@ export interface SetupCoordinatorPorts {
       operationId: string;
     }
   ): Promise<SetupCoordinatorStageResult>;
+  authorizeAws(
+    request: Record<string, unknown> & {
+      repo: string;
+      environment: string;
+      reused: boolean;
+    }
+  ): Promise<SetupCoordinatorAwsResult>;
   configureEnvironment(
     request: Record<string, unknown> &
       SetupCoordinatorTarget & {
@@ -236,9 +246,32 @@ export async function runSetupCoordinator(
     return { shouldMonitor: false };
   }
   const environmentRequest = record(request.environment);
+  let awsRoleArn = "";
+  if (target.provider === "aws" && !outstanding) {
+    const aws = await ports.authorizeAws({
+      ...environmentRequest,
+      repo: target.repo,
+      environment: ensured.name,
+      reused: ensured.state === "reused"
+    });
+    if (aws.kind === "failed") {
+      if (!(await ports.stopBoundary("before-setup-failure-cleanup"))) {
+        return { shouldMonitor: false };
+      }
+      await ports.finalizeFailure({
+        kind: "aws-authorization",
+        error: aws.error
+      });
+      return { shouldMonitor: false };
+    }
+    awsRoleArn = aws.roleArn;
+  }
   const clientId =
     setupResult && "clientId" in setupResult ? setupResult.clientId : undefined;
   const liveContext = ports.operation().context;
+  if (!awsRoleArn && typeof liveContext?.awsRoleArn === "string") {
+    awsRoleArn = liveContext.awsRoleArn;
+  }
   const environmentResult = await invoke(() =>
     ports.configureEnvironment({
       ...environmentRequest,
@@ -247,6 +280,7 @@ export async function runSetupCoordinator(
       operationEnvironment: target.environment,
       provider: target.provider,
       operationId: target.operationId,
+      ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
       clientId:
         (typeof clientId === "string" && clientId) ||
         (typeof liveContext?.clientId === "string" && liveContext.clientId) ||
