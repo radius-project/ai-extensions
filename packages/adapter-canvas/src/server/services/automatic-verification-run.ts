@@ -1,3 +1,4 @@
+import { assertSetupExecutionActive } from "@radius-project/core";
 import {
   findExactVerificationRun,
   hasPostDispatchVerificationRuns
@@ -23,12 +24,23 @@ export type AutomaticVerificationRunOutcome =
   | { state: "cancelled" };
 
 export async function discoverAutomaticVerificationRun(input: {
+  isStopped?(): boolean;
   identity: AutomaticVerificationIdentity;
   listRuns(): Promise<VerificationRunListResult>;
   stopBoundary(boundary: string): Promise<boolean>;
   sleep(milliseconds: number): Promise<void>;
 }): Promise<AutomaticVerificationRunOutcome> {
   const { identity } = input;
+  const active = () => assertSetupExecutionActive(input.isStopped);
+  const observe = async <T>(read: () => Promise<T>): Promise<T> => {
+    active();
+    try {
+      return await read();
+    } finally {
+      active();
+    }
+  };
+  active();
   const actionsUrl = verificationActionsUrl(identity.repo, identity.workflow);
   const manualRequired = (reason: string): AutomaticVerificationRunOutcome => ({
     state: "manual_required",
@@ -38,16 +50,19 @@ export async function discoverAutomaticVerificationRun(input: {
   });
 
   for (let attempt = 0; attempt < DISCOVERY_ATTEMPTS; attempt += 1) {
-    if (attempt > 0) await input.sleep(DISCOVERY_INTERVAL_MS);
-    if (
-      !(await input.stopBoundary(
+    if (attempt > 0) await observe(() => input.sleep(DISCOVERY_INTERVAL_MS));
+    const proceed = await observe(() =>
+      input.stopBoundary(
         `before-automatic-verification-discovery:${attempt + 1}`
-      ))
-    ) {
+      )
+    );
+    active();
+    if (!proceed) {
       return { state: "cancelled" };
     }
 
-    const listed = await input.listRuns();
+    const listed = await observe(input.listRuns);
+    active();
     if (listed.code !== 0 && listed.code !== "0") {
       return manualRequired(
         `GitHub would not return the workflow runs: ${

@@ -1,7 +1,10 @@
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted
+} from "@radius-project/core";
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
   providerMutationRecord,
-  settleProviderMutation,
   terminalizeProviderManualRequired
 } from "../../operations.js";
 import {
@@ -150,7 +153,7 @@ export async function runVerificationRetry(
   commandId: string,
   dependencies: VerificationRetryRunnerDependencies
 ): Promise<void> {
-  if (operation.endedAt) return;
+  if (operation.endedAt || dependencies.isStopped?.()) return;
   const login = selectedLogin(operation);
   if (!login) {
     dependencies.addStep(
@@ -269,6 +272,8 @@ export async function runVerificationRetry(
     executor
   );
   try {
+    const active = () => assertSetupExecutionActive(dependencies.isStopped);
+    active();
     const saved = operation.verification || {};
     const resumeKnownRun = shouldResumeKnownVerificationRun({
       accountUnavailablePhase: saved.accountUnavailablePhase,
@@ -302,7 +307,9 @@ export async function runVerificationRetry(
         });
         return;
       }
+      active();
       if (!(await stopBoundary("after-verification-retry-dispatch"))) return;
+      active();
       await dependencies.monitor(operation.operationId);
       if (dependencies.isStopped?.()) return;
       dependencies.setCommandState(
@@ -363,15 +370,27 @@ export async function runVerificationRetry(
         operationMarker,
         allowRegistrationRetry: false,
         ports: {
+          isStopped: dependencies.isStopped,
           runGh: async (args) => {
-            const result = await executor.run(args, { timeout: 30000 });
+            let result: ProviderMutationCommandResult;
+            try {
+              active();
+              result = await executor.run(args, { timeout: 30000 });
+            } finally {
+              active();
+            }
             if (Number(result.code) !== 0) {
-              const authorizationError =
-                await dependencies.selectedCommandAuthorizationError(
-                  executor,
-                  repo,
-                  result
-                );
+              let authorizationError: Error | null;
+              try {
+                authorizationError =
+                  await dependencies.selectedCommandAuthorizationError(
+                    executor,
+                    repo,
+                    result
+                  );
+              } finally {
+                active();
+              }
               if (authorizationError) throw authorizationError;
             }
             return result;
@@ -423,6 +442,7 @@ export async function runVerificationRetry(
         }
       });
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) return;
       if (
         error instanceof ProviderMutationRecoveryError &&
         error.code === "provider-mutation-recovery-persistence-failed"
@@ -460,14 +480,6 @@ export async function runVerificationRetry(
           };
           await dependencies.persist(operation);
           return;
-        }
-        if (!dispatchMayExist && mutation?.status === "prepared") {
-          settleProviderMutation(
-            operation,
-            mutation.mutationId,
-            "not_applied",
-            "Radius did not send the verification dispatch because its journal could not be saved."
-          );
         }
         dependencies.addStep(
           operation,
@@ -510,6 +522,7 @@ export async function runVerificationRetry(
       return;
     }
 
+    active();
     if (dispatch.state === "cancelled") return;
     if (dispatch.state === "baseline_failed") {
       dependencies.setCommandState(
@@ -542,12 +555,17 @@ export async function runVerificationRetry(
       return;
     }
     if (dispatch.state === "rejected") {
-      const authorizationError =
-        await dependencies.selectedCommandAuthorizationError(
-          executor,
-          repo,
-          dispatch.result
-        );
+      let authorizationError: Error | null;
+      try {
+        authorizationError =
+          await dependencies.selectedCommandAuthorizationError(
+            executor,
+            repo,
+            dispatch.result
+          );
+      } finally {
+        active();
+      }
       if (authorizationError) {
         await failSelectedAccount({
           operation,
@@ -597,8 +615,19 @@ export async function runVerificationRetry(
       dependencies.stageVerify
     );
     dependencies.setCommandState(operation, commandId, "running");
-    await dependencies.persist(operation);
+    if (!(await dependencies.persist(operation))) {
+      await failPersistence({
+        operation,
+        commandId,
+        message: "Radius could not save the accepted verification retry.",
+        evidence: null,
+        dependencies
+      });
+      return;
+    }
+    active();
     if (!(await stopBoundary("after-verification-retry-dispatch"))) return;
+    active();
     await dependencies.monitor(operation.operationId);
     if (dependencies.isStopped?.()) return;
     dependencies.setCommandState(
@@ -608,6 +637,8 @@ export async function runVerificationRetry(
       dependencies.currentState(operation.operationId)
     );
     await dependencies.persist(operation);
+  } catch (error) {
+    if (!isSetupExecutionInterrupted(error)) throw error;
   } finally {
     releaseExecutor();
   }
