@@ -665,6 +665,14 @@ describe("real server and fake SDK runtime ownership", () => {
   ] as const)(
     "stops the real %s service at %s without publishing a terminal cleanup result",
     async (stage, boundary) => {
+      const externalCommand = vi.spyOn(gh, "cliExec").mockImplementation(() => {
+        throw new Error("Unexpected external command during failure cleanup");
+      });
+      const externalFetch = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async () => {
+          throw new Error("Unexpected network request during failure cleanup");
+        });
       const owner = createEnvironmentExecutionOwner();
       let repositoryReads = 0;
       const run = vi.fn(async (args: string[]) => {
@@ -681,9 +689,10 @@ describe("real server and fake SDK runtime ownership", () => {
           if (repositoryReads === 2) {
             if (boundary === "before-cleanup") owner.shutdown();
             return {
-              code: 1,
-              stdout: "",
-              stderr: "HTTP 403: repository unavailable"
+              code: 0,
+              stdout:
+                '{"full_name":"fixture/app","permissions":{"admin":false}}',
+              stderr: ""
             };
           }
           return {
@@ -765,12 +774,12 @@ describe("real server and fake SDK runtime ownership", () => {
           resolve();
         });
       });
+      expect(externalCommand).not.toHaveBeenCalled();
+      expect(externalFetch).not.toHaveBeenCalled();
       expect(
         repositoryReads,
         JSON.stringify({ failure: op.failure, calls: run.mock.calls })
-      ).toBe(
-        stage === "configuration" && boundary === "cleanup-delete" ? 3 : 2
-      );
+      ).toBe(2);
       expect(op.endedAt).toBeNull();
       expect(op.failure).toBeNull();
       expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
