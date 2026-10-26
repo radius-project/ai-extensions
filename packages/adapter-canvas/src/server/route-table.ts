@@ -188,6 +188,7 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "none",
     "azure-discovery"
   ),
+  declare("GET", "/api/list-aws-roles", "exact", "none", "azure-discovery"),
   legacyPost("/api/app-params", "exact", "json", "environments"),
   legacyPost("/api/create-environment", "exact", "json", "environments"),
   declare("GET", "/api/load-graph-stream", "exact", "none", "graphs-planning"),

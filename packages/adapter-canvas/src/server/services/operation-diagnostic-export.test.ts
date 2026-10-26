@@ -125,6 +125,10 @@ function build(value: unknown = operation(), version = "0.3.0-edge.1") {
 }
 
 describe("createOperationDiagnosticExport", () => {
+  it.each(["azure", "aws"])("reports the %s provider", (provider) => {
+    expect(build(operation({ provider })).operation.provider).toBe(provider);
+  });
+
   it("builds the exact local support schema from allowlisted states and counts", () => {
     expect(build()).toEqual({
       diagnosticSchemaVersion: 2,

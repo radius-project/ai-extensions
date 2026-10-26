@@ -11,7 +11,8 @@ import { createAzureDiscoveryRoutes } from "../../../src/server/routes/azure-dis
 import {
   azureDiscoveryContract,
   commandLine,
-  temporaryKubeconfigDouble
+  temporaryKubeconfigDouble,
+  TEST_KUBECONFIG_PATH
 } from "../../support/azure-discovery-contract.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
@@ -49,10 +50,15 @@ const CLI = {
   namespaces: commandLine(
     azureDiscoveryContract({ cluster: "c", resourceGroup: "rg" }).namespaces!
   ),
-  eks: "aws eks list-clusters --query clusters --output json",
-  vpcs: "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json",
-  subnets:
-    "aws ec2 describe-subnets --query Subnets[].{id:SubnetId, name:SubnetId} --output json"
+  eks: "aws eks list-clusters --query clusters --region us-west-2 --output json",
+  describeCluster: (name: string) =>
+    `aws eks describe-cluster --name ${name} --region us-west-2 --output json`,
+  vpcs: "aws ec2 describe-vpcs --region us-west-2 --output json",
+  subnets: "aws ec2 describe-subnets --region us-west-2 --output json",
+  routeTables: "aws ec2 describe-route-tables --region us-west-2 --output json",
+  eksKubeconfig: (name: string) =>
+    `aws eks update-kubeconfig --name ${name} --region us-west-2 --kubeconfig ${TEST_KUBECONFIG_PATH}`,
+  eksNamespaces: `kubectl --kubeconfig ${TEST_KUBECONFIG_PATH} get namespaces -o jsonpath={.items[*].metadata.name}`
 };
 
 function start(): {
@@ -345,19 +351,56 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
   it("reports a failing aws enumeration as a partial result rather than an error status", async () => {
     const { cli } = start();
     cli.set(CLI.eks, '["eks-1"]');
+    cli.set(
+      CLI.describeCluster("eks-1"),
+      JSON.stringify({
+        cluster: {
+          resourcesVpcConfig: { vpcId: "vpc-1" },
+          accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" }
+        }
+      })
+    );
     cli.set(CLI.vpcs, { throws: new Error("vpcs denied") });
-    cli.set(CLI.subnets, "[]");
+    cli.set(CLI.subnets, '{"Subnets":[]}');
+    cli.set(CLI.routeTables, '{"RouteTables":[]}');
+    cli.set(CLI.eksKubeconfig("eks-1"), "");
+    cli.set(CLI.eksNamespaces, "default team-a");
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/discover`, {
       method: "POST",
-      body: JSON.stringify({ provider: "aws" })
+      body: JSON.stringify({
+        provider: "aws",
+        accountId: "123456789012",
+        region: "us-west-2"
+      })
     });
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(
-      '{"clusters":[{"id":"eks-1","name":"eks-1"}],"resourceGroups":[],' +
-        '"namespaces":["default","kube-system","radius-system"],"vpcs":[],"subnets":[],' +
+      '{"clusters":[{"id":"eks-1","name":"eks-1","vpcId":"vpc-1",' +
+        '"authenticationMode":"API_AND_CONFIG_MAP","usable":true}],"resourceGroups":[],' +
+        '"namespaces":["default","team-a"],"vpcs":[],"subnets":[],' +
         '"errors":{"vpcs":"vpcs denied"}}'
     );
+  });
+
+  it("refuses an aws discovery without a valid region before any cli call", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "aws", accountId: "123456789012" })
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      error:
+        'Invalid AWS region "". Select a credential profile with a region such as us-west-2.',
+      clusters: [],
+      resourceGroups: [],
+      namespaces: [],
+      vpcs: [],
+      subnets: []
+    });
   });
 });
