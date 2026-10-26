@@ -159,6 +159,7 @@ export interface SetupVerificationDispatchInput {
   operationMarker: string;
   allowRegistrationRetry: boolean;
   ports: {
+    isStopped?(): boolean;
     runGh(args: string[]): Promise<SetupWorkflowCommandResult>;
     sendDispatch(): Promise<SetupWorkflowCommandResult>;
     persist(): Promise<void>;
@@ -306,6 +307,7 @@ export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
     branch: string
   ): Promise<string | null | undefined>;
   discoverAutomaticVerificationRun(input: {
+    isStopped?(): boolean;
     identity: {
       repo: string;
       workflow: string;
