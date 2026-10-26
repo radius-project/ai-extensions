@@ -33,6 +33,7 @@ import {
   runRadBicepPublish
 } from "@radius-project/adapter-shared";
 import { createRadiusCliVersionReader } from "./radius-cli-version.js";
+import { readAwsSwitch } from "./aws-switch.js";
 import { github, fetchFileFromRepo, getBranchHeadSha } from "./gh.js";
 import {
   defaultBranchForState,
@@ -118,7 +119,11 @@ const sessionHolder = createSessionHolder();
 const executionOwner = createEnvironmentExecutionOwner();
 const accountContext = createProductionGitHubAccountContext();
 const { servers, getOrCreateServer, stopServer, getLastWebviewActivityAt } =
-  createProductionCanvasServerRuntime({ executionOwner, accountContext });
+  createProductionCanvasServerRuntime({
+    executionOwner,
+    accountContext,
+    awsEnabled: readAwsSwitch(process.env)
+  });
 
 const ghCommandPresentation = resolveGhCommandPresentation();
 const dependencies: RadiusExtensionDependencies = {

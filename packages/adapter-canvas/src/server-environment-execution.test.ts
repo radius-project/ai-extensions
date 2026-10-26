@@ -61,6 +61,7 @@ function coordinator(
       deleteRadiusEnvironment: unavailable,
       runAz: unavailable,
       readAzureIdentity: unavailable,
+      removeAwsEnvironmentAccess: unavailable,
       deleteGitHubEnvironment: unavailable,
       deleteStatePackage: unavailable,
       withCredentialProvenanceLock: (work) => work(),
@@ -76,6 +77,7 @@ function coordinator(
       }
     },
     {
+      awsEnabled: false,
       executionOwner: owner,
       accountContext,
       setupServices,
@@ -222,42 +224,47 @@ describe("production coordinator scheduling scopes", () => {
     }
   );
 
-  it("requires an explicit shared account context", () => {
-    const dependencies = {
-      executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createEnvironmentAccountContext("runtime", {
-        createReadOnlyExecutor: unavailable,
-        withSelectedAccount: unavailable
-      }),
-      servers: new Map(),
-      setupServices: {
-        authorizeAzure: unavailable,
-        configureEnvironment: unavailable
-      }
-    };
-    Reflect.deleteProperty(dependencies, "accountContext");
-    expect(() =>
-      createInstanceRequestCoordinator(
-        "panel",
-        () => "",
-        {
-          deleteRadiusEnvironment: unavailable,
-          runAz: unavailable,
-          readAzureIdentity: unavailable,
-          deleteGitHubEnvironment: unavailable,
-          deleteStatePackage: unavailable,
-          withCredentialProvenanceLock: (work) => work(),
-          readCredentialProvenance: () => [],
-          removeCredentialProvenance: unavailable,
-          clearEnvironmentCredentialProvenance: unavailable,
-          persist: unavailable,
-          errorMessage: String,
-          log: () => {}
-        },
-        dependencies
-      )
-    ).toThrow("Missing request coordinator dependency: accountContext");
-  });
+  it.each(["accountContext", "awsEnabled"])(
+    "requires an explicit %s",
+    (name) => {
+      const dependencies = {
+        awsEnabled: false,
+        executionOwner: createEnvironmentExecutionOwner(),
+        accountContext: createEnvironmentAccountContext("runtime", {
+          createReadOnlyExecutor: unavailable,
+          withSelectedAccount: unavailable
+        }),
+        servers: new Map(),
+        setupServices: {
+          authorizeAzure: unavailable,
+          configureEnvironment: unavailable
+        }
+      };
+      Reflect.deleteProperty(dependencies, name);
+      expect(() =>
+        createInstanceRequestCoordinator(
+          "panel",
+          () => "",
+          {
+            deleteRadiusEnvironment: unavailable,
+            runAz: unavailable,
+            readAzureIdentity: unavailable,
+            removeAwsEnvironmentAccess: unavailable,
+            deleteGitHubEnvironment: unavailable,
+            deleteStatePackage: unavailable,
+            withCredentialProvenanceLock: (work) => work(),
+            readCredentialProvenance: () => [],
+            removeCredentialProvenance: unavailable,
+            clearEnvironmentCredentialProvenance: unavailable,
+            persist: unavailable,
+            errorMessage: String,
+            log: () => {}
+          },
+          dependencies
+        )
+      ).toThrow(`Missing request coordinator dependency: ${name}`);
+    }
+  );
 
   it("leases setup under the runtime key and saved account before honoring a stop", async () => {
     const owner = createEnvironmentExecutionOwner();

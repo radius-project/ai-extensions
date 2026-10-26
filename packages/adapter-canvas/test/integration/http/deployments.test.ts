@@ -210,6 +210,10 @@ function start(
         workflowSyncs.push(args);
         return Promise.resolve({ created: [], failed: [] });
       },
+      deleteApplicationWorkflowFiles: [
+        "delete-application.yml",
+        "delete-azure.yml"
+      ],
       findWorkflowRun: () => Promise.resolve(7),
       runGh: (args) => {
         dispatches.push(args);
@@ -1987,6 +1991,7 @@ function startDeploy(
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
       isValidRepoSlug,
+      deleteApplicationWorkflowFiles: [],
       readInstanceEntry: (instanceId) => container?.instances.get(instanceId),
       triggerDeployRepairHandoff:
         callbacks.triggerDeployRepairHandoff ?? (() => false),

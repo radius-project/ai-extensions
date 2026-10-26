@@ -104,12 +104,28 @@ describe("environmentPage", () => {
       repo: "octo/app",
       branch: "feature/x",
       activeSubtab: "credentials",
+      awsEnabled: false,
       mutationNonce: ""
     });
     expect(html).toContain(browserEntryMarker("environment-page"));
     expect(html.split(browserScript("environment-page"))).toHaveLength(2);
     expectSafeInlineScripts(html);
   });
+
+  it.each([
+    [false, '<option value="aws" disabled>AWS (coming soon)</option>'],
+    [true, '<option value="aws">AWS</option>']
+  ])(
+    "carries the AWS switch (%s) into page state and the credential form",
+    (awsEnabled, option) => {
+      const html = environmentPage({ contextRepo: "octo/app", awsEnabled });
+
+      expect(
+        readBrowserPageState(html, ENVIRONMENT_PAGE_STATE_ID)
+      ).toMatchObject({ awsEnabled });
+      expect(html).toContain(option);
+    }
+  );
 
   it("serializes the host-specific GitHub CLI presentation", () => {
     const html = environmentPage({
@@ -145,6 +161,7 @@ describe("environmentPage", () => {
       repo: "octo/app",
       branch: "feature/x",
       activeSubtab: "credentials",
+      awsEnabled: false,
       mutationNonce: HOSTILE_STATE
     });
     expectSafeInlineScripts(html);
@@ -161,6 +178,7 @@ describe("environmentPage", () => {
       repo: HOSTILE_STATE,
       branch: HOSTILE_STATE,
       activeSubtab: "environments",
+      awsEnabled: false,
       mutationNonce: ""
     });
     expect(html).not.toContain("<script>alert(1)</script>");

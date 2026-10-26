@@ -16,6 +16,8 @@ import {
   request as azureRequest
 } from "../test/support/azure-setup.js";
 
+const ROLE_ARN = "arn:aws:iam::111111111111:role/radius-deploy";
+
 function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
   const target: SetupCoordinatorTarget = {
     operationId: "op_setup",
@@ -85,6 +87,10 @@ function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
     authorizeAzure: async (request) => {
       transcript.push(["azure", request]);
       return { kind: "completed", clientId: "selected-client" };
+    },
+    authorizeAws: async (request) => {
+      transcript.push(["aws", request]);
+      return { kind: "completed", roleArn: ROLE_ARN };
     },
     configureEnvironment: async (request) => {
       transcript.push(["configure", request]);
@@ -188,7 +194,7 @@ describe("runSetupCoordinator", () => {
             provider,
             data: {
               clientId: forwarded.clientId,
-              roleArn: provider === "aws" ? "role" : undefined
+              roleArn: forwarded.roleArn === undefined ? undefined : "role"
             }
           },
           environment.ports
@@ -281,6 +287,143 @@ describe("runSetupCoordinator", () => {
     ).rejects.toMatchObject({
       code: "provider-mutation-outcome-unknown",
       message: "read already recorded"
+    });
+  });
+
+  describe("AWS", () => {
+    function awsHarness(overrides: Partial<SetupCoordinatorPorts> = {}) {
+      const test = harness(overrides);
+      test.target.provider = "aws";
+      test.operation.request = {
+        environment: { accountId: "111111111111", cluster: "dev-cluster" }
+      };
+      return test;
+    }
+
+    it("authorizes the deploy identity before configuring the environment with its role", async () => {
+      const test = awsHarness();
+      expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
+        shouldMonitor: true
+      });
+      const stages = test.transcript.filter(
+        (entry) =>
+          Array.isArray(entry) &&
+          (entry[0] === "aws" || entry[0] === "configure")
+      );
+      expect(stages).toEqual([
+        [
+          "aws",
+          {
+            accountId: "111111111111",
+            cluster: "dev-cluster",
+            repo: "owner/repo",
+            environment: "dev",
+            reused: true
+          }
+        ],
+        [
+          "configure",
+          {
+            accountId: "111111111111",
+            cluster: "dev-cluster",
+            ...test.target,
+            operationEnvironment: "dev",
+            roleArn: ROLE_ARN,
+            clientId: ""
+          }
+        ]
+      ]);
+    });
+
+    it("marks a newly created GitHub environment as not reused", async () => {
+      const test = awsHarness({
+        ensureEnvironment: async () => ({
+          name: "dev",
+          state: "created",
+          providerId: "17"
+        })
+      });
+      await runSetupCoordinator(test.target, test.ports);
+      expect(test.transcript).toContainEqual([
+        "aws",
+        expect.objectContaining({ reused: false })
+      ]);
+    });
+
+    it("finalizes an AWS authorization failure without configuring the environment", async () => {
+      const error = { status: 409, message: "conflict", code: "conflict" };
+      const test = awsHarness({
+        authorizeAws: async () => ({ kind: "failed", error })
+      });
+      expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
+        shouldMonitor: false
+      });
+      expect(test.transcript.slice(-2)).toEqual([
+        ["stop", "before-setup-failure-cleanup"],
+        ["failure", { kind: "aws-authorization", error }]
+      ]);
+      expect(
+        test.transcript.some(
+          (entry) => Array.isArray(entry) && entry[0] === "configure"
+        )
+      ).toBe(false);
+    });
+
+    it("stops without finalizing when the stop boundary declines after an AWS failure", async () => {
+      const test = awsHarness({
+        authorizeAws: async () => ({ kind: "failed", error: "denied" }),
+        stopBoundary: async (boundary) =>
+          boundary !== "before-setup-failure-cleanup"
+      });
+      expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
+        shouldMonitor: false
+      });
+      expect(
+        test.transcript.some(
+          (entry) => Array.isArray(entry) && entry[0] === "failure"
+        )
+      ).toBe(false);
+    });
+
+    it("reuses the recorded role instead of authorizing again while reconciling", async () => {
+      const test = awsHarness({
+        authorizeAws: async () => {
+          throw new Error("A reconciling setup must not authorize again");
+        },
+        readEnsuredEnvironment: (name) => ({
+          name,
+          state: "reused",
+          providerId: "17"
+        })
+      });
+      test.mutations.push({ mutationId: "pending", kind: "github_variable" });
+      test.operation.context = { awsRoleArn: ROLE_ARN };
+      expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
+        shouldMonitor: true
+      });
+      expect(test.transcript).toContainEqual([
+        "configure",
+        expect.objectContaining({ roleArn: ROLE_ARN })
+      ]);
+    });
+
+    it("leaves the role out when no authorization or recorded role exists", async () => {
+      const test = awsHarness({
+        readEnsuredEnvironment: (name) => ({
+          name,
+          state: "reused",
+          providerId: "17"
+        })
+      });
+      test.mutations.push({ mutationId: "pending", kind: "github_variable" });
+      await runSetupCoordinator(test.target, test.ports);
+      const configure = test.transcript.find(
+        (entry) => Array.isArray(entry) && entry[0] === "configure"
+      );
+      expect(configure).toBeDefined();
+      expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
+        "roleArn"
+      );
     });
   });
 });

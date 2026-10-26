@@ -228,6 +228,19 @@ function normalizeNamespace(value: string | undefined): string {
 // conflicting whenever their application resource groups differ — the exact
 // duplicate this guard exists to catch. The cluster's own resource group is
 // part of the key, because it is what scopes an AKS cluster's name.
+// The delete confirmation names what leaves the cloud account and what stays.
+export function deleteEnvironmentMessage(
+  name: string,
+  environment:
+    { provider?: string; config?: EnvironmentInfrastructure } | undefined
+): string {
+  if (environment?.provider === "aws") {
+    const cluster = environment.config?.cluster || "its EKS cluster";
+    return `This deletes the GitHub environment "${name}" and removes the Radius environment from ${cluster}. It removes this environment's trust subject and its radius-deploy-${name} policy from the deploy IAM role. The role itself and the account's GitHub identity provider are kept, because other environments in this repository may use them. Applications already deployed to it must be deleted first.`;
+  }
+  return `This deletes the GitHub environment "${name}", removes the Radius environment from the cluster, and permanently deletes the environment's federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.`;
+}
+
 export function findNamespaceConflict(
   environments: readonly EnvironmentRecord[],
   claim: NamespaceClaim
@@ -520,7 +533,7 @@ export function initializeEnvironmentPane(
         const provider = environment?.provider ?? "";
         options.confirmDialog?.show({
           title: "Delete environment?",
-          message: `This deletes the GitHub environment "${name}", removes the Radius environment from the cluster, and permanently deletes the environment's federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.`,
+          message: deleteEnvironmentMessage(name, environment),
           confirmLabel: "Delete environment",
           onConfirm: () => deleteEnvironment(name, provider, button)
         });

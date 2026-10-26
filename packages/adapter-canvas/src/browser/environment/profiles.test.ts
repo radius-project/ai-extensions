@@ -15,6 +15,7 @@ import {
   parseGithubIdentity,
   parseGithubReadiness,
   profileDetailSpecs,
+  profileDiscoveryScope,
   providerLabel
 } from "./profiles.js";
 import type {
@@ -59,6 +60,7 @@ interface ProfilesPage {
   providerInput: ReturnType<typeof createFakeInput>;
   identityAzureEl: ReturnType<typeof createFakeElement>;
   identityAwsEl: ReturnType<typeof createFakeElement>;
+  identityDescEl: ReturnType<typeof createFakeElement>;
   panelAzureEl: ReturnType<typeof createFakeElement>;
   panelAwsEl: ReturnType<typeof createFakeElement>;
   deployBtn: ReturnType<typeof createFakeInput>;
@@ -110,6 +112,7 @@ function renderProfilesPage(
   const providerInput = createFakeInput("env-selected-provider");
   const identityAzureEl = createFakeElement("env-identity-azure");
   const identityAwsEl = createFakeElement("env-identity-aws");
+  const identityDescEl = createFakeElement("env-identity-desc");
   const panelAzureEl = createFakeElement("panel-azure");
   const panelAwsEl = createFakeElement("panel-aws");
   const deployBtn = createFakeInput("deploy-btn");
@@ -140,6 +143,7 @@ function renderProfilesPage(
     providerInput,
     identityAzureEl,
     identityAwsEl,
+    identityDescEl,
     panelAzureEl,
     panelAwsEl,
     deployBtn,
@@ -173,6 +177,7 @@ function renderProfilesPage(
     providerInput,
     identityAzureEl,
     identityAwsEl,
+    identityDescEl,
     panelAzureEl,
     panelAwsEl,
     deployBtn,
@@ -488,6 +493,33 @@ describe("parseGithubReadiness", () => {
       parse({ id: "github-account-scopes", params: { login: "octocat" } })
     ).toBeNull();
   });
+});
+
+describe("profileDiscoveryScope", () => {
+  it("scopes Azure discovery by subscription and tenant", () => {
+    expect(
+      profileDiscoveryScope(
+        { name: "a", provider: "azure", subscriptionId: "s", tenantId: "t" },
+        "azure"
+      )
+    ).toEqual(["s", "t"]);
+  });
+
+  it("scopes AWS discovery by account and region", () => {
+    expect(profileDiscoveryScope(AWS_PROFILE, "aws")).toEqual([
+      "123456789012",
+      "us-east-1"
+    ]);
+  });
+
+  it.each(["azure", "aws"] as const)(
+    "falls back to empty %s scope values a profile does not carry",
+    (provider) => {
+      expect(
+        profileDiscoveryScope({ name: "bare", provider }, provider)
+      ).toEqual(["", ""]);
+    }
+  );
 });
 
 describe("findProfile", () => {
@@ -1042,6 +1074,37 @@ describe("loadProfiles", () => {
     expect(page.deployBtn.disabled).toBe(false);
     expect(page.identityAzureEl.style.display).toBe("");
     expect(page.identityAwsEl.style.display).toBe("none");
+    expect(page.identityDescEl.textContent).toBe(
+      "The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets."
+    );
+  });
+
+  it("shows the IAM role identity and discovers in the account and region for an AWS profile", async () => {
+    const page = renderProfilesPage();
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
+      () => profilesResponse([AWS_PROFILE])
+    );
+    const { deps, discoverCalls } = makeDeps();
+    const handle = initializeCredentialProfilesPanel(
+      page.browser.context,
+      deps
+    );
+
+    await handle?.loadProfiles("aws-prod");
+
+    expect(page.identityAzureEl.style.display).toBe("none");
+    expect(page.identityAwsEl.style.display).toBe("");
+    expect(page.identityDescEl.textContent).toBe(
+      "The IAM role GitHub Actions assumes to deploy, over OIDC, with no stored secrets."
+    );
+    // The harness records discovery's two scope arguments under their Azure
+    // names; for AWS they carry the account and region.
+    expect(discoverCalls.at(-1)).toEqual({
+      provider: "aws",
+      subscriptionId: "123456789012",
+      tenantId: "us-east-1"
+    });
   });
 
   it("omits disabled and unknown providers and refuses to preselect them", async () => {
@@ -1397,8 +1460,10 @@ describe("profile selection", () => {
     discoverCalls.splice(0);
 
     page.awsRefreshBtn.dispatch("click");
+    // AWS discovery is scoped by the profile's account and region, carried in
+    // the same two positions Azure uses for its subscription and tenant.
     expect(discoverCalls).toEqual([
-      { provider: "aws", subscriptionId: "", tenantId: "" }
+      { provider: "aws", subscriptionId: "123456789012", tenantId: "us-east-1" }
     ]);
   });
 
