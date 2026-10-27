@@ -49,6 +49,7 @@ export interface WorkflowFileCommitterPorts {
     sha: string
   ): Promise<{ ok: boolean; stderr: string; timedOut?: boolean }>;
   mutationRecovery?: {
+    isStopped(): boolean;
     operation: object & {
       operationId: string;
       providerRecovery?: { state?: string };
@@ -87,7 +88,8 @@ export function bindWorkflowFileCommitterPorts(
         {
           ...createSetupWorkflowRecoveryPort(
             ports.mutationRecovery.operation,
-            ports.mutationRecovery.persist
+            ports.mutationRecovery.persist,
+            ports.mutationRecovery.isStopped
           ),
           beforeMutation: ports.mutationRecovery.beforeMutation
         }

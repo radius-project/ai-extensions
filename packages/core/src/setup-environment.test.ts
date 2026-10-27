@@ -66,7 +66,7 @@ describe("configureSetupEnvironment", () => {
       });
       await expect(
         configureSetupEnvironment(h.input, h.ports)
-      ).resolves.toEqual({ kind: "stopped" });
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
       expect(written.at(-1)).toBe(heldVariable);
       expect(h.failures).toEqual([]);
     }

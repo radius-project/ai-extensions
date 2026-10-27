@@ -1,4 +1,5 @@
 import {
+  assertSetupExecutionActive,
   ensureGitHubEnvironment as ensureCoreGitHubEnvironment,
   type EnsureGitHubEnvironmentInput,
   type GitHubEnvironmentCommandResult
@@ -221,6 +222,7 @@ export function selectedEnvironmentReader(executor: {
 export async function ensureGitHubEnvironment(
   input: Omit<EnsureGitHubEnvironmentInput, "recovery" | "now" | "sleep"> & {
     mutationRecovery?: {
+      isStopped(): boolean;
       operation: object & { operationId: string };
       persist(): Promise<void>;
     };
@@ -247,7 +249,11 @@ export async function ensureGitHubEnvironment(
             executeRecoverableMutation({
               ...mutation,
               operation: mutationRecovery.operation,
-              persist: mutationRecovery.persist
+              persist: mutationRecovery.persist,
+              assertActive: () => {
+                assertSetupExecutionActive(mutationRecovery.isStopped);
+                mutation.assertActive?.();
+              }
             })
         }
       : undefined

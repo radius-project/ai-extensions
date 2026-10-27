@@ -4194,7 +4194,11 @@ test.describe("Radius Canvas in Chromium", () => {
             stderr: "Request_ResourceNotFound: directory not ready"
           };
         },
-        { operation, persist: () => ops.operations.persist() },
+        {
+          isStopped: () => false,
+          operation,
+          persist: () => ops.operations.persist()
+        },
         async () => true,
         async () => {}
       );

@@ -29,7 +29,11 @@ function execution(
       workflow.operation.state === "cancelled" ? "stopped"
       : workflow.operation.inputRequired ? "input-required"
       : "failed",
-    recovery: createAzureRecoveryPort(workflow.operation, persist),
+    recovery: createAzureRecoveryPort(
+      workflow.operation,
+      persist,
+      workflow.isStopped
+    ),
     ...createAzureSetupPresentation(workflow)
   };
 }
@@ -99,7 +103,11 @@ export function createAzureCredentialPorts(
       dependencies.ensureServicePrincipal(
         clientId,
         workflow.runAz,
-        { operation, persist: operations.persist },
+        {
+          operation,
+          persist: operations.persist,
+          isStopped: workflow.isStopped
+        },
         beforeCreate,
         dependencies.sleep
       ),

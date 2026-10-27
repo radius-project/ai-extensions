@@ -2304,6 +2304,7 @@ export async function ensureServicePrincipal(
   clientId: string,
   runAz: (args: string[]) => Promise<Partial<CommandResult>>,
   mutationRecovery?: {
+    isStopped(): boolean;
     operation: object & { operationId: string };
     persist(): Promise<void>;
   },
@@ -2316,7 +2317,8 @@ export async function ensureServicePrincipal(
     mutationRecovery ?
       createAzureRecoveryPort(
         mutationRecovery.operation,
-        mutationRecovery.persist
+        mutationRecovery.persist,
+        mutationRecovery.isStopped
       )
     : undefined,
     beforeCreate,
@@ -4154,6 +4156,7 @@ export function createEnvironmentOperationExecution(
 
   const execution = createSetupExecution({
     scope: attachment,
+    deferAdmissionRecovery: executionOwner.deferAdmissionRecovery,
     getOperation: (operationId) => operations.get(operationId),
     persist: () => operations.persist(),
     report: (diagnostic) => operations.report?.(diagnostic),
@@ -4417,6 +4420,7 @@ export function createEnvironmentOperationExecution(
                 }
               }),
             persistProviderMutation: () => operations.persist(),
+            isStopped: attachment.isShuttingDown,
             finalizeEnvironmentResolutionFailure: async (
               operation,
               input,
@@ -5456,6 +5460,13 @@ export function createInstanceRequestCoordinator(
   function startRecoveredTasks(): void {
     for (const op of operations.all()) {
       if (
+        dependencies.executionOwner.deferAdmissionRecovery(
+          op.operationId,
+          startRecoveredTasks
+        )
+      )
+        continue;
+      if (
         op.kind === "delete" &&
         !op.endedAt &&
         !deletionAttachment.hasTask(op.operationId)
@@ -5881,6 +5892,8 @@ export function createProductionCanvasServerRuntime(
     operationsControlDependencies
   );
   const operationControl: OperationControlService = (input, publish) => {
+    if (operations.get(input.operationId)?.kind !== "delete")
+      return sharedOperationControl(input, publish);
     const original =
       input.instanceId === undefined ?
         undefined
@@ -5993,6 +6006,7 @@ export function createProductionCanvasServerRuntime(
   });
 
   const azureSetupDependencies = composeAzureAutoSetupDependencies({
+    isStopped: () => executionOwner.isShuttingDown(),
     lifecycle: {
       get: (operationId) => operations.get(operationId),
       isStale: (operation) => isStale(operation),
