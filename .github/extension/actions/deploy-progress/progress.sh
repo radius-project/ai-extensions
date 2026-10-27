@@ -138,7 +138,7 @@ radius_publish_live_progress_once() {
     progress_dir=$(radius_progress_dir)
     mkdir -p "${progress_dir}"
 
-    if ! raw_resources=$(rad resource list --preview \
+    if ! raw_resources=$(rad resource list \
         --application "${application}" --output json 2>/dev/null); then
         echo "::warning::Live Radius resource polling failed; retaining the previous snapshot."
         return 0
