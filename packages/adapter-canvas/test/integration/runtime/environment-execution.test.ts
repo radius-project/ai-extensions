@@ -283,6 +283,7 @@ describe("real server and fake SDK runtime ownership", () => {
         command: "continue"
       });
       await entered.promise;
+      operations.delete(original.operationId);
       const other = createOperation({
         operationId: "other-recovery",
         repo: "fixture/other",

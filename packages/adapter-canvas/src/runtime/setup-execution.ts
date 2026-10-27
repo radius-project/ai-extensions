@@ -38,7 +38,10 @@ type TaskScope = Pick<
 >;
 
 export interface SetupExecutionPorts {
-  deferAdmissionRecovery(operationId: string, recover: () => void): boolean;
+  deferAdmissionRecovery(
+    operationId: string,
+    recover: (operationId: string) => void
+  ): boolean;
   scope: TaskScope;
   getOperation(operationId: string): SetupExecutionOperation | null | undefined;
   persist(): Promise<void>;
@@ -271,14 +274,14 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
     }
   }
 
+  function recoverCurrentOperation(operationId: string): void {
+    const current = ports.getOperation(operationId);
+    if (current) recoverOperation(current);
+  }
+
   function recoverOperation(operation: SetupExecutionOperation): void {
     const operationId = operation.operationId;
-    if (
-      ports.deferAdmissionRecovery(operationId, () => {
-        const current = ports.getOperation(operationId);
-        if (current) recoverOperation(current);
-      })
-    )
+    if (ports.deferAdmissionRecovery(operationId, recoverCurrentOperation))
       return;
     if (
       ports.isShuttingDown(operation.operationId) ||
@@ -294,6 +297,7 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
       scheduleAutomaticRecoveryRollback(operation.operationId);
       return;
     }
+
     if (
       operation.recoveryState === "provider_reconciliation_pending" &&
       !operation.endedAt

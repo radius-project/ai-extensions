@@ -47,6 +47,7 @@ export function createEnvironmentExecutionOwner(
     }
   >();
   const activeTasks = new Map<string | undefined, Set<Promise<void>>>();
+  const activeRecords = new Set<TaskRecord>();
   const settledListeners = new Map<string | undefined, Set<() => void>>();
   const deletionSettledListeners = new Map<
     string | undefined,
@@ -225,6 +226,7 @@ export function createEnvironmentExecutionOwner(
               if (tasks.get(operationId) === record) tasks.delete(operationId);
             }
             const active = activeTasks.get(instanceId);
+            activeRecords.delete(record);
             active?.delete(running);
             const deletionSettled = activeDeletions.delete(running);
             if (active?.size === 0) {
@@ -259,6 +261,7 @@ export function createEnvironmentExecutionOwner(
           promise: running
         };
         tasks.set(operationId, record);
+        activeRecords.add(record);
         instanceTasks.add(running);
         if (tasks !== sharedTasks) activeDeletions.add(running);
         void running.catch((error: unknown) => {
@@ -286,7 +289,9 @@ export function createEnvironmentExecutionOwner(
     claimAdmission(operationId: string) {
       if (admissions.has(operationId) || blockedAdmissions.has(operationId))
         return null;
-      const hadTask = sharedTasks.has(operationId);
+      const hadTask = [...activeRecords].some(
+        (record) => record.operationId === operationId
+      );
       const admission = {
         started: false,
         blocked: false,

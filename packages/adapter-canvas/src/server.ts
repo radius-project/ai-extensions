@@ -5679,23 +5679,27 @@ export function createInstanceRequestCoordinator(
   const browserMutationNonce = randomUUID();
 
   function startRecoveredTasks(): void {
-    for (const op of operations.all()) {
+    for (const op of operations.all()) startRecoveredTask(op.operationId);
+  }
+
+  function startRecoveredTask(operationId: string): void {
+    const op = operations.get(operationId);
+    if (!op) return;
+    if (op.kind === "delete") {
+      if (!attachment.isCurrent() || deletionAttachment.isShuttingDown())
+        return;
       if (
         dependencies.executionOwner.deferAdmissionRecovery(
-          op.operationId,
-          startRecoveredTasks
+          operationId,
+          startRecoveredTask
         )
       )
-        continue;
-      if (
-        op.kind === "delete" &&
-        !op.endedAt &&
-        !deletionAttachment.hasTask(op.operationId)
-      ) {
+        return;
+      if (!op.endedAt && !deletionAttachment.hasTask(op.operationId)) {
         execution.scheduleEnvironmentOperation(op);
-      } else {
-        execution.recoverOperation(op);
       }
+    } else {
+      execution.recoverOperation(op);
     }
   }
 
