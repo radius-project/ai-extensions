@@ -49,6 +49,10 @@ gh() {
     "release view")
       [[ -f release ]] || return 1
       if [[ "$*" == *"--json isDraft"* ]]; then
+        if [[ -f draft-query-fails ]]; then
+          echo "Release state request failed" >&2
+          return 1
+        fi
         if [[ -f published ]]; then echo false; else echo true; fi
       elif [[ "$*" == *"--json assets"* ]]; then
         echo graph-libraries.tar.gz
@@ -139,6 +143,21 @@ describe("npm release shell boundaries", () => {
     expect(result.calls).not.toContain("release create");
     expect(result.calls).not.toContain("api repos/fixture/repo/git/refs ");
     expect(existsSync(join(result.root, "published"))).toBe(true);
+  });
+
+  it("stops recovery when the draft-state request fails despite uploaded assets", () => {
+    const result = run(release, [
+      "tag",
+      "release",
+      "uploaded",
+      "draft-query-fails"
+    ]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Release state request failed");
+    expect(result.calls).not.toContain("release upload");
+    expect(result.calls).not.toContain("release edit");
+    expect(result.calls).not.toContain("--json assets");
+    expect(existsSync(join(result.root, "published"))).toBe(false);
   });
 
   it("checks a completed release without replacing its assets", () => {

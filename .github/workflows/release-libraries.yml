@@ -154,7 +154,8 @@ jobs:
             gh release create "$tag" --verify-tag --draft \
               --title "Graph libraries ${SOURCE_SHA:0:12}" --notes-file "$RUNNER_TEMP/notes.md"
           fi
-          if [[ "$(gh release view "$tag" --json isDraft --jq .isDraft)" == "true" ]]; then
+          is_draft="$(gh release view "$tag" --json isDraft --jq .isDraft)"
+          if [[ "$is_draft" == "true" ]]; then
             gh release upload "$tag" "$bundle" \
               .artifacts/npm-release/libraries/*.spdx.json --clobber
             gh release edit "$tag" --draft=false --latest=false
