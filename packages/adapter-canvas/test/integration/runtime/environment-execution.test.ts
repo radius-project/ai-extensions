@@ -1103,12 +1103,9 @@ describe("real server and fake SDK runtime ownership", () => {
       "AZURE_TENANT_ID"
     ].flatMap((stage) =>
       ["issued", "prepared"].flatMap((boundary) =>
-        ["service", "tool"].map((entry) => [
-          stage,
-          boundary,
-          entry,
-          "shutdown"
-        ])
+        ["service", "tool"].map(
+          (entry) => [stage, boundary, entry, "shutdown"] as const
+        )
       )
     ),
     ...["ghcr-head", "ghcr-post", "ghcr-put", "ghcr-manifest"].map((stage) => [

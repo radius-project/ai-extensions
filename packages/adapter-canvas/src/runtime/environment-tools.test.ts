@@ -861,6 +861,7 @@ describe("environment tool handlers", () => {
       const schedule = vi.fn(() => true);
       h.ports.control = createOperationsControlService({
         get: (id) => h.registry.get(id),
+        claimAdmission: h.owner.claimAdmission,
         acquireForRetry: (operation) => h.registry.acquireForRetry(operation),
         persistOperations: h.persist,
         reportOperationDiagnostic: vi.fn(),
@@ -889,6 +890,83 @@ describe("environment tool handlers", () => {
       expect(h.ports.reportError).toHaveBeenCalledTimes(url && !valid ? 1 : 0);
       if (url && !valid) expect(JSON.stringify(result)).not.toContain(url);
       expect(schedule).not.toHaveBeenCalled();
+    }
+  );
+  it.each([
+    "service-progress",
+    "shutdown",
+    "replacement",
+    "operation-id",
+    "repository",
+    "environment",
+    "provider",
+    "account",
+    "context",
+    "request",
+    "resume-request",
+    "provider-recovery",
+    "artifacts",
+    "kind"
+  ] as const)(
+    "keeps service admission bound to its target during %s",
+    async (change) => {
+      const h = harness();
+      const op = h.stopped();
+      vi.mocked(h.ports.control).mockImplementation(async (input) => {
+        expect(input.isCurrent?.()).toBe(true);
+        switch (change) {
+          case "service-progress":
+            op.state = "running";
+            op.verification = { acquisitionProvisionalToken: "owned-retry" };
+            break;
+          case "shutdown":
+            h.owner.shutdown();
+            break;
+          case "replacement":
+            h.registry.put(structuredClone(op));
+            break;
+          case "operation-id":
+            op.operationId = "replacement";
+            break;
+          case "repository":
+            op.repo = "fixture/other";
+            break;
+          case "environment":
+            op.environment = "other";
+            break;
+          case "provider":
+            op.provider = "aws";
+            break;
+          case "account":
+            op.context = { githubLogin: "other-account" };
+            break;
+          case "context":
+            op.context = {
+              githubLogin: h.executor.login,
+              branch: "other-branch"
+            };
+            break;
+          case "request":
+            op.request = { azure: { appId: "other-app" } };
+            break;
+          case "resume-request":
+            op.resumeRequest = { environment: { environment: "other" } };
+            break;
+          case "provider-recovery":
+            op.providerRecovery = { state: "reconciliation_pending" };
+            break;
+          case "artifacts":
+            op.setupArtifacts = { azureApp: { appId: "other-app" } };
+            break;
+          case "kind":
+            op.kind = "delete";
+            break;
+        }
+        expect(input.isCurrent?.()).toBe(change === "service-progress");
+        return h.accepted();
+      });
+      await h.tools.control({ ...h.identity, action: "continue" });
+      expect(h.ports.control).toHaveBeenCalledOnce();
     }
   );
   it("surfaces and redacts thrown service failures", async () => {
@@ -937,6 +1015,24 @@ describe("environment tool handlers", () => {
       kind: "accepted",
       code: "operation-stop-requested",
       operation: h.identity
+    });
+  });
+  it("retains redacted persistence guidance from the service detail", async () => {
+    const h = harness();
+    vi.mocked(h.ports.control).mockResolvedValue({
+      status: 500,
+      body: {
+        code: "operation-continue-persist-failed",
+        error: "Radius could not save the request.",
+        detail:
+          "Inspect the saved operation before recovery. opaque-private-value"
+      }
+    });
+    expect(await h.tools.control({ ...h.identity, action: "stop" })).toEqual({
+      kind: "unavailable",
+      code: "operation-continue-persist-failed",
+      message:
+        "Radius could not save the request. Inspect the saved operation before recovery. [redacted]"
     });
   });
   it.each(["declined", "retargeted"] as const)(

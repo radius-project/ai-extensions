@@ -87,7 +87,8 @@ function fingerprint(operation: OperationRecord): string {
     operation.failure,
     operation.request,
     operation.resumeRequest,
-    operation.providerRecovery
+    operation.providerRecovery,
+    operation.setupArtifacts
   ]);
 }
 
@@ -294,9 +295,12 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
   ): EnvironmentToolResult {
     const code = text(result.body.code);
     if (result.status >= 400) {
-      const message =
+      const error =
         text(result.body.error) ||
         "The environment service refused the operation.";
+      const message = [error, text(result.body.detail)]
+        .filter(Boolean)
+        .join(" ");
       if (code === "verification-retry-pull-request-open") {
         const guidance = interaction(
           target,
@@ -672,11 +676,29 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
           if (!Object.hasOwn(commands, action))
             throw new Error("Unsupported environment command.");
           const command = commands[action as keyof typeof commands];
+          const configuration = () =>
+            JSON.stringify([
+              operation.kind,
+              operation.provider,
+              operation.context,
+              operation.request,
+              operation.resumeRequest,
+              operation.providerRecovery,
+              operation.setupArtifacts
+            ]);
+          const authorizedConfiguration = configuration();
           return outcome(
             await ports.control({
               operationId: target.operationId,
               ...command,
-              isCurrent
+              // The service owns command-state changes after handoff.
+              isCurrent: () =>
+                !ports.owner.isShuttingDown() &&
+                ports.getOperation(target.operationId) === operation &&
+                operation.operationId === target.operationId &&
+                operation.repo === target.repo &&
+                operation.environment === target.environment &&
+                configuration() === authorizedConfiguration
             }),
             target
           );
