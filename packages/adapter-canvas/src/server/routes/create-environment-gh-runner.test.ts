@@ -75,6 +75,7 @@ const target = {
 
 function mutationRecovery(operation: ReturnType<typeof createOperation>) {
   return {
+    isStopped: () => false,
     operation,
     persist: async () => {},
     recordVariable: (
@@ -149,6 +150,7 @@ describe("the workflow-scope gh runner", () => {
           isStopped: () => stopped,
           mutationRecovery: {
             ...mutationRecovery(operation),
+            isStopped: () => stopped,
             persist: async () => {
               const state = operation.providerRecovery.mutations[0].status;
               saved.push(state);

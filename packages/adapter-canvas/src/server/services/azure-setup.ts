@@ -1,5 +1,6 @@
 import {
   continuationMatchesLiveContext,
+  isSetupExecutionInterrupted,
   runAzureSetup
 } from "@radius-project/core";
 import {
@@ -96,6 +97,7 @@ const EXTERNAL_FUNCTIONS = [
 
 function validateDependencies(dependencies: AzureSetupDependencies): void {
   for (const name of [
+    "isStopped",
     "ensureServicePrincipal",
     "finalizeSetupFailure",
     "persistMutationCheckpoint",
@@ -170,6 +172,7 @@ export function createAzureSetupService(dependencies: AzureSetupDependencies) {
       if (!outcome) throw new Error("Azure setup did not report an outcome.");
       return outcome;
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       return setupHandlerFailure(error, (diagnostic) =>
         dependencies.operations.report(diagnostic)
       );
@@ -619,6 +622,7 @@ async function runAzureSetupService(
     runAzReady = true;
 
     const workflow: AzureAutoSetupWorkflow = {
+      isStopped: dependencies.isStopped,
       operation,
       steps,
       respond: (status, body) => complete({ kind: "failed", status, body }),
@@ -690,7 +694,7 @@ async function runAzureSetupService(
       }
     });
   } catch (error) {
-    if (finalizationStarted) throw error;
+    if (finalizationStarted || isSetupExecutionInterrupted(error)) throw error;
     if (
       error instanceof ProviderMutationRecoveryError &&
       error.code === "provider-mutation-outcome-unknown" &&

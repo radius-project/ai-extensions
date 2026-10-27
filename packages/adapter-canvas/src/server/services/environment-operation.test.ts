@@ -120,6 +120,7 @@ function dependencies(
       setupAwsDeployIdentity: async () => {
         throw new Error("unexpected AWS deploy identity setup");
       },
+      isStopped: () => false,
       guardStopBoundary: async (_target, boundary) => {
         events.push(`stop:${boundary}`);
         return true;

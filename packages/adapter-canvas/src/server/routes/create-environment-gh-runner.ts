@@ -26,6 +26,7 @@ export interface WorkflowScopeGhRunnerTarget {
   envName: string;
   environmentProviderId?: string | null;
   mutationRecovery?: {
+    isStopped(): boolean;
     operation: object & { operationId: string };
     persist(): Promise<void>;
     recordVariable(entry: {
@@ -119,7 +120,8 @@ export function createWorkflowScopeGhRunner(
         target.mutationRecovery ?
           createSetupWorkflowRecoveryPort(
             target.mutationRecovery.operation,
-            target.mutationRecovery.persist
+            target.mutationRecovery.persist,
+            target.mutationRecovery.isStopped
           )
         : undefined,
       recordVariable: (entry) => target.mutationRecovery?.recordVariable(entry)

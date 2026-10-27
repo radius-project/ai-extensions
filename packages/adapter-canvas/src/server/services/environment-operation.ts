@@ -53,6 +53,7 @@ export interface EnvironmentOperationRequest {
 }
 
 export interface EnvironmentOperationWorkflowDependencies {
+  isStopped(): boolean;
   preflightRepoAdmin(
     repo: string,
     executor: SelectedGhExecutor
@@ -266,6 +267,7 @@ export function createSetupCoordinatorPorts(
         runGh: (args) => executor.run(args),
         now: dependencies.now,
         mutationRecovery: {
+          isStopped: dependencies.isStopped,
           operation,
           persist: dependencies.persistProviderMutation
         },

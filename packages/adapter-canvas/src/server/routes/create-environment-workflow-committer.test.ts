@@ -137,6 +137,61 @@ const target = { targetRepo: "octo/app", envName: "dev" };
 
 afterEach(() => vi.useRealTimers());
 
+it.each(["github_workflow.put", "github_branch.create"])(
+  "sends no %s request when shutdown wins prepared-intent persistence",
+  async (kind) => {
+    const operation = createOperation({ operationId: "held-publication" });
+    const h = harness({
+      runGh: [{ code: 1, stderr: "HTTP 404: Not Found" }],
+      runGhWorkflow: [{ code: 1, stderr: "protected branch" }],
+      defaultBranch: "main",
+      headSha: "sha-1"
+    });
+    const branch = vi.spyOn(h.ports, "createBranchRef");
+    let stopped = false;
+    let release = () => {};
+    let entered = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prepared = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const statuses: string[] = [];
+    h.ports.mutationRecovery = {
+      operation,
+      isStopped: () => stopped,
+      persist: async () => {
+        const mutation = operation.providerRecovery.mutations.at(-1);
+        if (mutation?.kind !== kind) return;
+        statuses.push(mutation.status);
+        if (mutation.status === "prepared") {
+          entered();
+          await gate;
+        }
+      }
+    };
+    const pending = createWorkflowFileCommitter(
+      h.ports,
+      target
+    ).commitWorkflowFileSmart("p", CONTENT, "m");
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    await prepared;
+    const before = h.calls.length;
+    stopped = true;
+    release();
+    await rejected;
+    expect(h.calls).toHaveLength(before);
+    expect(branch).not.toHaveBeenCalled();
+    expect(statuses).toEqual(["prepared", "not_applied"]);
+    expect(h.tempRemovals).toEqual(
+      h.tempWrites.map((_, index) => `/tmp/body-${index + 1}.json`)
+    );
+  }
+);
+
 it("publication baseline parity: recovered empty-branch deletion", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(1700000000000);
@@ -156,6 +211,7 @@ it("publication baseline parity: recovered empty-branch deletion", async () => {
     providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
   });
   h.ports.mutationRecovery = {
+    isStopped: () => false,
     operation,
     persist: async () => {
       trace.push([
@@ -199,6 +255,7 @@ describe("committing a workflow file", () => {
       ]
     });
     first.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {
         saved.push(JSON.stringify(toPersistedOperation(operation)));
@@ -250,6 +307,7 @@ describe("committing a workflow file", () => {
       ]
     });
     second.ports.mutationRecovery = {
+      isStopped: () => false,
       operation: reloaded,
       persist: async () => {
         saved.push(JSON.stringify(toPersistedOperation(reloaded)));
@@ -343,7 +401,11 @@ describe("committing a workflow file", () => {
       ]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
     const committer = createWorkflowFileCommitter(h.ports, target);
 
     await committer.commitWorkflowFileSmart("first.yml", CONTENT, "Add first");
@@ -400,6 +462,7 @@ describe("committing a workflow file", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -467,7 +530,11 @@ describe("committing a workflow file", () => {
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -510,7 +577,11 @@ describe("committing a workflow file", () => {
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -543,7 +614,11 @@ describe("committing a workflow file", () => {
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -579,7 +654,11 @@ describe("committing a workflow file", () => {
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
     const operation = createOperation({ operationId: "op_workflow" });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -610,6 +689,7 @@ describe("committing a workflow file", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -643,6 +723,7 @@ describe("committing a workflow file", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -679,6 +760,7 @@ describe("committing a workflow file", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -869,6 +951,7 @@ describe("the protected-branch pull-request fallback", () => {
     });
     const operation = createOperation({ operationId: "op_workflow" });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -907,6 +990,7 @@ describe("the protected-branch pull-request fallback", () => {
       providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
     });
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {}
     };
@@ -942,7 +1026,11 @@ describe("the protected-branch pull-request fallback", () => {
       target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
       providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -992,7 +1080,11 @@ describe("the protected-branch pull-request fallback", () => {
       target: "octo/app\0radius/setup-dev-workflows-workflow\0sha-1",
       providerIdempotencyKey: "radius/setup-dev-workflows-workflow"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1065,6 +1157,7 @@ describe("the protected-branch pull-request fallback", () => {
     const operation = createOperation({ operationId: "op_workflow" });
     const boundaries: string[] = [];
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {
         const fallbackWrite = operation.providerRecovery.mutations.find(
@@ -1279,6 +1372,7 @@ describe("what survives a crash during a recovered branch delete", () => {
     // so none may say the delete is settled while the branch is still there.
     const saved: Array<string | undefined> = [];
     h.ports.mutationRecovery = {
+      isStopped: () => false,
       operation,
       persist: async () => {
         saved.push(
@@ -1303,7 +1397,11 @@ describe("what survives a crash during a recovered branch delete", () => {
 
   it("keeps the blocker after the refused record is reloaded", async () => {
     const { h, operation } = refusedDeleteHarness();
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1338,7 +1436,11 @@ describe("the predecessor blob a workflow retry records", () => {
       runGh: [{ code: 0, stdout: "blob-before" }],
       runGhWorkflow: [{ code: 1, stderr: "HTTP 409: Conflict" }]
     });
-    first.ports.mutationRecovery = { operation, persist: async () => {} };
+    first.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
     await expect(
       createWorkflowFileCommitter(first.ports, target).commitWorkflowFileSmart(
         PATH,
@@ -1352,7 +1454,11 @@ describe("the predecessor blob a workflow retry records", () => {
       runGh: [{ code: 0, stdout: "blob-after" }],
       runGhWorkflow: [{ code: 0, stdout: PUT_RESPONSE }]
     });
-    second.ports.mutationRecovery = { operation, persist: async () => {} };
+    second.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(second.ports, target).commitWorkflowFileSmart(
@@ -1379,7 +1485,11 @@ describe("the predecessor blob a workflow retry records", () => {
       ],
       runGhWorkflow: [{ code: 1, timedOut: true }]
     });
-    first.ports.mutationRecovery = { operation, persist: async () => {} };
+    first.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
     await expect(
       createWorkflowFileCommitter(first.ports, target).commitWorkflowFileSmart(
         PATH,
@@ -1400,7 +1510,11 @@ describe("the predecessor blob a workflow retry records", () => {
         { code: 0, stdout: MARKED_COMMIT }
       ]
     });
-    second.ports.mutationRecovery = { operation, persist: async () => {} };
+    second.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(second.ports, target).commitWorkflowFileSmart(
@@ -1472,7 +1586,11 @@ describe("recovering a setup branch after the default branch moved", () => {
       defaultBranch: "main",
       headSha: "sha-moved"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1550,7 +1668,11 @@ describe("recovering a setup branch after the default branch moved", () => {
       ],
       defaultBranch: "main"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1588,7 +1710,11 @@ describe("recovering a setup branch after the default branch moved", () => {
       defaultBranch: "main",
       headSha: "sha-moved"
     });
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1659,7 +1785,11 @@ describe("the in-process recovered branch delete", () => {
         stderr: "HTTP 403: Resource not accessible"
       })
     );
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1683,7 +1813,11 @@ describe("the in-process recovered branch delete", () => {
         NOT_FOUND
       )
     );
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1710,7 +1844,11 @@ describe("the in-process recovered branch delete", () => {
         { code: 0, stdout: JSON.stringify({ object: { sha: "sha-1" } }) }
       )
     );
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
@@ -1736,7 +1874,11 @@ describe("the in-process recovered branch delete", () => {
         stderr: "HTTP 403: Resource not accessible"
       })
     );
-    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    h.ports.mutationRecovery = {
+      isStopped: () => false,
+      operation,
+      persist: async () => {}
+    };
 
     await expect(
       createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(

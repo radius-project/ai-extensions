@@ -1,4 +1,7 @@
-import type { SetupWorkflowRecoveryPort } from "@radius-project/core";
+import {
+  assertSetupExecutionActive,
+  type SetupWorkflowRecoveryPort
+} from "@radius-project/core";
 import {
   providerMutationId,
   providerMutationRecord,
@@ -17,7 +20,8 @@ export function createSetupWorkflowRecoveryPort(
     operationId: string;
     providerRecovery?: { state?: string };
   },
-  persist: () => Promise<void>
+  persist: () => Promise<void>,
+  isStopped: () => boolean
 ): SetupWorkflowRecoveryPort {
   return {
     operationId: operation.operationId,
@@ -27,7 +31,15 @@ export function createSetupWorkflowRecoveryPort(
     willWrite: (kind, target) =>
       providerMutationWillWrite(operation, kind, target),
     execute: (input) =>
-      executeRecoverableMutation({ ...input, operation, persist }),
+      executeRecoverableMutation({
+        ...input,
+        operation,
+        persist,
+        assertActive: () => {
+          assertSetupExecutionActive(isStopped);
+          input.assertActive?.();
+        }
+      }),
     rollbackPending: () =>
       operation.providerRecovery?.state === "rollback_pending",
     markRollbackPending: () => {
