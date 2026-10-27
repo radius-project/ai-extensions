@@ -828,37 +828,69 @@ describe("environment tool handlers", () => {
     expect(await pending).toMatchObject({ code: "operation-context-changed" });
     expect(h.ports.control).not.toHaveBeenCalled();
   });
-  it("preserves owning refusal codes and merge-required guidance", async () => {
-    const h = harness();
-    const op = mergeHandoff({ repo: target.repo });
-    op.operationId = h.op.operationId;
-    op.context = { githubLogin: h.executor.login };
-    h.registry.put(op);
-    const schedule = vi.fn(() => true);
-    h.ports.control = createOperationsControlService({
-      get: (id) => h.registry.get(id),
-      acquireForRetry: (operation) => h.registry.acquireForRetry(operation),
-      persistOperations: h.persist,
-      reportOperationDiagnostic: vi.fn(),
-      checkPullRequestMerge: async () => ({ state: "open" }),
-      inspectVerificationWorkflow: async () => {
-        throw new Error("Unexpected inspection");
-      },
-      cancelVerificationWorkflow: async () => {
-        throw new Error("Unexpected cancellation");
-      },
-      schedule,
-      invalidateEnvironmentListing: vi.fn()
-    });
-    expect(
-      await h.tools.control({ ...h.identity, action: "verify" })
-    ).toMatchObject({
-      kind: "interaction_required",
-      code: "verification-retry-pull-request-open",
-      interaction: { kind: "pull-request-merge", supported: false }
-    });
-    expect(schedule).not.toHaveBeenCalled();
-  });
+  it.each([
+    ["valid", "https://github.com/fixture/app/pull/12", true],
+    ["padded", "  https://github.com/fixture/app/pull/12  ", true],
+    [
+      "maximum length",
+      `https://github.com/fixture/app/pull/${"1".repeat(2048 - "https://github.com/fixture/app/pull/".length)}`,
+      true
+    ],
+    ["absent", undefined, false],
+    ["empty", "", false],
+    ["malformed", "opaque-private-value", false],
+    ["foreign repository", "https://github.com/foreign/app/pull/12", false],
+    ["non-HTTPS", "http://github.com/fixture/app/pull/12", false],
+    ["query", "https://github.com/fixture/app/pull/12?token=private", false],
+    [
+      "oversized",
+      `https://github.com/fixture/app/pull/${"1".repeat(2049 - "https://github.com/fixture/app/pull/".length)}`,
+      false
+    ]
+  ] as const)(
+    "preserves merge guidance with a %s saved URL",
+    async (_name, url, valid) => {
+      const h = harness();
+      const op = mergeHandoff({
+        repo: target.repo,
+        pullRequestUrl: url ?? null
+      });
+      op.operationId = h.op.operationId;
+      op.context = { githubLogin: h.executor.login };
+      h.registry.put(op);
+      const schedule = vi.fn(() => true);
+      h.ports.control = createOperationsControlService({
+        get: (id) => h.registry.get(id),
+        acquireForRetry: (operation) => h.registry.acquireForRetry(operation),
+        persistOperations: h.persist,
+        reportOperationDiagnostic: vi.fn(),
+        checkPullRequestMerge: async () => ({ state: "open" }),
+        inspectVerificationWorkflow: async () => {
+          throw new Error("Unexpected inspection");
+        },
+        cancelVerificationWorkflow: async () => {
+          throw new Error("Unexpected cancellation");
+        },
+        schedule,
+        invalidateEnvironmentListing: vi.fn()
+      });
+      const result = await h.tools.control({ ...h.identity, action: "verify" });
+      expect(result).toMatchObject({
+        kind: "interaction_required",
+        code: "verification-retry-pull-request-open",
+        interaction: { kind: "pull-request-merge", supported: false }
+      });
+      if (result.kind !== "interaction_required")
+        throw new Error("Missing merge guidance");
+      expect(result.interaction.pullRequestUrl).toBe(
+        valid ? url?.trim() : undefined
+      );
+      expect(JSON.stringify(result).length).toBeLessThan(4000);
+      expect(h.ports.reportError).toHaveBeenCalledTimes(url && !valid ? 1 : 0);
+      if (url && !valid) expect(JSON.stringify(result)).not.toContain(url);
+      expect(schedule).not.toHaveBeenCalled();
+    }
+  );
   it("surfaces and redacts thrown service failures", async () => {
     const h = harness();
     vi.mocked(h.ports.control).mockRejectedValue(

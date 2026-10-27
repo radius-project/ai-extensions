@@ -18,7 +18,12 @@ import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.j
 import { mergeHandoff } from "../../support/server/operation-fixtures.js";
 import {
   createOperation,
+  finish,
   operations,
+  recordAzureApp,
+  recordCommittedWorkflowFile,
+  recordCommitState,
+  toPersistedOperation,
   requireInput,
   STAGE_VERIFY
 } from "../../../src/operations.js";
@@ -240,6 +245,7 @@ async function composition(
     ready,
     readExecutor,
     executor,
+    accountContext,
     reportError,
     settled
   };
@@ -589,7 +595,11 @@ describe("registered environment tools with production runtime services", () => 
             {
               kind: "interaction_required",
               code: "verification-retry-pull-request-open",
-              interaction: { kind: "pull-request-merge", supported: false }
+              interaction: {
+                kind: "pull-request-merge",
+                supported: false,
+                pullRequestUrl: "https://github.com/fixture/app/pull/12"
+              }
             }
           : {
               kind: "refused",
@@ -605,6 +615,158 @@ describe("registered environment tools with production runtime services", () => 
       }
     }
   );
+  it.each([
+    null,
+    "",
+    "opaque-private-value",
+    "http://github.com/fixture/app/pull/12",
+    "https://github.com/foreign/app/pull/12"
+  ])(
+    "does not expose invalid saved merge evidence %j through the registered tool",
+    async (pullRequestUrl) => {
+      const h = await composition({ realSetup: true });
+      const op = mergeHandoff({ repo: target.repo, pullRequestUrl });
+      op.context = { githubLogin: h.executor.login };
+      operations.put(op);
+      try {
+        const result = await h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action: "verify"
+        });
+        expect(result).toMatchObject({
+          kind: "refused",
+          code: "verification-retry-github-account-unavailable"
+        });
+        expect(result).not.toHaveProperty("interaction");
+        if (pullRequestUrl)
+          expect(JSON.stringify(result)).not.toContain(pullRequestUrl);
+        expect(h.run).not.toHaveBeenCalled();
+        expect(h.runtime.servers.size).toBe(0);
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
+  it("preserves unknown dispatch evidence when the registered verify tool shuts down during send", async () => {
+    const h = await composition({ realSetup: true });
+    const entered = deferred();
+    const send = deferred();
+    const saving = deferred();
+    const saved = deferred();
+    const op = createOperation({ ...target, provider: "azure" });
+    op.context.githubLogin = h.executor.login;
+    op.currentStage = STAGE_VERIFY;
+    recordAzureApp(op, {
+      state: "reused",
+      appId: "11111111-1111-4111-8111-111111111111"
+    });
+    recordCommittedWorkflowFile(op, {
+      path: ".github/workflows/radius-verify-credentials.yml",
+      branch: "main",
+      mode: "default_branch",
+      commitSha: "c".repeat(40),
+      blobSha: "b".repeat(40),
+      contentSha256: "d".repeat(64),
+      previousBlobSha: null,
+      previousBlobKnown: true
+    });
+    recordCommitState(op, { mode: "default_branch", branch: "main" });
+    op.verification = {
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      operationMarker: op.operationId,
+      runId: "16"
+    };
+    finish(op, "failed_partial", {
+      failure: {
+        code: "verify-run-failed",
+        stage: STAGE_VERIFY,
+        message: "Failed verification",
+        classification: "user-fixable"
+      }
+    });
+    operations.put(op);
+    const snapshots: ReturnType<typeof toPersistedOperation>[] = [];
+    h.persist.mockImplementation(async () => {
+      snapshots.push(structuredClone(toPersistedOperation(op)));
+      if (op.providerRecovery.mutations.at(-1)?.status === "outcome_unknown") {
+        saving.resolve();
+        await saved.promise;
+      }
+    });
+    h.run.mockImplementation(async (args) => {
+      if (args[0] === "run" && args[1] === "list")
+        return { code: 0, stdout: "[]", stderr: "" };
+      if (args[0] !== "workflow")
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      entered.resolve();
+      await send.promise;
+      return { code: 1, stdout: "", stderr: "timeout", timedOut: true };
+    });
+    const external = vi.spyOn(gh, "cliExec").mockImplementation(() => {
+      throw new Error("Unexpected ambient command");
+    });
+    const network = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => {
+        throw new Error("Unexpected network request");
+      });
+    let done = Promise.resolve();
+    try {
+      const result = await h.invoke("radius_environment_control", {
+        ...target,
+        operationId: op.operationId,
+        action: "verify"
+      });
+      expect(result).toMatchObject({
+        kind: "accepted",
+        operation: { ...target, operationId: op.operationId }
+      });
+      done = h.settled();
+      await Promise.race([entered.promise, done]);
+      expect(h.run).toHaveBeenCalledTimes(2);
+      expect(h.accountContext.getExecutor(op.operationId)).toBe(h.executor);
+      await h.extension.shutdown();
+      send.resolve();
+      await Promise.race([saving.promise, done]);
+      expect(op.providerRecovery.mutations.at(-1)?.status).toBe(
+        "outcome_unknown"
+      );
+      expect(h.accountContext.getExecutor(op.operationId)).toBe(h.executor);
+      saved.resolve();
+      await done;
+      expect(h.accountContext.getExecutor(op.operationId)).toBeUndefined();
+      expect(h.owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
+      expect(h.run).toHaveBeenCalledTimes(2);
+      expect(op.endedAt).toBeNull();
+      expect(op.failure).toBeNull();
+      expect(snapshots.at(-1)?.providerRecovery.mutations.at(-1)).toMatchObject(
+        {
+          kind: "github_workflow.dispatch_retry",
+          status: "outcome_unknown"
+        }
+      );
+      expect(
+        await h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action: "verify"
+        })
+      ).toMatchObject({ kind: "unavailable", code: "operation-shutting-down" });
+      expect(h.runtime.servers.size).toBe(0);
+      expect(h.runner).not.toHaveBeenCalled();
+      expect(external).not.toHaveBeenCalled();
+      expect(network).not.toHaveBeenCalled();
+      expect(h.reportError).not.toHaveBeenCalled();
+    } finally {
+      send.resolve();
+      saved.resolve();
+      await h.extension.shutdown();
+      await done;
+    }
+  });
   it("registers flat provider schemas while retaining a nested answer union", async () => {
     const h = await composition();
     try {

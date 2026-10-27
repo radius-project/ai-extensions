@@ -10,6 +10,7 @@ import type {
 import type { OperationResumeService } from "../server/services/operation-resume.js";
 import type { createSetupStartService } from "../server/services/setup-start.js";
 import type { VerificationStatusResult } from "../server/services/verification-status.js";
+import { parsePullRequestUrl } from "../server/services/pull-request-url.js";
 import type { DeploymentAccountResolver } from "./deployment-account.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import type { SessionHolder } from "./session.js";
@@ -116,7 +117,7 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
     code: string,
     message: string,
     supported = false
-  ): EnvironmentToolResult => ({
+  ): Extract<EnvironmentToolResult, { kind: "interaction_required" }> => ({
     kind: "interaction_required",
     code,
     interaction: {
@@ -296,8 +297,26 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
       const message =
         text(result.body.error) ||
         "The environment service refused the operation.";
-      if (code === "verification-retry-pull-request-open")
-        return interaction(target, "pull-request-merge", code, message);
+      if (code === "verification-retry-pull-request-open") {
+        const guidance = interaction(
+          target,
+          "pull-request-merge",
+          code,
+          message
+        );
+        const savedUrl = text(result.body.pullRequestUrl);
+        const reference = parsePullRequestUrl(savedUrl, target.repo);
+        if (reference && savedUrl.trim().length <= 2048) {
+          guidance.interaction.pullRequestUrl = `https://github.com/${reference.repo}/pull/${reference.number}`;
+        } else if (result.body.pullRequestUrl) {
+          ports.reportError(
+            new Error(
+              "The saved setup pull request URL is invalid for this operation."
+            )
+          );
+        }
+        return guidance;
+      }
       return result.status >= 500 ?
           unavailable(code || "environment-service-unavailable", message)
         : refused(code || "environment-command-refused", message);
