@@ -1,5 +1,6 @@
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { CanvasState } from "../../shared.js";
+import { isSetupExecutionInterrupted } from "@radius-project/core";
 import {
   admitCreateEnvironmentRequest,
   type AdmissionPorts,
@@ -381,6 +382,7 @@ export function createConfigureEnvironmentService(
         throw new Error("Environment setup did not report an outcome.");
       return outcome;
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       return setupHandlerFailure(error, dependencies.reportOperationDiagnostic);
     }
   };
@@ -549,7 +551,7 @@ async function runConfigureEnvironmentService(
       }
     });
   } catch (e) {
-    if (finalizationStarted) throw e;
+    if (finalizationStarted || isSetupExecutionInterrupted(e)) throw e;
     if (
       dependencies.isShuttingDown() &&
       e instanceof ProviderMutationRecoveryError &&

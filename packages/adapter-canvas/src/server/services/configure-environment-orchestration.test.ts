@@ -1108,6 +1108,7 @@ describe("matched headless and panel-bound setup service parity", () => {
         respond: unexpectedParityCall
       });
     const dependencies: EnvironmentOperationWorkflowDependencies = {
+      isStopped: d.isShuttingDown,
       preflightRepoAdmin: d.preflightRepoAdmin,
       preflightGhcrPackageWriteAccess: d.preflightGhcrPackageWriteAccess,
       readGitHubJson: d.readGitHubJson,
@@ -2370,12 +2371,16 @@ describe("environment configuration service: the seven-step workflow", () => {
         if (stopped && outcome === "persistence-error")
           throw new Error("acknowledgement journal unavailable");
       };
-      const result = await configure({ repo: "octo/app" });
-      expect(result).toMatchObject(
-        outcome === "persistence-error" ?
-          { kind: "failed", status: 500 }
-        : { kind: "stopped", status: 503 }
-      );
+      const pending = configure({ repo: "octo/app" });
+      if (outcome === "persistence-error")
+        await expect(pending).resolves.toMatchObject({
+          kind: "failed",
+          status: 500
+        });
+      else
+        await expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
       expect(
         harness.ghCalls.filter((call) => call.startsWith("run list "))
       ).toHaveLength(1);
@@ -2856,6 +2861,43 @@ describe("environment configuration service: the seven-step workflow", () => {
     expect(harness.journal).toContain(
       "recordGitHubEnvironment:created_candidate"
     );
+  });
+
+  it("interrupts configuration-stage environment creation after a held intent save without cleanup", async () => {
+    const harness = start();
+    let stopped = false;
+    let entered = () => {};
+    let release = () => {};
+    const prepared = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const saved: string[] = [];
+    harness.dependencies.isShuttingDown = () => stopped;
+    harness.dependencies.persistOperations = async () => {
+      const mutation = harness.operation.providerRecovery?.mutations?.at(-1);
+      if (mutation?.kind !== "github_environment.put") return;
+      saved.push(mutation.status);
+      if (mutation.status === "prepared") {
+        entered();
+        await gate;
+      }
+    };
+    const pending = configure({ repo: "octo/app" });
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    await prepared;
+    const calls = [...harness.ghCalls];
+    stopped = true;
+    release();
+    await rejected;
+    expect(harness.ghCalls).toEqual(calls);
+    expect(saved).toEqual(["prepared", "not_applied"]);
+    expect(harness.failures).toEqual([]);
+    expect(harness.finished).toEqual([]);
   });
 
   it("fails before workflow mutation when the default branch cannot be resolved", async () => {
@@ -4029,8 +4071,9 @@ describe("environment configuration service: the protected-branch path", () => {
       input.respond(503, { code: "setup-shutting-down" });
       return false;
     };
-    const result = await configure({ repo: "octo/app" });
-    expect(result).toMatchObject({ kind: "stopped", status: 503 });
+    await expect(configure({ repo: "octo/app" })).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
     expect(
       harness.ghCalls.filter((call) => call.startsWith("run list "))
     ).toHaveLength(1);

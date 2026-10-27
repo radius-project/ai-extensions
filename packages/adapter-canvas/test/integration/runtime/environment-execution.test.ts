@@ -20,7 +20,6 @@ import {
 import {
   createOperation,
   buildDeleteStages,
-  setStageState,
   finish,
   fromPersistedOperation,
   operations,
@@ -316,7 +315,7 @@ describe("real server and fake SDK runtime ownership", () => {
     }
   });
   it.each(["continue", "deletion"] as const)(
-    "refuses %s on coordinator replacement while recovery waits for held admission",
+    "retains runtime continue but refuses deletion on coordinator replacement: %s",
     async (command) => {
       const runtime = await composition();
       const entered = deferred();
@@ -362,6 +361,15 @@ describe("real server and fake SDK runtime ownership", () => {
         await runtime.canvas.open(context());
         expect(runtime.owner.hasActiveEnvironmentTasks("panel")).toBe(false);
         gate.resolve();
+        if (command === "continue") {
+          expect(await pending).toMatchObject({ status: 202 });
+          await runtime.entered.promise;
+          expect(writes).toBe(1);
+          expect(runtime.accountContext.getExecutor(op.operationId)).toBe(
+            runtime.executor
+          );
+          return;
+        }
         expect(await pending).toMatchObject({
           status: 409,
           body: { code: "operation-context-changed" }
@@ -1026,14 +1034,19 @@ describe("real server and fake SDK runtime ownership", () => {
     }
   );
 
-  it.each([
-    "azure",
-    "RADIUS_MANAGED",
-    "RADIUS_STATE_BACKEND",
-    "AZURE_TENANT_ID"
-  ] as const)(
-    "persists an acknowledged %s write during shutdown before releasing its selected executor",
-    async (stage) => {
+  it.each(
+    [
+      "azure",
+      "environment",
+      "RADIUS_MANAGED",
+      "RADIUS_STATE_BACKEND",
+      "AZURE_TENANT_ID"
+    ].flatMap((stage) =>
+      ["issued", "prepared"].map((boundary) => [stage, boundary])
+    )
+  )(
+    "retains the %s %s journal and account through shutdown",
+    async (stage, boundary) => {
       const owner = createEnvironmentExecutionOwner();
       const entered = deferred();
       const writeGate = deferred();
@@ -1069,6 +1082,12 @@ describe("real server and fake SDK runtime ownership", () => {
         }
         if (args[0] !== "api")
           throw new Error(`Unexpected GitHub command: ${args.join(" ")}`);
+        if (stage === "environment" && args.includes("PUT")) {
+          entered.resolve();
+          await writeGate.promise;
+          acknowledged = true;
+          return success('{"name":"dev","id":17}');
+        }
         const endpoint = args[1]?.replace(/^\//, "");
         if (endpoint === "user") return success('{"login":"saved-account"}');
         if (endpoint === "repos/fixture/app")
@@ -1076,7 +1095,9 @@ describe("real server and fake SDK runtime ownership", () => {
             '{"id":23,"name":"app","full_name":"fixture/app","default_branch":"main","owner":{"id":11,"login":"fixture","type":"User"},"permissions":{"admin":true}}'
           );
         if (endpoint === "repos/fixture/app/environments/dev")
-          return success('{"name":"dev","id":17}');
+          return stage === "environment" && !acknowledged ?
+              { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
+            : success('{"name":"dev","id":17}');
         if (args.includes("/repos/fixture/app/environments?per_page=100"))
           return success();
         if (endpoint === "repos/fixture/app/actions/oidc/customization/sub")
@@ -1221,6 +1242,29 @@ describe("real server and fake SDK runtime ownership", () => {
       const snapshots: (typeof op)[] = [];
       vi.spyOn(operations, "persist").mockImplementation(async () => {
         snapshots.push(structuredClone(operations.latest("fixture/app")));
+        const mutation = op.providerRecovery.mutations.at(-1);
+        const targetMutation =
+          stage === "azure" ? mutation?.kind === "azure_application.create"
+          : stage === "environment" ?
+            mutation?.kind === "github_environment.put"
+          : mutation?.kind === "github_environment_variable.put" &&
+            mutation.intent?.name === stage;
+        if (
+          boundary === "prepared" &&
+          targetMutation &&
+          mutation?.status === "prepared"
+        ) {
+          entered.resolve();
+          await writeGate.promise;
+        }
+        if (
+          boundary === "prepared" &&
+          targetMutation &&
+          mutation?.status === "not_applied"
+        ) {
+          persisted.resolve();
+          await persistGate.promise;
+        }
         if (acknowledged) {
           persisted.resolve();
           await persistGate.promise;
@@ -1255,7 +1299,7 @@ describe("real server and fake SDK runtime ownership", () => {
         };
         writeGate.resolve();
         await Promise.race([persisted.promise, completed]);
-        expect(acknowledged).toBe(true);
+        expect(acknowledged).toBe(boundary === "issued");
         expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         persistGate.resolve();
         await completed;
@@ -1274,28 +1318,33 @@ describe("real server and fake SDK runtime ownership", () => {
           expect.arrayContaining([
             expect.objectContaining({
               kind:
-                stage === "azure" ?
-                  "azure_application.create"
+                stage === "azure" ? "azure_application.create"
+                : stage === "environment" ? "github_environment.put"
                 : "github_environment_variable.put",
-              status: "confirmed"
+              status: boundary === "issued" ? "confirmed" : "not_applied"
             })
           ])
         );
-        expect(snapshots.at(-1)?.setupArtifacts).toMatchObject(
-          stage === "azure" ?
-            {
-              azureApp: { state: "created", origin: "this_operation", appId }
-            }
-          : {
-              githubEnvironmentVariables: expect.arrayContaining([
-                expect.objectContaining({
-                  name: stage,
-                  previousKnown: true,
-                  previousValue: null
-                })
-              ])
-            }
-        );
+        if (boundary === "issued")
+          expect(snapshots.at(-1)?.setupArtifacts).toMatchObject(
+            stage === "azure" ?
+              {
+                azureApp: { state: "created", origin: "this_operation", appId }
+              }
+            : stage === "environment" ?
+              {
+                githubEnvironment: { providerId: "17" }
+              }
+            : {
+                githubEnvironmentVariables: expect.arrayContaining([
+                  expect.objectContaining({
+                    name: stage,
+                    previousKnown: true,
+                    previousValue: null
+                  })
+                ])
+              }
+          );
         expect(runtime.servers.size).toBe(0);
         const released = await coordinator.withSelectedAccount(
           executor.login,

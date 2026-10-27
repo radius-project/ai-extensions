@@ -137,6 +137,7 @@ function harness(options: {
     }
   });
   const workflow: AzureAutoSetupWorkflow = {
+    isStopped: () => false,
     operation,
     steps: [],
     respond: () => {},

@@ -271,7 +271,11 @@ describe("ensureGitHubEnvironment", () => {
           mutations += 1;
           return result();
         },
-        mutationRecovery: { operation, persist: async () => {} }
+        mutationRecovery: {
+          isStopped: () => false,
+          operation,
+          persist: async () => {}
+        }
       })
     ).rejects.toBeInstanceOf(GitHubEnvironmentEnsureError);
     expect(stopChecks).toBe(0);
@@ -308,7 +312,11 @@ describe("ensureGitHubEnvironment", () => {
           putCalls += 1;
           return result({ code: 1, timedOut: true });
         },
-        mutationRecovery: { operation, persist: async () => {} },
+        mutationRecovery: {
+          isStopped: () => false,
+          operation,
+          persist: async () => {}
+        },
         now: () => Date.parse(putStartedAt)
       }).catch((error: unknown) => error);
       return { operation, failure, putCalls };
@@ -366,7 +374,11 @@ describe("ensureGitHubEnvironment", () => {
           return readResult({ ok: false, status: 404 });
         },
         runGh: async () => result({ code: 1, timedOut: true }),
-        mutationRecovery: { operation, persist: async () => {} }
+        mutationRecovery: {
+          isStopped: () => false,
+          operation,
+          persist: async () => {}
+        }
       }).catch((error: unknown) => error);
 
       // Absence is an answer, so the mutation resolves rather than hanging.
@@ -409,6 +421,7 @@ describe("ensureGitHubEnvironment", () => {
           throw new Error("confirmed PUT must not replay");
         },
         mutationRecovery: {
+          isStopped: () => false,
           operation: operation as object & { operationId: string },
           persist: async () => {}
         }
@@ -508,6 +521,7 @@ describe("ensureGitHubEnvironment", () => {
             stdout: JSON.stringify({ id: 1234567, name: "production" })
           }),
         mutationRecovery: {
+          isStopped: () => false,
           operation,
           persist: async () => {
             persists += 1;
@@ -546,7 +560,11 @@ describe("ensureGitHubEnvironment", () => {
             : readResult({ json: { name: "production" } });
         },
         runGh: async () => result({ code: 1, timedOut: true }),
-        mutationRecovery: { operation, persist: async () => {} }
+        mutationRecovery: {
+          isStopped: () => false,
+          operation,
+          persist: async () => {}
+        }
       })
     ).rejects.toMatchObject({
       code: "provider-mutation-manual-required",
@@ -1214,7 +1232,11 @@ describe("a retry after the provider refused the first attempt", () => {
           })
         }),
       now: () => RETRY_AT,
-      mutationRecovery: { operation, persist: async () => {} }
+      mutationRecovery: {
+        isStopped: () => false,
+        operation,
+        persist: async () => {}
+      }
     });
     expect(ensured.creationProof?.proven).toBe(false);
     expect(ensured.creationProof?.proven).toBe(false);

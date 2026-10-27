@@ -3,3 +3,5 @@
 ---
 
 **Fixed:** Share in-progress environment setup recovery across panel attachments, and prevent old tasks or delayed updates from clearing newer work or overwriting a reopened panel.
+
+An old task cannot fail, reconcile or roll back a replacement operation, even when the replacement has no queued task.

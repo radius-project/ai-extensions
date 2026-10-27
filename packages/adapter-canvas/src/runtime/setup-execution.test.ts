@@ -32,6 +32,7 @@ function fixture() {
     throw new Error("Unexpected setup execution");
   };
   const ports = {
+    deferAdmissionRecovery: owner.deferAdmissionRecovery,
     scope,
     getOperation: vi.fn((id: string) => records.get(id)),
     persist: vi.fn(async () => {}),
@@ -75,6 +76,7 @@ function fixture() {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -138,6 +140,79 @@ describe("runtime setup execution construction", () => {
 });
 
 describe("runtime setup execution", () => {
+  it.each(
+    [
+      "queued",
+      "unresolved",
+      "rollback",
+      "terminal",
+      "removed",
+      "missing",
+      "shutdown"
+    ].flatMap((replacement) =>
+      ["success", "failure"].map((outcome) => [replacement, outcome])
+    )
+  )(
+    "does not grant old %s work authority on %s settlement",
+    async (replacement, outcome) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const { ports, operation, records, settled, scope, timers } = fixture();
+      const old = operation();
+      if (replacement === "missing") records.delete(old.operationId);
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let started = () => {};
+      const entered = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      ports.runOperation
+        .mockImplementationOnce(async () => {
+          started();
+          await gate;
+          if (outcome === "failure") throw new Error("Old work failed");
+        })
+        .mockResolvedValue(undefined);
+      const execution = createSetupExecution(ports);
+      execution.scheduleEnvironmentOperation(old);
+      await entered;
+      const current = operation();
+      if (replacement === "unresolved") {
+        prepareProviderMutation(current, {
+          kind: "azure_app.create",
+          target: "replacement"
+        });
+      }
+      if (replacement === "terminal" || replacement === "rollback")
+        finish(current, "failed");
+      if (replacement === "rollback")
+        current.providerRecovery.state = "rollback_pending";
+      current.executionActive = true;
+      if (replacement === "removed") records.delete(old.operationId);
+      if (replacement === "shutdown") scope.markShuttingDown();
+      const before = structuredClone(current);
+      if (replacement === "queued" || replacement === "unresolved")
+        execution.scheduleEnvironmentOperation(current);
+      release();
+      await settled();
+      expect(current).toEqual(
+        replacement === "queued" || replacement === "unresolved" ?
+          { ...before, executionActive: false }
+        : before
+      );
+      expect(ports.runOperation).toHaveBeenCalledTimes(
+        replacement === "queued" || replacement === "unresolved" ? 2 : 1
+      );
+      expect(ports.persist).not.toHaveBeenCalled();
+      expect(ports.report).not.toHaveBeenCalled();
+      expect(ports.admitRecoveryRollback).not.toHaveBeenCalled();
+      expect(ports.recoverCleanup).not.toHaveBeenCalled();
+      expect(timers).toEqual([]);
+      expect(scope.hasActiveTasks()).toBe(false);
+    }
+  );
+
   it("ignores a reconciliation callback delivered after the execution scope stops", async () => {
     const { ports, operation, settled, scope } = fixture();
     const op = operation();

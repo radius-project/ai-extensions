@@ -98,6 +98,7 @@ function dependencies(
     failures,
     posts,
     dependencies: {
+      isStopped: () => false,
       guardStopBoundary: async (_target, boundary) => {
         events.push(`stop:${boundary}`);
         return true;

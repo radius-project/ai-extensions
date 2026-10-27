@@ -617,6 +617,49 @@ describe("ensureServicePrincipal", () => {
   // before: this operation may have made it and crashed before the ledger
   // caught up. Reading that as pre-existing leaves it behind at rollback.
   describe("a principal found again after a crash", () => {
+    it("does not send a principal create after shutdown during intent persistence", async () => {
+      const operation = createOperation({ operationId: "held-principal" });
+      let stopped = false;
+      let entered = () => {};
+      let release = () => {};
+      const prepared = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const statuses: string[] = [];
+      const run = vi.fn(async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "Request_ResourceNotFound"
+      }));
+      const pending = ensureServicePrincipal("app-1", run, {
+        operation,
+        isStopped: () => stopped,
+        persist: async () => {
+          const status = operation.providerRecovery.mutations.at(-1)?.status;
+          statuses.push(String(status));
+          if (status === "prepared") {
+            entered();
+            await gate;
+          }
+        }
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      await prepared;
+      stopped = true;
+      release();
+      await rejected;
+      expect(run).toHaveBeenCalledOnce();
+      expect(statuses).toEqual(["prepared", "not_applied"]);
+      expect(operation.setupArtifacts.servicePrincipal.state).toBe(
+        "not_started"
+      );
+    });
+
     const NOT_FOUND = {
       code: 1,
       stdout: "",
@@ -645,7 +688,7 @@ describe("ensureServicePrincipal", () => {
               { code: 0, stdout: createStdout, stderr: "" }
             );
         },
-        { operation, persist: async () => {} }
+        { isStopped: () => false, operation, persist: async () => {} }
       );
       return operation;
     }
@@ -659,6 +702,7 @@ describe("ensureServicePrincipal", () => {
           return { code: 0, stdout: `${objectId}\n`, stderr: "" };
         },
         {
+          isStopped: () => false,
           operation: operation as object & { operationId: string },
           persist: async () => {}
         }
@@ -904,7 +948,7 @@ describe("ensureServicePrincipal", () => {
       const operation = createOperation({ operationId: "op_sp" });
       return {
         operation,
-        port: { operation, persist: async () => {} }
+        port: { operation, persist: async () => {}, isStopped: () => false }
       };
     }
 

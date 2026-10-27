@@ -38,6 +38,7 @@ type TaskScope = Pick<
 >;
 
 export interface SetupExecutionPorts {
+  deferAdmissionRecovery(operationId: string, recover: () => void): boolean;
   scope: TaskScope;
   getOperation(operationId: string): SetupExecutionOperation | null | undefined;
   persist(): Promise<void>;
@@ -78,6 +79,7 @@ export function reopenProviderReconciliation(operation: unknown): boolean {
 
 export function createSetupExecution(ports: SetupExecutionPorts) {
   for (const name of [
+    "deferAdmissionRecovery",
     "getOperation",
     "persist",
     "report",
@@ -127,13 +129,15 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
   ): boolean {
     if (ports.isShuttingDown(operationId)) return false;
     let reconciliationNeeded = false;
-    let currentAtSettlement: SetupExecutionOperation | null | undefined;
     const op = ports.getOperation(operationId);
+    const isCurrent = () =>
+      op != null && ports.getOperation(operationId) === op;
     if (op) setExecutionActive(op, true);
     ports.scope.schedule(operationId, {
       run: task,
       cancelled,
       failed: async (error) => {
+        if (!isCurrent()) return;
         const current = ports.getOperation(operationId);
         if (isSetupExecutionInterrupted(error)) return;
         if (ports.isShuttingDown(operationId)) {
@@ -176,12 +180,13 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
         }
       },
       settling: () => {
-        const current = (currentAtSettlement = ports.getOperation(operationId));
+        if (!isCurrent()) return;
+        const current = op;
         if (current && !current.endedAt) setExecutionActive(current, false);
       },
       settled: () => {
-        if (ports.isShuttingDown(operationId)) return;
-        const current = currentAtSettlement;
+        if (!isCurrent() || ports.isShuttingDown(operationId)) return;
+        const current = op;
         if (
           current?.endedAt &&
           current.providerRecovery?.state === "rollback_pending" &&
@@ -267,6 +272,14 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
   }
 
   function recoverOperation(operation: SetupExecutionOperation): void {
+    const operationId = operation.operationId;
+    if (
+      ports.deferAdmissionRecovery(operationId, () => {
+        const current = ports.getOperation(operationId);
+        if (current) recoverOperation(current);
+      })
+    )
+      return;
     if (
       ports.isShuttingDown(operation.operationId) ||
       operation.kind === "delete" ||

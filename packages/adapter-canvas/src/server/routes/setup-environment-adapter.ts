@@ -61,8 +61,10 @@ export function createSetupEnvironmentPorts(input: {
     steps.push(message);
   };
   return {
-    recovery: createSetupWorkflowRecoveryPort(operation, () =>
-      d.persistOperations()
+    recovery: createSetupWorkflowRecoveryPort(
+      operation,
+      () => d.persistOperations(),
+      d.isShuttingDown
     ),
     stopRequested: () => shouldStop(operation),
     isExecutionStopped: d.isShuttingDown,
@@ -121,7 +123,11 @@ export function createSetupEnvironmentPorts(input: {
         requestedName,
         readGitHubJson: (path) => d.readGitHubJson(path, executor),
         runGh: (args) => executor.run(args),
-        mutationRecovery: { operation, persist: () => d.persistOperations() },
+        mutationRecovery: {
+          operation,
+          persist: () => d.persistOperations(),
+          isStopped: d.isShuttingDown
+        },
         beforeCreate,
         now: d.now
       }),
@@ -139,6 +145,7 @@ export function createSetupEnvironmentPorts(input: {
           ...(journalVariables ?
             {
               mutationRecovery: {
+                isStopped: d.isShuttingDown,
                 operation,
                 persist: () => d.persistOperations(),
                 recordVariable: (entry) =>

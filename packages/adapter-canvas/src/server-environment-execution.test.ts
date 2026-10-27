@@ -180,6 +180,63 @@ describe("production coordinator scheduling scopes", () => {
       expect(owner.hasActiveEnvironmentTasks("panel")).toBe(false);
     }
   );
+  it.each(["queued", "unresolved", "rollback"] as const)(
+    "does not finalize a %s replacement when the old production task rejects",
+    async (mode) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const owner = createEnvironmentExecutionOwner();
+      const old = operation("replaced-task");
+      const entered = deferred();
+      const gate = deferred();
+      const runner = vi.fn(async () => {});
+      runner.mockImplementationOnce(async () => {
+        entered.resolve();
+        await gate.promise;
+        throw new Error("Old task rejected");
+      });
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockResolvedValue(undefined);
+      const rollback = vi.fn<OperationControlService>(unavailable);
+      const handler = coordinator(
+        owner,
+        "panel",
+        runner,
+        undefined,
+        undefined,
+        undefined,
+        rollback
+      );
+      handler.scheduleEnvironmentOperation(old);
+      await entered.promise;
+      const replacement = operation(old.operationId);
+      if (mode === "unresolved")
+        prepareProviderMutation(replacement, {
+          kind: "azure_application.create",
+          target: "replacement"
+        });
+      if (mode === "rollback") {
+        finish(replacement, "failed");
+        replacement.providerRecovery.state = "rollback_pending";
+      }
+      replacement.executionActive = true;
+      const before = structuredClone(replacement);
+      if (mode !== "rollback")
+        handler.scheduleEnvironmentOperation(replacement);
+      gate.resolve();
+      await settled(owner, "panel");
+      expect(operations.get(old.operationId)).toBe(replacement);
+      expect(replacement).toEqual(
+        mode === "rollback" ? before : { ...before, executionActive: false }
+      );
+      expect(runner).toHaveBeenCalledTimes(mode === "rollback" ? 1 : 2);
+      expect(persist).not.toHaveBeenCalled();
+      expect(rollback).not.toHaveBeenCalled();
+      expect(owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+      owner.shutdown();
+    }
+  );
+
   it("re-evaluates deferred recovery against the replacement record after corrective persistence", async () => {
     const owner = createEnvironmentExecutionOwner();
     const original = stoppedSetup();
@@ -428,7 +485,7 @@ describe("production coordinator scheduling scopes", () => {
           };
         },
         runGhWorkflow: unavailable,
-        mutationRecovery: { operation: op, persist },
+        mutationRecovery: { isStopped: () => false, operation: op, persist },
         tempFile: {
           write: () => {
             throw new Error("Unexpected workflow write");
@@ -578,7 +635,7 @@ describe("production coordinator scheduling scopes", () => {
     const persist = vi.fn(async () => {
       throw new Error("Recovery storage unavailable.");
     });
-    const recovery = createSetupWorkflowRecoveryPort(op, persist);
+    const recovery = createSetupWorkflowRecoveryPort(op, persist, () => false);
     const fetcher = vi.fn(unavailable);
     vi.stubGlobal("fetch", fetcher);
     const control = vi.fn<OperationControlService>(unavailable);

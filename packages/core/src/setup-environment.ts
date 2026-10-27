@@ -5,6 +5,7 @@ import {
 } from "./setup-github-environment.js";
 import {
   assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
   ProviderMutationRecoveryError
 } from "./setup-recovery-error.js";
 import { createWorkflowFileCommitter } from "./setup-workflow-committer.js";
@@ -40,6 +41,7 @@ export async function configureSetupEnvironment(
     try {
       return { completed: true, value: await mutate() };
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       if (
         error instanceof ProviderMutationRecoveryError &&
         error.code === "provider-mutation-outcome-unknown"
@@ -78,6 +80,7 @@ export async function configureSetupEnvironment(
       () => ports.stopBoundary("before-github-environment-create")
     );
   } catch (error) {
+    if (isSetupExecutionInterrupted(error)) throw error;
     if (error instanceof GitHubEnvironmentEnsureCancelled)
       return { kind: "stopped" };
     if (

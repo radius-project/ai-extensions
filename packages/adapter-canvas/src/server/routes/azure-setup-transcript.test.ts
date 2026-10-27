@@ -152,6 +152,7 @@ describe("Azure setup ordered provider transcript", () => {
       }
     });
     const workflow: AzureAutoSetupWorkflow = {
+      isStopped: () => false,
       operation,
       steps,
       runAz,
