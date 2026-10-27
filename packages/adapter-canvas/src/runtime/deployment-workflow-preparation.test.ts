@@ -35,7 +35,20 @@ function fixture() {
   const sync = vi.fn<typeof syncRepoWorkflows>(
     async (_repo, _environments, options) => {
       options?.log?.("synchronizing");
-      return { created: [], updated: [], failed: [], skipped: false };
+      return {
+        created: [],
+        updated: [],
+        failed: [],
+        skipped: false,
+        generationFailures: [],
+        branches: ["main", "feature/model"],
+        synchronized: ["main", "feature/model"].flatMap((branch) =>
+          [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE].map((file) => ({
+            path: `.github/workflows/${file}`,
+            branch
+          }))
+        )
+      };
     }
   );
   const log = vi.fn();
@@ -54,6 +67,42 @@ function fixture() {
 }
 
 describe("deployment workflow preparation", () => {
+  it.each(["generation", "missing-evidence"] as const)(
+    "refuses actual sync %s after successful preflight",
+    async (failure) => {
+      const f = fixture();
+      f.sync.mockResolvedValue({
+        created: [],
+        updated: [],
+        failed: [],
+        skipped: false,
+        branches: ["main", "feature/model"],
+        synchronized: [],
+        generationFailures:
+          failure === "generation" ?
+            [
+              {
+                path: `.github/workflows/${DEPLOY_AZURE_FILE}`,
+                environment: "dev",
+                reason: "generation-error"
+              }
+            ]
+          : []
+      });
+      await expect(
+        f.service.synchronize(
+          "fixture/app",
+          "dev",
+          "azure",
+          [DEPLOY_AZURE_FILE],
+          "feature/model"
+        )
+      ).rejects.toThrow("Could not prepare deployment workflows");
+      expect(f.generateDeployWorkflow).toHaveBeenCalledOnce();
+      expect(f.sync).toHaveBeenCalledOnce();
+    }
+  );
+
   it("does not generate or rewrite existing workflow files", async () => {
     const f = fixture();
     await f.service.publish(
@@ -203,6 +252,8 @@ describe("deployment workflow preparation", () => {
       updated: ["changed"],
       registrationPending: ["new", "concurrent"],
       failed: [],
+      generationFailures: [],
+      synchronized: [],
       skipped: false
     });
     expect(
@@ -225,6 +276,8 @@ describe("deployment workflow preparation", () => {
       created: [],
       updated: [],
       failed: [{ path: "deploy.yml", branch: "protected" }],
+      generationFailures: [],
+      synchronized: [],
       skipped: false
     });
     await expect(

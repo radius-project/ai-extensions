@@ -14,6 +14,8 @@ import type { SelectedGhExecutor } from "../../../src/gh.js";
 import {
   DEPLOY_AZURE_FILE,
   DEPLOY_DISPATCHER_FILE,
+  createWorkflowTemplateReader,
+  generateDeployWorkflow,
   syncRepoWorkflows
 } from "../../../src/infra.js";
 import { bindDeploymentExecutor } from "../../../src/runtime/deployment-executor.js";
@@ -46,9 +48,19 @@ type Scenario =
   | "baseline-unavailable"
   | "dispatch-refused"
   | "dispatch-timeout";
+type TemplateScenario = "template-unavailable" | "template-expired";
 
-function fixture(scenario: Scenario) {
+function fixture(scenario: Scenario | TemplateScenario) {
   const files = new Map<string, string>();
+  if (scenario.startsWith("template-")) {
+    for (const branch of [BRANCH, "trunk"]) {
+      for (const file of [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE])
+        files.set(
+          `/repos/${REPO}/contents/.github/workflows/${file}?ref=${encodeURIComponent(branch)}`,
+          "name: stale\n"
+        );
+    }
+  }
   let secretWritten = false;
   const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
   const refused = (stderr: string) => ({ code: 1, stdout: "", stderr });
@@ -187,6 +199,50 @@ function fixture(scenario: Scenario) {
     () => true
   );
   const workflows = createDeploymentWorkflowPorts(executor);
+  let now = 0;
+  let preflightDone = false;
+  let entered = () => {};
+  const atSynchronization = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  if (scenario.startsWith("template-")) {
+    const readTemplate = createWorkflowTemplateReader(
+      async (_repo, path) => {
+        if (scenario === "template-unavailable" || now > 60000)
+          return { content: null, error: "HTTP 503: template unavailable" };
+        return {
+          content: readFileSync(
+            new URL(`../../../../../${path}`, import.meta.url),
+            "utf8"
+          ),
+          error: null
+        };
+      },
+      () => now
+    );
+    workflows.generateDeployWorkflow = async (environment, appFile) => {
+      const generated = await generateDeployWorkflow(
+        environment,
+        appFile,
+        {},
+        readTemplate
+      );
+      preflightDone = true;
+      return generated;
+    };
+    const getDefaultBranch = workflows.getDefaultBranch;
+    workflows.getDefaultBranch = async (repo) => {
+      if (preflightDone) {
+        entered();
+        await held;
+      }
+      return getDefaultBranch(repo);
+    };
+  }
   const log = vi.fn();
   const preparation = createDeploymentWorkflowPreparation(workflows, {
     sync: syncRepoWorkflows,
@@ -241,6 +297,11 @@ function fixture(scenario: Scenario) {
     run,
     state,
     log,
+    atSynchronization,
+    expireCache: () => {
+      now = 60001;
+      release();
+    },
     start: () =>
       service.prepareAndDispatch({
         entry: { state },
@@ -254,6 +315,31 @@ function fixture(scenario: Scenario) {
 }
 
 describe("selected deployment preparation boundary", () => {
+  it.each(["template-unavailable", "template-expired"] as const)(
+    "refuses stale workflows when actual template generation is %s",
+    async (scenario) => {
+      const f = fixture(scenario);
+      const pending = f.start();
+      try {
+        if (scenario === "template-expired") {
+          await f.atSynchronization;
+          f.expireCache();
+        }
+        expect(await pending).toMatchObject({ dispatched: false });
+        expect(f.state.deployDispatchEvidence).toBe("refused");
+        expect(f.state.deployErrorKind).toBe("dispatch-refused");
+        expect(
+          f.run.mock.calls.filter(([args]) => args[0] === "workflow")
+        ).toEqual([]);
+        expect(
+          f.run.mock.calls.filter(([args]) => args.includes("PUT"))
+        ).toEqual([]);
+      } finally {
+        f.expireCache();
+        await pending;
+      }
+    }
+  );
   it("keeps real file, template, secret, baseline and dispatch work on one selected executor", async () => {
     const f = fixture("success");
     expect(await f.start()).toMatchObject({

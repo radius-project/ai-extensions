@@ -95,6 +95,12 @@ export interface WorkflowCommitFailure {
   branch: string;
 }
 
+export interface WorkflowGenerationFailure {
+  path: string;
+  environment: string;
+  reason: "generation-error" | "missing-or-empty";
+}
+
 export interface SyncWorkflowResult {
   // Paths of already-committed files that were rewritten because they had
   // drifted from the upstream template.
@@ -111,8 +117,56 @@ export interface SyncWorkflowResult {
   // Per-branch commit failures (create or update) so a caller can surface a
   // specific "couldn't commit to <branch>" message instead of a generic hint.
   failed: WorkflowCommitFailure[];
+  // Required deployment candidates that could not be generated for an environment.
+  generationFailures: WorkflowGenerationFailure[];
+  // Evidence from this pass, including unchanged and verified concurrent writes.
+  synchronized: Array<{ path: string; branch: string }>;
   branches?: string[];
   skipped: boolean;
+}
+
+function requiredDeploymentPaths(only?: string[]): string[] {
+  const requested =
+    only?.length ? new Set(only.map((file) => file.split("/").pop())) : null;
+  return [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE]
+    .filter((file) => !requested || requested.has(file))
+    .map((file) => `.github/workflows/${file}`);
+}
+
+export function assertDeploymentWorkflowsSynchronized(
+  result: SyncWorkflowResult,
+  only: string[],
+  workingBranch: string
+): void {
+  const failures = result.failed.map(
+    ({ path, branch }) => `${path} on ${branch}`
+  );
+  const required = requiredDeploymentPaths(only);
+  for (const failure of result.generationFailures) {
+    if (required.includes(failure.path))
+      failures.push(
+        `${failure.path} for "${failure.environment}" (${failure.reason})`
+      );
+  }
+  const branches = new Set(
+    [...(result.branches ?? []), workingBranch.trim()].filter(Boolean)
+  );
+  if (required.length && (result.skipped || !result.branches?.length))
+    failures.push("required synchronization was skipped");
+  for (const branch of branches) {
+    for (const path of required) {
+      if (
+        !result.synchronized.some(
+          (entry) => entry.path === path && entry.branch === branch
+        )
+      )
+        failures.push(`${path} on ${branch} (not synchronized)`);
+    }
+  }
+  if (failures.length)
+    throw new Error(
+      "Could not prepare deployment workflows: " + failures.join(", ")
+    );
 }
 
 interface TemplateCacheEntry {
@@ -780,7 +834,9 @@ export function generatePortalUrl(
  * of newly-authored paths (so a caller can tell it must wait for GitHub to
  * register a just-created workflow before dispatching), and `failed` the
  * per-branch commit failures (so a caller can name the branch a commit was
- * rejected on).
+ * rejected on). `generationFailures` records required deployment candidates
+ * missing from generation; `synchronized` records successful path/branch work
+ * so strict callers cannot mistake a skipped candidate for a current workflow.
  */
 export async function syncRepoWorkflows(
   repo: string,
@@ -799,7 +855,14 @@ export async function syncRepoWorkflows(
   const log = typeof opts.log === "function" ? opts.log : () => {};
   const envs = (environments || []).filter((e) => e && e.name);
   if (!repo || envs.length === 0)
-    return { updated: [], created: [], failed: [], skipped: true };
+    return {
+      updated: [],
+      created: [],
+      failed: [],
+      generationFailures: [],
+      synchronized: [],
+      skipped: true
+    };
 
   // Optional allow-list of bare workflow filenames to sync. When set, only
   // those files are considered (see opts.only above).
@@ -834,6 +897,16 @@ export async function syncRepoWorkflows(
     byPath.set(path, list);
   };
   const wf = (name: string) => `.github/workflows/${name}`;
+  const required = requiredDeploymentPaths(opts.only);
+  const generationFailures: WorkflowGenerationFailure[] = [];
+  const generationFailed = (
+    path: string,
+    environment: string,
+    reason: WorkflowGenerationFailure["reason"]
+  ) => {
+    generationFailures.push({ path, environment, reason });
+    log(`required template ${path} for "${environment}": ${reason}`);
+  };
 
   for (const env of envs) {
     // Which providers to generate verify candidates for. An environment whose
@@ -868,10 +941,17 @@ export async function syncRepoWorkflows(
         env.name,
         ".radius/app.bicep"
       );
+      for (const path of required) {
+        const content = deploy[path.slice(".github/workflows/".length)];
+        if (typeof content !== "string" || !content.trim())
+          generationFailed(path, env.name, "missing-or-empty");
+      }
       for (const [file, content] of Object.entries(deploy))
-        add(wf(file), content, null);
+        if (content.trim()) add(wf(file), content, null);
     } catch (e) {
       log(`skipped deploy templates for "${env.name}": ${errorMessage(e)}`);
+      for (const path of required)
+        generationFailed(path, env.name, "generation-error");
     }
     try {
       const del = await ports.generateDeleteWorkflow(env.name);
@@ -886,6 +966,7 @@ export async function syncRepoWorkflows(
   const created = new Set<string>();
   const registrationPending = new Set<string>();
   const failed: WorkflowCommitFailure[] = [];
+  const synchronized: SyncWorkflowResult["synchronized"] = [];
   // Cache branch-existence lookups so authoring missing files doesn't re-query
   // the same branch for every candidate path. A branch that isn't on the remote
   // (e.g. an unpushed working branch) must never be authored onto.
@@ -944,6 +1025,7 @@ export async function syncRepoWorkflows(
           } else {
             registrationPending.add(path);
           }
+          synchronized.push({ path, branch });
         } catch (e) {
           failed.push({ path, branch });
           log(`could not create ${path} on "${branch}": ${errorMessage(e)}`);
@@ -956,7 +1038,10 @@ export async function syncRepoWorkflows(
         envDeleteDispatcherPresent = true;
       // In sync if the committed copy matches any environment's generated
       // content — the only per-env difference is the cosmetic dispatch default.
-      if (candidates.some((c) => c.content === committed)) continue;
+      if (candidates.some((c) => c.content === committed)) {
+        synchronized.push({ path, branch });
+        continue;
+      }
       const setupMarker =
         path === VERIFY_WORKFLOW_PATH ?
           setupPushOperationMarker(committed)
@@ -982,7 +1067,10 @@ export async function syncRepoWorkflows(
             );
           }
         }
-        if (setupVariantMatches) continue;
+        if (setupVariantMatches) {
+          synchronized.push({ path, branch });
+          continue;
+        }
       }
 
       // Drift detected. Prefer a replacement whose provider matches the
@@ -1009,6 +1097,7 @@ export async function syncRepoWorkflows(
           updated.add(path);
           log(`updated ${path} on "${branch}"`);
         }
+        synchronized.push({ path, branch });
       } catch (e) {
         failed.push({ path, branch });
         log(`could not update ${path} on "${branch}": ${errorMessage(e)}`);
@@ -1023,6 +1112,8 @@ export async function syncRepoWorkflows(
       { registrationPending: [...registrationPending] }
     : {}),
     failed,
+    generationFailures,
+    synchronized,
     branches,
     skipped: false
   };

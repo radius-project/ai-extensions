@@ -7,6 +7,14 @@ function fixture(result: Partial<SyncWorkflowResult> = {}) {
     created: [],
     updated: [],
     failed: [],
+    generationFailures: [],
+    branches: ["main", "feature/model&review=1"],
+    synchronized: ["main", "feature/model&review=1"].flatMap((branch) =>
+      ["run-rad-commands.yml", "run-rad-commands-azure.yml"].map((file) => ({
+        path: `.github/workflows/${file}`,
+        branch
+      }))
+    ),
     skipped: false,
     ...result
   });
@@ -34,6 +42,51 @@ const target = [
 >;
 
 describe("workflow presynchronization caller policies", () => {
+  it.each([
+    {
+      generationFailures: [
+        {
+          path: ".github/workflows/run-rad-commands.yml",
+          environment: "Preview East",
+          reason: "generation-error" as const
+        }
+      ]
+    },
+    { synchronized: [] },
+    { branches: undefined },
+    { skipped: true }
+  ])(
+    "rejects incomplete internal synchronization evidence without exposing it through best effort: %j",
+    async (result) => {
+      const { service } = fixture(result);
+      await expect(service.forDeployment(...target)).rejects.toThrow(
+        "Could not prepare deployment workflows"
+      );
+      expect(await service.bestEffort(...target)).toEqual({
+        created: [],
+        updated: [],
+        failed: []
+      });
+    }
+  );
+
+  it("does not turn generation failures for unrequested deployment paths into blockers", async () => {
+    const { service } = fixture({
+      generationFailures: [
+        {
+          path: ".github/workflows/run-rad-commands-azure.yml",
+          environment: "dev",
+          reason: "missing-or-empty"
+        }
+      ]
+    });
+    expect(
+      await service.forDeployment("fixture/app", "dev", "", [
+        "run-rad-commands.yml"
+      ])
+    ).toEqual({ created: [], updated: [], failed: [] });
+  });
+
   it("rejects failed deployment updates but preserves delete's failure evidence", async () => {
     const failed = [
       { path: ".github/workflows/run-rad-commands.yml", branch: "main" },

@@ -1,4 +1,9 @@
-import type { syncRepoWorkflows, WorkflowCommitFailure } from "../../infra.js";
+import {
+  assertDeploymentWorkflowsSynchronized,
+  type syncRepoWorkflows,
+  type SyncWorkflowResult,
+  type WorkflowCommitFailure
+} from "../../infra.js";
 
 interface WorkflowPresyncResult {
   created: string[];
@@ -17,9 +22,16 @@ export function createWorkflowPresync(ports: {
     provider: string,
     only: string[],
     workingBranch = ""
-  ): Promise<WorkflowPresyncResult> {
+  ): Promise<SyncWorkflowResult> {
     if (!repo || !environment || only.length === 0)
-      return { created: [], updated: [], failed: [] };
+      return {
+        created: [],
+        updated: [],
+        failed: [],
+        generationFailures: [],
+        synchronized: [],
+        skipped: true
+      };
     const result = await ports.synchronize(
       repo,
       [{ name: environment, provider: provider || "" }],
@@ -36,6 +48,10 @@ export function createWorkflowPresync(ports: {
       ports.log(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
+    return result;
+  }
+
+  function project(result: SyncWorkflowResult): WorkflowPresyncResult {
     return {
       // Concurrent creation still needs the dispatcher's registration retry.
       created: [
@@ -49,7 +65,7 @@ export function createWorkflowPresync(ports: {
   return {
     async bestEffort(...args: Parameters<typeof synchronize>) {
       try {
-        return await synchronize(...args);
+        return project(await synchronize(...args));
       } catch (error) {
         ports.log(
           `[radius workflow-presync] ${args[0]}: ${ports.errorMessage(error)}`
@@ -59,15 +75,8 @@ export function createWorkflowPresync(ports: {
     },
     async forDeployment(...args: Parameters<typeof synchronize>) {
       const result = await synchronize(...args);
-      if (result.failed.length) {
-        throw new Error(
-          "Could not prepare deployment workflows: " +
-            result.failed
-              .map(({ path, branch }) => `${path} on ${branch}`)
-              .join(", ")
-        );
-      }
-      return result;
+      assertDeploymentWorkflowsSynchronized(result, args[3], args[4] ?? "");
+      return project(result);
     }
   };
 }

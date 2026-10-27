@@ -118,6 +118,7 @@ vi.mock("./gh.js", () => ({
 
 const {
   createWorkflowTemplateReader,
+  assertDeploymentWorkflowsSynchronized,
   syncRepoWorkflows,
   generateVerifyWorkflow,
   generateDeployWorkflow,
@@ -187,6 +188,221 @@ describe("scoped workflow template reads", () => {
       return { ports, log };
     }
 
+    const deployFiles = ["run-rad-commands.yml", "run-rad-commands-azure.yml"];
+    const fullDeploy = Object.fromEntries(
+      deployFiles.map((file) => [file, `current ${file}`])
+    );
+
+    it.each([
+      "noop",
+      "update",
+      "create",
+      "concurrent-create",
+      "concurrent-update"
+    ] as const)(
+      "establishes per-branch required evidence after %s",
+      async (mode) => {
+        const { ports } = fixture();
+        vi.mocked(ports.generateDeployWorkflow).mockResolvedValue(fullDeploy);
+        vi.mocked(ports.fetchFileFromRepo).mockImplementation(
+          async (_repo, path) =>
+            mode === "noop" ?
+              fullDeploy[path.slice(".github/workflows/".length)]
+            : mode === "create" || mode === "concurrent-create" ? null
+            : "stale"
+        );
+        vi.mocked(ports.commitFileToRepo).mockResolvedValue(
+          !mode.startsWith("concurrent-")
+        );
+        const result = await syncRepoWorkflows(
+          "fixture/app",
+          [{ name: "dev" }],
+          {
+            only: deployFiles,
+            workingBranch: "topic",
+            create: true
+          },
+          ports
+        );
+        expect(result.generationFailures).toEqual([]);
+        expect(result.synchronized).toEqual(
+          ["trunk", "topic"].flatMap((branch) =>
+            deployFiles.map((file) => ({
+              path: `.github/workflows/${file}`,
+              branch
+            }))
+          )
+        );
+        expect(() =>
+          assertDeploymentWorkflowsSynchronized(result, deployFiles, "topic")
+        ).not.toThrow();
+        if (mode === "noop")
+          expect(ports.commitFileToRepo).not.toHaveBeenCalled();
+        if (mode === "concurrent-create")
+          expect(result.registrationPending).toEqual(
+            deployFiles.map((file) => `.github/workflows/${file}`)
+          );
+      }
+    );
+
+    it.each<Record<string, string>>([
+      {},
+      { "run-rad-commands.yml": "dispatcher" },
+      { ...fullDeploy, "run-rad-commands-azure.yml": "" },
+      { ...fullDeploy, "run-rad-commands-azure.yml": " \n " }
+    ])(
+      "reports missing or empty required output separately from commit failures: %j",
+      async (generated) => {
+        const { ports } = fixture();
+        vi.mocked(ports.generateDeployWorkflow).mockResolvedValue(generated);
+        const result = await syncRepoWorkflows(
+          "fixture/app",
+          [{ name: "dev" }],
+          { only: deployFiles },
+          ports
+        );
+        expect(result.failed).toEqual([]);
+        expect(result.generationFailures).toEqual(
+          deployFiles
+            .filter((file) => !generated[file]?.trim())
+            .map((file) => ({
+              path: `.github/workflows/${file}`,
+              environment: "dev",
+              reason: "missing-or-empty"
+            }))
+        );
+        expect(() =>
+          assertDeploymentWorkflowsSynchronized(result, deployFiles, "")
+        ).toThrow("missing-or-empty");
+      }
+    );
+
+    it.each(["trunk", "topic"])(
+      "refuses a required update denied on %s and retains successful branch evidence",
+      async (denied) => {
+        const { ports } = fixture();
+        vi.mocked(ports.generateDeployWorkflow).mockResolvedValue(fullDeploy);
+        vi.mocked(ports.commitFileToRepo).mockImplementation(
+          async (_repo, _path, _body, branch) => {
+            if (branch === denied) throw new Error("protected");
+            return true;
+          }
+        );
+        const result = await syncRepoWorkflows(
+          "fixture/app",
+          [{ name: "dev" }],
+          { only: deployFiles, workingBranch: "topic", create: true },
+          ports
+        );
+        expect(result.failed).toHaveLength(2);
+        expect(result.synchronized).toHaveLength(2);
+        expect(
+          result.synchronized.every(({ branch }) => branch !== denied)
+        ).toBe(true);
+        expect(() =>
+          assertDeploymentWorkflowsSynchronized(result, deployFiles, "topic")
+        ).toThrow(`on ${denied}`);
+      }
+    );
+
+    it.each(["not-created", "branch-absent"] as const)(
+      "refuses a skipped required path (%s)",
+      async (reason) => {
+        const { ports } = fixture();
+        vi.mocked(ports.generateDeployWorkflow).mockResolvedValue(fullDeploy);
+        vi.mocked(ports.fetchFileFromRepo).mockResolvedValue(null);
+        vi.mocked(ports.getBranchHeadSha).mockResolvedValue(null);
+        const result = await syncRepoWorkflows(
+          "fixture/app",
+          [{ name: "dev" }],
+          {
+            only: deployFiles,
+            workingBranch: "topic",
+            create: reason === "branch-absent"
+          },
+          ports
+        );
+        expect(result.failed).toEqual([]);
+        expect(result.synchronized).toEqual([]);
+        expect(() =>
+          assertDeploymentWorkflowsSynchronized(result, deployFiles, "topic")
+        ).toThrow("not synchronized");
+      }
+    );
+
+    it("does not require omitted AWS output or unrequested optional families", async () => {
+      const { ports } = fixture();
+      vi.mocked(ports.generateVerifyWorkflow).mockRejectedValue(
+        new Error("optional verify unavailable")
+      );
+      vi.mocked(ports.generateDeleteWorkflow).mockRejectedValue(
+        new Error("optional delete unavailable")
+      );
+      vi.mocked(ports.generateDeployWorkflow).mockResolvedValue(fullDeploy);
+      const result = await syncRepoWorkflows(
+        "fixture/app",
+        [{ name: "dev" }],
+        {},
+        ports
+      );
+      expect(result.generationFailures).toEqual([]);
+      expect(() =>
+        assertDeploymentWorkflowsSynchronized(result, [], "")
+      ).not.toThrow();
+      expect(result.synchronized.map(({ path }) => path)).toEqual(
+        deployFiles.map((file) => `.github/workflows/${file}`)
+      );
+    });
+
+    it("requires only requested deployment paths and does not block delete on deployment generation failure", async () => {
+      const { ports } = fixture();
+      const result = await syncRepoWorkflows(
+        "fixture/app",
+        [{ name: "dev" }],
+        { only: [".github/workflows/run-rad-commands.yml"] },
+        ports
+      );
+      expect(result.generationFailures).toEqual([]);
+      expect(() =>
+        assertDeploymentWorkflowsSynchronized(
+          result,
+          ["run-rad-commands.yml"],
+          ""
+        )
+      ).not.toThrow();
+      vi.mocked(ports.generateDeployWorkflow).mockRejectedValue(
+        new Error("unavailable")
+      );
+      const optional = await syncRepoWorkflows(
+        "fixture/app",
+        [{ name: "dev" }],
+        { only: ["delete-application.yml"] },
+        ports
+      );
+      expect(optional.generationFailures).toEqual([]);
+      expect(optional.updated).toEqual([
+        ".github/workflows/delete-application.yml"
+      ]);
+    });
+
+    it("does not hide one environment's missing template behind another environment's candidate", async () => {
+      const { ports } = fixture();
+      vi.mocked(ports.generateDeployWorkflow)
+        .mockResolvedValueOnce({})
+        .mockResolvedValue(fullDeploy);
+      const result = await syncRepoWorkflows(
+        "fixture/app",
+        [{ name: "missing" }, { name: "complete" }],
+        { only: deployFiles },
+        ports
+      );
+      expect(result.generationFailures).toHaveLength(2);
+      expect(result.synchronized).toHaveLength(2);
+      expect(() =>
+        assertDeploymentWorkflowsSynchronized(result, deployFiles, "")
+      ).toThrow('for "missing"');
+    });
+
     it.each([
       "generateVerifyWorkflow",
       "generateDeployWorkflow",
@@ -208,6 +424,21 @@ describe("scoped workflow template reads", () => {
         expect(result.updated).toHaveLength(2);
         expect(ports.commitFileToRepo).toHaveBeenCalledTimes(2);
         expect(result.failed).toEqual([]);
+        expect(result.generationFailures).toEqual(
+          generator === "generateDeployWorkflow" ?
+            deployFiles.map((file) => ({
+              path: `.github/workflows/${file}`,
+              environment: "dev",
+              reason: "generation-error"
+            }))
+          : [
+              {
+                path: ".github/workflows/run-rad-commands-azure.yml",
+                environment: "dev",
+                reason: "missing-or-empty"
+              }
+            ]
+        );
       }
     );
 

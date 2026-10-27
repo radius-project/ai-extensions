@@ -1,6 +1,7 @@
 import {
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
+  assertDeploymentWorkflowsSynchronized,
   syncRepoWorkflows,
   type WorkflowSyncPorts
 } from "../infra.js";
@@ -89,14 +90,7 @@ export function createDeploymentWorkflowPreparation(
         },
         workflows
       );
-      if (result.failed.length > 0) {
-        throw new Error(
-          "Could not prepare deployment workflows: " +
-            result.failed
-              .map(({ path, branch }) => `${path} on ${branch}`)
-              .join(", ")
-        );
-      }
+      assertDeploymentWorkflowsSynchronized(result, only, workingBranch);
       const changed = [...result.updated, ...result.created];
       if (changed.length)
         ports.log(
