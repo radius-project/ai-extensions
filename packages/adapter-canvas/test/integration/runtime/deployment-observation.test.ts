@@ -24,13 +24,40 @@ function fixture(
     state: CanvasState;
     run: SelectedGhExecutor["run"];
     buildGraph: ProductionDeploymentMonitorPorts["buildGraph"];
-  }
+  },
+  preparationFailure?: "generation" | "synchronization"
 ) {
   const pipeline = createDeploymentPipelineRunner(conclusion);
   const detailStarted = createDeferred<void>();
   const detailGate = createDeferred<void>();
   let dispatched = false;
+  let synchronizing = false;
   const run = vi.fn<SelectedGhExecutor["run"]>(async (args, options) => {
+    if (args[0] === "api" && args[1] === "/repos/fixture/app")
+      synchronizing = true;
+    if (
+      preparationFailure === "generation" &&
+      args[0] === "api" &&
+      args[1].includes(
+        "/radius-project/ai-extensions/contents/.github/extension/run-rad-commands.yml"
+      )
+    )
+      return { code: 1, stdout: "", stderr: "HTTP 503: template unavailable" };
+    if (
+      preparationFailure === "synchronization" &&
+      synchronizing &&
+      args[0] === "api" &&
+      args[1].startsWith("/repos/fixture/app/contents/.github/workflows/") &&
+      args[1].endsWith("?ref=feature%2Fmodel")
+    )
+      return { code: 1, stdout: "", stderr: "HTTP 404: branch disappeared" };
+    if (
+      preparationFailure === "synchronization" &&
+      synchronizing &&
+      args[0] === "api" &&
+      args[1] === "/repos/fixture/app/git/ref/heads/feature%2Fmodel"
+    )
+      return { code: 1, stdout: "", stderr: "HTTP 404: branch disappeared" };
     if (recovery && args[0] === "api" && /\/contents\/apps\//.test(args[1]))
       return recovery.run(args, options);
     if (args[0] === "workflow") dispatched = true;
@@ -146,6 +173,78 @@ function fixture(
 }
 
 describe("production deployment owner and monitor composition", () => {
+  it.each(["generation", "synchronization"] as const)(
+    "publishes required workflow %s refusal without starting dispatch or observation",
+    async (failure) => {
+      const f = fixture("success", undefined, failure);
+      const panel: CanvasState = {};
+      try {
+        f.presentation.attach("observer", panel, f.execution.invocation);
+        f.detailGate.resolve();
+        await f.start();
+        expect(f.execution.state).toMatchObject({
+          deployStatus: "failed",
+          deployErrorKind: "dispatch-refused",
+          deployDispatchEvidence: "refused"
+        });
+        expect(panel).toMatchObject({
+          deployStatus: "failed",
+          deployErrorKind: "dispatch-refused",
+          deployDispatchEvidence: "refused"
+        });
+        expect(f.execution.state.deployRunId).toBeUndefined();
+        expect(f.execution.state.deployDispatchReference).toBeUndefined();
+        const commands = f.run.mock.calls.map(([args]) => args);
+        expect(
+          commands.filter(
+            (args) =>
+              args[0] === "workflow" ||
+              args[0] === "run" ||
+              args[1]?.includes("/actions/runs/")
+          )
+        ).toEqual([]);
+        if (failure === "generation") {
+          expect(panel.deployError).toContain("template unavailable");
+          expect(commands.filter((args) => args.includes("PUT"))).toEqual([]);
+        } else {
+          expect(panel.deployError).toContain(
+            ".github/workflows/run-rad-commands.yml on feature/model"
+          );
+          expect(
+            commands.filter(
+              (args) =>
+                args[1] === "/repos/fixture/app/git/ref/heads/feature%2Fmodel"
+            )
+          ).toHaveLength(2);
+          const writes = f.run.mock.calls
+            .filter(([args]) => args.includes("PUT"))
+            .map(([args, options]) => ({
+              path: args[3],
+              branch: JSON.parse(options?.stdin ?? "{}").branch
+            }));
+          expect(writes).toEqual([
+            {
+              path: "/repos/fixture/app/contents/.github/workflows/run-rad-commands.yml",
+              branch: "trunk"
+            },
+            {
+              path: "/repos/fixture/app/contents/.github/workflows/run-rad-commands-azure.yml",
+              branch: "trunk"
+            }
+          ]);
+        }
+        expect(f.execution.invocation.generation).toBe(1);
+        expect(f.work).toHaveBeenCalledOnce();
+        expect(f.settled).toHaveBeenCalledOnce();
+        expect(f.release).toHaveBeenCalledOnce();
+        expect(f.owner.activeReservation(f.target)).toBeUndefined();
+        expect(f.pipeline.unexpected).toEqual([]);
+      } finally {
+        f.dispose();
+      }
+    }
+  );
+
   it("ignores a matching workspace and later panel retargeting throughout committed graph, secret, dispatch and observation", async () => {
     vi.useFakeTimers();
     const workspace = fs.mkdtempSync(join(tmpdir(), "deployment-selection-"));
