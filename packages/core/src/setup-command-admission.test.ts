@@ -4,9 +4,21 @@ import {
   type SetupCommandAdmissionPorts
 } from "./setup-command-admission.js";
 
+function deferred() {
+  let resolve = () => {};
+  let reject = (_error: Error) => {};
+  const promise = new Promise<void>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
 function fixture(overrides: Partial<SetupCommandAdmissionPorts> = {}) {
   const events: string[] = [];
   const ports: SetupCommandAdmissionPorts = {
+    isCurrent: () => true,
+    unwindStale: vi.fn(async () => {}),
     acquire: vi.fn<SetupCommandAdmissionPorts["acquire"]>(() => {
       events.push("acquire");
       return { ok: true };
@@ -44,6 +56,72 @@ function fixture(overrides: Partial<SetupCommandAdmissionPorts> = {}) {
 }
 
 describe("setup command admission", () => {
+  describe.each(["restore-terminal", "close-operation"] as const)(
+    "%s currentness",
+    (policy) => {
+      it("refuses stale input synchronously before acquisition", async () => {
+        const { ports } = fixture({ isCurrent: () => false });
+        await admitSetupCommand(policy, ports);
+        expect(ports.acquire).not.toHaveBeenCalled();
+        expect(ports.unwindStale).toHaveBeenCalledOnce();
+        expect(ports.publish).toHaveBeenCalledExactlyOnceWith({
+          state: "stale"
+        });
+      });
+
+      it.each([false, true])(
+        "unwinds stale persistence (reject=%s) before publishing refusal",
+        async (reject) => {
+          const gate = deferred();
+          const entered = deferred();
+          let current = true;
+          const { ports } = fixture({
+            isCurrent: () => current,
+            persist: async () => {
+              entered.resolve();
+              await gate.promise;
+            }
+          });
+          const result = admitSetupCommand(policy, ports);
+          await entered.promise;
+          current = false;
+          if (reject) gate.reject(new Error("save failed"));
+          else gate.resolve();
+          await result;
+          expect(ports.unwindStale).toHaveBeenCalledOnce();
+          expect(ports.restore).not.toHaveBeenCalled();
+          expect(ports.running).not.toHaveBeenCalled();
+          expect(ports.schedule).not.toHaveBeenCalled();
+          expect(ports.publish).toHaveBeenCalledExactlyOnceWith({
+            state: "stale"
+          });
+        }
+      );
+
+      it("reports failed durable undo without publishing a stale-success outcome", async () => {
+        let current = true;
+        const error = new Error("corrective write failed");
+        const { ports } = fixture({
+          isCurrent: () => current,
+          persist: async () => {
+            current = false;
+          },
+          unwindStale: async () => {
+            throw error;
+          }
+        });
+        await admitSetupCommand(policy, ports);
+        expect(ports.publish).toHaveBeenCalledExactlyOnceWith({
+          state: "persist-failed",
+          error
+        });
+        expect(ports.reportPersistenceFailure).toHaveBeenCalledExactlyOnceWith(
+          error
+        );
+        expect(ports.schedule).not.toHaveBeenCalled();
+      });
+    }
+  );
   it.each(["before", "persist"] as const)(
     "leaves commands recoverable when shutdown happens at %s",
     async (phase) => {

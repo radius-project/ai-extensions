@@ -45,6 +45,12 @@ export function createEnvironmentExecutionOwner(
   const settledListeners = new Map<string, Set<() => void>>();
   const shuttingDownInstances = new Set<string>();
   const verificationMonitors = new Set<string>();
+  const blockedAdmissions = new Set<string>();
+  const attachments = new Map<string, number>();
+  const admissions = new Map<
+    string,
+    { started: boolean; blocked: boolean; recovery: Set<() => void> }
+  >();
   let generation = 0;
 
   function hasActiveEnvironmentTasks(instanceId: string): boolean {
@@ -87,6 +93,7 @@ export function createEnvironmentExecutionOwner(
 
   function attach(instanceId: string) {
     const attachmentGeneration = ++generation;
+    attachments.set(instanceId, attachmentGeneration);
     const tasks = new Map<string, TaskRecord>();
     const automaticRollbacks = new Set<string>();
     const reconciliationTimers = new Map<string, unknown>();
@@ -94,8 +101,11 @@ export function createEnvironmentExecutionOwner(
     return {
       instanceId,
       generation: attachmentGeneration,
+      isCurrent: () => attachments.get(instanceId) === attachmentGeneration,
       hasTask: (operationId: string) => tasks.has(operationId),
       schedule(operationId: string, task: EnvironmentTask): void {
+        const admission = admissions.get(operationId);
+        if (admission) admission.started = true;
         let instanceTasks = activeTasks.get(instanceId);
         if (!instanceTasks) {
           instanceTasks = new Set();
@@ -157,6 +167,43 @@ export function createEnvironmentExecutionOwner(
 
   return {
     attach,
+    claimAdmission(operationId: string) {
+      if (admissions.has(operationId) || blockedAdmissions.has(operationId))
+        return null;
+      const admission = {
+        started: [...activeTasks.values()].some((tasks) =>
+          tasks.has(operationId)
+        ),
+        blocked: false,
+        recovery: new Set<() => void>()
+      };
+      admissions.set(operationId, admission);
+      return {
+        canRestore: () =>
+          admissions.get(operationId) === admission && !admission.started,
+        blockRecovery: () => {
+          admission.blocked = true;
+        },
+        release: () => {
+          if (admissions.get(operationId) !== admission) return;
+          if (admission.blocked) {
+            admissions.delete(operationId);
+            blockedAdmissions.add(operationId);
+            admission.recovery.clear();
+            return;
+          }
+          admissions.delete(operationId);
+          for (const recover of admission.recovery) clock.microtask(recover);
+        }
+      };
+    },
+    deferAdmissionRecovery(operationId: string, recover: () => void): boolean {
+      if (blockedAdmissions.has(operationId)) return true;
+      const admission = admissions.get(operationId);
+      if (!admission) return false;
+      if (!admission.blocked) admission.recovery.add(recover);
+      return true;
+    },
     hasActiveEnvironmentTasks,
     onEnvironmentTasksSettled,
     markEnvironmentInstanceShuttingDown(instanceId: string): void {

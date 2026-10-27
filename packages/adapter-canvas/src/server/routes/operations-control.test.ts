@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
@@ -199,6 +200,7 @@ function dependencies(
     invalidatedListings: []
   };
   const base: OperationsControlDependencies = {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     reportOperationDiagnostic: () => {
       throw new Error("Unexpected operation control diagnostic");
     },
