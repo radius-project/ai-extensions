@@ -15,7 +15,10 @@ import {
   createFakeSession
 } from "../../support/runtime/fakes.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
-import { mergeHandoff } from "../../support/server/operation-fixtures.js";
+import {
+  mergeHandoff,
+  stoppedSetup
+} from "../../support/server/operation-fixtures.js";
 import {
   createOperation,
   finish,
@@ -252,6 +255,165 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it.each(
+    [
+      "current",
+      "removed",
+      "replaced",
+      "repository",
+      "environment",
+      "provider",
+      "account",
+      "context",
+      "request",
+      "resume-request",
+      "provider-recovery",
+      "artifacts",
+      "shutdown"
+    ].flatMap((change) =>
+      ["continue", "rollback"].map((action) => [change, action] as const)
+    )
+  )(
+    "preserves admission ownership when the tool's held save becomes %s after %s authorization",
+    async (change, action) => {
+      const confirm = vi.fn(async () => true);
+      const h = await composition({ confirm });
+      const op = stoppedSetup({ repo: target.repo });
+      op.context = { githubLogin: h.executor.login };
+      operations.put(op);
+      const entered = deferred();
+      const gate = deferred();
+      h.persist.mockImplementationOnce(async () => {
+        entered.resolve();
+        await gate.promise;
+      });
+      try {
+        const pending = h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action
+        });
+        await entered.promise;
+        expect(h.runner).not.toHaveBeenCalled();
+        const replacement = structuredClone(op);
+        if (change === "removed") operations.delete(op.operationId);
+        if (change === "replaced") operations.put(replacement);
+        if (change === "repository") op.repo = "fixture/other";
+        if (change === "environment") op.environment = "other";
+        if (change === "provider") op.provider = "aws";
+        if (change === "account") op.context = { githubLogin: "other-account" };
+        if (change === "context")
+          op.context = {
+            githubLogin: h.executor.login,
+            branch: "other-branch"
+          };
+        if (change === "request")
+          op.request = { azure: { appId: "other-app" } };
+        if (change === "resume-request")
+          op.resumeRequest = { environment: { environment: "other" } };
+        if (change === "provider-recovery")
+          op.providerRecovery = { state: "reconciliation_pending" };
+        if (change === "artifacts")
+          recordAzureApp(op, { state: "created", appId: "other-app" });
+        if (change === "shutdown") h.owner.shutdown();
+        expect(confirm).toHaveBeenCalledTimes(action === "rollback" ? 1 : 0);
+        gate.resolve();
+        const result = await pending;
+        if (change === "current") {
+          expect(result).toMatchObject({ kind: "accepted" });
+          await h.settled();
+          expect(h.runner).toHaveBeenCalledOnce();
+        } else {
+          expect(result).toMatchObject({
+            kind: "refused",
+            code: "operation-context-changed"
+          });
+          expect(h.runner).not.toHaveBeenCalled();
+          expect(h.persist).toHaveBeenCalledTimes(2);
+          if (change === "removed")
+            expect(operations.get(op.operationId)).toBeNull();
+          if (change === "replaced")
+            expect(operations.get(op.operationId)).toBe(replacement);
+        }
+      } finally {
+        gate.resolve();
+        await h.extension.shutdown();
+      }
+    }
+  );
+
+  it("refuses registered controls while another admission owns the operation", async () => {
+    const h = await composition();
+    const op = stoppedSetup({ repo: target.repo });
+    op.context = { githubLogin: h.executor.login };
+    operations.put(op);
+    const claim = h.owner.claimAdmission(op.operationId);
+    if (!claim) throw new Error("Missing fixture admission");
+    try {
+      expect(
+        await h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action: "continue"
+        })
+      ).toMatchObject({ kind: "refused", code: "operation-context-changed" });
+      expect(h.persist).not.toHaveBeenCalled();
+      expect(h.runner).not.toHaveBeenCalled();
+      expect(claim.canRestore()).toBe(true);
+    } finally {
+      claim.release();
+      await h.extension.shutdown();
+    }
+  });
+
+  it("surfaces failed corrective persistence and blocks registered recovery", async () => {
+    const h = await composition();
+    const op = stoppedSetup({ repo: target.repo });
+    op.context = { githubLogin: h.executor.login };
+    operations.put(op);
+    const entered = deferred();
+    const gate = deferred();
+    h.persist
+      .mockImplementationOnce(async () => {
+        entered.resolve();
+        await gate.promise;
+      })
+      .mockRejectedValueOnce(new Error("Fixture corrective save failed"));
+    try {
+      const input = {
+        ...target,
+        operationId: op.operationId,
+        action: "continue"
+      };
+      const pending = h.invoke("radius_environment_control", input);
+      await entered.promise;
+      const replacement = stoppedSetup({ repo: target.repo });
+      replacement.operationId = op.operationId;
+      replacement.context = { githubLogin: h.executor.login };
+      operations.put(replacement);
+      gate.resolve();
+      expect(await pending).toMatchObject({
+        kind: "unavailable",
+        code: "operation-continue-persist-failed",
+        message: expect.stringContaining(
+          "inspect the saved operation before recovery"
+        )
+      });
+      expect(await h.invoke("radius_environment_control", input)).toMatchObject(
+        {
+          kind: "refused",
+          code: "operation-context-changed"
+        }
+      );
+      expect(operations.get(op.operationId)).toBe(replacement);
+      expect(h.runner).not.toHaveBeenCalled();
+      expect(h.persist).toHaveBeenCalledTimes(2);
+    } finally {
+      gate.resolve();
+      await h.extension.shutdown();
+    }
+  });
+
   it.each(["malformed", "empty", "oversized"] as const)(
     "serializes safe %s application guidance through the registered status handler",
     async (shape) => {
