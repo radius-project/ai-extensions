@@ -109,11 +109,18 @@ describe("runtime environment execution ownership", () => {
     expect(recover).not.toHaveBeenCalled();
   });
 
-  it.each(["before", "during"] as const)(
-    "cannot restore over a task claimed %s admission",
-    async (when) => {
+  it.each(
+    ["before", "during"].flatMap((when) =>
+      ["setup", "deletion"].map((kind) => [when, kind])
+    )
+  )(
+    "cannot restore over a task claimed %s admission in %s",
+    async (when, kind) => {
       const owner = createEnvironmentExecutionOwner();
-      const attachment = owner.attach("panel");
+      const attachment =
+        kind === "setup" ?
+          owner.attach("panel")
+        : owner.attachDeletion("panel");
       const gate = deferred();
       if (when === "before")
         attachment.schedule(

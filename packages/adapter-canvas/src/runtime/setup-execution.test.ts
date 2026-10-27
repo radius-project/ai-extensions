@@ -72,7 +72,7 @@ function fixture() {
       });
     });
   }
-  return { ports, scope, records, timers, operation, settled };
+  return { owner, ports, scope, records, timers, operation, settled };
 }
 
 afterEach(() => {
@@ -140,6 +140,35 @@ describe("runtime setup execution construction", () => {
 });
 
 describe("runtime setup execution", () => {
+  it.each(["current", "replaced", "removed", "shutdown"])(
+    "re-evaluates only the deferred runtime admission when it is %s",
+    async (change) => {
+      const { owner, ports, records, operation, settled } = fixture();
+      const op = operation();
+      op.recoveryState = "provider_reconciliation_pending";
+      const claim = owner.claimAdmission(op.operationId);
+      if (!claim) throw new Error("Missing claim");
+      ports.runOperation.mockResolvedValue(undefined);
+      const execution = createSetupExecution(ports);
+      execution.recoverOperation(op);
+      execution.recoverOperation(op);
+      if (change === "removed") records.delete(op.operationId);
+      if (change === "replaced") {
+        const replacement = operation();
+        replacement.recoveryState = "provider_reconciliation_pending";
+      }
+      if (change === "shutdown") owner.shutdown();
+      claim.release();
+      await Promise.resolve();
+      await settled();
+      expect(ports.runOperation).toHaveBeenCalledTimes(
+        change === "current" || change === "replaced" ? 1 : 0
+      );
+      expect(ports.persist).not.toHaveBeenCalled();
+      expect(ports.admitRecoveryRollback).not.toHaveBeenCalled();
+    }
+  );
+
   it.each(
     [
       "queued",
