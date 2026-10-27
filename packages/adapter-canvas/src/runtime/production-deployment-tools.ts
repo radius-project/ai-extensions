@@ -15,6 +15,7 @@ import type { SessionHolder } from "./session.js";
 export interface ProductionDeploymentToolsPorts extends ProductionDeploymentMonitorPorts {
   account: DeploymentAccountResolver;
   session: SessionHolder;
+  radiusAppBicepSkill(repoPath?: string, brief?: string): string;
   reportError(error: unknown): void;
   redactDiagnostic(value: string): string;
 }
@@ -31,11 +32,19 @@ export function createProductionDeploymentTools(
   });
   const notify = createDeploymentNotifications({
     owner: ports.owner,
-    repair: ({ repo, branch, error, deployRunUrl, attemptId }) =>
+    repair: ({ repo, branch, appFile, error, deployRunUrl, attemptId }) =>
       ports.session.get().send(
         deployRepairHandoffMessage(repo, branch, {
           error,
           deployRunUrl,
+          appFile,
+          skillBootstrap:
+            appFile && appFile !== ".radius/app.bicep" ?
+              ports.radiusAppBicepSkill(
+                undefined,
+                `Repair only the admitted existing file ${JSON.stringify(appFile)}. Do not regenerate a deployment profile.`
+              )
+            : undefined,
           attemptId
         })
       ),

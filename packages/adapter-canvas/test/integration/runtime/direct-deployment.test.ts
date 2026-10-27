@@ -69,6 +69,7 @@ describe("registered direct deployment tools", () => {
       const invalidate = vi.spyOn(runtime, "invalidateDeploymentListCache");
       const compile = vi.fn(async () => []);
       sdk.deps.deployment = createProductionDeploymentTools({
+        radiusAppBicepSkill: sdk.deps.radiusAppBicepSkill,
         owner: deployment.owner,
         account: deployment.account,
         session: sdk.deps.session,
@@ -108,6 +109,9 @@ describe("registered direct deployment tools", () => {
         await dispatchEntered.promise;
         const first = deployment.owner.resolve();
         if (first.kind !== "resolved") throw new Error(first.kind);
+        const firstExecution = deployment.owner.execution(first.invocation);
+        if (!firstExecution) throw new Error("Missing owned execution.");
+        firstExecution.state.appFile = "apps/unrelated-panel.bicep";
         if (lifecycle === "final-panel-close") await sdk.host.close("radius");
         expect(sdk.servers.size).toBe(0);
         if (lifecycle === "zero-panel")
@@ -122,6 +126,29 @@ describe("registered direct deployment tools", () => {
         for (let tick = 0; tick < 100 && send.mock.calls.length < 2; tick++)
           await vi.advanceTimersByTimeAsync(1000);
         expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][0]).toEqual(send.mock.calls[0][0]);
+        for (const [message] of send.mock.calls) {
+          if (!message || typeof message !== "object" || !("prompt" in message))
+            throw new Error("Missing repair handoff prompt.");
+          expect(message.prompt).toContain(
+            '--begin --repair-target "apps/custom.bicep"'
+          );
+          expect(message.prompt).toContain("--repair-context <context>");
+          expect(message.prompt).toContain("/test/bin/node");
+          expect(message.prompt).toContain("/test/skills/radius-app-bicep");
+          expect(message.prompt).toContain(
+            "Dependencies and inherited configuration are read-only."
+          );
+          expect(message.prompt).toContain(
+            `Pass attemptId "${first.invocation.attemptId}" to both tools.`
+          );
+          expect(message.prompt).not.toContain("apps/unrelated-panel.bicep");
+        }
+        expect(sdk.deps.radiusAppBicepSkill).toHaveBeenCalledTimes(2);
+        expect(sdk.deps.radiusAppBicepSkill).toHaveBeenLastCalledWith(
+          undefined,
+          'Repair only the admitted existing file "apps/custom.bicep". Do not regenerate a deployment profile.'
+        );
         expect(
           deployment.owner.activeReservation(deployment.target)
         ).toBeUndefined();
@@ -241,6 +268,122 @@ describe("registered direct deployment tools", () => {
     }
   );
 
+  it.each(["immediate", "delayed"] as const)(
+    "refuses required-template failure through the registered tool after %s selected read",
+    async (timing) => {
+      vi.useFakeTimers();
+      const sdk = await createRuntimeSdkHarness();
+      const entered = createDeferred<void>();
+      const released = createDeferred<void>();
+      const pipeline = createDeploymentPipelineRunner("failure", {
+        existingEnvironment: true
+      });
+      const deployment = createDeploymentToolHarness({
+        owner: createProductionDeploymentExecutionOwner(),
+        run: async (args, options) => {
+          if (
+            args[1]?.includes("/contents/.github/extension/run-rad-commands")
+          ) {
+            entered.resolve();
+            if (timing === "delayed") await released.promise;
+            return {
+              code: 1,
+              stdout: "",
+              stderr: "HTTP 503: required template unavailable"
+            };
+          }
+          return pipeline.run(args, options);
+        }
+      });
+      const invalidate = vi.fn();
+      sdk.deps.deployment = createProductionDeploymentTools({
+        owner: deployment.owner,
+        account: deployment.account,
+        session: sdk.deps.session,
+        radiusAppBicepSkill: sdk.deps.radiusAppBicepSkill,
+        ghCommandPresentation: BARE_GH_COMMAND_PRESENTATION,
+        runAz: async () => {
+          throw new Error("Unexpected Azure command.");
+        },
+        reportError: deployment.reportError,
+        redactDiagnostic: (value) => value,
+        reportWorkflowProgress: vi.fn(),
+        invalidateDeployListCache: invalidate
+      });
+      const start = sdk.extension.tools.find(
+        ({ name }) => name === "radius_deploy"
+      );
+      const status = sdk.extension.tools.find(
+        ({ name }) => name === "radius_deploy_status"
+      );
+      if (!start || !status) throw new Error("Missing deployment tools.");
+      try {
+        expect(
+          await start.handler({
+            repo: "fixture/app",
+            environment: "dev",
+            branch: "feature/model",
+            provider: "aws",
+            appFile: "apps/custom.bicep"
+          })
+        ).toContain("started");
+        await entered.promise;
+        if (timing === "delayed") {
+          expect(sdk.deps.deployment.hasPendingWork()).toBe(true);
+          expect(sdk.session.send).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(60000);
+          expect(
+            deployment.owner.activeReservation(deployment.target)
+          ).toBeDefined();
+        }
+        released.resolve();
+        await vi.waitFor(() =>
+          expect(sdk.deps.deployment.hasPendingWork()).toBe(false)
+        );
+        const result = JSON.parse(String(await status.handler({})));
+        expect(result).toMatchObject({
+          status: "failed",
+          errorKind: "dispatch-refused",
+          diagnostic: expect.stringContaining(
+            "Could not synchronize deploy workflows"
+          )
+        });
+        expect(result.diagnostic).toContain(
+          "radius-project/ai-extensions/.github/extension/run-rad-commands.yml"
+        );
+        expect(result).not.toHaveProperty("generationFailures");
+        expect(result).not.toHaveProperty("synchronized");
+        expect(
+          deployment.run.mock.calls.some(
+            ([args]) =>
+              args[0] === "workflow" ||
+              args.includes("PUT") ||
+              args[0] === "secret"
+          )
+        ).toBe(false);
+        expect(deployment.account).toHaveBeenCalledOnce();
+        expect(
+          deployment.owner.activeReservation(deployment.target)
+        ).toBeUndefined();
+        expect(sdk.session.send).toHaveBeenCalledOnce();
+        const message = vi.mocked(sdk.session.send).mock.calls[0][0];
+        if (!message || typeof message !== "object" || !("prompt" in message))
+          throw new Error("Missing deployment notice.");
+        const notice = message.prompt;
+        expect(notice).not.toContain("--repair-target");
+        expect(notice).not.toContain("repair-and-redeploy");
+        expect(sdk.deps.radiusAppBicepSkill).not.toHaveBeenCalled();
+        expect(invalidate).not.toHaveBeenCalled();
+        expect(pipeline.unexpected).toEqual([]);
+        expect(sdk.servers.size).toBe(0);
+        expect(sdk.getOrCreateServer).not.toHaveBeenCalled();
+      } finally {
+        released.resolve();
+        await sdk.extension.shutdown("test");
+      }
+    }
+  );
+
   it.each(["shutdown", "replacement"] as const)(
     "cleans selected staged artifacts and prevents late registered-tool work after %s",
     async (retirement) => {
@@ -282,6 +425,7 @@ describe("registered direct deployment tools", () => {
       });
       const compile = vi.fn(async () => []);
       sdk.deps.deployment = createProductionDeploymentTools({
+        radiusAppBicepSkill: sdk.deps.radiusAppBicepSkill,
         owner: deployment.owner,
         account: deployment.account,
         session: sdk.deps.session,
@@ -484,6 +628,7 @@ describe("registered direct deployment tools", () => {
         deploymentAccount: accounts.deployment
       });
       sdk.deps.deployment = createProductionDeploymentTools({
+        radiusAppBicepSkill: sdk.deps.radiusAppBicepSkill,
         owner,
         account: accounts.deployment,
         session: sdk.deps.session,
@@ -650,6 +795,7 @@ describe("registered direct deployment tools", () => {
       });
       const invalidate = vi.spyOn(runtime, "invalidateDeploymentListCache");
       sdk.deps.deployment = createProductionDeploymentTools({
+        radiusAppBicepSkill: sdk.deps.radiusAppBicepSkill,
         owner: deployment.owner,
         account: deployment.account,
         session: sdk.deps.session,
@@ -839,6 +985,7 @@ describe("registered direct deployment tools", () => {
       }
     });
     sdk.deps.deployment = createProductionDeploymentTools({
+      radiusAppBicepSkill: sdk.deps.radiusAppBicepSkill,
       owner: deployment.owner,
       account: deployment.account,
       session: sdk.deps.session,
@@ -924,6 +1071,7 @@ describe("registered direct deployment tools", () => {
       return admission(args, options);
     });
     sdk.deps.deployment = createProductionDeploymentTools({
+      radiusAppBicepSkill: sdk.deps.radiusAppBicepSkill,
       owner: deployment.owner,
       account: deployment.account,
       session: sdk.deps.session,

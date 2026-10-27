@@ -61,6 +61,7 @@ describe("production deployment owner runtime binding", () => {
         ...runtime,
         executionOwner,
         deployment: createProductionDeploymentTools({
+          radiusAppBicepSkill: fake.deps.radiusAppBicepSkill,
           owner: runtime.deploymentOwner,
           account: runtime.deploymentAccount,
           session: fake.deps.session,
@@ -254,6 +255,7 @@ describe("production deployment owner runtime binding", () => {
           ...runtime,
           executionOwner,
           deployment: createProductionDeploymentTools({
+            radiusAppBicepSkill: fake.deps.radiusAppBicepSkill,
             owner: runtime.deploymentOwner,
             account: accounts.deployment,
             session: fake.deps.session,
@@ -473,6 +475,7 @@ describe("production deployment owner runtime binding", () => {
           ...runtime,
           executionOwner,
           deployment: createProductionDeploymentTools({
+            radiusAppBicepSkill: fake.deps.radiusAppBicepSkill,
             owner: runtime.deploymentOwner,
             account,
             session: fake.deps.session,

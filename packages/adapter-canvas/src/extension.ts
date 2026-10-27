@@ -180,6 +180,7 @@ const dependencies: RadiusExtensionDependencies = {
       )
   }),
   deployment: createProductionDeploymentTools({
+    radiusAppBicepSkill,
     owner: deploymentOwner,
     account: deploymentAccount,
     session: sessionHolder,
