@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
@@ -113,6 +114,7 @@ function start(): Harness {
 
   const routes = createTestRouteTable({
     ...createOperationsControlRoutes({
+      claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
       isShuttingDown: () => shuttingDown.value,
       get: (operationId) => records.get(operationId) ?? null,
       acquireForRetry: (operation) => registry.acquireForRetry(operation),
@@ -671,10 +673,15 @@ describe("operation controls real-loopback HIT", () => {
       expect(response.headers.get("Content-Type")).toBe("application/json");
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       expect(await response.json()).toMatchObject({
-        code: "operation-active",
+        code:
+          change === "account" ? "operation-active" : (
+            "operation-context-changed"
+          ),
         operationId: op.operationId
       });
-      expect(harness.persistCalls).toEqual(["persist"]);
+      expect(harness.persistCalls).toEqual(
+        change === "account" ? ["persist"] : ["persist", "persist"]
+      );
       expect(harness.scheduled).toEqual([]);
       expect(op.control.commands).toEqual([]);
     }

@@ -38,6 +38,74 @@ afterEach(() => {
 });
 
 describe("runtime environment execution ownership", () => {
+  it("defers recovery until the exact admission releases and fences superseded attachments", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const first = owner.attach("panel");
+    const replacement = owner.attach("panel");
+    expect(first.isCurrent()).toBe(false);
+    expect(replacement.isCurrent()).toBe(true);
+    const claim = owner.claimAdmission("op");
+    if (!claim) throw new Error("Missing admission");
+    expect(claim.canRestore()).toBe(true);
+    expect(owner.claimAdmission("op")).toBeNull();
+    const recovered = deferred();
+    const recover = vi.fn(() => recovered.resolve());
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(true);
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(true);
+    expect(recover).not.toHaveBeenCalled();
+    claim.release();
+    claim.release();
+    await recovered.promise;
+    expect(recover).toHaveBeenCalledOnce();
+    expect(claim.canRestore()).toBe(false);
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(false);
+    const next = owner.claimAdmission("op");
+    expect(next).not.toBeNull();
+    claim.release();
+    expect(next?.canRestore()).toBe(true);
+    next?.release();
+  });
+
+  it("releases the provisional claim but keeps recovery blocked after an uncertain durable undo", () => {
+    const owner = createEnvironmentExecutionOwner();
+    const claim = owner.claimAdmission("op");
+    if (!claim) throw new Error("Missing admission");
+    const recover = vi.fn();
+    claim.blockRecovery();
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(true);
+    claim.release();
+    claim.release();
+    expect(claim.canRestore()).toBe(false);
+    expect(owner.claimAdmission("op")).toBeNull();
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(true);
+    expect(recover).not.toHaveBeenCalled();
+  });
+
+  it.each(["before", "during"] as const)(
+    "cannot restore over a task claimed %s admission",
+    async (when) => {
+      const owner = createEnvironmentExecutionOwner();
+      const attachment = owner.attach("panel");
+      const gate = deferred();
+      if (when === "before")
+        attachment.schedule(
+          "op",
+          task(() => gate.promise)
+        );
+      const claim = owner.claimAdmission("op");
+      if (!claim) throw new Error("Missing admission");
+      if (when === "during")
+        attachment.schedule(
+          "op",
+          task(() => gate.promise)
+        );
+      expect(claim.canRestore()).toBe(false);
+      gate.resolve();
+      await settled(owner, "panel");
+      expect(claim.canRestore()).toBe(false);
+      claim.release();
+    }
+  );
   it("constructs without work and isolates runtime claims and shutdown markers", () => {
     const owner = createEnvironmentExecutionOwner();
     const other = createEnvironmentExecutionOwner();

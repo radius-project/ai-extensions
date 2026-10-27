@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
+import type {
+  OperationStore,
+  PersistedOperationsEnvelope
+} from "../../operation-store.js";
+import type { OperationRecord } from "../routes/operations-status.js";
 import {
   enterStage,
+  createRegistry,
+  acceptCommand,
+  beginRetryAttempt,
   finish,
   pauseForProviderRestart,
   STAGE_VERIFY,
@@ -18,9 +27,20 @@ import {
   reusedOnlyFailure
 } from "../../../test/support/server/operation-fixtures.js";
 
+function deferred() {
+  let resolve = () => {};
+  let reject = (_error: Error) => {};
+  const promise = new Promise<void>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
 function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
   const operation = stoppedSetup();
   const dependencies: OperationsControlDependencies = {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     get: vi.fn((id) => (id === operation.operationId ? operation : null)),
     acquireForRetry: vi.fn<OperationsControlDependencies["acquireForRetry"]>(
       () => ({ ok: true })
@@ -52,6 +72,364 @@ function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
 }
 
 describe("direct operation control service", () => {
+  it("refuses a record whose registered ID does not match before acquiring admission", async () => {
+    const operation = stoppedSetup();
+    const { dependencies } = fixture({ get: () => operation });
+    expect(
+      await createOperationsControlService(dependencies)({
+        operationId: "different-id",
+        command: "continue"
+      })
+    ).toMatchObject({
+      status: 409,
+      body: { code: "operation-context-changed" }
+    });
+    expect(dependencies.acquireForRetry).not.toHaveBeenCalled();
+    expect(dependencies.persistOperations).not.toHaveBeenCalled();
+  });
+
+  it("refuses a competing admission rather than reporting a provisional command as accepted", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const { operation, dependencies, input } = fixture({
+      claimAdmission: owner.claimAdmission
+    });
+    const claim = owner.claimAdmission(operation.operationId);
+    if (!claim) throw new Error("Missing admission");
+    acceptCommand(operation, {
+      kind: "rollback",
+      attempt: 1,
+      target: "competing"
+    });
+    try {
+      expect(
+        await createOperationsControlService(dependencies)(input)
+      ).toMatchObject({
+        status: 409,
+        body: { code: "operation-context-changed" }
+      });
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+    } finally {
+      claim.release();
+    }
+  });
+
+  it.each([false, true])(
+    "corrects a stale rejected precondition save (undo fails=%s)",
+    async (undoFails) => {
+      const operation = mergeHandoff();
+      const entered = deferred();
+      const gate = deferred();
+      const owner = createEnvironmentExecutionOwner();
+      let current = true;
+      let writes = 0;
+      const { dependencies } = fixture({
+        claimAdmission: owner.claimAdmission,
+        get: () => operation,
+        persistOperations: async () => {
+          if (++writes === 1) {
+            entered.resolve();
+            await gate.promise;
+          } else if (undoFails) throw new Error("undo offline");
+        }
+      });
+      const pending = createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "retry",
+        retryKind: "verification",
+        isCurrent: () => current
+      });
+      await entered.promise;
+      current = false;
+      gate.reject(new Error("deadline offline"));
+      expect(await pending).toMatchObject({
+        status: undoFails ? 500 : 409,
+        body: {
+          code:
+            undoFails ?
+              "operation-control-recovery-persist-failed"
+            : "operation-context-changed"
+        }
+      });
+      expect(writes).toBe(2);
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+      expect(dependencies.reportOperationDiagnostic).toHaveBeenCalledTimes(
+        undoFails ? 1 : 0
+      );
+    }
+  );
+
+  it.each([false, true])(
+    "does not close or invalidate a stale ownership-free exit after save (reject=%s)",
+    async (reject) => {
+      const operation = reusedOnlyFailure();
+      const before = structuredClone(operation);
+      const entered = deferred();
+      const gate = deferred();
+      let current = true;
+      let writes = 0;
+      const { dependencies } = fixture({
+        get: () => operation,
+        persistOperations: async () => {
+          if (++writes === 1) {
+            entered.resolve();
+            await gate.promise;
+          }
+        }
+      });
+      const pending = createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "exit",
+        isCurrent: () => current
+      });
+      await entered.promise;
+      current = false;
+      if (reject) gate.reject(new Error("exit save failed"));
+      else gate.resolve();
+      expect(await pending).toMatchObject({
+        status: 409,
+        body: { code: "operation-context-changed" }
+      });
+      expect(operation).toMatchObject(before);
+      expect(dependencies.invalidateEnvironmentListing).not.toHaveBeenCalled();
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+      expect(writes).toBe(2);
+    }
+  );
+  it.each(["removed", "replaced", "id", "repository", "environment"] as const)(
+    "does not reacquire a %s record after an asynchronous precondition",
+    async (change) => {
+      for (const phase of ["deadline", "merge"] as const) {
+        const operation = mergeHandoff();
+        const registry = createRegistry();
+        registry.put(operation);
+        const id = operation.operationId;
+        const entered = deferred();
+        const gate = deferred();
+        let saves = 0;
+        const { dependencies } = fixture({
+          get: (operationId) => registry.get(operationId),
+          acquireForRetry: vi.fn((record) => registry.acquireForRetry(record)),
+          persistOperations: async () => {
+            if (++saves === 1 && phase === "deadline") {
+              entered.resolve();
+              await gate.promise;
+            }
+          },
+          checkPullRequestMerge: vi.fn(async () => {
+            entered.resolve();
+            await gate.promise;
+            return { state: "merged" as const };
+          })
+        });
+        const result = createOperationsControlService(dependencies)({
+          operationId: id,
+          command: "retry",
+          retryKind: "verification"
+        });
+        await entered.promise;
+        if (change === "removed") registry.delete(id);
+        else if (change === "replaced")
+          registry.put(structuredClone(operation));
+        else if (change === "id") operation.operationId = "replacement-id";
+        else if (change === "repository") operation.repo = "fixture/other";
+        else operation.environment = "other";
+        const replacement = registry.get(id);
+        const before = structuredClone(replacement);
+        gate.resolve();
+        expect(await result).toMatchObject({
+          status: 409,
+          body: { code: "operation-context-changed" }
+        });
+        expect(registry.get(id)).toBe(replacement);
+        expect(registry.get(id)).toEqual(before);
+        expect(dependencies.acquireForRetry).not.toHaveBeenCalled();
+        expect(dependencies.schedule).not.toHaveBeenCalled();
+        if (phase === "deadline")
+          expect(dependencies.checkPullRequestMerge).not.toHaveBeenCalled();
+      }
+    }
+  );
+
+  it.each(["removed", "replaced", "coordinator"] as const)(
+    "corrects a held snapshot before restart when %s changes",
+    async (change) => {
+      const entered = deferred();
+      const gate = deferred();
+      let saved: PersistedOperationsEnvelope | null = null;
+      let writes = 0;
+      const store: OperationStore = {
+        load: async () => structuredClone(saved),
+        save: async (envelope) => {
+          if (++writes === 1) {
+            entered.resolve();
+            await gate.promise;
+          }
+          saved = structuredClone(envelope);
+        }
+      };
+      const registry = createRegistry({ store });
+      const operation = stoppedSetup();
+      registry.put(operation);
+      const before = structuredClone(operation);
+      let current = true;
+      const { dependencies } = fixture({
+        get: (id) => registry.get(id),
+        acquireForRetry: (op) => registry.acquireForRetry(op),
+        persistOperations: () => registry.persist()
+      });
+      const result = createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "continue",
+        isCurrent: () => current
+      });
+      await entered.promise;
+      let replacement: OperationRecord | null = null;
+      if (change === "removed") registry.delete(operation.operationId);
+      else if (change === "replaced") {
+        replacement = structuredClone(before);
+        replacement.environment = "replacement";
+        registry.put(replacement);
+      } else current = false;
+      gate.resolve();
+      expect(await result).toMatchObject({
+        status: 409,
+        body: { code: "operation-context-changed" }
+      });
+      expect(writes).toBe(2);
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+      const restarted = createRegistry({ store });
+      await restarted.hydrate();
+      const restored = restarted.get(operation.operationId);
+      if (change === "removed") expect(restored).toBeNull();
+      else {
+        expect(restored.control.commands).toEqual([]);
+        expect(restored.environment).toBe(
+          change === "replaced" ? "replacement" : before.environment
+        );
+      }
+      if (replacement)
+        expect(registry.get(operation.operationId)).toBe(replacement);
+      if (change === "coordinator") expect(operation).toMatchObject(before);
+    }
+  );
+
+  it.each([false, true])(
+    "refuses stale admission after a held save (reject=%s) and restores its lock and retry token",
+    async (reject) => {
+      const operation = mergeHandoff();
+      const before = structuredClone(operation);
+      const registry = createRegistry();
+      registry.put(operation);
+      const entered = deferred();
+      const gate = deferred();
+      let current = true;
+      let saves = 0;
+      const { dependencies } = fixture({
+        get: (id) => registry.get(id),
+        acquireForRetry: (op) => registry.acquireForRetry(op),
+        checkPullRequestMerge: async () => ({ state: "merged" }),
+        persistOperations: async () => {
+          if (++saves === 2) {
+            entered.resolve();
+            await gate.promise;
+          }
+        }
+      });
+      const service = createOperationsControlService(dependencies);
+      const input = {
+        operationId: operation.operationId,
+        command: "retry" as const,
+        retryKind: "verification",
+        isCurrent: () => current
+      };
+      const result = service(input);
+      await entered.promise;
+      current = false;
+      if (reject) gate.reject(new Error("save failed"));
+      else gate.resolve();
+      expect(await result).toMatchObject({
+        status: 409,
+        body: { code: "operation-context-changed" }
+      });
+      expect(operation).toMatchObject(before);
+      expect(operation.verification).not.toHaveProperty(
+        "acquisitionProvisionalToken"
+      );
+      expect(registry.running(operation.repo)).toBeNull();
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+      expect(saves).toBe(3);
+      current = true;
+      expect(await service(input)).toMatchObject({ status: 202 });
+      expect(dependencies.schedule).toHaveBeenCalledOnce();
+    }
+  );
+
+  it.each(["write", "task", "new-command"] as const)(
+    "fails closed without restoring over %s ownership or failed correction",
+    async (failure) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = deferred();
+      const gate = deferred();
+      let current = true;
+      let saves = 0;
+      const { operation, dependencies, input } = fixture({
+        claimAdmission: owner.claimAdmission,
+        persistOperations: async () => {
+          if (++saves === 1) {
+            entered.resolve();
+            await gate.promise;
+          } else if (failure === "write")
+            throw new Error("corrective store offline");
+        }
+      });
+      const result = createOperationsControlService(dependencies)({
+        ...input,
+        isCurrent: () => current
+      });
+      await entered.promise;
+      const taskGate = deferred();
+      const taskSettled = deferred();
+      if (failure === "task")
+        owner.attach("competing").schedule(operation.operationId, {
+          run: () => taskGate.promise,
+          failed: async () => {
+            throw new Error("Unexpected task failure");
+          },
+          settling: () => {},
+          settled: () => taskSettled.resolve()
+        });
+      if (failure === "new-command")
+        acceptCommand(operation, {
+          kind: "retry_cleanup",
+          attempt: beginRetryAttempt(operation, "cleanup"),
+          target: "new-owner"
+        });
+      const competing = structuredClone(operation);
+      current = false;
+      gate.resolve();
+      expect(await result).toMatchObject({
+        status: 500,
+        body: {
+          detail: expect.stringContaining("could not durably undo admission")
+        }
+      });
+      expect(dependencies.reportOperationDiagnostic).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "operation-control-recovery-persist-failed"
+        })
+      );
+      expect(dependencies.schedule).not.toHaveBeenCalled();
+      const recover = vi.fn();
+      expect(owner.deferAdmissionRecovery(operation.operationId, recover)).toBe(
+        true
+      );
+      expect(owner.claimAdmission(operation.operationId)).toBeNull();
+      expect(recover).not.toHaveBeenCalled();
+      if (failure !== "write") expect(operation).toEqual(competing);
+      taskGate.resolve();
+      if (failure === "task") await taskSettled.promise;
+    }
+  );
   it.each([true, false])(
     "revalidates a queued command with optional publisher=%s",
     async (publishResult) => {
@@ -252,6 +630,7 @@ describe("direct operation control service", () => {
   });
 
   it.each([
+    "claimAdmission",
     "get",
     "acquireForRetry",
     "persistOperations",
@@ -328,8 +707,9 @@ describe("direct operation control service", () => {
     const service = createOperationsControlService(dependencies);
     const first = service(input);
     await entered;
+    const reads = vi.mocked(dependencies.get).mock.calls.length;
     const second = service({ ...input, instanceId: "another-subscriber" });
-    expect(dependencies.get).toHaveBeenCalledOnce();
+    expect(dependencies.get).toHaveBeenCalledTimes(reads);
     expect(dependencies.schedule).not.toHaveBeenCalled();
     release();
     const [accepted, duplicate] = await Promise.all([first, second]);
@@ -412,7 +792,6 @@ describe("direct operation control service", () => {
       status: 409,
       body: { code: "operation-context-changed" }
     });
-    expect(dependencies.get).toHaveBeenCalledOnce();
     expect(dependencies.schedule).toHaveBeenCalledOnce();
   });
 
@@ -465,7 +844,6 @@ describe("direct operation control service", () => {
     const second = service(input);
     await expect(first).rejects.toBe(failure);
     expect(await second).toMatchObject({ status: 202 });
-    expect(dependencies.get).toHaveBeenCalledTimes(2);
     expect(dependencies.schedule).toHaveBeenCalledOnce();
   });
 
@@ -515,7 +893,7 @@ describe("direct operation control service", () => {
     });
     expect(result).toMatchObject({
       status: 409,
-      body: { code: "operation-active" }
+      body: { code: "operation-context-changed" }
     });
     expect(dependencies.schedule).not.toHaveBeenCalled();
     expect(current.control.commands).toEqual([]);

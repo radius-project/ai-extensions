@@ -7,6 +7,7 @@ import {
 } from "./runtime/environment-account-context.js";
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
+import { stoppedSetup } from "../test/support/server/operation-fixtures.js";
 import type { SetupServices } from "./server/services/setup-outcome.js";
 import {
   createOperationsControlService,
@@ -137,6 +138,76 @@ afterEach(() => {
 });
 
 describe("production coordinator scheduling scopes", () => {
+  it("re-evaluates deferred recovery against the replacement record after corrective persistence", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const original = stoppedSetup();
+    operations.put(original);
+    const entered = deferred();
+    const save = deferred();
+    const recovered = deferred();
+    const taskGate = deferred();
+    let writes = 0;
+    const schedule = vi.fn(() => true);
+    const service = createOperationsControlService({
+      claimAdmission: owner.claimAdmission,
+      get: (id) => operations.get(id),
+      acquireForRetry: (op) => operations.acquireForRetry(op),
+      persistOperations: async () => {
+        if (++writes === 1) {
+          entered.resolve();
+          await save.promise;
+        }
+      },
+      reportOperationDiagnostic: () => {
+        throw new Error("Unexpected diagnostic");
+      },
+      checkPullRequestMerge: unavailable,
+      inspectVerificationWorkflow: unavailable,
+      cancelVerificationWorkflow: unavailable,
+      schedule,
+      invalidateEnvironmentListing: () => {
+        throw new Error("Unexpected invalidation");
+      }
+    });
+    const pending = service({
+      operationId: original.operationId,
+      command: "continue"
+    });
+    await entered.promise;
+    const replacement = createOperation({
+      operationId: original.operationId,
+      repo: original.repo,
+      environment: "replacement",
+      provider: "azure",
+      kind: "delete"
+    });
+    operations.put(replacement);
+    const runner = vi.fn(async (id: string) => {
+      expect(operations.get(id)).toBe(replacement);
+      expect(writes).toBe(2);
+      recovered.resolve();
+      await taskGate.promise;
+    });
+    const handler = coordinator(owner, "replacement", runner);
+    try {
+      handler.startRecoveredTasks();
+      handler.startRecoveredTasks();
+      expect(owner.hasActiveEnvironmentTasks("replacement")).toBe(false);
+      save.resolve();
+      expect(await pending).toMatchObject({
+        status: 409,
+        body: { code: "operation-context-changed" }
+      });
+      await recovered.promise;
+      expect(runner).toHaveBeenCalledOnce();
+      expect(schedule).not.toHaveBeenCalled();
+      expect(operations.get(original.operationId)).toBe(replacement);
+    } finally {
+      save.resolve();
+      taskGate.resolve();
+      await settled(owner, "replacement");
+    }
+  });
   it.each([
     "not_applied",
     "cancelled",
@@ -1064,6 +1135,7 @@ describe("production coordinator scheduling scopes", () => {
       const get = vi.fn(() => op);
       const schedule = vi.fn(() => true);
       const service = createOperationsControlService({
+        claimAdmission: owner.claimAdmission,
         get,
         acquireForRetry: () => ({ ok: true }),
         persistOperations: unavailable,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { admitSetupCommand } from "@radius-project/core";
 import {
   acceptCommand,
@@ -41,6 +42,7 @@ import {
 } from "../../operations.js";
 import { errorMessage } from "../../runtime/util.js";
 import type { OperationRecord } from "../routes/operations-status.js";
+import type { EnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 
 // Cooperative controls for an environment operation: stop, the two forward
 // commands (continue a deliberate stop, retry a failed continuation), rollback
@@ -141,6 +143,7 @@ export type RepositoryLockResult =
   { ok: true } | { ok: false; conflict: { operationId: string } };
 
 export interface OperationsControlDependencies {
+  claimAdmission: EnvironmentExecutionOwner["claimAdmission"];
   isShuttingDown?(): boolean;
   get(operationId: string): OperationRecord | null;
   // Takes the repository lock back for a retry of a record that already owns
@@ -203,6 +206,12 @@ const clientView: (operation: OperationRecord) => unknown = toClientView;
 // One resolved control request: the record the decision is taken from, the
 // verdict that allowed it, and the seams it may use.
 interface CommandRequest {
+  isCurrent(): boolean;
+  isRecordCurrent(): boolean;
+  admission: NonNullable<
+    ReturnType<OperationsControlDependencies["claimAdmission"]>
+  >;
+  ownedSnapshot: unknown;
   context: OperationControlContext;
   dependencies: OperationsControlDependencies;
   operationId: string;
@@ -339,15 +348,15 @@ function unknownOperation(context: OperationControlContext): void {
   });
 }
 
-async function resolveOperation(
+function resolveOperation(
   context: OperationControlContext,
   dependencies: Pick<OperationsControlDependencies, "get">,
   { allowDelete = false }: { allowDelete?: boolean } = {}
-): Promise<{
+): {
   operationId: string;
   operation: OperationRecord;
   params: Readonly<Record<string, string>>;
-} | null> {
+} | null {
   const params = { retryKind: context.retryKind ?? "" };
   const operationId = context.operationId;
   const operation = operationId ? dependencies.get(operationId) : null;
@@ -679,6 +688,7 @@ async function requireMergedSetupPullRequest(
   const provisionalToken = randomUUID();
   request.provisionalToken = provisionalToken;
   markVerificationRetryPrecondition(operation, provisionalToken);
+  request.ownedSnapshot = snapshotRetryState(operation);
   const restoreProvisionalDeadline = (): void => {
     const current = operation.verification as
       { acquisitionProvisionalToken?: unknown } | undefined;
@@ -691,6 +701,7 @@ async function requireMergedSetupPullRequest(
   try {
     await dependencies.persistOperations();
   } catch (error) {
+    if (await refuseChangedRequest(request)) return false;
     restoreProvisionalDeadline();
     sendJson(context, 500, {
       error:
@@ -702,11 +713,13 @@ async function requireMergedSetupPullRequest(
     });
     return false;
   }
+  if (await refuseChangedRequest(request)) return false;
   const pullRequestUrl = eligibility.pullRequestUrl ?? null;
   const merge = await dependencies.checkPullRequestMerge(
     operation,
     pullRequestUrl
   );
+  if (await refuseChangedRequest(request)) return false;
   if (merge.state === "unavailable") {
     restoreProvisionalDeadline();
     const account = merge.login ? `@${merge.login}` : "the selected account";
@@ -807,13 +820,9 @@ const RETRY_PERSIST_FAILURE = {
  * accepted. The record keeps its own terminal verdict: the customer left the
  * setup, which is a different fact from how the setup ended.
  */
-async function closeExitedSetup({
-  context,
-  dependencies,
-  operationId,
-  operation,
-  eligibility
-}: CommandRequest): Promise<boolean> {
+async function closeExitedSetup(request: CommandRequest): Promise<boolean> {
+  const { context, dependencies, operationId, operation, eligibility } =
+    request;
   if ((eligibility.targets?.length ?? 0) > 0) return false;
   const snapshot: unknown = snapshotRetryState(operation);
   const accepted = acceptOperationCommand(operation, {
@@ -830,9 +839,11 @@ async function closeExitedSetup({
       ABANDON_COMMAND_OUTCOME
     : EXIT_COMMAND_OUTCOME
   );
+  request.ownedSnapshot = snapshotRetryState(operation);
   try {
     await dependencies.persistOperations();
   } catch (error) {
+    if (await refuseChangedRequest(request)) return true;
     // Nothing was removed and nothing was saved, so the record goes back to the
     // decision the customer is still looking at.
     rollbackRetryAttempt(operation, snapshot);
@@ -845,6 +856,7 @@ async function closeExitedSetup({
     });
     return true;
   }
+  if (await refuseChangedRequest(request)) return true;
   // The listing the picker reads is repo-scoped and cached, so the refresh the
   // browser performs next has to reach GitHub rather than the payload written
   // while this setup was still running.
@@ -993,7 +1005,10 @@ function isRetryKind(value: string): value is OperationRetryKind {
  * it durable, and only then hand the work to a runner.
  */
 async function runAcceptedCommand(
-  {
+  request: CommandRequest,
+  spec: CommandSpec
+): Promise<void> {
+  const {
     context,
     dependencies,
     operationId,
@@ -1001,10 +1016,13 @@ async function runAcceptedCommand(
     eligibility,
     rollbackSnapshot,
     provisionalToken
-  }: CommandRequest,
-  spec: CommandSpec
-): Promise<void> {
+  } = request;
   await admitSetupCommand(spec.schedulerMiss, {
+    isCurrent: () =>
+      request.isCurrent() &&
+      request.admission.canRestore() &&
+      isDeepStrictEqual(snapshotRetryState(operation), request.ownedSnapshot),
+    unwindStale: () => unwindChangedRequest(request),
     isStopped: dependencies.isShuttingDown,
     acquire: () => {
       const lock = dependencies.acquireForRetry(operation);
@@ -1034,6 +1052,7 @@ async function runAcceptedCommand(
         commandId,
         provisionalToken
       );
+      request.ownedSnapshot = snapshotRetryState(operation);
     },
     persist: () => dependencies.persistOperations(),
     running: (commandId) => setCommandState(operation, commandId, "running"),
@@ -1049,6 +1068,9 @@ async function runAcceptedCommand(
       }),
     publish: (outcome) => {
       switch (outcome.state) {
+        case "stale":
+          publishStale(context);
+          break;
         case "stopped":
           sendJson(context, 503, {
             error:
@@ -1143,51 +1165,135 @@ async function runControlCommand(
   ) => CommandSpec | null,
   options: { allowDelete?: boolean } = {}
 ): Promise<void> {
-  const resolved = await resolveOperation(context, dependencies, options);
+  const resolved = resolveOperation(context, dependencies, options);
   if (!resolved) return;
   const { operationId, operation, params } = resolved;
   const spec = selectSpec(params, operationId);
   if (!spec) return;
 
-  if (spec.activeKinds) {
-    const active = findActiveOperationCommand(operation, spec.activeKinds);
-    if (active) {
-      sendJson(context, 202, {
+  const repo = operation.repo;
+  const environment = operation.environment;
+  const isRecordCurrent = () =>
+    dependencies.get(operationId) === operation &&
+    operation.operationId === operationId &&
+    operation.repo === repo &&
+    operation.environment === environment;
+  const isCurrent = () => isRecordCurrent() && (context.isCurrent?.() ?? true);
+  if (!isCurrent()) {
+    publishStale(context);
+    return;
+  }
+  const admission = dependencies.claimAdmission(operationId);
+  if (!admission) {
+    sendJson(context, 409, {
+      code: "operation-context-changed",
+      error:
+        "Another admission owns this operation, or its durable undo failed. Inspect the saved operation before recovery.",
+      operationId
+    });
+    return;
+  }
+  try {
+    if (spec.activeKinds) {
+      const active = findActiveOperationCommand(operation, spec.activeKinds);
+      if (active) {
+        sendJson(context, 202, {
+          operationId,
+          statusUrl: statusUrlFor(operationId),
+          commandId: active.commandId,
+          duplicate: true,
+          operation: clientView(operation)
+        });
+        return;
+      }
+    }
+    const eligibility = spec.eligibility(operation);
+    if (!eligibility.ok) {
+      sendJson(context, 409, {
+        error: retryRefusalMessage(
+          spec.refusalKind ?? spec.name,
+          eligibility.code
+        ),
+        code: eligibility.code,
         operationId,
-        statusUrl: statusUrlFor(operationId),
-        commandId: active.commandId,
-        duplicate: true,
+        ...(eligibility.detail ? { detail: eligibility.detail } : {}),
         operation: clientView(operation)
       });
       return;
     }
-  }
-
-  const eligibility = spec.eligibility(operation);
-  if (!eligibility.ok) {
-    sendJson(context, 409, {
-      error: retryRefusalMessage(
-        spec.refusalKind ?? spec.name,
-        eligibility.code
-      ),
-      code: eligibility.code,
+    const request: CommandRequest = {
+      isRecordCurrent,
+      isCurrent,
+      admission,
+      ownedSnapshot: snapshotRetryState(operation),
+      context,
+      dependencies,
       operationId,
-      ...(eligibility.detail ? { detail: eligibility.detail } : {}),
-      operation: clientView(operation)
-    });
-    return;
+      operation,
+      eligibility,
+      rollbackSnapshot: snapshotRetryState(operation)
+    };
+    if (spec.precondition && !(await spec.precondition(request))) return;
+    if (spec.settleWithoutWork && (await spec.settleWithoutWork(request)))
+      return;
+    await runAcceptedCommand(request, spec);
+  } finally {
+    admission.release();
   }
-  const request: CommandRequest = {
-    context,
-    dependencies,
-    operationId,
-    operation,
-    eligibility,
-    rollbackSnapshot: snapshotRetryState(operation)
-  };
-  if (spec.precondition && !(await spec.precondition(request))) return;
-  if (spec.settleWithoutWork && (await spec.settleWithoutWork(request))) return;
-  await runAcceptedCommand(request, spec);
+}
+
+function publishStale(context: OperationControlContext): void {
+  sendJson(context, 409, {
+    code: "operation-context-changed",
+    error: "The operation context changed before the command was admitted.",
+    operationId: context.operationId
+  });
+}
+
+async function unwindChangedRequest(request: CommandRequest): Promise<void> {
+  const { operation, admission, dependencies, rollbackSnapshot } = request;
+  try {
+    if (request.isRecordCurrent()) {
+      if (
+        !admission.canRestore() ||
+        !isDeepStrictEqual(snapshotRetryState(operation), request.ownedSnapshot)
+      ) {
+        throw new Error(
+          "Another task or command owns the operation; its state was not restored."
+        );
+      }
+      rollbackRetryAttempt(operation, rollbackSnapshot);
+    }
+    // The previous write captured its envelope before awaiting the store.
+    // Queue a fresh registry snapshot, never reinsert the captured record.
+    await dependencies.persistOperations();
+  } catch (error) {
+    admission.blockRecovery();
+    throw new Error(
+      `Radius could not durably undo admission; inspect the saved operation before recovery. ${errorMessage(error)}`,
+      { cause: error }
+    );
+  }
+}
+
+async function refuseChangedRequest(request: CommandRequest): Promise<boolean> {
+  if (request.isCurrent()) return false;
+  try {
+    await unwindChangedRequest(request);
+    publishStale(request.context);
+  } catch (error) {
+    request.dependencies.reportOperationDiagnostic({
+      operationId: request.operationId,
+      code: "operation-control-recovery-persist-failed",
+      message: errorMessage(error)
+    });
+    sendJson(request.context, 500, {
+      code: "operation-control-recovery-persist-failed",
+      error: errorMessage(error),
+      operationId: request.operationId
+    });
+  }
+  return true;
 }
 
 /**
@@ -1267,6 +1373,7 @@ export function createOperationsControlService(
   dependencies: OperationsControlDependencies
 ): OperationControlService {
   for (const name of [
+    "claimAdmission",
     "get",
     "acquireForRetry",
     "persistOperations",

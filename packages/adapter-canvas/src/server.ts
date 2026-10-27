@@ -5347,7 +5347,16 @@ export function createInstanceRequestCoordinator(
   }
 
   function startRecoveredTasks(): void {
+    if (executionOwner.isShuttingDown(instanceId) || !attachment.isCurrent())
+      return;
     for (const op of operations.all()) {
+      if (
+        executionOwner.deferAdmissionRecovery(
+          op.operationId,
+          startRecoveredTasks
+        )
+      )
+        continue;
       // Resume a delete operation that was mid-flight when the process
       // restarted. The runner is resume-safe (each stage re-runs only while
       // pending/running), so re-scheduling converges. Delete operations never
@@ -5825,6 +5834,7 @@ export function createProductionCanvasServerRuntime(
   );
 
   const operationsControlDependencies: OperationsControlDependencies = {
+    claimAdmission: executionOwner.claimAdmission,
     get: (operationId) => operations.get(operationId),
     acquireForRetry: (op) => operations.acquireForRetry(op),
     persistOperations: () => operations.persist(),
@@ -5889,9 +5899,27 @@ export function createProductionCanvasServerRuntime(
       envListCache.invalidate(repo);
     }
   };
-  const operationControl = createOperationsControlService(
+  const sharedOperationControl = createOperationsControlService(
     operationsControlDependencies
   );
+  const operationControl: OperationControlService = (input, publish) => {
+    const original =
+      input.instanceId === undefined ?
+        undefined
+      : instanceRequestCoordinators.get(input.instanceId);
+    return sharedOperationControl(
+      {
+        ...input,
+        isCurrent: () =>
+          (input.instanceId === undefined ||
+            (original !== undefined &&
+              instanceRequestCoordinators.get(input.instanceId) ===
+                original)) &&
+          (input.isCurrent?.() ?? true)
+      },
+      publish
+    );
+  };
   const operationsControlRoutes = createOperationsControlRoutes(
     operationsControlDependencies,
     operationControl

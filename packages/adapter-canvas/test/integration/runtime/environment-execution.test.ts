@@ -15,6 +15,8 @@ import {
 } from "../../support/runtime/fakes.js";
 import {
   createOperation,
+  buildDeleteStages,
+  setStageState,
   finish,
   fromPersistedOperation,
   operations,
@@ -133,6 +135,73 @@ afterEach(() => {
 });
 
 describe("real server and fake SDK runtime ownership", () => {
+  it.each(["continue", "deletion"] as const)(
+    "refuses %s on coordinator replacement while recovery waits for held admission",
+    async (command) => {
+      const runtime = await composition();
+      const entered = deferred();
+      const gate = deferred();
+      let writes = 0;
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        if (++writes === 1) {
+          entered.resolve();
+          await gate.promise;
+        }
+      });
+      try {
+        await runtime.canvas.open(context());
+        const op =
+          command === "continue" ? stoppedSetup() : (
+            createOperation({
+              repo: "fixture/app",
+              environment: "dev",
+              provider: "azure",
+              kind: "delete",
+              stages: buildDeleteStages()
+            })
+          );
+        if (command === "deletion") {
+          op.stages[0].state = "succeeded";
+          setStageState(op, op.stages[1].id, "failed");
+          finish(op, "failed_partial", {
+            failure: { code: "credential-delete-failed" }
+          });
+        }
+        operations.put(op);
+        const before = structuredClone(op);
+        const input = {
+          operationId: op.operationId,
+          instanceId: "panel",
+          command:
+            command === "continue" ? ("continue" as const) : ("retry" as const),
+          retryKind: command === "deletion" ? "deletion" : undefined
+        };
+        const pending = runtime.server.operationControl(input);
+        await entered.promise;
+        await runtime.server.stopServer("panel", true);
+        await runtime.canvas.open(context());
+        expect(runtime.owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+        gate.resolve();
+        expect(await pending).toMatchObject({
+          status: 409,
+          body: { code: "operation-context-changed" }
+        });
+        expect(op).toMatchObject(before);
+        expect(writes).toBe(2);
+        expect(runtime.owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+        expect(
+          runtime.accountContext.getExecutor(op.operationId)
+        ).toBeUndefined();
+        expect(await runtime.server.operationControl(input)).toMatchObject({
+          status: 202
+        });
+        await runtime.entered.promise;
+      } finally {
+        gate.resolve();
+        await runtime.cleanup();
+      }
+    }
+  );
   it.each(["continue", "resume"] as const)(
     "persists direct %s before scheduling the existing attached runner without an internal POST",
     async (command) => {
