@@ -6,4 +6,4 @@
 
 Cooperative Stop remains available while setup holds its GitHub account lease or credentials are unavailable. Setup trims surrounding whitespace from environment names and returns the canonical target with its operation ID for subsequent status and control calls.
 
-Input prompts refresh after setup finishes settling, and application-selection prompts include bounded, redacted choices with IDs, creation dates and the saved default. Verification reports the required setup pull request merge rather than an unexplained refusal.
+Input prompts refresh after setup finishes settling, and application-selection prompts include bounded, redacted choices with IDs, creation dates and the saved default. Verification reports the required setup pull request merge with a validated link to the saved repository's pull request when available. Runtime shutdown preserves uncertain verification dispatch evidence without starting further reconciliation or reporting a false terminal failure.
