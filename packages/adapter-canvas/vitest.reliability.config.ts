@@ -54,6 +54,7 @@ export default defineConfig({
       "src/runtime/{hooks,create-radius-extension}.test.ts",
       "test/integration/runtime/deployment-ownership.test.ts",
       "test/support/runtime/deployment.test.ts",
+      "test/support/artifact/cleanup.test.ts",
       "src/infra.test.ts",
       "src/remote-rad-artifacts.test.ts",
       "src/gh*.test.ts",

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
+import { removeArtifactWorkspace } from "../../support/artifact/cleanup.js";
 
 const repository = path.resolve(import.meta.dirname, "../../../../..");
 const scripts = path.join(
@@ -20,7 +21,7 @@ describe.runIf(Boolean(compiler))(
   () => {
     it.each([false, true])(
       "preserves dependency resolution and changes only the admitted target (canonical=%s)",
-      (canonical) => {
+      async (canonical) => {
         if (!compiler) throw new Error("Missing explicit test compiler.");
         const root = fs.realpathSync.native(
           fs.mkdtempSync(path.join(os.tmpdir(), "packaged-repair-"))
@@ -42,6 +43,8 @@ describe.runIf(Boolean(compiler))(
           });
         const run = (command: string, args: string[]) => {
           const result = execute(command, args);
+          expect(result.error).toBeUndefined();
+          expect(result.signal).toBeNull();
           expect(result.status, result.stderr || result.error?.message).toBe(0);
           return result.stdout;
         };
@@ -199,11 +202,11 @@ describe.runIf(Boolean(compiler))(
             "custom [model].bicep"
           ]);
         } finally {
-          fs.rmSync(root, { recursive: true, force: true });
+          await removeArtifactWorkspace(root);
         }
       }
     );
-    it("rejects encoded self-reads through the real compiler, not a filename substring heuristic", () => {
+    it("rejects encoded self-reads through the real compiler, not a filename substring heuristic", async () => {
       if (!compiler) throw new Error("Missing explicit test compiler.");
       const root = fs.realpathSync.native(
         fs.mkdtempSync(path.join(os.tmpdir(), "repair-self-read-"))
@@ -273,7 +276,7 @@ describe.runIf(Boolean(compiler))(
           "custom.bicep"
         ]);
       } finally {
-        fs.rmSync(root, { recursive: true, force: true });
+        await removeArtifactWorkspace(root);
       }
     });
   }
