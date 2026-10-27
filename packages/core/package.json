@@ -1,7 +1,12 @@
 {
   "name": "@radius-project/core",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/radius-project/ai-extensions.git",
+    "directory": "packages/core"
+  },
   "license": "Apache-2.0",
   "description": "UI-agnostic core for the Radius Canvas product: repo modeling, application graph build/diff, compute-platform abstraction, and workflow generation. No SDK / HTTP / DOM dependencies.",
   "type": "module",
@@ -32,6 +37,7 @@
   },
   "publishConfig": {
     "access": "public",
+    "registry": "https://registry.npmjs.org/",
     "main": "./dist/graph/index.js",
     "types": "./dist/graph/index.d.ts",
     "exports": {

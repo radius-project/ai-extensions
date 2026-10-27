@@ -28,13 +28,19 @@ const legacyTypeExports = {
 
 export function validateLibraryManifest(manifest, name, coreVersion) {
   assert.equal(manifest.name, name);
-  // Guards against an accidental publish until a publish workflow exists.
-  assert.equal(manifest.private, true, `${name} must stay private`);
+  const expected = publicExports[name];
+  assert.ok(expected, `Unknown library: ${name}`);
+  assert.equal(manifest.private, false, `${name} must be publishable`);
+  assert.equal(manifest.publishConfig.access, "public");
+  assert.equal(manifest.publishConfig.registry, "https://registry.npmjs.org/");
+  assert.deepEqual(manifest.repository, {
+    type: "git",
+    url: "git+https://github.com/radius-project/ai-extensions.git",
+    directory: `packages/${name.split("/")[1]}`
+  });
   assert.equal(manifest.license, "Apache-2.0");
   assert.equal(manifest.type, "module");
   assert.doesNotMatch(JSON.stringify(manifest), /(?:workspace|catalog):/);
-  const expected = publicExports[name];
-  assert.ok(expected, `Unknown library: ${name}`);
   assert.deepEqual(manifest.typesVersions, { "*": legacyTypeExports[name] });
   assert.deepEqual(
     Object.keys(manifest.exports).sort(),

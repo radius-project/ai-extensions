@@ -2,7 +2,7 @@
 
 This is the reference: how the release works and why. If you just need to cut one, follow the [release runbook](./RELEASE_RUNBOOK.md) instead.
 
-This repo ships **plugins** - today exactly one, the `radius` plugin, whose manifest and readme live under [`plugins/radius/`](../../plugins/radius) and whose canvas extension lives under [`extensions/radius/`](../../extensions/radius). Everything else - the three `@radius-project/*` packages - is implementation detail that gets bundled into a plugin's `extension.mjs` and is never published to a registry. The pipeline is written for the plural case throughout, so a second plugin needs no change to it.
+This repo ships **plugins** and **npm graph libraries**. The `radius` plugin has its manifest and readme under [`plugins/radius/`](../../plugins/radius) and its canvas extension under [`extensions/radius/`](../../extensions/radius). The graph libraries also ship as compiled npm packages for other React hosts. The internal adapters stay private and are bundled into the plugin's `extension.mjs`. Plugin and library releases use separate workflows and Changeset scopes.
 
 Three things follow from that, and they are the things to understand before releasing:
 
@@ -31,9 +31,9 @@ A stable release publishes exactly one tag, `<plugin>@<version>`, and it points 
 | `packages/adapter-shared/` | `@radius-project/adapter-shared` | Shared adapter helpers.                               |
 | `packages/adapter-canvas/` | `@radius-project/adapter-canvas` | Copilot canvas adapter; builds the bundle.            |
 
-Today `plugins/` holds one entry, `radius`, paired with `extensions/radius/`. The split mirrors [`github/awesome-copilot`](https://github.com/github/awesome-copilot): `pnpm-workspace.yaml` lists `extensions/*` because that is where a plugin's `package.json` lives, while `plugins/` stays the directory the registry scans. All packages are `private: true` and none is published to a registry. `@radius-project/adapter-shared` and `@radius-project/adapter-canvas` are listed in `ignore` in [`.changeset/config.json`](../../.changeset/config.json), so their `version` fields are inert - nothing consumes them, and internal dependencies use `workspace:*`, which resolves by path rather than by range. The two graph libraries, `@radius-project/core` and `@radius-project/graph-react`, declare `publishConfig.access: public` and are versioned separately from plugins with `pnpm run version:libraries`. They stay `private: true` so nothing can publish them before a publish workflow exists.
+Today `plugins/` holds one entry, `radius`, paired with `extensions/radius/`. The split mirrors [`github/awesome-copilot`](https://github.com/github/awesome-copilot): `pnpm-workspace.yaml` lists `extensions/*` because that is where a plugin's `package.json` lives, while `plugins/` stays the directory the registry scans. The plugin and internal adapters stay private. `@radius-project/adapter-shared` and `@radius-project/adapter-canvas` are listed in `ignore` in [`.changeset/config.json`](../../.changeset/config.json), so their versions do not change during a release. The public graph libraries, `@radius-project/core` and `@radius-project/graph-react`, declare `publishConfig.access: public` and are versioned separately with `pnpm run version:libraries`.
 
-Because every package is private, [`privatePackages.version`](https://changesets.dev/guide/config#privatepackages) is enabled so Changesets versions plugins it will never publish to a registry. `privatePackages.tag` is deliberately disabled: the generic Changesets tag command scans every eligible package and tags the source commit, while the release workflow must create only the selected plugin's tag, on its artifact commit. The `ignore` list keeps the internal adapter workspaces inert.
+[`privatePackages.version`](https://changesets.dev/guide/config#privatepackages) is enabled so Changesets versions plugins it will never publish to a registry. `privatePackages.tag` is deliberately disabled: the generic Changesets tag command scans every eligible package and tags the source commit, while the plugin release workflow must create only the selected plugin's tag, on its artifact commit. The `ignore` list keeps the internal adapter workspaces inert.
 
 Each plugin package owns a `build` script that assembles its own `.artifacts/<name>/`. That is the contract CI relies on: `pnpm --filter <plugin> run build` is how any plugin is built, so a new one plugs in without touching a workflow. The output is git-ignored and never assembled in place; on a release branch, the assembled tree is published at `plugins/<name>/`, while `extensions/<name>/` remains source-only on `main`.
 
@@ -41,13 +41,14 @@ Each plugin package owns a `build` script that assembles its own `.artifacts/<na
 
 [`extensions/<plugin>/package.json`](../../extensions/radius/package.json) is the **single source of truth** for that plugin. Every other version string is derived from it by [`scripts/version.mjs`](../../scripts/version.mjs):
 
-| File                                           | How it gets its version                                                     |
-|------------------------------------------------|-----------------------------------------------------------------------------|
-| `extensions/<plugin>/package.json`             | Bumped by `changeset version`. **Source of truth.**                         |
-| `plugins/<plugin>/plugin.json`                 | Derived - `version`.                                                        |
-| `.github/plugin/marketplace.json` plugin entry | Derived; an edge publish retargets and restamps its generated catalog copy. |
-| `.github/plugin/marketplace.json` `metadata`   | Independent marketplace version; plugin release commands preserve it.       |
-| `packages/*/package.json`                      | Not versioned - ignored by Changesets.                                      |
+| File                                                              | How it gets its version                                                     |
+|-------------------------------------------------------------------|-----------------------------------------------------------------------------|
+| `extensions/<plugin>/package.json`                                | Bumped by `changeset version`. **Source of truth.**                         |
+| `plugins/<plugin>/plugin.json`                                    | Derived - `version`.                                                        |
+| `.github/plugin/marketplace.json` plugin entry                    | Derived; an edge publish retargets and restamps its generated catalog copy. |
+| `.github/plugin/marketplace.json` `metadata`                      | Independent marketplace version; plugin release commands preserve it.       |
+| `packages/core/package.json`, `packages/graph-react/package.json` | Bumped separately by `pnpm run version:libraries`.                          |
+| Internal adapter `package.json` files                             | Not versioned - ignored by Changesets.                                      |
 
 `pnpm run version` remains the all-plugin local command. The release workflow uses `scripts/release-version.mjs`, which temporarily extends `.changeset/config.json`'s existing ignore list with every plugin outside the selected scope, invokes the Changesets CLI without `--ignore`, restores the original config bytes even when versioning fails, and then runs the same manifest synchronization. The temporary config is necessary because Changesets rejects CLI `--ignore` when the checked-in config already ignores internal packages. CI runs `pnpm run version:check`; `pnpm run version:sync` repairs drift across all plugins.
 
@@ -63,11 +64,25 @@ Include one in any PR that changes behaviour:
 pnpm changeset
 ```
 
-Changesets offers only `radius`, because that is the only thing this repo ships. Choose `patch` / `minor` / `major` and write a summary aimed at someone who installed the plugin - not at someone reading the source. Commit the generated `.changeset/*.md`.
+Choose the plugin or public libraries affected by the change, then choose `patch` / `minor` / `major` and write a summary for their users. Commit the generated `.changeset/*.md`. Never put a plugin and a library in the same Changeset: each release scope must leave the other scope's notes queued.
 
-Describing the change in terms of the internal package that happened to change is the failure mode to avoid: those packages have no changelog, so that detail lands nowhere a user will see it.
+For changes in internal adapters, name the plugin that ships the behavior rather than the ignored adapter package.
 
 The non-blocking Changesets workflow creates or updates a pull request comment showing whether a release changeset is present. Documentation, tests, and build-only changes may intentionally omit one or use `pnpm changeset --empty`; the release pull request itself is exempt because `changeset version` has already consumed its changesets. Labelling a pull request `pr:no-changeset` records the omission as deliberate and swaps the reminder for a note that it was waived - nothing is blocked either way, so the label is documentation for reviewers rather than an override.
+
+## Releasing npm graph libraries
+
+The [Release npm libraries workflow](../../.github/workflows/release-libraries.yml) is manual and accepts only `main`. It does not publish on a push or a plugin release. It keeps the existing public names: `@radius-project/core/graph` and `/domain` supply browser-safe contracts, and `@radius-project/graph-react` supplies the React renderer and CSS. The packed core root and graph-react `presentation` subpath remain private workspace APIs.
+
+Before the first run, an npm package owner must create or reserve both scoped packages and configure their [trusted publishers](https://docs.npmjs.com/trusted-publishers/). Use GitHub organization `radius-project`, repository `ai-extensions`, workflow filename `release-libraries.yml`, and environment `npm`. Allow direct `npm publish`, not only staged publishing. npm requires a package to exist before its trusted publisher can be configured; complete that one-time setup through the package owner's approved process. Do not add a long-lived npm token to this repository. Add required reviewers and a `main` branch rule to the GitHub `npm` environment. Configure each new trusted publisher shortly before its first release because unused configurations expire.
+
+1. Merge library changes with a library-only Changeset.
+2. On a release branch, run `pnpm install --frozen-lockfile`, `pnpm run version:libraries`, and `pnpm install --lockfile-only`. Submit the changed library versions, changelogs, consumed Changesets, and lockfile as a signed release pull request. Do not run the plugin version command.
+3. Merge that pull request, then run **Actions > Release npm libraries > Run workflow** on `main`. The workflow requires a stable version and non-empty release notes for each library. It does not choose or change versions.
+4. Approve the `npm` environment after the shared checks, packed React 18/19 consumer tests, and real Headlamp qualification pass. Headlamp receives the same tarballs that npm receives, not a second build. The publish job installs no dependencies and uses npm OIDC with provenance and lifecycle scripts disabled.
+5. Check npm and the `graph-libraries-<source SHA>` GitHub release. The release includes the package tarballs and qualification receipts in an archive, plus one SPDX inventory per library as separate assets. Each inventory names its library and includes build dependencies because Dagre, graphlib, and lodash are bundled.
+
+The workflow publishes dependencies before their consumers. If a run stops after publishing one package, rerun it at the same source commit. An existing npm version is accepted only when its registry integrity matches the qualified tarball byte for byte. A different tarball under the same version, an unknown registry error, or a failed qualification stops publication. Use a new Changeset and version to correct a published package; npm versions cannot be replaced. If all packages were published but the GitHub release step failed, the rerun completes that step without publishing the packages again.
 
 ## Cutting a release
 
@@ -121,7 +136,7 @@ Nothing in the release pipeline is keyed to `radius`, so a second plugin is a di
 
 ## If a package is ever published
 
-The graph libraries are already versioned independently, so publishing them, for example for the Radius Dashboard, needs two changes: flip `private` to `false` in both manifests and the packed-manifest check in `scripts/library-artifacts.mjs`, and add a workflow step that publishes the packed tarballs. Publishing an adapter workspace would also mean removing it from `ignore` in `.changeset/config.json`.
+The graph libraries use the separate [npm release workflow](#releasing-npm-graph-libraries). Publishing an adapter workspace would also require removing it from `ignore` in `.changeset/config.json`; adapters are not npm release candidates.
 
 ## What the edge channel does
 

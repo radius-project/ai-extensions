@@ -77,7 +77,9 @@ function environment() {
     npm_config_cache: join(runDirectory, "npm-cache"),
     npm_config_offline: "true",
     npm_config_registry: "http://127.0.0.1:9",
-    npm_config_ignore_scripts: "true"
+    npm_config_ignore_scripts: "true",
+    // Dependency manifests must not replace the pinned runner or download tools.
+    pnpm_config_pm_on_fail: "ignore"
   };
 }
 
