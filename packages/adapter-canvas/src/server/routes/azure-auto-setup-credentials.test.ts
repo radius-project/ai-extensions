@@ -9,6 +9,7 @@ import type {
 } from "./azure-auto-setup-types.js";
 import { deterministicProviderUuid } from "../services/provider-mutation-recovery.js";
 import { createAzureAutoSetupTestDependencies } from "../../../test/support/server/azure-auto-setup.js";
+import { providerMutationsByKind } from "../../operations.js";
 
 const APP_ID = "33333333-3333-3333-3333-333333333333";
 const APP_OBJECT_ID = "55555555-5555-5555-5555-555555555555";
@@ -209,6 +210,69 @@ function harness(options: {
 }
 
 describe("Azure auto-setup credentials and roles service (SU-08)", () => {
+  it.each([
+    "azure_federated_credential.create",
+    "azure_role_assignment.create"
+  ])(
+    "interrupts the real credential workflow before an unsent %s after a held save",
+    async (kind) => {
+      const test = harness({
+        runAz: async (args) => {
+          const line = args.join(" ");
+          if (line.includes("federated-credential list"))
+            return result({ stdout: "[]" });
+          if (
+            kind === "azure_role_assignment.create" &&
+            line.includes("federated-credential create")
+          )
+            return result({ stdout: JSON.stringify(LIVE_CREDENTIAL) });
+          throw new Error(`Unexpected provider write: ${line}`);
+        }
+      });
+      let stopped = false;
+      let entered = () => {};
+      let release = () => {};
+      const prepared = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const saved: string[] = [];
+      test.workflow.isStopped = () => stopped;
+      test.input.dependencies.operations.persist = async () => {
+        const mutation = providerMutationsByKind(
+          test.workflow.operation,
+          kind
+        ).at(-1);
+        if (!mutation) return;
+        saved.push(mutation.status);
+        if (mutation.status === "prepared") {
+          entered();
+          await gate;
+        }
+      };
+      const pending = configureAzureAutoSetupCredentials(test.input);
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      await prepared;
+      const calls = test.calls.filter((call) => call.startsWith("az:"));
+      stopped = true;
+      release();
+      await rejected;
+      expect(test.calls.filter((call) => call.startsWith("az:"))).toEqual(
+        calls
+      );
+      expect(saved).toEqual(["prepared", "not_applied"]);
+      expect(test.failures).toEqual([]);
+      expect(test.recordedRoleAssignments).toEqual([]);
+      expect(test.calls.filter((call) => call.startsWith("remove:"))).toEqual([
+        "remove:C:\\temp\\fic.json"
+      ]);
+    }
+  );
+
   it("reports a Service Principal failure before listing credentials", async () => {
     const test = harness({
       runAz: async (args) => {
