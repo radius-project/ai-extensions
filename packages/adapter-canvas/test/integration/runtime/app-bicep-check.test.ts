@@ -471,6 +471,136 @@ test("passes a warning-free Bicep compilation", () => {
   assert.equal(result.stderr, "");
 });
 
+test.each([
+  "valid",
+  "compiler-error",
+  "secure-schema",
+  "disabled-security"
+] as const)(
+  "uses explicit repair context with sibling resolution and mandatory %s checks",
+  (scenario) => {
+    const directory = temporaryDirectory();
+    const apps = path.join(directory, "apps");
+    fs.mkdirSync(apps);
+    const git = (args: string[]) => {
+      const result = spawnSync("git", args, {
+        cwd: directory,
+        encoding: "utf8"
+      });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout;
+    };
+    git(["init", "--quiet", "--initial-branch", "main"]);
+    git(["config", "user.name", "Repair fixture"]);
+    git(["config", "core.autocrlf", "false"]);
+    git(["config", "user.email", "fixture@example.invalid"]);
+    const target = path.join(apps, "custom.bicep");
+    fs.writeFileSync(target, "param original string\n");
+    const dependency = path.join(apps, "module.bicep");
+    fs.writeFileSync(dependency, "param moduleValue string\n");
+    const config = path.join(directory, "bicepconfig.json");
+    fs.writeFileSync(
+      config,
+      scenario === "disabled-security" ?
+        '{"analyzers":{"core":{"rules":{"secure-secrets-in-params":{"level":"off"}}}}}\n'
+      : "{}\n"
+    );
+    fs.writeFileSync(path.join(directory, "unrelated.txt"), "original");
+    git(["add", "."]);
+    git(["commit", "--quiet", "-m", "fixture"]);
+    fs.writeFileSync(path.join(directory, "unrelated.txt"), "unrelated staged");
+    git(["add", "--", "unrelated.txt"]);
+    const parameters =
+      scenario === "secure-schema" ?
+        { credential: { type: "securestring" } }
+      : {};
+    const compiled = template(
+      {
+        resource: {
+          type: "Radius.Compute/containers@2025-08-01-preview",
+          properties: {
+            properties:
+              scenario === "secure-schema" ?
+                { credential: "[parameters('credential')]" }
+              : {}
+          }
+        }
+      },
+      parameters
+    );
+    const diagnostics =
+      scenario === "compiler-error" ?
+        sarif([
+          {
+            level: "error",
+            message: { text: "fixture type mismatch" },
+            ruleId: "BCP036"
+          }
+        ])
+      : sarif([]);
+    const env = {
+      ...process.env,
+      ...fakeBicep(
+        apps,
+        diagnostics,
+        scenario === "compiler-error" ? 1 : 0,
+        compiled
+      )
+    };
+    fs.writeFileSync(
+      path.join(apps, "jsonrpc.json"),
+      JSON.stringify({ additionalFilePaths: [dependency, config] })
+    );
+    const publisher = path.join(path.dirname(checker), "promote-app-model.mjs");
+    const call = (script: string, args: string[]) =>
+      spawnSync(process.execPath, [script, ...args], {
+        cwd: directory,
+        env,
+        encoding: "utf8"
+      });
+    const begun = call(publisher, [
+      "--begin",
+      "--repair-target",
+      "apps/custom.bicep"
+    ]);
+    assert.equal(begun.status, 0, begun.stderr);
+    const run = JSON.parse(begun.stdout) as { staged: string; context: string };
+    const bytes = "param repaired string = 'preserve exact bytes'\r\n \t";
+    fs.writeFileSync(run.staged, bytes);
+    const checked = call(checker, [
+      run.staged,
+      "--repair-context",
+      run.context
+    ]);
+    assert.equal(checked.status, scenario === "valid" ? 0 : 1, checked.stderr);
+    assert.doesNotMatch(checked.stderr, /source-code-reference/u);
+    const published = call(publisher, ["--repair-context", run.context]);
+    assert.equal(
+      published.status,
+      scenario === "valid" ? 0 : 1,
+      published.stderr
+    );
+    assert.equal(
+      fs.readFileSync(target, "utf8"),
+      scenario === "valid" ? bytes : "param original string\n"
+    );
+    assert.equal(git(["show", ":unrelated.txt"]), "unrelated staged");
+    assert.equal(
+      fs.readFileSync(dependency, "utf8"),
+      "param moduleValue string\n"
+    );
+    assert.equal(fs.existsSync(path.join(directory, ".radius")), false);
+    for (let i = 0; i < 2; i++) {
+      const aborted = call(publisher, [
+        "--abort",
+        "--repair-context",
+        run.context
+      ]);
+      assert.equal(aborted.status, 0, aborted.stderr);
+    }
+  }
+);
+
 test("fails when a non-application Radius resource has no durable source reference", () => {
   const directory = temporaryDirectory();
   const compiledOutput = template({

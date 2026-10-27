@@ -160,16 +160,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
     appBicepHandoff?: Parameters<
       RadiusExtensionDependencies["hostCallbacks"]["setAppBicepHandoff"]
     >[0];
-    deployRepairHandoff?:
-      | ((input: {
-          repo: string;
-          branch: string;
-          error: string;
-          deployRunUrl: string;
-          attemptId: string;
-          instanceId: string;
-        }) => unknown)
-      | null;
+    deployRepairHandoff?: Parameters<
+      RadiusExtensionDependencies["hostCallbacks"]["setDeployRepairHandoff"]
+    >[0];
     deployFailureNotice?:
       | ((input: {
           repo: string;

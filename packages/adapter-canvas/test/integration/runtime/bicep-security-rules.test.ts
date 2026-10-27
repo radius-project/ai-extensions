@@ -84,6 +84,7 @@ interface SecurityRulesModule {
     filePaths: string[],
     options?: {
       stagingDir?: string | null;
+      repairApp?: string | null;
       readFile?: (file: string) => Buffer | null;
     }
   ): Inspection;
@@ -1319,6 +1320,33 @@ describe("readFileIfPresent", () => {
 });
 
 describe("inspectSecurityRules", () => {
+  it.each(["disabled", "malformed", "missing", "suppression"] as const)(
+    "never suggests editing a read-only custom repair dependency with %s policy evidence",
+    (failure) => {
+      const app = path.resolve("apps", "staged.bicep");
+      const dependency = path.resolve(
+        failure === "suppression" ? "module.bicep" : "bicepconfig.json"
+      );
+      const data =
+        failure === "disabled" ?
+          JSON.stringify(ruleLevel(secureValueRule, "off"))
+        : failure === "malformed" ? "{"
+        : failure === "missing" ? null
+        : `#disable-next-line ${secureValueRule}\nparam x string\n`;
+      const result = rules.inspectSecurityRules([app, dependency], {
+        repairApp: app,
+        readFile: (file) =>
+          file === app ? Buffer.from("")
+          : data === null ? null
+          : Buffer.from(data)
+      });
+      expect(result.unavailable).toBeNull();
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0]).toContain("read-only repair dependency");
+      expect(result.findings[0]).not.toContain("give the run a staged");
+      expect(result.findings[0]).not.toContain("Make it valid JSON");
+    }
+  );
   // A synthetic, platform-neutral workspace: every path is absolute on the
   // running platform, and a file is readable only when the case lists it.
   const workspace = path.resolve(path.sep, "workspace", "repo");

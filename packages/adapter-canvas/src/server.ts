@@ -1436,7 +1436,8 @@ interface DeploymentDeliveryLifetime {
 export function triggerDeployRepairHandoff(
   entry: { state: CanvasState } | undefined,
   instanceId = "",
-  lifetime?: DeploymentDeliveryLifetime
+  lifetime?: DeploymentDeliveryLifetime,
+  target?: { repo: string; branch: string; appFile?: string }
 ): boolean {
   try {
     if (lifetime && !lifetime.isCurrent()) return false;
@@ -1447,8 +1448,10 @@ export function triggerDeployRepairHandoff(
       state,
       {
         repo:
-          state.deployingRepo || state.plannedRepo || state.contextRepo || "",
-        branch: state.deployingBranch || "",
+          target?.repo ??
+          (state.deployingRepo || state.plannedRepo || state.contextRepo || ""),
+        branch: target?.branch ?? (state.deployingBranch || ""),
+        appFile: target?.appFile,
         error: state.deployError || "",
         deployRunUrl: state.deployRunUrl || "",
         instanceId
@@ -5347,26 +5350,31 @@ export function createProductionCanvasServerRuntime(
     const isCurrent = () =>
       deploymentOwner.execution(resolved.invocation) === execution &&
       !execution.observation.stopped;
-    const result = notify(execution, instanceId, {
-      isCurrent,
-      trackWork: deploymentOwner.trackWork,
-      redactDiagnostic: execution.executor.redact,
-      publish: () => deploymentOwner.publish(resolved.invocation),
-      retry: (callback, milliseconds) => {
-        void deploymentOwner.trackWork(
-          retryDeploymentDelivery(callback, milliseconds, {
-            delay: (delay) => execution.observation.delay(delay),
-            isCurrent,
-            errorMessage: (error) => execution.executor.errorMessage(error),
-            reportError: (message) =>
-              console.error(
-                "[radius deployment] Delivery retry failed:",
-                message
-              )
-          })
-        );
-      }
-    });
+    const result = notify(
+      execution,
+      instanceId,
+      {
+        isCurrent,
+        trackWork: deploymentOwner.trackWork,
+        redactDiagnostic: execution.executor.redact,
+        publish: () => deploymentOwner.publish(resolved.invocation),
+        retry: (callback, milliseconds) => {
+          void deploymentOwner.trackWork(
+            retryDeploymentDelivery(callback, milliseconds, {
+              delay: (delay) => execution.observation.delay(delay),
+              isCurrent,
+              errorMessage: (error) => execution.executor.errorMessage(error),
+              reportError: (message) =>
+                console.error(
+                  "[radius deployment] Delivery retry failed:",
+                  message
+                )
+            })
+          );
+        }
+      },
+      execution.invocation.target
+    );
     deploymentOwner.publish(resolved.invocation);
     return result;
   }

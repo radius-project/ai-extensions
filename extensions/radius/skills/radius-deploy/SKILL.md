@@ -20,7 +20,7 @@ Trigger the `Radius - Run rad Commands` workflow which spins up an ephemeral k3d
 Before invoking this skill, all of these must exist:
 
 1. A GitHub Environment configured with cloud credentials → use the `radius-environment` skill if missing.
-2. A `.radius/app.bicep` file → use the `radius-app-bicep` skill if missing.
+2. An existing selected application `.bicep` file (normally `.radius/app.bicep`) → use the `radius-app-bicep` skill if a new model is needed.
 3. The user's PAT in the extension's storage (auto-seeded from `gh auth token`).
 
 ## How to invoke
@@ -59,7 +59,7 @@ When a canvas deploy fails, the extension hands the failure to you with an `atte
 
 ### Push the repair before redeploying
 
-The workflow checks the branch out **from GitHub**. A fix that exists only in the local worktree is not deployed: the run would check out and redeploy the unchanged file. Commit and push the repaired `.radius/app.bicep` to the deploy branch before calling `radius_deploy`. If that branch is protected and you cannot push, stop and tell the user or open a pull request rather than redeploying an unchanged branch.
+The workflow checks the branch out **from GitHub**. A fix that exists only in the local worktree is not deployed: the run would check out and redeploy the unchanged file. Commit and push only the repaired application file named by the admitted handoff to its deploy branch before calling `radius_deploy`; do not include unrelated staged work. If that branch is protected and you cannot push, stop and tell the user or open a pull request rather than redeploying an unchanged branch.
 
 ### Dispatching the workflow directly
 
@@ -100,9 +100,9 @@ The generated workflows serialize Gateway lifecycle operations across all Radius
 Before troubleshooting, classify the failure, because the fix lives in different places:
 
 - **Infrastructure or environment failures** — recipe download or execution, provider mismatch, cluster or credential or connectivity issues, or a pod that never becomes ready (the cases in [Common failure modes](#common-failure-modes)). These are not caused by the app model; handle them here.
-- **Modeling or schema failures** — the error points at `.radius/app.bicep`: unknown resource type or API version, unknown or missing property, invalid reference between resources, wrong credential shape, or a Bicep parse or compile error. These are fixed by editing the app definition, not the deploy pipeline.
+- **Modeling or schema failures** — the error points at the admitted application file: unknown resource type or API version, unknown or missing property, invalid reference between resources, wrong credential shape, or a Bicep parse or compile error. These are fixed through staged application repair, not by editing the deploy pipeline.
 
-For a modeling or schema failure, hand the deploy error and the relevant logs to the `radius-app-bicep` skill to repair `.radius/app.bicep` in place, commit and push the repair to the deploy branch, then redeploy with `radius_deploy` (passing the `attemptId` from the handoff) and poll `radius_deploy_status` until it reaches a terminal state. The `radius-app-bicep` skill owns choosing the fix (including trying a different fix when the same error recurs); the deploy loop only passes it the latest error, redeploys, and counts attempts. Make at most `RETRY_CAP` repair-and-redeploy attempts automatically, stopping early if the deploy succeeds or `radius-app-bicep` reports it has no different fix to try. Once those automatic attempts are used up (or you stop early), do not keep retrying on your own: surface the result to the user and make further attempts only if they explicitly ask you to.
+For a modeling or schema failure, hand the deploy error, relevant logs and immutable admitted application path to `radius-app-bicep`. A custom path uses that skill's repair-only sibling staging and explicit repair context; canonical `.radius/app.bicep` uses canonical staging. Never tell the agent to edit a different/default model in place. Local modules, imports, data, types and configuration remain read-only. Commit and push only the published repaired target, then redeploy with `radius_deploy` (passing the `attemptId` from the handoff) and poll `radius_deploy_status` until it reaches a terminal state. A publication exit `2` requires inspecting Git staging, not rerunning promotion; exit `3` requires preserving the reported backup/context and stopping for recovery. The modeling skill owns choosing a different valid fix; the deploy loop passes evidence, redeploys and counts attempts. Make at most `RETRY_CAP` automatic repair-and-redeploy attempts, stopping on success, a safety refusal or no different fix. Further attempts require an explicit user request.
 
 A deploy started from the canvas Deploy button hands its failure to you automatically, so you may receive this repair request without having started the deploy yourself.
 

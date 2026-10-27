@@ -689,12 +689,17 @@ function remedy(file, stagingDir, modelConfig) {
 // unchecked.
 export function inspectSecurityRules(
   filePaths,
-  { stagingDir = null, readFile = readFileIfPresent } = {}
+  { stagingDir = null, repairApp = null, readFile = readFileIfPresent } = {}
 ) {
   const findings = [];
   const modelConfig =
     stagingDir === null ? null : stagedModelConfig(filePaths, stagingDir);
   for (const file of new Set(filePaths)) {
+    const readOnly = repairApp !== null && file !== repairApp;
+    const guidance =
+      readOnly ?
+        "This is a read-only repair dependency. Stop this repair; do not edit the dependency or override its configuration."
+      : remedy(file, stagingDir, modelConfig);
     let bytes;
     try {
       bytes = readFile(file);
@@ -703,7 +708,7 @@ export function inspectSecurityRules(
     }
     if (bytes === null) {
       findings.push(
-        `${file}: error compile-file-missing: Bicep reads this file for the compile, but it does not exist, so whether it disables or suppresses a security rule cannot be established. Add the file or remove the reference to it.`
+        `${file}: error compile-file-missing: Bicep reads this file for the compile, but it does not exist, so whether it disables or suppresses a security rule cannot be established. ${readOnly ? guidance : "Add the file or remove the reference to it."}`
       );
       continue;
     }
@@ -712,20 +717,20 @@ export function inspectSecurityRules(
       const parsed = parseBicepConfig(text);
       if (parsed.error !== undefined) {
         findings.push(
-          `${file}: error bicep-config-invalid: the Bicep configuration could not be parsed (${parsed.error}), so whether the security rules run cannot be established. Make it valid JSON; comments are allowed and trailing commas are not.`
+          `${file}: error bicep-config-invalid: the Bicep configuration could not be parsed (${parsed.error}), so whether the security rules run cannot be established. ${readOnly ? guidance : "Make it valid JSON; comments are allowed and trailing commas are not."}`
         );
         continue;
       }
       for (const problem of configurationProblems(parsed.config)) {
         findings.push(
-          `${file}: error security-rule-disabled: ${problem}. ${remedy(file, stagingDir, modelConfig)}`
+          `${file}: error security-rule-disabled: ${problem}. ${guidance}`
         );
       }
       continue;
     }
     for (const { line, directive, rules } of securitySuppressions(text)) {
       findings.push(
-        `${file}:${line}: error security-rule-suppressed: ${suppressionSummary(directive, rules)} ${remedy(file, stagingDir, modelConfig)}`
+        `${file}:${line}: error security-rule-suppressed: ${suppressionSummary(directive, rules)} ${guidance}`
       );
     }
   }

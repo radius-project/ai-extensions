@@ -21,6 +21,7 @@ function fixture() {
   const input = {
     repo: "acme/app",
     branch: "feature",
+    appFile: "apps/custom.bicep",
     instanceId: "",
     error: "Build failed",
     deployRunUrl: "https://github.com/acme/app/actions/runs/42"

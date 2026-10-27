@@ -34,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import {
   DefinitionNotFoundError,
   buildSchema,
+  propertySensitivity,
   selectResource,
   validateGeneratedIndex,
   validateGeneratedTypes
@@ -41,6 +42,7 @@ import {
 
 export {
   buildSchema,
+  propertySensitivity,
   decodePropertyFlags,
   normalizeTypeReference,
   parseIndexReference,
@@ -352,34 +354,6 @@ export async function writeStagedBicepConfig(stagingInput, extension) {
     path.join(stagingDir, "bicepconfig.json"),
     `${JSON.stringify(output, null, 2)}\n`
   );
-}
-
-// Property sensitivity for one resolved type, taken from the schema this script
-// already built. Credential inputs live in the properties envelope, which is
-// where every Radius type puts them and the only place `validate-bicep.mjs`
-// inspects, so the map is one level deep rather than a second copy of the whole
-// schema. A discriminated envelope contributes its variants' properties too: a
-// property is sensitive when any shape of the envelope marks it sensitive,
-// because reporting a property the schema does treat as sensitive would fail a
-// model that is correct.
-export function propertySensitivity(schema) {
-  const envelope = schema.properties;
-  const properties = isObject(envelope) ? envelope.properties : undefined;
-  if (!isObject(properties)) return {};
-  const groups = [properties];
-  if (isObject(properties.variants)) {
-    groups.push(...Object.values(properties.variants));
-  }
-  const sensitivity = {};
-  for (const group of groups) {
-    if (!isObject(group) || !isObject(group.properties)) continue;
-    for (const [name, property] of Object.entries(group.properties)) {
-      sensitivity[name] =
-        sensitivity[name] === true ||
-        (isObject(property) && property.sensitive === true);
-    }
-  }
-  return sensitivity;
 }
 
 // Whether one entry in the staged map is a usable `property -> sensitive`

@@ -41,6 +41,7 @@ export function createDeploymentNotifications(ports: {
     const input = {
       repo: execution.invocation.target.repo,
       branch: execution.invocation.target.branch,
+      appFile: execution.invocation.target.appFile,
       error: execution.state.deployError || "",
       deployRunUrl: execution.state.deployRunUrl || "",
       instanceId: ""

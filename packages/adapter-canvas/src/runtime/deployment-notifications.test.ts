@@ -31,6 +31,7 @@ describe("owned deployment notification composition", () => {
             expect.objectContaining({
               repo: f.target.repo,
               branch: f.target.branch,
+              appFile: f.target.appFile,
               attemptId: execution.invocation.attemptId,
               instanceId: ""
             })

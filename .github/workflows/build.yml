@@ -141,7 +141,12 @@ jobs:
       - name: Build Radius artifact on Windows
         run: pnpm run build
 
+      - name: Install pinned offline repair-test compiler
+        run: node scripts/install-repair-test-compiler.mjs
+
       - name: Run Windows artifact integration tests
+        env:
+          RADIUS_REQUIRE_REPAIR_COMPILER: "1"
         run: pnpm run test:integration:artifact
 
   canvas-chromium:
@@ -376,6 +381,10 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       # Each plugin package owns a `build` script that assembles its own dist/.
+      - name: Install pinned offline repair-test compiler
+        if: matrix.plugin == 'radius'
+        run: node scripts/install-repair-test-compiler.mjs
+
       - name: Build
         env:
           PLUGIN_VERSION: ${{ steps.version.outputs.version }}
@@ -388,6 +397,7 @@ jobs:
       - name: Run built-artifact smoke tests
         env:
           PLUGIN_VERSION: ${{ steps.version.outputs.version }}
+          RADIUS_REQUIRE_REPAIR_COMPILER: ${{ matrix.plugin == 'radius' && '1' || '' }}
         run: pnpm --filter "$PLUGIN_NAME" run test:artifact
 
       - name: Verify the plugin dist is complete

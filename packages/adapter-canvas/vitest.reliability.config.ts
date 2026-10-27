@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     include: [
       "src/deploy-artifacts.test.ts",
+      "src/repair-staging.test.ts",
+      "src/repair-dependencies.test.ts",
+      "src/repair-type-schemas.test.ts",
       "../core/src/deploy-artifact-evidence.test.ts",
       "../core/src/workflow-read-policy.test.ts",
       "../core/src/setup-{admission,boundary,provider-configuration}.test.ts",

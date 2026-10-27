@@ -22,7 +22,13 @@ describe("Windows pull-request test gate", () => {
       "pnpm --filter @radius-project/adapter-canvas exec vitest run test/ci/cloud-e2e-workflows.test.ts test/e2e-cloud/support/copilot-app-host.test.ts",
       "pnpm --filter @radius-project/adapter-canvas exec vitest run src/credential-provenance-store.test.ts src/operation-store.test.ts src/node-executable.test.ts src/publish-targets.test.ts src/promote-app-model.test.ts src/server/temporary-kubeconfig.test.ts test/integration/runtime/radius-type-definition.test.ts",
       "pnpm run build",
+      "node scripts/install-repair-test-compiler.mjs",
       "pnpm run test:integration:artifact"
     ]);
+    expect(
+      job.steps.find(
+        (step) => step.run === "pnpm run test:integration:artifact"
+      ).env.RADIUS_REQUIRE_REPAIR_COMPILER
+    ).toBe("1");
   });
 });

@@ -222,11 +222,19 @@ export function createRadiusExtension(
       })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
-    ({ repo, branch, error, deployRunUrl, attemptId }) =>
+    ({ repo, branch, appFile, error, deployRunUrl, attemptId }) =>
       deps.session.get().send(
         deployRepairHandoffMessage(repo, branch, {
           error,
           deployRunUrl,
+          appFile,
+          skillBootstrap:
+            appFile && appFile !== ".radius/app.bicep" ?
+              deps.radiusAppBicepSkill(
+                undefined,
+                `Repair only the admitted existing file ${JSON.stringify(appFile)}. Do not regenerate a deployment profile.`
+              )
+            : undefined,
           attemptId
         })
       )

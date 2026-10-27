@@ -1,4 +1,4 @@
-// Staged modeling runs: what a run must produce before it may be published,
+// Canonical staged modeling runs: what a run must produce before publication,
 // and what to say when it fails.
 //
 // Modeling used to write straight into `.radius/`, one file at a time, so a run
@@ -23,6 +23,8 @@
 // Pure by construction — no filesystem, no `node:` built-ins — because
 // `packages/core` is compiled into the browser bundle through its barrel. The
 // caller supplies the directory listing, the file contents, and a hasher.
+// Existing custom-file repairs use the publisher's repair-only sibling mode,
+// not this multi-file generation contract or its origin-compatible hashing.
 
 // Directory holding an in-flight run, relative to `.radius/`. The prefix is
 // matched to find leftovers, so it must stay a prefix no other `.radius/` entry

@@ -530,6 +530,16 @@ describe("production deployment owner runtime binding", () => {
             { timeout: 5000 }
           );
           expect(session.send).toHaveBeenCalledTimes(2);
+          if (outcome === "failure") {
+            for (const [message] of vi.mocked(session.send).mock.calls) {
+              const prompt = JSON.stringify(message);
+              expect(prompt).toContain("apps/custom.bicep");
+              expect(prompt).toContain("--repair-target");
+              expect(prompt).toContain("--repair-context");
+              expect(prompt).not.toContain(".radius/app.bicep");
+              expect(prompt).not.toContain("radius_generate_app");
+            }
+          }
           await vi.waitFor(() =>
             expect(runtime.deploymentOwner.hasPendingWork()).toBe(false)
           );
@@ -652,8 +662,63 @@ describe("production deployment owner runtime binding", () => {
       }
     }
   );
+  it.each(["missing-node", "missing-skill"] as const)(
+    "keeps an unavailable custom-repair bootstrap out of executable SDK instructions (%s)",
+    async (scenario) => {
+      const fake = createFakeDependencies();
+      if (scenario === "missing-node")
+        vi.mocked(fake.deps.radiusAppBicepSkill).mockReturnValue(
+          '{"nodeCommand":null,"instruction":"Install supported Node and stop."}'
+        );
+      else
+        vi.mocked(fake.deps.radiusAppBicepSkill).mockImplementation(() => {
+          throw new Error("Skill installation missing");
+        });
+      const session = createFakeSession();
+      const extension = await bootstrapRadiusExtension(fake.deps, {
+        createCanvas: (declaration) => declaration,
+        joinSession: async () => session
+      });
+      try {
+        const handoff = fake.capturedHostCallbacks.deployRepairHandoff;
+        if (!handoff) throw new Error("Deployment repair was not registered");
+        const call = async () =>
+          handoff({
+            repo: "fixture/app",
+            branch: "feature",
+            appFile: "apps/custom.bicep",
+            error: "BCP037 invalid property",
+            deployRunUrl: "",
+            attemptId: "attempt-1",
+            instanceId: ""
+          });
+        if (scenario === "missing-skill") {
+          await expect(call()).rejects.toThrow("Skill installation missing");
+          expect(session.send).not.toHaveBeenCalled();
+        } else {
+          await call();
+          const prompt = JSON.stringify(vi.mocked(session.send).mock.calls);
+          expect(prompt).toContain("Stop; do not stage");
+          expect(prompt).toContain("BCP037");
+          expect(prompt).not.toContain("--repair-target");
+        }
+        expect(fake.deps.getOrCreateServer).not.toHaveBeenCalled();
+      } finally {
+        await extension.shutdown();
+      }
+    }
+  );
+
   it("delivers one explicit headless repair through SDK bootstrap and retries a rejected send", async () => {
     const fake = createFakeDependencies();
+    vi.mocked(fake.deps.radiusAppBicepSkill).mockReturnValue(
+      JSON.stringify({
+        skill: "radius-app-bicep",
+        skillBase: "/fixture/plugin/skills/radius-app-bicep",
+        nodeCommand: "/fixture/node",
+        instruction: "Use the provided runtime and skill directory."
+      })
+    );
     const session = createFakeSession();
     const extension = await bootstrapRadiusExtension(fake.deps, {
       createCanvas: (declaration) => declaration,
@@ -675,6 +740,7 @@ describe("production deployment owner runtime binding", () => {
       const input = {
         repo: "fixture/app",
         branch: "feature/model",
+        appFile: "apps/custom.bicep",
         deployRunUrl: "https://github.com/fixture/app/actions/runs/42",
         error: "build failed; access_token=synthetic-value",
         instanceId: ""
@@ -703,6 +769,14 @@ describe("production deployment owner runtime binding", () => {
       expect(errors).toHaveLength(1);
       const prompts = JSON.stringify(vi.mocked(session.send).mock.calls);
       expect(prompts).toContain("attempt-1");
+      expect(prompts).toContain("apps/custom.bicep");
+      expect(prompts).toContain("/fixture/node");
+      expect(prompts).toContain("/fixture/plugin/skills/radius-app-bicep");
+      expect(fake.deps.radiusAppBicepSkill).toHaveBeenCalledWith(
+        undefined,
+        'Repair only the admitted existing file "apps/custom.bicep". Do not regenerate a deployment profile.'
+      );
+      expect(prompts).not.toContain(".radius/app.bicep");
       expect(prompts).not.toContain("synthetic-value");
       expect(fake.deps.getOrCreateServer).not.toHaveBeenCalled();
     } finally {

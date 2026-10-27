@@ -17,6 +17,9 @@ export default defineConfig({
         "packages/*/src/**/*.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/bicep-security-rules.mjs",
+        "extensions/radius/skills/radius-app-bicep/scripts/repair-staging.mjs",
+        "extensions/radius/skills/radius-app-bicep/scripts/repair-dependencies.mjs",
+        "extensions/radius/skills/radius-app-bicep/scripts/repair-type-schemas.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
         "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs"
       ],

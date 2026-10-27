@@ -15,7 +15,11 @@ it.each(["template-unavailable", "update-denied"] as const)(
           failure === "template-unavailable" &&
           args[1]?.includes("/contents/.github/extension/run-rad-commands")
         ) {
-          return { code: 1, stdout: "", stderr: "HTTP 503: template unavailable" };
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 503: template unavailable"
+          };
         }
         if (args.includes("PUT")) {
           writes.push(JSON.parse(String(options?.stdin)));
@@ -62,7 +66,9 @@ it.each(["template-unavailable", "update-denied"] as const)(
       await vi.waitFor(
         () => {
           expect(entry.state.deployStatus).toBe("failed");
-          expect(runtime.deploymentOwner.activeReservation(target)).toBeUndefined();
+          expect(
+            runtime.deploymentOwner.activeReservation(target)
+          ).toBeUndefined();
         },
         { timeout: 10000 }
       );
@@ -72,23 +78,40 @@ it.each(["template-unavailable", "update-denied"] as const)(
           []
         : ["trunk", "trunk", "feature/model&review=1", "feature/model&review=1"]
       );
-      expect(entry.state.deployError).toContain("Could not prepare deployment workflows");
+      const refusal =
+        failure === "template-unavailable" ?
+          'Could not synchronize deploy workflows on branch "feature/model&review=1"'
+        : "Could not prepare deployment workflows";
+      expect(entry.state.deployError).toContain(refusal);
+      if (failure === "template-unavailable")
+        expect(entry.state.deployError).toContain(
+          "radius-project/ai-extensions/.github/extension/run-rad-commands.yml"
+        );
       expect(entry.state.deployDispatchEvidence).toBe("refused");
       const status = await fetch(`${entry.baseUrl}/api/deploy-status`);
       expect(status.status).toBe(200);
       const body = await status.json();
       expect(body).toMatchObject({
         status: "failed",
-        error: expect.stringContaining("Could not prepare deployment workflows")
+        error: expect.stringContaining(refusal)
       });
       expect(body).not.toHaveProperty("generationFailures");
       expect(body).not.toHaveProperty("synchronized");
-      expect(run.mock.calls.filter(([args]) => args[0] === "workflow")).toEqual([]);
+      expect(run.mock.calls.filter(([args]) => args[0] === "workflow")).toEqual(
+        []
+      );
       expect(run.mock.calls.some(([args]) => args[0] === "auth")).toBe(false);
       expect(account).toHaveBeenCalledOnce();
-      expect(run.mock.calls.filter(([args]) => args[1]?.includes("/contents/.radius/app.bicep"))).toEqual([
+      expect(
+        run.mock.calls.filter(([args]) =>
+          args[1]?.includes("/contents/.radius/app.bicep")
+        )
+      ).toEqual([
         [
-          ["api", "/repos/fixture/app/contents/.radius/app.bicep?ref=feature%2Fmodel%26review%3D1"],
+          [
+            "api",
+            "/repos/fixture/app/contents/.radius/app.bicep?ref=feature%2Fmodel%26review%3D1"
+          ],
           { timeout: 15000 }
         ]
       ]);

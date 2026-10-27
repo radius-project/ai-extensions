@@ -11,6 +11,7 @@ import { errorMessage } from "./util.js";
 export interface DeploymentRepairHandoffInput {
   repo: string;
   branch: string;
+  appFile?: string;
   error: string;
   deployRunUrl: string;
   attemptId: string;

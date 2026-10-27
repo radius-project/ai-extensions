@@ -1453,7 +1453,7 @@ const bicep = path.join(
 // model that does not exist has nothing to inspect, and the compile reports it
 // exactly as it did before this check existed. Never rejects, so the compile
 // running alongside it is always awaited rather than left behind.
-async function inspectCompiledFiles(securityRules, app, staged) {
+async function inspectCompiledFiles(securityRules, app, staged, repairContext) {
   if (!existsSync(app)) {
     return { findings: [], unavailable: null };
   }
@@ -1463,7 +1463,8 @@ async function inspectCompiledFiles(securityRules, app, staged) {
       return { findings: [], unavailable: references.error };
     }
     return securityRules.inspectSecurityRules(references.filePaths, {
-      stagingDir: staged ? path.dirname(app) : null
+      stagingDir: staged ? path.dirname(app) : null,
+      repairApp: repairContext ? app : null
     });
   } catch (error) {
     return { findings: [], unavailable: error.message };
@@ -1543,7 +1544,7 @@ function compileModel(app) {
 // Compiles the model and distinguishes model diagnostics from a check that
 // could not produce a reliable verdict. The budget wraps it rather than living
 // inside it.
-async function check(app, staged) {
+async function check(app, staged, repairContext, repairDependencies) {
   // Loaded before anything is spawned rather than imported statically, so an
   // installation missing the sibling module reaches the catch below main() and
   // reports the check as unavailable (exit 2) instead of failing to load
@@ -1555,7 +1556,12 @@ async function check(app, staged) {
   // still lets the compile's own diagnostics through, so one attempt reports
   // everything the model has to fix.
   const [securityRules, compiled] = await Promise.all([
-    inspectCompiledFiles(securityRuleModule, app, staged),
+    inspectCompiledFiles(
+      securityRuleModule,
+      app,
+      staged && !repairContext,
+      repairContext
+    ),
     compileModel(app)
   ]);
   securityRules.findings.forEach(report);
@@ -1612,7 +1618,13 @@ async function check(app, staged) {
     return EXIT_CHECK_UNAVAILABLE;
   }
 
-  const resolvedTypes = readResolvedTypes(app, staged);
+  const resolvedTypes =
+    repairContext ?
+      (await import("./repair-type-schemas.mjs")).repairTypeSchemas(
+        repairDependencies,
+        readFileSync
+      )
+    : readResolvedTypes(app, staged);
   if (resolvedTypes.status === "unusable") {
     report(
       `${app}: error checker-unavailable: the resolved type schemas staged in ${resolvedTypes.file} could not be read: ${resolvedTypes.detail}. ` +
@@ -1624,7 +1636,8 @@ async function check(app, staged) {
   }
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
-  const invalidSourceReference = checkSourceCodeReferences(template, app);
+  const invalidSourceReference =
+    !repairContext && checkSourceCodeReferences(template, app);
   const invalidConnectionSource = checkConnectionSources(template, app);
   const unresolvedRuntimeVariable = checkRuntimeVariableExpansion(
     template,
@@ -1657,7 +1670,25 @@ async function check(app, staged) {
 
 async function main() {
   const app = path.resolve(process.argv[2] || ".radius/app.bicep");
-  const run = readRunRecord(app);
+  const contextIndex = process.argv.indexOf("--repair-context");
+  const context =
+    contextIndex === -1 ? undefined : process.argv[contextIndex + 1];
+  let repair;
+  let validation;
+  let run;
+  if (contextIndex !== -1) {
+    if (!context || context.startsWith("--"))
+      throw new Error("Repair validation requires its context.");
+    const { createRepairStaging } = await import("./repair-staging.mjs");
+    repair = createRepairStaging();
+    validation = await repair.prepareValidation(context, app);
+    const record = validation.record;
+    run = {
+      file: record.context,
+      record: { ...record, validated: null },
+      state: parseRepairState(record.repair)
+    };
+  } else run = readRunRecord(app);
   if (run === null) {
     return await check(app, false);
   }
@@ -1685,7 +1716,7 @@ async function main() {
     return EXIT_CHECK_UNAVAILABLE;
   }
 
-  const status = await check(app, true);
+  const status = await check(app, true, context, validation?.dependencies);
   // An unavailable check produced no new model verdict, so keep the last model
   // failure for comparison with the next completed validation. Success clears
   // it because there is no longer a failed model to compare.
@@ -1723,6 +1754,8 @@ async function main() {
       `This was compile ${decision.attempt} of ${REPAIR_COMPILE_LIMIT}; the repair budget is now spent and the checker will refuse to compile this run again.`
     );
   }
+  if (repair)
+    await repair.finishValidation(validation, status === EXIT_SUCCESS);
   return status;
 }
 

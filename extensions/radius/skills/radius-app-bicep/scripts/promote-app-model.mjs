@@ -82,13 +82,16 @@ function fail(message) {
   process.exit(1);
 }
 
-function flag(name) {
+function flag(name, trim = true) {
   const index = process.argv.indexOf(`--${name}`);
   if (index === -1) return "";
   const value = process.argv[index + 1];
-  return typeof value === "string" && !value.startsWith("--") ?
-      value.trim()
-    : "";
+  return (
+    typeof value === "string" && !value.startsWith("--") ?
+      trim ? value.trim()
+      : value
+    : ""
+  );
 }
 
 function hasFlag(name) {
@@ -703,7 +706,39 @@ function abort() {
   );
 }
 
-if (hasFlag("begin")) {
+if (hasFlag("repair-target") || hasFlag("repair-context")) {
+  try {
+    const { createRepairStaging } = await import("./repair-staging.mjs");
+    const repair = createRepairStaging();
+    if (hasFlag("begin")) {
+      if (hasFlag("repair-context"))
+        throw new Error("Begin cannot reuse a repair context.");
+      console.log(
+        JSON.stringify(
+          await repair.begin(process.cwd(), flag("repair-target", false))
+        )
+      );
+    } else {
+      if (hasFlag("repair-target"))
+        throw new Error(
+          "Repair target is fixed at begin; use only --repair-context."
+        );
+      const context = flag("repair-context", false);
+      if (!context) throw new Error("An explicit repair context is required.");
+      if (hasFlag("abort")) {
+        repair.abort(context);
+        console.log("Removed only this run's temporary repair artifacts.");
+      } else {
+        const result = await repair.publish(context);
+        process.exitCode = result.code;
+        (result.code === 0 ? console.log : console.error)(result.message);
+      }
+    }
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = error.message.startsWith("Recovery required") ? 3 : 1;
+  }
+} else if (hasFlag("begin")) {
   begin();
 } else if (hasFlag("abort")) {
   abort();

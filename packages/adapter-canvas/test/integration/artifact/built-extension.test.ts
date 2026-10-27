@@ -435,6 +435,17 @@ describe("P0-C built Radius extension artifact", () => {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
     expectMatchingFile(SOURCE_PREVIEW, join(DIST, "assets", "preview.png"));
+    for (const script of [
+      "repair-staging.mjs",
+      "repair-dependencies.mjs",
+      "repair-type-schemas.mjs",
+      "radius-type-schema.mjs",
+      "promote-app-model.mjs"
+    ])
+      expectMatchingFile(
+        join(SOURCE_SKILL, "scripts", script),
+        join(DIST_SKILL, "scripts", script)
+      );
     const radiusTypeResolver = readFileSync(
       join(
         DIST,

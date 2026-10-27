@@ -237,6 +237,7 @@ export interface HostCallbackDependencies {
       | ((input: {
           repo: string;
           branch: string;
+          appFile?: string;
           error: string;
           deployRunUrl: string;
           attemptId: string;

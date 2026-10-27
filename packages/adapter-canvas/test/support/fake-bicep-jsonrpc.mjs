@@ -10,6 +10,7 @@
 // `jsonrpc.json` file in the same directory changes the behavior:
 //
 //   filePaths  list exactly these files instead
+//   additionalFilePaths  append these resolved dependencies to the defaults
 //   raw        write this text instead of a framed response
 //   error      answer with this JSON-RPC error object
 //   notify     send a notification frame before the response
@@ -94,7 +95,10 @@ function respond(request) {
         jsonrpc: "2.0",
         id: request.id,
         result: {
-          filePaths: control.filePaths ?? defaultFilePaths(request.params.path)
+          filePaths: control.filePaths ?? [
+            ...defaultFilePaths(request.params.path),
+            ...(control.additionalFilePaths ?? [])
+          ]
         }
       };
   write(notification + frame(answer));

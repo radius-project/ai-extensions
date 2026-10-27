@@ -29,6 +29,29 @@ describe("DEFAULT_CANVAS_PAGE", () => {
   it("lands a page-less open on the application graph", () => {
     expect(DEFAULT_CANVAS_PAGE).toBe("graph");
   });
+
+  describe("custom deployment repair handoff", () => {
+    it("carries the admitted file through diagnosis, sibling validation, publication and commit", () => {
+      const prompt = deployRepairHandoffPrompt("acme/app", "release/model", {
+        appFile: "apps/custom.bicep",
+        attemptId: "owned-attempt",
+        error: "schema rejected"
+      });
+      expect(prompt).toContain("points at apps/custom.bicep");
+      expect(prompt).toContain('--begin --repair-target "apps/custom.bicep"');
+      expect(prompt).toContain(
+        "validate-bicep.mjs <staged-file> --repair-context <context>"
+      );
+      expect(prompt).toContain(
+        "promote-app-model.mjs --repair-context <context>"
+      );
+      expect(prompt).toContain("commit the repaired apps/custom.bicep");
+      expect(prompt).toContain("unrelated staged changes");
+      expect(prompt).toContain("owned-attempt");
+      expect(prompt).not.toContain(".radius/app.bicep");
+      expect(prompt).not.toContain("radius_generate_app");
+    });
+  });
 });
 
 describe("appBicepHandoffPrompt", () => {
@@ -529,6 +552,49 @@ describe("appModelRadiusCliOutdatedNotice", () => {
 });
 
 describe("deployRepairHandoffPrompt", () => {
+  it.each([true, false])(
+    "stops custom repair when Node is unavailable without losing diagnostics (%s)",
+    (details) => {
+      const prompt = deployRepairHandoffPrompt("fixture/app", "feature", {
+        appFile: "apps/custom.bicep",
+        skillBootstrap: JSON.stringify({
+          nodeCommand: null,
+          instruction: "Install supported Node and stop."
+        }),
+        ...(details ?
+          {
+            error: "BCP037 invalid property",
+            deployRunUrl: "https://example.invalid/run"
+          }
+        : {})
+      });
+      expect(prompt).toContain(
+        "Stop; do not stage, validate, publish, commit or redeploy"
+      );
+      expect(prompt).not.toContain("--repair-target");
+      expect(prompt).toContain(details ? "BCP037" : "no error text");
+      if (details) expect(prompt).toContain("https://example.invalid/run");
+    }
+  );
+  it.each([null, "invalid", {}, { nodeCommand: 42 }, { nodeCommand: "" }])(
+    "rejects malformed custom repair bootstrap %j",
+    (bootstrap) => {
+      expect(() =>
+        deployRepairHandoffPrompt("", "", {
+          appFile: "apps/custom.bicep",
+          skillBootstrap: JSON.stringify(bootstrap)
+        })
+      ).toThrow("Invalid deployment repair skill bootstrap");
+    }
+  );
+  it("uses a supported bootstrap only for the admitted custom file", () => {
+    const prompt = deployRepairHandoffPrompt("", "", {
+      appFile: "apps/custom.bicep",
+      skillBootstrap: '{"nodeCommand":"/fixture/node"}'
+    });
+    expect(prompt).toContain("/fixture/node");
+    expect(prompt).toContain("--repair-target");
+  });
   const failure = {
     error:
       'BCP037: The property "bogus" is not allowed on objects of type Container.',

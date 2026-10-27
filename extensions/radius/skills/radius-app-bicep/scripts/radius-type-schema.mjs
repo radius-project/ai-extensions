@@ -11,6 +11,24 @@ export class DefinitionNotFoundError extends Error {
   }
 }
 
+export function propertySensitivity(schema) {
+  const envelope = schema.properties;
+  const properties = isObject(envelope) ? envelope.properties : undefined;
+  if (!isObject(properties)) return {};
+  const groups = [properties];
+  if (isObject(properties.variants))
+    groups.push(...Object.values(properties.variants));
+  const sensitivity = {};
+  for (const group of groups) {
+    if (!isObject(group) || !isObject(group.properties)) continue;
+    for (const [name, property] of Object.entries(group.properties))
+      sensitivity[name] =
+        sensitivity[name] === true ||
+        (isObject(property) && property.sensitive === true);
+  }
+  return sensitivity;
+}
+
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
