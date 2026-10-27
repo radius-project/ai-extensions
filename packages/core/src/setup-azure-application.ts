@@ -27,7 +27,10 @@ import type {
   AzureApplicationPorts,
   AzureApplication
 } from "./setup-azure-contracts.js";
-import type { ProviderMutationCommandResult } from "./setup-azure-recovery.js";
+import type {
+  ProviderMutationCommandResult,
+  RecoverableMutationResult
+} from "./setup-azure-recovery.js";
 import {
   azureRetryDelayMs,
   isReplicationLagError,
@@ -836,83 +839,75 @@ export async function resolveAzureAutoSetupApplication({
           !(await stopBoundary("before-app-registration-owner-add"))
         )
           return null;
-        const ownerMutation =
-          await ports.recovery.execute<ProviderMutationCommandResult>({
-            kind: "azure_app_owner.add",
-            target: ownerMutationTarget,
-            providerIdempotencyKey: ownerMutationTarget,
-            beforeMutation: () =>
-              stopBoundary("before-app-registration-owner-add"),
-            mutate: async () => {
-              let result: ProviderMutationCommandResult = {
-                code: 1,
-                stdout: "",
-                stderr: "App Registration owner assignment was not attempted."
-              };
-              for (
-                let attempt = 1;
-                attempt <= APP_PROPAGATION_ATTEMPTS;
-                attempt++
-              ) {
-                result = await runAz(
+        let ownerMutation: RecoverableMutationResult<ProviderMutationCommandResult>;
+        for (let attempt = 1; ; attempt++) {
+          ownerMutation =
+            await ports.recovery.execute<ProviderMutationCommandResult>({
+              kind: "azure_app_owner.add",
+              target: ownerMutationTarget,
+              providerIdempotencyKey: ownerMutationTarget,
+              // Stop applies to the logical mutation, not propagation retries.
+              // The recovery port still fences runtime shutdown on every request.
+              beforeMutation:
+                attempt === 1 ?
+                  () => stopBoundary("before-app-registration-owner-add")
+                : undefined,
+              mutate: async () => {
+                const result = await runAz(
                   buildAppOwnerAddArgs({
                     appId: clientId,
                     ownerObjectId: caller.id
                   })
                 );
-                if (
-                  result.code === 0 ||
-                  result.code === "0" ||
-                  isAppOwnerAlreadyAssignedError(result.stderr)
-                ) {
-                  break;
+                return isAppOwnerAlreadyAssignedError(result.stderr) ?
+                    { ...result, code: 0, alreadyAssigned: true }
+                  : result;
+              },
+              accept: (result) => result,
+              acceptedEvidence: (result) =>
+                (result as { alreadyAssigned?: boolean }).alreadyAssigned ?
+                  "Entra reported the Azure CLI identity was already an owner, so this operation added nothing."
+                : null,
+              reconcile: async () => {
+                const owners = await readCreatedAppOwners(clientId, caller.id);
+                if (owners.code !== 0 && owners.code !== "0") {
+                  throw new Error(
+                    owners.stderr ||
+                      owners.stdout ||
+                      "App Registration owners could not be read."
+                  );
                 }
-                if (
-                  !isReplicationLagError(result.stderr || result.stdout) ||
-                  attempt >= APP_PROPAGATION_ATTEMPTS
-                ) {
-                  break;
-                }
-                const delay = azureRetryDelayMs(
-                  result.stderr || result.stdout,
-                  2000 * attempt
-                );
-                if (delay === null) break;
-                await ports.sleep(delay);
+                const ownerIds = parseDirectoryObjectIds(owners.stdout);
+                return ownerIds.includes(caller.id.toLowerCase()) ?
+                    {
+                      state: "applied" as const,
+                      value: { code: 0, stdout: owners.stdout, stderr: "" },
+                      evidence:
+                        "The exact App Registration and Azure CLI owner identity matched."
+                    }
+                  : {
+                      state: "not_applied" as const,
+                      evidence:
+                        "Microsoft Entra confirmed the Azure CLI identity is not an owner."
+                    };
               }
-              return isAppOwnerAlreadyAssignedError(result.stderr) ?
-                  { ...result, code: 0, alreadyAssigned: true }
-                : result;
-            },
-            accept: (result) => result,
-            acceptedEvidence: (result) =>
-              (result as { alreadyAssigned?: boolean }).alreadyAssigned ?
-                "Entra reported the Azure CLI identity was already an owner, so this operation added nothing."
-              : null,
-            reconcile: async () => {
-              const owners = await readCreatedAppOwners(clientId, caller.id);
-              if (owners.code !== 0 && owners.code !== "0") {
-                throw new Error(
-                  owners.stderr ||
-                    owners.stdout ||
-                    "App Registration owners could not be read."
-                );
-              }
-              const ownerIds = parseDirectoryObjectIds(owners.stdout);
-              return ownerIds.includes(caller.id.toLowerCase()) ?
-                  {
-                    state: "applied" as const,
-                    value: { code: 0, stdout: owners.stdout, stderr: "" },
-                    evidence:
-                      "The exact App Registration and Azure CLI owner identity matched."
-                  }
-                : {
-                    state: "not_applied" as const,
-                    evidence:
-                      "Microsoft Entra confirmed the Azure CLI identity is not an owner."
-                  };
-            }
-          });
+            });
+          if (
+            ownerMutation.state !== "not_applied" ||
+            !ownerMutation.result ||
+            !isReplicationLagError(
+              ownerMutation.result.stderr || ownerMutation.result.stdout
+            ) ||
+            attempt >= APP_PROPAGATION_ATTEMPTS
+          )
+            break;
+          const delay = azureRetryDelayMs(
+            ownerMutation.result.stderr || ownerMutation.result.stdout,
+            2000 * attempt
+          );
+          if (delay === null) break;
+          await ports.sleep(delay);
+        }
         if (ownerMutation.state === "cancelled") return null;
         const ownerAdd =
           ownerMutation.state === "applied" ?
@@ -972,78 +967,75 @@ export async function resolveAzureAutoSetupApplication({
           !(await stopBoundary("before-app-registration-tag-update"))
         )
           return null;
-        const tagMutation =
-          await ports.recovery.execute<ProviderMutationCommandResult>({
-            kind: "azure_app_tags.patch",
-            target: tagMutationTarget,
-            providerIdempotencyKey: clientId,
-            beforeMutation: () =>
-              stopBoundary("before-app-registration-tag-update"),
-            mutate: async () => {
-              let result: ProviderMutationCommandResult = {
-                code: 1,
-                stdout: "",
-                stderr: "App Registration tag update was not attempted."
-              };
-              for (
-                let attempt = 1;
-                attempt <= APP_PROPAGATION_ATTEMPTS;
-                attempt++
-              ) {
-                result = await runAz(
+        let tagMutation: RecoverableMutationResult<ProviderMutationCommandResult>;
+        for (let attempt = 1; ; attempt++) {
+          tagMutation =
+            await ports.recovery.execute<ProviderMutationCommandResult>({
+              kind: "azure_app_tags.patch",
+              target: tagMutationTarget,
+              providerIdempotencyKey: clientId,
+              beforeMutation:
+                attempt === 1 ?
+                  () => stopBoundary("before-app-registration-tag-update")
+                : undefined,
+              mutate: () =>
+                runAz(
                   buildAppTagPatchArgs({
                     appId: clientId,
                     tags: provenanceTags
                   })
+                ),
+              accept: (result) => result,
+              reconcile: async () => {
+                const shown = await readCreatedAppTags(
+                  clientId,
+                  provenanceTags
                 );
-                if (result.code === 0 || result.code === "0") break;
-                if (
-                  !isReplicationLagError(result.stderr || result.stdout) ||
-                  attempt >= APP_PROPAGATION_ATTEMPTS
-                ) {
-                  break;
+                if (shown.code !== 0 && shown.code !== "0") {
+                  throw new Error(
+                    shown.stderr ||
+                      shown.stdout ||
+                      "App Registration tags could not be read."
+                  );
                 }
-                const delay = azureRetryDelayMs(
-                  result.stderr || result.stdout,
-                  2000 * attempt
-                );
-                if (delay === null) break;
-                await ports.sleep(delay);
+                const tags = parseAppTags(shown.stdout);
+                if (!tags) {
+                  throw new Error(
+                    "Microsoft Entra returned unreadable App Registration tags."
+                  );
+                }
+                const missing = missingRequiredAppTags(tags, provenanceTags);
+                return missing.length === 0 ?
+                    {
+                      state: "applied" as const,
+                      value: { code: 0, stdout: shown.stdout, stderr: "" },
+                      evidence:
+                        "The exact App Registration carries every Radius operation provenance tag."
+                    }
+                  : {
+                      state: "manual_required" as const,
+                      guidance:
+                        `App Registration "${clientId}" does not carry the exact Radius operation provenance tags. ` +
+                        "Radius will not overwrite or delete it based on display name."
+                    };
               }
-              return result;
-            },
-            accept: (result) => result,
-            reconcile: async () => {
-              const shown = await readCreatedAppTags(clientId, provenanceTags);
-              if (shown.code !== 0 && shown.code !== "0") {
-                throw new Error(
-                  shown.stderr ||
-                    shown.stdout ||
-                    "App Registration tags could not be read."
-                );
-              }
-              const tags = parseAppTags(shown.stdout);
-              if (!tags) {
-                throw new Error(
-                  "Microsoft Entra returned unreadable App Registration tags."
-                );
-              }
-              const missing = missingRequiredAppTags(tags, provenanceTags);
-              return missing.length === 0 ?
-                  {
-                    state: "applied" as const,
-                    value: { code: 0, stdout: shown.stdout, stderr: "" },
-                    evidence:
-                      "The exact App Registration carries every Radius operation provenance tag."
-                  }
-                : {
-                    state: "manual_required" as const,
-                    guidance:
-                      `App Registration "${clientId}" does not carry the exact Radius operation provenance tags. ` +
-                      "Radius will not overwrite or delete it based on display name."
-                  };
-            }
-          });
+            });
+          if (
+            tagMutation.state !== "not_applied" ||
+            !tagMutation.result ||
+            !isReplicationLagError(
+              tagMutation.result.stderr || tagMutation.result.stdout
+            ) ||
+            attempt >= APP_PROPAGATION_ATTEMPTS
+          )
+            break;
+          const delay = azureRetryDelayMs(
+            tagMutation.result.stderr || tagMutation.result.stdout,
+            2000 * attempt
+          );
+          if (delay === null) break;
+          await ports.sleep(delay);
+        }
         if (tagMutation.state === "cancelled") return null;
         const tagPatch =
           tagMutation.state === "applied" ?

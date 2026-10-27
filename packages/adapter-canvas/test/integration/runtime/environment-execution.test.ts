@@ -1044,9 +1044,15 @@ describe("real server and fake SDK runtime ownership", () => {
       "RADIUS_MANAGED",
       "RADIUS_STATE_BACKEND",
       "AZURE_TENANT_ID"
-    ].flatMap((stage) =>
-      ["issued", "prepared"].map((boundary) => [stage, boundary])
-    )
+    ]
+      .flatMap((stage) =>
+        ["issued", "prepared"].map((boundary) => [stage, boundary])
+      )
+      .concat(
+        ["azure-owner", "azure-tags"].flatMap((stage) =>
+          ["issued", "prepared", "delay"].map((boundary) => [stage, boundary])
+        )
+      )
   )(
     "retains the %s %s journal and account through shutdown",
     async (stage, boundary) => {
@@ -1056,6 +1062,12 @@ describe("real server and fake SDK runtime ownership", () => {
       const persisted = deferred();
       const persistGate = deferred();
       const appId = "22222222-2222-4222-8222-222222222222";
+      const callerId = "44444444-4444-4444-8444-444444444444";
+      const azureStage = stage.startsWith("azure");
+      const azureRetry = stage === "azure-owner" || stage === "azure-tags";
+      const rejected = deferred();
+      let azureAttempts = 0;
+      let retryPrepared = false;
       const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
       const variableValues = new Map<string, string>();
       let acknowledged = false;
@@ -1119,19 +1131,33 @@ describe("real server and fake SDK runtime ownership", () => {
       });
       const runAz = vi.fn(async (args: string[]) => {
         const command = args.slice(0, 3).join(" ");
-        if (stage === "azure" && command === "ad app create") {
+        const retryTarget =
+          stage === "azure-owner" ?
+            args.slice(0, 4).join(" ") === "ad app owner add"
+          : stage === "azure-tags" &&
+            args[0] === "rest" &&
+            args.includes("PATCH");
+        if (retryTarget && ++azureAttempts === 1) {
+          rejected.resolve();
+          return { code: 1, stdout: "", stderr: "Directory_ObjectNotFound" };
+        }
+        if ((stage === "azure" && command === "ad app create") || retryTarget) {
           entered.resolve();
           await writeGate.promise;
           acknowledged = true;
-          return success(appId);
+          return success(stage === "azure" ? appId : "");
         }
+        if (azureRetry && command === "ad app create") return success(appId);
+        if (azureRetry && args.slice(0, 4).join(" ") === "ad app owner add")
+          return success();
+        if (azureRetry && args.slice(0, 4).join(" ") === "ad app owner list")
+          return success(callerId);
         if (args.slice(0, 2).join(" ") === "account set") return success();
         if (args.slice(0, 2).join(" ") === "account show")
           return success(
             '{"id":"11111111-1111-4111-8111-111111111111","tenantId":"33333333-3333-4333-8333-333333333333","user":{"type":"user","name":"fixture@example.test"}}'
           );
-        if (command === "ad signed-in-user show")
-          return success("44444444-4444-4444-8444-444444444444");
+        if (command === "ad signed-in-user show") return success(callerId);
         if (command === "ad app list") return success("[]");
         throw new Error(`Unexpected Azure command: ${args.join(" ")}`);
       });
@@ -1140,7 +1166,16 @@ describe("real server and fake SDK runtime ownership", () => {
           if (command !== "az")
             throw new Error(`Unexpected executable: ${command}`);
           void runAz(args).then(
-            (result) => callback(null, result.stdout, result.stderr),
+            (result) =>
+              callback(
+                result.code === 0 ?
+                  null
+                : Object.assign(new Error(result.stderr), {
+                    code: result.code
+                  }),
+                result.stdout,
+                result.stderr
+              ),
             (error: unknown) =>
               callback(
                 error instanceof Error ? error : new Error(String(error)),
@@ -1208,11 +1243,9 @@ describe("real server and fake SDK runtime ownership", () => {
       });
       op.context.githubLogin = "saved-account";
       op.currentStage =
-        stage === "azure" ?
-          STAGE_AUTHORIZE_IDENTITY
-        : STAGE_CONFIGURE_ENVIRONMENT;
+        azureStage ? STAGE_AUTHORIZE_IDENTITY : STAGE_CONFIGURE_ENVIRONMENT;
       op.request = {
-        needsAzureCredentials: stage === "azure",
+        needsAzureCredentials: azureStage,
         azure: {
           repo: op.repo,
           environment: op.environment,
@@ -1248,20 +1281,25 @@ describe("real server and fake SDK runtime ownership", () => {
         const mutation = op.providerRecovery.mutations.at(-1);
         const targetMutation =
           stage === "azure" ? mutation?.kind === "azure_application.create"
+          : stage === "azure-owner" ? mutation?.kind === "azure_app_owner.add"
+          : stage === "azure-tags" ? mutation?.kind === "azure_app_tags.patch"
           : stage === "environment" ?
             mutation?.kind === "github_environment.put"
           : mutation?.kind === "github_environment_variable.put" &&
             mutation.intent?.name === stage;
         if (
           boundary === "prepared" &&
+          (!azureRetry || azureAttempts === 1) &&
           targetMutation &&
           mutation?.status === "prepared"
         ) {
+          retryPrepared = true;
           entered.resolve();
           await writeGate.promise;
         }
         if (
           boundary === "prepared" &&
+          (!azureRetry || retryPrepared) &&
           targetMutation &&
           mutation?.status === "not_applied"
         ) {
@@ -1275,6 +1313,8 @@ describe("real server and fake SDK runtime ownership", () => {
       });
       let completed = Promise.resolve();
       try {
+        if (azureRetry)
+          vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
         runtime.setupExecution.scheduleEnvironmentOperation(op);
         completed = new Promise<void>((resolve) => {
           const stop = owner.onEnvironmentTasksSettled(undefined, () => {
@@ -1282,7 +1322,17 @@ describe("real server and fake SDK runtime ownership", () => {
             resolve();
           });
         });
-        await Promise.race([entered.promise, completed]);
+        if (azureRetry) {
+          await Promise.race([rejected.promise, completed]);
+          await vi.advanceTimersByTimeAsync(0);
+          expect(op.providerRecovery.mutations.at(-1)).toMatchObject({
+            status: "not_applied",
+            evidence: "Directory_ObjectNotFound"
+          });
+          if (boundary !== "delay") await vi.advanceTimersByTimeAsync(2000);
+        }
+        if (boundary !== "delay")
+          await Promise.race([entered.promise, completed]);
         const diagnostics = JSON.stringify({
           failure: op.failure,
           gh: run.mock.calls,
@@ -1301,9 +1351,11 @@ describe("real server and fake SDK runtime ownership", () => {
           fetch: ghcr.calls.length
         };
         writeGate.resolve();
-        await Promise.race([persisted.promise, completed]);
+        if (boundary === "delay") await vi.advanceTimersByTimeAsync(2000);
+        else await Promise.race([persisted.promise, completed]);
         expect(acknowledged).toBe(boundary === "issued");
-        expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+        if (boundary !== "delay")
+          expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         persistGate.resolve();
         await completed;
         expect(op.endedAt).toBeNull();
@@ -1322,6 +1374,8 @@ describe("real server and fake SDK runtime ownership", () => {
             expect.objectContaining({
               kind:
                 stage === "azure" ? "azure_application.create"
+                : stage === "azure-owner" ? "azure_app_owner.add"
+                : stage === "azure-tags" ? "azure_app_tags.patch"
                 : stage === "environment" ? "github_environment.put"
                 : "github_environment_variable.put",
               status: boundary === "issued" ? "confirmed" : "not_applied"
@@ -1330,7 +1384,7 @@ describe("real server and fake SDK runtime ownership", () => {
         );
         if (boundary === "issued")
           expect(snapshots.at(-1)?.setupArtifacts).toMatchObject(
-            stage === "azure" ?
+            azureStage ?
               {
                 azureApp: { state: "created", origin: "this_operation", appId }
               }
@@ -1348,6 +1402,17 @@ describe("real server and fake SDK runtime ownership", () => {
                 ])
               }
           );
+        if (azureRetry) {
+          expect(azureAttempts).toBe(boundary === "issued" ? 2 : 1);
+          expect(op.providerRecovery.mutations.at(-1)).toMatchObject({
+            initialDiagnostic: expect.stringContaining(
+              "Directory_ObjectNotFound"
+            )
+          });
+          expect(
+            op.providerRecovery.mutations.at(-1)?.reconcileAttempts ?? 0
+          ).toBe(0);
+        }
         expect(runtime.servers.size).toBe(0);
         const released = await coordinator.withSelectedAccount(
           executor.login,

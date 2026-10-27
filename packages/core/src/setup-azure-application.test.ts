@@ -349,11 +349,16 @@ describe("Azure application policy ports", () => {
         return command("Directory_ObjectNotFound", 1);
       return run(args);
     };
-    test.application.recovery.execute = async (mutation) => ({
-      state: "applied",
-      value: mutation.accept(await mutation.mutate()),
-      recovered: false
-    });
+    test.application.recovery.execute = async (mutation) => {
+      const result = await mutation.mutate();
+      return result.code === 0 ?
+          {
+            state: "applied",
+            value: mutation.accept(result),
+            recovered: false
+          }
+        : { state: "not_applied", result };
+    };
     expect(await resolveAzureAutoSetupApplication(facts)).toMatchObject({
       clientId,
       state: "created"

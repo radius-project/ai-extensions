@@ -10,4 +10,6 @@ Shutdown during recovery-record persistence prevents unsent Azure, GitHub enviro
 
 Shutdown before rereading an unresolved request preserves its original evidence and reconciliation-attempt count instead of consuming retries or escalating to manual recovery.
 
+Azure owner and provenance-tag propagation retries stop issuing requests after shutdown. Rejected attempts retain their diagnostics, while user Stop still completes the current logical mutation.
+
 Verification dispatch and automatic run discovery stop further reads and monitoring after shutdown, without turning a late response into a setup failure. Sent requests retain their actual outcome; uncertain dispatches require inspection before another run can be sent, including after restart. Storage failures remain explicit.
