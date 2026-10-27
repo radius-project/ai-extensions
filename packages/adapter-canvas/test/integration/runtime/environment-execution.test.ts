@@ -135,6 +135,59 @@ afterEach(() => {
 });
 
 describe("real server and fake SDK runtime ownership", () => {
+  it("does not repeat another operation's provider recovery when held admission releases", async () => {
+    const runtime = await composition();
+    const entered = deferred();
+    const save = deferred();
+    const register = vi.spyOn(runtime.accountContext, "registerExecutor");
+    let writes = 0;
+    vi.spyOn(operations, "persist").mockImplementation(async () => {
+      if (++writes === 1) {
+        entered.resolve();
+        await save.promise;
+      }
+    });
+    try {
+      await runtime.canvas.open(context());
+      const original = stoppedSetup();
+      operations.put(original);
+      const pending = runtime.server.operationControl({
+        operationId: original.operationId,
+        instanceId: "panel",
+        command: "continue"
+      });
+      await entered.promise;
+      const other = createOperation({
+        operationId: "other-recovery",
+        repo: "fixture/other",
+        environment: "dev",
+        provider: "azure"
+      });
+      other.recoveryState = "provider_reconciliation_pending";
+      operations.put(other);
+      await runtime.server.stopServer("panel", true);
+      await runtime.canvas.open(context());
+      await runtime.entered.promise;
+      expect(register).toHaveBeenCalledExactlyOnceWith(
+        other.operationId,
+        runtime.executor
+      );
+      save.resolve();
+      expect(await pending).toMatchObject({
+        status: 409,
+        body: { code: "operation-context-changed" }
+      });
+      await runtime.settle();
+      expect(register).toHaveBeenCalledExactlyOnceWith(
+        other.operationId,
+        runtime.executor
+      );
+      expect(runtime.owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+    } finally {
+      save.resolve();
+      await runtime.cleanup();
+    }
+  });
   it.each(["continue", "deletion"] as const)(
     "refuses %s on coordinator replacement while recovery waits for held admission",
     async (command) => {

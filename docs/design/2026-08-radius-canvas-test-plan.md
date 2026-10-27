@@ -61,6 +61,8 @@ Cancellation is not a separate implementation phase. Add each test at the lowest
 
 The shared-control admission correction adds CN-05/CN-07 evidence in core/service unit tests, production-coordinator tests and fake-SDK runtime integration: held save success/rejection, operation/target and coordinator replacement, deferred recovery, ownership-safe restoration, provisional-token and repository-lock restoration, corrective-save failure, and hydration after successful correction. Retained HTTP integration checks `409 operation-context-changed` with JSON/no-store framing. Recovery remains blocked in-process after uncertain undo; failed or interrupted corrective persistence does not change existing restart semantics. The [migration inventory](./2026-09-github-radius-migration-inventory.md#command-admission-review) records this bounded guarantee rather than claiming crash safety or real-host qualification.
 
+The deferred-recovery follow-up adds a two-operation runtime regression: releasing X's admission cannot schedule a second provider-reconciliation task for Y. Owner tests verify operation-specific callbacks and independent claim release; coordinator tests retain current-record relookup and refuse removed, shutdown or superseded contexts.
+
 GitHub authentication follows the same approach rather than becoming a separate phase. Phase 5 covers injected `GH_TOKEN` and `GITHUB_TOKEN`, stored `gh` accounts, precedence, explicit account selection, required scopes, package credentials, redaction, and failures. Phase 6 covers the identity and account-selection UI. Phase 7 repeats the fake-credential matrix on supported operating systems. Phase 8 verifies a real secure credential store with disposable accounts and cleanup.
 
 ## Standard local check
