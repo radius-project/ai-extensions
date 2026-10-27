@@ -6752,6 +6752,8 @@ test.describe("Radius Canvas in Chromium", () => {
       });
     });
     await gotoCanvas(page, canvas, "planned");
+    // Initial planning reloads the document before rendering the fixture graph.
+    await expect(page.locator(".rad-node")).toHaveCount(2);
     await expectNoWcagViolations(page);
     // Load-bearing, not a duplicated line: the first load and the axe scan run
     // on a live clock and consume an unpredictable share of the 5s heartbeat
