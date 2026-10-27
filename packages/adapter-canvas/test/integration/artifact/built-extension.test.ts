@@ -1505,7 +1505,21 @@ describe("P0-C built Radius extension artifact", () => {
   });
 
   it("installs every managed file without deleting unrelated root files", () => {
-    const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
+    const sharedArtifactSnapshot = () =>
+      relativeFilesUnder(DIST).map((file) => {
+        const stat = statSync(join(DIST, file), { bigint: true });
+        return {
+          file,
+          ino: stat.ino,
+          size: stat.size,
+          mtimeNs: stat.mtimeNs,
+          ctimeNs: stat.ctimeNs
+        };
+      });
+    const sharedArtifactBefore = sharedArtifactSnapshot();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
+    const installDir = join(workspaceRoot, "installed");
+    const isolatedDist = join(workspaceRoot, ".artifacts", "radius");
     const installPath = join(installDir, "extension.mjs");
     const unrelatedRootFile = join(installDir, "unrelated-root.txt");
     const staleWorkflow = join(installDir, "workflows", "removed.yml");
@@ -1516,41 +1530,48 @@ describe("P0-C built Radius extension artifact", () => {
       "REMOVED.md"
     );
     try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      mkdirSync(installDir);
       writeFileSync(unrelatedRootFile, "keep root\n");
       mkdirSync(dirname(staleWorkflow), { recursive: true });
       writeFileSync(staleWorkflow, "stale\n");
       mkdirSync(dirname(staleSkill), { recursive: true });
       writeFileSync(staleSkill, "stale\n");
 
-      execFileSync(process.execPath, ["build.mjs", "--install"], {
-        cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
+      const result = spawnSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
         env: {
           ...process.env,
+          RADIUS_SOURCE_REF: SOURCE_REF,
           RADIUS_CANVAS_INSTALL_PATH: installPath
-        },
-        stdio: "pipe"
+        }
       });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("[canvas] installed");
 
       const managedFiles: Array<readonly [string, string]> = [
         [ARTIFACT_RELATIVE_PATH, "extension.mjs"],
         [`${ARTIFACT_RELATIVE_PATH}.map`, "extension.mjs.map"],
         ["THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES.txt"],
-        ...relativeFilesUnder(join(DIST, "workflows")).map(
+        ...relativeFilesUnder(join(isolatedDist, "workflows")).map(
           (filePath) =>
             [`workflows/${filePath}`, `workflows/${filePath}`] as const
         ),
-        ...relativeFilesUnder(join(DIST, "skills")).map(
+        ...relativeFilesUnder(join(isolatedDist, "skills")).map(
           (filePath) => [`skills/${filePath}`, `skills/${filePath}`] as const
         )
       ];
       for (const [source, installed] of managedFiles) {
         expectMatchingFile(
-          join(DIST, ...source.split("/")),
+          join(isolatedDist, ...source.split("/")),
           join(installDir, ...installed.split("/"))
         );
       }
       const builtPackage = JSON.parse(
-        readFileSync(join(DIST, "package.json"), "utf8")
+        readFileSync(join(isolatedDist, "package.json"), "utf8")
       ) as Record<string, unknown>;
       expect(
         JSON.parse(readFileSync(join(installDir, "package.json"), "utf8"))
@@ -1558,8 +1579,9 @@ describe("P0-C built Radius extension artifact", () => {
       expect(readFileSync(unrelatedRootFile, "utf8")).toBe("keep root\n");
       expect(existsSync(staleWorkflow)).toBe(false);
       expect(existsSync(staleSkill)).toBe(false);
+      expect(sharedArtifactSnapshot()).toEqual(sharedArtifactBefore);
     } finally {
-      rmSync(installDir, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
     }
   });
 
