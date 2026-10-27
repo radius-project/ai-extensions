@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { RADIUS_REF } from "@radius-project/core";
 import { createHarness } from "@radius-project/adapter-shared/test-support/ghcr-bootstrap";
 import * as gh from "../../../src/gh.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
@@ -1372,6 +1374,27 @@ describe("real server and fake SDK runtime ownership", () => {
   )(
     "preserves unresolved $provider evidence at $attempts attempts when shutdown prevents reread",
     async ({ provider, attempts }) => {
+      vi.spyOn(gh, "fetchFileFromRepoResult").mockImplementation(
+        async (repo, path, ref) => {
+          if (
+            repo !== "radius-project/ai-extensions" ||
+            path !== ".github/extension/verify-azure.yml" ||
+            ref !== RADIUS_REF
+          )
+            throw new Error(`Unexpected template read: ${repo}:${ref}:${path}`);
+          return {
+            content: readFileSync(
+              new URL(
+                "../../../../../.github/extension/verify-azure.yml",
+                import.meta.url
+              ),
+              "utf8"
+            ),
+            error: null,
+            status: 200
+          };
+        }
+      );
       const owner = createEnvironmentExecutionOwner();
       const entered = deferred();
       const gate = deferred();
