@@ -16,10 +16,11 @@ The [Copilot CLI Modeling](../../.github/workflows/copilot-cli-modeling.yml) wor
    - The agent loaded the `radius-app-bicep` skill from the `radius` plugin. A project skill with the same name does not count.
    - `.radius/app.bicep` exists and is not empty.
    - `.radius/app.origin.json` records the hash of that `app.bicep`. The skill writes this record when it publishes a model, so an `app.bicep` that the agent writes outside the skill fails.
+   - The session events, `app.bicep`, and `app.origin.json` are regular files. The run does not read a symbolic link or a file under one.
 
 The summary shows the model calls, tokens, and durations, but they do not change the result.
 
-These checks find a run that does not produce a model. They do not stop an agent that forges the evidence. The agent has `sudo` on the runner, so it can write a skill event or an origin record itself.
+These checks find a run that does not produce a model. They do not stop an agent that forges the evidence. The agent has `sudo` on the runner, so it can write a skill event or an origin record itself. It can also change the tools and action code that later steps of its job run. [#1114](https://github.com/radius-project/ai-extensions/issues/1114) tracks running the session in a container.
 
 The CLI runs with a disposable `HOME`. The run removes variables with secret names (such as `*TOKEN*` and `*SECRET*`) from the CLI's environment, because the agent runs commands in third-party sample code. Only the session process gets the Copilot token, and `--secret-env-vars` keeps the token out of the agent's shell and MCP server environments.
 
@@ -49,7 +50,7 @@ The workflow is a daily regression check, so a failure must mean that modeling b
 
 - The CLI install step has a 5-minute timeout. npm retries failed downloads.
 - The case checkout retries `git fetch` three times and stops a transfer that stays below 1 KB/s for 60 seconds.
-- The harness stops the session after 30 minutes, before the 40-minute step timeout, so it always writes `summary.md`.
+- The checkout, the plugin install, and the session must finish in 35 minutes, and the session in 30 minutes. Then the harness stops the session and writes `summary.md` before the 45-minute step timeout.
 
 The harness does not retry a session. A session that ends without `.radius/app.bicep` is the failure this check exists to find.
 
@@ -83,7 +84,7 @@ Each case uploads the `copilot-cli-modeling-<case>` artifact with these files:
 - `logs/`: the CLI output and the Copilot runtime logs.
 - `radius/`: if the agent wrote `.radius/app.bicep`, the regular files in the `.radius` directory. The run skips symbolic links.
 
-The run removes GitHub tokens and the Copilot token from every file it writes and from the job summary.
+The run removes GitHub tokens and the Copilot token from every text file it writes and from the job summary. It copies a binary file without changes only if the file has no token. For a gzip file, such as a `.tgz` package, the data in it must also have no token. The job log names each file that the run skips.
 
 ## Run it locally
 

@@ -121,9 +121,9 @@ jobs:
           copilot --version
 
       - name: Model the sample with Copilot CLI
-        # Longer than the harness's 30-minute session timeout, so the harness
-        # gives up first and writes its summary.
-        timeout-minutes: 40
+        # Longer than the harness's 35-minute run limit, so the harness stops
+        # the session first and writes its summary.
+        timeout-minutes: 45
         env:
           COPILOT_GITHUB_TOKEN: ${{ github.token }}
           CASE: ${{ matrix.case }}

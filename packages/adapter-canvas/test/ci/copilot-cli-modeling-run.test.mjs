@@ -1,8 +1,11 @@
+import { execFileSync } from "node:child_process";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   symlink,
   writeFile
@@ -10,11 +13,12 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import {
   DATASET_PROMPT,
   MODELING_SKILL,
+  RUN_TIME_LIMIT_MS,
   cliVersionOf,
   collectEvidence,
   copilotArgs,
@@ -23,6 +27,7 @@ import {
   modelingEnvironment,
   outcomeFailure,
   parseRunOptions,
+  runModeling,
   summaryMarkdown,
   writeSummary
 } from "../../../../scripts/copilot-cli-modeling/run-modeling.mjs";
@@ -51,7 +56,10 @@ const origin = (model) => JSON.stringify({ appBicepHash: hashAppBicep(model) });
 const temporaryDirectories = [];
 
 async function temporaryDirectory() {
-  const directory = await mkdtemp(path.join(tmpdir(), "copilot-cli-modeling-"));
+  // A real path, because the run reads evidence only through real paths.
+  const directory = await realpath(
+    await mkdtemp(path.join(tmpdir(), "copilot-cli-modeling-"))
+  );
   temporaryDirectories.push(directory);
 
   return directory;
@@ -77,12 +85,11 @@ describe("run options", () => {
 
   const env = { COPILOT_GITHUB_TOKEN: "ghs_x" };
 
-  it("uses the CLI's default model and effort and a home inside the work directory", () => {
+  it("uses the CLI's default model and effort", () => {
     expect(parseRunOptions(argv, env)).toMatchObject({
       model: undefined,
       reasoningEffort: undefined,
-      token: "ghs_x",
-      home: path.join(path.resolve("/t/work"), "home")
+      token: "ghs_x"
     });
     expect(
       parseRunOptions([...argv, "--model", " ", "--reasoning-effort", " "], env)
@@ -424,7 +431,9 @@ describe("the run output", () => {
       sessionId: "s1",
       session: { skills: [`radius:${MODELING_SKILL}`] },
       appBicep: model,
-      appOrigin: origin(model)
+      appOrigin: origin(model),
+      refused: [],
+      skipped: [`.radius/link.txt: not a regular file`]
     });
     expect((await readdir(outputDir, { recursive: true })).sort()).toEqual(
       [
@@ -465,7 +474,9 @@ describe("the run output", () => {
       sessionId: undefined,
       session: undefined,
       appBicep: undefined,
-      appOrigin: undefined
+      appOrigin: undefined,
+      refused: [],
+      skipped: []
     });
   });
 
@@ -508,6 +519,184 @@ describe("the run output", () => {
     expect(await readFile(stepSummaryFile, "utf8")).toMatch(
       /^earlier\n## Copilot CLI modeling run/
     );
+  });
+});
+
+// A stand-in for Copilot CLI. Only the session may get the token. The session
+// records a skill event, prints the token, and then acts as FAKE_COPILOT_MODE
+// says.
+const FAKE_COPILOT = `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
+const [command] = process.argv.slice(2);
+const token = process.env.COPILOT_GITHUB_TOKEN;
+if (command === "--version" || command === "plugin") {
+  if (token) {
+    console.error("The token reached copilot " + command + ".");
+    process.exit(9);
+  }
+  if (command === "--version") console.log("GitHub Copilot CLI 1.0.99-2.");
+  process.exit(0);
+}
+if (!token) process.exit(8);
+const sessionDir = path.join(process.env.HOME, ".copilot", "session-state", "s1");
+fs.mkdirSync(sessionDir, { recursive: true });
+fs.writeFileSync(
+  path.join(sessionDir, "events.jsonl"),
+  JSON.stringify({ type: "skill.invoked", data: { name: "radius-app-bicep", pluginName: "radius" } }) + "\\n"
+);
+console.log("token " + token);
+const mode = process.env.FAKE_COPILOT_MODE;
+if (mode === "exit") process.exit(3);
+if (mode === "hang") {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  fs.writeFileSync(process.env.FAKE_COPILOT_PID_FILE, String(child.pid));
+  setInterval(() => {}, 1000);
+} else {
+  fs.mkdirSync(".radius");
+  fs.writeFileSync(".radius/app.origin.json", process.env.FAKE_APP_ORIGIN);
+  if (mode === "link") fs.symlinkSync(process.env.FAKE_LINK_TARGET, ".radius/app.bicep");
+  else fs.writeFileSync(".radius/app.bicep", process.env.FAKE_APP_BICEP);
+}
+`;
+
+describe.skipIf(process.platform === "win32")("a modeling run", () => {
+  const TOKEN = "seeded-token-value";
+  const MODEL = "extension radius\n";
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** A case whose GitHub URL git reads from a local repository. */
+  async function setUp(mode) {
+    const root = await realpath(await temporaryDirectory());
+    const source = path.join(root, "source");
+    const git = (...args) =>
+      execFileSync(
+        "git",
+        ["-c", "user.name=t", "-c", "user.email=t@t", "-C", source, ...args],
+        { encoding: "utf8" }
+      ).trim();
+    await mkdir(source);
+    git("init", "-q");
+    await writeFile(path.join(source, "main.go"), "package main\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "app");
+    const caseFile = path.join(root, "case.yaml");
+    await writeFile(
+      caseFile,
+      `source:\n  repo: https://github.com/fake/app\n  commit: ${git("rev-parse", "HEAD")}\n`
+    );
+    const pluginDir = path.join(root, "plugin");
+    await mkdir(pluginDir);
+    await writeFile(path.join(pluginDir, "plugin.json"), '{"name":"radius"}');
+    const bin = path.join(root, "bin");
+    await mkdir(bin);
+    await writeFile(path.join(bin, "copilot"), FAKE_COPILOT);
+    await chmod(path.join(bin, "copilot"), 0o755);
+    const outside = path.join(root, "outside.bicep");
+    await writeFile(outside, "outside the sample\n");
+    const pidFile = path.join(root, "grandchild.pid");
+
+    for (const [name, value] of Object.entries({
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      // CI sets it, and the run must not write to the real job summary.
+      GITHUB_STEP_SUMMARY: "",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `url.file://${source}.insteadOf`,
+      GIT_CONFIG_VALUE_0: "https://github.com/fake/app",
+      FAKE_COPILOT_MODE: mode,
+      FAKE_COPILOT_PID_FILE: pidFile,
+      FAKE_APP_BICEP: MODEL,
+      FAKE_APP_ORIGIN: origin(MODEL),
+      FAKE_LINK_TARGET: outside
+    }))
+      vi.stubEnv(name, value);
+
+    return {
+      pidFile,
+      outputDir: path.join(root, "out"),
+      options: {
+        caseFile,
+        pluginDir,
+        workDir: path.join(root, "work"),
+        outputDir: path.join(root, "out"),
+        model: "model-a",
+        reasoningEffort: "medium",
+        token: TOKEN
+      }
+    };
+  }
+
+  const isRunning = (pid) => {
+    try {
+      process.kill(pid, 0);
+
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it("passes when the skill publishes app.bicep, and keeps the token out of the output", async () => {
+    const { options, outputDir } = await setUp("publish");
+
+    expect(await runModeling(options)).toMatchObject({
+      result: "succeeded",
+      cliVersion: "1.0.99-2",
+      sessionId: "s1",
+      skills: [`radius:${MODELING_SKILL}`],
+      appBicepWritten: true
+    });
+    expect(
+      await readFile(path.join(outputDir, "radius", "app.bicep"), "utf8")
+    ).toBe(MODEL);
+    const output = await readFile(
+      path.join(outputDir, "logs", "copilot-output.log"),
+      "utf8"
+    );
+    expect(output).toBe("token [REDACTED]\n");
+  });
+
+  it("fails with the CLI's exit code", async () => {
+    const { options } = await setUp("exit");
+
+    expect(await runModeling(options)).toMatchObject({
+      result: "failed",
+      failure: expect.stringContaining("Copilot CLI exited with code 3.")
+    });
+  });
+
+  it("stops the session and the processes it started at the run's time limit", async () => {
+    const { options, outputDir, pidFile } = await setUp("hang");
+
+    const summary = await runModeling({ ...options, runTimeLimitMs: 4000 });
+
+    expect(summary).toMatchObject({
+      result: "failed",
+      failure: expect.stringMatching(/^The session did not finish in \d s\.$/)
+    });
+    const grandchild = Number(await readFile(pidFile, "utf8"));
+    await expect.poll(() => isRunning(grandchild)).toBe(false);
+    expect(
+      await readFile(path.join(outputDir, "summary.md"), "utf8")
+    ).toContain("did not finish");
+  }, 20_000);
+
+  it("refuses an app.bicep that is a symbolic link", async () => {
+    const { options, outputDir } = await setUp("link");
+
+    const summary = await runModeling(options);
+
+    expect(summary).toMatchObject({
+      result: "failed",
+      failure: expect.stringContaining("refused to read .radius/app.bicep")
+    });
+    expect(
+      await readFile(path.join(outputDir, "summary.md"), "utf8")
+    ).not.toContain("outside the sample");
   });
 });
 
@@ -664,9 +853,11 @@ describe("the Copilot CLI Modeling workflow", () => {
     const modeling = step(job, "Model the sample with Copilot CLI")[
       "timeout-minutes"
     ];
-    // The harness stops the session after 30 minutes and must give up before
-    // the step does. The job outlasts both steps, so the upload runs.
-    expect(modeling).toBeGreaterThan(30);
+    // The harness must stop the session and write the summary before the
+    // step times out. The job outlasts both steps, so the upload runs.
+    expect(modeling * 60_000).toBeGreaterThanOrEqual(
+      RUN_TIME_LIMIT_MS + 5 * 60_000
+    );
     expect(job["timeout-minutes"]).toBeGreaterThan(install + modeling);
   });
 });

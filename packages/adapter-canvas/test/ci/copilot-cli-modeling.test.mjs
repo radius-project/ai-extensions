@@ -1,6 +1,14 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -8,7 +16,10 @@ import {
   PLUGIN_SOURCE,
   stageMarketplace
 } from "../../../../scripts/copilot-cli-modeling/marketplace.mjs";
-import { redactSecrets } from "../../../../scripts/copilot-cli-modeling/redact.mjs";
+import {
+  copyRedactedDirectory,
+  redactSecrets
+} from "../../../../scripts/copilot-cli-modeling/redact.mjs";
 import {
   checkoutCommands,
   excludeTargets,
@@ -190,6 +201,46 @@ describe("redactSecrets", () => {
 
   it("ignores secrets too short to redact safely", () => {
     expect(redactSecrets("abc def", ["abc"])).toBe("abc def");
+  });
+});
+
+describe("copyRedactedDirectory", () => {
+  it("copies binary files byte for byte and skips any that may hold a secret", async () => {
+    const root = await temporaryDirectory();
+    const from = path.join(root, "from");
+    const to = path.join(root, "to");
+    await mkdir(from);
+    const secret = "my-secret-value";
+
+    const files = {
+      "text.txt": Buffer.from(`\uFEFFa ${secret}\n`),
+      "image.bin": Buffer.from([0x00, 0xff, 0xfe, 0x80, 0x0a]),
+      "package.tgz": gzipSync("plain"),
+      "secret.bin": Buffer.concat([Buffer.from([0xff]), Buffer.from(secret)]),
+      "secret.tgz": gzipSync(`a ${secret}`),
+      "token.tgz": gzipSync(`ghs_${"a".repeat(36)}`),
+      "truncated.tgz": gzipSync("plain").subarray(0, 12)
+    };
+
+    for (const [name, bytes] of Object.entries(files))
+      await writeFile(path.join(from, name), bytes);
+
+    expect((await copyRedactedDirectory(from, to, [secret])).sort()).toEqual(
+      ["secret.bin", "secret.tgz", "token.tgz", "truncated.tgz"].map(
+        (name) => `${name}: binary, and it may hold a secret`
+      )
+    );
+    expect((await readdir(to)).sort()).toEqual([
+      "image.bin",
+      "package.tgz",
+      "text.txt"
+    ]);
+    expect(await readFile(path.join(to, "text.txt"), "utf8")).toBe(
+      "\uFEFFa [REDACTED]\n"
+    );
+
+    for (const name of ["image.bin", "package.tgz"])
+      expect(await readFile(path.join(to, name))).toEqual(files[name]);
   });
 });
 

@@ -20,6 +20,7 @@ import {
 } from "./marketplace.mjs";
 import { isJsonObject, parseJson } from "./json.mjs";
 import {
+  BINARY_WITH_SECRET,
   copyRedacted,
   copyRedactedDirectory,
   redactSecrets
@@ -44,8 +45,18 @@ export const TOKEN_VARIABLE = "COPILOT_GITHUB_TOKEN";
 
 /** The plugin skill that models the app. A passing run must load it. */
 export const MODELING_SKILL = "radius-app-bicep";
+
+/**
+ * The time from the start of the run to the end of the session, including
+ * the checkout and the plugin install. The workflow's step timeout must leave
+ * time after it to stop the agent and write the summary.
+ */
+export const RUN_TIME_LIMIT_MS = 35 * 60_000;
 const SESSION_TIMEOUT_MS = 30 * 60_000;
 const COMMAND_TIMEOUT_MS = 5 * 60_000;
+
+/** The time between asking the session to stop and killing it. */
+const STOP_GRACE_MS = 20_000;
 
 /**
  * Names of variables that must not reach the CLI. Its agent runs shell
@@ -114,7 +125,6 @@ export function parseRunOptions(argv, env) {
     outputDir,
     model: values.model?.trim() || undefined,
     reasoningEffort: values["reasoning-effort"]?.trim() || undefined,
-    home: path.join(workDir, "home"),
     token
   };
 }
@@ -301,13 +311,13 @@ function describeError(cause) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** Runs a command to completion, or stops it after `COMMAND_TIMEOUT_MS`. */
-function run(command, args, env) {
+/** Runs a command to completion, or stops it after `timeoutMs`. */
+function run(command, args, { env, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       env,
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: COMMAND_TIMEOUT_MS
+      timeout: timeoutMs
     });
     let stdout = "";
     let stderr = "";
@@ -321,8 +331,8 @@ function run(command, args, env) {
 }
 
 /** Runs a command and returns its output. Throws if the command fails. */
-async function check(command, args, env) {
-  const result = await run(command, args, env);
+async function check(command, args, options) {
+  const result = await run(command, args, options);
 
   if (result.code !== 0)
     throw new Error(
@@ -337,7 +347,7 @@ async function check(command, args, env) {
  * output to `logFile`. When the session ends or times out, the run stops the
  * whole group, so no process that the agent started outlives the run.
  */
-async function runSession(args, { cwd, env, logFile }) {
+async function runSession(args, { cwd, env, logFile, timeLimitMs }) {
   const out = await fs.open(logFile, "w");
 
   try {
@@ -357,12 +367,13 @@ async function runSession(args, { cwd, env, logFile }) {
     };
 
     let timedOut = false;
+    let killTimer;
 
     const timer = setTimeout(() => {
       timedOut = true;
       signal("SIGTERM");
-      setTimeout(() => signal("SIGKILL"), 20_000).unref();
-    }, SESSION_TIMEOUT_MS);
+      killTimer = setTimeout(() => signal("SIGKILL"), STOP_GRACE_MS);
+    }, timeLimitMs);
 
     try {
       const code = await new Promise((resolve, reject) => {
@@ -373,6 +384,7 @@ async function runSession(args, { cwd, env, logFile }) {
       return { code, timedOut };
     } finally {
       clearTimeout(timer);
+      clearTimeout(killTimer);
       signal("SIGKILL");
     }
   } finally {
@@ -408,9 +420,10 @@ function log(message) {
 /**
  * Makes the trial checkout that the dataset protocol describes.
  *
+ * @param timeoutMs The time that the next git command may take.
  * @returns The real path of the session root.
  */
-async function prepareSample(sample, checkoutDir, env) {
+async function prepareSample(sample, checkoutDir, env, timeoutMs) {
   // A transfer slower than 1 KB/s for 60 s fails, so a stalled fetch is
   // retried instead of using up the job timeout.
   const gitEnv = {
@@ -419,24 +432,23 @@ async function prepareSample(sample, checkoutDir, env) {
     GIT_HTTP_LOW_SPEED_TIME: "60"
   };
 
+  const git = (args) =>
+    check("git", args, { env: gitEnv, timeoutMs: timeoutMs() });
+
   for (const args of checkoutCommands(sample, checkoutDir)) {
     if (!args.includes("fetch")) {
-      await check("git", args, gitEnv);
+      await git(args);
       continue;
     }
 
-    await retry(() => check("git", args, gitEnv), {
+    await retry(() => git(args), {
       attempts: 3,
       delayMs: 10_000,
       onRetry: (error, attempt) =>
         log(`Attempt ${attempt} of git fetch failed: ${describeError(error)}`)
     });
   }
-  const head = await check(
-    "git",
-    ["-C", checkoutDir, "rev-parse", "HEAD"],
-    env
-  );
+  const head = await git(["-C", checkoutDir, "rev-parse", "HEAD"]);
 
   if (head !== sample.commit)
     throw new Error(`The checkout is at ${head}, not ${sample.commit}.`);
@@ -459,6 +471,7 @@ async function prepareSample(sample, checkoutDir, env) {
 
 export async function runModeling(options) {
   const startedAt = Date.now();
+  const runTimeLimitMs = options.runTimeLimitMs ?? RUN_TIME_LIMIT_MS;
   const secrets = [options.token];
   const sample = parseCaseYaml(await fs.readFile(options.caseFile, "utf8"));
 
@@ -468,41 +481,59 @@ export async function runModeling(options) {
         `Copilot home and checkout there: ${options.workDir}`
     );
   await fs.mkdir(options.outputDir, { recursive: true });
-  const logDir = path.join(options.workDir, "logs");
-  await fs.mkdir(logDir, { recursive: true });
-  await fs.mkdir(options.home, { recursive: true });
-  const env = modelingEnvironment(process.env, options.home);
+  await fs.mkdir(options.workDir, { recursive: true });
+  // The evidence checks compare real paths, so every path starts from one.
+  const workDir = await fs.realpath(options.workDir);
+  const home = path.join(workDir, "home");
+  const logDir = path.join(workDir, "logs");
+  await fs.mkdir(home);
+  await fs.mkdir(logDir);
+  const env = modelingEnvironment(process.env, home);
+
+  /** `limitMs`, or less when the run's time limit comes first. */
+  const timeAllowed = (limitMs) => {
+    const left = startedAt + runTimeLimitMs - Date.now();
+
+    if (left <= 0)
+      throw new Error(
+        `The run reached its time limit of ${formatSeconds(runTimeLimitMs / 1000)}.`
+      );
+
+    return Math.min(limitMs, left);
+  };
+
+  const copilot = (args) =>
+    check("copilot", args, { env, timeoutMs: timeAllowed(COMMAND_TIMEOUT_MS) });
+
   let root;
   let cliVersion;
   let sessionDurationSeconds;
   let failure;
 
   try {
-    const version = await check("copilot", ["--version"], env);
+    const version = await copilot(["--version"]);
     cliVersion = cliVersionOf(version);
     log(`Using Copilot CLI ${cliVersion ?? version}.`);
     log(`Checking out ${sample.repo}@${sample.commit}.`);
     root = await prepareSample(
       sample,
-      path.join(options.workDir, "checkout", repositoryName(sample)),
-      env
+      path.join(workDir, "checkout", repositoryName(sample)),
+      env,
+      () => timeAllowed(COMMAND_TIMEOUT_MS)
     );
     log(`Staging the plugin from ${options.pluginDir}.`);
     // The CLI loads the plugin from this directory during the session.
-    const marketplaceDir = path.join(options.workDir, "marketplace");
+    const marketplaceDir = path.join(workDir, "marketplace");
     await stageMarketplace({ pluginDir: options.pluginDir, marketplaceDir });
-    await check(
-      "copilot",
-      ["plugin", "marketplace", "add", marketplaceDir],
-      env
-    );
-    await check("copilot", ["plugin", "install", PLUGIN_SOURCE], env);
+    await copilot(["plugin", "marketplace", "add", marketplaceDir]);
+    await copilot(["plugin", "install", PLUGIN_SOURCE]);
     log(`Installed ${PLUGIN_SOURCE}.`);
     log(`Sending the prompt: ${DATASET_PROMPT}`);
 
     // Only the session gets the token. --secret-env-vars keeps it out of the
     // agent's shell and MCP server environments.
     const outputLog = path.join(logDir, "copilot-output.log");
+    const sessionLimitMs = timeAllowed(SESSION_TIMEOUT_MS);
     const sessionStartedAt = Date.now();
 
     const session = await runSession(
@@ -514,14 +545,15 @@ export async function runModeling(options) {
       {
         cwd: root,
         env: { ...env, [TOKEN_VARIABLE]: options.token },
-        logFile: outputLog
+        logFile: outputLog,
+        timeLimitMs: sessionLimitMs
       }
     );
     sessionDurationSeconds = Math.round((Date.now() - sessionStartedAt) / 1000);
 
     if (session.timedOut)
       throw new Error(
-        `The session did not finish in ${SESSION_TIMEOUT_MS / 60_000} minutes.`
+        `The session did not finish in ${formatSeconds(sessionLimitMs / 1000)}.`
       );
 
     if (session.code !== 0) {
@@ -544,15 +576,22 @@ export async function runModeling(options) {
     log(`Failed: ${failure}`);
   }
 
-  const { sessionId, session, appBicep, appOrigin } = await collectEvidence({
-    home: options.home,
+  const evidence = await collectEvidence({
+    home,
     outputDir: options.outputDir,
     logDir,
     root,
     secrets
   });
 
-  failure ??= outcomeFailure({ session, appBicep, appOrigin });
+  for (const entry of evidence.skipped) log(`Did not copy ${entry}.`);
+
+  if (evidence.refused.length > 0)
+    failure ??=
+      `The run refused to read ${evidence.refused.join(", ")}. Evidence ` +
+      "must be a regular file, not a symbolic link or a file under one.";
+  failure ??= outcomeFailure(evidence);
+  const { sessionId, session, appBicep } = evidence;
 
   const summary = {
     ...(failure === undefined ?
@@ -611,12 +650,38 @@ export async function writeSummary({
 }
 
 /**
+ * What `file` is: `missing`, a regular `file`, or `other`, such as a
+ * symbolic link, a file under one, or a pipe. `file` must be a real path, so
+ * a path that resolves anywhere else goes through a symbolic link.
+ */
+async function fileKind(file) {
+  let stats;
+
+  try {
+    stats = await fs.lstat(file);
+  } catch (error) {
+    if (error?.code === "ELOOP") return "other";
+
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return "missing";
+
+    throw error;
+  }
+
+  return stats.isFile() && (await fs.realpath(file)) === file ?
+      "file"
+    : "other";
+}
+
+/**
  * Copies the session events, the logs, and the regular files in `.radius`
  * into the output directory, with secrets removed. Runs after success and
- * after failure.
+ * after failure. Reads only regular files, so a symbolic link that the agent
+ * leaves cannot make the run read a file outside the agent's directories.
  *
- * @returns What the agent did, and the text of `app.bicep` and
- *   `app.origin.json`.
+ * @param home, logDir, root Real paths.
+ * @returns What the agent did, the text of `app.bicep` and
+ *   `app.origin.json`, the evidence that the run `refused` to read because it
+ *   is not a regular file, and the files it `skipped`, each with the reason.
  */
 export async function collectEvidence({
   home,
@@ -625,6 +690,22 @@ export async function collectEvidence({
   root,
   secrets
 }) {
+  const evidence = {
+    sessionId: undefined,
+    session: undefined,
+    appBicep: undefined,
+    appOrigin: undefined,
+    refused: [],
+    skipped: []
+  };
+
+  const copy = async (from, to, name) => {
+    if ((await fileKind(from)) !== "file")
+      evidence.skipped.push(`${name}: not a regular file`);
+    else if (!(await copyRedacted(from, to, secrets)))
+      evidence.skipped.push(`${name}: ${BINARY_WITH_SECRET}`);
+  };
+
   const copilotDir = path.join(home, ".copilot");
   const stateDir = path.join(copilotDir, "session-state");
 
@@ -633,51 +714,58 @@ export async function collectEvidence({
     (name) => !name.startsWith(".")
   );
 
-  const sessionId = sessionIds.length === 1 ? sessionIds[0] : undefined;
-  let session;
+  if (sessionIds.length === 1) {
+    evidence.sessionId = sessionIds[0];
+    const eventsFile = path.join(stateDir, evidence.sessionId, "events.jsonl");
+    const kind = await fileKind(eventsFile);
 
-  if (sessionId !== undefined) {
-    const eventsFile = path.join(stateDir, sessionId, "events.jsonl");
-
-    if (await exists(eventsFile)) {
-      session = summarizeSessionEvents(await fs.readFile(eventsFile, "utf8"));
-      await copyRedacted(
+    if (kind === "other")
+      evidence.refused.push(path.join("~", path.relative(home, eventsFile)));
+    else if (kind === "file") {
+      evidence.session = summarizeSessionEvents(
+        await fs.readFile(eventsFile, "utf8")
+      );
+      await copy(
         eventsFile,
         path.join(outputDir, "session-events.jsonl"),
-        secrets
+        "session-events.jsonl"
       );
     }
   }
 
-  for (const dir of [logDir, path.join(copilotDir, "logs")])
+  for (const [dir, name] of [
+    [logDir, "logs"],
+    [path.join(copilotDir, "logs"), "~/.copilot/logs"]
+  ])
     for (const entry of await ifMissing(fs.readdir(dir), []))
       if (entry.endsWith(".log"))
-        await copyRedacted(
+        await copy(
           path.join(dir, entry),
           path.join(outputDir, "logs", entry),
-          secrets
+          `${name}/${entry}`
         );
-
-  const evidence = {
-    sessionId,
-    session,
-    appBicep: undefined,
-    appOrigin: undefined
-  };
 
   if (root === undefined) return evidence;
   const radiusDir = path.join(root, ".radius");
-  const read = (name) =>
-    ifMissing(fs.readFile(path.join(radiusDir, name), "utf8"), undefined);
+
+  const read = async (name) => {
+    const file = path.join(radiusDir, name);
+    const kind = await fileKind(file);
+
+    if (kind === "other") evidence.refused.push(`.radius/${name}`);
+
+    return kind === "file" ? fs.readFile(file, "utf8") : undefined;
+  };
   evidence.appBicep = await read("app.bicep");
   evidence.appOrigin = await read("app.origin.json");
 
   if (evidence.appBicep !== undefined)
-    await copyRedactedDirectory(
+    for (const entry of await copyRedactedDirectory(
       radiusDir,
       path.join(outputDir, "radius"),
       secrets
-    );
+    ))
+      evidence.skipped.push(`.radius/${entry}`);
 
   return evidence;
 }
