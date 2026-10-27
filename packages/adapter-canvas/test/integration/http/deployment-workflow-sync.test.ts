@@ -7,6 +7,8 @@ import { createEnvironmentExecutionOwner } from "../../../src/runtime/environmen
 import { configureOperationStore } from "../../../src/operations.js";
 import { disabledOperationStore } from "../../../src/operation-store.js";
 
+const ghExecutable = process.platform === "win32" ? "gh.exe" : "gh";
+
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof childProcess>()),
   execFile: vi.fn()
@@ -44,7 +46,7 @@ it.each(["template-unavailable", "update-denied"] as const)(
           let stdout = "";
           let stderr = "";
           const api = argv.find((arg) => arg.startsWith("/repos/"));
-          if (file !== "gh") {
+          if (file !== ghExecutable) {
             unexpected.push([file, ...argv]);
             stderr = "Unexpected non-GitHub command.";
           } else if (argv[0] === "workflow") {
@@ -169,7 +171,7 @@ it.each(["template-unavailable", "update-denied"] as const)(
         )
       ).toEqual([
         [
-          "gh",
+          ghExecutable,
           "api",
           "/repos/fixture/app/contents/.radius/app.bicep?ref=feature/model&review=1",
           "--jq",
