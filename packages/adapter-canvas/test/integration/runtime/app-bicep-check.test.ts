@@ -50,7 +50,9 @@ afterEach(() => {
 }, 30_000);
 
 function temporaryDirectory(): string {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "app-bicep-check-"));
+  const directory = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "app-bicep-check-"))
+  );
   temporaryDirectories.add(directory);
   return directory;
 }

@@ -42,7 +42,7 @@ export function createRepairStaging({
   runGit = git
 } = {}) {
   function workspace(cwd) {
-    const root = files.realpathSync(
+    const root = files.realpathSync.native(
       runGit(cwd, ["rev-parse", "--show-toplevel"])
     );
     if (
@@ -92,7 +92,7 @@ export function createRepairStaging({
     regular(root, target);
     if (samePath(target, path.join(root, ".radius", "app.bicep")))
       throw new Error("Use canonical staging for .radius/app.bicep.");
-    return files.realpathSync(target);
+    return files.realpathSync.native(target);
   }
 
   function metadata(root) {

@@ -52,7 +52,7 @@ function git(cwd: string, args: string[]) {
   return result.stdout.trim();
 }
 function fixture(options: Parameters<Module["createRepairStaging"]>[0] = {}) {
-  const root = fs.realpathSync(
+  const root = fs.realpathSync.native(
     fs.mkdtempSync(path.join(os.tmpdir(), "repair-stage-"))
   );
   roots.push(root);
@@ -368,11 +368,28 @@ describe("existing-file repair transaction", () => {
     f.repair.abort(run.context);
   });
   it.runIf(process.platform === "win32")(
-    "preserves actual filename casing and refuses a Windows delete-sharing lock",
+    "accepts Windows short workspace spelling, preserves filename casing and refuses a delete-sharing lock",
     async () => {
       const f = fixture();
+      const spelling = spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:RADIUS_REPAIR_PATH).ShortPath"
+        ],
+        {
+          env: { ...process.env, RADIUS_REPAIR_PATH: f.root },
+          encoding: "utf8",
+          windowsHide: true
+        }
+      );
+      expect(spelling.status, spelling.stderr).toBe(0);
+      const shortRoot = spelling.stdout.trim();
+      expect(fs.realpathSync.native(shortRoot)).toBe(f.root);
       const run = await f.repair.begin(
-        f.root,
+        shortRoot,
         path.relative(f.root, f.target).toUpperCase()
       );
       expect(run.target).toBe(path.relative(f.root, f.target));

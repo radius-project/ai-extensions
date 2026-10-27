@@ -22,7 +22,7 @@ describe.runIf(Boolean(compiler))(
       "preserves dependency resolution and changes only the admitted target (canonical=%s)",
       (canonical) => {
         if (!compiler) throw new Error("Missing explicit test compiler.");
-        const root = fs.realpathSync(
+        const root = fs.realpathSync.native(
           fs.mkdtempSync(path.join(os.tmpdir(), "packaged-repair-"))
         );
         const home = path.join(root, "home");
@@ -205,7 +205,7 @@ describe.runIf(Boolean(compiler))(
     );
     it("rejects encoded self-reads through the real compiler, not a filename substring heuristic", () => {
       if (!compiler) throw new Error("Missing explicit test compiler.");
-      const root = fs.realpathSync(
+      const root = fs.realpathSync.native(
         fs.mkdtempSync(path.join(os.tmpdir(), "repair-self-read-"))
       );
       const repo = path.join(root, "repo");
