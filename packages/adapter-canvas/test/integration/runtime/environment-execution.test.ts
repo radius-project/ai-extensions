@@ -1123,12 +1123,9 @@ describe("real server and fake SDK runtime ownership", () => {
       ])
     ),
     ...["azure-owner", "azure-tags"].flatMap((stage) =>
-      ["issued", "prepared", "delay", "inner-delay"].map((boundary) => [
-        stage,
-        boundary,
-        "service",
-        "shutdown"
-      ])
+      ["issued", "prepared", "delay", "inner-delay"].map(
+        (boundary) => [stage, boundary, "service", "shutdown"] as const
+      )
     ),
     ["azure-principal", "inner-delay", "service", "shutdown"],
     ["environment", "inner-delay", "service", "shutdown"],

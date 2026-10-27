@@ -78,6 +78,7 @@ describe("verification workflow cancellation", () => {
     const calls: string[][] = [];
     await expect(
       cancelVerificationWorkflow(executor, identity, {
+        authority: { assertCurrent() {}, issued() {} },
         run: async (_executor, args) => {
           calls.push(args);
           if (args[0] === "api") return { code: 0, stdout: "", stderr: "" };
@@ -95,6 +96,7 @@ describe("verification workflow cancellation", () => {
     const calls: string[][] = [];
     await expect(
       cancelVerificationWorkflow(executor, identity, {
+        authority: { assertCurrent() {}, issued() {} },
         run: async (_executor, args) => {
           calls.push(args);
           return {
@@ -111,6 +113,7 @@ describe("verification workflow cancellation", () => {
   it("reports a still-active accepted cancellation", async () => {
     await expect(
       cancelVerificationWorkflow(executor, identity, {
+        authority: { assertCurrent() {}, issued() {} },
         run: async (_executor, args) =>
           args[0] === "api" ?
             { code: 0, stdout: "", stderr: "" }
@@ -123,6 +126,7 @@ describe("verification workflow cancellation", () => {
     let reads = 0;
     await expect(
       cancelVerificationWorkflow(executor, identity, {
+        authority: { assertCurrent() {}, issued() {} },
         run: async (_executor, args) => {
           if (args[0] === "api") {
             return { code: 1, stdout: "", stderr: "cannot cancel" };
@@ -143,6 +147,7 @@ describe("verification workflow cancellation", () => {
   it("surfaces a failed cancellation while the exact run remains active", async () => {
     await expect(
       cancelVerificationWorkflow(executor, identity, {
+        authority: { assertCurrent() {}, issued() {} },
         run: async (_executor, args) =>
           args[0] === "api" ?
             { code: 1, stdout: "", stderr: "cannot cancel" }

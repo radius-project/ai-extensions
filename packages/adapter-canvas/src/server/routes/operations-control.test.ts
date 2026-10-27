@@ -63,6 +63,10 @@ import {
   type OperationFixture
 } from "../../../test/support/server/operation-fixtures.js";
 import type { CanvasServerEntry } from "../types.js";
+import type {
+  WorkflowCancellationTarget,
+  WorkflowCancellationAuthority
+} from "../services/workflow-cancellation-target.js";
 
 // The terminal announcement is a single process-wide listener, so every test
 // that touches it registers its own and clears it afterwards.
@@ -133,21 +137,6 @@ type ControlHandler = (
 /** The control path for one action on a saved record. */
 function controlPath(op: { operationId: string }, action: string): string {
   return `/api/operations/${op.operationId}/${action}`;
-}
-
-function verificationRunId(operation: {
-  verification?: unknown;
-  [key: string]: unknown;
-}): string {
-  const verification = operation.verification;
-  if (
-    !verification ||
-    typeof verification !== "object" ||
-    !("runId" in verification)
-  ) {
-    throw new Error("test operation has no verification run");
-  }
-  return String(verification.runId);
 }
 
 async function call(
@@ -1235,6 +1224,12 @@ describe("POST /api/operations/{id}/continue", () => {
   });
 
   describe("POST /api/operations/{id}/cancel-workflow", () => {
+    function stoppedSetup() {
+      const operation = newOperation();
+      operation.context = { githubLogin: "saved-account" };
+      finish(operation, "cancelled");
+      return operation;
+    }
     it("cancels only the exact run after setup is stopped", async () => {
       const op = stoppedSetup();
       op.verification = { runId: "42" };
@@ -1242,8 +1237,8 @@ describe("POST /api/operations/{id}/continue", () => {
       const seen: string[] = [];
 
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
-        cancelVerificationWorkflow: (operation) => {
-          seen.push(verificationRunId(operation));
+        cancelVerificationWorkflow: (target) => {
+          seen.push(target.runId);
           return Promise.resolve("inactive");
         }
       });
@@ -1261,7 +1256,11 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let cancellations = 0;
       const dependencies = {
-        cancelVerificationWorkflow: () => {
+        cancelVerificationWorkflow: (
+          _target: WorkflowCancellationTarget,
+          authority: WorkflowCancellationAuthority
+        ) => {
+          authority.issued();
           cancellations += 1;
           if (cancellations === 1) {
             return Promise.reject(new Error("GitHub temporarily unavailable"));
@@ -1364,6 +1363,7 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let cancellations = 0;
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        reportOperationDiagnostic: vi.fn(),
         persistOperations: () => Promise.reject(new Error("disk gone")),
         cancelVerificationWorkflow: () => {
           cancellations += 1;
@@ -1373,8 +1373,7 @@ describe("POST /api/operations/{id}/continue", () => {
 
       expect(out.recording.status).toBe(500);
       expect(out.payload()).toMatchObject({
-        code: "workflow-cancel-persist-failed",
-        detail: "disk gone"
+        code: "operation-control-recovery-persist-failed"
       });
       expect(cancellations).toBe(0);
       expect(verificationWorkflowState(op)).toBe("active");
@@ -1391,21 +1390,23 @@ describe("POST /api/operations/{id}/continue", () => {
       setVerificationWorkflowState(op, "active");
       let persists = 0;
       const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        reportOperationDiagnostic: vi.fn(),
         persistOperations: () => {
           persists += 1;
           return persists === 1 ?
               Promise.resolve()
             : Promise.reject(new Error("disk gone"));
         },
-        cancelVerificationWorkflow: () =>
-          Promise.reject(new Error("GitHub unavailable"))
+        cancelVerificationWorkflow: (_target, authority) => {
+          authority.issued();
+          return Promise.reject(new Error("GitHub unavailable"));
+        }
       });
 
-      expect(out.recording.status).toBe(502);
+      expect(out.recording.status).toBe(500);
       expect(out.payload()).toMatchObject({
-        code: "workflow-cancel-failed",
-        detail:
-          "GitHub unavailable Radius also could not save the workflow status: disk gone"
+        code: "workflow-cancel-result-persist-failed",
+        detail: "GitHub unavailable"
       });
       expect(verificationWorkflowState(op)).toBe("unknown");
     });

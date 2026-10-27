@@ -48,6 +48,91 @@ function deferred() {
 }
 
 describe("production environment owner HTTP binding", () => {
+  it.each(["shutdown", "changed-run"] as const)(
+    "refuses cancellation over HTTP after %s during status read",
+    async (change) => {
+      const entered = deferred();
+      const gate = deferred();
+      const owner = createEnvironmentExecutionOwner();
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] !== "run") throw new Error("Unexpected cancellation POST");
+        entered.resolve();
+        await gate.promise;
+        return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache() {}
+      });
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext: createEnvironmentAccountContext(
+          "http-cancellation",
+          coordinator
+        )
+      });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.verification = { runId: "42", workflowState: "active" };
+      finish(op, "cancelled");
+      operations.put(op);
+      let pending: Promise<Response> | undefined;
+      try {
+        const entry = await runtime.getOrCreateServer("cancel", "environment");
+        pending = fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/cancel-workflow`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        await entered.promise;
+        if (change === "shutdown") owner.shutdown();
+        else op.verification = { runId: "43", workflowState: "active" };
+        gate.resolve();
+        const response = await pending;
+        expect(response.status).toBe(change === "shutdown" ? 503 : 409);
+        expect(response.headers.get("content-type")).toContain(
+          "application/json"
+        );
+        expect(response.headers.get("cache-control")).toContain("no-store");
+        expect(await response.json()).toMatchObject({
+          code:
+            change === "shutdown" ?
+              "operation-shutting-down"
+            : "operation-context-changed"
+        });
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(op.verification).toEqual({
+          runId: change === "shutdown" ? "42" : "43",
+          workflowState: "active"
+        });
+      } finally {
+        gate.resolve();
+        await pending;
+        await runtime.stopServer("cancel", true);
+      }
+    }
+  );
+
   it.each(["timeout", "confirmed"] as const)(
     "refuses a fresh HTTP retry after shutdown and restored %s dispatch",
     async (acknowledgement) => {

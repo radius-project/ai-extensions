@@ -89,6 +89,14 @@ CI is authoritative for checks that require a controlled operating system or hos
 
 ## Completed phases
 
+### Confirmed workflow cancellation evidence
+
+CN-03, CN-05, CN-07 and CN-08 cancellation evidence now includes `operation-workflow-cancellation.test.ts`, the existing cancellation helper and selected-executor unit suites, registered `environment-tools.test.ts` runtime integration, and production `environment-execution.test.ts` HTTP integration. Held confirmation, persistence, account acquisition and status reads prove that shutdown or changed operation/repository/environment/login/run/verification-attempt authority cannot issue a cancellation POST. The selected executor's `beforeExecute` callback fences its asynchronous identity verification as well. Separate tests retain original acknowledged/unknown outcomes across shutdown, replacement and failed persistence, preserve completion racing POST, and observe repeated/restored cancellations without blindly reposting. The new service race suite participates in scheduled reliability.
+
+The Chromium interrupted-setup pause/cancel/delete journey retains confirmation accessibility, keyboard dismissal/restoration and exact-run/no-duplicate assertions. No browser implementation, rendered state or canonical visual baseline changes are introduced. Built-extension smoke runs after a fresh build. Native Windows coverage may encounter the four existing shell-fixture `ENOENT` failures and platform-dependent aggregate floors; these are not a passing coverage gate and require source-qualified CI coverage. Existing restart authorization and its admission crash-window limitation remain unchanged; the requested general fresh-restart authorization work is deferred until after the stack merges.
+
+The cancellation service and target module both measure 100% statements, lines and functions locally; branch coverage is 98.80% and 92.85%, respectively. The remaining branches are the null-control fallbacks at `operation-workflow-cancellation.ts:159` and `workflow-cancellation-target.ts:55,67`: `getOperationControl` creates a control record for every non-null operation, so these cannot run through a valid service operation. No coverage exclusions or lower floors were added. The helper's remaining partial branches are unchanged identity/error-format fallbacks, not new cancellation authority paths.
+
 ### Phases 0–2: record behavior, then separate runtime and server work
 
 Phase 0 recorded the supported actions, tools, pages, routes, branch behavior, selected markup, package shape, and coverage baseline. Phase 1 made extension setup and lifecycle behavior testable without connecting to a real Copilot session. Phase 2 moved all 40 API routes to named owners, tested requests through a real local server, and removed the old fallback path.

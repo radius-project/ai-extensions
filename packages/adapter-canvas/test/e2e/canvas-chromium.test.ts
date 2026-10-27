@@ -4619,6 +4619,16 @@ test.describe("Radius Canvas in Chromium", () => {
       "Cancel the verification workflow?"
     );
     await expectNoWcagViolations(page);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(cancelWorkflow).toBeFocused();
+    expect(
+      (await canvas.cliCalls()).some((call) =>
+        call.args.some((arg) => arg.endsWith("/actions/runs/39/cancel"))
+      )
+    ).toBe(false);
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
     const confirm = dialog.getByRole("button", { name: "Cancel workflow" });
     await confirm.focus();
     await page.keyboard.press("Enter");

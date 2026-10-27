@@ -11,6 +11,7 @@ import type { OperationResumeService } from "../server/services/operation-resume
 import type { createSetupStartService } from "../server/services/setup-start.js";
 import type { VerificationStatusResult } from "../server/services/verification-status.js";
 import { parsePullRequestUrl } from "../server/services/pull-request-url.js";
+import { captureWorkflowCancellationTarget } from "../server/services/workflow-cancellation-target.js";
 import type { DeploymentAccountResolver } from "./deployment-account.js";
 import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
 import type { SessionHolder } from "./session.js";
@@ -607,6 +608,10 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
               "The command is not currently eligible for this setup operation."
             );
           }
+          const cancellationTarget =
+            action === "cancel-workflow" ?
+              captureWorkflowCancellationTarget(operation)
+            : undefined;
           const exit: { ok: boolean; abandon?: boolean; targets?: unknown[] } =
             canExitSetup(operation);
           const sensitive =
@@ -632,8 +637,8 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
                 `Use a trusted host to confirm ${action} for this saved setup. No command was admitted.`
               );
             const effect =
-              action === "cancel-workflow" ?
-                "Cancel only the exact saved verification workflow run."
+              cancellationTarget ?
+                `Cancel only workflow run ${cancellationTarget.runId} using @${cancellationTarget.login}.`
               : action === "bypass-verification" ?
                 "Allow this environment to be used despite the confirmed permissions-only verification failure."
               : action === "abandon" ?
@@ -687,21 +692,49 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
               operation.setupArtifacts
             ]);
           const authorizedConfiguration = configuration();
-          return outcome(
-            await ports.control({
-              operationId: target.operationId,
-              ...command,
-              // The service owns command-state changes after handoff.
-              isCurrent: () =>
-                !ports.owner.isShuttingDown() &&
-                ports.getOperation(target.operationId) === operation &&
-                operation.operationId === target.operationId &&
-                operation.repo === target.repo &&
-                operation.environment === target.environment &&
-                configuration() === authorizedConfiguration
-            }),
-            target
-          );
+          const result = await ports.control({
+            operationId: target.operationId,
+            ...command,
+            ...(cancellationTarget ? { cancellationTarget } : {}),
+            // The service owns command-state changes after handoff.
+            isCurrent: () =>
+              !ports.owner.isShuttingDown() &&
+              ports.getOperation(target.operationId) === operation &&
+              operation.operationId === target.operationId &&
+              operation.repo === target.repo &&
+              operation.environment === target.environment &&
+              configuration() === authorizedConfiguration
+          });
+          if (result.body.cancellation) {
+            const evidence = result.body.cancellation;
+            const cancellation = {
+              ...evidence,
+              target: {
+                ...evidence.target,
+                operationId: diagnostic(evidence.target.operationId),
+                commandId: diagnostic(evidence.target.commandId),
+                repo: diagnostic(evidence.target.repo),
+                environment: diagnostic(evidence.target.environment),
+                login: diagnostic(evidence.target.login),
+                runId: diagnostic(evidence.target.runId)
+              }
+            };
+            return result.status >= 400 ?
+                {
+                  ...unavailable(
+                    text(result.body.code),
+                    text(result.body.error)
+                  ),
+                  cancellation
+                }
+              : {
+                  kind: "accepted",
+                  code: text(result.body.code),
+                  operation: safe(operation),
+                  cancellation
+                };
+          }
+          return outcome(result, target);
         } finally {
           pending.delete(key);
         }

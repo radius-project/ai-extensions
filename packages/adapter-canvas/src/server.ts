@@ -309,7 +309,6 @@ import { createOperationsControlRoutes } from "./server/routes/operations-contro
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
 import {
   cancelVerificationWorkflow,
-  requireVerificationWorkflowIdentity,
   readVerificationWorkflowState
 } from "./server/services/verification-workflow-cancellation.js";
 import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
@@ -715,35 +714,6 @@ function canvasGraphResources(values: unknown[]): CanvasGraphResource[] {
 // the route module from `operations.ts`, which is independently tested; the
 // merge proof stays in its own service with a single GitHub port. What is
 // injected here is the genuine I/O the routes cannot decide alone.
-function requiredVerificationWorkflowContext(op: {
-  operationId: string;
-  repo?: unknown;
-  verification?: unknown;
-  context?: unknown;
-  [key: string]: unknown;
-}): {
-  identity: ReturnType<typeof requireVerificationWorkflowIdentity>;
-  login: string;
-} {
-  const identity = requireVerificationWorkflowIdentity(op);
-  const operationContext =
-    op.context && typeof op.context === "object" ? op.context : null;
-  const login =
-    (
-      operationContext &&
-      "githubLogin" in operationContext &&
-      typeof operationContext.githubLogin === "string"
-    ) ?
-      operationContext.githubLogin.trim()
-    : "";
-  if (!login) {
-    throw new Error(
-      "The interrupted setup does not record the GitHub account that started it."
-    );
-  }
-  return { identity, login };
-}
-
 // Composition root for the `azure-discovery` routes. Four seams:
 // `az` runner (which carries the agent-session-stripped `cliExec` environment
 // the Azure setup routes run under), the general trimmed-stdout CLI runner the
@@ -6050,31 +6020,48 @@ export function createProductionCanvasServerRuntime(
         },
         errorMessage
       }),
-    inspectVerificationWorkflow: async (op) => {
-      const { identity, login } = requiredVerificationWorkflowContext(op);
+    inspectVerificationWorkflow: async (target, assertCurrent) => {
+      assertCurrent();
       const result = await githubAccountCoordinator.withSelectedAccount(
-        login,
-        { ownerKey: accountContext.ownerKey, operationId: op.operationId },
-        (executor) =>
-          readVerificationWorkflowState(executor, identity, {
+        target.login,
+        { ownerKey: accountContext.ownerKey, operationId: target.operationId },
+        async (executor) => {
+          assertCurrent();
+          if (executor.login !== target.login)
+            throw new Error(
+              "The selected GitHub executor does not match the authorized account."
+            );
+          const state = await readVerificationWorkflowState(executor, target, {
             run: (selected, args) => selected.run(args, { timeout: 30000 })
-          }),
+          });
+          assertCurrent();
+          return state;
+        },
         30000
       );
+      assertCurrent();
       if (result.value !== "active" && result.value !== "inactive") {
         throw new Error("GitHub returned an unsupported workflow state.");
       }
       return result.value;
     },
-    cancelVerificationWorkflow: async (op) => {
-      const { identity, login } = requiredVerificationWorkflowContext(op);
+    cancelVerificationWorkflow: async (target, authority) => {
+      authority.assertCurrent();
       const result = await githubAccountCoordinator.withSelectedAccount(
-        login,
-        { ownerKey: accountContext.ownerKey, operationId: op.operationId },
-        (executor) =>
-          cancelVerificationWorkflow(executor, identity, {
-            run: (selected, args) => selected.run(args, { timeout: 30000 })
-          }),
+        target.login,
+        { ownerKey: accountContext.ownerKey, operationId: target.operationId },
+        (executor) => {
+          authority.assertCurrent();
+          if (executor.login !== target.login)
+            throw new Error(
+              "The selected GitHub executor does not match the authorized account."
+            );
+          return cancelVerificationWorkflow(executor, target, {
+            run: (selected, args, beforeExecute) =>
+              selected.run(args, { timeout: 30000, beforeExecute }),
+            authority
+          });
+        },
         30000
       );
       return result.value;

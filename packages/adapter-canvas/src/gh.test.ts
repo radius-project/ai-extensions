@@ -1365,6 +1365,46 @@ describe("GitHub CLI version compatibility", () => {
 });
 
 describe("selected GitHub executor", { concurrent: false }, () => {
+  it.each([false, true])(
+    "checks command authority after held identity verification (stale=%s)",
+    async (stale) => {
+      const gh = await loadGh("linux", {
+        token: "selected-injected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        apiLogin: "tokuser",
+        commandResult: { stdout: "{}" }
+      });
+      const executor = await gh.createSelectedGhExecutor("tokuser");
+      childProcess.execFile.mockClear();
+      let completeIdentity = () => {};
+      childProcess.execFile.mockImplementationOnce(
+        (_file, args, _options, callback) => {
+          expect(args).toEqual(["api", "user", "--jq", ".login"]);
+          completeIdentity = () => callback(null, "tokuser", "");
+          return { stdin: { end() {} } };
+        }
+      );
+      const beforeExecute = vi.fn(() => {
+        if (stale) throw new Error("Authorization expired");
+      });
+      const pending = executor.run(
+        ["api", "--method", "POST", "repos/fixture/app/actions/runs/42/cancel"],
+        { beforeExecute }
+      );
+      expect(beforeExecute).not.toHaveBeenCalled();
+      expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+      completeIdentity();
+      if (stale) await expect(pending).rejects.toThrow("Authorization expired");
+      else await expect(pending).resolves.toMatchObject({ code: 0 });
+      expect(beforeExecute).toHaveBeenCalledOnce();
+      expect(childProcess.execFile).toHaveBeenCalledTimes(stale ? 1 : 2);
+      if (!stale)
+        expect(childProcess.execFile.mock.calls[1][2]).not.toHaveProperty(
+          "beforeExecute"
+        );
+    }
+  );
+
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();

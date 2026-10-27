@@ -890,6 +890,7 @@ describe("stop, then continue or roll back, over the socket", () => {
       const harness = start();
       const entry = await container!.getOrCreate("panel-recovery");
       const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
+      op.context = { githubLogin: "saved-account" };
       op.verification = { runId: "42" };
       setVerificationWorkflowState(op, "active");
 

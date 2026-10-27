@@ -19,16 +19,14 @@ import {
   markVerificationRetryPrecondition,
   findActiveCommand,
   finish,
-  getOperationControl,
   isProviderRestartDecision,
   markVerificationRetryAcquisition,
   rollbackRetryAttempt,
   setCommandState,
   setStageState,
+  setVerificationWorkflowState,
   snapshotRetryState,
   stopProviderRestartDecision,
-  setVerificationWorkflowState,
-  verificationWorkflowState,
   toClientView,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
@@ -37,12 +35,20 @@ import {
   STAGE_VERIFY,
   type OperationAttemptKind,
   type OperationCommandKind,
-  type StopRequestOutcome,
-  type VerificationWorkflowState
+  type StopRequestOutcome
 } from "../../operations.js";
 import { errorMessage } from "../../runtime/util.js";
 import type { OperationRecord } from "../routes/operations-status.js";
 import type { EnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
+import { cancelOperationWorkflow } from "./operation-workflow-cancellation.js";
+import {
+  captureWorkflowCancellationTarget,
+  matchesWorkflowCancellationTarget,
+  WorkflowCancellationRefusal,
+  type WorkflowCancellationTarget,
+  type WorkflowCancellationResult,
+  type WorkflowCancellationAuthority
+} from "./workflow-cancellation-target.js";
 
 // Cooperative controls for an environment operation: stop, the two forward
 // commands (continue a deliberate stop, retry a failed continuation), rollback
@@ -68,11 +74,12 @@ import type { EnvironmentExecutionOwner } from "../../runtime/environment-execut
 
 export interface OperationControlResult {
   status: number;
-  body: Record<string, unknown>;
+  body: Record<string, unknown> & { cancellation?: WorkflowCancellationResult };
 }
 
 export interface OperationControlInput {
   operationId: string;
+  cancellationTarget?: WorkflowCancellationTarget;
   isCurrent?(): boolean;
   instanceId?: string;
   command:
@@ -179,10 +186,12 @@ export interface OperationsControlDependencies {
   // behind under the status its last attempt wrote.
   invalidateEnvironmentListing(repo: string): void;
   inspectVerificationWorkflow(
-    operation: OperationRecord
+    target: WorkflowCancellationTarget,
+    assertCurrent: () => void
   ): Promise<"active" | "inactive">;
   cancelVerificationWorkflow(
-    operation: OperationRecord
+    target: WorkflowCancellationTarget,
+    authority: WorkflowCancellationAuthority
   ): Promise<"inactive" | "cancelling">;
 }
 
@@ -414,10 +423,22 @@ async function handleStopOperation(
       return;
     }
     try {
-      setVerificationWorkflowState(
-        operation,
-        await dependencies.inspectVerificationWorkflow(operation)
+      const target = captureWorkflowCancellationTarget(operation);
+      const assertCurrent = () => {
+        if (dependencies.isShuttingDown?.())
+          throw new WorkflowCancellationRefusal("operation-shutting-down");
+        if (
+          dependencies.get(operationId) !== operation ||
+          !matchesWorkflowCancellationTarget(operation, target)
+        )
+          throw new WorkflowCancellationRefusal("operation-context-changed");
+      };
+      const state = await dependencies.inspectVerificationWorkflow(
+        target,
+        assertCurrent
       );
+      assertCurrent();
+      setVerificationWorkflowState(operation, state);
       await dependencies.persistOperations();
     } catch (error) {
       setVerificationWorkflowState(operation, "unknown");
@@ -523,18 +544,10 @@ async function handleCancelWorkflow(
   context: OperationControlContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
-  const resolved = await resolveOperation(context, dependencies);
+  const resolved = resolveOperation(context, dependencies);
   if (!resolved) return;
   const { operationId, operation } = resolved;
-  const verification =
-    operation.verification && typeof operation.verification === "object" ?
-      operation.verification
-    : null;
-  const runId =
-    verification && "runId" in verification && verification.runId != null ?
-      String(verification.runId)
-    : "";
-  if (operation.state !== "cancelled" || !runId) {
+  if (operation.state !== "cancelled" || !context.cancellationTarget) {
     sendJson(context, 409, {
       error:
         "Pause setup before cancelling its exact verification workflow run.",
@@ -544,119 +557,14 @@ async function handleCancelWorkflow(
     });
     return;
   }
-  if (
-    verificationWorkflowState(operation) === "unknown" ||
-    verificationWorkflowState(operation) === "cancelling"
-  ) {
-    let state: VerificationWorkflowState;
-    try {
-      state = await dependencies.inspectVerificationWorkflow(operation);
-    } catch (error) {
-      sendJson(context, 502, {
-        error: "Radius could not read the verification workflow status.",
-        code: "workflow-status-read-failed",
-        operationId,
-        detail: errorMessage(error),
-        operation: clientView(operation)
-      });
-      return;
-    }
-    setVerificationWorkflowState(operation, state);
-    try {
-      await dependencies.persistOperations();
-    } catch (error) {
-      setVerificationWorkflowState(operation, "unknown");
-      sendJson(context, 500, {
-        error:
-          "Radius read the verification workflow status but could not save it. Try again.",
-        code: "workflow-status-persist-failed",
-        operationId,
-        detail: errorMessage(error),
-        operation: clientView(operation)
-      });
-      return;
-    }
-    sendJson(context, 200, {
-      operationId,
-      code: "workflow-status-checked",
-      statusUrl: statusUrlFor(operationId),
-      operation: clientView(operation)
-    });
-    return;
-  }
-  const snapshot = snapshotRetryState(operation);
-  const previousCancellationAttempts = (
-    getOperationControl(operation)?.commands ?? []
-  )
-    .filter(
-      (command) =>
-        command.kind === "cancel_workflow" && command.target === runId
-    )
-    .map((command) => command.attempt);
-  const cancellationAttempt =
-    previousCancellationAttempts.length === 0 ?
-      0
-    : Math.max(...previousCancellationAttempts) + 1;
-  const accepted = acceptOperationCommand(operation, {
-    kind: "cancel_workflow",
-    attempt: cancellationAttempt,
-    target: runId
-  });
-  setCommandState(operation, accepted.command.commandId, "running");
-  setVerificationWorkflowState(operation, "cancelling");
-  try {
-    await dependencies.persistOperations();
-  } catch (error) {
-    rollbackRetryAttempt(operation, snapshot);
-    sendJson(context, 500, {
-      error:
-        "Radius could not save the workflow cancellation request, so it did not contact GitHub. Try again.",
-      code: "workflow-cancel-persist-failed",
-      operationId,
-      detail: errorMessage(error)
-    });
-    return;
-  }
-  try {
-    const state = await dependencies.cancelVerificationWorkflow(operation);
-    setVerificationWorkflowState(operation, state);
-    setCommandState(operation, accepted.command.commandId, "finished", state);
-    await dependencies.persistOperations();
-    sendJson(context, state === "inactive" ? 200 : 202, {
-      operationId,
-      code:
-        state === "inactive" ? "workflow-cancelled" : (
-          "workflow-cancellation-pending"
-        ),
-      statusUrl: statusUrlFor(operationId),
-      operation: clientView(operation)
-    });
-  } catch (error) {
-    setVerificationWorkflowState(operation, "unknown");
-    setCommandState(
+  context.publish(
+    await cancelOperationWorkflow(
+      context,
       operation,
-      accepted.command.commandId,
-      "finished",
-      "failed"
-    );
-    let persistError: unknown = null;
-    try {
-      await dependencies.persistOperations();
-    } catch (saveError) {
-      persistError = saveError;
-    }
-    sendJson(context, 502, {
-      error:
-        "Radius could not confirm cancellation of the verification workflow.",
-      code: "workflow-cancel-failed",
-      operationId,
-      detail:
-        persistError === null ?
-          errorMessage(error)
-        : `${errorMessage(error)} Radius also could not save the workflow status: ${errorMessage(persistError)}`,
-      operation: clientView(operation)
-    });
-  }
+      context.cancellationTarget,
+      dependencies
+    )
+  );
 }
 
 /**
@@ -1419,6 +1327,33 @@ export function createOperationsControlService(
   const operationMutations = new Map<string, Promise<OperationControlResult>>();
   return (input, publish) => {
     const operationId = input.operationId;
+    if (input.command === "cancel-workflow" && !input.cancellationTarget) {
+      const operation = dependencies.get(operationId);
+      if (operation) {
+        try {
+          const target = captureWorkflowCancellationTarget(operation);
+          const callerCurrent = input.isCurrent;
+          input = {
+            ...input,
+            cancellationTarget: target,
+            isCurrent: () =>
+              dependencies.get(operationId) === operation &&
+              callerCurrent?.() !== false
+          };
+        } catch (error) {
+          const unavailable = {
+            status: 409,
+            body: {
+              operationId,
+              code: "workflow-cancel-not-available",
+              error: errorMessage(error)
+            }
+          };
+          publish?.(unavailable);
+          return Promise.resolve(unavailable);
+        }
+      }
+    }
     const previous = operationMutations.get(operationId) ?? Promise.resolve();
     const current = previous
       .catch(() => {})

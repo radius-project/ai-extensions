@@ -54,11 +54,17 @@ async function composition(
     permissionsFailure?: boolean;
     beforeResume?: () => Promise<void>;
     realSetup?: boolean;
+    beforeLease?: () => Promise<void>;
+    leaseLogin?: string;
+    cancellationRun?: (
+      args: string[]
+    ) => Promise<{ code: number; stdout: string; stderr: string }>;
   } = {}
 ) {
   const fake = createFakeDependencies();
   const owner = createEnvironmentExecutionOwner();
   const run = vi.fn(async (args: string[]) => {
+    if (options.cancellationRun) return options.cancellationRun(args);
     if (options.permissionsFailure) {
       if (args.join(" ") === "run view 42 --log --repo fixture/app")
         return {
@@ -117,9 +123,14 @@ async function composition(
   });
   const accountContext = createEnvironmentAccountContext(
     "tools-runtime",
-    options.realSetup ?
+    options.realSetup || options.cancellationRun ?
       createGitHubAccountCoordinator({
-        createExecutor: async () => executor,
+        createExecutor: async () => {
+          await options.beforeLease?.();
+          return options.leaseLogin ?
+              successfulSelectedGhExecutor({ login: options.leaseLogin, run })
+            : executor;
+        },
         getActiveKeyringLogin: async () => executor.login,
         switchKeyringAccount: async () => {
           throw new Error("Unexpected account switch");
@@ -255,6 +266,222 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it.each(["active", "unknown"])(
+    "refuses a mismatched leased executor for %s workflow",
+    async (state) => {
+      const h = await composition({
+        confirm: async () => true,
+        leaseLogin: "wrong-account",
+        cancellationRun: async () => {
+          throw new Error("Wrong executor must not run");
+        }
+      });
+      const op = stoppedSetup({ repo: target.repo });
+      op.context = { githubLogin: h.executor.login };
+      op.verification = { runId: "42", workflowState: state };
+      operations.put(op);
+      try {
+        expect(
+          await h.invoke("radius_environment_control", {
+            ...target,
+            operationId: op.operationId,
+            action: "cancel-workflow"
+          })
+        ).toMatchObject({
+          kind: "unavailable",
+          code:
+            state === "active" ?
+              "workflow-cancel-failed"
+            : "workflow-status-read-failed"
+        });
+        expect(h.run).not.toHaveBeenCalled();
+      } finally {
+        await h.extension.shutdown();
+      }
+    }
+  );
+
+  it.each(
+    ["confirmation", "save", "account", "status"].flatMap((boundary) =>
+      [
+        "shutdown",
+        "removed",
+        "replaced",
+        "repo",
+        "environment",
+        "login",
+        "run",
+        "attempt"
+      ].map((change) => [boundary, change] as const)
+    )
+  )(
+    "fences confirmed cancellation across held %s and %s",
+    async (boundary, change) => {
+      const entered = deferred();
+      const gate = deferred();
+      const hold = async () => {
+        entered.resolve();
+        await gate.promise;
+      };
+      const confirm = vi.fn(async () => {
+        if (boundary === "confirmation") await hold();
+        return true;
+      });
+      const h = await composition({
+        confirm,
+        beforeLease: boundary === "account" ? hold : undefined,
+        cancellationRun: async (args) => {
+          if (args[0] !== "run")
+            throw new Error("Cancellation POST must not be issued");
+          if (boundary === "status") await hold();
+          return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+        }
+      });
+      const op = stoppedSetup({ repo: target.repo });
+      op.context = { githubLogin: h.executor.login };
+      op.verification = { runId: "42", workflowState: "active" };
+      operations.put(op);
+      if (boundary === "save") h.persist.mockImplementationOnce(hold);
+      let pending: Promise<EnvironmentToolResult> | undefined;
+      try {
+        pending = h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action: "cancel-workflow"
+        });
+        await entered.promise;
+        expect(confirm).toHaveBeenCalledWith(
+          expect.stringContaining("run 42 using @saved-account")
+        );
+        const replacement = structuredClone(op);
+        if (change === "shutdown") h.owner.shutdown();
+        if (change === "removed") operations.delete(op.operationId);
+        if (change === "replaced") operations.put(replacement);
+        if (change === "repo") op.repo = "fixture/other";
+        if (change === "environment") op.environment = "other";
+        if (change === "login") op.context = { githubLogin: "other-account" };
+        if (change === "run")
+          op.verification = { runId: "43", workflowState: "active" };
+        if (change === "attempt") op.control.attempts.verification += 1;
+        gate.resolve();
+        const result = await pending;
+        expect(result.kind).not.toBe("accepted");
+        expect(result.code).toBe(
+          change === "shutdown" && boundary !== "confirmation" ?
+            "operation-shutting-down"
+          : "operation-context-changed"
+        );
+        expect(h.run.mock.calls.some(([args]) => args.includes("POST"))).toBe(
+          false
+        );
+        if (change === "removed")
+          expect(operations.get(op.operationId)).toBeNull();
+        if (change === "replaced")
+          expect(operations.get(op.operationId)).toBe(replacement);
+        if (change === "run")
+          expect(op.verification).toEqual({
+            runId: "43",
+            workflowState: "active"
+          });
+        expect(h.accountContext.getExecutor(op.operationId)).toBeUndefined();
+      } finally {
+        gate.resolve();
+        await pending;
+        await h.extension.shutdown();
+      }
+    }
+  );
+
+  it.each(["shutdown", "run", "repo", "login", "removed", "replaced"] as const)(
+    "retains original issued cancellation across %s",
+    async (change) => {
+      const entered = deferred();
+      const gate = deferred();
+      const h = await composition({
+        confirm: async () => true,
+        cancellationRun: async (args) => {
+          if (args[0] === "api") {
+            entered.resolve();
+            await gate.promise;
+            return { code: 0, stdout: "", stderr: "" };
+          }
+          if (args[0] === "run")
+            return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+          throw new Error(`Unexpected command ${args.join(" ")}`);
+        }
+      });
+      const op = stoppedSetup({ repo: target.repo });
+      op.context = { githubLogin: h.executor.login };
+      op.verification = { runId: "42", workflowState: "active" };
+      operations.put(op);
+      const diagnostics = vi
+        .spyOn(operations, "report")
+        .mockImplementation(() => {});
+      try {
+        const pending = h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action: "cancel-workflow"
+        });
+        await entered.promise;
+        const replacement = structuredClone(op);
+        if (change === "shutdown") h.owner.shutdown();
+        if (change === "run")
+          op.verification = { runId: "43", workflowState: "active" };
+        if (change === "repo") op.repo = "fixture/other";
+        if (change === "login") op.context = { githubLogin: "other-account" };
+        if (change === "removed") operations.delete(op.operationId);
+        if (change === "replaced") operations.put(replacement);
+        gate.resolve();
+        const result = await pending;
+        expect(
+          h.run.mock.calls.filter(([args]) => args.includes("POST"))
+        ).toEqual([
+          [
+            [
+              "api",
+              "--method",
+              "POST",
+              "repos/fixture/app/actions/runs/42/cancel"
+            ],
+            { timeout: 30000, beforeExecute: expect.any(Function) }
+          ]
+        ]);
+        expect(result.cancellation).toMatchObject({
+          target: { repo: "fixture/app", login: "saved-account", runId: "42" },
+          state: "cancelling",
+          issued: true
+        });
+        if (change === "removed" || change === "replaced") {
+          expect(result.code).toBe("workflow-cancellation-result-detached");
+          expect(diagnostics).toHaveBeenCalledWith(
+            expect.objectContaining({ code: result.code })
+          );
+          expect(operations.get(op.operationId)).toBe(
+            change === "removed" ? null : replacement
+          );
+        } else {
+          expect(result.kind).toBe("accepted");
+          expect(op.control.commands.at(-1)).toMatchObject({
+            target: "42",
+            state: "finished",
+            outcome: "cancelling",
+            workflowCancellation: { runId: "42", login: "saved-account" }
+          });
+          expect(h.persist).toHaveBeenCalledTimes(2);
+          if (change === "run")
+            expect(op.verification).toEqual({
+              runId: "43",
+              workflowState: "active"
+            });
+        }
+      } finally {
+        gate.resolve();
+        await h.extension.shutdown();
+      }
+    }
+  );
+
   it.each(
     [
       "current",
