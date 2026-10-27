@@ -9,6 +9,7 @@ export default defineConfig({
       "../core/src/setup-{admission,boundary,provider-configuration}.test.ts",
       "../core/src/setup-{command-admission,input-resume}.test.ts",
       "src/server/services/operation-{control,resume}.test.ts",
+      "src/server/services/{operation-workflow-cancellation,verification-workflow-cancellation}.test.ts",
       "src/server/routes/operations-{control,status}.test.ts",
       "../core/src/setup-{coordinator,github-environment*}.test.ts",
       "src/server/services/environment-operation.test.ts",

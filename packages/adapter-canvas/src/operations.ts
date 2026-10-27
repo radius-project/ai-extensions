@@ -262,7 +262,19 @@ export type OperationCommandState = "accepted" | "running" | "finished";
 export type OperationAttemptKind =
   "setup" | "verification" | "cleanup" | "deletion";
 
+export interface WorkflowCancellationTarget {
+  readonly operationId: string;
+  readonly commandId: string;
+  readonly cancellationAttempt: number;
+  readonly repo: string;
+  readonly environment: string;
+  readonly login: string;
+  readonly runId: string;
+  readonly verificationAttempt: number;
+}
+
 export type OperationCommandRecord = {
+  workflowCancellation?: WorkflowCancellationTarget;
   kind: OperationCommandKind;
   commandId: string;
   attempt: number;
@@ -887,8 +899,36 @@ export function readOperationControl(value: any): OperationControlRecord {
         state: entry.state,
         acceptedAt: isoOrNull(entry.acceptedAt) || nowIso(),
         completedAt: isoOrNull(entry.completedAt),
-        outcome: isoOrNull(entry.outcome)
+        outcome: isoOrNull(entry.outcome),
+        ...(isWorkflowCancellationTarget(entry.workflowCancellation) ?
+          { workflowCancellation: structuredClone(entry.workflowCancellation) }
+        : {})
       });
+    }
+
+    function isWorkflowCancellationTarget(
+      value: unknown
+    ): value is WorkflowCancellationTarget {
+      if (!value || typeof value !== "object") return false;
+      const record = value as Record<string, unknown>;
+      return (
+        [
+          "operationId",
+          "commandId",
+          "repo",
+          "environment",
+          "login",
+          "runId"
+        ].every(
+          (key) => typeof record[key] === "string" && record[key].length > 0
+        ) &&
+        ["cancellationAttempt", "verificationAttempt"].every(
+          (key) =>
+            typeof record[key] === "number" &&
+            Number.isSafeInteger(record[key]) &&
+            record[key] >= 0
+        )
+      );
     }
   }
   if (Array.isArray(value.outcomes)) {

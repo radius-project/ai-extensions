@@ -6,6 +6,7 @@ import {
   projectOperationActions
 } from "../operations.js";
 import type { OperationRecord } from "../server/routes/operations-status.js";
+import type { WorkflowCancellationResult } from "../server/services/workflow-cancellation-target.js";
 import {
   environmentRecord,
   environmentString,
@@ -118,7 +119,9 @@ export function projectEnvironmentApplicationChoices(
   };
 }
 
-export type EnvironmentToolResult =
+export type EnvironmentToolResult = {
+  cancellation?: WorkflowCancellationResult;
+} & (
   | {
       kind: "accepted" | "status";
       code: string;
@@ -137,7 +140,8 @@ export type EnvironmentToolResult =
       code: string;
       message: string;
       operation?: SafeEnvironmentOperation;
-    };
+    }
+);
 
 const actionNames = new Map<string, EnvironmentControlAction>([
   ["continue-setup", "continue"],
