@@ -3,7 +3,10 @@ import {
   GitHubEnvironmentEnsureError,
   type EnsuredGitHubEnvironment
 } from "./setup-github-environment.js";
-import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import {
+  isSetupExecutionInterrupted,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 
 export interface SetupCoordinatorTarget {
   operationId: string;
@@ -195,6 +198,7 @@ export async function runSetupCoordinator(
     try {
       return await action();
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       if (
         outstanding &&
         ports
