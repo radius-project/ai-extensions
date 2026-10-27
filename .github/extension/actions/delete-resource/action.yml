@@ -109,7 +109,7 @@ runs:
         # Map the resource type to its rad command. Only application and environment
         # are supported; anything else fails fast without touching the control plane.
         # --yes bypasses the interactive confirmation prompt. `rad app delete` and
-        # `rad env delete` always target Radius.Core and reject --preview.
+        # `rad env delete` always target Radius.Core.
         case "$RESOURCE_TYPE" in
           application)
             VERB=(app delete)

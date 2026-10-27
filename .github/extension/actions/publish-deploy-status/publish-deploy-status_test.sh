@@ -781,6 +781,6 @@ grep -q "LC_ALL=C sed" "${PROGRESS_HELPER}" ||
 # APP_NAME is intentionally literal because this checks the generated script.
 # shellcheck disable=SC2016
 grep -q 'rad resource list -a "$APP_NAME" -o json' "${BODY_SCRIPT}" ||
-    fail "deploy progress must list Radius.Core resources without --preview"
+    fail "deploy progress must list Radius.Core resources for the application"
 
 echo "publish-deploy-status tests passed"

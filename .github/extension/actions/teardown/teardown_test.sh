@@ -15,8 +15,8 @@
 #   4. teardown runs `rad shutdown` only when state-restored == "true".
 #   5. teardown skips `rad shutdown` (with a ::warning::) when it is not "true"
 #      (a run that failed before startup must not overwrite the state archive).
-#   6. teardown lists Radius.Core applications with `rad app list` (no
-#      `--preview`), and surfaces a warning if that listing fails
+#   6. teardown lists Radius.Core applications with `rad app list`
+#      and surfaces a warning if that listing fails
 #      instead of swallowing it silently.
 #   7. Every workflow that uses the teardown action (discovered dynamically)
 #      wires state-restored from a restore-state step (id: restore-state) in the
@@ -228,7 +228,7 @@ for value in ("", "false"):
     if "::warning" not in persist_stdout:
         fail(f"teardown must emit a ::warning:: when skipping persistence (value='{value}')")
 
-# 6. Status listing runs `rad app list` without --preview and warns (does not
+# 6. Status listing runs `rad app list` and warns (does not
 #    swallow) on failure.
 _, _, status_rad, _ = run_block(status_block)
 if not re.search(r"(?m)^app list\s*$", status_rad):

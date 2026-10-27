@@ -124,7 +124,7 @@ describe("buildDeployRadCommand", () => {
 });
 
 describe("buildAppGraphRadCommand", () => {
-  it("includes the icon flag without --preview", () => {
+  it("selects the deployed application and includes resource icons", () => {
     expect(buildAppGraphRadCommand("my-app")).toBe(
       "app graph --application my-app --include-icons"
     );
