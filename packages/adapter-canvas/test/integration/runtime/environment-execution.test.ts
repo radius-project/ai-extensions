@@ -1365,6 +1365,229 @@ describe("real server and fake SDK runtime ownership", () => {
     }
   );
 
+  it.each(
+    ["azure", "github"].flatMap((provider) =>
+      [0, 11].map((attempts) => ({ provider, attempts }))
+    )
+  )(
+    "preserves unresolved $provider evidence at $attempts attempts when shutdown prevents reread",
+    async ({ provider, attempts }) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = deferred();
+      const gate = deferred();
+      const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+      const workflowPath = ".github/workflows/radius-verify-credentials.yml";
+      const run = vi.fn(async (args: string[]) => {
+        const endpoint = args[1]?.replace(/^\//, "");
+        if (
+          endpoint === "repos/fixture/app" &&
+          args.includes(".default_branch")
+        )
+          return success("main");
+        if (
+          [
+            workflowPath,
+            ".github/workflows/run-rad-commands.yml",
+            ".github/workflows/radius-deploy.yml"
+          ].some(
+            (path) => endpoint === `repos/fixture/app/contents/${path}?ref=main`
+          ) &&
+          args.includes(".content")
+        )
+          return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        if (endpoint === "repos/fixture/app/environments/dev")
+          return success('{"name":"dev","id":17}');
+        if (args.includes("/repos/fixture/app/environments?per_page=100"))
+          return success();
+        if (endpoint === "repos/fixture/app")
+          return success(
+            '{"id":23,"full_name":"fixture/app","default_branch":"main","owner":{"id":11,"login":"fixture","type":"User"}}'
+          );
+        if (
+          provider === "azure" &&
+          endpoint === "repos/fixture/app/actions/oidc/customization/sub"
+        ) {
+          return success('{"use_default":true,"use_immutable_subject":false}');
+        }
+        if (
+          provider === "github" &&
+          endpoint === `repos/fixture/app/contents/${workflowPath}`
+        ) {
+          entered.resolve();
+          await gate.promise;
+          return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        }
+        throw new Error(`Unexpected GitHub read or write: ${args.join(" ")}`);
+      });
+      const runAz = vi.fn(async (args: string[]) => {
+        if (
+          provider === "azure" &&
+          args.slice(0, 3).join(" ") === "ad app list"
+        ) {
+          entered.resolve();
+          await gate.promise;
+          return success("[]");
+        }
+        if (args.slice(0, 2).join(" ") === "account set") return success();
+        if (args.slice(0, 2).join(" ") === "account show")
+          return success(
+            '{"id":"11111111-1111-4111-8111-111111111111","tenantId":"33333333-3333-4333-8333-333333333333","user":{"type":"user","name":"fixture@example.test"}}'
+          );
+        throw new Error(`Unexpected Azure read or write: ${args.join(" ")}`);
+      });
+      vi.spyOn(gh, "cliExec").mockImplementation(
+        (command, args, _options, callback) => {
+          if (command !== "az")
+            throw new Error(`Unexpected executable: ${command}`);
+          void runAz(args).then(
+            (result) => callback(null, result.stdout, result.stderr),
+            (error: unknown) =>
+              callback(
+                error instanceof Error ? error : new Error(String(error)),
+                "",
+                ""
+              )
+          );
+          return new ChildProcess();
+        }
+      );
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache: () => {}
+      });
+      const accountContext = createEnvironmentAccountContext(
+        "runtime",
+        coordinator
+      );
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext
+      });
+      const op = createOperation({
+        operationId: "resumed-shutdown",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.currentStage =
+        provider === "azure" ?
+          STAGE_AUTHORIZE_IDENTITY
+        : STAGE_CONFIGURE_ENVIRONMENT;
+      op.request = {
+        needsAzureCredentials: provider === "azure",
+        azure: {
+          resourceGroup: "fixture-group",
+          cluster: "fixture-cluster",
+          subscriptionId: "11111111-1111-4111-8111-111111111111"
+        },
+        environment: {
+          provider: "azure",
+          clientId: "22222222-2222-4222-8222-222222222222",
+          tenantId: "33333333-3333-4333-8333-333333333333",
+          subscriptionId: "11111111-1111-4111-8111-111111111111"
+        }
+      };
+      recordGitHubEnvironment(op, {
+        state: "reused",
+        origin: "pre_existing",
+        repo: op.repo,
+        environment: op.environment,
+        providerId: "17"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind:
+          provider === "azure" ?
+            "azure_application.create"
+          : "github_workflow.put",
+        target:
+          provider === "azure" ?
+            "fixture/app:dev:radius-deploy-fixture-app"
+          : `fixture/app:<default>:${workflowPath}`
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        "outcome_unknown",
+        "Original provider acknowledgement was lost"
+      );
+      op.providerRecovery.mutations[0].reconcileAttempts = attempts;
+      const original = structuredClone(op.providerRecovery);
+      operations.put(op);
+      const snapshots: (typeof original)[] = [];
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        snapshots.push(structuredClone(op.providerRecovery));
+      });
+      const diagnostics = vi.spyOn(operations, "report");
+      const fake = createFakeDependencies();
+      const extension = await bootstrapRadiusExtension(
+        { ...fake.deps, ...runtime, executionOwner: owner },
+        {
+          createCanvas: (declaration) => declaration,
+          joinSession: async () => createFakeSession()
+        }
+      );
+      let completed = Promise.resolve();
+      try {
+        runtime.setupExecution.scheduleEnvironmentOperation(op);
+        completed = new Promise<void>((resolve) => {
+          const stop = owner.onEnvironmentTasksSettled(undefined, () => {
+            stop();
+            resolve();
+          });
+        });
+        await Promise.race([entered.promise, completed]);
+        expect(
+          op.executionActive,
+          JSON.stringify({
+            calls: run.mock.calls,
+            az: runAz.mock.calls,
+            failure: op.failure
+          })
+        ).toBe(true);
+        expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+        await extension.shutdown();
+        expect(accountContext.getExecutor(op.operationId)).toBe(executor);
+        const before = {
+          gh: run.mock.calls.length,
+          az: runAz.mock.calls.length
+        };
+        gate.resolve();
+        await completed;
+        expect(run.mock.calls.slice(before.gh)).toEqual([]);
+        expect(runAz.mock.calls.slice(before.az)).toEqual([]);
+        expect(op.providerRecovery).toEqual(original);
+        for (const snapshot of snapshots) expect(snapshot).toEqual(original);
+        expect(op.failure).toBeNull();
+        expect(op.endedAt).toBeNull();
+        expect(diagnostics).not.toHaveBeenCalledWith(
+          expect.objectContaining({ scope: "setup-task-shutdown" })
+        );
+        expect(accountContext.getExecutor(op.operationId)).toBeUndefined();
+        expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
+        const released = await coordinator.withSelectedAccount(
+          executor.login,
+          { ownerKey: "after-shutdown" },
+          async () => true
+        );
+        expect(released.value).toBe(true);
+      } finally {
+        gate.resolve();
+        await completed;
+        owner.shutdown();
+        await extension.shutdown();
+      }
+    }
+  );
+
   it("detaches a closed panel immediately while its setup and account remain owned", async () => {
     const runtime = await composition();
     const register = vi.spyOn(runtime.accountContext, "registerExecutor");
