@@ -54,6 +54,7 @@ export interface EnvironmentRequiredInteraction extends EnvironmentTarget {
   checkpoint?: string;
   code?: string;
   appSelection?: EnvironmentApplicationChoices;
+  pullRequestUrl?: string;
 }
 
 export interface EnvironmentApplicationChoices {
