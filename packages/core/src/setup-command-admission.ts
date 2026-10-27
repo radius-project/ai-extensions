@@ -4,9 +4,12 @@ export type SetupCommandAdmissionResult =
   | { state: "persist-failed"; error: unknown }
   | { state: "unscheduled" }
   | { state: "stopped" }
+  | { state: "stale" }
   | { state: "accepted"; commandId: string; attempt: number };
 
 export interface SetupCommandAdmissionPorts {
+  isCurrent(): boolean;
+  unwindStale(): Promise<void>;
   isStopped?(): boolean;
   acquire(): { ok: true } | { ok: false; operationId: string };
   begin(): { ok: boolean; commandId: string; attempt: number };
@@ -25,6 +28,19 @@ export async function admitSetupCommand(
   schedulerMiss: "close-operation" | "restore-terminal",
   ports: SetupCommandAdmissionPorts
 ): Promise<void> {
+  const refuseStale = async () => {
+    try {
+      await ports.unwindStale();
+      ports.publish({ state: "stale" });
+    } catch (error) {
+      ports.reportPersistenceFailure(error);
+      ports.publish({ state: "persist-failed", error });
+    }
+  };
+  if (!ports.isCurrent()) {
+    await refuseStale();
+    return;
+  }
   if (ports.isStopped?.()) {
     ports.publish({ state: "stopped" });
     return;
@@ -44,8 +60,16 @@ export async function admitSetupCommand(
   try {
     await ports.persist();
   } catch (error) {
+    if (!ports.isCurrent()) {
+      await refuseStale();
+      return;
+    }
     ports.restore();
     ports.publish({ state: "persist-failed", error });
+    return;
+  }
+  if (!ports.isCurrent()) {
+    await refuseStale();
     return;
   }
   if (ports.isStopped?.()) {
