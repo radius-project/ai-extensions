@@ -138,6 +138,37 @@ afterEach(() => {
 });
 
 describe("production coordinator scheduling scopes", () => {
+  it.each(["removed", "shutdown", "superseded"] as const)(
+    "does not recover deferred admission after its context is %s",
+    (change) => {
+      const callbacks: Array<() => void> = [];
+      const owner = createEnvironmentExecutionOwner({
+        deferTask: async () => {},
+        microtask: (callback) => {
+          callbacks.push(callback);
+        },
+        reconciliationTimer: () => {
+          throw new Error("Unexpected timer");
+        }
+      });
+      const op = operation("deferred");
+      op.kind = "delete";
+      const claim = owner.claimAdmission(op.operationId);
+      if (!claim) throw new Error("Missing admission");
+      const runner = vi.fn(unavailable);
+      const handler = coordinator(owner, "panel", runner);
+      handler.startRecoveredTasks();
+      if (change === "removed") operations.delete(op.operationId);
+      else if (change === "shutdown")
+        owner.markEnvironmentInstanceShuttingDown("panel");
+      else coordinator(owner, "panel", runner);
+      claim.release();
+      expect(callbacks).toHaveLength(1);
+      for (const callback of callbacks) callback();
+      expect(runner).not.toHaveBeenCalled();
+      expect(owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+    }
+  );
   it("re-evaluates deferred recovery against the replacement record after corrective persistence", async () => {
     const owner = createEnvironmentExecutionOwner();
     const original = stoppedSetup();

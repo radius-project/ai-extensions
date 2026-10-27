@@ -38,6 +38,34 @@ afterEach(() => {
 });
 
 describe("runtime environment execution ownership", () => {
+  it("notifies a shared recovery callback only for the admission that released", () => {
+    const callbacks: Array<() => void> = [];
+    const owner = createEnvironmentExecutionOwner({
+      deferTask: async () => {},
+      microtask: (callback) => {
+        callbacks.push(callback);
+      },
+      reconciliationTimer: () => {
+        throw new Error("Unexpected timer");
+      }
+    });
+    const first = owner.claimAdmission("first");
+    const second = owner.claimAdmission("second");
+    if (!first || !second) throw new Error("Missing admission");
+    const recover = vi.fn();
+    owner.deferAdmissionRecovery("first", recover);
+    owner.deferAdmissionRecovery("first", recover);
+    owner.deferAdmissionRecovery("second", recover);
+    first.release();
+    expect(callbacks).toHaveLength(1);
+    callbacks[0]();
+    expect(recover).toHaveBeenCalledExactlyOnceWith("first");
+    expect(second.canRestore()).toBe(true);
+    second.release();
+    expect(callbacks).toHaveLength(2);
+    callbacks[1]();
+    expect(recover.mock.calls).toEqual([["first"], ["second"]]);
+  });
   it("defers recovery until the exact admission releases and fences superseded attachments", async () => {
     const owner = createEnvironmentExecutionOwner();
     const first = owner.attach("panel");
@@ -56,7 +84,7 @@ describe("runtime environment execution ownership", () => {
     claim.release();
     claim.release();
     await recovered.promise;
-    expect(recover).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledExactlyOnceWith("op");
     expect(claim.canRestore()).toBe(false);
     expect(owner.deferAdmissionRecovery("op", recover)).toBe(false);
     const next = owner.claimAdmission("op");

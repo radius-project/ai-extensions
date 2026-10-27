@@ -49,7 +49,11 @@ export function createEnvironmentExecutionOwner(
   const attachments = new Map<string, number>();
   const admissions = new Map<
     string,
-    { started: boolean; blocked: boolean; recovery: Set<() => void> }
+    {
+      started: boolean;
+      blocked: boolean;
+      recovery: Set<(operationId: string) => void>;
+    }
   >();
   let generation = 0;
 
@@ -175,7 +179,7 @@ export function createEnvironmentExecutionOwner(
           tasks.has(operationId)
         ),
         blocked: false,
-        recovery: new Set<() => void>()
+        recovery: new Set<(operationId: string) => void>()
       };
       admissions.set(operationId, admission);
       return {
@@ -193,11 +197,16 @@ export function createEnvironmentExecutionOwner(
             return;
           }
           admissions.delete(operationId);
-          for (const recover of admission.recovery) clock.microtask(recover);
+          for (const recover of admission.recovery) {
+            clock.microtask(() => recover(operationId));
+          }
         }
       };
     },
-    deferAdmissionRecovery(operationId: string, recover: () => void): boolean {
+    deferAdmissionRecovery(
+      operationId: string,
+      recover: (operationId: string) => void
+    ): boolean {
       if (blockedAdmissions.has(operationId)) return true;
       const admission = admissions.get(operationId);
       if (!admission) return false;

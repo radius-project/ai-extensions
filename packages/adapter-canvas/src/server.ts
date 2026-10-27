@@ -5347,70 +5347,66 @@ export function createInstanceRequestCoordinator(
   }
 
   function startRecoveredTasks(): void {
+    for (const op of operations.all()) startRecoveredTask(op.operationId);
+  }
+
+  function startRecoveredTask(operationId: string): void {
     if (executionOwner.isShuttingDown(instanceId) || !attachment.isCurrent())
       return;
-    for (const op of operations.all()) {
-      if (
-        executionOwner.deferAdmissionRecovery(
-          op.operationId,
-          startRecoveredTasks
-        )
-      )
-        continue;
-      // Resume a delete operation that was mid-flight when the process
-      // restarted. The runner is resume-safe (each stage re-runs only while
-      // pending/running), so re-scheduling converges. Delete operations never
-      // enter input_required, so there is no prompt state to skip here.
-      if (
-        op.kind === "delete" &&
-        !op.endedAt &&
-        !attachment.hasTask(op.operationId)
-      ) {
-        scheduleServerOwnedTask(op.operationId, () =>
-          runEnvironmentOperation(op.operationId)
-        );
-        continue;
-      }
-      if (
-        op.endedAt &&
-        op.providerRecovery?.state === "rollback_pending" &&
-        !providerRecoveryManualGuidance(op)
-      ) {
-        scheduleAutomaticRecoveryRollback(op.operationId);
-        continue;
-      }
-      if (
-        op.recoveryState === "provider_reconciliation_pending" &&
-        !op.endedAt
-      ) {
-        scheduleRecoveredProviderMutation(op);
-        continue;
-      }
-      if (
-        (op.recoveryState !== "verification_pending" &&
-          op.recoveryState !== "verification_acquisition_pending") ||
-        op.currentStage !== STAGE_VERIFY ||
-        op.endedAt ||
-        !executionOwner.claimVerificationMonitor(op.operationId)
-      )
-        continue;
-      scheduleServerOwnedTask(op.operationId, async () => {
-        try {
-          if (op.recoveryState === "verification_acquisition_pending") {
-            await runVerificationRetry(
-              op.operationId,
-              String(op.verification?.retryCommandId || "")
-            );
-          } else {
-            await monitorVerificationAsSelectedAccount(op, (executor) =>
-              resolveRecoveredVerificationRun(op, executor)
-            );
-          }
-        } finally {
-          executionOwner.releaseVerificationMonitor(op.operationId);
-        }
-      });
+    const op = operations.get(operationId);
+    if (!op) return;
+    if (executionOwner.deferAdmissionRecovery(operationId, startRecoveredTask))
+      return;
+    // Resume a delete operation that was mid-flight when the process
+    // restarted. The runner is resume-safe (each stage re-runs only while
+    // pending/running), so re-scheduling converges. Delete operations never
+    // enter input_required, so there is no prompt state to skip here.
+    if (
+      op.kind === "delete" &&
+      !op.endedAt &&
+      !attachment.hasTask(op.operationId)
+    ) {
+      scheduleServerOwnedTask(op.operationId, () =>
+        runEnvironmentOperation(op.operationId)
+      );
+      return;
     }
+    if (
+      op.endedAt &&
+      op.providerRecovery?.state === "rollback_pending" &&
+      !providerRecoveryManualGuidance(op)
+    ) {
+      scheduleAutomaticRecoveryRollback(op.operationId);
+      return;
+    }
+    if (op.recoveryState === "provider_reconciliation_pending" && !op.endedAt) {
+      scheduleRecoveredProviderMutation(op);
+      return;
+    }
+    if (
+      (op.recoveryState !== "verification_pending" &&
+        op.recoveryState !== "verification_acquisition_pending") ||
+      op.currentStage !== STAGE_VERIFY ||
+      op.endedAt ||
+      !executionOwner.claimVerificationMonitor(op.operationId)
+    )
+      return;
+    scheduleServerOwnedTask(op.operationId, async () => {
+      try {
+        if (op.recoveryState === "verification_acquisition_pending") {
+          await runVerificationRetry(
+            op.operationId,
+            String(op.verification?.retryCommandId || "")
+          );
+        } else {
+          await monitorVerificationAsSelectedAccount(op, (executor) =>
+            resolveRecoveredVerificationRun(op, executor)
+          );
+        }
+      } finally {
+        executionOwner.releaseVerificationMonitor(op.operationId);
+      }
+    });
   }
 
   /**
