@@ -109,11 +109,11 @@ describe(".github/extension release assets", () => {
     expect(installStep.run).not.toMatch(/install-rad\.sh\s+edge\b/u);
   });
 
-  // A `workflow_dispatch` boolean input arrives as the string "true"/"false"
-  // (including its declared default), so handing it straight to a reusable
-  // workflow's `type: boolean` input passes a string where a boolean is
-  // declared — on every run, not only the ones that set it. Each such value has
-  // to be coerced, e.g. `${{ inputs.force == 'true' }}`. See actions/runner#1483.
+  // A `workflow_dispatch` boolean input is a real boolean in the `inputs`
+  // context, but older runners and `github.event.inputs` carry the string
+  // "true"/"false" (actions/runner#1483). Comparing only to 'true' turns a real
+  // `true` into false, so a forwarded value must accept both forms, e.g.
+  // `${{ inputs.force == true || inputs.force == 'true' }}`.
   it("coerces every dispatch boolean it forwards to a reusable workflow", () => {
     const workflows = filesUnder(EXTENSION_ROOT).filter((path) =>
       /\.ya?ml$/u.test(path)
@@ -136,7 +136,10 @@ describe(".github/extension release assets", () => {
           );
           if (!named) continue;
           forwarded++;
-          if (!value.includes(`inputs.${named} ==`)) {
+          if (
+            !value.includes(`inputs.${named} == true`) ||
+            !value.includes(`inputs.${named} == 'true'`)
+          ) {
             uncoerced.push(`${path}: ${input}: ${value}`);
           }
         }

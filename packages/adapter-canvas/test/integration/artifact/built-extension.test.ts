@@ -29,6 +29,7 @@ import {
   compileBrowserStyle
 } from "../../../src/browser/build.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
+import { RADIUS_SESSION_START_CONTEXT } from "../../../src/runtime/declarations.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
@@ -824,6 +825,36 @@ describe("P0-C built Radius extension artifact", () => {
     for (const block of bicepBlocks) {
       expect(block).not.toMatch(LITERAL_CREDENTIAL_ASSIGNMENT);
     }
+  });
+
+  it("keeps continuation and missing-model ownership consistent across shipped graph instructions", () => {
+    assertCurrentArtifact();
+    const bundle = readFileSync(ARTIFACT, "utf8");
+    const graphGuidance = readFileSync(
+      join(DIST, "skills", "radius-app-graph", "SKILL.md"),
+      "utf8"
+    );
+    const continuation =
+      "Continue with any other part of the user's request, or end the turn.";
+    const stopReferenceCheck =
+      "stop the reference check without waiting or retrying";
+
+    expect(bundle).toContain(continuation);
+    expect(bundle).toContain(stopReferenceCheck);
+    for (const guidance of [RADIUS_SESSION_START_CONTEXT, graphGuidance]) {
+      expect(guidance).toContain(continuation);
+      expect(guidance).toContain(stopReferenceCheck);
+      expect(guidance).not.toMatch(
+        /(?<!or )\bend (?:the current|the) turn\b/iu
+      );
+      expect(guidance).toMatch(
+        /do not start missing-model generation independently/iu
+      );
+      expect(guidance).toMatch(/canvas[^\n]*authoring handoff/iu);
+    }
+    expect(graphGuidance).toContain(
+      "run the `radius-app-bicep` skill as a repair of the existing model"
+    );
   });
 
   it("packages fail-closed guidance for developer rad resolution failures", () => {

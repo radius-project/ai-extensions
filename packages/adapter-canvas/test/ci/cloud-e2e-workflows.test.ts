@@ -19,7 +19,7 @@
 // derived - the Playwright timeout from the config module, the job timeout from
 // the parsed YAML - so the invariant holds if either number changes, which is
 // the point of asserting it at all.
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -30,6 +30,7 @@ import cloudConfig from "../../playwright.cloud.config.js";
 import { redactCredentials } from "../../src/credential-redaction.js";
 import { CLOUD_CANVAS_HOSTS } from "../e2e-cloud/support/cloud-canvas-host.js";
 import { COPILOT_APP_SUITE_TIMEOUT_MS } from "../e2e-cloud/support/cloud-timeout-budget.js";
+import { COPILOT_APP_DEFAULT_CDP_PORT } from "../e2e-cloud/support/copilot-app-cdp.js";
 import {
   ENVIRONMENT_NAME_PREFIX,
   RESOURCE_GROUP_PREFIX
@@ -236,8 +237,12 @@ describe("cloud-e2e.yml", () => {
       options: [...CLOUD_CANVAS_HOSTS],
       default: "harness"
     });
+    expect(dispatch.inputs).not.toHaveProperty("manual-app-sign-in");
 
     const job = workflow.jobs?.["cloud-e2e"];
+    expect(
+      steps(job).find((step) => step.run === "pnpm run test:cloud")?.env
+    ).not.toHaveProperty("RADIUS_CLOUD_E2E_MANUAL_APP_SIGN_IN");
     expect(job?.env?.RADIUS_CLOUD_E2E_CANVAS_HOST).toBe("${{ " + host + " }}");
     expect(job?.["runs-on"]).toBe(
       "${{ " + host + " == 'copilot-app' && 'windows-2025' || 'ubuntu-24.04' }}"
@@ -278,6 +283,206 @@ describe("cloud-e2e.yml", () => {
     });
   });
 
+  it("scopes elevated WebView2 debugging to the app and removes only its owned policy", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const all = steps(workflow.jobs?.["cloud-e2e"]);
+    const enableIndex = all.findIndex((step) => step.id === "copilot-cdp");
+    const runIndex = all.findIndex((step) => step.run?.includes("test:cloud"));
+    const removeIndex = all.findIndex(
+      (step) => step.name === "Remove Copilot app browser debugging policy"
+    );
+    const enable = all[enableIndex];
+    const remove = all[removeIndex];
+    const policy =
+      "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
+
+    expect(enableIndex).toBeGreaterThan(0);
+    expect(enableIndex).toBeLessThan(runIndex);
+    expect(removeIndex).toBeGreaterThan(runIndex);
+    expect(enable?.if).toBe(
+      "steps.fixture.outputs.configured == 'true' && env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'copilot-app'"
+    );
+    expect(enable?.shell).toBe("pwsh");
+    expect(enable?.run).toContain(`$policy = '${policy}'`);
+    expect(enable?.run).toContain(
+      `New-ItemProperty -LiteralPath $policy -Name 'github.exe' -Value '--remote-debugging-port=${COPILOT_APP_DEFAULT_CDP_PORT}' -PropertyType String`
+    );
+    expect(enable?.run).toContain(
+      "(Get-Item -LiteralPath $policy).GetValueNames().Contains('github.exe')"
+    );
+    expect(enable?.run).toContain(
+      "$env:RUNNER_ENVIRONMENT -ne 'github-hosted'"
+    );
+    expect(enable?.run).toContain("'configured=true' >> $env:GITHUB_OUTPUT");
+    expect(remove?.if).toBe(
+      "always() && steps.fixture.outputs.configured == 'true' && steps.copilot-cdp.outputs.configured == 'true'"
+    );
+    expect(remove?.shell).toBe("pwsh");
+    expect(remove?.run).toBe(
+      "$ErrorActionPreference = 'Stop'\n" +
+        `$policy = '${policy}'\n` +
+        "Remove-ItemProperty -LiteralPath $policy -Name 'github.exe'\n"
+    );
+    expect(enable?.["continue-on-error"]).toBeUndefined();
+    expect(remove?.["continue-on-error"]).toBeUndefined();
+  });
+
+  it.skipIf(process.platform !== "win32").each([
+    {
+      state: "missing",
+      runner: "github-hosted",
+      githubActions: "true",
+      fails: false,
+      success: true
+    },
+    {
+      state: "other-app",
+      runner: "github-hosted",
+      githubActions: "true",
+      fails: false,
+      success: true
+    },
+    {
+      state: "existing",
+      runner: "github-hosted",
+      githubActions: "true",
+      fails: false,
+      success: false
+    },
+    {
+      state: "missing",
+      runner: "self-hosted",
+      githubActions: "true",
+      fails: false,
+      success: false
+    },
+    {
+      state: "missing",
+      runner: "github-hosted",
+      githubActions: "false",
+      fails: false,
+      success: false
+    },
+    {
+      state: "missing",
+      runner: "github-hosted",
+      githubActions: "",
+      fails: false,
+      success: false
+    },
+    {
+      state: "missing",
+      runner: "github-hosted",
+      githubActions: "true",
+      fails: true,
+      success: false
+    }
+  ])(
+    "executes the policy setup without replacing existing state: $state, $runner, Actions=$githubActions, write failure=$fails",
+    async ({ state, runner, githubActions, fails, success }) => {
+      const workflow = await parseWorkflow(RUN_WORKFLOW);
+      const all = steps(workflow.jobs?.["cloud-e2e"]);
+      const enable = all.find((step) => step.id === "copilot-cdp")?.run;
+      const remove = all.find(
+        (step) => step.name === "Remove Copilot app browser debugging policy"
+      )?.run;
+      expect(enable).toBeDefined();
+      expect(remove).toBeDefined();
+      const root = await mkdtemp(path.join(tmpdir(), "radius-cdp-policy-"));
+      try {
+        const script = `
+$ErrorActionPreference = 'Stop'
+$calls = [System.Collections.Generic.List[string]]::new()
+function Test-Path { param($LiteralPath) return $env:TEST_STATE -ne 'missing' }
+function Get-Item {
+  param($LiteralPath)
+  $key = [pscustomobject]@{}
+  $key | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value {
+    if ($env:TEST_STATE -eq 'existing') { return @('github.exe', 'other.exe') }
+    return @('other.exe')
+  }
+  return $key
+}
+function New-Item { param($Path, [switch]$Force) $calls.Add('create-key') }
+function New-ItemProperty {
+  param($LiteralPath, $Name, $Value, $PropertyType)
+  $calls.Add("set:$LiteralPath|$Name|$Value|$PropertyType")
+  if ($env:TEST_WRITE_FAIL -eq 'true') { throw 'Policy write denied' }
+}
+function Remove-ItemProperty {
+  param($LiteralPath, $Name)
+  $calls.Add("remove:$LiteralPath|$Name")
+}
+try {
+  & {
+${enable}
+  }
+  & {
+${remove}
+  }
+} finally {
+  Write-Output ($calls -join ';')
+}
+`;
+        const result = spawnSync(
+          "pwsh",
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            Buffer.from(script, "utf16le").toString("base64")
+          ],
+          {
+            encoding: "utf8",
+            timeout: 4_000,
+            env: {
+              PATH: process.env.PATH,
+              SystemRoot: process.env.SystemRoot,
+              TEMP: root,
+              TMP: root,
+              GITHUB_ACTIONS: githubActions,
+              RUNNER_ENVIRONMENT: runner,
+              GITHUB_OUTPUT: path.join(root, "output"),
+              TEST_STATE: state,
+              TEST_WRITE_FAIL: String(fails)
+            }
+          }
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(success ? 0 : 1);
+        const policy =
+          "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
+        const write = `set:${policy}|github.exe|--remote-debugging-port=${COPILOT_APP_DEFAULT_CDP_PORT}|String`;
+        const unsupportedRunner =
+          runner !== "github-hosted" || githubActions !== "true";
+        const calls =
+          unsupportedRunner || state === "existing" ?
+            []
+          : [
+              ...(state === "missing" ? ["create-key"] : []),
+              write,
+              ...(success ? [`remove:${policy}|github.exe`] : [])
+            ];
+        expect(result.stdout.trim()).toBe(calls.join(";"));
+        if (success) {
+          expect(await readFile(path.join(root, "output"), "utf8")).toMatch(
+            /^configured=true\r?\n$/
+          );
+        } else {
+          expect(await readdir(root)).not.toContain("output");
+          expect(result.stderr).toContain(
+            unsupportedRunner ? "only allowed on disposable"
+            : state === "existing" ? "Refusing to replace it"
+            : "Policy write denied"
+          );
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("isolates package credentials while using OIDC and an installation token", async () => {
     // Azure and repository access credentials are minted per run and expire
     // with it. The App signing key and package PAT remain masked secrets.
@@ -297,6 +502,10 @@ describe("cloud-e2e.yml", () => {
         "${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}",
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
         "${{ steps.fixture.outputs.full-name }}",
+      AIEXT_CLOUD_E2E_FOREIGN_APP_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_FOREIGN_APP_NAME }}",
+      AIEXT_CLOUD_E2E_ORPHAN_APP_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_ORPHAN_APP_NAME }}",
       AIEXT_CLOUD_E2E_RESOURCE_GROUP:
         "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}",
       CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
@@ -583,9 +792,158 @@ describe("cloud-e2e-cleanup.yml", () => {
     // Deleting a deployment record is a write, and the records outlive the
     // environment that names them, so environment write alone is not enough.
     expect(token?.with?.["permission-deployments"]).toBe("write");
+    // Deleting a repository environment needs Administration write.
+    expect(token?.with?.["permission-administration"]).toBe("write");
     // cloud-e2e.yml mints its journey token with no permission inputs, so any
     // grant added to this installation widens that token too.
     expect(token?.with?.["permission-packages"]).toBeUndefined();
+  });
+
+  // GitHub expressions treat the number 0 as false, so a numeric input of 0
+  // would fall back to the default and never delete everything.
+  it("accepts max_age_hours as a string input that defaults to 6", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const text = await readWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const validate = purge.find(
+      (step) => step.name === "Validate max_age_hours"
+    );
+
+    expect(text).toMatch(
+      /max_age_hours:\n\s+description: >-[\s\S]*?\n\s+type: string\n\s+required: false\n\s+default: "6"\n/
+    );
+    expect(text).toContain("MAX_AGE_HOURS: ${{ inputs.max_age_hours || '6' }}");
+    expect(validate?.run).toContain("^[0-9]+$");
+  });
+
+  it.each([
+    ["6", 0],
+    ["0", 0],
+    ["720", 0],
+    ["721", 1],
+    ["-1", 1],
+    ["six", 1],
+    ["", 1]
+  ] as const)("validates max_age_hours=%j", async (value, status) => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const validate = steps(workflow.jobs?.purge).find(
+      (step) => step.name === "Validate max_age_hours"
+    );
+    const directory = await mkdtemp(path.join(tmpdir(), "max-age-"));
+    try {
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          MAX_AGE_HOURS: value,
+          GITHUB_STEP_SUMMARY: path.join(directory, "summary.md")
+        },
+        input: `set -euo pipefail\n${validate?.run}`
+      });
+      expect(result.status).toBe(status);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("gates the reset on a final check that ignores age", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const gateIndex = purge.findIndex(
+      (step) => step.id === "pre-reset-verification"
+    );
+    const resetIndex = purge.findIndex(
+      (step) =>
+        step.name === "Reset the fixture default branch under the shared lease"
+    );
+    const script = purge[gateIndex]?.run ?? "";
+
+    expect(gateIndex).toBeGreaterThanOrEqual(0);
+    expect(resetIndex).toBeGreaterThan(gateIndex);
+    for (const selector of [
+      "selectPrefixedEnvironments",
+      "selectNamedApplications",
+      "selectLeakedClusterWorkloads",
+      "selectStatePackages"
+    ])
+      expect(script).toContain(selector);
+    expect(script).toContain("cleanup_namespace_probe");
+    expect(script).toContain("max_age_hours=0");
+  });
+
+  // The gate deletes nothing, so it must report state that the delete steps
+  // safely skip: an application that setup did not tag, and a state package
+  // with no readable timestamp.
+  it.each([
+    {
+      case: "untagged application and undated package",
+      leaked: true,
+      status: 1
+    },
+    { case: "clean fixture", leaked: false, status: 0 }
+  ])("runs the reset gate: $case", async ({ leaked, status }) => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const gate = steps(workflow.jobs?.purge).find(
+      (step) => step.id === "pre-reset-verification"
+    );
+    const directory = await mkdtemp(path.join(tmpdir(), "reset-gate-"));
+    const application = JSON.stringify(
+      leaked ?
+        [
+          {
+            id: "untagged-object",
+            appId: "untagged-app",
+            displayName: "radius-deploy-owner-fixture-repo",
+            tags: []
+          }
+        ]
+      : []
+    );
+    const packages = JSON.stringify([
+      leaked ?
+        [{ name: "fixture-repo-radius-state-radtest-abc-0123456789ab" }]
+      : [{ name: "radius-project-canvas" }]
+    ]);
+    const stubs = [
+      'timeout() { shift; "$@"; }',
+      `gh() { case "$*" in *environments*) echo '[{"environments":[]}]' ;; *packages*) echo '${packages}' ;; *) return 99 ;; esac; }`,
+      `az() { echo '${application}'; }`,
+      'kubectl() { case "$1 $2" in "get namespace") ;; *) echo \'{"items":[]}\' ;; esac; }'
+    ].join("\n");
+    try {
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          RUNNER_TEMP: directory,
+          GITHUB_STEP_SUMMARY: path.join(directory, "summary.md"),
+          GH_PACKAGES_TOKEN: "packages-token",
+          APPLICATION_NAME: "radius-deploy-owner-fixture-repo",
+          ENVIRONMENT_PREFIX: "radtest-",
+          FIXTURE_APPLICATION: "fixture",
+          FIXTURE_OWNER: "owner",
+          FIXTURE_REPOSITORY: "owner/fixture-repo",
+          RADIUS_ENVIRONMENT_NAMESPACE: "default"
+        },
+        input: `${stubs}\n${gate?.run}`
+      });
+      expect(result.stderr).not.toMatch(/error|unbound/i);
+      expect(result.status).toBe(status);
+      if (leaked) {
+        expect(result.stdout).toContain(
+          "Entra application untagged-object (appId untagged-app)"
+        );
+        expect(result.stdout).toContain(
+          "GHCR state package fixture-repo-radius-state-radtest-abc-0123456789ab"
+        );
+      } else {
+        expect(result.stdout).not.toContain("Leaked state remains");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("deletes legacy resource groups only after the Radius applications on them", async () => {
@@ -617,7 +975,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       [
         "Purge leaked Entra service principals and applications",
         "Purge stale GitHub deployment records",
-        "Purge stale GitHub Environments",
+        "List and delete Radius environments",
         "Purge stale workflow fallback pull requests and branches"
       ].includes(step.name ?? "")
     );
@@ -672,7 +1030,8 @@ describe("cloud-e2e-cleanup.yml", () => {
       "environment-cleanup",
       "stale-ghcr-state-cleanup",
       "ghcr-state-cleanup",
-      "fallback-ref-cleanup"
+      "fallback-ref-cleanup",
+      "pre-reset-verification"
     ])
       expect(reset?.if).toContain(`steps.${prerequisite}.outcome == 'success'`);
   });
@@ -688,7 +1047,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       (step) => step.name === "Purge stale GitHub deployment records"
     );
     const environmentsIndex = purge.findIndex(
-      (step) => step.name === "Purge stale GitHub Environments"
+      (step) => step.name === "List and delete Radius environments"
     );
     const script = purge[deploymentsIndex]?.run ?? "";
 
@@ -709,7 +1068,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       (step) => step.name === "Purge stale GitHub deployment records"
     );
     const environments = purge.find(
-      (step) => step.name === "Purge stale GitHub Environments"
+      (step) => step.name === "List and delete Radius environments"
     );
 
     expect(deployments?.id).toBe("deployment-records-cleanup");
@@ -861,9 +1220,140 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("az resource list \\");
     expect(script).toContain("selectReclaimableGroupResources");
     expect(script).toContain('az resource delete --ids "$id"');
+    // Without --verbose the CLI hides why a delete failed.
+    expect(script).toContain("az version --output json");
+    expect(script).toMatch(
+      /az resource delete --ids "\$id" --verbose 2>"\$delete_log"/
+    );
+    expect(script).toContain('${delete_error//"$SUBSCRIPTION_ID"/***}');
+    expect(script).toMatch(
+      /if \(\( \$\{#failures\[@\]\} > 0 \)\); then[\s\S]*exit 1/
+    );
     // Nothing here is tagged, so age cannot be what qualifies a resource.
     expect(script).not.toContain("MAX_AGE_HOURS");
   });
+
+  it.each(
+    ["all deletes succeed", "one delete fails"].flatMap((scenario) =>
+      ["LF", "CRLF"].map((lineEnding) => ({ scenario, lineEnding }))
+    )
+  )(
+    "runs the shared resource group cleanup shell when $scenario with $lineEnding rows",
+    async ({ scenario, lineEnding }) => {
+      const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+      const groupCleanup = steps(workflow.jobs?.purge).find(
+        (step) => step.id === "shared-resource-cleanup"
+      );
+      expect(groupCleanup?.run).toBeDefined();
+      const directory = await mkdtemp(path.join(tmpdir(), "group-cleanup-"));
+      const subscription = "00000000-1111-2222-3333-444444444444";
+      const group = `/subscriptions/${subscription}/resourceGroups/synthetic-group/providers`;
+      const failing = `${group}/Microsoft.DBforPostgreSQL/flexibleServers/pgsql-first`;
+      const passing = `${group}/Microsoft.DBforPostgreSQL/flexibleServers/pgsql-second`;
+      const cluster = {
+        id: `${group}/Microsoft.ContainerService/managedClusters/synthetic-cluster`,
+        name: "synthetic-cluster",
+        type: "Microsoft.ContainerService/managedClusters"
+      };
+      const remaining = JSON.stringify([cluster]);
+      const resources = JSON.stringify([
+        cluster,
+        {
+          id: failing,
+          name: "pgsql-first",
+          type: "Microsoft.DBforPostgreSQL/flexibleServers"
+        },
+        {
+          id: passing,
+          name: "pgsql-second",
+          type: "Microsoft.DBforPostgreSQL/flexibleServers"
+        }
+      ]);
+      const summary = path.join(directory, "summary.md");
+      const deletes = path.join(directory, "deletes.txt");
+      try {
+        const node = process.execPath.replaceAll("'", "'\\''");
+        const result = spawnSync("bash", ["--noprofile", "--norc", "-s"], {
+          cwd: REPOSITORY_ROOT,
+          encoding: "utf8",
+          env: {
+            PATH: process.env.PATH,
+            RUNNER_TEMP: directory,
+            GITHUB_STEP_SUMMARY: summary,
+            AKS_CLUSTER_NAME: "synthetic-cluster",
+            RESOURCE_GROUP: "synthetic-group",
+            SUBSCRIPTION_ID: subscription
+          },
+          // Match Linux jq output instead of adding CR to the last TSV field.
+          input: `
+            ${process.platform === "win32" ? 'jq() { command jq --binary "$@"; }' : ""}
+            node() { '${node}' "$@"; }
+            jq() {
+              command jq "$@" | while IFS= read -r row; do
+                printf '%s${lineEnding === "CRLF" ? "\\r\\n" : "\\n"}' "\${row%$'\\r'}"
+              done
+            }
+            sleep() { :; }
+            az() {
+              case "$1 \${2:-}" in
+                "version --output") printf '%s\\n' '{"azure-cli":"2.91.0"}' ;;
+                "resource list")
+                  # The verify pass sees the group after the deletes.
+                  if [[ -s '${deletes}' ]]; then
+                    printf '%s\\n' '${remaining}'
+                  else
+                    printf '%s\\n' '${resources}'
+                  fi ;;
+                "resource delete")
+                  printf '%s\\n' "$4" >>'${deletes}'
+                  if [[ "$4" == '${failing}' && '${scenario}' == "one delete fails" ]]; then
+                    printf 'ERROR: synthetic failure for %s\\n' "$4" >&2
+                    return 1
+                  fi
+                  printf 'INFO: deleted %s\\n' "$4" >&2 ;;
+                *) return 99 ;;
+              esac
+            }
+            ${groupCleanup?.run}
+          `
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.stdout).toContain('"azure-cli":"2.91.0"');
+        // A failed delete does not stop the rest of the group being reclaimed.
+        expect((await readFile(deletes, "utf8")).trim().split("\n")).toEqual([
+          failing,
+          passing
+        ]);
+        const summaryText = await readFile(summary, "utf8");
+        expect(result.stderr).not.toContain("\r");
+        expect(summaryText).not.toContain("\r");
+        if (scenario === "all deletes succeed") {
+          expect(result.status).toBe(0);
+          expect(summaryText).toContain("reclaimed from synthetic-group: 2");
+          expect(summaryText).not.toContain("<details>");
+          return;
+        }
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          `ERROR: synthetic failure for ${failing}`
+        );
+        expect(result.stderr).toContain(`INFO: deleted ${passing}`);
+        expect(result.stderr).toContain(
+          "delete Microsoft.DBforPostgreSQL/flexibleServers pgsql-first"
+        );
+        expect(summaryText).toContain("reclaimed from synthetic-group: 1");
+        expect(summaryText).toContain(
+          "az resource delete failed for Microsoft.DBforPostgreSQL/flexibleServers pgsql-first (exit 1)"
+        );
+        expect(summaryText).toContain(
+          "ERROR: synthetic failure for /subscriptions/***/resourceGroups/synthetic-group"
+        );
+        expect(summaryText).not.toContain(subscription);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
 
   it("removes only allowlisted assignments before deleting leaked service principals", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
@@ -1094,7 +1584,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     // progress, and the shared concurrency group is only half that guarantee.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const job = workflow.jobs?.purge;
-    expect(job?.env?.MAX_AGE_HOURS).toBe("6");
+    expect(job?.env?.MAX_AGE_HOURS).toBe("${{ inputs.max_age_hours || '6' }}");
 
     const ageGatedDestructiveSteps = steps(job).filter(
       (candidate) =>

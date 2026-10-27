@@ -62,7 +62,8 @@ Both documents track their own delivery status; the test plan's phase table is t
 
 - External errors must propagate as explicit failures; never return success-shaped fallbacks.
 - Destructive environment and deployment operations fail closed whenever identity, preconditions, or external state cannot be established.
-- The session repository's graph and planned views use the current worktree branch, never an implicit `main`. Graph diff uses explicit committed base and head branches.
+- The session repository's graph and planned views use the current worktree branch, never an implicit `main`. Graph diff uses explicit base and head selections.
+- Current graph previews can read saved workspace models without a commit or push. This describes shipped behavior, not the target source policy: [Stage 4](../../../docs/design/2026-09-github-radius-migration-inventory.md#graph-reads-source-references-and-comparison) plans to separate committed PR comparisons from workspace-aware comparisons and remove silent workspace-to-remote fallback.
 - Reject stale source-reference context tokens, confine filesystem paths to the workspace, and preserve deployment repair attempt identity.
 - Bind test HTTP servers to `127.0.0.1` on OS-assigned ports. Close servers, streams, child processes, timers, browser contexts, and temporary workspaces on success and failure.
 - Rendered HTML, JavaScript strings, URLs, and serialized state must be escaped for their output context.

@@ -4,6 +4,7 @@ import {
   azureRoleScope,
   buildManualRoleAssignmentGuidance,
   describeWorkflowCommitFailure,
+  providerCredentialStatus,
   publishWorkflowFiles,
   VERIFY_WORKFLOW_PATH,
   WORKFLOW_SCOPE_HINT,
@@ -40,6 +41,42 @@ function configurationRecorder(
 }
 
 describe("applyProviderConfiguration", () => {
+  it.each([
+    {
+      provider: "azure",
+      note: "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
+    },
+    {
+      provider: "aws",
+      note: "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
+    }
+  ])(
+    "keeps the same $provider missing-credential note for apply and status-only calls",
+    async ({ provider, note }) => {
+      const { ports, variables, steps } = configurationRecorder();
+      const expected = { credentialsComplete: false, missingCredNote: note };
+      expect(providerCredentialStatus(provider, {}, ports)).toEqual(expected);
+      expect(variables).toEqual([]);
+      expect(steps).toEqual([]);
+      expect(await applyProviderConfiguration(provider, {}, ports)).toEqual(
+        expected
+      );
+    }
+  );
+
+  it("publishes initial narration before a failed write without later success messages", async () => {
+    const error = new Error("provider outcome unknown");
+    const { ports, steps } = configurationRecorder({
+      setEnvironmentVariable: async () => {
+        throw error;
+      }
+    });
+    await expect(applyProviderConfiguration("azure", {}, ports)).rejects.toBe(
+      error
+    );
+    expect(steps).toEqual(["Setting environment variables and secrets..."]);
+  });
+
   it("writes every azure value the request carries and counts what was set", async () => {
     const { ports, variables, steps } = configurationRecorder();
     const data: CreateEnvironmentRequestData = {
@@ -265,6 +302,34 @@ describe("buildManualRoleAssignmentGuidance", () => {
 });
 
 describe("describeWorkflowCommitFailure", () => {
+  it.each(["verify", "deploy"] as const)(
+    "gives App permission recovery instead of OAuth scope advice for a %s workflow",
+    (kind) => {
+      const diagnostic =
+        "HTTP 403: refusing to allow a GitHub App to create or update workflow `.github/workflows/x.yml` without `workflows` permission";
+
+      const failure = describeWorkflowCommitFailure(
+        kind,
+        ".github/workflows/x.yml",
+        "octo/app",
+        diagnostic
+      );
+
+      expect(failure.status).toBe(400);
+      expect(failure.code).toBe(`${kind}-workflow-commit-failed`);
+      expect(failure.error).toContain(diagnostic);
+      expect(failure.error).toContain(
+        "Grant the GitHub App Workflows: write permission"
+      );
+      expect(failure.error).toContain(
+        "approve the updated installation permissions"
+      );
+      expect(failure.error).toContain("retry with a new installation token");
+      expect(failure.error).not.toContain("auth refresh -h");
+      expect(failure.error).not.toContain("fork the repository");
+    }
+  );
+
   it("uses the bundled GitHub CLI path for workflow-scope guidance", () => {
     const failure = describeWorkflowCommitFailure(
       "verify",

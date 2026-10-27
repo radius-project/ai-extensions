@@ -97,7 +97,7 @@ jobs:
     # dependency install, browser download, teardown, and artifact upload.
     # One value covers both canvas hosts; the Copilot app host has the longer
     # suite budget, because it adds the app start and modeling stages.
-    timeout-minutes: 290
+    timeout-minutes: 340
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
@@ -205,10 +205,34 @@ jobs:
             exit 1
           }
 
+      # WebView2 150+ ignores debugging environment variables in elevated
+      # processes. Hosted Windows runners need an app-scoped machine policy.
+      - name: Enable Copilot app browser debugging
+        id: copilot-cdp
+        if: steps.fixture.outputs.configured == 'true' && env.RADIUS_CLOUD_E2E_CANVAS_HOST == 'copilot-app'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+            throw 'The browser debugging policy is only allowed on disposable GitHub-hosted Windows runners.'
+          }
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          if (Test-Path -LiteralPath $policy) {
+            if ((Get-Item -LiteralPath $policy).GetValueNames().Contains('github.exe')) {
+              throw 'A browser debugging policy for github.exe already exists. Refusing to replace it.'
+            }
+          } else {
+            New-Item -Path $policy -Force | Out-Null
+          }
+          New-ItemProperty -LiteralPath $policy -Name 'github.exe' -Value '--remote-debugging-port=9222' -PropertyType String | Out-Null
+          'configured=true' >> $env:GITHUB_OUTPUT
+
       # No stored Azure secret exists. The runner's OIDC token is exchanged for
       # an Azure token scoped to the dedicated bootstrap identity, which holds
       # subscription Contributor, RBAC administration, and Graph
-      # `Application.ReadWrite.OwnedBy` - and is federated on this repository's
+      # `Application.ReadWrite.OwnedBy` (plus `Application.Read.All` with admin
+      # consent before enabling seeded-app probes; see CLOUD_E2E_RUNBOOK.md).
+      # It is federated on this repository's
       # default branch only, so no pull request can mint a token for it.
       - name: Sign in to Azure
         if: steps.fixture.outputs.configured == 'true'
@@ -228,7 +252,7 @@ jobs:
       - name: Create a GitHub App token for the fixture repository
         id: app-token
         if: steps.fixture.outputs.configured == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
@@ -252,6 +276,11 @@ jobs:
           AIEXT_CLOUD_E2E_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
           AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
+          # Optional. Each names an Entra application an administrator seeded
+          # once and that the CI identity does not own. Without a value, the
+          # matching refusal probe skips and says why.
+          AIEXT_CLOUD_E2E_FOREIGN_APP_NAME: ${{ vars.AIEXT_CLOUD_E2E_FOREIGN_APP_NAME }}
+          AIEXT_CLOUD_E2E_ORPHAN_APP_NAME: ${{ vars.AIEXT_CLOUD_E2E_ORPHAN_APP_NAME }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment
           # before starting Canvas or any CLI child command. With the Copilot
@@ -264,11 +293,19 @@ jobs:
           CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
         run: pnpm run test:cloud
 
+      - name: Remove Copilot app browser debugging policy
+        if: always() && steps.fixture.outputs.configured == 'true' && steps.copilot-cdp.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+          Remove-ItemProperty -LiteralPath $policy -Name 'github.exe'
+
       - name: Create a fresh read-only GitHub App token for diagnostics
         id: diagnostics-token
         if: always() && steps.fixture.outputs.configured == 'true'
         continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}

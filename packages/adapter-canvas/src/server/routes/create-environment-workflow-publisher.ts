@@ -4,8 +4,19 @@ import type {
   CreateEnvironmentOperation,
   WorkflowCommitOutcome
 } from "./create-environment-types.js";
-import { cloudCredentialsComplete } from "../../deploy.js";
-import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
+import {
+  applySetupProviderConfiguration,
+  setupProviderCredentialStatus,
+  type SetupProviderConfigurationEvent,
+  type SetupProviderCredentialPorts,
+  type SetupProviderCredentialStatus
+} from "@radius-project/core";
+export { azureRoleScope } from "@radius-project/core";
+import {
+  publishSetupWorkflowFiles,
+  type SetupWorkflowPublicationEvent
+} from "@radius-project/core";
+import { encodeWorkflowContent } from "@radius-project/adapter-shared";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   displayGhCommand,
@@ -62,10 +73,7 @@ export const WORKFLOW_SCOPE_HINT = workflowScopeHint(
 export const VERIFY_WORKFLOW_PATH =
   ".github/workflows/radius-verify-credentials.yml";
 
-export interface ProviderConfigurationPorts {
-  azureCredential(): Record<string, unknown>;
-  awsCredential(): Record<string, unknown>;
-  optionalString(value: unknown): string;
+export interface ProviderConfigurationPorts extends SetupProviderCredentialPorts {
   setEnvironmentVariable(name: string, value: unknown): Promise<boolean>;
   pushStep(message: string): void;
 }
@@ -87,49 +95,23 @@ export function providerCredentialStatus(
     "azureCredential" | "awsCredential" | "optionalString"
   >
 ): ProviderCredentialStatus {
-  if (provider === "azure") {
-    const azureCreds = ports.azureCredential();
-    const credentialsComplete = cloudCredentialsComplete("azure", {
-      clientId: data.clientId || ports.optionalString(azureCreds.clientId),
-      tenantId: data.tenantId || ports.optionalString(azureCreds.tenantId),
-      subscriptionId:
-        data.subscriptionId || ports.optionalString(azureCreds.subscriptionId)
-    });
-    return {
-      credentialsComplete,
-      missingCredNote:
-        credentialsComplete ? "" : (
-          "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
-        )
-    };
-  }
+  return presentProviderCredentialStatus(
+    setupProviderCredentialStatus(provider, data, ports)
+  );
+}
 
-  const credentialsComplete = cloudCredentialsComplete("aws", {
-    roleArn: data.roleArn || ""
-  });
+export function presentProviderCredentialStatus({
+  provider,
+  credentialsComplete
+}: SetupProviderCredentialStatus): ProviderCredentialStatus {
   return {
     credentialsComplete,
     missingCredNote:
-      credentialsComplete ? "" : (
-        "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
-      )
+      credentialsComplete ? ""
+      : provider === "azure" ?
+        "Azure OIDC credentials (client ID, tenant ID, and subscription ID) are not fully configured for this environment. Use auto-setup or enter them manually, then verify credentials from the Environments list."
+      : "The AWS IAM role ARN is not configured for this environment. Enter it (or use auto-setup), then verify credentials from the Environments list."
   };
-}
-
-// The RBAC scope at which to grant the environment identity a subscription-
-// visible role. A role assignment at resource-group scope still surfaces the
-// parent subscription to `az account list` / azure/login (fixing the
-// "No subscriptions found" credential-verification failure, issue #280), while
-// staying narrower than a subscription-wide grant, so prefer the resource group
-// when one is configured; fall back to the whole subscription otherwise. Pure.
-export function azureRoleScope(
-  subscriptionId: string,
-  resourceGroup?: string
-): string {
-  const rg = (resourceGroup || "").trim();
-  return rg ?
-      `/subscriptions/${subscriptionId}/resourceGroups/${rg}`
-    : `/subscriptions/${subscriptionId}`;
 }
 
 // The exact `az role assignment create` command a user can run to grant the
@@ -145,93 +127,49 @@ export function buildManualRoleAssignmentGuidance(
   return `az role assignment create --assignee ${assignee} --role Contributor --scope ${scope}`;
 }
 
-// Step 2. Values from the request win; anything absent falls back to the
-// shared credential record. `||` rather than `??` throughout, so an empty
-// string is treated as absent exactly as it was inline.
 export async function applyProviderConfiguration(
   provider: string,
   data: CreateEnvironmentRequestData,
   ports: ProviderConfigurationPorts
 ): Promise<ProviderCredentialStatus> {
-  ports.pushStep("Setting environment variables and secrets...");
-  const azureCreds = ports.azureCredential();
-  const awsCreds = ports.awsCredential();
-  const credentialStatus = providerCredentialStatus(provider, data, ports);
+  return presentProviderCredentialStatus(
+    await applySetupProviderConfiguration(provider, data, {
+      azureCredential: () => ports.azureCredential(),
+      awsCredential: () => ports.awsCredential(),
+      optionalString: (value) => ports.optionalString(value),
+      setEnvironmentVariable: (name, value) =>
+        ports.setEnvironmentVariable(name, value),
+      report: (event) => reportProviderConfiguration(event, ports)
+    })
+  );
+}
 
-  if (provider === "azure") {
-    const clientId = data.clientId || ports.optionalString(azureCreds.clientId);
-    const tenantId = data.tenantId || ports.optionalString(azureCreds.tenantId);
-    const subscriptionId =
-      data.subscriptionId || ports.optionalString(azureCreds.subscriptionId);
-    const rg = data.resourceGroup || "";
-    const clusterRg = data.clusterResourceGroup || "";
-    const k8s = data.cluster || "";
-
-    await ports.setEnvironmentVariable("AZURE_CLIENT_ID", clientId);
-    await ports.setEnvironmentVariable("AZURE_TENANT_ID", tenantId);
-    await ports.setEnvironmentVariable("AZURE_SUBSCRIPTION_ID", subscriptionId);
-    await ports.setEnvironmentVariable("AZURE_RESOURCE_GROUP", rg);
-    await ports.setEnvironmentVariable("AZURE_AKS_CLUSTER_NAME", k8s);
-    // The cluster's own resource group, which is not `AZURE_RESOURCE_GROUP`:
-    // that one holds the application's resource group. An AKS cluster name is
-    // only unique within a resource group, so this is what lets the namespace
-    // gate tell two same-named clusters in one subscription apart. An empty
-    // value is a no-op in `setEnvironmentVariable`, so a cluster whose resource
-    // group could not be resolved never erases a previously stored one.
-    await ports.setEnvironmentVariable("AZURE_AKS_RESOURCE_GROUP", clusterRg);
-    await ports.setEnvironmentVariable("AZURE_LOCATION", data.location);
-    await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
-
-    const setCount = [
-      clientId,
-      tenantId,
-      subscriptionId,
-      rg,
-      k8s,
-      clusterRg,
-      data.location,
-      data.namespace
-    ].filter(Boolean).length;
-    ports.pushStep(`Set ${setCount} environment value(s) for Azure.`);
-    if (!credentialStatus.credentialsComplete) {
-      ports.pushStep(
-        "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
-      );
-      return credentialStatus;
+export function reportProviderConfiguration(
+  event: SetupProviderConfigurationEvent,
+  ports: Pick<ProviderConfigurationPorts, "pushStep">
+): void {
+  switch (event.kind) {
+    case "configuration-started":
+      return ports.pushStep("Setting environment variables and secrets...");
+    case "azure-values-configured": {
+      const setCount = event.count;
+      return ports.pushStep(`Set ${setCount} environment value(s) for Azure.`);
     }
-    // Credentials are complete, but a manually-entered app registration may have
-    // no role assignment that surfaces the subscription — verify then fails at
-    // Azure Login with "No subscriptions found" (issue #280). Surface the exact
-    // grant command rather than running it, since the identity may be shared or
-    // owned by another team.
-    const roleScope = azureRoleScope(subscriptionId, rg);
-    ports.pushStep(
-      'ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: ' +
-        buildManualRoleAssignmentGuidance(clientId, roleScope)
-    );
-    return { credentialsComplete: true, missingCredNote: "" };
+    case "credentials-missing":
+      if (event.provider === "azure") {
+        return ports.pushStep(
+          "⚠️ Missing OIDC credentials (clientId/tenantId/subscriptionId). Use auto-setup or enter them manually."
+        );
+      }
+      return ports.pushStep(
+        "⚠️ Missing AWS role ARN. Enter it or use auto-setup before verifying credentials."
+      );
+    case "azure-role-guidance":
+      return ports.pushStep(
+        'ℹ️ If credential verification fails with "No subscriptions found", the configured identity has no subscription-visible role. Grant one, then retry: ' +
+          buildManualRoleAssignmentGuidance(event.assignee, event.scope)
+      );
   }
-
-  const roleArn = data.roleArn || "";
-  const region =
-    data.region || ports.optionalString(awsCreds.region) || "us-east-1";
-  const accountId = data.accountId || ports.optionalString(awsCreds.accountId);
-  const k8s = data.cluster || "";
-
-  await ports.setEnvironmentVariable("AWS_ROLE_ARN", roleArn);
-  await ports.setEnvironmentVariable("AWS_REGION", region);
-  await ports.setEnvironmentVariable("AWS_ACCOUNT_ID", accountId);
-  await ports.setEnvironmentVariable("AWS_EKS_CLUSTER_NAME", k8s);
-  await ports.setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
-  await ports.setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
-  await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
-  if (!credentialStatus.credentialsComplete) {
-    ports.pushStep(
-      "⚠️ Missing AWS role ARN. Enter it or use auto-setup before verifying credentials."
-    );
-    return credentialStatus;
-  }
-  return { credentialsComplete: true, missingCredNote: "" };
 }
 
 // The message a failed workflow commit is reported with. Pure, so the hint
@@ -246,8 +184,13 @@ export function describeWorkflowCommitFailure(
   ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): { status: number; error: string; code: string } {
   const hint =
-    needsWorkflowScope(stderr) ?
-      workflowScopeHint(ghCommandPresentation)
+    (
+      /refusing to allow a GitHub App .* without .?workflows.? permission/i.test(
+        stderr || ""
+      )
+    ) ?
+      "Grant the GitHub App Workflows: write permission, approve the updated installation permissions, and retry with a new installation token. GitHub CLI auth refresh cannot change GitHub App permissions."
+    : needsWorkflowScope(stderr) ? workflowScopeHint(ghCommandPresentation)
     : WRITE_ACCESS_HINT;
   const label =
     kind === "verify" ? "verify-credentials workflow" : "deploy workflow";
@@ -350,195 +293,77 @@ export async function publishWorkflowFiles(
   ports: WorkflowPublisherPorts,
   target: WorkflowPublisherTarget
 ): Promise<WorkflowPublishResult> {
-  const {
-    operation,
-    targetRepo,
-    envName,
-    provider,
-    defaultBranch,
-    setupPushOperationMarker
-  } = target;
-  // Every field a rollback needs to prove this exact write, recorded with the
-  // file rather than derived later: the branch it landed on, the commit it
-  // created, the blob it produced, the digest of the bytes Radius sent, and the
-  // blob the path held before.
-  const commitRecord = (path: string, commit: WorkflowCommitOutcome) => ({
-    path,
-    branch: commit.viaPr ? ports.pullRequestBranch() : defaultBranch,
-    mode: commit.viaPr ? "pull_request" : "default_branch",
-    commitSha: commit.commitSha ?? null,
-    blobSha: commit.blobSha ?? null,
-    contentSha256: commit.contentSha256 ?? null,
-    previousBlobSha: commit.previousBlobSha ?? null,
-    previousBlobKnown: commit.previousBlobKnown === true
-  });
-
-  // Step 3: Commit the verify-credentials workflow
-  ports.pushStep("Checking verify-credentials workflow...");
-  const verifyWorkflow = await ports.generateVerifyWorkflow(
-    envName,
-    provider,
-    setupPushOperationMarker
+  const result = await publishSetupWorkflowFiles(
+    {
+      ...ports,
+      encode: encodeWorkflowContent,
+      report: (event) => reportWorkflowPublication(event, ports),
+      recordCommittedWorkflowFile: (entry) =>
+        ports.recordCommittedWorkflowFile(target.operation, entry)
+    },
+    target
   );
-  const verifyContent = Buffer.from(verifyWorkflow).toString("base64");
-
-  const verifyCommit = await ports.commitWorkflowFileSmart(
-    VERIFY_WORKFLOW_PATH,
-    verifyContent,
-    "Add Radius verify-credentials workflow for environment " + envName
-  );
-  if (verifyCommit.cancelled) return { outcome: "cancelled" };
-
-  if (!verifyCommit.ok) {
-    ports.pushStep("❌ Failed to commit verify-credentials workflow.");
-    if (!(await ports.gate())) return { outcome: "cancelled" };
+  if (result.outcome === "refused") {
     return {
       outcome: "refused",
       ...describeWorkflowCommitFailure(
-        "verify",
-        VERIFY_WORKFLOW_PATH,
-        targetRepo,
-        verifyCommit.stderr,
+        result.workflow,
+        result.path,
+        target.targetRepo,
+        result.stderr,
         ports.ghCommandPresentation
       ),
-      ghError: verifyCommit.stderr || ""
+      ghError: result.stderr
     };
   }
-  if (verifyCommit.changed) {
-    ports.pushStep("✅ Verify workflow committed.");
-  } else {
-    ports.pushStep("✅ Verify workflow already up to date.");
-  }
-  if (verifyCommit.changed) {
-    ports.recordCommittedWorkflowFile(
-      operation,
-      commitRecord(VERIFY_WORKFLOW_PATH, verifyCommit)
-    );
-  }
-  if (!(await ports.gate())) return { outcome: "cancelled" };
+  return result;
+}
 
-  // Step 4: Also commit the deploy workflows (dispatcher + both provider
-  // workflows). The dispatcher references both provider files by path, so all
-  // three must exist in the target repo.
-  ports.pushStep("Checking deploy workflows...");
-  let deployChanges = 0;
-  const deployWorkflows = await ports.generateDeployWorkflow(
-    envName,
-    ".radius/app.bicep"
-  );
-
-  for (const [fileName, content] of Object.entries(deployWorkflows)) {
-    const deployContent = Buffer.from(content).toString("base64");
-    const deployPath = ".github/workflows/" + fileName;
-
-    const deployCommit = await ports.commitWorkflowFileSmart(
-      deployPath,
-      deployContent,
-      "Add Radius deploy workflow (" + fileName + ") for environment " + envName
-    );
-    if (deployCommit.cancelled) return { outcome: "cancelled" };
-
-    if (!deployCommit.ok) {
-      ports.pushStep("❌ Failed to commit deploy workflow " + fileName + ".");
-      if (!(await ports.gate())) return { outcome: "cancelled" };
-      return {
-        outcome: "refused",
-        ...describeWorkflowCommitFailure(
-          "deploy",
-          deployPath,
-          targetRepo,
-          deployCommit.stderr,
-          ports.ghCommandPresentation
-        ),
-        ghError: deployCommit.stderr || ""
-      };
-    }
-    if (deployCommit.changed) {
-      deployChanges += 1;
-      ports.recordCommittedWorkflowFile(
-        operation,
-        commitRecord(deployPath, deployCommit)
+export function reportWorkflowPublication(
+  event: SetupWorkflowPublicationEvent,
+  ports: Pick<WorkflowPublisherPorts, "pushStep" | "errorMessage">
+): void {
+  switch (event.kind) {
+    case "checking":
+      return ports.pushStep(
+        event.workflow === "verify" ? "Checking verify-credentials workflow..."
+        : event.workflow === "deploy" ? "Checking deploy workflows..."
+        : "Checking delete workflows..."
       );
-    }
-    if (!(await ports.gate())) return { outcome: "cancelled" };
-  }
-  // Remove the legacy monolithic deploy workflow so it cannot double-trigger
-  // alongside the new dispatcher. On protected repositories the deletion is
-  // committed to the setup branch and lands with the rest of the workflow PR.
-  try {
-    const legacyDelete = await ports.deleteLegacyDeployWorkflow(
-      targetRepo,
-      ports.pullRequestBranch() || undefined
-    );
-    if (legacyDelete === "cancelled") return { outcome: "cancelled" };
-  } catch (error) {
-    if (!(await ports.gate())) return { outcome: "cancelled" };
-    throw error;
-  }
-  if (!(await ports.gate())) return { outcome: "cancelled" };
-  if (deployChanges > 0) {
-    ports.pushStep("✅ Deploy workflows committed.");
-  } else {
-    ports.pushStep("✅ Deploy workflows already up to date.");
-  }
-
-  // Step 4b: Commit the application-delete workflows (dispatcher + Azure
-  // provider workflow) so the Delete Deployment button can dispatch `rad app
-  // delete`. Only Azure workflows are generated and committed; the AWS provider
-  // file is never produced.
-  ports.pushStep("Checking delete workflows...");
-  try {
-    let deleteChanges = 0;
-    let deleteFailures = 0;
-    const deleteWorkflows = await ports.generateDeleteWorkflow(envName);
-    for (const [fileName, content] of Object.entries(deleteWorkflows)) {
-      const delContent = Buffer.from(content).toString("base64");
-      const delPath = ".github/workflows/" + fileName;
-
-      const delCommit = await ports.commitWorkflowFileSmart(
-        delPath,
-        delContent,
-        "Add Radius delete workflow (" +
-          fileName +
-          ") for environment " +
-          envName
+    case "commit-failed":
+      if (event.workflow === "verify")
+        return ports.pushStep(
+          "❌ Failed to commit verify-credentials workflow."
+        );
+      return ports.pushStep(
+        "❌ Failed to commit deploy workflow " + event.fileName + "."
       );
-      if (delCommit.cancelled) return { outcome: "cancelled" };
-
-      if (!delCommit.ok) {
-        deleteFailures += 1;
-        ports.pushStep(
-          "⚠️ Could not commit delete workflow " +
-            fileName +
-            ": " +
-            ((delCommit.stderr || "").trim() || "GitHub API request failed.")
+    case "verify-completed":
+      if (event.changed) return ports.pushStep("✅ Verify workflow committed.");
+      return ports.pushStep("✅ Verify workflow already up to date.");
+    case "deploy-completed":
+      if (event.changed)
+        return ports.pushStep("✅ Deploy workflows committed.");
+      return ports.pushStep("✅ Deploy workflows already up to date.");
+    case "delete-completed":
+      if (event.outcome === "warnings")
+        return ports.pushStep(
+          "⚠️ Delete workflow checks completed with warnings."
         );
-      }
-      if (delCommit.ok && delCommit.changed) {
-        deleteChanges += 1;
-        ports.recordCommittedWorkflowFile(
-          operation,
-          commitRecord(delPath, delCommit)
-        );
-      }
-      if (!(await ports.gate())) return { outcome: "cancelled" };
-    }
-    if (deleteFailures > 0) {
-      ports.pushStep("⚠️ Delete workflow checks completed with warnings.");
-    } else if (deleteChanges > 0) {
-      ports.pushStep("✅ Delete workflows committed.");
-    } else {
-      ports.pushStep("✅ Delete workflows already up to date.");
-    }
-  } catch (delErr) {
-    if (delErr instanceof ProviderMutationRecoveryError) throw delErr;
-    // Delete workflows are non-critical to environment creation, so surface the
-    // failure but don't abort the whole flow.
-    ports.pushStep(
-      "⚠️ Could not generate/commit delete workflows: " +
-        ports.errorMessage(delErr)
-    );
+      if (event.outcome === "changed")
+        return ports.pushStep("✅ Delete workflows committed.");
+      return ports.pushStep("✅ Delete workflows already up to date.");
+    case "delete-commit-failed":
+      return ports.pushStep(
+        "⚠️ Could not commit delete workflow " +
+          event.fileName +
+          ": " +
+          (event.stderr.trim() || "GitHub API request failed.")
+      );
+    case "delete-generation-failed":
+      return ports.pushStep(
+        "⚠️ Could not generate/commit delete workflows: " +
+          ports.errorMessage(event.error)
+      );
   }
-
-  return { outcome: "published" };
 }

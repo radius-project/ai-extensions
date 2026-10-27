@@ -102,6 +102,10 @@ interface PipelineScript {
   // the page to keep waiting for the model.
   modelingActivityAtMs?: number;
   observeModelingRun?: () => Promise<number | null>;
+  // The head commit each branch is at now, keyed by branch. Missing models a
+  // commit that cannot be read.
+  branchSourceCommits?: Record<string, string>;
+  readBranchSourceRevision?: (branch: string) => Promise<string>;
   branchResolution?:
     WorkspaceBranchResolution | (() => Promise<WorkspaceBranchResolution>);
   commitBranchResolution?: boolean;
@@ -307,6 +311,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         Promise.resolve(harnessScript.modelingActivityAtMs ?? null)
       );
     },
+    readBranchSourceRevision: (_entry, _repo, branch) =>
+      harnessScript.readBranchSourceRevision?.(branch) ??
+      Promise.resolve(harnessScript.branchSourceCommits?.[branch] ?? ""),
     prepareSourceRefResources,
     setSourceRefResources,
     isCurrentSourceRefToken,
@@ -520,6 +527,77 @@ describe("graph planning workflows", () => {
       ]);
     });
 
+    it.each([
+      ["loadGraph", "graph", { repo: "octo/app" }],
+      ["planGraph", "planned", { repo: "octo/app" }],
+      [
+        "diffBranches",
+        "diff",
+        { repo: "octo/app", base: "main", head: "feature/x" }
+      ]
+    ] as const)(
+      "keeps the %s missing-model handoff current until the selection changes",
+      async (workflow, view, request) => {
+        const harness = start({
+          selections: {
+            main: selectionOf({ content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          }
+        });
+        const handoff = vi.spyOn(
+          harness.dependencies,
+          "triggerAppBicepHandoff"
+        );
+        await harness.run(workflow, JSON.stringify(request));
+        const isCurrent = handoff.mock.calls[0]?.[5];
+        if (!isCurrent) throw new Error("Missing handoff currency predicate");
+        expect(isCurrent()).toBe(true);
+        await harness.run(
+          workflow,
+          JSON.stringify({ ...request, restartWait: true })
+        );
+        expect(isCurrent()).toBe(true);
+        const record = harness.state.graphProgressRecords?.[view];
+        if (!record) throw new Error(`Missing ${view} progress record.`);
+        record.graphProgressKey = "another-selection";
+        expect(isCurrent()).toBe(false);
+      }
+    );
+
+    it.each([
+      ["loadGraph", "graph", { repo: "octo/app" }],
+      ["planGraph", "planned", { repo: "octo/app" }],
+      [
+        "diffBranches",
+        "diff",
+        { repo: "octo/app", base: "main", head: "feature/x" }
+      ]
+    ] as const)(
+      "ends the %s missing-model handoff when the source selection changes",
+      async (workflow, view, request) => {
+        const harness = start({
+          selections: {
+            main: selectionOf({ content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          }
+        });
+        const handoff = vi.spyOn(
+          harness.dependencies,
+          "triggerAppBicepHandoff"
+        );
+        await harness.run(workflow, JSON.stringify(request));
+        const isCurrent = handoff.mock.calls[0]?.[5];
+        if (!isCurrent) throw new Error("Missing handoff currency predicate");
+        prepareSourceRefResources(harness.entry, view, {
+          repo: "octo/app",
+          branch: "new-selection",
+          baseBranch: "new-base",
+          headBranch: "new-head"
+        });
+        expect(isCurrent()).toBe(false);
+      }
+    );
+
     it("surfaces a reported permanent authoring failure without requesting modeling again", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) }
@@ -538,7 +616,7 @@ describe("graph planning workflows", () => {
 
       expect(outcome.payload).toEqual({
         error:
-          "Application model generation stopped: The configured Recipe rejects the required credential shape. Fix the reported issue, then refresh the Radius Canvas to try modeling again.",
+          "Application model generation failed: The configured Recipe rejects the required credential shape. The source revision could not be read. Automatic retry is paused. Click Refresh to retry, or reload to check the source again.",
         modelingFailed: true,
         appModelAuthoringFailed: true,
         repo: "octo/app",
@@ -546,34 +624,252 @@ describe("graph planning workflows", () => {
       });
       expect(harness.handoffs).toEqual([]);
       expect(messages(harness.state).at(-1)).toContain(
-        "Application model generation stopped"
+        "Application model generation failed"
       );
     });
 
-    it("clears a permanent authoring failure and requests a new attempt on explicit refresh", async () => {
+    function failedAt(commit?: string) {
       const harness = start({
-        selections: { main: selectionOf({ content: null }) }
+        selections: { main: selectionOf({ content: null }) },
+        branchSourceCommits: { main: "sha-1" }
       });
       harness.state.appModelFailures = {
         "octo/app::main": {
           attemptToken: "attempt-1",
-          error: "The configured Recipe rejects the required credential shape."
+          error: "The configured Recipe rejects the required credential shape.",
+          ...(commit === undefined ? {} : { sourceRevision: commit })
         }
       };
       harness.state.appModelAttemptTokens = {
         "octo/app::main": "attempt-1"
       };
+      return harness;
+    }
 
-      const outcome = await harness.run(
-        "loadGraph",
-        '{"repo":"octo/app","restartWait":true}'
-      );
+    it("keeps reporting a permanent failure when the page is reloaded", async () => {
+      const harness = failedAt("sha-1");
+
+      for (let load = 0; load < 3; load++) {
+        const outcome = await harness.run(
+          "loadGraph",
+          '{"repo":"octo/app","restartWait":true}'
+        );
+        expect(outcome.payload).toMatchObject({
+          modelingFailed: true,
+          appModelAuthoringFailed: true
+        });
+      }
+
+      expect(harness.handoffs).toEqual([]);
+      expect(harness.state.appModelAttemptTokens).toEqual({
+        "octo/app::main": "attempt-1"
+      });
+    });
+
+    it.each([
+      ["loadGraph", { repo: "octo/app" }],
+      ["planGraph", { repo: "octo/app" }],
+      ["diffBranches", { repo: "octo/app", base: "main", head: "feature/x" }]
+    ] as const)(
+      "releases a concluded failure only for the explicit %s retry",
+      async (workflow, request) => {
+        const harness = start({
+          selections: {
+            main: selectionOf({ content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          },
+          branchSourceCommits: { main: "sha-1" }
+        });
+        harness.state.appModelFailures = {
+          "octo/app::main": {
+            attemptToken: "attempt-1",
+            error: "Recipe unavailable",
+            sourceRevision: "sha-1"
+          }
+        };
+        harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+        for (const retryModeling of [undefined, false, "true"]) {
+          const automatic = await harness.run(
+            workflow,
+            JSON.stringify({
+              ...request,
+              restartWait: true,
+              refresh: true,
+              retryModeling
+            })
+          );
+          expect(automatic.payload).toMatchObject({
+            appModelAuthoringFailed: true
+          });
+          expect(harness.handoffs).toEqual([]);
+        }
+        const explicit = await harness.run(
+          workflow,
+          JSON.stringify({ ...request, retryModeling: true, restartWait: true })
+        );
+        expect(explicit.payload).toMatchObject({ needsAppBicep: true });
+        expect(harness.state.appModelFailures).toEqual({});
+        expect(harness.handoffs).toHaveLength(1);
+      }
+    );
+
+    it("reports an unreadable revision instead of promising saved-edit recovery", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchSourceCommits: { main: "" }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "Recipe unavailable",
+          sourceRevision: "sha-1"
+        }
+      };
+      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+      const result = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(result.payload).toMatchObject({
+        error: expect.stringContaining(
+          "Automatic retry is paused. Click Refresh"
+        )
+      });
+      expect(harness.handoffs).toEqual([]);
+    });
+
+    it.each([
+      [undefined, "change saved source files, update the branch, or click"],
+      ["", "change saved source files, update the branch, or click"],
+      [
+        '["azure","prod"]',
+        "change saved source files, update the branch or target environment, or click"
+      ]
+    ])(
+      "offers environment recovery only for an attempt with environment %j",
+      async (environmentKey, recovery) => {
+        const harness = failedAt("sha-1");
+        harness.state.appModelFailures!["octo/app::main"] = {
+          ...harness.state.appModelFailures!["octo/app::main"]!,
+          ...(environmentKey === undefined ? {} : { environmentKey })
+        };
+        const result = await harness.run("loadGraph", '{"repo":"octo/app"}');
+        expect(result.payload.error).toContain(recovery);
+      }
+    );
+
+    it.each([
+      ["loadGraph", "request"],
+      ["loadGraph", "source reference"],
+      ["planGraph", "progress"],
+      ["planGraph", "request"],
+      ["planGraph", "source reference"]
+    ] as const)(
+      "rejects %s superseded by %s while a failure's source revision is read",
+      async (workflow, superseded) => {
+        const harness = failedAt("sha-0");
+        const view = workflow === "loadGraph" ? "graph" : "planned";
+        harness.script.readBranchSourceRevision = async () => {
+          if (superseded === "progress") {
+            replaceProgressRecord(harness.state, view, {
+              stage: "checking_model",
+              state: "running",
+              detail: "New request",
+              sequence: 1
+            });
+          } else if (superseded === "source reference") {
+            prepareSourceRefResources(harness.entry, view, {
+              repo: "octo/app",
+              branch: "new-selection"
+            });
+          } else if (workflow === "loadGraph") {
+            harness.state.graphBuildGeneration =
+              (harness.state.graphBuildGeneration ?? 0) + 1;
+          } else {
+            beginPlannedGraphRequest(harness.state);
+          }
+          return "sha-1";
+        };
+        const outcome = await harness.run(workflow, '{"repo":"octo/app"}');
+        expect(outcome.status).toBe(409);
+        expect(outcome.payload).toEqual({ stale: true });
+        expect(
+          harness.state.appModelFailures?.["octo/app::main"]?.sourceRevision
+        ).toBe("sha-0");
+        expect(harness.handoffs).toEqual([]);
+      }
+    );
+
+    it("recovers a missing baseline without retrying unchanged source", async () => {
+      const harness = failedAt();
+      await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(
+        harness.state.appModelFailures?.["octo/app::main"]?.sourceRevision
+      ).toBe("sha-1");
+      await harness.run("loadGraph", '{"repo":"octo/app","restartWait":true}');
+      expect(harness.handoffs).toEqual([]);
+      harness.script.branchSourceCommits = { main: "sha-2" };
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("clears a permanent failure and requests a new attempt once the branch commit changes", async () => {
+      const harness = failedAt("sha-0");
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
 
       expect(outcome.payload).toMatchObject({ needsAppBicep: true });
       expect(outcome.payload.modelingFailed).toBeUndefined();
       expect(harness.state.appModelFailures).toEqual({});
       expect(harness.state.appModelAttemptTokens).toEqual({});
       expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it.each([
+      ["the branch commit cannot be read", "sha-0", ""],
+      ["no commit was recorded with the failure", undefined, "sha-1"]
+    ])(
+      "keeps a permanent failure when %s",
+      async (_case, recorded, current) => {
+        const harness = failedAt(recorded);
+        harness.script.branchSourceCommits = { main: current };
+
+        const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+        expect(outcome.payload).toMatchObject({ modelingFailed: true });
+        expect(harness.handoffs).toEqual([]);
+      }
+    );
+
+    it("keeps a permanent failure when reading the branch commit throws", async () => {
+      const harness = failedAt("sha-0");
+      harness.script.readBranchSourceRevision = () =>
+        Promise.reject(new Error("offline"));
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toMatchObject({ modelingFailed: true });
+      expect(harness.handoffs).toEqual([]);
+    });
+
+    it("does not clear a newer failure recorded while the commit was being read", async () => {
+      const harness = failedAt("sha-0");
+      harness.script.readBranchSourceRevision = () => {
+        harness.state.appModelFailures = {
+          "octo/app::main": {
+            attemptToken: "attempt-2",
+            error: "A newer failure.",
+            sourceRevision: "sha-0"
+          }
+        };
+        harness.state.appModelAttemptTokens = {
+          "octo/app::main": "attempt-2"
+        };
+        return Promise.resolve("sha-1");
+      };
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toMatchObject({ modelingFailed: true });
+      expect(harness.handoffs).toEqual([]);
     });
 
     it("still hands off when the branch tree cannot be read", async () => {
@@ -1343,6 +1639,50 @@ describe("graph planning workflows", () => {
   });
 
   describe("POST /api/plan-graph", () => {
+    it.each([
+      ["azure", "dev", false],
+      ["azure", "production", true],
+      ["aws", "dev", true]
+    ])(
+      "compares the selected provider %s and environment %s with the failed attempt",
+      async (provider, environment, retries) => {
+        const harness = start({
+          selections: { main: selectionOf({ content: null }) },
+          branchSourceCommits: { main: "sha-1" }
+        });
+        harness.state.appModelFailures = {
+          "octo/app::main": {
+            attemptToken: "attempt-1",
+            error: "Recipe unavailable",
+            sourceRevision: "sha-1",
+            environmentKey: '["azure","dev"]'
+          }
+        };
+        harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+        const handoff = vi.spyOn(
+          harness.dependencies,
+          "triggerAppBicepHandoff"
+        );
+        const result = await harness.run(
+          "planGraph",
+          JSON.stringify({
+            repo: "octo/app",
+            provider,
+            environment,
+            restartWait: true
+          })
+        );
+        expect(result.payload).toMatchObject(
+          retries ? { needsAppBicep: true } : { appModelAuthoringFailed: true }
+        );
+        expect(harness.handoffs).toHaveLength(retries ? 1 : 0);
+        if (retries)
+          expect(handoff.mock.calls[0]?.[6]).toBe(
+            JSON.stringify([provider, environment])
+          );
+      }
+    );
+
     it("answers 400 for a malformed body and 503 without a Content-Type for a missing entry", async () => {
       const malformed = await start().run("planGraph", "nope");
       expect(malformed.status).toBe(400);
@@ -1398,14 +1738,39 @@ describe("graph planning workflows", () => {
       expect(harness.branchCommits).toEqual(["main"]);
     });
 
-    it("clears a permanent authoring failure before an explicit planned refresh", async () => {
+    it("clears a permanent authoring failure once the branch commit changes before a planned load", async () => {
       const harness = start({
-        selections: { main: selectionOf({ content: null }) }
+        selections: { main: selectionOf({ content: null }) },
+        branchSourceCommits: { main: "sha-1" }
       });
       harness.state.appModelFailures = {
         "octo/app::main": {
           attemptToken: "attempt-1",
-          error: "Recipe conflict"
+          error: "Recipe conflict",
+          sourceRevision: "sha-0"
+        }
+      };
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+
+      const outcome = await harness.run("planGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.state.appModelFailures).toEqual({});
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
+    it("keeps a permanent authoring failure when the planned view is reloaded", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) },
+        branchSourceCommits: { main: "sha-1" }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "Recipe conflict",
+          sourceRevision: "sha-1"
         }
       };
       harness.state.appModelAttemptTokens = {
@@ -1417,9 +1782,8 @@ describe("graph planning workflows", () => {
         '{"repo":"octo/app","restartWait":true}'
       );
 
-      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
-      expect(harness.state.appModelFailures).toEqual({});
-      expect(harness.handoffs).toHaveLength(1);
+      expect(outcome.payload).toMatchObject({ modelingFailed: true });
+      expect(harness.handoffs).toEqual([]);
     });
 
     it("does not hand off a missing model after a newer plan supersedes it", async () => {
@@ -2026,7 +2390,7 @@ describe("graph planning workflows", () => {
         expect(outcome.status).toBe(200);
         expect(outcome.payload).toEqual({
           error:
-            "Application model generation stopped: The configured Recipe rejects the required credential shape. Fix the reported issue, then refresh the Radius Canvas to try modeling again.",
+            "Application model generation failed: The configured Recipe rejects the required credential shape. The source revision could not be read. Automatic retry is paused. Click Refresh to retry, or reload to check the source again.",
           modelingFailed: true,
           appModelAuthoringFailed: true,
           repo: "octo/app"
@@ -2057,18 +2421,24 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs).toHaveLength(1);
     });
 
-    it("clears both sides and asks again when the diff is explicitly refreshed", async () => {
+    it("clears both sides and asks again when both branch commits have changed", async () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main", content: null }),
           "feature/x": selectionOf({ branch: "feature/x", content: null })
-        }
+        },
+        branchSourceCommits: { main: "sha-1", "feature/x": "sha-9" }
       });
       harness.state.appModelFailures = {
-        "octo/app::main": { attemptToken: "attempt-1", error: "base failed" },
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "base failed",
+          sourceRevision: "sha-0"
+        },
         "octo/app::feature/x": {
           attemptToken: "attempt-1",
-          error: "head failed"
+          error: "head failed",
+          sourceRevision: "sha-2"
         }
       };
       harness.state.appModelAttemptTokens = {
@@ -2076,10 +2446,7 @@ describe("graph planning workflows", () => {
         "octo/app::feature/x": "attempt-1"
       };
 
-      const outcome = await harness.run(
-        "diffBranches",
-        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
-      );
+      const outcome = await harness.run("diffBranches", diffBody);
 
       expect(outcome.payload).toMatchObject({ needsAppBicep: true });
       expect(outcome.payload.modelingFailed).toBeUndefined();
@@ -2088,31 +2455,54 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs).toHaveLength(1);
     });
 
-    // The clearing sits ahead of the both-missing check so a half-modeled
-    // comparison still unfences its missing side; leaving that fence standing
-    // would make the next comparison terminal the moment the modeled side
-    // stopped carrying content.
-    it("clears the still-missing side's failure on an explicit refresh when the other side has a model", async () => {
+    it("keeps the diff's failure when the comparison is reloaded and no branch moved", async () => {
+      const harness = start({
+        selections: {
+          main: selectionOf({ branch: "main", content: null }),
+          "feature/x": selectionOf({ branch: "feature/x", content: null })
+        },
+        branchSourceCommits: { main: "sha-1", "feature/x": "sha-2" }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "base failed",
+          sourceRevision: "sha-1"
+        }
+      };
+      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+
+      const outcome = await harness.run(
+        "diffBranches",
+        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({ modelingFailed: true });
+      expect(harness.handoffs).toEqual([]);
+    });
+
+    // The reconcile sits ahead of the both-missing check so a half-modeled
+    // comparison still frees a moved branch's fence.
+    it("clears the still-missing side's failure when its branch moved and the other side has a model", async () => {
       const harness = start({
         selections: {
           main: selectionOf({ branch: "main" }),
           "feature/x": selectionOf({ branch: "feature/x", content: null })
-        }
+        },
+        branchSourceCommits: { main: "sha-1", "feature/x": "sha-9" }
       });
       harness.state.appModelFailures = {
         "octo/app::feature/x": {
           attemptToken: "attempt-1",
-          error: "head failed"
+          error: "head failed",
+          sourceRevision: "sha-2"
         }
       };
       harness.state.appModelAttemptTokens = {
         "octo/app::feature/x": "attempt-1"
       };
 
-      await harness.run(
-        "diffBranches",
-        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
-      );
+      await harness.run("diffBranches", diffBody);
 
       expect(harness.state.appModelFailures).toEqual({});
       expect(harness.state.appModelAttemptTokens).toEqual({});
@@ -2141,38 +2531,55 @@ describe("graph planning workflows", () => {
       });
     });
 
-    it("leaves fencing state alone when a newer comparison supersedes the request", async () => {
-      let harness!: Harness;
-      harness = start({
-        selections: {
-          main: selectionOf({ branch: "main", content: null }),
-          "feature/x": selectionOf({ branch: "feature/x", content: null })
-        },
-        afterSelect: () => {
-          prepareSourceRefResources(harness.entry, "diff", {
-            repo: "octo/app",
-            baseBranch: "main",
-            headBranch: "feature/y"
-          });
+    it.each(["selection", "source read"])(
+      "leaves fencing state alone when a newer comparison supersedes the request during %s",
+      async (phase) => {
+        let harness!: Harness;
+        harness = start({
+          selections: {
+            main: selectionOf({ branch: "main", content: null }),
+            "feature/x": selectionOf({ branch: "feature/x", content: null })
+          },
+          branchSourceCommits: { main: "sha-9", "feature/x": "sha-9" },
+          afterSelect:
+            phase === "selection" ?
+              () => {
+                prepareSourceRefResources(harness.entry, "diff", {
+                  repo: "octo/app",
+                  baseBranch: "main",
+                  headBranch: "feature/y"
+                });
+              }
+            : undefined
+        });
+        if (phase === "source read") {
+          harness.script.readBranchSourceRevision = async () => {
+            prepareSourceRefResources(harness.entry, "diff", {
+              repo: "octo/app",
+              baseBranch: "main",
+              headBranch: "feature/y"
+            });
+            return "sha-9";
+          };
         }
-      });
-      harness.state.appModelFailures = {
-        "octo/app::main": { attemptToken: "attempt-1", error: "base failed" }
-      };
-      harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
+        const failure = {
+          attemptToken: "attempt-1",
+          error: "base failed",
+          sourceRevision: "sha-1"
+        };
+        harness.state.appModelFailures = { "octo/app::main": failure };
+        harness.state.appModelAttemptTokens = { "octo/app::main": "attempt-1" };
 
-      const outcome = await harness.run(
-        "diffBranches",
-        '{"repo":"octo/app","base":"main","head":"feature/x","restartWait":true}'
-      );
+        const outcome = await harness.run("diffBranches", diffBody);
 
-      expect(outcome.status).toBe(409);
-      expect(outcome.payload).toEqual({ stale: true });
-      expect(harness.state.appModelFailures).toEqual({
-        "octo/app::main": { attemptToken: "attempt-1", error: "base failed" }
-      });
-      expect(harness.handoffs).toEqual([]);
-    });
+        expect(outcome.status).toBe(409);
+        expect(outcome.payload).toEqual({ stale: true });
+        expect(harness.state.appModelFailures).toEqual({
+          "octo/app::main": failure
+        });
+        expect(harness.handoffs).toEqual([]);
+      }
+    );
 
     it.each([
       ["base", "main", "feature/x"],

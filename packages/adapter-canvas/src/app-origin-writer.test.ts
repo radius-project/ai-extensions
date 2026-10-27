@@ -9,6 +9,7 @@ import {
   parseAppOrigin,
   serializeAppOrigin
 } from "@radius-project/core";
+import { RADIUS_EXTENSION_REGISTRY } from "@radius-project/adapter-shared";
 import { hashAppBicep } from "./app-bicep-hash.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 
@@ -55,7 +56,27 @@ interface Checkout {
   commit: string;
 }
 
-function checkout(model = MODEL, withCommit = true): Checkout {
+// The pin show-radius-type.mjs writes for a stable 0.60 CLI. Built from the
+// adapter's own registry constant, so a writer whose copy of the registry
+// drifted would stop finding the version in it.
+const PIN_0_60 = `${RADIUS_EXTENSION_REGISTRY}:0.60`;
+
+function bicepConfig(radius: unknown): string {
+  return `${JSON.stringify(
+    {
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius, customTypes: "./custom-types.tgz" }
+    },
+    null,
+    2
+  )}\n`;
+}
+
+function checkout(
+  model = MODEL,
+  withCommit = true,
+  config: string | null = bicepConfig(PIN_0_60)
+): Checkout {
   const root = fs.realpathSync(
     fs.mkdtempSync(path.join(os.tmpdir(), "app-origin-"))
   );
@@ -63,6 +84,9 @@ function checkout(model = MODEL, withCommit = true): Checkout {
   fs.mkdirSync(path.join(root, ".radius"));
   const appPath = path.join(root, ".radius", "app.bicep");
   fs.writeFileSync(appPath, model);
+  if (config !== null) {
+    fs.writeFileSync(path.join(root, ".radius", "bicepconfig.json"), config);
+  }
   git(root, ["init", "--quiet", "--initial-branch", "main"]);
   git(root, ["config", "user.email", "radius@example.invalid"]);
   git(root, ["config", "user.name", "Radius Test"]);
@@ -130,6 +154,7 @@ describe("write-app-origin", () => {
       generatedAt: "2026-08-11T05:32:32.000Z",
       sourceCommit: repo.commit,
       skillVersion: "0.1.0-edge-0b33186",
+      radiusVersion: "0.60",
       appBicepHash: hashAppBicep(MODEL)
     });
   });
@@ -153,6 +178,7 @@ describe("write-app-origin", () => {
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: repo.commit,
         skillVersion: "0.1.0",
+        radiusVersion: "0.60",
         appBicepHash: hashAppBicep(MODEL)
       })
     );
@@ -266,6 +292,7 @@ describe("write-app-origin", () => {
       generatedAt: "2026-08-11T05:32:32.000Z",
       sourceCommit: repo.commit,
       skillVersion: "",
+      radiusVersion: "0.60",
       appBicepHash: hashAppBicep(MODEL)
     });
   });
@@ -334,6 +361,108 @@ describe("write-app-origin", () => {
 
     expect(result.status).toBe("up-to-date");
     expect(result.stale).toBe(false);
+  });
+
+  it.each([
+    ["a stable release", "0.60", "0.60"],
+    ["a prerelease", "0.61.0-rc1", "0.61.0-rc1"],
+    ["an edge build", "latest", "latest"]
+  ])(
+    "records the Radius version of %s from the pin beside the model",
+    (_label, tag, expected) => {
+      const repo = checkout(
+        MODEL,
+        true,
+        bicepConfig(`  ${RADIUS_EXTENSION_REGISTRY}:${tag}  `)
+      );
+
+      const result = run([repo.appPath, "--skill-version", "1"], repo.root);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(
+        parseAppOrigin(fs.readFileSync(repo.originPath, "utf8"))?.radiusVersion
+      ).toBe(expected);
+    }
+  );
+
+  // Like a blank skillVersion, a blank radiusVersion only switches one
+  // comparison off. The record is still written, because without it the model
+  // would read as unverified on every graph open. The warning says which of the
+  // causes it was, since each needs a different fix.
+  it.each([
+    ["there is no bicepconfig.json", null, /bicepconfig\.json does not exist/u],
+    [
+      "bicepconfig.json is not JSON",
+      "{ not json",
+      /bicepconfig\.json could not be read as JSON/u
+    ],
+    [
+      "bicepconfig.json is JSON null",
+      "null",
+      /bicepconfig\.json does not pin extensions\.radius/u
+    ],
+    [
+      "the pin is missing",
+      `${JSON.stringify({ extensions: {} })}\n`,
+      /does not pin extensions\.radius/u
+    ],
+    ["the pin is blank", bicepConfig("  "), /does not pin extensions\.radius/u],
+    [
+      "the pin is not a string",
+      bicepConfig(60),
+      /does not pin extensions\.radius/u
+    ],
+    [
+      "the pin names another registry",
+      bicepConfig("br:example.invalid/radius:0.60"),
+      /"br:example\.invalid\/radius:0\.60", which is not a br:biceptypes\.azurecr\.io\/radius:<version> reference/u
+    ],
+    [
+      "the pin is a local package",
+      bicepConfig("./radius.tgz"),
+      /which is not a br:biceptypes\.azurecr\.io\/radius:<version> reference/u
+    ],
+    [
+      "the pin has no version",
+      bicepConfig(`${RADIUS_EXTENSION_REGISTRY}:`),
+      /which is not a br:biceptypes\.azurecr\.io\/radius:<version> reference/u
+    ]
+  ])(
+    "records an unknown Radius version with a warning when %s",
+    (_label, config, warning) => {
+      const repo = checkout(MODEL, true, config);
+
+      const result = run([repo.appPath, "--skill-version", "1"], repo.root);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toMatch(warning);
+      expect(result.stderr).toMatch(
+        /skip the Radius version comparison for this model/u
+      );
+      expect(
+        parseAppOrigin(fs.readFileSync(repo.originPath, "utf8"))
+      ).toMatchObject({ radiusVersion: "", skillVersion: "1" });
+    }
+  );
+
+  // The installed CLI and the record have to describe the version in the same
+  // form, or every model would read as needing a refresh.
+  it("reports a model as up to date when the installed CLI uses the recorded Radius version", () => {
+    const repo = checkout();
+
+    run([repo.appPath, "--skill-version", "1"], repo.root);
+
+    expect(
+      evaluateAppModelFreshness({
+        model: MODEL,
+        originText: fs.readFileSync(repo.originPath, "utf8"),
+        headCommit: repo.commit,
+        generatorVersion: "1",
+        radiusVersion: "0.60",
+        hashAppBicep
+      }).status
+    ).toBe("up-to-date");
   });
 
   it("refuses to write a record for a model it cannot read", () => {

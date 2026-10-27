@@ -9,6 +9,7 @@ import {
   isRadiusCanvasTitle,
   probeCdpEndpoint,
   selectMainPage,
+  waitForMainPage,
   type CdpFetch
 } from "./copilot-app-cdp.js";
 
@@ -167,6 +168,122 @@ describe("selectMainPage", () => {
       "No Copilot app page found over CDP. Targets seen: about:blank, <empty>"
     );
     expect(() => selectMainPage([])).toThrow(/Targets seen: <none>/);
+  });
+});
+
+describe("waitForMainPage", () => {
+  function clock() {
+    let elapsed = 0;
+    const waits: number[] = [];
+    return {
+      waits,
+      now: () => elapsed,
+      wait: (milliseconds: number) => {
+        waits.push(milliseconds);
+        elapsed += milliseconds;
+        return Promise.resolve();
+      }
+    };
+  }
+
+  const timing = { timeoutMs: 250, intervalMs: 100 };
+
+  it("returns an existing app page without waiting", async () => {
+    const main = page("http://tauri.localhost/");
+    const time = clock();
+    await expect(
+      waitForMainPage(
+        { ...time, pages: () => [page("https://github.com/login"), main] },
+        timing
+      )
+    ).resolves.toBe(main);
+    expect(time.waits).toEqual([]);
+  });
+
+  it("waits for an existing blank page to navigate to the app", async () => {
+    const time = clock();
+    const main = {
+      url: () => (time.now() < 200 ? "about:blank" : "http://tauri.localhost/")
+    };
+    await expect(
+      waitForMainPage({ ...time, pages: () => [main] }, timing)
+    ).resolves.toBe(main);
+    expect(time.waits).toEqual([100, 100]);
+  });
+
+  it("reads new targets on each poll and ignores canvas pages", async () => {
+    const time = clock();
+    const main = page("tauri://localhost/");
+    await expect(
+      waitForMainPage(
+        {
+          ...time,
+          pages: () =>
+            time.now() === 0 ? []
+            : time.now() === 100 ? [page("http://127.0.0.1:4100/?page=graph")]
+            : [page("about:blank"), main]
+        },
+        timing
+      )
+    ).resolves.toBe(main);
+    expect(time.waits).toEqual([100, 100]);
+  });
+
+  it("accepts a page that becomes ready at the deadline", async () => {
+    const time = clock();
+    const main = page("http://tauri.localhost/");
+    await expect(
+      waitForMainPage(
+        { ...time, pages: () => (time.now() >= 250 ? [main] : []) },
+        timing
+      )
+    ).resolves.toBe(main);
+    expect(time.waits).toEqual([100, 100, 50]);
+  });
+
+  it.each([
+    { pages: [], seen: "<none>" },
+    { pages: [page("about:blank"), page("")], seen: "about:blank, <empty>" }
+  ])("reports the last targets after timeout: $seen", async (scenario) => {
+    const time = clock();
+    await expect(
+      waitForMainPage({ ...time, pages: () => scenario.pages }, timing)
+    ).rejects.toThrow(
+      `No Copilot app page found over CDP within 250 ms. Targets seen: ${scenario.seen}`
+    );
+    expect(time.waits).toEqual([100, 100, 50]);
+  });
+
+  it("stops when reading targets fails after a wait", async () => {
+    const time = clock();
+    const failure = new Error("browser disconnected");
+    await expect(
+      waitForMainPage(
+        {
+          ...time,
+          pages: () => {
+            if (time.now() > 0) throw failure;
+            return [page("about:blank")];
+          }
+        },
+        timing
+      )
+    ).rejects.toBe(failure);
+    expect(time.waits).toEqual([100]);
+  });
+
+  it("propagates a failed wait without retrying", async () => {
+    const failure = new Error("wait cancelled");
+    await expect(
+      waitForMainPage(
+        {
+          pages: () => [],
+          now: () => 0,
+          wait: () => Promise.reject(failure)
+        },
+        timing
+      )
+    ).rejects.toBe(failure);
   });
 });
 

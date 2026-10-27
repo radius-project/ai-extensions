@@ -77,6 +77,7 @@ function readinessService(
   }
 ) {
   return createGitHubAccountReadinessService(accountCoordinator, {
+    ownerKey: "runtime",
     ports: {
       probePackageAccess: async () => packageAccess
     }
@@ -85,7 +86,9 @@ function readinessService(
 
 describe("GitHub account readiness", () => {
   it("reports one ready result when every selected-account capability passes", async () => {
-    const service = readinessService(coordinator(selectedExecutor({})));
+    const accountCoordinator = coordinator(selectedExecutor({}));
+    const lease = vi.spyOn(accountCoordinator, "withSelectedAccount");
+    const service = readinessService(accountCoordinator);
 
     await expect(
       service.check({
@@ -107,6 +110,12 @@ describe("GitHub account readiness", () => {
         packages: { state: "ready" }
       }
     });
+    expect(lease).toHaveBeenCalledExactlyOnceWith(
+      "octocat",
+      { ownerKey: "runtime" },
+      expect.any(Function),
+      3000
+    );
   });
 
   it("accepts a GitHub App installation with setup permissions and a separate package credential", async () => {
@@ -346,7 +355,7 @@ describe("GitHub account readiness", () => {
     );
     const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["repo"] })),
-      { ports: { probePackageAccess } }
+      { ownerKey: "runtime", ports: { probePackageAccess } }
     );
 
     const result = await service.check({
@@ -378,6 +387,7 @@ describe("GitHub account readiness", () => {
     const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["repo"] })),
       {
+        ownerKey: "runtime",
         ports: {
           probePackageAccess: () =>
             Promise.resolve({ ok: false, detail: "not checked" })
@@ -463,7 +473,7 @@ describe("GitHub account readiness", () => {
           }
         })
       ),
-      { ports: { probePackageAccess } }
+      { ownerKey: "runtime", ports: { probePackageAccess } }
     );
 
     const result = await service.check({
@@ -490,7 +500,7 @@ describe("GitHub account readiness", () => {
     );
     const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["write:packages"] })),
-      { ports: { probePackageAccess } }
+      { ownerKey: "runtime", ports: { probePackageAccess } }
     );
 
     const result = await service.check({

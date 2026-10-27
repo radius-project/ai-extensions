@@ -234,6 +234,63 @@ describe("RU-03: tool declarations", () => {
   });
 
   describe("RU-19: session start guidance", () => {
+    it("opens the graph first and leaves missing-model authoring to the Canvas handoff", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "without explicitly requesting model creation or updates"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        '1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).'
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Let the Canvas detect a missing app.bicep and queue its automatic radius-app-bicep authoring handoff."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-bicep skill, or a delegated agent."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "First, check whether"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "Only AFTER the skill has written"
+      );
+    });
+
+    it("allows remaining work such as deployment after opening the graph without waiting for a model", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "After opening, do not wait for the model. Continue with any other part of the user's request, or end the turn."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "After opening, end the current turn"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        'When the user asks to "deploy my app", "create environment": open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<current-repo>" } }).'
+      );
+    });
+
+    it("keeps explicitly requested model authoring available", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion."
+      );
+    });
+
+    it("preserves source-reference repair without polling an unready graph", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "For that check, call get_graph_resources at most once; if ready is false, stop the reference check without waiting or retrying."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Repair missing source references on a ready graph through the radius-app-graph skill's radius-app-bicep repair workflow."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        "poll for a missing model, call radius_generate_app or the radius-app-bicep skill"
+      );
+    });
+
+    it("finishes explicit model authoring before a combined request's graph open", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        'For a combined request such as "generate the model and show me the graph", this explicit-authoring instruction takes precedence over the graph-only flow below: complete authoring successfully, then open the requested graph.'
+      );
+    });
+
     it("does not ask the agent to generate a graph diff before pull requests", () => {
       expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
         "radius_generate_pr_diff_markdown"

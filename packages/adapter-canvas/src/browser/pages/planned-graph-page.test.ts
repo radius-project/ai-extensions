@@ -24,7 +24,11 @@ import {
   PLAN_PROGRESS_MS,
   PLAN_RETRY_MS
 } from "./planned-graph-page.js";
-import { DEPLOYMENTS_PATH } from "../repositories.js";
+import {
+  DEPLOYMENTS_PATH,
+  PLAN_RETRY_LABEL,
+  PLAN_RETRY_TITLE
+} from "../repositories.js";
 
 function initializePlannedGraphPage(
   context: BrowserContext,
@@ -163,6 +167,202 @@ function globals(overrides: Record<string, unknown> = {}) {
 }
 
 describe("initializePlannedGraphPage", () => {
+  const settle = async (
+    browser: ReturnType<typeof fixture>["browser"]
+  ): Promise<void> => {
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+  };
+
+  it("sends the explicit Refresh flag once, not on automatic planning or polls", async () => {
+    const { browser, button, hint } = fixture();
+    const bodies: Record<string, unknown>[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse(
+        bodies.length === 1 ?
+          { modelingFailed: true, error: "Recipe unavailable." }
+        : { needsAppBicep: true }
+      );
+    });
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    expect(bodies[0]).not.toHaveProperty("retryModeling");
+    expect(button.dataset.mode).toBe("retry");
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("title")).toBe(PLAN_RETRY_TITLE);
+    expect(hint.textContent).toContain('click "Refresh"');
+    button.dispatch("click");
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    expect(button.disabled).toBe(true);
+    await settle(browser);
+    expect(bodies[1]).toMatchObject({ retryModeling: true, restartWait: true });
+    expect(button.focusCount).toBe(1);
+    expect(button.disabled).toBe(false);
+    expect(browser.net.calls.some((call) => call.url === "/api/deploy")).toBe(
+      false
+    );
+    browser.clock.tick(PLAN_RETRY_MS);
+    await settle(browser);
+    expect(bodies[2]).not.toHaveProperty("retryModeling");
+    teardown();
+    expect(button.listenerCount()).toBe(0);
+  });
+
+  it("ignores a Refresh click while its request is pending", async () => {
+    const { browser, button } = fixture();
+    const pending = createDeferred<HttpResponse>();
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () =>
+      ++calls === 1 ?
+        jsonResponse({ modelingFailed: true, error: "Recipe unavailable." })
+      : pending.promise
+    );
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    button.dispatch("click");
+    await settle(browser);
+    expect(calls).toBe(2);
+    button.dispatch("click");
+    await settle(browser);
+    expect(calls).toBe(2);
+    pending.resolve(jsonResponse({ refreshed: true }));
+    await settle(browser);
+    teardown();
+  });
+
+  it("restores Deploy Application after a successful Refresh", async () => {
+    const { browser, button } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse(
+        ++calls === 1 ?
+          { modelingFailed: true, error: "Recipe unavailable." }
+        : { refreshed: true }
+      )
+    );
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    button.dispatch("click");
+    await settle(browser);
+    expect(button.dataset.mode).toBe("deploy");
+    expect(button.textContent).toBe("Deploy Application");
+    teardown();
+  });
+
+  it("does not focus a Refresh result that cannot deploy", async () => {
+    const { browser, button } = fixture({
+      deploymentsPayload: {
+        deployments: [
+          { app: "app", environment: "dev", status: "pending", runUrl: "" }
+        ]
+      }
+    });
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse(
+        ++calls === 1 ?
+          { modelingFailed: true, error: "Recipe unavailable." }
+        : { refreshed: true }
+      )
+    );
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    button.dispatch("click");
+    await settle(browser);
+    expect(button.dataset.mode).toBe("deploy");
+    expect(button.disabled).toBe(true);
+    expect(button.focusCount).toBe(0);
+    teardown();
+  });
+
+  it("clears Refresh when the user changes the selection", async () => {
+    const { browser, button, environment } = fixture();
+    const pending = createDeferred<HttpResponse>();
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () =>
+      ++calls === 1 ?
+        jsonResponse({ modelingFailed: true, error: "Recipe unavailable." })
+      : pending.promise
+    );
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    environment.dispatch("change");
+    expect(button.dataset.mode).toBe("deploy");
+    expect(button.textContent).toBe("Deploy Application");
+    expect(button.disabled).toBe(true);
+    teardown();
+  });
+
+  it("does not transfer a queued explicit retry to a later automatic branch selection", async () => {
+    const { browser, button, branch } = fixture();
+    const bodies: Record<string, unknown>[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse({
+        modelingFailed: true,
+        error: "Recipe unavailable."
+      });
+    });
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    button.dispatch("click");
+    branch.value = "other";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+    expect(bodies.at(-1)).toMatchObject({ branch: "other" });
+    expect(bodies.at(-1)).not.toHaveProperty("retryModeling");
+    expect(button.focusCount).toBe(0);
+    teardown();
+  });
+
+  it("offers Refresh after a network failure", async () => {
+    const { browser, button } = fixture();
+    browser.net.handle("/api/plan-graph", () =>
+      Promise.reject(new Error("offline"))
+    );
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    button.dispatch("click");
+    await settle(browser);
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
+    teardown();
+  });
+
+  it("offers Refresh after an incomplete plan response", async () => {
+    const { browser, button } = fixture();
+    browser.net.handle("/api/plan-graph", () => jsonResponse({}));
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    teardown();
+  });
+
+  it("keeps Create Environment when a plan fails without an environment", async () => {
+    const { browser, button } = fixture({
+      envListing: "empty",
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ modelingFailed: true, error: "Recipe unavailable." })
+    );
+    const teardown = initializePlannedGraphPage(browser.context, globals());
+    await settle(browser);
+    expect(button.dataset.mode).toBe("create-env");
+    expect(button.textContent).toBe("Create Environment");
+    button.dispatch("click");
+    expect(browser.nav.assigned).toEqual(["/?page=environment&new=1"]);
+    teardown();
+  });
+
   it("does nothing when the page state element is absent", () => {
     const browser = createFakeBrowser();
     const teardown = initializePlannedGraphPage(browser.context, globals());
@@ -180,7 +380,7 @@ describe("initializePlannedGraphPage", () => {
     ).toThrow('Radius browser global "radiusSetGraphError" is not available.');
   });
 
-  it("renders model compilation failures only on the graph and disables deployment", async () => {
+  it("renders model compilation failures only on the graph and offers Refresh", async () => {
     const { browser, button, status, branch } = fixture();
     const setError = vi.fn();
     browser.net.handle("/api/plan-graph", () =>
@@ -204,8 +404,32 @@ describe("initializePlannedGraphPage", () => {
       "Your application model couldn't be compiled."
     );
     expect(status.style.display).toBe("none");
-    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+    expect(button.disabled).toBe(false);
     expect(branch.listenerCount("change")).toBe(1);
+  });
+
+  it("shows model failures without optional wrapper or deployment controls", async () => {
+    const { browser } = fixture({ withWrapper: false, withButton: false });
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({
+        modelingFailed: true,
+        error: "Recipe unavailable."
+      })
+    );
+    const setError = vi.fn();
+    const teardown = initializePlannedGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "Recipe unavailable."
+    );
+    teardown();
   });
 
   it("renders persisted resources and binds idempotently", async () => {
@@ -433,6 +657,9 @@ describe("initializePlannedGraphPage", () => {
 
   it("delegates a plan button click to the shared deploy flow", async () => {
     const { browser, button } = fixture();
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     browser.clock.tick(0);

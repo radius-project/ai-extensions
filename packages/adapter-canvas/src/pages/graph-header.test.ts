@@ -68,6 +68,13 @@ describe("graphHeader page selection", () => {
     expect(graphHeader("graph")).not.toMatch(/\son[a-z]+=/);
   });
 
+  it.each(["graph", "planned", "deployed", "graph-diff", "nope"])(
+    "leaves retry controls to the %s page body",
+    (page) => {
+      expect(graphHeader(page)).not.toContain('id="modeling-refresh"');
+    }
+  );
+
   it("opens the graph content wrapper that graphHeaderClose closes", () => {
     expect(graphHeader("graph")).toContain('<div id="graph-page-content">');
     expect(graphHeaderClose()).toBe("</div>");

@@ -29,6 +29,13 @@ export default defineConfig({
           functions: 100,
           lines: 100
         },
+        "packages/adapter-canvas/src/runtime/{environment-account-context,production-github-account-context}.ts":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
         "packages/core/src/setup-*.ts": {
           statements: 100,
           branches: 100,

@@ -170,10 +170,14 @@ export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (can
 3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 In every example below, "<radius-instance>" means the existing Radius Canvas instanceId when one is open, or "${RADIUS_CANVAS_INSTANCE_ID}" only when none is open.
 
-When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
-1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
-2. If it does not, author it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure, and writes the file to the working tree) and follow that skill to completion.
-3. Only AFTER the skill has written app.bicep to the working tree, open: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }). For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
+When the user explicitly asks to create or update the application model, use radius_generate_app and follow the radius-app-bicep skill to completion. For a combined request such as "generate the model and show me the graph", this explicit-authoring instruction takes precedence over the graph-only flow below: complete authoring successfully, then open the requested graph.
+
+When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases, without explicitly requesting model creation or updates:
+1. Open the graph Canvas first, without checking for or generating app.bicep: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }).
+2. Let the Canvas detect a missing app.bicep and queue its automatic radius-app-bicep authoring handoff. Do not inspect the workspace or poll to detect a missing model, and do not start missing-model generation independently through radius_generate_app, the radius-app-bicep skill, or a delegated agent.
+3. After opening, do not wait for the model. Continue with any other part of the user's request, or end the turn. You may inspect an already-ready graph for missing source references. For that check, call get_graph_resources at most once; if ready is false, stop the reference check without waiting or retrying. Repair missing source references on a ready graph through the radius-app-graph skill's radius-app-bicep repair workflow.
+
+For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
 
 The planned page resolves .radius/app.bicep from the working tree the same way. The graph-diff page also reads an on-disk .radius/app.bicep for whichever side exactly matches the current workspace repo and branch. Do not commit or push the current worktree merely to compare it. A different repo or branch is read from GitHub and must already contain a committed model; if it does not, report that the diff is unavailable rather than publishing the worktree.
 

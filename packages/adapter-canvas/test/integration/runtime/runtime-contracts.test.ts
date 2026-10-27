@@ -23,6 +23,19 @@ import { createUnconfirmedMonitor } from "../../support/server/unconfirmed-monit
 import { deployFailureNoticePrompt } from "../../../src/runtime/hooks.js";
 import { DEPLOY_COMPLETED_UNCONFIRMED_MESSAGE } from "../../../src/deploy-artifacts.js";
 import { createWorkflowObservationScope } from "../../../src/server/services/workflow-observation-scope.js";
+import { createGraphPlanningWorkflows } from "../../../src/server/routes/graph-workflows.js";
+import {
+  prepareSourceRefResources,
+  setSourceRefResources
+} from "../../../src/source-refs.js";
+import {
+  addGraphProgress,
+  beginPlannedGraphRequest,
+  canReuseModeledGraph,
+  isCurrentPlannedGraphRequest,
+  isCurrentSourceRefToken
+} from "../../../src/server.js";
+import type { CanvasGraphResource } from "../../../src/shared.js";
 import {
   createWorkflowArtifactReader,
   type WorkflowRunner
@@ -137,6 +150,7 @@ describe("P0-A Radius runtime registration contract", () => {
         readLog: async () =>
           "Error: quota\n----- END DEPLOY ERROR -----\nfixture log text",
         redactDiagnostic: redactCredentials,
+        sleep: async () => {},
         readControlPlaneLog: () => Promise.reject(new Error("fixture-private"))
       }
     );
@@ -856,6 +870,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit,
         skillVersion: "0.1.0-test",
+        radiusVersion: "0.60",
         appBicepHash: hashAppBicep(model)
       });
     const harness = await createRuntimeSdkHarness({
@@ -894,6 +909,129 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     await handoff?.(request);
 
     expect(harness.session.send).not.toHaveBeenCalled();
+
+    await harness.extension.shutdown("test");
+  });
+
+  // The upgrade flow end to end through the real runtime: a newer CLI asks for
+  // one refresh, the regenerated record stops it, and the next upgrade asks
+  // again.
+  it("asks for one refresh per Radius upgrade and stops once the model records the new version", async () => {
+    const model =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+    const origin = (radiusVersion: string) =>
+      serializeAppOrigin({
+        generatedAt: "2026-08-11T05:32:32.000Z",
+        sourceCommit: "a".repeat(40),
+        skillVersion: "0.1.0-test",
+        radiusVersion,
+        appBicepHash: hashAppBicep(model)
+      });
+    let recorded = "0.60";
+    let installed = "0.61";
+    const harness = await createRuntimeSdkHarness({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+      headCommits: { "workspace:/workspace": "a".repeat(40) },
+      sourceChangedSince: false
+    });
+    harness.deps.appModel.fetchWorkspaceFile = async () => origin(recorded);
+    harness.deps.appModel.radiusVersion = async () => installed;
+    const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+    const send = harness.session.send as ReturnType<typeof vi.fn>;
+    const request = { repo: "acme/widgets", branches: ["main"], page: "graph" };
+
+    await handoff?.(request);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(send.mock.calls[0][0])).toContain(
+      "generated with Radius 0.60, but the installed Radius CLI uses 0.61"
+    );
+
+    // The same versions again, as on every later graph open, ask nothing.
+    send.mockClear();
+    await handoff?.(request);
+    expect(send).not.toHaveBeenCalled();
+
+    // The skill regenerated and the record now saves 0.61.
+    recorded = "0.61";
+    await handoff?.(request);
+    expect(send).not.toHaveBeenCalled();
+
+    // A later plugin upgrade is a new situation and is asked about again.
+    installed = "0.62";
+    await handoff?.(request);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("notes an older Radius CLI instead of asking for a refresh it could not complete", async () => {
+    const model =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+    const harness = await createRuntimeSdkHarness({
+      radiusVersion: "0.60",
+      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
+          serializeAppOrigin({
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            radiusVersion: "0.61",
+            appBicepHash: hashAppBicep(model)
+          })
+      },
+      headCommits: { "workspace:/workspace": "b".repeat(40) },
+      // The source moved too. The refresh it would normally ask for cannot
+      // succeed on an older CLI, so it is not asked for.
+      sourceChangedSince: true
+    });
+
+    await harness.capturedHostCallbacks.appBicepHandoff?.({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph"
+    });
+
+    expect(harness.session.send).not.toHaveBeenCalled();
+    expect(harness.session.log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "generated with Radius 0.61, but the installed Radius CLI uses the older 0.60. Update the Radius plugin"
+      )
+    );
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("does not regenerate a model recorded before Radius versions were saved", async () => {
+    const model =
+      "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";
+    const harness = await createRuntimeSdkHarness({
+      radiusVersion: "0.61",
+      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: `${JSON.stringify(
+          {
+            generatedAt: "2026-08-11T05:32:32.000Z",
+            sourceCommit: "a".repeat(40),
+            skillVersion: "0.1.0-test",
+            appBicepHash: hashAppBicep(model)
+          },
+          null,
+          2
+        )}\n`
+      },
+      headCommits: { "workspace:/workspace": "a".repeat(40) },
+      sourceChangedSince: false
+    });
+
+    await harness.capturedHostCallbacks.appBicepHandoff?.({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph"
+    });
+
+    expect(harness.session.send).not.toHaveBeenCalled();
+    expect(harness.deps.appModel.radiusVersion).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
@@ -953,6 +1091,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         generatedAt: "2026-08-11T05:32:32.000Z",
         sourceCommit: String(commit).padStart(40, "0"),
         skillVersion: "0.1.0-test",
+        radiusVersion: "0.60",
         appBicepHash: hashAppBicep(model)
       });
     const handoff = harness.capturedHostCallbacks.appBicepHandoff;
@@ -1326,8 +1465,207 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
 });
 
 describe("TL-11 permanent modeling failure through the assembled runtime", () => {
+  it("delivers a new attempt after a reported failure releases the panel cache and preserves attempted environment identity", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: { "acme/widgets@main": ["Dockerfile"] },
+      headCommits: { "workspace:/workspace": "workspace:source-1" }
+    });
+    try {
+      const entry = await harness.deps.getOrCreateServer(
+        "radius-panel",
+        "graph"
+      );
+      Object.assign(entry.state, {
+        canvasInstanceId: "radius-panel",
+        contextRepo: "acme/widgets",
+        contextBranch: "main",
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: "main",
+        workspacePath: "/workspace"
+      });
+      const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+      const report = harness.extension.tools.find(
+        (candidate) => candidate.name === "radius_report_modeling_failure"
+      );
+      if (!handoff || !report) throw new Error("Missing modeling registration");
+      const request = {
+        repo: "acme/widgets",
+        branches: ["main"],
+        page: "graph",
+        state: entry.state,
+        environmentKey: '["azure","dev"]',
+        isCurrent: () => true
+      };
+      await handoff({ ...request, isCurrent: () => false });
+      expect(harness.session.send).not.toHaveBeenCalled();
+      await handoff(request);
+      expect(harness.session.send).toHaveBeenCalledTimes(1);
+      const firstToken =
+        entry.state.appModelAttemptTokens?.["acme/widgets::main"];
+      entry.state.plannedEnvironment = "production";
+      expect(
+        await report.handler({
+          instanceId: "radius-panel",
+          repo: "acme/widgets",
+          branch: "main",
+          attemptToken: firstToken,
+          error: "Recipe unavailable"
+        })
+      ).toEqual({ recorded: true });
+      expect(
+        entry.state.appModelFailures?.["acme/widgets::main"]?.environmentKey
+      ).toBe('["azure","dev"]');
+      expect(entry.state.appBicepHandoffKeys).toEqual({});
+      await handoff({ ...request, environmentKey: '["azure","production"]' });
+      expect(harness.session.send).toHaveBeenCalledTimes(2);
+      expect(
+        entry.state.appModelAttemptTokens?.["acme/widgets::main"]
+      ).not.toBe(firstToken);
+      expect(
+        entry.state.appModelAttemptEnvironments?.["acme/widgets::main"]
+      ).toBe('["azure","production"]');
+    } finally {
+      await harness.extension.shutdown("test");
+    }
+  });
+
+  it.each([
+    ["loadGraph", "graph", { repo: "acme/widgets", branch: "main" }],
+    ["planGraph", "graph", { repo: "acme/widgets", branch: "main" }],
+    [
+      "diffBranches",
+      "graph-diff",
+      { repo: "acme/widgets", base: "main", head: "feature" }
+    ]
+  ] as const)(
+    "still asks the agent to model when %s polls the same selection during the grace window",
+    async (workflow, page, request) => {
+      const harness = await createRuntimeSdkHarness({
+        workspaceTreeByRepoBranch: {
+          "acme/widgets@main": ["Dockerfile"],
+          "acme/widgets@feature": ["Dockerfile"]
+        },
+        headCommits: { "workspace:/workspace": "workspace:source-1" }
+      });
+      try {
+        const entry = await harness.deps.getOrCreateServer(
+          "radius-panel",
+          page
+        );
+        Object.assign(entry.state, {
+          canvasInstanceId: "radius-panel",
+          contextRepo: "acme/widgets",
+          contextBranch: "main",
+          workspaceRepo: "acme/widgets",
+          workspaceBranch: "main",
+          workspacePath: "/workspace",
+          plannedProvider: "azure",
+          plannedEnvironment: "dev"
+        });
+        const appModelHandoff = harness.capturedHostCallbacks.appBicepHandoff;
+        if (!appModelHandoff) throw new Error("Missing modeling handoff");
+        const handoffs: Promise<unknown>[] = [];
+        const workflows = createGraphPlanningWorkflows({
+          readInstanceEntry: () => entry,
+          resolveBranchForRequest: (_entry, _repo, branch) =>
+            Promise.resolve({
+              status: "resolved",
+              branch: branch || "main",
+              followsWorkspaceBranch: false
+            }),
+          commitBranchResolution: () => true,
+          pipeline: {
+            selectAppBicep: (_entry, _repo, branch) =>
+              Promise.resolve({
+                content: null,
+                fromWorkspace: true,
+                branch,
+                bicepPath: ""
+              }),
+            bicepPathOf: () => ".radius/app.bicep",
+            stageArtifacts: () => Promise.reject(new Error("unexpected")),
+            compileResources: () => Promise.reject(new Error("unexpected")),
+            toCanvasResources: (values) => values as CanvasGraphResource[],
+            graphJsonPathFor: () => "",
+            definitionHashFor: () => "",
+            modelRevisionFor: () => "",
+            discardStagedArtifacts: () => {}
+          },
+          triggerAppBicepHandoff: (
+            handoffEntry,
+            repo,
+            branches,
+            handoffPage,
+            progressView,
+            isCurrent,
+            environmentKey
+          ) => {
+            handoffs.push(
+              Promise.resolve(
+                appModelHandoff({
+                  repo,
+                  branches: Array.isArray(branches) ? branches : [branches],
+                  page: handoffPage,
+                  progressView,
+                  state: handoffEntry?.state,
+                  isCurrent,
+                  environmentKey
+                })
+              )
+            );
+          },
+          triggerGraphRepairHandoff: () => ({
+            attempt: 1,
+            maxAttempts: 3,
+            repairing: true,
+            repairExhausted: false
+          }),
+          clearGraphRepairAttempt: () => {},
+          listBranchPaths: () => Promise.resolve(["Dockerfile"]),
+          observeModelingRun: () => Promise.resolve(null),
+          readBranchSourceRevision: () => Promise.resolve("workspace:source-1"),
+          prepareSourceRefResources,
+          setSourceRefResources,
+          isCurrentSourceRefToken,
+          canReuseModeledGraph,
+          addGraphProgress,
+          beginPlannedGraphRequest,
+          isCurrentPlannedGraphRequest,
+          fetchRecipePack: () => Promise.resolve([]),
+          resolveRecipeOutputs: () => Promise.resolve([]),
+          computeGraphDiff: () => [],
+          record: (value) =>
+            value && typeof value === "object" ?
+              (value as Record<string, unknown>)
+            : {},
+          optionalString: (value) => (typeof value === "string" ? value : ""),
+          errorMessage: (error) => String(error),
+          logError: () => {},
+          now: () => Date.now()
+        });
+        const body = JSON.stringify(request);
+        let polled = false;
+        vi.mocked(harness.deps.clock.wait).mockImplementation(async () => {
+          if (polled) return;
+          polled = true;
+          await workflows[workflow]({ instanceId: "radius-panel", body });
+        });
+
+        await workflows[workflow]({ instanceId: "radius-panel", body });
+        await handoffs[0];
+
+        expect(polled).toBe(true);
+        expect(harness.session.send).toHaveBeenCalledTimes(1);
+      } finally {
+        await harness.extension.shutdown("test");
+      }
+    }
+  );
+
   it("records a current attempt and rejects a stale report", async () => {
-    const harness = await createRuntimeSdkHarness();
+    const harness = await createRuntimeSdkHarness({
+      headCommits: { "workspace:/workspace": "workspace:saved-source-1" }
+    });
     const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
     Object.assign(entry.state, {
       contextRepo: "acme/widgets",
@@ -1365,12 +1703,21 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
     expect(
       entry.state.appModelFailures?.["acme/widgets::main"]?.error
     ).toContain("configured Recipe");
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::main"]?.sourceRevision
+    ).toBe("workspace:saved-source-1");
+    expect(harness.deps.appModel.workspaceSourceRevision).toHaveBeenCalledWith(
+      "/workspace"
+    );
+    expect(harness.deps.appModel.branchHeadCommit).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });
 
   it("records a diff attempt per branch so either side can end the comparison's wait", async () => {
-    const harness = await createRuntimeSdkHarness();
+    const harness = await createRuntimeSdkHarness({
+      headCommits: { "acme/widgets@feature/x": "remote-source-1" }
+    });
     const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
     Object.assign(entry.state, {
       contextRepo: "acme/widgets",
@@ -1404,6 +1751,16 @@ describe("TL-11 permanent modeling failure through the assembled runtime", () =>
     expect(
       entry.state.appModelFailures?.["acme/widgets::main"]
     ).toBeUndefined();
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::feature/x"]?.sourceRevision
+    ).toBe("remote:remote-source-1");
+    expect(harness.deps.appModel.branchHeadCommit).toHaveBeenCalledWith(
+      "acme/widgets",
+      "feature/x"
+    );
+    expect(
+      harness.deps.appModel.workspaceSourceRevision
+    ).not.toHaveBeenCalled();
 
     await harness.extension.shutdown("test");
   });

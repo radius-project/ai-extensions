@@ -32,6 +32,10 @@ on:
         description: Git ref or commit to build. Defaults to the triggering ref.
         type: string
         default: ""
+    secrets:
+      CODECOV_TOKEN:
+        description: Token for uploads from trusted repository workflows.
+        required: false
 permissions: {}
 
 jobs:
@@ -128,6 +132,9 @@ jobs:
       - name: Run Windows managed executable tests
         run: pnpm --filter @radius-project/adapter-shared exec vitest run src/rad.test.ts src/rad-process.test.ts
 
+      - name: Run Windows cloud host configuration tests
+        run: pnpm --filter @radius-project/adapter-canvas exec vitest run test/ci/cloud-e2e-workflows.test.ts test/e2e-cloud/support/copilot-app-host.test.ts
+
       - name: Run Windows filesystem, executable and resolver tests
         run: pnpm --filter @radius-project/adapter-canvas exec vitest run src/credential-provenance-store.test.ts src/operation-store.test.ts src/node-executable.test.ts src/publish-targets.test.ts src/promote-app-model.test.ts src/server/temporary-kubeconfig.test.ts test/integration/runtime/radius-type-definition.test.ts
 
@@ -149,7 +156,7 @@ jobs:
       matrix:
         shard: [1, 2]
     container:
-      image: mcr.microsoft.com/playwright:v1.64.0-noble@sha256:06a9939e57531807f8d5fd76ce44b53165ffb7d7501d87ab10e285c20b1e971f
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea
     permissions:
       contents: read
     steps:
@@ -238,6 +245,19 @@ jobs:
             coverage/lcov.info
           if-no-files-found: error
           retention-days: 14
+
+      # Pull requests establish patch coverage, while publish.yml refreshes the
+      # project baseline after every push to main. The token is unavailable to
+      # fork PRs, so Codecov falls back to tokenless upload there.
+      - name: Upload coverage to Codecov
+        if: ${{ always() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && steps.coverage.outcome != 'skipped' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          codecov_yml_path: ./.codecov.yml
+          files: coverage/lcov.info
+          fail_ci_if_error: false
+          verbose: true
 
       - name: Check progress demo bundle
         run: pnpm --filter @radius-project/adapter-canvas run demo:check

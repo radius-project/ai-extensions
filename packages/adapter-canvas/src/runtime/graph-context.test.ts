@@ -28,6 +28,7 @@ function origin(
   overrides: {
     sourceCommit?: string;
     skillVersion?: string;
+    radiusVersion?: string;
     model?: string;
   } = {}
 ): string {
@@ -35,6 +36,7 @@ function origin(
     generatedAt: "2026-08-11T05:32:32.000Z",
     sourceCommit: overrides.sourceCommit ?? COMMIT,
     skillVersion: overrides.skillVersion ?? VERSION,
+    radiusVersion: overrides.radiusVersion ?? "0.60",
     appBicepHash: hashAppBicep(overrides.model ?? MODEL)
   });
 }
@@ -208,6 +210,97 @@ describe("resolveAppModelStatus", () => {
     );
 
     expect(status.freshness.status).toBe("generator-changed");
+  });
+
+  it.each([
+    ["a newer", "0.61", "radius-version-changed", true],
+    ["an older", "0.59", "radius-cli-outdated", false]
+  ])(
+    "compares the record with %s Radius version from the installed CLI",
+    async (_label, radiusVersion, expected, stale) => {
+      const { resolveAppModelStatus, deps } = helpers({
+        radiusVersion,
+        bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+        filesByRepoBranch: {
+          [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
+        },
+        headCommits: { "workspace:/workspace": COMMIT }
+      });
+
+      const status = await resolveAppModelStatus(
+        "acme/widgets",
+        "main",
+        WORKSPACE_STATE
+      );
+
+      expect(status.freshness.status).toBe(expected);
+      expect(status.freshness.stale).toBe(stale);
+      expect(deps.appModel.radiusVersion).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it("compares the Radius version on a branch it cannot refresh too", async () => {
+    const { resolveAppModelStatus } = helpers({
+      radiusVersion: "0.61",
+      bicepByRepoBranch: { "remote:other/repo@release": MODEL },
+      filesByRepoBranch: {
+        [`remote:other/repo@release:${APP_ORIGIN_REPO_PATH}`]: origin()
+      }
+    });
+
+    const status = await resolveAppModelStatus(
+      "other/repo",
+      "release",
+      WORKSPACE_STATE
+    );
+
+    expect(status.refreshable).toBe(false);
+    expect(status.freshness.status).toBe("radius-version-changed");
+  });
+
+  // A record written before radiusVersion existed skips the comparison, so
+  // asking the CLI would spend a process launch on an answer nothing reads.
+  it("does not ask the CLI when the record saved no Radius version", async () => {
+    const { resolveAppModelStatus, deps } = helpers({
+      radiusVersion: "0.61",
+      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin({
+          radiusVersion: ""
+        })
+      },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+
+    const status = await resolveAppModelStatus(
+      "acme/widgets",
+      "main",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("up-to-date");
+    expect(deps.appModel.radiusVersion).not.toHaveBeenCalled();
+  });
+
+  it("skips the Radius version check when reading the CLI fails", async () => {
+    const { resolveAppModelStatus, deps } = helpers({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": MODEL },
+      filesByRepoBranch: {
+        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]: origin()
+      },
+      headCommits: { "workspace:/workspace": COMMIT }
+    });
+    vi.mocked(deps.appModel.radiusVersion).mockRejectedValueOnce(
+      new Error("rad is not installed")
+    );
+
+    const status = await resolveAppModelStatus(
+      "acme/widgets",
+      "main",
+      WORKSPACE_STATE
+    );
+
+    expect(status.freshness.status).toBe("up-to-date");
   });
 
   // The branch head is not fetched for a branch we do not have checked out. The

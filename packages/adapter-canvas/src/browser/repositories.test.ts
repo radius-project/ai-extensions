@@ -6,10 +6,13 @@ import {
   DEPLOYMENTS_PATH,
   DIFF_BRANCH_TIMEOUT_MS,
   ENVIRONMENTS_PATH,
+  PLAN_RETRY_LABEL,
+  PLAN_RETRY_TITLE,
   REPOS_PATH,
   REPO_RETRY_MS,
   applyDeployedEnvState,
   applyModeledEnvState,
+  modeledHintText,
   applyPlanEnvState,
   branchLabel,
   buildApplicationOptions,
@@ -1383,6 +1386,41 @@ describe("planned primary button state", () => {
     expect(button.getAttribute("title")).toContain("could not be generated");
   });
 
+  it.each([
+    [false, false],
+    [true, true]
+  ])(
+    "offers Refresh when a retry is recommended (pending=%s)",
+    (pending, disabled) => {
+      const { browser, button, hint, created } = plannedButtons();
+      created["planned-app"].value = "store";
+      created["planned-branch"].value = "feature";
+      created["planned-env"].value = "dev";
+      const state = readyPlanState();
+      state.requestFailed = true;
+      state.retryRecommended = true;
+      state.planPending = pending;
+
+      applyPlanEnvState(browser.context, state, true, false);
+
+      expect(button.dataset.mode).toBe("retry");
+      expect(button.textContent).toBe(PLAN_RETRY_LABEL);
+      expect(button.disabled).toBe(disabled);
+      expect(button.getAttribute("title")).toBe(PLAN_RETRY_TITLE);
+      expect(hint.textContent).toContain('click "Refresh"');
+    }
+  );
+
+  it("offers environment creation before a recommended retry", () => {
+    const { browser, button } = plannedButtons();
+    const state = readyPlanState();
+    state.retryRecommended = true;
+
+    applyPlanEnvState(browser.context, state, false, false);
+
+    expect(button.dataset.mode).toBe("create-env");
+  });
+
   it("clears a stale title when the state becomes deployable", () => {
     const { browser, button, created } = plannedButtons();
     created["planned-app"].value = "store";
@@ -2288,6 +2326,18 @@ describe("modeled pane state", () => {
   it("does nothing on a page without the button", () => {
     const browser = createFakeBrowser();
     expect(() => applyModeledEnvState(browser.context, true)).not.toThrow();
+  });
+
+  it.each([
+    ["plan", 'click "Plan Deployment"'],
+    ["create-env", "must first create an environment"],
+    ["unavailable", "temporarily unavailable"]
+  ])("describes the %s mode in the subtitle hint", (mode, text) => {
+    expect(modeledHintText(mode)).toContain(text);
+  });
+
+  it("leaves the subtitle hint empty before the environment listing settles", () => {
+    expect(modeledHintText(undefined)).toBe("");
   });
 
   it("routes the primary action to the environment form or the planned graph", () => {
