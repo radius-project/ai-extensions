@@ -278,6 +278,8 @@ describe("registered direct deployment tools", () => {
       const pipeline = createDeploymentPipelineRunner("failure", {
         existingEnvironment: true
       });
+      const compile = vi.fn(async () => []);
+      const readRadArtifacts = vi.fn(async () => ({ dir: "", remote: false }));
       const deployment = createDeploymentToolHarness({
         owner: createProductionDeploymentExecutionOwner(),
         run: async (args, options) => {
@@ -305,6 +307,8 @@ describe("registered direct deployment tools", () => {
         runAz: async () => {
           throw new Error("Unexpected Azure command.");
         },
+        buildGraph: compile,
+        readRadArtifacts,
         reportError: deployment.reportError,
         redactDiagnostic: (value) => value,
         reportWorkflowProgress: vi.fn(),
@@ -328,6 +332,21 @@ describe("registered direct deployment tools", () => {
           })
         ).toContain("started");
         await entered.promise;
+        expect(readRadArtifacts).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            repo: "fixture/app",
+            branch: "feature/model",
+            bicepRepoPath: "apps/custom.bicep"
+          })
+        );
+        expect(compile).toHaveBeenCalledExactlyOnceWith(
+          "param environment string\n",
+          "apps/custom.bicep",
+          expect.objectContaining({
+            radArtifactsDir: "",
+            cleanupRadArtifactsDir: false
+          })
+        );
         if (timing === "delayed") {
           expect(sdk.deps.deployment.hasPendingWork()).toBe(true);
           expect(sdk.session.send).not.toHaveBeenCalled();
