@@ -45,6 +45,7 @@ export interface EnvironmentToolsPorts {
   start: ReturnType<typeof createSetupStartService>;
   control: OperationControlService;
   resume: OperationResumeService;
+  scheduleResume(operation: OperationRecord): boolean;
   verification(
     target: EnvironmentTarget & { operationId: string },
     executor: SelectedGhExecutor
@@ -544,11 +545,28 @@ export function createEnvironmentTools(ports: EnvironmentToolsPorts) {
               );
             }
             issued.consumed = true;
+            const authorization = JSON.stringify([
+              operation.provider,
+              operation.context,
+              operation.setupArtifacts
+            ]);
             return outcome(
               await ports.resume(
                 {
                   operationId: target.operationId,
-                  code: text(answer?.code)
+                  code: text(answer?.code),
+                  isCurrent: () =>
+                    !ports.owner.isShuttingDown() &&
+                    ports.getOperation(target.operationId) === operation &&
+                    operation.operationId === target.operationId &&
+                    operation.repo === target.repo &&
+                    operation.environment === target.environment &&
+                    JSON.stringify([
+                      operation.provider,
+                      operation.context,
+                      operation.setupArtifacts
+                    ]) === authorization,
+                  schedule: ports.scheduleResume
                 },
                 async () => {
                   if (!isCurrent() || operation.inputRequired !== issued.prompt)

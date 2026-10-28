@@ -97,6 +97,10 @@ The Chromium interrupted-setup pause/cancel/delete journey retains confirmation 
 
 The cancellation service and target module both measure 100% statements, lines and functions locally; branch coverage is 98.80% and 92.85%, respectively. The remaining branches are the null-control fallbacks at `operation-workflow-cancellation.ts:159` and `workflow-cancellation-target.ts:55,67`: `getOperationControl` creates a control record for every non-null operation, so these cannot run through a valid service operation. No coverage exclusions or lower floors were added. The helper's remaining partial branches are unchanged identity/error-format fallbacks, not new cancellation authority paths.
 
+### Final setup control races
+
+The final setup-control follow-up extends CN-03/CN-05/CN-07/CN-08 evidence with stale Stop reads (success and rejection), replacement-safe status persistence and terminal announcements, and verification bypass at the selected executor's final identity fence. Registered runtime and production HTTP tests protect the shared bindings, while selected-executor tests retain issued success and error settlement. Cancellation tests distinguish preexisting settling tasks from new tasks and preserve unrelated operation evidence. Registered resume covers held input/save, shutdown, retarget/replacement, success, save failure and failed corrective persistence; registered controls retain transient task-busy and blocked-recovery guidance. These suites remain in the existing reliability allowlist. Source-qualified coverage/build/platform results are recorded in the final owning-session handoff, not inferred from an earlier passing head.
+
 ### Phases 0–2: record behavior, then separate runtime and server work
 
 Phase 0 recorded the supported actions, tools, pages, routes, branch behavior, selected markup, package shape, and coverage baseline. Phase 1 made extension setup and lifecycle behavior testable without connecting to a real Copilot session. Phase 2 moved all 40 API routes to named owners, tested requests through a real local server, and removed the old fallback path.

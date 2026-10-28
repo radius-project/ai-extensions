@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import type {
   OperationStore,
@@ -12,6 +12,7 @@ import {
   beginRetryAttempt,
   finish,
   pauseForProviderRestart,
+  onOperationTerminal,
   STAGE_VERIFY,
   verificationWorkflowState
 } from "../../operations.js";
@@ -26,6 +27,8 @@ import {
   retryableSetup,
   reusedOnlyFailure
 } from "../../../test/support/server/operation-fixtures.js";
+
+afterEach(() => onOperationTerminal(null));
 
 function deferred() {
   let resolve = () => {};
@@ -72,6 +75,143 @@ function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
 }
 
 describe("direct operation control service", () => {
+  it.each(
+    [
+      "run",
+      "replacement",
+      "removal",
+      "shutdown",
+      "repo",
+      "environment",
+      "account",
+      "attempt",
+      "state",
+      "id"
+    ].flatMap((change) =>
+      ["read", "save"].flatMap((boundary) =>
+        [false, true].map((reject) => ({ change, boundary, reject }))
+      )
+    )
+  )(
+    "preserves the recorded Stop without stale observation writes: $change at $boundary reject=$reject",
+    async ({ change, boundary, reject }) => {
+      const operation = newOperation();
+      operation.context = { githubLogin: "alice" };
+      operation.resumeRequest = {
+        environment: {
+          repo: operation.repo,
+          environment: "dev",
+          provider: "azure"
+        }
+      };
+      enterStage(operation, STAGE_VERIFY);
+      operation.verification = { runId: "42", workflowState: "active" };
+      pauseForProviderRestart(operation);
+      let current: OperationRecord | null = operation;
+      const entered = deferred();
+      const gate = deferred();
+      const owner = createEnvironmentExecutionOwner();
+      let saves = 0;
+      const { dependencies } = fixture({
+        get: () => current,
+        isShuttingDown: owner.isShuttingDown,
+        inspectVerificationWorkflow: async () => {
+          if (boundary === "read") {
+            entered.resolve();
+            await gate.promise;
+          }
+          return "inactive";
+        },
+        persistOperations: vi.fn(async () => {
+          if (++saves === 2 && boundary === "save") {
+            entered.resolve();
+            await gate.promise;
+          }
+        })
+      });
+      const pending = createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "stop"
+      });
+      await entered.promise;
+      const announce = vi.fn();
+      onOperationTerminal(announce);
+      expect(operation.state).toBe("cancelled");
+      if (change === "run")
+        operation.verification = { runId: "43", workflowState: "active" };
+      if (change === "replacement") current = structuredClone(operation);
+      if (change === "removal") current = null;
+      if (change === "shutdown") owner.shutdown();
+      if (change === "repo") operation.repo = "fixture/other";
+      if (change === "environment") operation.environment = "other";
+      if (change === "account") operation.context = { githubLogin: "other" };
+      if (change === "attempt") operation.control.attempts.verification++;
+      if (change === "state") operation.state = "running";
+      if (change === "id") operation.operationId = "other";
+      const before = structuredClone(operation);
+      const replacement = structuredClone(current);
+      if (reject) gate.reject(new Error("late network error"));
+      else gate.resolve();
+      expect(await pending).toMatchObject({
+        status: change === "shutdown" ? 503 : 409,
+        body: {
+          code:
+            change === "shutdown" ?
+              "operation-shutting-down"
+            : "operation-context-changed",
+          stopRecorded: true
+        }
+      });
+      expect(operation).toEqual(before);
+      expect(current).toEqual(replacement);
+      expect(dependencies.persistOperations).toHaveBeenCalledTimes(
+        boundary === "read" ? 1 : 2
+      );
+      expect(operation.journey?.notifiedAt).toBeFalsy();
+      expect(announce).not.toHaveBeenCalled();
+    }
+  );
+
+  it("retains known workflow status when its save fails after the Stop was recorded", async () => {
+    const operation = newOperation();
+    operation.context = { githubLogin: "alice" };
+    operation.resumeRequest = {
+      environment: {
+        repo: operation.repo,
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    enterStage(operation, STAGE_VERIFY);
+    operation.verification = { runId: "42", workflowState: "active" };
+    pauseForProviderRestart(operation);
+    const { dependencies } = fixture({
+      get: () => operation,
+      inspectVerificationWorkflow: async () => "inactive",
+      persistOperations: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("disk unavailable"))
+    });
+    expect(
+      await createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "stop"
+      })
+    ).toMatchObject({
+      status: 500,
+      body: {
+        code: "workflow-status-persist-failed",
+        stopRecorded: true,
+        detail: "disk unavailable"
+      }
+    });
+    expect(operation.state).toBe("cancelled");
+    expect(verificationWorkflowState(operation)).toBe("inactive");
+    expect(dependencies.persistOperations).toHaveBeenCalledTimes(2);
+    expect(operation.journey?.notifiedAt).toBeFalsy();
+  });
+
   it("rejects a replacement login during final admission persistence without restoring the old account", async () => {
     const operation = mergeHandoff();
     operation.context = { githubLogin: " original " };

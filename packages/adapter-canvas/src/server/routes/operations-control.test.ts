@@ -433,16 +433,17 @@ describe("POST /api/operations/{id}/stop", () => {
       }
     });
 
-    expect(out.recording.status).toBe(200);
+    expect(out.recording.status).toBe(500);
     expect(out.payload()).toMatchObject({
-      code: "operation-stopped-workflow-status-unknown",
-      detail:
-        "GitHub unavailable Radius also could not save the unknown workflow status: disk gone"
+      code: "workflow-status-persist-failed",
+      stopRecorded: true,
+      detail: "disk gone",
+      observationError: "GitHub unavailable"
     });
     expect(verificationWorkflowState(op)).toBe("unknown");
-    expect(announced).toEqual([op.operationId]);
+    expect(announced).toEqual([]);
     expect(
-      out.payload().operation.actions.map((action: { id: string }) => action.id)
+      toClientView(op).actions.map((action: { id: string }) => action.id)
     ).not.toContain("rollback");
   });
 

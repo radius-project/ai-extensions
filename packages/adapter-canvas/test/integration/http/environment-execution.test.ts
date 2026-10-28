@@ -19,6 +19,8 @@ import {
   recordAzureApp,
   requireInput,
   finish,
+  pauseForProviderRestart,
+  onOperationTerminal,
   operations,
   OPERATION_SCHEMA_VERSION,
   setVerificationWorkflowState,
@@ -34,6 +36,7 @@ import {
 } from "../../../src/operation-store.js";
 
 afterEach(async () => {
+  onOperationTerminal(null);
   vi.restoreAllMocks();
   operations.clear();
   await configureOperationStore(disabledOperationStore());
@@ -48,9 +51,19 @@ function deferred() {
 }
 
 describe("production environment owner HTTP binding", () => {
-  it.each(["shutdown", "changed-run"] as const)(
-    "refuses cancellation over HTTP after %s during status read",
-    async (change) => {
+  it.each(
+    ["shutdown", "changed-run"].flatMap((change) =>
+      ["stop", "cancel-workflow"].flatMap((action) =>
+        (action === "stop" ? [false, true] : [false]).map((reject) => ({
+          change,
+          action,
+          reject
+        }))
+      )
+    )
+  )(
+    "refuses $action over HTTP after $change during status read (reject=$reject)",
+    async ({ change, action, reject }) => {
       const entered = deferred();
       const gate = deferred();
       const owner = createEnvironmentExecutionOwner();
@@ -58,6 +71,7 @@ describe("production environment owner HTTP binding", () => {
         if (args[0] !== "run") throw new Error("Unexpected cancellation POST");
         entered.resolve();
         await gate.promise;
+        if (reject) throw new Error("late network failure");
         return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
       });
       const executor = successfulSelectedGhExecutor({
@@ -86,13 +100,28 @@ describe("production environment owner HTTP binding", () => {
       });
       op.context.githubLogin = executor.login;
       op.verification = { runId: "42", workflowState: "active" };
-      finish(op, "cancelled");
+      if (action === "stop") {
+        op.resumeRequest = {
+          environment: {
+            repo: op.repo,
+            environment: op.environment,
+            provider: "azure"
+          }
+        };
+        op.currentStage = STAGE_VERIFY;
+        pauseForProviderRestart(op);
+      } else finish(op, "cancelled");
       operations.put(op);
       let pending: Promise<Response> | undefined;
       try {
         const entry = await runtime.getOrCreateServer("cancel", "environment");
+        const persist = vi
+          .spyOn(operations, "persist")
+          .mockResolvedValue(undefined);
+        const announce = vi.fn();
+        onOperationTerminal(announce);
         pending = fetch(
-          `${entry.baseUrl}/api/operations/${op.operationId}/cancel-workflow`,
+          `${entry.baseUrl}/api/operations/${op.operationId}/${action}`,
           {
             method: "POST",
             headers: {
@@ -121,6 +150,11 @@ describe("production environment owner HTTP binding", () => {
             : "operation-context-changed"
         });
         expect(run).toHaveBeenCalledTimes(1);
+        if (action === "stop") {
+          expect(op.state).toBe("cancelled");
+          expect(persist).toHaveBeenCalledTimes(1);
+          expect(announce).not.toHaveBeenCalled();
+        }
         expect(op.verification).toEqual({
           runId: change === "shutdown" ? "42" : "43",
           workflowState: "active"

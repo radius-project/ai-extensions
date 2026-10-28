@@ -95,6 +95,7 @@ function harness() {
     resume: vi.fn(async () => {
       throw new Error("Unexpected resume");
     }),
+    scheduleResume: schedule,
     verification: vi.fn(async () => {
       throw new Error("Unexpected observation");
     }),
@@ -586,7 +587,9 @@ describe("environment tool handlers", () => {
     vi.mocked(h.ports.resume).mockImplementation(async (input, readInput) => {
       expect(input).toEqual({
         operationId: h.op.operationId,
-        code: "app-selection-required"
+        code: "app-selection-required",
+        isCurrent: expect.any(Function),
+        schedule: h.ports.scheduleResume
       });
       expect(await readInput()).toMatchObject({
         ...target,

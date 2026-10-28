@@ -9,6 +9,7 @@ import type { WorkflowObservationScope } from "./workflow-observation-scope.js";
 import type { OperationControlResult } from "./operation-control.js";
 
 const VERIFICATION_BYPASS_VARIABLE = "RADIUS_VERIFICATION_BYPASSED";
+class VerificationBypassRefusal extends Error {}
 // The exception categories a user is allowed to bypass: a permissions gap (4.4)
 // or an unreachable cluster / cloud endpoint (4.5) can be resolved after the
 // environment record exists. An OIDC-trust gap (4.3) and any unclassified
@@ -135,7 +136,13 @@ export async function verificationBypass(
       return result(503, { error: "Workflow observation stopped." });
     }
     const observationStopped = (): boolean =>
-      scope.stopped || !input.isCurrent();
+      scope.stopped ||
+      !input.isCurrent() ||
+      dependencies.getOperation(operationId) !== verifyOp ||
+      verifyOp.repo !== repo ||
+      verifyOp.environment !== envName ||
+      String(verifyOp.verification?.runId ?? "") !== runId ||
+      String(verifyOp.context?.githubLogin ?? "").trim() !== pinnedLogin;
     if (observationStopped()) {
       return result(503, { error: "Workflow observation stopped." });
     }
@@ -302,6 +309,7 @@ export async function verificationBypass(
 
     // 5. Record the bypass under the pinned executor, keyed to the specific run
     //    the user accepted.
+    let issued = false;
     try {
       const writeResult = await selectedExecutor.run(
         [
@@ -315,7 +323,16 @@ export async function verificationBypass(
           "--repo",
           repo
         ],
-        { timeout: 20000 }
+        {
+          timeout: 20000,
+          beforeExecute: () => {
+            if (observationStopped())
+              throw new VerificationBypassRefusal(
+                "Workflow observation stopped."
+              );
+            issued = true;
+          }
+        }
       );
       if (writeResult.code !== 0 && writeResult.code !== "0") {
         throw new Error(
@@ -323,6 +340,15 @@ export async function verificationBypass(
         );
       }
     } catch (e) {
+      if (
+        e instanceof VerificationBypassRefusal ||
+        (!issued && observationStopped())
+      )
+        return result(503, {
+          code: "workflow-observation-stopped",
+          error:
+            "Workflow observation stopped. No verification bypass was issued."
+        });
       return result(500, {
         error:
           "Could not record the verification bypass: " +

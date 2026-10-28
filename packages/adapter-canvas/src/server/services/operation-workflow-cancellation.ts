@@ -71,6 +71,7 @@ export async function cancelOperationWorkflow(
   const restoreVerification = () => {
     if (
       targetCurrent() &&
+      admission.canRestore({ allowPreexistingTask: true }) &&
       isDeepStrictEqual(operation.verification, ownedVerification)
     )
       operation.verification = previousVerification;
@@ -154,7 +155,10 @@ export async function cancelOperationWorkflow(
       }
     };
     const unwind = async () => {
-      if (recordCurrent() && admission.canRestore()) {
+      if (
+        recordCurrent() &&
+        admission.canRestore({ allowPreexistingTask: true })
+      ) {
         const commands = getOperationControl(operation)?.commands;
         const index = commands?.indexOf(command) ?? -1;
         if (

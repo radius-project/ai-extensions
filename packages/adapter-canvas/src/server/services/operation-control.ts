@@ -18,6 +18,7 @@ import {
   enterStage,
   markVerificationRetryPrecondition,
   findActiveCommand,
+  getOperationControl,
   finish,
   isProviderRestartDecision,
   markVerificationRetryAcquisition,
@@ -43,7 +44,6 @@ import type { EnvironmentExecutionOwner } from "../../runtime/environment-execut
 import { cancelOperationWorkflow } from "./operation-workflow-cancellation.js";
 import {
   captureWorkflowCancellationTarget,
-  matchesWorkflowCancellationTarget,
   WorkflowCancellationRefusal,
   type WorkflowCancellationTarget,
   type WorkflowCancellationResult,
@@ -408,6 +408,28 @@ async function handleStopOperation(
   const { operationId, operation } = resolved;
   if (isProviderRestartDecision(operation)) {
     const snapshot = snapshotRetryState(operation);
+    const repo = operation.repo;
+    const environment = operation.environment;
+    const account = structuredClone(operation.context);
+    const verificationAttempt =
+      getOperationControl(operation)?.attempts.verification;
+    let ownedVerification = structuredClone(operation.verification);
+    const assertCurrent = () => {
+      if (dependencies.isShuttingDown?.())
+        throw new WorkflowCancellationRefusal("operation-shutting-down");
+      if (
+        dependencies.get(operationId) !== operation ||
+        operation.operationId !== operationId ||
+        operation.repo !== repo ||
+        operation.environment !== environment ||
+        getOperationControl(operation)?.attempts.verification !==
+          verificationAttempt ||
+        !isDeepStrictEqual(operation.context, account) ||
+        !isDeepStrictEqual(operation.verification, ownedVerification) ||
+        operation.state !== "cancelled"
+      )
+        throw new WorkflowCancellationRefusal("operation-context-changed");
+    };
     stopProviderRestartDecision(operation);
     try {
       await dependencies.persistOperations();
@@ -423,51 +445,61 @@ async function handleStopOperation(
       return;
     }
     try {
-      const target = captureWorkflowCancellationTarget(operation);
-      const assertCurrent = () => {
-        if (dependencies.isShuttingDown?.())
-          throw new WorkflowCancellationRefusal("operation-shutting-down");
-        if (
-          dependencies.get(operationId) !== operation ||
-          !matchesWorkflowCancellationTarget(operation, target)
-        )
-          throw new WorkflowCancellationRefusal("operation-context-changed");
-      };
-      const state = await dependencies.inspectVerificationWorkflow(
-        target,
-        assertCurrent
-      );
+      assertCurrent();
+      let state: "active" | "inactive" | "unknown";
+      let readError: unknown;
+      try {
+        const target = captureWorkflowCancellationTarget(operation);
+        state = await dependencies.inspectVerificationWorkflow(
+          target,
+          assertCurrent
+        );
+      } catch (error) {
+        if (error instanceof WorkflowCancellationRefusal) throw error;
+        assertCurrent();
+        state = "unknown";
+        readError = error;
+      }
       assertCurrent();
       setVerificationWorkflowState(operation, state);
-      await dependencies.persistOperations();
-    } catch (error) {
-      setVerificationWorkflowState(operation, "unknown");
-      let persistError: unknown = null;
+      ownedVerification = structuredClone(operation.verification);
       try {
         await dependencies.persistOperations();
       } catch (saveError) {
-        persistError = saveError;
+        assertCurrent();
+        sendJson(context, 500, {
+          operationId,
+          code: "workflow-status-persist-failed",
+          stopRecorded: true,
+          error:
+            "The Stop request was saved, but Radius could not save the workflow status. Inspect the saved operation before continuing.",
+          detail: errorMessage(saveError),
+          ...(readError ? { observationError: errorMessage(readError) } : {})
+        });
+        return;
       }
+      assertCurrent();
+      announceOperationTerminal(operation);
       sendJson(context, 200, {
         operationId,
-        code: "operation-stopped-workflow-status-unknown",
-        detail:
-          persistError === null ?
-            errorMessage(error)
-          : `${errorMessage(error)} Radius also could not save the unknown workflow status: ${errorMessage(persistError)}`,
+        code:
+          state === "unknown" ?
+            "operation-stopped-workflow-status-unknown"
+          : "operation-stopped",
+        ...(readError ? { detail: errorMessage(readError) } : {}),
         statusUrl: statusUrlFor(operationId),
         operation: clientView(operation)
       });
-      announceOperationTerminal(operation);
-      return;
+    } catch (error) {
+      if (!(error instanceof WorkflowCancellationRefusal)) throw error;
+      sendJson(context, error.code === "operation-shutting-down" ? 503 : 409, {
+        operationId,
+        code: error.code,
+        stopRecorded: true,
+        error:
+          "The Stop request was saved, but workflow observation was refused because its operation changed or the session is shutting down. No late workflow status was saved."
+      });
     }
-    announceOperationTerminal(operation);
-    sendJson(context, 200, {
-      operationId,
-      code: "operation-stopped",
-      statusUrl: statusUrlFor(operationId),
-      operation: clientView(operation)
-    });
     return;
   }
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import { verificationBypass } from "./verification-bypass.js";
 import { createWorkflowObservationScope } from "./workflow-observation-scope.js";
+import type { SelectedGhCommandOptions } from "../../gh.js";
 
 function fixture() {
   const run = vi.fn(async (args: string[]) => {
@@ -57,6 +58,76 @@ function fixture() {
 }
 
 describe("shared verification bypass", () => {
+  it.each([
+    "shutdown",
+    "stale",
+    "repo",
+    "environment",
+    "run",
+    "login",
+    "missing-run",
+    "missing-login",
+    "replacement",
+    "removal"
+  ] as const)(
+    "refuses %s at the final executor boundary without invalidating the listing",
+    async (change) => {
+      const h = fixture();
+      const original = h.deps.getSelectedGitHubExecutor("setup-1");
+      if (!original) throw new Error("Missing executor");
+      let current = true;
+      h.input.isCurrent = () => current;
+      let entered = () => {};
+      let release = () => {};
+      const boundary = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.deps.getSelectedGitHubExecutor = () => ({
+        ...original,
+        run: async (args: string[], options?: SelectedGhCommandOptions) => {
+          if (args[0] === "variable") {
+            entered();
+            await gate;
+            options?.beforeExecute?.();
+          }
+          return original.run(args, options);
+        }
+      });
+      try {
+        const pending = verificationBypass(h.input, h.deps);
+        await boundary;
+        if (change === "shutdown") h.scope.stop();
+        if (change === "stale") current = false;
+        if (change === "repo") h.op.repo = "fixture/other";
+        if (change === "environment") h.op.environment = "other";
+        if (change === "run") h.op.verification.runId = "43";
+        if (change === "login") h.op.context.githubLogin = "other-account";
+        if (change === "missing-run")
+          Object.assign(h.op, { verification: null });
+        if (change === "missing-login") Object.assign(h.op, { context: null });
+        if (change === "replacement") {
+          const replacement = structuredClone(h.op);
+          h.deps.getOperation = () => replacement;
+        }
+        if (change === "removal") h.deps.getOperation = () => null;
+        release();
+        expect(await pending).toMatchObject({
+          status: 503,
+          body: { code: "workflow-observation-stopped" }
+        });
+        expect(h.run.mock.calls.some(([args]) => args[0] === "variable")).toBe(
+          false
+        );
+        expect(h.deps.envListCacheDelete).not.toHaveBeenCalled();
+      } finally {
+        release();
+        h.scope.stop();
+      }
+    }
+  );
   it("does not write when observation stops during failure classification", async () => {
     const h = fixture();
     h.deps.explainNoSubscriptions = () => {
@@ -217,7 +288,7 @@ describe("shared verification bypass", () => {
           "--repo",
           "fixture/app"
         ],
-        { timeout: 20000 }
+        { timeout: 20000, beforeExecute: expect.any(Function) }
       );
       expect(h.deps.envListCacheDelete).toHaveBeenCalledExactlyOnceWith(
         "fixture/app"

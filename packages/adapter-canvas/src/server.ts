@@ -7030,6 +7030,7 @@ export function createProductionCanvasServerRuntime(
     | "start"
     | "control"
     | "resume"
+    | "scheduleResume"
     | "verification"
     | "bypass"
     | "getOperation"
@@ -7038,6 +7039,8 @@ export function createProductionCanvasServerRuntime(
     start: setupStart,
     control: operationControl,
     resume: operationResume,
+    scheduleResume: (operation) =>
+      setupExecution.scheduleEnvironmentOperation(operation),
     getOperation: (id) => operations.get(id),
     readExecutor: (login) =>
       githubAccountCoordinator.createReadOnlyExecutor(login),
