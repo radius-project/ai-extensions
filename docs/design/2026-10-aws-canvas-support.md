@@ -94,12 +94,10 @@ Sharing one role causes problems that Azure's separate objects avoid:
 
 ### Non-goals
 
-1. **App credentials for S3 and Bedrock.** This doc records the choice of EKS Pod Identity. The work, and the recipes for those two types, are designed and built separately.
-2. **Kafka on AWS in the first release.** Radius can't yet read Amazon MSK's broker addresses, and no Kubernetes Kafka recipe exists for any cloud.
-3. **AWS resource coverage in Radius Bicep.** That's the full AWS coverage design.
-4. **Creating or changing EKS clusters, VPCs, or subnets.** The canvas only discovers them, the same as for AKS.
-5. **Deploying to a VPC other than the cluster's.** Each recipe puts its service in the cluster's security group, which belongs to the cluster's VPC.
-6. **Clusters whose API is reachable only from a private network.** GitHub's runners can't reach them. A check for both clouds is separate work.
+1. AWS resource coverage in Radius Bicep. That's the full AWS coverage design.
+2. Creating or changing EKS clusters, VPCs, or subnets. The canvas only discovers them, the same as for AKS.
+3. Deploying to a VPC other than the cluster's. Each recipe puts its service in the cluster's security group, which belongs to the cluster's VPC.
+4. Clusters whose API is reachable only from a private network. GitHub's runners can't reach them. A check for both clouds is separate work.
 
 ## Design overview
 
@@ -260,7 +258,7 @@ Each recipe that creates a VPC-based service builds a subnet group from the envi
 
 ### How apps get AWS credentials
 
-On Azure, a recipe returns a key, such as a storage account key, and the app uses it. Amazon S3 and Amazon Bedrock accept only IAM credentials, which a recipe can't hand back as a key today. We'll use **EKS Pod Identity**: a role per app, with access to only its own resources, linked to the app's pod. The other options are under [Alternatives considered](#other-alternatives).
+On Azure, a recipe returns a key, such as a storage account key, and the app uses it. Amazon S3 and Amazon Bedrock accept only IAM credentials, which a recipe can't hand back as a key today. We'll use **EKS Pod Identity**: a role per app, with access to only its own resources, linked to the app's pod.
 
 Pod Identity stores no secret. The app's AWS SDK gets short-lived credentials automatically, so most apps need no code change. It's AWS's recommended way for pods to reach AWS services, and it matches the passwordless model the canvas already uses for deploys. It brings three new requirements:
 
@@ -268,7 +266,7 @@ Pod Identity stores no secret. The app's AWS SDK gets short-lived credentials au
 - **A change to a shared type:** the container type and its recipe give each app its own Kubernetes service account.
 - **More IAM rights for the deploy identity:** it must be able to create per-app roles, limited by a permissions boundary and an IAM path, so it can't create a role with more access than itself.
 
-AWS ships before pod identity, without the object storage and models recipes. The models recipe will create no resource: it returns the regional Bedrock endpoint and a Bedrock model ID, because the type's default model isn't on Bedrock.
+AWS ships before pod identity, without the object storage and models recipes.
 
 ### Application graph
 
@@ -401,8 +399,4 @@ One role per environment avoids the lock and the shared limits. But every new en
 
 - **One shared policy per deploy identity for the statements every environment repeats:** it would raise the limit to about 30 environments, but adds one more object that setup, rollback, and delete have to manage, and that every environment depends on.
 - **One managed policy per environment:** managed policy names are unique across the account, so two repositories with a `dev` environment would collide. A role also holds at most 20 managed policies, and `PowerUserAccess` would use one.
-- **Always keeping the access entry:** a deploy identity still used by an environment on another cluster would keep cluster-admin on a cluster it no longer needs.
 - **Keeping the AWS recipes in ai-extensions and publishing them to each user's registry at deploy:** this needs a registry secret copied into the control plane, and a hard-coded recipe list for the planned graph. One versioned pack in `resource-types-contrib` is how the other packs work.
-- **Other ways for apps to get AWS credentials:** long-lived access keys never expire and need rights to create IAM users, the cluster's node role gives every pod the same access, and IAM roles for service accounts need an OIDC provider per cluster. New credential fields or separate Radius types per cloud would change the types that Azure apps use.
-- **Shipping S3 and Bedrock recipes before pod identity, or waiting for pod identity before shipping AWS:** the first leaves apps unable to connect, with nothing explaining why. The second holds back every other type by the weeks pod identity takes.
-- **A per-deploy Kubernetes service account token instead of refreshing EKS tokens:** it creates objects on the user's cluster. It's the fallback if refreshing proves unreliable.
