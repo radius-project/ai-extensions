@@ -149,7 +149,11 @@ Radius never tags or deletes a picked role, and only adds and removes what each 
 
 The trust policy has one statement for the account's GitHub identity provider, listing every accepted subject, as in the example under [Problem](#problem). Setup adds the environment's subject to that list, and leaves any statement that doesn't name the GitHub identity provider unchanged. Setup builds the subject with the same code Azure uses, so it matches what GitHub sends.
 
-**Two setups at once.** Setup, delete, rollback, and **Repair** each take a lock on the deploy identity before they read its trust policy. Setup holds it until **Configure environment** has written the GitHub environment, so a delete or rollback that checks which environments use a cluster always sees an environment that's being set up. The lock is an IAM policy named `radius-lock-<role>`: AWS refuses to create a policy whose name already exists, so only one holder can create it, and deleting it releases the lock. It lives in AWS, so every repository that uses the role shares it, even when the role was picked. A second setup waits for the lock. A lock older than 10 minutes is treated as abandoned, so a crashed setup doesn't block the role forever.
+**Two setups at once.** Setup, delete, rollback, and **Repair** each take a lock on the deploy identity before they read its trust policy. Setup holds it until **Configure environment** has written the GitHub environment, so a delete or rollback that checks which environments use a cluster always sees an environment that's being set up. The lock is an IAM policy named `radius-lock-<role>`: AWS refuses to create a policy whose name already exists, so only one holder can create it, and deleting it releases the lock. It lives in AWS, so every repository that uses the role shares it, even when the role was picked. A second setup waits for the lock.
+
+**A lock that isn't released.** A setup that crashes leaves its lock behind. Radius never takes over a lock on its own, because a setup that only paused could resume after the takeover and overwrite the new holder's changes. After 10 minutes, the waiting setup shows who holds the lock and since when, and offers **Remove lock**, which the developer uses after confirming the other setup has stopped.
+
+Each holder also checks that it still owns the lock. AWS gives every new policy a new policy ID, even when its name and ARN are reused. The holder records the ID of the lock it created, and checks the lock still has that ID before each write to the deploy identity and before releasing it. A setup that resumes after its lock was removed stops without writing, and can't delete the next holder's lock.
 
 Someone can still change the trust policy by hand, outside Radius. The verify workflow fails when GitHub can't assume the deploy identity, and a deploy that fails for the same reason offers **Repair**, which adds the subject back.
 
@@ -242,7 +246,7 @@ The AWS workflows are committed only when the repository creates its first AWS e
 
 The pack's parameters come from the environment: the EKS cluster name, the subnet IDs, and the routes gateway and image registry that the Kubernetes recipes need. The AWS account and region come from the Radius environment.
 
-Each recipe that creates a VPC-based service builds a subnet group from the environment's subnets, and adds the service to the cluster's security group, so pods can reach it without new rules. A security group of its own, open only on the service's port, would be tighter. But AWS generates a security group's ID, so Radius would create a new one on every redeploy. Each service moves to its own security group once the full AWS coverage work lets Radius redeploy resources whose ID AWS generates.
+Each recipe that creates a VPC-based service builds a subnet group from the environment's subnets, and adds the service to the cluster's security group. Pods reach the service only if their traffic is allowed into that group: the nodes must be members of the cluster security group, or have rules that allow the service's port. EKS adds managed nodes to the cluster security group, except when a launch template sets its own security groups. Self-managed nodes, and pods with their own security groups, need the membership or rules set up by their owner. A security group of its own, open only on the service's port, would be tighter. But AWS generates a security group's ID, so Radius would create a new one on every redeploy. Each service moves to its own security group once the full AWS coverage work lets Radius redeploy resources whose ID AWS generates.
 
 **Redeploys.** Until the idempotent AWS deployments design ships in Radius, an unchanged redeploy of an RDS database isn't fully a no-op: it resends the master password and the subnet list. The database keeps running, and no new resource is created.
 
@@ -317,6 +321,7 @@ The checks and their messages are in each section above: the CLI and account che
 - Discovery is denied, or finds nothing: each list says whether the account has none or the signed-in identity can't read them. The namespace still accepts a typed name.
 - GitHub environment already set up for Azure: asks for another environment name.
 - The lock can't be created because the signed-in identity lacks `iam:CreatePolicy`: names the missing permission.
+- The lock is held for more than 10 minutes: shows who holds it and since when, and offers **Remove lock**.
 
 **Stopped part way.** The **Setup didn't finish** card lists what was created, and offers **Roll back** and **Retry**.
 
@@ -356,7 +361,8 @@ The checks and their messages are in each section above: the CLI and account che
   - Each case under [Failure handling](#failure-handling).
   - That no write happens before the checks pass.
   - That rollback undoes exactly what the setup record lists.
-  - The deploy identity lock across setup, delete, rollback, and **Repair**, including an abandoned lock, and a rollback that keeps an access entry another setup reused.
+  - The deploy identity lock across setup, delete, rollback, and **Repair**, and a rollback that keeps an access entry another setup reused.
+  - A setup that pauses, has its lock removed and taken by another setup, then resumes: it stops without writing, and the new holder's lock stays.
   - **Repair** adding back a lost subject.
   - The access entry rules at environment delete, for a Radius-created and a picked deploy identity.
 - **Browser tests**: the deploy identity section, the role picker, subnet checks and warnings, and that AWS stays hidden with the switch off.
