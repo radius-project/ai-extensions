@@ -106,10 +106,45 @@ describe(".github/extension release assets", () => {
     expect(installStep.run).toContain(
       'bash "${GITHUB_ACTION_PATH}/install-radius.sh"'
     );
+    expect(action.inputs["release-override"]).toMatchObject({
+      required: false,
+      default: ""
+    });
     expect(installStep.env.RADIUS_RELEASE_OVERRIDE).toBe(
-      "${{ vars.RADIUS_RELEASE_OVERRIDE }}"
+      "${{ inputs.release-override }}"
     );
     expect(installStep.env.RADIUS_INSTALL_REF).toMatch(/^v\d+\.\d+\.\d+$/u);
+  });
+
+  it("passes the selected environment's release override to every control-plane action", () => {
+    const callers = readdirSync(EXTENSION_ROOT)
+      .filter((file) => /\.ya?ml$/u.test(file))
+      .flatMap((file) => {
+        const workflow = parseYaml(
+          readFileSync(join(EXTENSION_ROOT, file), "utf8")
+        );
+        return Object.values(workflow.jobs ?? {}).flatMap((job) =>
+          (job.steps ?? [])
+            .filter((step) =>
+              step.uses?.startsWith(`${INTERNAL_PREFIX}setup-control-plane@`)
+            )
+            .map((step) => ({ file, job, step }))
+        );
+      });
+
+    expect(callers.map(({ file }) => file).sort()).toEqual([
+      "delete-aws.yml",
+      "delete-azure.yml",
+      "delete-environment-azure.yml",
+      "run-rad-commands-aws.yml",
+      "run-rad-commands-azure.yml"
+    ]);
+    for (const { file, job, step } of callers) {
+      expect(job.environment, file).toBe("${{ inputs.environment }}");
+      expect(step.with?.["release-override"], file).toBe(
+        "${{ vars.RADIUS_RELEASE_OVERRIDE }}"
+      );
+    }
   });
 
   // A `workflow_dispatch` boolean input is a real boolean in the `inputs`

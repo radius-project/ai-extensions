@@ -15,6 +15,17 @@ fail() {
 }
 
 mkdir -p "${TEST_ROOT}/bin"
+REAL_JQ="$(command -v jq)"
+export REAL_JQ
+cat >"${TEST_ROOT}/bin/jq" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${JQ_CRLF_OUTPUT:-}" == true ]]; then
+    "${REAL_JQ}" "$@" | sed -e 's/\r$//' -e 's/$/\r/'
+else
+    exec "${REAL_JQ}" "$@"
+fi
+BASH
 cat >"${TEST_ROOT}/bin/curl" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -49,7 +60,7 @@ else
     cp "${INSTALLER_FIXTURE}" "${output}"
 fi
 BASH
-chmod +x "${TEST_ROOT}/bin/curl"
+chmod +x "${TEST_ROOT}/bin/curl" "${TEST_ROOT}/bin/jq"
 
 write_action() {
     local ref="$1" checksum="$2"
@@ -239,5 +250,47 @@ cmp -s "${TEST_ROOT}/explicit-before.yml" "${ACTION_FILE}" ||
     fail "failed explicit selection changed the action"
 cmp -s "${TEST_ROOT}/explicit-before.json" "${RELEASE_FILE}" ||
     fail "failed explicit selection changed the managed CLI"
+
+JQ_CRLF_OUTPUT=true PATH="${TEST_ROOT}/bin:${PATH}" jq -n false >"${TEST_ROOT}/crlf.json"
+grep -Uq $'\r' "${TEST_ROOT}/crlf.json" ||
+    fail "the Windows jq fake did not emit carriage returns"
+
+export RELEASE_JSON='{"tag_name":"v1.2.3","prerelease":false,"draft":false}'
+write_action v1.2.2 "${OLD_CHECKSUM}"
+write_release v1.2.2
+JQ_CRLF_OUTPUT=true run_update >/dev/null
+grep -Fxq 'tag=v1.2.3' "${GITHUB_OUTPUT}" ||
+    fail "CRLF jq output broke the default stable updater"
+
+for tag in v1.2.3 v1.3.0-rc.1; do
+    prerelease=false
+    [[ "${tag}" != *-rc.* ]] || prerelease=true
+    export RELEASE_JSON="{\"tag_name\":\"${tag}\",\"prerelease\":${prerelease},\"draft\":false}"
+    write_action v1.2.2 "${OLD_CHECKSUM}"
+    write_release v1.2.2
+    JQ_CRLF_OUTPUT=true run_update --version "${tag}" >/dev/null
+    [[ "$(jq -r '.tag + " " + .commit' "${RELEASE_FILE}")" == "${tag} ${COMMIT_SHA}" ]] ||
+        fail "CRLF jq output broke explicit release selection for ${tag}"
+    grep -Fxq "tag=${tag}" "${GITHUB_OUTPUT}" ||
+        fail "CRLF jq output corrupted the selected tag"
+    grep -Fq "RADIUS_INSTALL_REF: ${tag}" "${ACTION_FILE}" ||
+        fail "CRLF jq output corrupted the action pin"
+    release="$(sed -n 's/^release=//p' "${GITHUB_OUTPUT}")"
+    [[ "$(jq -r '.tag + " " + .commit + " " + .checksum' <<<"${release}")" == \
+        "${tag} ${COMMIT_SHA} ${EXPECTED_CHECKSUM}" ]] ||
+        fail "CRLF jq output corrupted the deployment metadata"
+    if grep -Uq $'\r' "${GITHUB_OUTPUT}" "${RELEASE_FILE}" "${ACTION_FILE}"; then
+        fail "CRLF jq output leaked into generated files"
+    fi
+    cp "${ACTION_FILE}" "${TEST_ROOT}/crlf-before.yml"
+    cp "${RELEASE_FILE}" "${TEST_ROOT}/crlf-before.json"
+    JQ_CRLF_OUTPUT=true run_update --version "${tag}" >/dev/null
+    grep -Fxq 'changed=false' "${GITHUB_OUTPUT}" ||
+        fail "CRLF jq output broke an already-current release check"
+    cmp -s "${TEST_ROOT}/crlf-before.yml" "${ACTION_FILE}" ||
+        fail "CRLF jq output rewrote an already-current action"
+    cmp -s "${TEST_ROOT}/crlf-before.json" "${RELEASE_FILE}" ||
+        fail "CRLF jq output rewrote an already-current release file"
+done
 
 echo "Radius installer updater tests passed"
