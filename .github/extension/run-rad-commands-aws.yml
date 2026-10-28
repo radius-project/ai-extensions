@@ -276,9 +276,10 @@ jobs:
           AWS_EKS_CLUSTER_NAME: ${{ vars.AWS_EKS_CLUSTER_NAME }}
           RADIUS_SUBNET_IDS: ${{ vars.RADIUS_SUBNET_IDS }}
           # The aws-eks recipe pack is not in defaults.yaml yet. The extension
-          # fills this URL from the commit it pins (AWS_EKS_RECIPE_PACK in its
-          # core package) until the catalog carries the pack.
+          # fills this URL and commit from the one it pins (AWS_EKS_RECIPE_PACK
+          # in its core package) until the catalog carries the pack.
           RECIPE_PACK_URL: '{{AWS_EKS_RECIPE_PACK_URL}}'
+          RECIPE_PACK_REF: '{{AWS_EKS_RECIPE_PACK_REF}}'
         run: |
           # load-contrib-catalog exports the catalog and generic accessors from
           # the same Radius ref as this generated workflow.
@@ -303,6 +304,12 @@ jobs:
           # pack accepts that or a JSON array string; pass the list on.
           if ! [[ "$RADIUS_SUBNET_IDS" =~ ^subnet-[0-9a-f]+(,subnet-[0-9a-f]+)*$ ]]; then
             echo "ERROR: RADIUS_SUBNET_IDS must be a comma-separated list of subnet IDs." >&2
+            exit 1
+          fi
+          # The aws-eks recipes are tagged with the contrib commit that published
+          # them, so the pack and its recipes must come from the same commit.
+          if ! [[ "$RECIPE_PACK_REF" =~ ^[0-9a-f]{40}$ ]] || [[ "$RECIPE_PACK_URL" != *"/${RECIPE_PACK_REF}/"* ]]; then
+            echo "ERROR: RECIPE_PACK_REF must be the 40-character commit RECIPE_PACK_URL reads the pack from." >&2
             exit 1
           fi
 
@@ -358,9 +365,8 @@ jobs:
 
           # The pack uses the mutable `latest` aliases for Kubernetes recipes.
           # Rewrite each one present to the namespace commit that defaults.yaml
-          # validated, the same way the Azure pack is pinned. The MySQL recipe
-          # stays on its `latest` tag until the contrib repository publishes a
-          # versioned aws-eks-recipes artifact.
+          # validated, the same way the Azure pack is pinned. The aws-eks recipes
+          # are pinned to the pack's own commit further down.
           pin_kube_recipe() {
             local resource_type="$1" recipe="$2" pinned_source mutable_source
             pinned_source="$(radius_contrib_kube_recipe_source "$resource_type" "$recipe")"
@@ -409,6 +415,25 @@ jobs:
           if [ -n "$offenders" ]; then
             echo "ERROR: unpinned kube recipes remain in the AWS recipe pack:" >&2
             echo "$offenders" >&2
+            exit 1
+          fi
+
+          # The contrib repository publishes each aws-eks recipe tagged with the
+          # commit it was built from, and `latest` only moves on a Radius stable
+          # release. Pin every aws-eks recipe to the commit the pack came from.
+          AWS_RECIPE='ghcr\.io/radius-project/aws-eks-recipes/[a-z0-9._-]+'
+          sed -i -E "s|(${AWS_RECIPE}):latest'|\\1:${RECIPE_PACK_REF}'|g" "$RECIPE_PACK_BICEP"
+          aws_sources=$(grep -oE "${AWS_RECIPE}:[^']+" "$RECIPE_PACK_BICEP") || {
+            grep_status=$?
+            if [ "$grep_status" -gt 1 ]; then
+              echo "ERROR: failed to scan ${RECIPE_PACK_BICEP} for aws-eks recipes." >&2
+              exit "$grep_status"
+            fi
+          }
+          aws_offenders=$(printf '%s\n' "$aws_sources" | grep -vxE "(${AWS_RECIPE}:${RECIPE_PACK_REF})?") || true
+          if [ -n "$aws_offenders" ]; then
+            echo "ERROR: aws-eks recipes not pinned to ${RECIPE_PACK_REF} remain in the AWS recipe pack:" >&2
+            printf '%s\n' "$aws_offenders" | sort -u >&2
             exit 1
           fi
 

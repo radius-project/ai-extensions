@@ -22,7 +22,8 @@ readonly STUB_BIN="${TEST_ROOT}/bin"
 readonly CATALOG_HELPER="${TEST_ROOT}/contrib-catalog.sh"
 readonly CALLS="${TEST_ROOT}/calls.log"
 readonly OUTPUT="${TEST_ROOT}/output.log"
-readonly PACK_URL="https://raw.githubusercontent.com/radius-project/resource-types-contrib/0123456789abcdef0123456789abcdef01234567/recipe-packs/aws-eks/aws-eks.bicep"
+readonly PACK_REF="0123456789abcdef0123456789abcdef01234567"
+readonly PACK_URL="https://raw.githubusercontent.com/radius-project/resource-types-contrib/${PACK_REF}/recipe-packs/aws-eks/aws-eks.bicep"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -54,6 +55,7 @@ if len(names) != 1:
 
 run_at = None
 pack_url = None
+pack_ref = None
 step_indent = len(lines[names[0]]) - len(lines[names[0]].lstrip(" "))
 for i in range(names[0] + 1, len(lines)):
     line = lines[i]
@@ -63,12 +65,17 @@ for i in range(names[0] + 1, len(lines)):
     match = re.match(r"^\s*RECIPE_PACK_URL:\s*(.+?)\s*$", line)
     if match:
         pack_url = match.group(1)
+    match = re.match(r"^\s*RECIPE_PACK_REF:\s*(.+?)\s*$", line)
+    if match:
+        pack_ref = match.group(1)
     if re.match(r"^\s*run:\s*\|\s*$", line):
         run_at = i
         break
 
 if pack_url != "'{{AWS_EKS_RECIPE_PACK_URL}}'":
     sys.exit("RECIPE_PACK_URL must come from the generator's pinned pack, got %r" % pack_url)
+if pack_ref != "'{{AWS_EKS_RECIPE_PACK_REF}}'":
+    sys.exit("RECIPE_PACK_REF must come from the generator's pinned pack, got %r" % pack_ref)
 if run_at is None:
     sys.exit("provider setup step has no 'run: |' block")
 
@@ -153,6 +160,7 @@ run_step() {
             AWS_EKS_CLUSTER_NAME=dev-cluster \
             RADIUS_SUBNET_IDS=subnet-0a1,subnet-0b2 \
             RECIPE_PACK_URL="${PACK_URL}" \
+            RECIPE_PACK_REF="${PACK_REF}" \
             "$@" \
             bash -e "${BODY_SCRIPT}"
     ) >"${OUTPUT}" 2>&1
@@ -178,8 +186,11 @@ test_deploys_the_pinned_pack_with_its_parameters() {
     fi
     grep -qF "kube-recipes/containers:pinned0123" "${work}/.radius/radius-recipe-pack.bicep" ||
         fail "the containers recipe was not pinned"
-    grep -qF "aws-eks-recipes/mysqldatabases:latest" "${work}/.radius/radius-recipe-pack.bicep" ||
-        fail "the MySQL recipe source changed"
+    grep -qF "source: 'ghcr.io/radius-project/aws-eks-recipes/mysqldatabases:${PACK_REF}'" "${work}/.radius/radius-recipe-pack.bicep" ||
+        fail "the MySQL recipe was not pinned to the pack's commit"
+    if grep -q "aws-eks-recipes/[a-z]*:latest" "${work}/.radius/radius-recipe-pack.bicep"; then
+        fail "an aws-eks recipe was left on its mutable latest tag"
+    fi
     grep -qxF "provider-pack=aws-eks" "${work}/github-output" ||
         fail "the provider pack name was not exposed"
 }
@@ -195,6 +206,21 @@ test_refuses_invalid_input_before_any_change() {
     fi
 }
 
+# A pack whose aws-eks recipe carries some other tag cannot be pinned to the
+# pack's commit, so the deploy stops before deploying the pack.
+test_refuses_an_aws_recipe_on_another_tag() {
+    local pack="${TEST_ROOT}/edge-pack.bicep"
+    sed "s|aws-eks-recipes/mysqldatabases:latest|aws-eks-recipes/mysqldatabases:edge|" "${PACK_FIXTURE}" >"${pack}"
+    if run_step PACK_FIXTURE="${pack}"; then
+        fail "an aws-eks recipe on the edge tag should be refused"
+    fi
+    grep -qF "aws-eks-recipes/mysqldatabases:edge" "${OUTPUT}" ||
+        fail "the refusal did not name the unpinned recipe"
+    if grep -qF "rad deploy .radius/radius-recipe-pack.bicep" "${CALLS}"; then
+        fail "the recipe pack was deployed with an unpinned aws-eks recipe"
+    fi
+}
+
 extract_provider_setup_step
 write_stubs
 test_deploys_the_pinned_pack_with_its_parameters
@@ -207,5 +233,9 @@ test_refuses_invalid_input_before_any_change AWS_EKS_CLUSTER_NAME "" "AWS_EKS_CL
 test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS "subnet-0a1, subnet-0b2" "RADIUS_SUBNET_IDS must be"
 test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS '["subnet-0a1"]' "RADIUS_SUBNET_IDS must be"
 test_refuses_invalid_input_before_any_change RADIUS_SUBNET_IDS "" "RADIUS_SUBNET_IDS must be"
+test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "main" "RECIPE_PACK_REF must be"
+test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "" "RECIPE_PACK_REF must be"
+test_refuses_invalid_input_before_any_change RECIPE_PACK_REF "fedcba9876543210fedcba9876543210fedcba98" "RECIPE_PACK_REF must be"
+test_refuses_an_aws_recipe_on_another_tag
 
 echo "AWS provider recipe-pack setup tests passed"

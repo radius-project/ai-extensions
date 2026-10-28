@@ -18,7 +18,10 @@ import {
   defaultDeployTemplateVars,
   generateDeployWorkflow
 } from "./deploy.js";
-import { AWS_EKS_RECIPE_PACK_URL } from "../modeling/recipe-pack.js";
+import {
+  AWS_EKS_RECIPE_PACK,
+  AWS_EKS_RECIPE_PACK_URL
+} from "../modeling/recipe-pack.js";
 
 const BASE_TEMPLATES = {
   [DEPLOY_DISPATCHER_FILE]: `name: deploy
@@ -120,20 +123,25 @@ describe("generateDeployWorkflow", () => {
     );
   });
 
-  it("fills the pinned aws-eks recipe pack URL and does not let callers override it", () => {
+  it("fills the pinned aws-eks recipe pack URL and commit and does not let callers override them", () => {
     const files = generateDeployWorkflow(
       "prod",
       ".radius/app.bicep",
       {
         ...BASE_TEMPLATES,
         [DEPLOY_AWS_FILE]:
-          "env:\n  RECIPE_PACK_URL: '{{AWS_EKS_RECIPE_PACK_URL}}'\n"
+          "env:\n  RECIPE_PACK_URL: '{{AWS_EKS_RECIPE_PACK_URL}}'\n  RECIPE_PACK_REF: '{{AWS_EKS_RECIPE_PACK_REF}}'\n"
       },
-      { templateVars: { AWS_EKS_RECIPE_PACK_URL: "https://example.com/pack" } }
+      {
+        templateVars: {
+          AWS_EKS_RECIPE_PACK_URL: "https://example.com/pack",
+          AWS_EKS_RECIPE_PACK_REF: "main"
+        }
+      }
     );
 
     expect(files[DEPLOY_AWS_FILE]).toBe(
-      `env:\n  RECIPE_PACK_URL: '${AWS_EKS_RECIPE_PACK_URL}'\n`
+      `env:\n  RECIPE_PACK_URL: '${AWS_EKS_RECIPE_PACK_URL}'\n  RECIPE_PACK_REF: '${AWS_EKS_RECIPE_PACK.ref}'\n`
     );
   });
 
@@ -356,6 +364,9 @@ describe("the committed AWS deploy template", () => {
 
     expect(files[DEPLOY_AWS_FILE]).toContain(
       `RECIPE_PACK_URL: '${AWS_EKS_RECIPE_PACK_URL}'`
+    );
+    expect(files[DEPLOY_AWS_FILE]).toContain(
+      `RECIPE_PACK_REF: '${AWS_EKS_RECIPE_PACK.ref}'`
     );
     expect(() => parseYaml(files[DEPLOY_AWS_FILE])).not.toThrow();
   });

@@ -1,5 +1,8 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
-import { AWS_EKS_RECIPE_PACK_URL } from "../modeling/recipe-pack.js";
+import {
+  AWS_EKS_RECIPE_PACK,
+  AWS_EKS_RECIPE_PACK_URL
+} from "../modeling/recipe-pack.js";
 
 // Production builds replace this environment read with the exact source commit
 // so fetched templates and every generated composite-action reference agree.
@@ -67,8 +70,8 @@ export function defaultDeployTemplateVars(): DeployWorkflowTemplateVars {
  * reusable `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider
  * workflows. The provider-agnostic phases live in composite actions referenced
  * from `radius-project/ai-extensions@{{RADIUS_REF}}` and are never copied here. Core
- * always fills the reserved `{{ENV}}`, `{{APP_FILE}}`, `{{RADIUS_REF}}`, and
- * `{{AWS_EKS_RECIPE_PACK_URL}}` placeholders. It also fills the architecture-aware
+ * always fills the reserved `{{ENV}}`, `{{APP_FILE}}`, `{{RADIUS_REF}}`,
+ * `{{AWS_EKS_RECIPE_PACK_URL}}`, and `{{AWS_EKS_RECIPE_PACK_REF}}` placeholders. It also fills the architecture-aware
  * `{{TARGET_CLUSTER_ARCH_MODE}}` and
  * `{{TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS}}` placeholders with runtime
  * GitHub-variable defaults. Callers may also supply additional
@@ -100,7 +103,8 @@ export function generateDeployWorkflow(
     ENV: env,
     APP_FILE: appFile,
     RADIUS_REF,
-    AWS_EKS_RECIPE_PACK_URL
+    AWS_EKS_RECIPE_PACK_URL,
+    AWS_EKS_RECIPE_PACK_REF: AWS_EKS_RECIPE_PACK.ref
   };
   const fill = (file: string): string => fillTemplate(pick(file), templateVars);
   const files: DeployWorkflowFiles = {
