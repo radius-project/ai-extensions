@@ -20,6 +20,8 @@ export const RECIPE_PACK_REF = "main";
 // graph read it from this pinned resource-types-contrib commit. This is the one
 // place to move it: to the merge commit of
 // radius-project/resource-types-contrib#442, and later to the catalog.
+// Users don't get this pack until the Radius runtime pinned in
+// .github/extension/actions/setup-control-plane has radius-project/radius#13465.
 export const AWS_EKS_RECIPE_PACK = {
   ref: "c84b0ac34f0c33db3d3d04ec95b097fb6863519b",
   path: "recipe-packs/aws-eks/aws-eks.bicep"
