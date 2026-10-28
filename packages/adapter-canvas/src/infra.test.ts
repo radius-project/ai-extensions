@@ -1285,7 +1285,7 @@ describe("with the AWS switch on", () => {
     );
   });
 
-  it("does not author a missing deploy AWS provider without `create`", async () => {
+  it("authors a missing deploy AWS provider when its dispatcher is on the branch", async () => {
     h.committed.main = await expectedFilesFor("dev", "aws", includeAws);
     delete h.committed.main[".github/workflows/run-rad-commands-aws.yml"];
 
@@ -1295,8 +1295,78 @@ describe("with the AWS switch on", () => {
       { includeAws }
     );
 
-    expect(res.created).toEqual([]);
+    expect(res.created).toEqual([".github/workflows/run-rad-commands-aws.yml"]);
+  });
+
+  it.each([
+    ["run-rad-commands.yml", "run-rad-commands-aws.yml"],
+    ["delete-application.yml", "delete-aws.yml"],
+    ["delete-environment.yml", "delete-environment-aws.yml"]
+  ])(
+    "commits the AWS provider before updating the Azure-only %s it now references",
+    async (dispatcher, provider) => {
+      // An Azure-only repository from before the switch: its dispatchers have
+      // no AWS job and no AWS provider is committed.
+      h.committed.main = await expectedFilesFor("dev", "azure");
+      const res = await syncRepoWorkflows(
+        "acme/app",
+        [{ name: "dev", provider: "azure" }],
+        { includeAws }
+      );
+
+      const order = h.commits.map((commit) => commit.path);
+      expect(res.created).toContain(`.github/workflows/${provider}`);
+      expect(res.updated).toContain(`.github/workflows/${dispatcher}`);
+      expect(order.indexOf(`.github/workflows/${provider}`)).toBeLessThan(
+        order.indexOf(`.github/workflows/${dispatcher}`)
+      );
+    }
+  );
+
+  it("leaves a dispatcher unchanged and reports it when its AWS provider cannot be committed", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    h.failCommits = true;
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { includeAws }
+    );
+
     expect(h.commits).toEqual([]);
+    expect(res.failed.map((failure) => failure.path).sort()).toEqual([
+      ".github/workflows/delete-application.yml",
+      ".github/workflows/delete-aws.yml",
+      ".github/workflows/delete-environment-aws.yml",
+      ".github/workflows/delete-environment.yml",
+      ".github/workflows/run-rad-commands-aws.yml",
+      ".github/workflows/run-rad-commands.yml"
+    ]);
+  });
+
+  it("checks a provider outside an `only` pass before writing its dispatcher", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { includeAws, only: ["run-rad-commands.yml"] }
+    );
+
+    expect(h.commits).toEqual([]);
+    expect(res.failed).toEqual([
+      { path: ".github/workflows/run-rad-commands.yml", branch: "main" }
+    ]);
+
+    h.committed.main[".github/workflows/run-rad-commands-aws.yml"] = (
+      await generateDeployWorkflow("dev", ".radius/app.bicep", { includeAws })
+    )["run-rad-commands-aws.yml"];
+    const ready = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { includeAws, only: ["run-rad-commands.yml"] }
+    );
+    expect(ready.updated).toEqual([".github/workflows/run-rad-commands.yml"]);
   });
 
   it("never commits AWS workflows while the switch is off", async () => {

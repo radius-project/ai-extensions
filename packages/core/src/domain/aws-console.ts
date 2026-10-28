@@ -71,6 +71,9 @@ export function awsConsoleUrl(id: string): string {
     (scope) => scope.type.toLowerCase() === "regions"
   )?.name;
   if (!region || !AWS_REGION.test(region)) return "";
+  // China regions are served from a separate partition's console, which this
+  // map does not cover. No link beats a link into the wrong partition.
+  if (region.startsWith("cn-")) return "";
   const target = AWS_CONSOLE_PATHS[parsed.type.toLowerCase()];
   if (!target) return "";
   // GovCloud regions are served from their own partition's console.
@@ -81,15 +84,18 @@ export function awsConsoleUrl(id: string): string {
   return `https://${host}${target.path}?region=${region}${target.hash}`;
 }
 
-const HTTPS_AUTHORITY = /^https:\/\/([^/?#]*)/i;
+const HTTPS_AUTHORITY = /^https:\/\/([^/?#\\]*)/i;
+const PLAIN_HOST = /^[a-z0-9.-]+$/;
 
 // The lowercased host of an https URL, or "" for anything else. Parsed by hand
-// because core stays free of DOM and Node types, so it has no URL global. A
-// console link never carries credentials, so an authority with `@` is refused.
+// because core stays free of DOM and Node types, so it has no URL global.
+// Browsers read `\` as `/` and strip or decode some characters in a host, so
+// only a plain host name, with an optional port, is named. A console link never
+// carries credentials, so an authority with `@` is refused too.
 function httpsHost(url: string): string {
   const authority = HTTPS_AUTHORITY.exec(url.trim())?.[1] ?? "";
-  if (authority.includes("@")) return "";
-  return authority.replace(/:\d*$/, "").toLowerCase();
+  const host = authority.replace(/:\d*$/, "").toLowerCase();
+  return PLAIN_HOST.test(host) ? host : "";
 }
 
 /**

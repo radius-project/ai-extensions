@@ -526,7 +526,7 @@ describe("detail rows", () => {
       {
         kind: "external",
         icon: "link",
-        label: "bucket in AWS console",
+        label: "bucket in portal",
         href: "https://producer.test/bucket",
         showUrl: false
       }
