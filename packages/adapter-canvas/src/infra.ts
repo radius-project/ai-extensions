@@ -888,36 +888,86 @@ export async function syncRepoWorkflows(
     return exists;
   };
 
+  // Each dispatcher `uses:` its provider workflows by path, and GitHub rejects
+  // the whole dispatcher when one is missing. Whenever a dispatcher is on a
+  // branch, its providers are authored even in the background pass (a
+  // `workflow_call`-only provider never runs on push, so that is safe), and a
+  // dispatcher is only written once every provider it references is there.
+  const includeAws = opts.includeAws ?? false;
+  const dispatcherProviders = new Map<string, string[]>([
+    [DEPLOY_DISPATCHER_FILE, deployWorkflowFiles(includeAws).slice(1)],
+    [
+      DELETE_APP_DISPATCHER_FILE,
+      deleteApplicationWorkflowFiles(includeAws).slice(1)
+    ],
+    [
+      DELETE_ENV_DISPATCHER_FILE,
+      deleteEnvironmentWorkflowFiles(includeAws).slice(1)
+    ]
+  ]);
+  const fileNameOf = (path: string): string =>
+    path.slice(path.lastIndexOf("/") + 1);
+  const isDispatcher = (path: string): boolean =>
+    dispatcherProviders.has(fileNameOf(path));
+  // Providers first, so a dispatcher is never written ahead of a file it uses.
+  const ordered = [...byPath.entries()].sort(
+    ([a], [b]) => Number(isDispatcher(a)) - Number(isDispatcher(b))
+  );
+
   for (const branch of branches) {
-    // The env-delete dispatcher (`delete-environment.yml`) hard-references its
-    // reusable provider via `uses: ./.github/workflows/delete-environment-azure.yml`,
-    // so the two static files must always be committed together. byPath is built
-    // with the dispatcher inserted before the provider, so this flag is set while
-    // the dispatcher is processed and read when the provider is reached: whenever
-    // the dispatcher is present on a branch, author the provider too even in the
-    // background pass (no `opts.create`), so a drift rewrite of the dispatcher can
-    // never leave a dangling `uses:` reference behind.
-    let envDeleteDispatcherPresent = false;
-    for (const [path, candidates] of byPath.entries()) {
-      const fileName = path.split("/").pop();
-      const committed = await fetchFileFromRepo(repo, path, branch);
+    const committedFiles = new Map<string, string | null>();
+    for (const [path] of ordered) {
+      committedFiles.set(path, await fetchFileFromRepo(repo, path, branch));
+    }
+    const present = new Set(
+      [...committedFiles]
+        .filter(([, content]) => content != null && content !== "")
+        .map(([path]) => fileNameOf(path))
+    );
+    // A provider outside this pass (`opts.only`) still has to be on the branch
+    // before a dispatcher that uses it is written.
+    for (const [path] of ordered) {
+      for (const provider of dispatcherProviders.get(fileNameOf(path)) || []) {
+        if (committedFiles.has(wf(provider)) || present.has(provider)) continue;
+        const content = await fetchFileFromRepo(repo, wf(provider), branch);
+        if (content != null && content !== "") present.add(provider);
+      }
+    }
+    const requiredProviders = new Set(
+      [...dispatcherProviders]
+        .filter(([dispatcher]) => present.has(dispatcher))
+        .flatMap(([, providers]) => providers)
+    );
+    for (const [path, candidates] of ordered) {
+      const fileName = fileNameOf(path);
+      const committed = committedFiles.get(path);
       const missing = committed == null || committed === "";
+      const absentProviders = (dispatcherProviders.get(fileName) || []).filter(
+        (provider) => !present.has(provider)
+      );
+      if (absentProviders.length > 0) {
+        // A write this pass would have made is reported as failed, so callers
+        // that check `failed` for the dispatcher still name the branch.
+        const wanted =
+          missing ?
+            opts.create
+          : !candidates.some((candidate) => candidate.content === committed);
+        // An unpushed branch takes no writes at all, so nothing failed there.
+        if (wanted && (await remoteHasBranch(branch))) {
+          failed.push({ path, branch });
+          log(
+            `left ${path} unchanged on "${branch}" until ${absentProviders.join(", ")} can be committed`
+          );
+        }
+        continue;
+      }
       if (missing) {
         // By default don't author missing files here (environment creation owns
         // that), and an unpushed working branch simply reads as "missing" and is
-        // skipped. When `opts.create` is set, author the file so the workflow is
-        // present on the branch it will run from — but only if the branch exists
-        // on the remote, so we never author onto an unpushed working branch. The
-        // env-delete provider is additionally force-authored when its dispatcher
-        // is present (see envDeleteDispatcherPresent), since a committed
-        // dispatcher without its provider is always a broken workflow; a
-        // `workflow_call`-only provider never triggers a run on push, so
-        // authoring it early is safe.
-        const forceAuthorEnvDeleteProvider =
-          (fileName === DELETE_ENV_AZURE_FILE ||
-            fileName === DELETE_ENV_AWS_FILE) &&
-          envDeleteDispatcherPresent;
-        if (!opts.create && !forceAuthorEnvDeleteProvider) continue;
+        // skipped. When `opts.create` is set, or a dispatcher on this branch uses
+        // the file, author it, but only if the branch exists on the remote, so we
+        // never author onto an unpushed working branch.
+        if (!opts.create && !requiredProviders.has(fileName)) continue;
         if (!(await remoteHasBranch(branch))) {
           log(`skipped creating ${path} on "${branch}" (branch not on remote)`);
           continue;
@@ -937,16 +987,13 @@ export async function syncRepoWorkflows(
           } else {
             registrationPending.add(path);
           }
+          present.add(fileName);
         } catch (e) {
           failed.push({ path, branch });
           log(`could not create ${path} on "${branch}": ${errorMessage(e)}`);
         }
         continue;
       }
-      // The env-delete dispatcher is present on this branch, so its reusable
-      // provider must be committed alongside it (see envDeleteDispatcherPresent).
-      if (fileName === DELETE_ENV_DISPATCHER_FILE)
-        envDeleteDispatcherPresent = true;
       // In sync if the committed copy matches any environment's generated
       // content — the only per-env difference is the cosmetic dispatch default.
       if (candidates.some((c) => c.content === committed)) continue;

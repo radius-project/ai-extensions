@@ -136,6 +136,8 @@ export interface AwsInfrastructureHandle {
   ): void;
   /** Restore a saved selection, such as when editing an environment. */
   restore(vpcId: string, subnetIds: readonly string[]): void;
+  /** Forget the last discovery, so nothing from an old account or region is kept. */
+  reset(): void;
   selectedSubnetIds(): string[];
   validationError(): string;
 }
@@ -284,6 +286,14 @@ export function initializeAwsInfrastructure(
       if (select && vpcId !== "") select.value = vpcId;
       selected = [...subnetIds];
       noPrivateZones = false;
+      renderSubnets();
+    },
+    reset() {
+      clusters = [];
+      subnets = [];
+      selected = [];
+      noPrivateZones = false;
+      discovered = false;
       renderSubnets();
     },
     selectedSubnetIds: () => [...selected],

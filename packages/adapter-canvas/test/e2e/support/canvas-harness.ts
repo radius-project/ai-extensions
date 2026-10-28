@@ -438,6 +438,8 @@ interface CanvasHarnessOptions {
   initialPage?: string;
   /** Defaults to "fake", so every existing suite is unaffected. */
   mode?: CanvasHarnessMode;
+  /** The developer-only AWS switch. Off by default, as users run. */
+  awsEnabled?: boolean;
   /**
    * Cloud mode only: an absolute path to a real clone to run against, disjoint
    * from the checkout running the suite. The caller owns its lifecycle; the
@@ -1456,6 +1458,7 @@ export class CanvasHarness {
         ...createTestCanvasServerRuntime({
           executionOwner: createEnvironmentExecutionOwner(),
           accountContext,
+          awsEnabled: options.awsEnabled ?? false,
           get environmentOperationRunner() {
             return environmentOperationRunner;
           }
@@ -2001,11 +2004,17 @@ export class CanvasHarness {
   }
 }
 
-export const test = base.extend<{ canvas: CanvasHarness }>({
-  canvas: async ({ page }, use, testInfo) => {
+export const test = base.extend<{
+  awsEnabled: boolean;
+  canvas: CanvasHarness;
+}>({
+  // Opt in per describe block with `test.use({ awsEnabled: true })`.
+  awsEnabled: [false, { option: true }],
+  canvas: async ({ page, awsEnabled }, use, testInfo) => {
     const canvas = await CanvasHarness.create({
       page,
-      title: testInfo.title
+      title: testInfo.title,
+      awsEnabled
     });
     try {
       await use(canvas);

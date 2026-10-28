@@ -1017,6 +1017,21 @@ export function initializeDiscoveryPanel(
     );
     if (statusEl) statusEl.textContent = "Discovering resources…";
     if (provider === "azure") renderAzureRemediation(null);
+    // The cluster, VPC, and subnets on screen belong to the previous lookup,
+    // possibly in another account or region. Clear them so Create stays
+    // blocked until this lookup succeeds, and stays blocked if it fails.
+    if (provider === "aws") {
+      awsClusterInfo = [];
+      renderSelect(
+        context,
+        "aws-cluster-select",
+        [],
+        "Discovering EKS clusters…",
+        false
+      );
+      renderSelect(context, "aws-vpc-select", [], "Discovering VPCs…", false);
+      awsInfrastructure.reset();
+    }
     const payload: Record<string, string> = { provider };
     // An AWS profile names an account and region where Azure names a
     // subscription and tenant; they arrive in the same two positions.

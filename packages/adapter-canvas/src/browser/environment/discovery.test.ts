@@ -1967,6 +1967,59 @@ describe("discoverResources", () => {
     );
   });
 
+  it.each([
+    ["is still running", "pending"],
+    ["fails", "fails"]
+  ])(
+    "clears the AWS selection while discovery for a new profile %s",
+    async (_label, outcome) => {
+      const page = renderDiscoveryPage();
+      let answer: Promise<HttpResponse> = Promise.resolve(
+        discoverResponse(awsPayload())
+      );
+      page.browser.net.handle(DISCOVER_ENDPOINT, () => answer);
+      const onInfrastructureChange = vi.fn();
+      const handle = initializeDiscoveryPanel(page.browser.context, {
+        mutationNonce: "nonce",
+        onInfrastructureChange
+      });
+      await handle?.discoverResources("aws", "123456789012", "us-west-2");
+      expect(page.selects["aws-cluster-select"].value).toBe("eks-1");
+      expect(handle?.awsInfrastructureError()).toBe("");
+
+      let fail: (reason: unknown) => void = () => {};
+      answer = new Promise<HttpResponse>((_resolve, reject) => {
+        fail = reject;
+      });
+      onInfrastructureChange.mockClear();
+      const next = handle?.discoverResources(
+        "aws",
+        "999988887777",
+        "eu-west-1"
+      );
+
+      expect(page.selects["aws-cluster-select"].value).toBe("");
+      expect(page.selects["aws-vpc-select"].value).toBe("");
+      expect(handle?.currentInfraSelection("aws")).toMatchObject({
+        cluster: "",
+        vpcId: "",
+        subnetIds: ""
+      });
+      expect(handle?.awsInfrastructureError()).not.toBe("");
+      expect(onInfrastructureChange).toHaveBeenCalled();
+
+      if (outcome === "fails") {
+        fail(new Error("denied"));
+        await next;
+        expect(page.selects["aws-cluster-select"].value).toBe("");
+        expect(handle?.awsInfrastructureError()).not.toBe("");
+      } else {
+        fail(new Error("abandoned"));
+        await next;
+      }
+    }
+  );
+
   it("requires a subnet selection before AWS discovery has run", () => {
     const page = renderDiscoveryPage();
     const handle = initializeDiscoveryPanel(page.browser.context);

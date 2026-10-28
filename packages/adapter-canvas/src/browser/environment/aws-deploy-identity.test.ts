@@ -59,6 +59,7 @@ function page(
   });
   return {
     browser,
+    scope,
     handle,
     name,
     arn,
@@ -306,5 +307,122 @@ describe("initializeAwsDeployIdentity", () => {
     await flush();
     expect(view.handle.request().existingRoleArn).toBe("");
     expect(view.name.disabled).toBe(false);
+  });
+
+  describe("a role lookup that finishes late", () => {
+    const ACCOUNT_A = "123456789012";
+    const ACCOUNT_B = "999988887777";
+
+    function deferred<T>() {
+      let resolve: (value: T) => void = () => {};
+      let reject: (reason: unknown) => void = () => {};
+      const promise = new Promise<T>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      return { promise, resolve, reject };
+    }
+
+    function pendingLookup(view: ReturnType<typeof page>) {
+      const response = deferred<HttpResponse>();
+      view.browser.net.handle(
+        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${ACCOUNT_A}`,
+        () => response.promise
+      );
+      view.handle.setProfile({ accountId: ACCOUNT_A, region: "us-west-2" });
+      view.use.dispatch("click");
+      return response;
+    }
+
+    const roles = () => json({ roles: [{ arn: ROLE_ARN, name: "deploy" }] });
+
+    it("does not open the picker after the profile moves to another account", async () => {
+      const view = page();
+      const response = pendingLookup(view);
+      view.handle.setProfile({ accountId: ACCOUNT_B, region: "us-west-2" });
+      response.resolve(roles());
+      await flush();
+      expect(view.promptRoleSelection).not.toHaveBeenCalled();
+      expect(view.use.textContent).toBe("use an existing role…");
+      expect(view.handle.request().existingRoleArn).toBe("");
+    });
+
+    it("does not report a failure for an account no longer selected", async () => {
+      const view = page();
+      const response = pendingLookup(view);
+      view.handle.setProfile({ accountId: ACCOUNT_B, region: "us-west-2" });
+      response.reject(new Error("offline"));
+      await flush();
+      expect(view.note.textContent).toBe("");
+      expect(view.use.textContent).toBe("use an existing role…");
+    });
+
+    it.each([
+      [
+        "answers",
+        (response: ReturnType<typeof pendingLookup>) =>
+          response.resolve(roles())
+      ],
+      [
+        "fails",
+        (response: ReturnType<typeof pendingLookup>) =>
+          response.reject(new Error("offline"))
+      ]
+    ])(
+      "leaves the page alone when the lookup %s after teardown",
+      async (_label, settle) => {
+        const view = page();
+        const response = pendingLookup(view);
+        view.scope.teardown();
+        settle(response);
+        await flush();
+        expect(view.promptRoleSelection).not.toHaveBeenCalled();
+        expect(view.use.textContent).toBe("Loading roles…");
+        expect(view.note.textContent).toBe("");
+      }
+    );
+
+    it("does not pin a role picked for the previous account", async () => {
+      const choice = deferred<AppPickerChoice>();
+      const view = page(() => choice.promise);
+      view.browser.net.handle(
+        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${ACCOUNT_A}`,
+        roles
+      );
+      view.handle.setProfile({ accountId: ACCOUNT_A, region: "us-west-2" });
+      view.use.dispatch("click");
+      await flush();
+      expect(view.promptRoleSelection).toHaveBeenCalledWith(
+        expect.objectContaining({
+          intro: expect.stringContaining(`account ${ACCOUNT_A}`)
+        })
+      );
+      view.handle.setProfile({ accountId: ACCOUNT_B, region: "us-west-2" });
+      choice.resolve({ appId: ROLE_ARN });
+      await flush();
+      expect(view.handle.request()).toEqual({
+        roleName: "radius-deploy-octo-shop",
+        existingRoleArn: ""
+      });
+      expect(view.name.disabled).toBe(false);
+    });
+
+    it("keeps only the latest of two lookups", async () => {
+      const view = page();
+      const first = pendingLookup(view);
+      const second = deferred<HttpResponse>();
+      view.browser.net.handle(
+        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${ACCOUNT_A}`,
+        () => second.promise
+      );
+      view.use.dispatch("click");
+      first.resolve(roles());
+      await flush();
+      expect(view.promptRoleSelection).not.toHaveBeenCalled();
+      second.resolve(roles());
+      await flush();
+      expect(view.promptRoleSelection).toHaveBeenCalledTimes(1);
+      expect(view.handle.request().existingRoleArn).toBe(ROLE_ARN);
+    });
   });
 });

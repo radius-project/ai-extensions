@@ -153,6 +153,9 @@ jobs:
           echo "✅ Cloud OIDC tokens projected into Radius pods."
 
       - name: Refresh external deployment target credentials
+        env:
+          CLUSTER: ${{ vars.AWS_EKS_CLUSTER_NAME }}
+          REGION: ${{ vars.AWS_REGION }}
         run: |
           TARGET_KUBECONFIG="$RADIUS_TARGET_KUBECONFIG"
 
@@ -160,6 +163,15 @@ jobs:
             echo "No target kubeconfig found, resources are on the k3d control plane"
             exit 0
           fi
+
+          # An EKS token lasts 15 minutes, and the one minted when connecting to
+          # the cluster predates the control-plane install and rollouts. Mint a
+          # fresh one right before the delete, as the application delete does.
+          echo "Generating fresh EKS token..."
+          ENDPOINT=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.endpoint' --output text)
+          CA_DATA=$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" --query 'cluster.certificateAuthority.data' --output text)
+          TOKEN=$(aws eks get-token --cluster-name "$CLUSTER" --region "$REGION" --output json | jq -r '.status.token')
+          printf 'apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: %s\n    server: %s\n  name: eks\ncontexts:\n- context:\n    cluster: eks\n    user: eks-user\n  name: eks\ncurrent-context: eks\nkind: Config\nusers:\n- name: eks-user\n  user:\n    token: %s\n' "$CA_DATA" "$ENDPOINT" "$TOKEN" > "$TARGET_KUBECONFIG"
 
           # Update the secret the chart mounted at install with the refreshed
           # kubeconfig, then restart the recipe-executing pods so they re-read it.
