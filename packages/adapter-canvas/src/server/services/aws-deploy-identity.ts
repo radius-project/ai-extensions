@@ -3,7 +3,6 @@ import {
   AWS_MANAGED_TAG,
   AWS_REPOSITORY_TAG,
   GITHUB_OIDC_AUDIENCE,
-  GITHUB_OIDC_HOST,
   GITHUB_OIDC_PROVIDER_URL,
   GITHUB_OIDC_THUMBPRINT,
   buildAwsEnvironmentPermissionPolicy,
@@ -12,6 +11,8 @@ import {
   checkAwsCliVersion,
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
+  githubOidcProviderArn,
+  isAwsCommercialRegion,
   isRadiusManagedRole,
   mergeGitHubTrustSubject,
   parseAwsRoleArn,
@@ -113,6 +114,14 @@ export async function setupAwsDeployIdentity(
   });
   const { accountId, region, cluster } = request;
   const regionArgs = ["--region", region];
+  // The ARNs below are built for the commercial partition, so a GovCloud or
+  // China region would fail part way through, after the first write.
+  if (!isAwsCommercialRegion(region)) {
+    return fail(
+      "aws-partition-unsupported",
+      `Radius sets up AWS environments in commercial AWS regions only, and ${region} is not one. Nothing was changed.`
+    );
+  }
 
   const version = await ports.runAws(["--version"]);
   const versionCheck = checkAwsCliVersion(
@@ -197,6 +206,12 @@ export async function setupAwsDeployIdentity(
   if (picked && !pickedArn) {
     return fail("aws-role-invalid", `"${picked}" is not an IAM role ARN.`);
   }
+  if (pickedArn && pickedArn.partition !== "aws") {
+    return fail(
+      "aws-partition-unsupported",
+      `IAM role ${picked} is in the ${pickedArn.partition} partition. Radius sets up AWS environments in commercial AWS regions only. Nothing was changed.`
+    );
+  }
   if (pickedArn && pickedArn.accountId !== accountId) {
     return fail(
       "aws-role-wrong-account",
@@ -236,6 +251,24 @@ export async function setupAwsDeployIdentity(
     );
   }
 
+  // Read the existing role's trust before anything is written, so a policy
+  // Radius cannot read stops setup with nothing created.
+  let trust: ReturnType<typeof mergeGitHubTrustSubject> | null = null;
+  if (!roleMissing) {
+    try {
+      trust = mergeGitHubTrustSubject(
+        parsePolicyDocument(role?.AssumeRolePolicyDocument),
+        accountId,
+        request.subject
+      );
+    } catch (error) {
+      return fail(
+        "aws-role-trust-unreadable",
+        `Could not read the trust policy of IAM role ${roleName}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   // The account-wide GitHub identity provider. Created once, never removed.
   const providers = await ports.runAws([
     "iam",
@@ -250,16 +283,47 @@ export async function setupAwsDeployIdentity(
     );
   }
   const providerList = parseJson(providers.stdout);
-  const hasProvider =
-    isRecord(providerList) &&
-    Array.isArray(providerList.OpenIDConnectProviderList) &&
-    providerList.OpenIDConnectProviderList.some(
-      (entry) =>
-        isRecord(entry) &&
-        typeof entry.Arn === "string" &&
-        entry.Arn.endsWith(`oidc-provider/${GITHUB_OIDC_HOST}`)
+  if (
+    !isRecord(providerList) ||
+    !Array.isArray(providerList.OpenIDConnectProviderList)
+  ) {
+    return fail(
+      "aws-oidc-provider-unreadable",
+      `Could not read the account's OIDC identity providers: ${detail(providers)}`
     );
+  }
+  const providerArn = githubOidcProviderArn(accountId);
+  const hasProvider = providerList.OpenIDConnectProviderList.some(
+    (entry) => isRecord(entry) && entry.Arn === providerArn
+  );
   if (hasProvider) {
+    // A provider made for another purpose may not accept the audience GitHub
+    // uses for AWS, and every token would then be refused at deploy time.
+    const provider = await ports.runAws([
+      "iam",
+      "get-open-id-connect-provider",
+      "--open-id-connect-provider-arn",
+      providerArn,
+      "--output",
+      "json"
+    ]);
+    const providerRecord = parseJson(provider.stdout);
+    if (
+      !succeeded(provider) ||
+      !isRecord(providerRecord) ||
+      !Array.isArray(providerRecord.ClientIDList)
+    ) {
+      return fail(
+        "aws-oidc-provider-unreadable",
+        `Could not read the account's GitHub identity provider: ${detail(provider)}`
+      );
+    }
+    if (!providerRecord.ClientIDList.includes(GITHUB_OIDC_AUDIENCE)) {
+      return fail(
+        "aws-oidc-provider-audience",
+        `The GitHub identity provider in account ${accountId} does not accept the ${GITHUB_OIDC_AUDIENCE} audience, so GitHub workflows could not assume the deploy role. Nothing was changed. Ask an IAM administrator to run: aws iam add-client-id-to-open-id-connect-provider --open-id-connect-provider-arn ${providerArn} --client-id ${GITHUB_OIDC_AUDIENCE}`
+      );
+    }
     ports.step(`✅ GitHub identity provider found in account ${accountId}.`);
   } else {
     const createProvider = await ports.runAws([
@@ -283,6 +347,9 @@ export async function setupAwsDeployIdentity(
         `Account ${accountId} has no GitHub identity provider, and the signed-in identity could not create one (${detail(createProvider)}). Ask an IAM administrator to run: ${createGitHubOidcProviderCommand()}`
       );
     }
+    if (succeeded(createProvider)) {
+      created.push(`the GitHub identity provider in account ${accountId}`);
+    }
     ports.step(
       `✅ Created the GitHub identity provider in account ${accountId}.`
     );
@@ -292,7 +359,7 @@ export async function setupAwsDeployIdentity(
 
   let roleArn: string;
   let roleCreated = false;
-  if (roleMissing) {
+  if (!trust) {
     const createRole = await ports.runAws([
       "iam",
       "create-role",
@@ -340,19 +407,6 @@ export async function setupAwsDeployIdentity(
         `✅ Using the selected IAM role ${roleName}.`
       : `✅ Reusing the Radius-managed IAM role ${roleName}`
     );
-    let trust;
-    try {
-      trust = mergeGitHubTrustSubject(
-        parsePolicyDocument(role?.AssumeRolePolicyDocument),
-        accountId,
-        request.subject
-      );
-    } catch (error) {
-      return fail(
-        "aws-role-trust-unreadable",
-        `Could not read the trust policy of IAM role ${roleName}: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
     if (trust.kept > 0) {
       ports.step(
         `ℹ️ Keeping ${trust.kept} subject(s) already trusted by this role`
@@ -487,6 +541,34 @@ export async function removeAwsEnvironmentFromRole(
     };
   }
   const { accountId, roleName } = parsed;
+  if (parsed.partition !== "aws") {
+    return {
+      ok: false,
+      message: `IAM role ${request.roleArn} is outside the commercial AWS partition, so Radius did not change it.`
+    };
+  }
+  // IAM addresses the role by name in whichever account the CLI is signed in
+  // to, so confirm that is the role's account before reading or writing.
+  const identity = await ports.runAws([
+    "sts",
+    "get-caller-identity",
+    "--output",
+    "json"
+  ]);
+  const caller = parseJson(identity.stdout);
+  const sessionAccount =
+    isRecord(caller) && typeof caller.Account === "string" ?
+      caller.Account
+    : "";
+  if (!succeeded(identity) || sessionAccount !== accountId) {
+    return {
+      ok: false,
+      message:
+        succeeded(identity) ?
+          `Your AWS CLI session is signed in to account ${sessionAccount || "(unknown)"}, but IAM role ${roleName} is in account ${accountId}. Nothing was changed. Sign in to account ${accountId}, then retry.`
+        : `No active AWS CLI session, so Radius could not clean up IAM role ${roleName}. Run "aws sso login" (or "aws configure"), then retry. ${detail(identity)}`
+    };
+  }
   const removed: string[] = [];
   const kept = [
     `IAM role ${roleName}`,
@@ -516,6 +598,19 @@ export async function removeAwsEnvironmentFromRole(
   const roleRecord = parseJson(getRole.stdout);
   const role =
     isRecord(roleRecord) && isRecord(roleRecord.Role) ? roleRecord.Role : {};
+  const fetched =
+    typeof role.Arn === "string" ? parseAwsRoleArn(role.Arn) : null;
+  if (
+    !fetched ||
+    fetched.partition !== parsed.partition ||
+    fetched.accountId !== accountId ||
+    fetched.roleName.toLowerCase() !== roleName.toLowerCase()
+  ) {
+    return {
+      ok: false,
+      message: `IAM returned ${typeof role.Arn === "string" ? role.Arn : "no role ARN"} for ${request.roleArn}, so Radius did not change it.`
+    };
+  }
   let trust;
   try {
     trust = removeGitHubTrustSubject(

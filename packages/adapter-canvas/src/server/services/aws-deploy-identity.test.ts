@@ -91,6 +91,17 @@ const freeChecks: Script = {
   })
 };
 
+const PROVIDER_ARN = `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`;
+
+const existingProvider: Script = {
+  "iam list-open-id-connect-providers": ok({
+    OpenIDConnectProviderList: [{ Arn: PROVIDER_ARN }]
+  }),
+  "iam get-open-id-connect-provider": ok({
+    ClientIDList: ["sts.amazonaws.com"]
+  })
+};
+
 const happyPath: Script = {
   ...freeChecks,
   "iam get-role": fail("An error occurred (NoSuchEntity) when calling GetRole"),
@@ -140,13 +151,7 @@ describe("setupAwsDeployIdentity", () => {
     const aws = fakeAws({
       ...happyPath,
       "iam get-role": ok(managedRole([PROD])),
-      "iam list-open-id-connect-providers": ok({
-        OpenIDConnectProviderList: [
-          {
-            Arn: `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`
-          }
-        ]
-      }),
+      ...existingProvider,
       "iam update-assume-role-policy": ok(),
       "eks create-access-entry": fail("ResourceInUseException: exists"),
       "eks associate-access-policy": fail("ResourceInUseException: exists")
@@ -342,7 +347,11 @@ describe("setupAwsDeployIdentity", () => {
     expect(result).toMatchObject({
       ok: false,
       code: "aws-access-entry-failed",
-      created: [`IAM role ${ROLE}`, `policy radius-deploy-dev on ${ROLE}`]
+      created: [
+        `the GitHub identity provider in account ${ACCOUNT}`,
+        `IAM role ${ROLE}`,
+        `policy radius-deploy-dev on ${ROLE}`
+      ]
     });
     expect(aws.sleeps).toEqual([2000, 4000, 8000, 15000, 30000]);
   });
@@ -371,6 +380,7 @@ describe("setupAwsDeployIdentity", () => {
       code: "aws-access-entry-failed",
       message: "Failed to grant cluster-admin on shop: AccessDeniedException",
       created: [
+        `the GitHub identity provider in account ${ACCOUNT}`,
         `IAM role ${ROLE}`,
         `policy radius-deploy-dev on ${ROLE}`,
         `access entry for ${ROLE} on shop`
@@ -538,11 +548,214 @@ describe("setupAwsDeployIdentity failure paths", () => {
   });
 });
 
+describe("setupAwsDeployIdentity safety gates", () => {
+  const MUTATIONS = new Set([
+    "create-open-id-connect-provider",
+    "create-role",
+    "update-assume-role-policy",
+    "put-role-policy",
+    "create-access-entry",
+    "associate-access-policy"
+  ]);
+  const writes = (calls: string[][]): string[] =>
+    calls.map((args) => args[1]).filter((command) => MUTATIONS.has(command));
+
+  it.each(["us-gov-west-1", "cn-north-1"])(
+    "refuses region %s before running the AWS CLI",
+    async (region) => {
+      const aws = fakeAws({});
+      const result = await setupAwsDeployIdentity(
+        { ...request, region },
+        aws.ports
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        code: "aws-partition-unsupported",
+        created: []
+      });
+      expect(aws.calls).toEqual([]);
+    }
+  );
+
+  it("refuses a picked role outside the commercial partition", async () => {
+    const aws = fakeAws(freeChecks);
+    const result = await setupAwsDeployIdentity(
+      {
+        ...request,
+        existingRoleArn: `arn:aws-us-gov:iam::${ACCOUNT}:role/${ROLE}`
+      },
+      aws.ports
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-partition-unsupported"
+    });
+    expect(writes(aws.calls)).toEqual([]);
+  });
+
+  it("reads an existing role's trust before creating the identity provider", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-role": ok({
+        Role: { ...managedRole([DEV]).Role, AssumeRolePolicyDocument: "{bad" }
+      })
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "aws-role-trust-unreadable",
+      created: []
+    });
+    expect(writes(aws.calls)).toEqual([]);
+    expect(aws.find("iam list-open-id-connect-providers")).toBeUndefined();
+  });
+
+  it.each([
+    ["empty output", ok("")],
+    ["malformed output", ok("not json")],
+    ["no provider list", ok({ Providers: [] })]
+  ])(
+    "stops on an unreadable provider inventory with %s",
+    async (_label, answer) => {
+      const aws = fakeAws({
+        ...happyPath,
+        "iam list-open-id-connect-providers": answer
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "aws-oidc-provider-unreadable"
+      });
+      expect(writes(aws.calls)).toEqual([]);
+    }
+  );
+
+  it("changes nothing when IAM answers with no role", async () => {
+    const removal = fakeAws({
+      "sts get-caller-identity": ok({ Account: ACCOUNT }),
+      "iam get-role": ok({})
+    });
+    expect(
+      await removeAwsEnvironmentFromRole(
+        { roleArn: ROLE_ARN, environment: "dev", subject: DEV },
+        removal.ports
+      )
+    ).toMatchObject({ ok: false });
+    expect(removal.calls).toHaveLength(2);
+  });
+
+  it("does not claim a provider another setup created first", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam create-open-id-connect-provider": fail("EntityAlreadyExists")
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({ ok: true });
+    const failing = fakeAws({
+      ...happyPath,
+      "iam create-open-id-connect-provider": fail("EntityAlreadyExists"),
+      "iam put-role-policy": fail("LimitExceeded")
+    });
+    expect(await setupAwsDeployIdentity(request, failing.ports)).toMatchObject({
+      ok: false,
+      created: [`IAM role ${ROLE}`]
+    });
+  });
+
+  it("recognizes only this account's GitHub provider", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam list-open-id-connect-providers": ok({
+        OpenIDConnectProviderList: [
+          {
+            Arn: "arn:aws:iam::999988887777:oidc-provider/token.actions.githubusercontent.com"
+          },
+          { Arn: `${PROVIDER_ARN}/enterprise` }
+        ]
+      })
+    });
+    await setupAwsDeployIdentity(request, aws.ports);
+    expect(aws.find("iam create-open-id-connect-provider")).toBeDefined();
+  });
+
+  it.each([
+    [
+      "does not accept GitHub's AWS audience",
+      ok({ ClientIDList: ["custom"] }),
+      "aws-oidc-provider-audience"
+    ],
+    ["cannot be read", fail("AccessDenied"), "aws-oidc-provider-unreadable"],
+    ["answers no client list", ok({}), "aws-oidc-provider-unreadable"]
+  ])("stops when the existing provider %s", async (_label, answer, code) => {
+    const aws = fakeAws({
+      ...happyPath,
+      ...existingProvider,
+      "iam get-open-id-connect-provider": answer
+    });
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toMatchObject({ ok: false, code, created: [] });
+    expect(writes(aws.calls)).toEqual([]);
+    if (code === "aws-oidc-provider-audience") {
+      expect(!result.ok && result.message).toContain(
+        `aws iam add-client-id-to-open-id-connect-provider --open-id-connect-provider-arn ${PROVIDER_ARN} --client-id sts.amazonaws.com`
+      );
+    }
+  });
+
+  it("adds trust to a picked role whose existing statement uses another audience", async () => {
+    const picked = {
+      Role: {
+        Arn: ROLE_ARN,
+        AssumeRolePolicyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { Federated: PROVIDER_ARN },
+              Action: "sts:AssumeRoleWithWebIdentity",
+              Condition: {
+                StringEquals: {
+                  "token.actions.githubusercontent.com:aud": "custom",
+                  "token.actions.githubusercontent.com:sub": DEV
+                }
+              }
+            }
+          ]
+        }
+      }
+    };
+    const aws = fakeAws({
+      ...happyPath,
+      ...existingProvider,
+      "iam get-role": ok(picked),
+      "iam update-assume-role-policy": ok()
+    });
+    const result = await setupAwsDeployIdentity(
+      { ...request, existingRoleArn: ROLE_ARN },
+      aws.ports
+    );
+    expect(result).toMatchObject({ ok: true });
+    const update = aws.find("iam update-assume-role-policy") ?? [];
+    const written = JSON.parse(
+      update[update.indexOf("--policy-document") + 1] ?? "{}"
+    );
+    expect(written.Statement).toHaveLength(2);
+    expect(written.Statement[1].Condition.StringEquals).toEqual({
+      "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+      "token.actions.githubusercontent.com:sub": [DEV]
+    });
+  });
+});
+
 describe("removeAwsEnvironmentFromRole", () => {
   const removal = { roleArn: ROLE_ARN, environment: "dev", subject: DEV };
+  const signedIn: Script = {
+    "sts get-caller-identity": ok({ Account: ACCOUNT })
+  };
 
   it("removes only this environment's subject and policy", async () => {
     const aws = fakeAws({
+      ...signedIn,
       "iam get-role": ok(managedRole([DEV, PROD])),
       "iam update-assume-role-policy": ok(),
       "iam delete-role-policy": ok()
@@ -562,7 +775,10 @@ describe("removeAwsEnvironmentFromRole", () => {
   });
 
   it("reports a role that is already gone and continues", async () => {
-    const aws = fakeAws({ "iam get-role": fail("NoSuchEntity") });
+    const aws = fakeAws({
+      ...signedIn,
+      "iam get-role": fail("NoSuchEntity")
+    });
     expect(await removeAwsEnvironmentFromRole(removal, aws.ports)).toEqual({
       ok: true,
       removed: [],
@@ -571,17 +787,85 @@ describe("removeAwsEnvironmentFromRole", () => {
   });
 
   it("fails without writing when the role's trust policy is unreadable", async () => {
-    const aws = fakeAws({ "iam get-role": ok("not json") });
+    const aws = fakeAws({
+      ...signedIn,
+      "iam get-role": ok({
+        Role: { Arn: ROLE_ARN, AssumeRolePolicyDocument: "{not json" }
+      })
+    });
     const result = await removeAwsEnvironmentFromRole(removal, aws.ports);
     expect(result).toMatchObject({ ok: false });
     expect(!result.ok && result.message).toContain(
       `Could not read the trust policy of IAM role ${ROLE}`
     );
-    expect(aws.calls).toHaveLength(1);
+    expect(aws.calls.map((args) => args[1])).toEqual([
+      "get-caller-identity",
+      "get-role"
+    ]);
+  });
+
+  it.each([
+    ["signed in to another account", ok({ Account: "999988887777" })],
+    ["not signed in", fail("Unable to locate credentials")],
+    ["answering no account", ok("not json")]
+  ])("changes nothing when the CLI session is %s", async (_label, identity) => {
+    const aws = fakeAws({
+      "sts get-caller-identity": identity,
+      "iam get-role": ok(managedRole([DEV]))
+    });
+    const result = await removeAwsEnvironmentFromRole(removal, aws.ports);
+    expect(result).toMatchObject({ ok: false });
+    expect(aws.calls.map((args) => args[1])).toEqual(["get-caller-identity"]);
+  });
+
+  it.each([
+    ["a role in another account", `arn:aws:iam::999988887777:role/${ROLE}`],
+    ["a differently named role", `arn:aws:iam::${ACCOUNT}:role/other`],
+    ["no role ARN", undefined],
+    ["a malformed role ARN", "role/radius-deploy-octo-shop"]
+  ])("changes nothing when IAM returns %s", async (_label, arn) => {
+    const aws = fakeAws({
+      ...signedIn,
+      "iam get-role": ok({ Role: { ...managedRole([DEV]).Role, Arn: arn } })
+    });
+    const result = await removeAwsEnvironmentFromRole(removal, aws.ports);
+    expect(result).toMatchObject({ ok: false });
+    expect(aws.calls.map((args) => args[1])).toEqual([
+      "get-caller-identity",
+      "get-role"
+    ]);
+  });
+
+  it("accepts the role ARN IAM returns with a path and different case", async () => {
+    const aws = fakeAws({
+      ...signedIn,
+      "iam get-role": ok({
+        Role: {
+          ...managedRole([PROD]).Role,
+          Arn: `arn:aws:iam::${ACCOUNT}:role/team/${ROLE.toUpperCase()}`
+        }
+      }),
+      "iam delete-role-policy": ok()
+    });
+    expect(
+      await removeAwsEnvironmentFromRole(removal, aws.ports)
+    ).toMatchObject({ ok: true });
+  });
+
+  it("refuses a role outside the commercial partition without calling AWS", async () => {
+    const aws = fakeAws({});
+    expect(
+      await removeAwsEnvironmentFromRole(
+        { ...removal, roleArn: `arn:aws-us-gov:iam::${ACCOUNT}:role/${ROLE}` },
+        aws.ports
+      )
+    ).toMatchObject({ ok: false });
+    expect(aws.calls).toEqual([]);
   });
 
   it("treats a missing policy as already removed", async () => {
     const aws = fakeAws({
+      ...signedIn,
       "iam get-role": ok(managedRole([PROD])),
       "iam delete-role-policy": fail("NoSuchEntity")
     });
@@ -607,7 +891,7 @@ describe("removeAwsEnvironmentFromRole", () => {
       }
     ]
   ])("fails closed on %s", async (_label, script) => {
-    const aws = fakeAws(script);
+    const aws = fakeAws({ ...signedIn, ...script });
     expect(
       await removeAwsEnvironmentFromRole(removal, aws.ports)
     ).toMatchObject({ ok: false });

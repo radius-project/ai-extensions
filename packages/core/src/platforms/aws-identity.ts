@@ -40,6 +40,19 @@ export function isAwsRegion(value: string): boolean {
   return AWS_REGION_PATTERN.test(value);
 }
 
+/**
+ * Whether a region is in the commercial `aws` partition, the only one the
+ * deploy identity's ARNs are built for. GovCloud and China regions use other
+ * partitions and other account IDs.
+ */
+export function isAwsCommercialRegion(value: string): boolean {
+  return (
+    isAwsRegion(value) &&
+    !value.startsWith("us-gov-") &&
+    !value.startsWith("cn-")
+  );
+}
+
 /** Parse `aws --version` output (`aws-cli/2.15.3 Python/...`). */
 export function parseAwsCliVersion(output: string): number[] | null {
   const match = /aws-cli\/(\d+)\.(\d+)\.(\d+)/.exec(output);
@@ -102,8 +115,8 @@ export function isAwsRoleName(value: string): boolean {
 
 /**
  * The per-environment permission policy name. It is an inline role policy, so
- * the name is unique per role rather than per account, and two repositories
- * with a `dev` environment never collide.
+ * the name is unique per role rather than per account. Two repositories that
+ * share a picked role and an environment name share this name.
  */
 export function buildAwsEnvironmentPolicyName(environment: string): string {
   return iamSafe(`radius-deploy-${environment}`).slice(
@@ -120,14 +133,17 @@ export function awsRoleArn(accountId: string, roleName: string): string {
   return `arn:aws:iam::${accountId}:role/${roleName}`;
 }
 
-/** Split a role ARN into its account and role name. */
+/** Split a role ARN into its partition, account, and role name. */
 export function parseAwsRoleArn(
   arn: string
-): { accountId: string; roleName: string } | null {
-  const match = /^arn:aws[a-z-]*:iam::(\d{12}):role\/(?:[^/]+\/)*([^/]+)$/.exec(
-    arn.trim()
-  );
-  return match ? { accountId: match[1], roleName: match[2] } : null;
+): { partition: string; accountId: string; roleName: string } | null {
+  const match =
+    /^arn:(aws[a-z-]*):iam::(\d{12}):role\/(?:[^/]+\/)*([^/]+)$/.exec(
+      arn.trim()
+    );
+  return match ?
+      { partition: match[1], accountId: match[2], roleName: match[3] }
+    : null;
 }
 
 type PolicyStatement = Record<string, unknown>;
@@ -182,6 +198,31 @@ function isGitHubStatement(
     stringList(principal.Federated).includes(providerArn) &&
     stringList(statement.Action).includes("sts:AssumeRoleWithWebIdentity")
   );
+}
+
+// Whether tokens GitHub mints for AWS (`aud` = sts.amazonaws.com) satisfy every
+// condition on a statement. Only `sub` and `aud` conditions are understood; a
+// statement with any other condition is treated as incompatible, so Radius
+// never relies on or extends trust it cannot read.
+function acceptsGitHubAudience(statement: PolicyStatement): boolean {
+  if (statement.Condition === undefined) return true;
+  if (!isRecord(statement.Condition)) return false;
+  for (const [operator, block] of Object.entries(statement.Condition)) {
+    if (operator !== "StringEquals" && operator !== "StringLike") return false;
+    if (!isRecord(block)) return false;
+    for (const [key, value] of Object.entries(block)) {
+      if (key === SUB_CLAIM) continue;
+      if (key !== AUD_CLAIM) return false;
+      const audiences = stringList(value);
+      if (
+        !audiences.includes(GITHUB_OIDC_AUDIENCE) &&
+        !(operator === "StringLike" && audiences.includes("*"))
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 function subjectsOf(statement: PolicyStatement): string[] {
@@ -265,7 +306,18 @@ export function mergeGitHubTrustSubject(
   const providerArn = githubOidcProviderArn(accountId);
   const trusted = trustedGitHubSubjects(existing, accountId);
   const kept = trusted.filter((value) => value !== subject).length;
-  if (trusted.includes(subject)) {
+  // Only a statement GitHub's AWS tokens can satisfy counts as already
+  // trusting the subject, and only one of those is extended with it.
+  const compatible = (statement: PolicyStatement): boolean =>
+    statement.Effect === "Allow" &&
+    isGitHubStatement(statement, providerArn) &&
+    acceptsGitHubAudience(statement);
+  if (
+    existing.Statement.some(
+      (statement) =>
+        compatible(statement) && subjectsOf(statement).includes(subject)
+    )
+  ) {
     return { policy: existing, kept, changed: false };
   }
   const statements = existing.Statement.filter(
@@ -273,8 +325,7 @@ export function mergeGitHubTrustSubject(
   );
   const index = statements.findIndex(
     (statement) =>
-      statement.Effect === "Allow" &&
-      isGitHubStatement(statement, providerArn) &&
+      compatible(statement) &&
       isRecord(statement.Condition) &&
       isRecord(statement.Condition.StringEquals) &&
       statement.Condition.StringEquals[SUB_CLAIM] !== undefined

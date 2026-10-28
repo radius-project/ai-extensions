@@ -101,7 +101,15 @@ describe("AWS console URL", () => {
       `${account}/regions/us-west-/providers/AWS.S3/Bucket/b`
     ],
     ["a malformed ID", "not/a/resource/id"],
-    ["an empty ID", ""]
+    ["an empty ID", ""],
+    [
+      "a China region in another partition",
+      `/planes/aws/aws/accounts/123456789012/regions/cn-north-1/providers/AWS.S3/Bucket/b`
+    ],
+    [
+      "the other China region",
+      `/planes/aws/aws/accounts/123456789012/regions/cn-northwest-1/providers/AWS.RDS/DBInstance/db`
+    ]
   ])("carries no link for %s", (_case, id) => {
     expect(awsConsoleUrl(id)).toBe("");
   });
@@ -123,6 +131,9 @@ describe("console name for a URL", () => {
     ["https://user@console.aws.amazon.com/s3/buckets", ""],
     ["https://console.aws.amazon.com@example.com/x", ""],
     ["https:///console.aws.amazon.com", ""],
+    ["https://outside.test\\.console.aws.amazon.com/rds/home", ""],
+    ["https://outside.test%2F.console.aws.amazon.com/rds/home", ""],
+    ["https://outside.test\t.console.aws.amazon.com/rds/home", ""],
     ["not a url", ""],
     ["", ""]
   ])("names %s as %j", (url, name) => {
