@@ -7,13 +7,7 @@
 
 The Radius canvas deploys apps only to Azure today. A developer whose team runs on AWS and Amazon EKS can't connect an account, create an environment, or deploy from the canvas. The provider list shows "AWS (coming soon)".
 
-This design adds AWS as a second provider with the same journey and screens as Azure: connect an account, create an environment on an existing EKS cluster, deploy, see the deployed graph, and delete. The hard part is the IAM role GitHub Actions uses to deploy, called the deploy identity: AWS has no per-environment object like Azure's federated credential, so environments share one role, its size limits, and its trust policy. This design settles that, and the spec's open engineering questions, with these decisions:
-
-- **One deploy identity per repository per AWS account,** shared by its environments.
-- **One inline policy per environment,** with `PowerUserAccess` limited to the environment's region. A deploy identity holds about 17 environments, close to Azure's 20.
-- **A lock on the deploy identity,** shared by every repository that uses it, held while setup, delete, rollback, or **Repair** changes it.
-- **Bicep recipes in a `resource-types-contrib` pack,** with EKS Pod Identity for apps that need AWS credentials.
-- **Tokens refreshed every 2 minutes** during deploys.
+This design adds AWS as a second provider with the same journey and screens as Azure: connect an account, create an environment on an existing EKS cluster, deploy, see the deployed graph, and delete. The hard part is the IAM role GitHub Actions uses to deploy, called the deploy identity: AWS has no per-environment object like Azure's federated credential, so environments share one role, its size limits, and its trust policy.
 
 A working prototype deployed a real app to EKS with MySQL on Amazon RDS, and this doc is based on it. AWS stays hidden from users until all of it ships.
 
