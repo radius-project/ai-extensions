@@ -63,6 +63,8 @@ The shared-control admission correction adds CN-05/CN-07 evidence in core/servic
 
 The deferred-recovery follow-up adds a two-operation runtime regression: releasing X's admission cannot schedule a second provider-reconciliation task for Y. Owner tests verify operation-specific callbacks and independent claim release; coordinator tests retain current-record relookup and refuse removed, shutdown or superseded contexts.
 
+The final-admission correction extends CN-05/CN-07 and RF-08 evidence with account replacement during the final save, transient monitor/terminal task overlap followed by retry, duplicate-command precedence, distinct failed-unwind responses, and same-ID close/reopen during pending resume. Core/service, real runtime and loopback HTTP cases cover persistence rejection, ownership-safe saved-prompt correction, failed correction, competing prompts/tasks and unchanged replacement records. Narrow cancellation consumers can distinguish pre-existing tasks from tasks registered after admission; full retry restoration remains forbidden across either. All owning suites already participate in the scheduled reliability selectors. These are deterministic fake-provider boundaries, not real-host or restart-authorization qualification.
+
 GitHub authentication follows the same approach rather than becoming a separate phase. Phase 5 covers injected `GH_TOKEN` and `GITHUB_TOKEN`, stored `gh` accounts, precedence, explicit account selection, required scopes, package credentials, redaction, and failures. Phase 6 covers the identity and account-selection UI. Phase 7 repeats the fake-credential matrix on supported operating systems. Phase 8 verifies a real secure credential store with disposable accounts and cleanup.
 
 ## Standard local check

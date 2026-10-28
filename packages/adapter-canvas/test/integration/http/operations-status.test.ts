@@ -1,4 +1,5 @@
 import { createServer, request } from "node:http";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
@@ -44,6 +45,7 @@ afterEach(async () => {
 });
 
 interface Harness {
+  attachment: { generation: number };
   records: Map<string, OperationActionRecord>;
   setLatest(record: unknown): void;
   latestCalls: string[];
@@ -132,6 +134,7 @@ const DIAGNOSTIC_OPERATION: OperationActionRecord = {
 };
 
 function start(strictBrowserMutations = false): Harness {
+  const attachment = { generation: 1 };
   const records = new Map<string, OperationActionRecord>([
     ["op-running", RUNNING],
     [SUCCESSFUL_OPERATION.operationId, SUCCESSFUL_OPERATION],
@@ -181,6 +184,7 @@ function start(strictBrowserMutations = false): Harness {
       nonce: "browser-nonce"
     });
   const actionDependencies: OperationActionDependencies = {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     getOperation: (operationId) => {
       operationReads.push(operationId);
       return records.get(operationId);
@@ -199,6 +203,10 @@ function start(strictBrowserMutations = false): Harness {
       error instanceof Error ? error.message : String(error),
     inputRequiredState: INPUT_REQUIRED_STATE
   };
+  const resume = createOperationResumeService({
+    ...actionDependencies,
+    isShuttingDown: () => shuttingDown.value
+  });
 
   const routes = createTestRouteTable(
     createOperationsStatusRoutes(
@@ -252,10 +260,14 @@ function start(strictBrowserMutations = false): Harness {
           error instanceof Error ? error.message : String(error)
       },
       actionDependencies,
-      createOperationResumeService({
-        ...actionDependencies,
-        isShuttingDown: () => shuttingDown.value
-      })
+      (input, readInput, publish) => {
+        const generation = attachment.generation;
+        return resume(
+          { ...input, isCurrent: () => attachment.generation === generation },
+          readInput,
+          publish
+        );
+      }
     )
   );
 
@@ -281,6 +293,7 @@ function start(strictBrowserMutations = false): Harness {
   });
 
   return {
+    attachment,
     records,
     latestCalls,
     running,
@@ -627,6 +640,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     "resume identity during HTTP %s",
     (phase) => {
       it.each([
+        "attachment",
         "removed",
         "replaced",
         "id",
@@ -708,7 +722,12 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
                 phase === "input" ? 0 : 1
               );
             });
-            if (change === "removed") harness.records.delete(id);
+            const promptBefore =
+              phase === "input" ?
+                structuredClone(operation.inputRequired)
+              : null;
+            if (change === "attachment") harness.attachment.generation++;
+            else if (change === "removed") harness.records.delete(id);
             else if (change === "replaced") {
               harness.records.set(id, structuredClone(operation));
             } else if (change === "id")
@@ -720,15 +739,37 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
             if (phase === "input") outgoing.end(body.slice(1));
             held.resolve();
             expect(await response.promise).toMatchObject({
-              status: 409,
+              status:
+                change === "attachment" && phase === "persist-rejection" ?
+                  500
+                : 409,
               contentType: "application/json",
-              body: { code: "operation-resume-mismatch", operationId: id }
+              body: {
+                code:
+                  change === "attachment" && phase === "persist-rejection" ?
+                    "operation-resume-recovery-persist-failed"
+                  : "operation-resume-mismatch",
+                operationId: id
+              }
             });
-            expect(operation).toEqual(originalBefore);
-            expect(harness.records.get(id)).toEqual(currentBefore);
+            if (change === "attachment") {
+              expect(operation.state).toBe("input_required");
+              expect(operation.inputRequired).toMatchObject({
+                code: "app-selection-required",
+                checkpoint: "saved-input"
+              });
+              expect(operation.request?.azure).toEqual({});
+              if (phase === "input")
+                expect(operation.inputRequired).toEqual(promptBefore);
+            } else {
+              expect(operation).toEqual(originalBefore);
+              expect(harness.records.get(id)).toEqual(currentBefore);
+            }
             expect(harness.scheduled).toEqual([]);
             expect(harness.persistCalls).toHaveLength(
-              phase === "input" ? 0 : 1
+              phase === "input" ? 0
+              : change === "attachment" ? 2
+              : 1
             );
           } finally {
             held.resolve();

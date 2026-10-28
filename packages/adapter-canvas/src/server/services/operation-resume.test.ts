@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import { createDeferred } from "../../../test/support/browser/fakes.js";
 import {
   canResumeInput,
   createOperation,
+  createRegistry,
   finish,
   requireInput,
   resumeAfterInput,
@@ -32,6 +34,7 @@ function fixture(overrides: Partial<OperationResumeDependencies> = {}) {
   };
   requireInput(operation, { code: input.code, checkpoint: "saved-prompt" });
   const dependencies: OperationResumeDependencies = {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     getOperation: vi.fn((id) =>
       id === operation.operationId ? operation : null
     ),
@@ -58,6 +61,179 @@ function fixture(overrides: Partial<OperationResumeDependencies> = {}) {
 }
 
 describe("direct operation input continuation", () => {
+  it.each([false, true])(
+    "refuses competing admission and unsettled tasks before reading an answer (publish=%s)",
+    async (publishing) => {
+      const owner = createEnvironmentExecutionOwner();
+      const { operation, dependencies, input, readInput } = fixture({
+        claimAdmission: owner.claimAdmission
+      });
+      const service = createOperationResumeService(dependencies);
+      const publish = publishing ? vi.fn() : undefined;
+      const claim = owner.claimAdmission(operation.operationId);
+      expect(await service(input, readInput, publish)).toMatchObject({
+        status: 409,
+        body: { code: "operation-resume-mismatch" }
+      });
+      claim?.release();
+      const gate = createDeferred<void>();
+      const settled = createDeferred<void>();
+      owner.attach("panel").schedule(operation.operationId, {
+        run: () => gate.promise,
+        failed: async () => {
+          throw new Error("Unexpected task failure");
+        },
+        settling: () => {},
+        settled: () => settled.resolve()
+      });
+      try {
+        expect(await service(input, readInput, publish)).toMatchObject({
+          status: 409,
+          body: { code: "operation-task-busy" }
+        });
+        expect(readInput).not.toHaveBeenCalled();
+        expect(dependencies.persistOperations).not.toHaveBeenCalled();
+        if (publish) expect(publish).toHaveBeenCalledTimes(2);
+      } finally {
+        gate.resolve();
+        await settled.promise;
+      }
+      expect(await service(input, readInput)).toMatchObject({ status: 202 });
+    }
+  );
+  it.each(["save", "save-rejection", "correction-rejection"] as const)(
+    "durably restores only the owned resume when authority is lost during %s",
+    async (failure) => {
+      const owner = createEnvironmentExecutionOwner();
+      const { operation, dependencies, input, readInput } = fixture({
+        claimAdmission: owner.claimAdmission
+      });
+      operation.operationId = input.operationId =
+        "op_11111111-1111-4111-8111-111111111111";
+      operation.resumeRequest = { azure: { appId: "old" } };
+      const before = structuredClone(operation);
+      const entered = createDeferred<void>();
+      const held = createDeferred<void>();
+      let current = true;
+      let bytes = "";
+      let writes = 0;
+      const registry = createRegistry({
+        store: {
+          load: async () => null,
+          save: async (envelope) => {
+            writes++;
+            if (writes === 1) {
+              entered.resolve();
+              await held.promise;
+            } else if (failure === "correction-rejection") {
+              throw new Error("correction offline");
+            }
+            bytes = JSON.stringify(envelope);
+            if (writes === 1 && failure === "save-rejection")
+              throw new Error("write completed before rejection");
+          }
+        }
+      });
+      registry.put(operation);
+      dependencies.getOperation = (id) => registry.get(id);
+      dependencies.persistOperations = () => registry.persist();
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      const service = createOperationResumeService(dependencies);
+      const pending = service(
+        { ...input, isCurrent: () => current },
+        readInput
+      );
+      await Promise.race([
+        entered.promise,
+        pending.then((result) => {
+          throw new Error(
+            `Resume returned before saving: ${JSON.stringify(result)}`
+          );
+        })
+      ]);
+      current = false;
+      held.resolve();
+      expect(await pending).toMatchObject({
+        status: failure === "correction-rejection" ? 500 : 409,
+        body: {
+          code:
+            failure === "correction-rejection" ?
+              "operation-resume-recovery-persist-failed"
+            : "operation-resume-mismatch"
+        }
+      });
+      expect(operation).toEqual(before);
+      expect(writes).toBe(2);
+      expect(dependencies.scheduleEnvironmentOperation).not.toHaveBeenCalled();
+      if (failure === "correction-rejection") {
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining("operation-resume-recovery-persist-failed")
+        );
+        expect(owner.claimAdmission(operation.operationId)).toBeNull();
+      } else {
+        expect(JSON.parse(bytes).operations[0]).toMatchObject({
+          state: "input_required",
+          inputRequired: before.inputRequired
+        });
+        expect(await service(input, readInput)).toMatchObject({ status: 202 });
+      }
+    }
+  );
+
+  it.each(["prompt", "task"] as const)(
+    "does not schedule or overwrite a competing %s after a held resume save",
+    async (change) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = createDeferred<void>();
+      const held = createDeferred<void>();
+      const taskGate = createDeferred<void>();
+      const settled = createDeferred<void>();
+      const { operation, dependencies, input, readInput } = fixture({
+        claimAdmission: owner.claimAdmission,
+        persistOperations: vi.fn(async () => {
+          entered.resolve();
+          await held.promise;
+        })
+      });
+      const pending = createOperationResumeService(dependencies)(
+        input,
+        readInput
+      );
+      await entered.promise;
+      if (change === "prompt") {
+        requireInput(operation, {
+          code: "service-management-reference-required",
+          checkpoint: "new"
+        });
+      } else {
+        owner.attach("other").schedule(operation.operationId, {
+          run: () => taskGate.promise,
+          failed: async () => {
+            throw new Error("Unexpected task failure");
+          },
+          settling: () => {},
+          settled: () => settled.resolve()
+        });
+      }
+      const competing = structuredClone(operation);
+      held.resolve();
+      try {
+        expect(await pending).toMatchObject({
+          status: 409,
+          body: { code: "operation-resume-mismatch" }
+        });
+        expect(operation).toEqual(competing);
+        expect(dependencies.persistOperations).toHaveBeenCalledOnce();
+        expect(
+          dependencies.scheduleEnvironmentOperation
+        ).not.toHaveBeenCalled();
+      } finally {
+        taskGate.resolve();
+        if (change === "task") await settled.promise;
+      }
+    }
+  );
+
   describe.each(["input", "persist", "persist-rejection"] as const)(
     "identity changes during %s",
     (phase) => {
@@ -183,6 +359,7 @@ describe("direct operation input continuation", () => {
 
   it.each([
     "getOperation",
+    "claimAdmission",
     "canResumeInput",
     "resumeAfterInput",
     "requireInput",
@@ -251,9 +428,10 @@ describe("direct operation input continuation", () => {
 
   it("restores the original prompt and answer fields after a failed save", async () => {
     const { operation, dependencies, input, readInput } = fixture({
-      persistOperations: async () => {
-        throw new Error("store offline");
-      }
+      persistOperations: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("store offline"))
+        .mockResolvedValue(undefined)
     });
     const result = await createOperationResumeService(dependencies)(
       input,

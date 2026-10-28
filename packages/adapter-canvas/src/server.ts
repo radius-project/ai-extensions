@@ -291,7 +291,10 @@ import {
   createOperationsStatusRoutes,
   type OperationActionDependencies
 } from "./server/routes/operations-status.js";
-import { createOperationResumeService } from "./server/services/operation-resume.js";
+import {
+  createOperationResumeService,
+  type OperationResumeService
+} from "./server/services/operation-resume.js";
 import {
   createOperationsControlService,
   type OperationControlService,
@@ -5779,6 +5782,7 @@ export function createProductionCanvasServerRuntime(
   }
 
   const operationActionDependencies: OperationActionDependencies = {
+    claimAdmission: executionOwner.claimAdmission,
     getOperation: (operationId) => operations.get(operationId),
     canResumeInput,
     resumeAfterInput,
@@ -5793,9 +5797,36 @@ export function createProductionCanvasServerRuntime(
     errorMessage,
     inputRequiredState: INPUT_REQUIRED_STATE
   };
-  const operationResume = createOperationResumeService(
+  const sharedOperationResume = createOperationResumeService(
     operationActionDependencies
   );
+  const operationResume: OperationResumeService = (
+    input,
+    readInput,
+    publish
+  ) => {
+    const original =
+      input.instanceId === undefined ?
+        undefined
+      : instanceRequestCoordinators.get(input.instanceId);
+    return sharedOperationResume(
+      {
+        ...input,
+        isCurrent: () =>
+          original !== undefined &&
+          input.instanceId !== undefined &&
+          instanceRequestCoordinators.get(input.instanceId) === original &&
+          (input.isCurrent?.() ?? true),
+        schedule: (operation) => {
+          if (!original) return false;
+          original.scheduleEnvironmentOperation(operation);
+          return true;
+        }
+      },
+      readInput,
+      publish
+    );
+  };
 
   // Composition root for the migrated `operations-status` family. Reads, creates,
   // and resumable actions each receive only the registry, mutation, persistence,

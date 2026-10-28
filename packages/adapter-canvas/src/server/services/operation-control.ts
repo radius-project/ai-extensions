@@ -745,8 +745,7 @@ async function requireMergedSetupPullRequest(
     });
     return false;
   }
-  // The merge check is the one await between deciding and acting, so the
-  // verdict is re-read rather than assumed to have survived it.
+  // Bind the successful proof to this account through the later admission save.
   if (
     dependencies.get(operationId) !== operation ||
     savedAccount() !== githubLogin ||
@@ -761,6 +760,9 @@ async function requireMergedSetupPullRequest(
     });
     return false;
   }
+  const previousIsCurrent = request.isCurrent;
+  request.isCurrent = () =>
+    previousIsCurrent() && savedAccount() === githubLogin;
   return true;
 }
 
@@ -1107,6 +1109,15 @@ async function runAcceptedCommand(
             detail: errorMessage(outcome.error)
           });
           break;
+        case "stale-unwind-failed":
+          sendJson(context, 500, {
+            error:
+              "Radius could not durably undo admission. Inspect the saved operation before recovery.",
+            code: "operation-control-recovery-persist-failed",
+            operationId,
+            detail: errorMessage(outcome.error)
+          });
+          break;
         case "unscheduled":
           sendJson(context, 503, {
             error: `Radius could not start the ${spec.workLabel ?? spec.name}, so no work was started and nothing changed. Try again.`,
@@ -1218,6 +1229,15 @@ async function runControlCommand(
         operationId,
         ...(eligibility.detail ? { detail: eligibility.detail } : {}),
         operation: clientView(operation)
+      });
+      return;
+    }
+    if (admission.hadTask) {
+      sendJson(context, 409, {
+        code: "operation-task-busy",
+        error:
+          "The previous operation task is still settling. Wait for it to finish, then retry.",
+        operationId
       });
       return;
     }

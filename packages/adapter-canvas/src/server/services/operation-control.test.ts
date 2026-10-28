@@ -72,6 +72,95 @@ function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
 }
 
 describe("direct operation control service", () => {
+  it("rejects a replacement login during final admission persistence without restoring the old account", async () => {
+    const operation = mergeHandoff();
+    operation.context = { githubLogin: " original " };
+    const before = structuredClone(operation);
+    const registry = createRegistry();
+    registry.put(operation);
+    const entered = deferred();
+    const gate = deferred();
+    let saves = 0;
+    const { dependencies } = fixture({
+      get: (id) => registry.get(id),
+      acquireForRetry: (op) => registry.acquireForRetry(op),
+      checkPullRequestMerge: async () => ({ state: "merged" }),
+      persistOperations: async () => {
+        if (++saves === 2) {
+          entered.resolve();
+          await gate.promise;
+        }
+      }
+    });
+    const pending = createOperationsControlService(dependencies)({
+      operationId: operation.operationId,
+      command: "retry",
+      retryKind: "verification"
+    });
+    await entered.promise;
+    operation.context = { githubLogin: "replacement" };
+    gate.resolve();
+    expect(await pending).toMatchObject({
+      status: 409,
+      body: { code: "operation-context-changed" }
+    });
+    expect(operation).toMatchObject({
+      ...before,
+      context: { githubLogin: "replacement" }
+    });
+    expect(registry.running(operation.repo)).toBeNull();
+    expect(dependencies.schedule).not.toHaveBeenCalled();
+    expect(saves).toBe(3);
+  });
+
+  it.each(["monitor", "terminal"] as const)(
+    "refuses an unsettled %s task transiently before admission writes and allows retry after settlement",
+    async (kind) => {
+      const owner = createEnvironmentExecutionOwner();
+      const operation = kind === "monitor" ? mergeHandoff() : stoppedSetup();
+      const gate = deferred();
+      const settled = deferred();
+      owner.attach("panel").schedule(operation.operationId, {
+        run: () => gate.promise,
+        failed: async () => {
+          throw new Error("Unexpected failure");
+        },
+        settling: () => {},
+        settled: () => settled.resolve()
+      });
+      const { dependencies } = fixture({
+        claimAdmission: owner.claimAdmission,
+        get: () => operation,
+        checkPullRequestMerge: vi.fn(async () => ({ state: "merged" as const }))
+      });
+      const input = {
+        operationId: operation.operationId,
+        command:
+          kind === "monitor" ? ("retry" as const) : ("continue" as const),
+        retryKind: "verification"
+      };
+      const service = createOperationsControlService(dependencies);
+      const before = structuredClone(operation);
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(await service(input)).toMatchObject({
+            status: 409,
+            body: { code: "operation-task-busy" }
+          });
+        }
+        expect(operation).toEqual(before);
+        expect(dependencies.persistOperations).not.toHaveBeenCalled();
+        expect(dependencies.checkPullRequestMerge).not.toHaveBeenCalled();
+        expect(dependencies.schedule).not.toHaveBeenCalled();
+      } finally {
+        gate.resolve();
+        await settled.promise;
+      }
+      expect(await service(input)).toMatchObject({ status: 202 });
+      expect(dependencies.schedule).toHaveBeenCalledOnce();
+    }
+  );
+
   it("refuses a record whose registered ID does not match before acquiring admission", async () => {
     const operation = stoppedSetup();
     const { dependencies } = fixture({ get: () => operation });

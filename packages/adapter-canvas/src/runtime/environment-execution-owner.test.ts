@@ -128,12 +128,35 @@ describe("runtime environment execution ownership", () => {
           task(() => gate.promise)
         );
       expect(claim.canRestore()).toBe(false);
+      expect(claim.hadTask).toBe(when === "before");
+      expect(claim.canRestore({ allowPreexistingTask: true })).toBe(
+        when === "before"
+      );
       gate.resolve();
       await settled(owner, "panel");
       expect(claim.canRestore()).toBe(false);
       claim.release();
     }
   );
+  it("does not let narrow pre-existing-task restoration cross a new task registration", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const attachment = owner.attach("panel");
+    const gate = deferred();
+    attachment.schedule(
+      "op",
+      task(() => gate.promise)
+    );
+    const claim = owner.claimAdmission("op");
+    expect(claim?.canRestore({ allowPreexistingTask: true })).toBe(true);
+    attachment.schedule(
+      "op",
+      task(async () => {})
+    );
+    expect(claim?.canRestore({ allowPreexistingTask: true })).toBe(false);
+    gate.resolve();
+    await settled(owner, "panel");
+    claim?.release();
+  });
   it("constructs without work and isolates runtime claims and shutdown markers", () => {
     const owner = createEnvironmentExecutionOwner();
     const other = createEnvironmentExecutionOwner();

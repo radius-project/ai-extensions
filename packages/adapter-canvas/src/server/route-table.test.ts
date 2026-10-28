@@ -76,6 +76,7 @@ const productionHandlers = {
     },
     {
       getOperation: () => undefined,
+      claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
       canResumeInput: () => false,
       resumeAfterInput: () => {},
       requireInput: () => {},
