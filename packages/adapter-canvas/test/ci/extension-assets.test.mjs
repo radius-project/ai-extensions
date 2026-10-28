@@ -104,9 +104,12 @@ describe(".github/extension release assets", () => {
 
     expect(installStep).toBeDefined();
     expect(installStep.run).toContain(
-      'install-rad.sh --version "$RADIUS_INSTALL_REF"'
+      'bash "${GITHUB_ACTION_PATH}/install-radius.sh"'
     );
-    expect(installStep.run).not.toMatch(/install-rad\.sh\s+edge\b/u);
+    expect(installStep.env.RADIUS_RELEASE_OVERRIDE).toBe(
+      "${{ vars.RADIUS_RELEASE_OVERRIDE }}"
+    );
+    expect(installStep.env.RADIUS_INSTALL_REF).toMatch(/^v\d+\.\d+\.\d+$/u);
   });
 
   // A `workflow_dispatch` boolean input is a real boolean in the `inputs`

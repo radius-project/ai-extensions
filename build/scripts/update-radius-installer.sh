@@ -37,6 +37,14 @@ write_output() {
 }
 
 main() {
+    local requested_tag=""
+    if (($#)); then
+        [[ $# -eq 2 && "$1" == "--version" ]] ||
+            fail "usage: update-radius-installer.sh [--version vX.Y.Z[-rc.N]]"
+        requested_tag="$2"
+        [[ "${requested_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] ||
+            fail "invalid Radius release tag: ${requested_tag}"
+    fi
     require_tools
     [[ -f "${ACTION_FILE}" ]] || fail "action file not found: ${ACTION_FILE}"
     [[ -f "${RELEASE_FILE}" ]] || fail "release file not found: ${RELEASE_FILE}"
@@ -46,9 +54,13 @@ main() {
         api_headers=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
     fi
 
-    local release tag prerelease draft checksum
+    local release tag prerelease draft checksum release_url
+    release_url="${RADIUS_RELEASE_API_URL}"
+    if [[ -n "${requested_tag}" ]]; then
+        release_url="${RADIUS_RELEASE_API_URL%/latest}/tags/${requested_tag}"
+    fi
     release="$(curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
-        "${api_headers[@]}" "${RADIUS_RELEASE_API_URL}")"
+        "${api_headers[@]}" "${release_url}")"
     tag="$(jq -er '.tag_name | select(type == "string")' <<<"${release}")" ||
         fail "latest Radius release did not include a tag."
     prerelease="$(jq -r 'if (.prerelease | type) == "boolean" then .prerelease else error("invalid prerelease") end' <<<"${release}")" ||
@@ -56,10 +68,16 @@ main() {
     draft="$(jq -r 'if (.draft | type) == "boolean" then .draft else error("invalid draft") end' <<<"${release}")" ||
         fail "latest Radius release did not include draft metadata."
 
-    [[ "${prerelease}" == false && "${draft}" == false ]] ||
-        fail "latest Radius release ${tag} is not stable."
-    [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-        fail "latest Radius release tag is not stable semver: ${tag}"
+    [[ "${draft}" == false ]] || fail "Radius release ${tag} is a draft."
+    if [[ -n "${requested_tag}" ]]; then
+        [[ "${tag}" == "${requested_tag}" ]] ||
+            fail "requested Radius release ${requested_tag}, but the API returned ${tag}."
+    else
+        [[ "${prerelease}" == false ]] ||
+            fail "latest Radius release ${tag} is not stable."
+        [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            fail "latest Radius release tag is not stable semver: ${tag}"
+    fi
 
     local commit
     commit="$(curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
@@ -71,7 +89,7 @@ main() {
     INSTALLER_TEMP="$(mktemp)"
     ACTION_TEMP="${ACTION_FILE}.tmp"
     curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
-        "${RADIUS_RAW_BASE_URL}/${tag}/deploy/install.sh" -o "${INSTALLER_TEMP}"
+        "${RADIUS_RAW_BASE_URL}/${commit}/deploy/install.sh" -o "${INSTALLER_TEMP}"
     [[ -s "${INSTALLER_TEMP}" ]] || fail "downloaded Radius installer is empty."
     checksum="$(sha256sum "${INSTALLER_TEMP}" | awk '{print $1}')"
     [[ "${checksum}" =~ ^[0-9a-f]{64}$ ]] ||
@@ -101,6 +119,8 @@ main() {
     write_output tag "${tag}"
     write_output checksum "${checksum}"
     write_output commit "${commit}"
+    write_output release "$(jq -cn --arg tag "${tag}" --arg commit "${commit}" \
+        --arg checksum "${checksum}" '{tag: $tag, commit: $commit, checksum: $checksum}')"
     if [[ "${current_tag}" == "${tag}" && "${current_checksum}" == "${checksum}" &&
         "${current_release_tag}" == "${tag}" && "${current_release_commit}" == "${commit}" && "${current_commit}" == "${commit}" ]]; then
         write_output changed false

@@ -87,6 +87,14 @@ To keep the two provider paths from duplicating the ~80% of steps they share, it
 
 The deploy flow generates the dispatcher and both provider workflows, commits them to the target repo under `.github/workflows/`, and dispatches `run-rad-commands.yml`.
 
+### Select a Radius release
+
+By default, `setup-control-plane` installs the checked-in stable Radius pin. To test another published release, set the GitHub Environment variable `RADIUS_RELEASE_OVERRIDE` to a JSON object with `tag`, `commit`, and `checksum` fields. Use the exact release tag, its 40-character source commit, and the 64-character SHA-256 checksum of `deploy/install.sh` at that commit. Release candidates are supported.
+
+The setup action downloads the installer from that commit, verifies its checksum, and installs the CLI and control plane for the selected tag. The recipe catalog uses the same commit. Deploy and delete workflows read the same environment variable. Invalid metadata, failed downloads, and checksum errors stop setup; they do not select another release.
+
+This variable changes the runner's Radius version, not the extension's local modeling CLI. The [Cloud E2E version input](../../docs/eng/CLOUD_E2E_RUNBOOK.md#select-a-radius-version) selects both. Leave the variable unset to retain the default pin. Do not change versions between deploy and delete unless the selected Radius release supports the saved state and application resources.
+
 ## `delete-application.yml` / `delete-environment.yml` (delete dispatchers and provider workflows)
 
 Radius deletes a deployed application or an environment with the same ephemeral-control-plane model as the deploy flow. Because deleting recipe-backed resources runs the recipes' delete path (e.g. `terraform destroy`) against the target cluster and cloud, the delete workflows restore the persisted Radius state first, run the delete, then persist the updated state again — so subsequent runs plan against the post-delete state.

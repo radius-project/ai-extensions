@@ -38,7 +38,7 @@ while (($#)); do
 done
 [[ -n "${url}" ]]
 printf '%s\n' "${url}" >>"${CURL_LOG}"
-if [[ "${url}" == */releases/latest ]]; then
+if [[ "${url}" == */releases/latest || "${url}" == */releases/tags/* ]]; then
     printf '%s\n' "${RELEASE_JSON}"
 elif [[ "${url}" == */commits/* ]]; then
     [[ "${FAIL_COMMIT_CURL:-}" != true ]] || exit 22
@@ -74,7 +74,7 @@ write_release() {
 
 run_update() {
     : >"${GITHUB_OUTPUT}"
-    PATH="${TEST_ROOT}/bin:${PATH}" bash "${UPDATER}"
+    PATH="${TEST_ROOT}/bin:${PATH}" bash "${UPDATER}" "$@"
 }
 
 export ACTION_FILE="${TEST_ROOT}/action.yml"
@@ -106,8 +106,8 @@ grep -Fq "RADIUS_INSTALL_COMMIT: ${COMMIT_SHA}" "${ACTION_FILE}" ||
     fail "updater did not record the release commit"
 grep -Fxq "changed=true" "${GITHUB_OUTPUT}" ||
     fail "updater did not report a change"
-grep -Fxq "https://example.test/radius/v1.2.3/deploy/install.sh" "${CURL_LOG}" ||
-    fail "updater fetched the installer from the wrong release"
+grep -Fxq "https://example.test/radius/${COMMIT_SHA}/deploy/install.sh" "${CURL_LOG}" ||
+    fail "updater did not fetch the installer from the immutable release commit"
 grep -Fq "/bin/bash install-rad.sh --version \"\$RADIUS_INSTALL_REF\"" "${ACTION_FILE}" ||
     fail "updater changed the pinned CLI install command"
 
@@ -177,6 +177,7 @@ export FAIL_CURL=true
 if run_update >/dev/null 2>&1; then
     fail "updater ignored a release API failure"
 fi
+unset FAIL_CURL
 
 # A moved or unresolvable release commit must fail without changing the pin.
 write_action v1.2.2 "${OLD_CHECKSUM}"
@@ -189,5 +190,54 @@ unset FAIL_COMMIT_CURL
 cmp -s "${TEST_ROOT}/before-commit.yml" "${ACTION_FILE}" ||
     fail "commit lookup failure changed the action"
 COMMIT_SHA="not-a-sha" run_update >/dev/null 2>&1 && fail "updater accepted a malformed commit"
+
+for tag in v1.2.3 v1.3.0-rc.1; do
+    prerelease=false
+    [[ "${tag}" != *-rc.* ]] || prerelease=true
+    export RELEASE_JSON="{\"tag_name\":\"${tag}\",\"prerelease\":${prerelease},\"draft\":false}"
+    run_update --version "${tag}" >/dev/null
+    [[ "$(jq -r .tag "${RELEASE_FILE}")" == "${tag}" ]] ||
+        fail "explicit version did not update the managed CLI"
+    grep -Fxq "https://example.test/releases/tags/${tag}" "${CURL_LOG}" ||
+        fail "explicit version did not query the requested release"
+    release="$(sed -n 's/^release=//p' "${GITHUB_OUTPUT}")"
+    [[ "$(jq -r '.tag' <<<"${release}")" == "${tag}" &&
+        "$(jq -r '.commit' <<<"${release}")" == "${COMMIT_SHA}" &&
+        "$(jq -r '.checksum' <<<"${release}")" == "${EXPECTED_CHECKSUM}" ]] ||
+        fail "explicit version did not emit complete deployment metadata"
+done
+
+cp "${ACTION_FILE}" "${TEST_ROOT}/explicit-before.yml"
+cp "${RELEASE_FILE}" "${TEST_ROOT}/explicit-before.json"
+for tag in "" edge main v1.2 'v1.3.0;echo bad' '../v1.3.0'; do
+    : >"${CURL_LOG}"
+    if run_update --version "${tag}" >/dev/null 2>&1; then
+        fail "updater accepted invalid version: ${tag}"
+    fi
+    [[ ! -s "${CURL_LOG}" ]] || fail "invalid version reached the network"
+done
+for args in '--version' '--unknown v1.2.3' '--version v1.2.3 extra'; do
+    : >"${CURL_LOG}"
+    read -r -a argv <<<"${args}"
+    if run_update "${argv[@]}" >/dev/null 2>&1; then
+        fail "updater accepted invalid arguments: ${args}"
+    fi
+    [[ ! -s "${CURL_LOG}" ]] || fail "invalid arguments reached the network"
+done
+for metadata in \
+    '{"tag_name":"v1.3.0-rc.1","prerelease":true,"draft":true}' \
+    '{"tag_name":"v1.3.0-rc.2","prerelease":true,"draft":false}' \
+    '{"tag_name":"v1.3.0-rc.1","draft":false}'; do
+    export RELEASE_JSON="${metadata}"
+    if run_update --version v1.3.0-rc.1 >/dev/null 2>&1; then
+        fail "updater accepted invalid explicit-release metadata"
+    fi
+done
+FAIL_CURL=true run_update --version v1.3.0-rc.1 >/dev/null 2>&1 &&
+    fail "updater ignored a missing explicit release"
+cmp -s "${TEST_ROOT}/explicit-before.yml" "${ACTION_FILE}" ||
+    fail "failed explicit selection changed the action"
+cmp -s "${TEST_ROOT}/explicit-before.json" "${RELEASE_FILE}" ||
+    fail "failed explicit selection changed the managed CLI"
 
 echo "Radius installer updater tests passed"
