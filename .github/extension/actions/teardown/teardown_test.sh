@@ -127,6 +127,7 @@ def run_block(script, env_extra=None, rad_fail_on="", capture_output=False,
         'if [ -n "${RAD_FAIL_ON}" ] && [[ "$*" == *"${RAD_FAIL_ON}"* ]]; then\n'
         "  exit 1\n"
         "fi\n"
+        'if [[ "$*" == "app list" ]]; then printf \'%s\\n\' "${RAD_APP_LIST_JSON}"; fi\n'
         "exit 0\n",
         encoding="utf-8",
     )
@@ -143,6 +144,7 @@ def run_block(script, env_extra=None, rad_fail_on="", capture_output=False,
     env["RAD_LOG"] = str(rad_log)
     env["GITHUB_OUTPUT"] = str(github_output)
     env["RAD_FAIL_ON"] = rad_fail_on
+    env["RAD_APP_LIST_JSON"] = "[]"
     if env_extra:
         env.update(env_extra)
 
@@ -238,6 +240,13 @@ if "--preview" in status_rad:
 status_fail_stdout, _, _, _ = run_block(status_block, rad_fail_on="app list")
 if "::warning" not in status_fail_stdout:
     fail("teardown status step must warn (not swallow) when `rad app list` fails")
+
+for empty_list in ("[]", "null"):
+    status_stdout, _, _, _ = run_block(
+        status_block, env_extra={"RAD_APP_LIST_JSON": empty_list}
+    )
+    if empty_list not in status_stdout or "::warning" in status_stdout:
+        fail(f"teardown must accept an empty application list: {empty_list}")
 
 # 7. Every workflow using the teardown action wires state-restored from a
 #    same-job restore-state step. Checked against every workflow discovered
