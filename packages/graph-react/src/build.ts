@@ -393,6 +393,7 @@ export function buildGraph(
       : settings.branch;
     const badgeKind = radiusDeployBadgeKind(resource.deployStatus);
     const resourceIcon = radiusResolveIconSource(resource);
+    const cloudOutputs = cloudOutputsOf(resource);
     pushNode(id, {
       borderColor: colors.border,
       borderWidth: 2.5,
@@ -429,8 +430,9 @@ export function buildGraph(
       portalUrl:
         resource.portalUrl ||
         resolved?.portalUrl ||
-        cloudConsoleUrl(resolved?.id ?? ""),
-      cloudResources: JSON.stringify(cloudOutputsOf(resource)),
+        cloudConsoleUrl(resolved?.id ?? "") ||
+        cloudConsoleUrl(cloudOutputs[0]?.id ?? ""),
+      cloudResources: JSON.stringify(cloudOutputs),
       provisioningState: resource.provisioningState
     });
 

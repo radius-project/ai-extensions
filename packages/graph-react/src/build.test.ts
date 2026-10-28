@@ -954,6 +954,61 @@ describe("planned and deploying graphs", () => {
     expect(modeled.dataById["db/output/1/role"].cloudId).toBe("");
   });
 
+  it("links an RDS database card to its instance when the recipe declares supporting resources first", () => {
+    const scope =
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers";
+    const rds = `${scope}/AWS.RDS/DBInstance/db`;
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "db",
+        name: "db",
+        outputResources: [
+          {
+            id: `${scope}/AWS.RDS/DBSubnetGroup/db-subnets`,
+            name: "db-subnets",
+            type: "AWS.RDS/DBSubnetGroup"
+          },
+          {
+            id: `${scope}/AWS.RDS/DBParameterGroup/db-params`,
+            name: "db-params",
+            type: "AWS.RDS/DBParameterGroup"
+          },
+          { id: rds, name: "instance", type: "AWS.RDS/DBInstance" }
+        ]
+      }
+    ]);
+    expect(built.dataById.db.concreteType).toContain("DBInstance");
+    expect(built.dataById.db.portalUrl).toBe(
+      "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2#databases:"
+    );
+  });
+
+  it("falls back to a linkable AWS output when the primary has no console page", () => {
+    const scope =
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers";
+    const built = buildGraph(settings({ deployMode: true }), [
+      {
+        id: "queue",
+        name: "queue",
+        outputResources: [
+          {
+            id: `${scope}/AWS.Logs/LogGroup/queue-logs`,
+            name: "queue-logs",
+            type: "AWS.Logs/LogGroup"
+          },
+          {
+            id: `${scope}/AWS.SQS/Queue/jobs`,
+            name: "jobs",
+            type: "AWS.SQS/Queue"
+          }
+        ]
+      }
+    ]);
+    expect(built.dataById.queue.portalUrl).toBe(
+      "https://us-west-2.console.aws.amazon.com/sqs/v3/home?region=us-west-2#/queues"
+    );
+  });
+
   it("gives an unrecognized AWS resource no console link", () => {
     const built = buildGraph(settings({ deployMode: true }), [
       {
