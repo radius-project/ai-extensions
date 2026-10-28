@@ -327,9 +327,15 @@ function action(
 }
 
 describe("operation controls real-loopback HIT", () => {
-  it.each(["not_applied", "outcome_unknown", "manual_required"] as const)(
-    "refuses rollback of a restored %s branch deletion without scheduling cleanup",
-    async (status) => {
+  it.each([
+    { status: "not_applied", evidence: null },
+    { status: "not_applied", evidence: "" },
+    { status: "not_applied", evidence: "HTTP 403" },
+    { status: "outcome_unknown", evidence: null },
+    { status: "manual_required", evidence: null }
+  ] as const)(
+    "refuses rollback of a restored $status branch deletion ($evidence) without scheduling cleanup",
+    async ({ status, evidence }) => {
       const harness = start();
       const entry = await container!.getOrCreate("panel-a");
       const saved = stoppedSetup({ includeEnvironment: true });
@@ -337,7 +343,7 @@ describe("operation controls real-loopback HIT", () => {
         kind: "github_branch.delete",
         target: "fixture/app\0setup-branch\0original-head"
       });
-      settleProviderMutation(saved, mutation.mutationId, status, null);
+      settleProviderMutation(saved, mutation.mutationId, status, evidence);
       const restored = fromPersistedOperation(toPersistedOperation(saved));
       restored.providerRecovery.state = "rollback_pending";
       const op = seed(harness, restored);
@@ -350,9 +356,17 @@ describe("operation controls real-loopback HIT", () => {
         );
         expect(response.status).toBe(409);
         expect(response.headers.get("Content-Type")).toBe("application/json");
-        expect(await body(response)).toMatchObject({
+        const refusal = await body(response);
+        expect(refusal).toMatchObject({
           code: "rollback-provider-outcome-unknown"
         });
+        if (status === "not_applied") {
+          expect(refusal).toMatchObject({
+            detail:
+              "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again." +
+              (evidence ? ` Details: ${evidence}` : "")
+          });
+        }
       }
       const view = await poll(
         entry.baseUrl,
