@@ -21,7 +21,7 @@ export const RECIPE_PACK_REF = "main";
 // place to move it: to the merge commit of
 // radius-project/resource-types-contrib#442, and later to the catalog.
 export const AWS_EKS_RECIPE_PACK = {
-  ref: "08e7182dbbc97a04e0eb73c7cf3fcd8f858f7236",
+  ref: "c84b0ac34f0c33db3d3d04ec95b097fb6863519b",
   path: "recipe-packs/aws-eks/aws-eks.bicep"
 } as const;
 
