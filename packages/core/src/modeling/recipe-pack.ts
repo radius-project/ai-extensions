@@ -23,7 +23,7 @@ export const RECIPE_PACK_REF = "main";
 // Users don't get this pack until the Radius runtime pinned in
 // .github/extension/actions/setup-control-plane has radius-project/radius#13465.
 export const AWS_EKS_RECIPE_PACK = {
-  ref: "c84b0ac34f0c33db3d3d04ec95b097fb6863519b",
+  ref: "aaf84d559d89fc0e3704ba95a56b57116d6fbace",
   path: "recipe-packs/aws-eks/aws-eks.bicep"
 } as const;
 
