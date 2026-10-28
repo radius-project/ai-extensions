@@ -9,8 +9,6 @@ The Radius canvas deploys apps only to Azure today. A developer whose team runs 
 
 This design adds AWS as a second provider with the same journey and screens as Azure: connect an account, create an environment on an existing EKS cluster, deploy, see the deployed graph, and delete. The hard part is the IAM role GitHub Actions uses to deploy, called the deploy identity: AWS has no per-environment object like Azure's federated credential, so environments share one role, its size limits, and its trust policy.
 
-A working prototype deployed a real app to EKS with MySQL on Amazon RDS, and this doc is based on it. AWS stays hidden from users until all of it ships.
-
 ## Background
 
 ### How an Azure environment works today
