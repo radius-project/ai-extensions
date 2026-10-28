@@ -593,7 +593,8 @@ describe("generateDeleteWorkflow", () => {
     // exits non-zero instead of pretending the environment is empty.
     expect(provider).not.toContain("|| echo '[]'");
     expect(provider).toContain("rad application list --output json");
-    expect(provider).toContain("jq -e 'type == \"array\"'");
+    expect(provider).toContain("elif .[0] == null then []");
+    expect(provider).toContain('elif (.[0] | type) == "array" then .[0]');
   });
 
   it("fills the {{ENV}} default into the environment dispatcher", async () => {
