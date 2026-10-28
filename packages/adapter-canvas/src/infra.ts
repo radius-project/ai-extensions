@@ -669,6 +669,21 @@ export async function generateDeleteWorkflow(
   return generated;
 }
 
+export interface WorkflowTemplates {
+  deploy(environment: string, appFile: string): Promise<Record<string, string>>;
+  delete(environment: string): Promise<Record<string, string>>;
+}
+
+// The deploy and delete templates one runtime commits, with its AWS switch
+// bound in.
+export function workflowTemplates(includeAws: boolean): WorkflowTemplates {
+  return {
+    deploy: (environment, appFile) =>
+      generateDeployWorkflow(environment, appFile, { includeAws }),
+    delete: (environment) => generateDeleteWorkflow(environment, { includeAws })
+  };
+}
+
 /**
  * Remove the `aws:` job (and any contiguous comment lines directly above it)
  * from a dispatcher workflow. Without the AWS switch only the Azure provider
