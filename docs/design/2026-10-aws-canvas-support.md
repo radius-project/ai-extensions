@@ -2,7 +2,6 @@
 
 - **Author**: Karishma Chawla (@kachawla)
 - **Date**: 2026-10
-- **Status**: In review
 
 ## Summary
 
