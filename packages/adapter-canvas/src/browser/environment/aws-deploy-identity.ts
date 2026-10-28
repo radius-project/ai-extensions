@@ -76,6 +76,9 @@ export function initializeAwsDeployIdentity(
 ): AwsDeployIdentityHandle {
   let accountId = "";
   let region = "";
+  // Bumped by every role lookup and every account change, so a lookup that
+  // finishes after either never opens the picker or pins a role.
+  let generation = 0;
   const nameInput = context.dom.inputById("aws-role-name-input");
   const arnInput = context.dom.inputById("aws-selected-role-arn");
   const note = context.dom.byId("aws-selected-role-note");
@@ -126,14 +129,19 @@ export function initializeAwsDeployIdentity(
   };
 
   const useExistingRole = async (useLink: DomElement): Promise<void> => {
+    const mine = ++generation;
+    const lookupAccount = accountId;
+    const stale = (): boolean => !scope.active || mine !== generation;
     useLink.textContent = "Loading roles…";
     let candidates: AwsRoleCandidate[];
     try {
       const response = await context.net.fetch(
-        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${encodeURIComponent(accountId)}`
+        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${encodeURIComponent(lookupAccount)}`
       );
       const payload = await response.json();
+      if (!scope.active) return;
       useLink.textContent = "use an existing role…";
+      if (stale()) return;
       const error = readString(payload, "error");
       if (error !== "") {
         showNote(error, true);
@@ -141,7 +149,9 @@ export function initializeAwsDeployIdentity(
       }
       candidates = parseAwsRoleCandidates(payload);
     } catch (error) {
+      if (!scope.active) return;
       useLink.textContent = "use an existing role…";
+      if (stale()) return;
       showNote(
         `Could not list IAM roles: ${error instanceof Error ? error.message : String(error)}`,
         true
@@ -156,7 +166,7 @@ export function initializeAwsDeployIdentity(
     try {
       choice = await deps.promptRoleSelection({
         title: "Use an existing role",
-        intro: `Select an IAM role in account ${accountId}. Radius adds this repository's trust, this environment's permissions, and cluster access to it, and never deletes it.`,
+        intro: `Select an IAM role in account ${lookupAccount}. Radius adds this repository's trust, this environment's permissions, and cluster access to it, and never deletes it.`,
         caution:
           "Sharing one role across repositories means every trusted repository can use its AWS permissions. Only do this for repos that belong to the same product.",
         candidates: candidates.map((candidate) => ({
@@ -171,7 +181,7 @@ export function initializeAwsDeployIdentity(
     } catch {
       return;
     }
-    if (!("appId" in choice)) return;
+    if (stale() || !("appId" in choice)) return;
     const picked = candidates.find(
       (candidate) => candidate.arn === choice.appId
     );
@@ -198,8 +208,12 @@ export function initializeAwsDeployIdentity(
   return {
     setProfile(profile) {
       const nextAccount = profile?.accountId ?? "";
-      // A pinned role belongs to one account; a different profile unpins it.
-      if (nextAccount !== accountId) clearPin();
+      // A pinned role belongs to one account; a different profile unpins it
+      // and abandons any lookup still running for the old account.
+      if (nextAccount !== accountId) {
+        generation += 1;
+        clearPin();
+      }
       accountId = nextAccount;
       region = profile?.region ?? "";
       refreshHelp();
