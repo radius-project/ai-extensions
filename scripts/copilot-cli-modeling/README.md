@@ -50,7 +50,7 @@ The workflow is a daily regression check, so a failure must mean that modeling b
 
 - The CLI install step has a 5-minute timeout. npm retries failed downloads.
 - The case checkout retries `git fetch` three times and stops a transfer that stays below 1 KB/s for 60 seconds.
-- The checkout, the plugin install, and the session must finish in 35 minutes, and the session in 30 minutes. Then the harness stops the session and writes `summary.md` before the 45-minute step timeout.
+- The checkout, the plugin install, and the session must finish in 35 minutes, and the session in 30 minutes. Then the harness stops the running command or session and every process that it started. It sends SIGTERM first and SIGKILL 20 seconds later. Then it writes `summary.md` before the 45-minute step timeout.
 
 The harness does not retry a session. A session that ends without `.radius/app.bicep` is the failure this check exists to find.
 

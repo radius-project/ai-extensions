@@ -27,6 +27,7 @@ import {
   modelingEnvironment,
   outcomeFailure,
   parseRunOptions,
+  runCommand,
   runModeling,
   summaryMarkdown,
   writeSummary
@@ -256,7 +257,7 @@ describe("run options", () => {
       {
         ...summary,
         result: "failed",
-        failure: "a | b",
+        failure: "a | b\r\nc\nd",
         cliVersion: undefined,
         requestedModel: undefined,
         requestedReasoningEffort: undefined,
@@ -269,7 +270,7 @@ describe("run options", () => {
       undefined
     );
 
-    expect(markdown).toContain("| Result | failed: a \\| b |");
+    expect(markdown).toContain("| Result | failed: a \\| b<br>c<br>d |");
     expect(markdown).toContain("| Copilot CLI | unknown |");
     expect(markdown).toContain("| Requested model | CLI default |");
     expect(markdown).toContain("| Requested reasoning effort | CLI default |");
@@ -524,11 +525,12 @@ describe("the run output", () => {
 
 // A stand-in for Copilot CLI. Only the session may get the token. The session
 // records a skill event, prints the token, and then acts as FAKE_COPILOT_MODE
-// says.
+// says. In setup-hang mode, --version waits on a process that keeps its output
+// open.
 const FAKE_COPILOT = `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const [command] = process.argv.slice(2);
 const token = process.env.COPILOT_GITHUB_TOKEN;
 if (command === "--version" || command === "plugin") {
@@ -536,6 +538,12 @@ if (command === "--version" || command === "plugin") {
     console.error("The token reached copilot " + command + ".");
     process.exit(9);
   }
+  if (command === "--version" && process.env.FAKE_COPILOT_MODE === "setup-hang")
+    spawnSync(
+      process.execPath,
+      ["-e", 'require("node:fs").writeFileSync(process.env.FAKE_COPILOT_PID_FILE, String(process.pid)); setInterval(() => {}, 1000)'],
+      { stdio: "inherit" }
+    );
   if (command === "--version") console.log("GitHub Copilot CLI 1.0.99-2.");
   process.exit(0);
 }
@@ -684,6 +692,46 @@ describe.skipIf(process.platform === "win32")("a modeling run", () => {
       await readFile(path.join(outputDir, "summary.md"), "utf8")
     ).toContain("did not finish");
   }, 20_000);
+
+  it("stops a setup command and the processes it started at the run's time limit", async () => {
+    const { options, outputDir, pidFile } = await setUp("setup-hang");
+
+    const summary = await runModeling({ ...options, runTimeLimitMs: 4000 });
+
+    expect(summary).toMatchObject({
+      result: "failed",
+      failure: expect.stringMatching(
+        /^copilot --version did not finish in \d s/
+      )
+    });
+    const grandchild = Number(await readFile(pidFile, "utf8"));
+    await expect.poll(() => isRunning(grandchild)).toBe(false);
+    expect(
+      await readFile(path.join(outputDir, "summary.md"), "utf8")
+    ).toContain("did not finish");
+  }, 20_000);
+
+  it("kills a command that ignores SIGTERM, and the processes it started", async () => {
+    // The command prints the PID of a child that keeps its output open.
+    const script =
+      'process.on("SIGTERM", () => {});' +
+      'const child = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "inherit" });' +
+      "console.log(child.pid);" +
+      "setInterval(() => {}, 1000);";
+
+    const result = await runCommand(process.execPath, ["-e", script], {
+      env: process.env,
+      timeoutMs: 2000,
+      stopGraceMs: 500
+    });
+
+    expect(result).toMatchObject({
+      code: null,
+      signal: "SIGKILL",
+      timedOut: true
+    });
+    await expect.poll(() => isRunning(Number(result.stdout))).toBe(false);
+  }, 10_000);
 
   it("refuses an app.bicep that is a symbolic link", async () => {
     const { options, outputDir } = await setUp("link");

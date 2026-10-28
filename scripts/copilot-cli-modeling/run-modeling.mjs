@@ -8,6 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -55,7 +56,7 @@ export const RUN_TIME_LIMIT_MS = 35 * 60_000;
 const SESSION_TIMEOUT_MS = 30 * 60_000;
 const COMMAND_TIMEOUT_MS = 5 * 60_000;
 
-/** The time between asking the session to stop and killing it. */
+/** The time between asking a command or the session to stop and killing it. */
 const STOP_GRACE_MS = 20_000;
 
 /**
@@ -262,7 +263,7 @@ export function summaryMarkdown(summary, appBicep) {
 
   const result =
     summary.result === "failed" ?
-      `failed: ${summary.failure.replaceAll("|", "\\|")}`
+      `failed: ${summary.failure.replaceAll("|", "\\|").replace(/\r?\n|\r/g, "<br>")}`
     : summary.result;
 
   const lines = [
@@ -311,82 +312,101 @@ function describeError(cause) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** Runs a command to completion, or stops it after `timeoutMs`. */
-function run(command, args, { env, timeoutMs }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs
+/**
+ * Starts a command in its own process group. At `timeLimitMs`, the run sends
+ * the group SIGTERM, and SIGKILL `stopGraceMs` later. When the command exits,
+ * the run kills the rest of the group, so no process that the command started
+ * outlives it. `finished` settles when the command and its output end.
+ */
+function startInGroup(
+  command,
+  args,
+  { cwd, env, stdio, timeLimitMs, stopGraceMs = STOP_GRACE_MS }
+) {
+  const child = spawn(command, args, { cwd, env, stdio, detached: true });
+
+  const signalGroup = (name) => {
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, name);
+    } catch {
+      // The process group already exited.
+    }
+  };
+
+  let timedOut = false;
+  let killTimer;
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    signalGroup("SIGTERM");
+    killTimer = setTimeout(() => signalGroup("SIGKILL"), stopGraceMs);
+  }, timeLimitMs);
+  child.once("exit", () => signalGroup("SIGKILL"));
+
+  const finished = once(child, "close")
+    .then(([code, signal]) => ({ code, signal, timedOut }))
+    .finally(() => {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
     });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
-    child.on("error", reject);
-    child.on("close", (code, signal) =>
-      resolve({ code, signal, stdout, stderr })
-    );
+
+  return { child, finished };
+}
+
+/** Runs a command to completion, or stops it after `timeoutMs`. */
+export async function runCommand(
+  command,
+  args,
+  { env, timeoutMs, stopGraceMs }
+) {
+  const { child, finished } = startInGroup(command, args, {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeLimitMs: timeoutMs,
+    stopGraceMs
   });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+  child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+
+  return { ...(await finished), stdout, stderr };
 }
 
 /** Runs a command and returns its output. Throws if the command fails. */
 async function check(command, args, options) {
-  const result = await run(command, args, options);
+  const result = await runCommand(command, args, options);
 
-  if (result.code !== 0)
+  if (result.code !== 0) {
+    const reason =
+      result.timedOut ?
+        `did not finish in ${formatSeconds(options.timeoutMs / 1000)}`
+      : `failed (${result.signal ?? `exit code ${String(result.code)}`})`;
+
     throw new Error(
-      `${command} ${args.join(" ")} failed (${result.signal ?? `exit code ${String(result.code)}`}): ${result.stderr.trim() || result.stdout.trim()}`
+      `${command} ${args.join(" ")} ${reason}: ${result.stderr.trim() || result.stdout.trim()}`
     );
+  }
 
   return result.stdout.trim();
 }
 
 /**
  * Runs the Copilot CLI session in its own process group and writes its
- * output to `logFile`. When the session ends or times out, the run stops the
- * whole group, so no process that the agent started outlives the run.
+ * output to `logFile`.
  */
 async function runSession(args, { cwd, env, logFile, timeLimitMs }) {
   const out = await fs.open(logFile, "w");
 
   try {
-    const child = spawn("copilot", args, {
+    const { code, timedOut } = await startInGroup("copilot", args, {
       cwd,
       env,
-      detached: true,
-      stdio: ["ignore", out.fd, out.fd]
-    });
+      stdio: ["ignore", out.fd, out.fd],
+      timeLimitMs
+    }).finished;
 
-    const signal = (name) => {
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, name);
-      } catch {
-        // The process group already exited.
-      }
-    };
-
-    let timedOut = false;
-    let killTimer;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      signal("SIGTERM");
-      killTimer = setTimeout(() => signal("SIGKILL"), STOP_GRACE_MS);
-    }, timeLimitMs);
-
-    try {
-      const code = await new Promise((resolve, reject) => {
-        child.once("error", reject);
-        child.once("exit", (exitCode) => resolve(exitCode));
-      });
-
-      return { code, timedOut };
-    } finally {
-      clearTimeout(timer);
-      clearTimeout(killTimer);
-      signal("SIGKILL");
-    }
+    return { code, timedOut };
   } finally {
     await out.close();
   }
