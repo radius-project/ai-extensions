@@ -702,6 +702,58 @@ describe("setupAwsDeployIdentity safety gates", () => {
     }
   });
 
+  it("trusts the environment on a picked role that restricts the subject with two operators", async () => {
+    const restricted = {
+      Effect: "Allow",
+      Principal: { Federated: PROVIDER_ARN },
+      Action: "sts:AssumeRoleWithWebIdentity",
+      Condition: {
+        StringEquals: {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": PROD
+        },
+        StringLike: { "token.actions.githubusercontent.com:sub": PROD }
+      }
+    };
+    const aws = fakeAws({
+      ...happyPath,
+      ...existingProvider,
+      "iam get-role": ok({
+        Role: {
+          Arn: ROLE_ARN,
+          AssumeRolePolicyDocument: {
+            Version: "2012-10-17",
+            Statement: [restricted]
+          }
+        }
+      }),
+      "iam update-assume-role-policy": ok()
+    });
+    const result = await setupAwsDeployIdentity(
+      { ...request, existingRoleArn: ROLE_ARN },
+      aws.ports
+    );
+    expect(result).toMatchObject({ ok: true });
+    const update = aws.find("iam update-assume-role-policy") ?? [];
+    const written = JSON.parse(
+      update[update.indexOf("--policy-document") + 1] ?? "{}"
+    );
+    expect(written.Statement).toEqual([
+      restricted,
+      {
+        Effect: "Allow",
+        Principal: { Federated: PROVIDER_ARN },
+        Action: "sts:AssumeRoleWithWebIdentity",
+        Condition: {
+          StringEquals: {
+            "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+            "token.actions.githubusercontent.com:sub": [DEV]
+          }
+        }
+      }
+    ]);
+  });
+
   it("adds trust to a picked role whose existing statement uses another audience", async () => {
     const picked = {
       Role: {
