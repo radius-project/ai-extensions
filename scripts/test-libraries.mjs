@@ -82,13 +82,18 @@ function environment() {
 }
 
 function run(cli, args, cwd) {
-  const result = spawnSync(process.execPath, [cli, ...args], {
-    cwd,
-    env: environment(),
-    encoding: "utf8",
-    timeout: 120_000,
-    maxBuffer: 8 * 1024 * 1024
-  });
+  const isScript = /\.(?:c|m)?js$/i.test(cli);
+  const result = spawnSync(
+    isScript ? process.execPath : cli,
+    isScript ? [cli, ...args] : args,
+    {
+      cwd,
+      env: environment(),
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 8 * 1024 * 1024
+    }
+  );
   if (result.error) throw result.error;
   assert.equal(
     result.status,
