@@ -1084,6 +1084,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     ["region is upper case", { region: "US-WEST-2" }],
     ["region has no zone number", { region: "us-west" }],
     ["cluster is blank", { cluster: "  " }],
+    ["cluster is missing", { cluster: "" }],
     ["vpcId is blank", { vpcId: " " }],
     ["subnetIds is blank", { subnetIds: "" }],
     ["both role inputs are missing", { roleName: "", existingRoleArn: "" }],

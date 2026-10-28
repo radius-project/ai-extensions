@@ -6478,6 +6478,11 @@ describe("environment deletion session reporting coordinator", () => {
       },
       {
         awsEnabled: false,
+        awsEnvironmentAccess: {
+          setup: async () => {
+            throw new Error("unexpected AWS setup");
+          }
+        },
         executionOwner,
         accountContext: createEnvironmentAccountContext("runtime", {
           createReadOnlyExecutor: async () => {

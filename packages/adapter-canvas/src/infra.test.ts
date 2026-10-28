@@ -132,7 +132,8 @@ const {
   configureVerifyOperationMarker,
   deployWorkflowFiles,
   deleteApplicationWorkflowFiles,
-  deleteEnvironmentWorkflowFiles
+  deleteEnvironmentWorkflowFiles,
+  workflowTemplates
 } = await import("./infra.js");
 const { hasVerificationOperationMarker } =
   await import("./verification-run-identity.js");
@@ -1154,6 +1155,30 @@ describe("with the AWS switch on", () => {
     (list, azure, aws) => {
       expect(list(false)).toEqual(azure);
       expect(list(true)).toEqual([...azure, aws]);
+    }
+  );
+
+  it.each([false, true])(
+    "binds the switch (%s) into the templates a runtime commits",
+    async (switchOn) => {
+      const templates = workflowTemplates(switchOn);
+
+      const deploy = await templates.deploy("prod", ".radius/app.bicep");
+      const remove = await templates.delete("prod");
+
+      expect(deploy).toEqual(
+        await generateDeployWorkflow("prod", ".radius/app.bicep", {
+          includeAws: switchOn
+        })
+      );
+      expect(remove).toEqual(
+        await generateDeleteWorkflow("prod", { includeAws: switchOn })
+      );
+      expect("run-rad-commands-aws.yml" in deploy).toBe(switchOn);
+      expect("delete-environment-aws.yml" in remove).toBe(switchOn);
+      expect(/^\s+aws:/m.test(deploy["run-rad-commands.yml"] ?? "")).toBe(
+        switchOn
+      );
     }
   );
 
