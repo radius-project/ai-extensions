@@ -20,6 +20,21 @@ Dependabot is configured by [`.github/dependabot.yml`](../../.github/dependabot.
 | `The Headlamp fixture must use graph-react's @xyflow/react pin`                          | [React Flow](#react-flow-xyflowreact)                       |
 | A `THIRD-PARTY-NOTICES.txt` marker is missing after a bundled dependency changes version | [Bundled third-party notices](#bundled-third-party-notices) |
 
+## pnpm
+
+The root [`package.json`](../../package.json)'s `packageManager` field is the only pnpm version pin. Update that field when upgrading pnpm; do not add a second pin to a nested package, workflow, container, or documentation. GitHub Actions omits `pnpm/action-setup`'s `version` input, the canonical visual Dockerfile reads the root manifest, and local installation reads the same field as described in [Prerequisites](../../CONTRIBUTING.md#prerequisites).
+
+After changing the pin, run these commands from the repository root:
+
+```bash
+npm install --global "$(node -p "require('./package.json').packageManager")"
+pnpm --version
+pnpm install --frozen-lockfile
+pnpm --dir .github/extension/actions/deploy-progress/artifact-uploader install --frozen-lockfile --ignore-workspace
+```
+
+The reported version must match the root declaration. Preserve the uploader's independent workspace and lockfile while invoking pnpm from the repository root with `--dir`. If the upgrade requires a lockfile migration, regenerate the affected lockfile with the declared pnpm version, review its changes, and confirm frozen installs succeed before running the repository checks. Do not update unrelated dependency versions just to upgrade the package manager.
+
 ## React Flow (`@xyflow/react`)
 
 `@radius-project/graph-react` pins `@xyflow/react` to an exact version in `packages/graph-react/package.json`. That pin is the source of truth: the stylesheet generator, the packed-manifest check, and the notice test all read it, and a test fails until the Headlamp fixture matches it. Dependabot updates the pin for you; the manual work is regenerating the stylesheet, updating the Headlamp fixture, and reviewing what the new version changes:
