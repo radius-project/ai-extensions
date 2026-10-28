@@ -82,18 +82,13 @@ function environment() {
 }
 
 function run(cli, args, cwd) {
-  const isScript = /\.(?:c|m)?js$/i.test(cli);
-  const result = spawnSync(
-    isScript ? process.execPath : cli,
-    isScript ? [cli, ...args] : args,
-    {
-      cwd,
-      env: environment(),
-      encoding: "utf8",
-      timeout: 120_000,
-      maxBuffer: 8 * 1024 * 1024
-    }
-  );
+  const result = spawnSync(cli, args, {
+    cwd,
+    env: environment(),
+    encoding: "utf8",
+    timeout: 120_000,
+    maxBuffer: 8 * 1024 * 1024
+  });
   if (result.error) throw result.error;
   assert.equal(
     result.status,
@@ -363,6 +358,9 @@ try {
     pnpm && existsSync(pnpm),
     "Run this smoke with pnpm run test:integration:libraries."
   );
+  const pnpmIsScript = /\.(?:c|m)?js$/i.test(pnpm);
+  const pnpmCommand = pnpmIsScript ? process.execPath : pnpm;
+  const pnpmArgs = pnpmIsScript ? [pnpm] : [];
   const coreManifest = readJson(join(coreRoot, "package.json"));
   const graphManifest = readJson(join(graphRoot, "package.json"));
   validateStylesheetBoundary(
@@ -380,7 +378,11 @@ try {
       readJson(join(artifacts, `${directory}-build.json`)),
       directory
     );
-    run(pnpm, ["pack", "--pack-destination", candidates], root);
+    run(
+      pnpmCommand,
+      [...pnpmArgs, "pack", "--pack-destination", candidates],
+      root
+    );
   }
   const coreTarball = join(candidates, tarballName(coreManifest));
   const graphTarball = join(candidates, tarballName(graphManifest));
@@ -417,7 +419,11 @@ try {
     for (const { root, manifest } of dependencies.values()) {
       const key = `${manifest.name}@${manifest.version}`;
       if (!packedDependencies.has(key)) {
-        run(pnpm, ["pack", "--pack-destination", dependencyTarballs], root);
+        run(
+          pnpmCommand,
+          [...pnpmArgs, "pack", "--pack-destination", dependencyTarballs],
+          root
+        );
         packedDependencies.set(
           key,
           join(dependencyTarballs, tarballName(manifest))
@@ -436,11 +442,18 @@ try {
     // Every candidate and dependency comes from local tarballs. Offline mode,
     // an empty config and an unreachable registry forbid a fallback download.
     run(
-      npm,
-      ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"],
+      process.execPath,
+      [
+        npm,
+        "install",
+        "--offline",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund"
+      ],
       consumer
     );
-    run(npm, ["ls", "--all", "--json"], consumer);
+    run(process.execPath, [npm, "ls", "--all", "--json"], consumer);
     const installedCore = assertInstalledLibrary(
       consumer,
       "core",
@@ -522,8 +535,9 @@ try {
       );
     }
     run(
-      "--import",
+      process.execPath,
       [
+        "--import",
         pathToFileURL(join(consumer, "resolution.mjs")).href,
         join(consumer, "runtime.mjs"),
         overrides.get("react").manifest.version
@@ -545,8 +559,13 @@ try {
       files: ["consumer.ts"]
     });
     const declarations = run(
-      join(dirname(require.resolve("typescript/package.json")), "bin", "tsc"),
-      ["-p", "tsconfig.json", "--listFiles"],
+      process.execPath,
+      [
+        join(dirname(require.resolve("typescript/package.json")), "bin", "tsc"),
+        "-p",
+        "tsconfig.json",
+        "--listFiles"
+      ],
       consumer
     );
     const compilerPackage = installedPackage("typescript", repoRoot);
