@@ -225,6 +225,54 @@ function acceptsGitHubAudience(statement: PolicyStatement): boolean {
   return true;
 }
 
+// IAM `StringLike`: `*` matches any run of characters and `?` exactly one,
+// case-sensitively; everything else is literal.
+function matchesStringLike(pattern: string, value: string): boolean {
+  const source = pattern
+    .split("")
+    .map((character) =>
+      character === "*" ? ".*"
+      : character === "?" ? "."
+      : character.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    )
+    .join("");
+  return new RegExp(`^${source}$`).test(value);
+}
+
+// The `sub` constraint each condition operator puts on a statement. AWS ANDs
+// operators, so a subject is accepted only when every one of them matches it.
+function subjectConstraints(
+  statement: PolicyStatement
+): { operator: "StringEquals" | "StringLike"; values: string[] }[] {
+  const condition = isRecord(statement.Condition) ? statement.Condition : {};
+  const constraints: {
+    operator: "StringEquals" | "StringLike";
+    values: string[];
+  }[] = [];
+  for (const operator of ["StringEquals", "StringLike"] as const) {
+    const block = condition[operator];
+    if (isRecord(block) && block[SUB_CLAIM] !== undefined) {
+      constraints.push({ operator, values: stringList(block[SUB_CLAIM]) });
+    }
+  }
+  return constraints;
+}
+
+// Whether a statement names `subject` and every `sub` constraint on it accepts
+// that subject. A statement with no `sub` constraint is not counted, so Radius
+// never relies on trust that is not scoped to a GitHub subject.
+function acceptsSubject(statement: PolicyStatement, subject: string): boolean {
+  const constraints = subjectConstraints(statement);
+  return (
+    constraints.length > 0 &&
+    constraints.every(({ operator, values }) =>
+      operator === "StringEquals" ?
+        values.includes(subject)
+      : values.some((pattern) => matchesStringLike(pattern, subject))
+    )
+  );
+}
+
 function subjectsOf(statement: PolicyStatement): string[] {
   const condition = isRecord(statement.Condition) ? statement.Condition : {};
   const subjects: string[] = [];
@@ -306,16 +354,15 @@ export function mergeGitHubTrustSubject(
   const providerArn = githubOidcProviderArn(accountId);
   const trusted = trustedGitHubSubjects(existing, accountId);
   const kept = trusted.filter((value) => value !== subject).length;
-  // Only a statement GitHub's AWS tokens can satisfy counts as already
-  // trusting the subject, and only one of those is extended with it.
+  // Only a statement GitHub's AWS tokens can satisfy, and whose every `sub`
+  // constraint accepts the subject, counts as already trusting it.
   const compatible = (statement: PolicyStatement): boolean =>
     statement.Effect === "Allow" &&
     isGitHubStatement(statement, providerArn) &&
     acceptsGitHubAudience(statement);
   if (
     existing.Statement.some(
-      (statement) =>
-        compatible(statement) && subjectsOf(statement).includes(subject)
+      (statement) => compatible(statement) && acceptsSubject(statement, subject)
     )
   ) {
     return { policy: existing, kept, changed: false };
@@ -323,13 +370,16 @@ export function mergeGitHubTrustSubject(
   const statements = existing.Statement.filter(
     (statement) => statement.Sid !== NO_SUBJECTS_SID
   );
-  const index = statements.findIndex(
-    (statement) =>
-      compatible(statement) &&
-      isRecord(statement.Condition) &&
-      isRecord(statement.Condition.StringEquals) &&
-      statement.Condition.StringEquals[SUB_CLAIM] !== undefined
-  );
+  // Only a statement whose single `sub` constraint is `StringEquals` is
+  // extended, because adding to it is then enough for AWS to accept the
+  // subject. Any other shape is kept as it is and a new exact statement added.
+  const index = statements.findIndex((statement) => {
+    if (!compatible(statement)) return false;
+    const constraints = subjectConstraints(statement);
+    return (
+      constraints.length === 1 && constraints[0].operator === "StringEquals"
+    );
+  });
   if (index < 0) {
     statements.push(githubTrustStatement(providerArn, [subject]));
   } else {
