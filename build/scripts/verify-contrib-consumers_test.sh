@@ -179,8 +179,11 @@ recipePacks:
   - name: sample
     repo: github.com/example/resource-types
     ref: cccccccccccccccccccccccccccccccccccccccc
+  - name: azure-aks
+    repo: github.com/example/resource-types
+    ref: cccccccccccccccccccccccccccccccccccccccc
 YAML
-else
+elif [[ "${url}" == https://raw.githubusercontent.com/example/resource-types/cccccccccccccccccccccccccccccccccccccccc/recipe-packs/sample/pack.bicep ]]; then
     cat >"${output}" <<BICEP
 param ${PACK_DECLARED_PARAMETER:-routesGatewayName} string
 param ${PACK_APPENDED_PARAMETER:-appendedParam} string
@@ -199,6 +202,25 @@ resource pack 'Radius.Core/recipePacks@2025-08-01-preview' = {
   }
 }
 BICEP
+elif [[ "${url}" == https://raw.githubusercontent.com/example/resource-types/cccccccccccccccccccccccccccccccccccccccc/recipe-packs/azure-aks/azure-aks.bicep ]]; then
+    cat >"${output}" <<'BICEP'
+extension radius
+
+param routesGatewayName string
+param routesGatewayNamespace string = 'default'
+param containerImagesRegistry string
+param containerImagesRegistrySecretName string = ''
+
+resource azureAksRecipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  name: 'azure-aks'
+  properties: {
+    recipes: {}
+  }
+}
+BICEP
+else
+    echo "Unexpected download: ${url}" >&2
+    exit 22
 fi
 BASH
 
@@ -394,5 +416,20 @@ if PATH="${TEST_ROOT}/bin:${PATH}" \
     bash "${VERIFIER}" >/dev/null 2>&1; then
     fail "verifier skipped a --parameters whose name it could not read"
 fi
+
+# Exercise the shipped Azure workflow against the Radius 0.62 pack contract.
+# The catalog intentionally has no legacy 'azure' entry, and curl accepts only
+# the new artifact path. The verifier also checks the name attached after deploy.
+cp "${REPO_ROOT}/.github/extension/run-rad-commands-azure.yml" "${TEST_ROOT}/extension/azure.yml"
+: >"${CURL_LOG}"
+PATH="${TEST_ROOT}/bin:${PATH}" \
+    CATALOG_REF="${REF}" \
+    CATALOG_HELPER="${HELPER_PATH}" \
+    EXTENSION_DIR="${TEST_ROOT}/extension" \
+    bash "${VERIFIER}" >"${TEST_ROOT}/azure.log"
+grep -Fq "/recipe-packs/azure-aks/azure-aks.bicep" "${CURL_LOG}" ||
+    fail "Azure workflow did not download the catalog-pinned AKS recipe pack"
+grep -Fq "Verified recipe pack azure-aks/azure-aks.bicep declares 'azure-aks'" "${TEST_ROOT}/azure.log" ||
+    fail "Azure workflow did not attach the declared AKS recipe pack"
 
 echo "contrib consumer verifier tests passed"
