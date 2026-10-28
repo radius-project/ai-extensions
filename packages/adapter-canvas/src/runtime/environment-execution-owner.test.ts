@@ -38,6 +38,45 @@ afterEach(() => {
 });
 
 describe("runtime environment execution ownership", () => {
+  it.each(["operation", "repo", "environment"] as const)(
+    "replaces stale reconciliation %s without letting its callback consume the new timer",
+    (change) => {
+      const callbacks: Array<() => void> = [];
+      const cancel = vi.fn();
+      const owner = createEnvironmentExecutionOwner({
+        deferTask: async () => {},
+        microtask: queueMicrotask,
+        reconciliationTimer: (callback) => {
+          callbacks.push(callback);
+          return cancel;
+        }
+      });
+      const scope = owner.attachRuntime();
+      const old = vi.fn();
+      const current = vi.fn();
+      const identity = {
+        operation: {},
+        repo: "fixture/app",
+        environment: "dev"
+      };
+      scope.scheduleReconciliation("op", old, identity);
+      scope.scheduleReconciliation("op", old, { ...identity });
+      expect(callbacks).toHaveLength(1);
+      scope.scheduleReconciliation("op", current, {
+        ...identity,
+        ...(change === "operation" ? { operation: {} }
+        : change === "repo" ? { repo: "fixture/other" }
+        : { environment: "prod" })
+      });
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(callbacks).toHaveLength(2);
+      callbacks[0]();
+      expect(old).not.toHaveBeenCalled();
+      callbacks[1]();
+      callbacks[1]();
+      expect(current).toHaveBeenCalledOnce();
+    }
+  );
   it("notifies a shared recovery callback only for the admission that released", () => {
     const callbacks: Array<() => void> = [];
     const owner = createEnvironmentExecutionOwner({

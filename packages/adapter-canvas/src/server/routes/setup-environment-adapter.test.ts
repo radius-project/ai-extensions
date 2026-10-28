@@ -308,7 +308,8 @@ describe("Canvas setup configuration adapter", () => {
     const request = {
       targetRepository: "octo/app",
       registry: "ghcr.io/octo/app/state",
-      credentials: handle
+      credentials: handle,
+      assertActive: () => {}
     };
     await first.ports.bootstrapStatePackage(request);
     expect(requests).toEqual([{ ...request, credentials }]);

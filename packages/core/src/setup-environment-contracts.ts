@@ -239,6 +239,7 @@ export interface SetupEnvironmentPorts extends SetupProviderCredentialPorts {
     targetRepository: string;
     registry: string;
     credentials: symbol | undefined;
+    assertActive(): void;
   }): Promise<{ visibility: string | undefined }>;
   workflowFiles(input: {
     targetRepo: string;

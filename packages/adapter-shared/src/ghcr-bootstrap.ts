@@ -87,6 +87,7 @@ export interface BootstrapGhcrOptions {
   registry: string;
   /** Credential acquisition failures reject unchanged before registry I/O. */
   loadCredentials(): Promise<GhCredentials>;
+  assertActive?(): void;
   fetchImpl?: FetchImplementation;
   registryOrigin?: string;
   apiBaseUrl?: string;
@@ -155,6 +156,7 @@ export interface RequestContext {
   requestTimeoutMs: number;
   operation: "bootstrap" | "deletion";
   credentialSource: GhCredentials["source"];
+  assertActive?(): void;
 }
 
 export interface RequestOptions {
@@ -255,6 +257,7 @@ export async function sleepWithinBudget(
   requests: RequestContext,
   milliseconds: number
 ): Promise<void> {
+  requests.assertActive?.();
   const remaining = ensureBudget(requests);
   if (milliseconds >= remaining) {
     throw new Error(
@@ -262,6 +265,7 @@ export async function sleepWithinBudget(
     );
   }
   await requests.sleep(milliseconds);
+  requests.assertActive?.();
   ensureBudget(requests);
 }
 
@@ -286,6 +290,7 @@ export async function request(
   const attempts = idempotent ? MAX_IDEMPOTENT_ATTEMPTS : 1;
   let attempt = 0;
   while (true) {
+    requests.assertActive?.();
     const remaining = ensureBudget(requests);
     const signal = AbortSignal.timeout(
       Math.max(1, Math.ceil(Math.min(requests.requestTimeoutMs, remaining)))
@@ -297,6 +302,7 @@ export async function request(
         signal
       });
     } catch (error) {
+      requests.assertActive?.();
       if (!idempotent || attempt + 1 === attempts) throw error;
       await sleepWithinBudget(requests, Math.min(500 * 2 ** attempt, 4000));
       attempt++;
@@ -508,7 +514,10 @@ async function pushBlob({
       bearerToken,
       `/v2/${encodedPath}/blobs/uploads/`,
       { method: "POST" }
-    ).catch(() => null);
+    ).catch(() => {
+      requests.assertActive?.();
+      return null;
+    });
     if (!start || start.status >= 500) {
       if (await readBlob()) return;
       if (attempt === 0) continue;
@@ -536,7 +545,10 @@ async function pushBlob({
       },
       body: bytes,
       redirect: "error"
-    }).catch(() => null);
+    }).catch(() => {
+      requests.assertActive?.();
+      return null;
+    });
     if (!upload || upload.status >= 500) {
       if (await readBlob()) return;
       if (attempt === 0) continue;
@@ -690,7 +702,10 @@ async function pushBootstrapManifest({
         },
         body: manifestBytes
       }
-    ).catch(() => null);
+    ).catch(() => {
+      requests.assertActive?.();
+      return null;
+    });
     if (response && response.status < 500) {
       if (response.status === 409 || response.status === 412) {
         const state = await readManifest();
@@ -830,6 +845,7 @@ export async function bootstrapGHCRStatePackage({
   targetRepository,
   registry,
   loadCredentials,
+  assertActive,
   fetchImpl = globalThis.fetch,
   registryOrigin,
   apiBaseUrl = "https://api.github.com",
@@ -856,6 +872,7 @@ export async function bootstrapGHCRStatePackage({
   ) {
     throw new Error("GHCR timeout values must be positive finite numbers.");
   }
+  assertActive?.();
   const auth = await loadCredentials();
   const requests: RequestContext = {
     fetchImpl,
@@ -864,7 +881,8 @@ export async function bootstrapGHCRStatePackage({
     deadline: now() + bootstrapTimeoutMs,
     requestTimeoutMs,
     operation: "bootstrap",
-    credentialSource: auth.source
+    credentialSource: auth.source,
+    assertActive
   };
   const canonicalTargetRepository = targetRepository.toLowerCase();
   const parsed = parseRegistry(registry, registryOrigin);

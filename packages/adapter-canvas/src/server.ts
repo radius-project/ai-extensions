@@ -4450,13 +4450,11 @@ export function createEnvironmentOperationExecution(
             instanceId,
             setupServices: {
               authorizeAzure: (request) => {
-                if (attachment.isShuttingDown())
-                  throw new Error("Setup execution is shutting down.");
+                assertSetupExecutionActive(attachment.isShuttingDown);
                 return setupServices.authorizeAzure(request);
               },
               configureEnvironment: (request, projectionInstanceId) => {
-                if (attachment.isShuttingDown())
-                  throw new Error("Setup execution is shutting down.");
+                assertSetupExecutionActive(attachment.isShuttingDown);
                 return setupServices.configureEnvironment(
                   request,
                   projectionInstanceId,
@@ -4500,6 +4498,8 @@ export function createEnvironmentOperationExecution(
       await monitorVerification(operationId);
     } catch (error) {
       if (!(error instanceof ProviderMutationRecoveryError)) {
+        if (isSetupExecutionInterrupted(error)) throw error;
+        assertSetupExecutionActive(attachment.isShuttingDown);
         const unresolved = unresolvedProviderMutations(op)[0];
         if (unresolved) {
           await recordProviderReconciliationFailure(
@@ -5768,6 +5768,9 @@ export function createProductionCanvasServerRuntime(
     readInput,
     publish
   ) => {
+    if (input.instanceId === undefined && input.isCurrent && input.schedule) {
+      return sharedOperationResume(input, readInput, publish);
+    }
     const original =
       input.instanceId === undefined ?
         undefined
@@ -6478,6 +6481,7 @@ export function createProductionCanvasServerRuntime(
         targetRepository: input.targetRepository,
         registry: input.registry,
         credentials: input.credentials as GhcrPackageCredentials,
+        assertActive: input.assertActive,
         ghCommandPresentation: GH_COMMAND_PRESENTATION
       }),
     stateRegistryForEnvironment,

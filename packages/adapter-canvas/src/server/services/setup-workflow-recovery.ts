@@ -1,5 +1,6 @@
 import {
   assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
   type SetupWorkflowRecoveryPort
 } from "@radius-project/core";
 import {
@@ -35,6 +36,7 @@ export function createSetupWorkflowRecoveryPort(
         ...input,
         operation,
         persist,
+        rethrowReconciliationError: isSetupExecutionInterrupted,
         assertActive: () => {
           assertSetupExecutionActive(isStopped);
           input.assertActive?.();

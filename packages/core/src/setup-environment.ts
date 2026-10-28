@@ -214,7 +214,9 @@ export async function configureSetupEnvironment(
         ports.bootstrapStatePackage({
           targetRepository: targetRepo,
           registry: stateRegistry,
-          credentials: packageCredentials
+          credentials: packageCredentials,
+          assertActive: () =>
+            assertSetupExecutionActive(ports.isExecutionStopped)
         })
     );
     if (!statePackageAttempt.completed) return { kind: "stopped" };
