@@ -48,12 +48,11 @@ runs:
       if: always()
       shell: bash
       run: |
-        # The pipeline deploys Radius.Core applications, so list them via the
-        # preview API surface to match; the legacy plane would show nothing. This is
-        # best-effort status output at teardown, so a failure must not fail the job
-        # -- but surface it instead of swallowing it silently, so a broken listing
-        # (e.g. wrong API plane) is visible in the log rather than looking empty.
-        rad app list --preview || echo "::warning title=Application status unavailable::rad app list --preview failed during teardown; continuing."
+        # `rad app list` lists the Radius.Core applications the pipeline deploys.
+        # This is best-effort status output at teardown, so a failure must not fail
+        # the job -- but surface it instead of swallowing it silently, so a broken
+        # listing is visible in the log rather than looking empty.
+        rad app list || echo "::warning title=Application status unavailable::rad app list failed during teardown; continuing."
 
     - name: Collect Radius logs
       if: failure()
