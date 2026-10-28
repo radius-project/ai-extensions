@@ -899,6 +899,44 @@ describe("provider mutation recovery journal", () => {
     );
   });
 
+  it.each([null, "", "HTTP 403"])(
+    "keeps branch-review instructions in the restored failure and cleanup refusals with evidence %j",
+    (evidence) => {
+      const op = createOperation({
+        operationId: "op_recovery",
+        provider: "azure",
+        repo: "octo/app",
+        environment: "prod"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_branch.delete",
+        target: "octo/app\0setup-branch\0original-head"
+      });
+      settleProviderMutation(op, mutation.mutationId, "not_applied", evidence);
+      const restored = reconcileRestoredOperation(
+        fromPersistedOperation(toPersistedOperation(op))
+      );
+      const guidance =
+        "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again." +
+        (evidence ? ` Details: ${evidence}` : "");
+
+      expect(toClientView(restored).failure.message).toBe(guidance);
+      expect(canStartRollback(restored)).toEqual({
+        ok: false,
+        code: "rollback-provider-outcome-unknown",
+        detail: guidance
+      });
+      expect(canRetryCleanup(restored)).toEqual({
+        ok: false,
+        code: "cleanup-retry-provider-outcome-unknown",
+        detail: guidance
+      });
+      expect(projectOperationActions(restored)).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: "rollback" })])
+      );
+    }
+  );
+
   it("preserves rollback admission when an uncertain branch deletion is restored", () => {
     const op = createOperation({
       operationId: "op_recovery",
