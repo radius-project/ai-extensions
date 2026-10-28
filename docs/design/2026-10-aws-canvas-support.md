@@ -7,9 +7,7 @@
 
 The Radius canvas deploys apps only to Azure today. A developer whose team runs on AWS and Amazon EKS can't connect an account, create an environment, or deploy from the canvas. The provider list shows "AWS (coming soon)".
 
-This design adds AWS as a second provider with the same journey and the same screens as Azure: connect an account, create an environment on an existing EKS cluster, deploy, see the deployed graph, and delete. Backing services such as MySQL run as AWS managed services, such as Amazon RDS, through an AWS recipe pack in Bicep.
-
-Most of the journey maps one to one from Azure. The hard part is the IAM role that GitHub Actions uses to deploy, called the deploy identity. Azure gives each environment its own federated credential and role assignment. AWS has no equivalent per-environment object, so environments share one role and its size limits, and two setups can overwrite each other's changes to it. This design settles those, and the spec's open engineering questions, with these decisions:
+This design adds AWS as a second provider with the same journey and screens as Azure: connect an account, create an environment on an existing EKS cluster, deploy, see the deployed graph, and delete. Most of it maps one to one from Azure. The hard part is the IAM role GitHub Actions uses to deploy, called the deploy identity: AWS has no per-environment object like Azure's federated credential, so environments share one role, its size limits, and its trust policy. This design settles that, and the spec's open engineering questions, with these decisions:
 
 - **One deploy identity per repository per AWS account,** shared by its environments, the same as one app registration on Azure.
 - **One inline policy per environment,** with `PowerUserAccess` limited to the environment's region. A deploy identity holds about 17 environments, close to Azure's 20.
@@ -17,7 +15,7 @@ Most of the journey maps one to one from Azure. The hard part is the IAM role th
 - **Bicep recipes in a `resource-types-contrib` pack,** with EKS Pod Identity for apps that need AWS credentials.
 - **Tokens refreshed every 2 minutes** during deploys.
 
-A working prototype deployed a real app to EKS with MySQL on Amazon RDS, and this doc is based on what it showed. AWS stays hidden from users until all of it ships.
+A working prototype deployed a real app to EKS with MySQL on Amazon RDS, and this doc is based on it. AWS stays hidden from users until all of it ships.
 
 ## Background
 
@@ -42,24 +40,22 @@ A deploy runs `run-rad-commands.yml` in GitHub Actions. It signs in to Azure wit
 
 ### What changes on AWS
 
-| Azure                                     | AWS                                                                                            |
-|-------------------------------------------|------------------------------------------------------------------------------------------------|
-| Subscription                              | Account and region                                                                             |
-| App registration                          | IAM role, the deploy identity                                                                  |
-| Federated credential, one per environment | An entry in the role's trust policy, called a subject. All environments share one trust policy |
-| Role assignment, one per environment      | An inline policy on the role. All environments share the role's size limit for inline policies |
-| AKS RBAC Cluster Admin                    | An EKS access entry with `AmazonEKSClusterAdminPolicy`                                         |
-| Resource group and AKS cluster            | EKS cluster, VPC, and subnets                                                                  |
-| `azure-aks` recipe pack                   | `aws-eks` recipe pack                                                                          |
+| What it's for                                        | Azure                                     | AWS                                                                           |
+|------------------------------------------------------|-------------------------------------------|-------------------------------------------------------------------------------|
+| Where the environment lives                          | Subscription                              | Account and region                                                            |
+| The identity GitHub Actions signs in as to deploy    | App registration                          | IAM role, the deploy identity                                                 |
+| Lets one GitHub environment sign in as that identity | Federated credential, one per environment | A subject in the role's trust policy. All environments share one trust policy |
+| What the deploy is allowed to change                 | Role assignment, one per environment      | An inline policy on the role. All environments share the role's size limit    |
+| Admin access to the cluster's Kubernetes API         | AKS RBAC Cluster Admin                    | An EKS access entry with `AmazonEKSClusterAdminPolicy`                        |
+| What the canvas discovers to deploy into             | Resource group and AKS cluster            | EKS cluster, VPC, and subnets                                                 |
+| Maps each Radius type to the recipe that creates it  | `azure-aks` recipe pack                   | `aws-eks` recipe pack                                                         |
 
 The last three rows are close matches. The first rows are where AWS differs: the per-environment objects Azure creates become edits to one shared role.
 
 ### Terms
 
-- **Deploy identity**: the IAM role GitHub Actions assumes to deploy. AWS's equivalent of the app registration.
-- **Subject**: the text GitHub puts in its OIDC token to say which repository and environment the token is for, such as `repo:contoso/storefront:environment:dev`. The deploy identity's trust policy lists the subjects it accepts.
+- **Subject**: the text in GitHub's OIDC token that names the repository and environment, such as `repo:contoso/storefront:environment:dev`.
 - **GitHub identity provider**: the account-level IAM object that lets AWS accept GitHub's OIDC tokens. One serves every repository in the account.
-- **Access entry**: the EKS object that gives an IAM role access to a cluster's Kubernetes API.
 - **Recipe pack**: the list that maps each Radius resource type to the recipe that creates it.
 
 ## Problem
@@ -148,9 +144,7 @@ flowchart LR
   R[resource-types-contrib] -- "aws-eks recipe pack" --> G
 ```
 
-In the example, setting up `dev` creates the GitHub identity provider and `radius-deploy-contoso-storefront`, adds `dev`'s subject, writes the policy `radius-dev-<hash>` limited to `us-west-2`, and adds an access entry on `storefront-dev`. Setting up `prod` later finds the role by its tags, adds `prod`'s subject, writes `radius-prod-<hash>` limited to `us-east-1`, and adds an access entry on `storefront-prod`. Each setup takes a lock for the repository first, so if both run at once, the second waits. Deleting `dev` removes exactly `dev`'s subject, policy, and access entry, and `prod` keeps working.
-
-A deploy assumes the deploy identity, refreshes its tokens in the background, and deploys with the `aws-eks` recipe pack. The MySQL database becomes an Amazon RDS instance, and the container runs on the cluster.
+In the example, `prod`'s setup finds the role `dev` created, adds its own subject and a policy limited to `us-east-1`, and adds an access entry on `storefront-prod`. Deleting `dev` later removes only `dev`'s three, and `prod` keeps working. A deploy runs MySQL as an Amazon RDS instance and the container on the cluster.
 
 ## Detailed design
 
@@ -281,18 +275,18 @@ The AWS workflows are committed only when the repository creates its first AWS e
 
 The pack's parameters come from the environment: the EKS cluster name, the subnet IDs, and the routes gateway and image registry that the Kubernetes recipes need. The AWS account and region come from the Radius environment.
 
-| Radius type                                  | What it deploys                  | Notes                                                                                                                                                 |
-|----------------------------------------------|----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
-| MySQL                                        | Amazon RDS DB instance           | In the first change                                                                                                                                   |
-| PostgreSQL, SQL Server                       | Amazon RDS DB instance           | SQL Server uses the Express edition                                                                                                                   |
-| Redis                                        | Amazon ElastiCache Serverless    | The only ElastiCache type Bicep can create                                                                                                            |
-| Search                                       | Amazon OpenSearch Service domain | A single-node domain uses only the first subnet, because it runs in one availability zone                                                             |
-| MongoDB                                      | Amazon DocumentDB cluster        | Needs the native DocumentDB handler from the full AWS coverage design                                                                                 |
-| RabbitMQ                                     | Amazon MQ broker                 | Needs the full AWS coverage fix for resources whose ID AWS generates                                                                                  |
-| Object storage                               | Amazon S3 bucket                 | Added with pod identity, because apps need it to connect                                                                                              |
-| Models                                       | Amazon Bedrock                   | Creates no resource. Returns the regional endpoint and a Bedrock model ID, because the type's default model isn't on Bedrock. Added with pod identity |
-| Kafka                                        | Amazon MSK, later                | MSK gives its broker addresses only through a separate API call, so the recipe can't return them to the app yet                                       |
-| Containers, images, volumes, routes, secrets | Kubernetes recipes               | They run on the cluster itself. Same as `azure-aks`                                                                                                   |
+| Radius type                                  | What it deploys                  | Notes                                                                                     |
+|----------------------------------------------|----------------------------------|-------------------------------------------------------------------------------------------|
+| MySQL                                        | Amazon RDS DB instance           | In the first change                                                                       |
+| PostgreSQL, SQL Server                       | Amazon RDS DB instance           | SQL Server uses the Express edition                                                       |
+| Redis                                        | Amazon ElastiCache Serverless    | The only ElastiCache type Bicep can create                                                |
+| Search                                       | Amazon OpenSearch Service domain | A single-node domain uses only the first subnet, because it runs in one availability zone |
+| MongoDB                                      | Amazon DocumentDB cluster        | Needs the native DocumentDB handler from the full AWS coverage design                     |
+| RabbitMQ                                     | Amazon MQ broker                 | Needs the full AWS coverage fix for resources whose ID AWS generates                      |
+| Object storage                               | Amazon S3 bucket                 | Later, see [App credentials](#app-credentials)                                            |
+| Models                                       | Amazon Bedrock                   | Later, see [App credentials](#app-credentials)                                            |
+| Kafka                                        | Amazon MSK                       | Later, see [Non-goals](#non-goals)                                                        |
+| Containers, images, volumes, routes, secrets | Kubernetes recipes               | They run on the cluster itself. Same as `azure-aks`                                       |
 
 Each recipe that creates a VPC-based service builds a subnet group from the environment's subnets, and adds the service to the cluster's security group, so pods can reach it without new rules. A security group of its own, open only on the service's port, would be tighter. But AWS generates a security group's ID, so Radius would create a new one on every redeploy. Each service moves to its own security group once the full AWS coverage work lets Radius redeploy resources whose ID AWS generates.
 
@@ -310,7 +304,7 @@ Pod Identity stores no secret. The app's AWS SDK gets short-lived credentials au
 - **A change to a shared type:** the container type and its recipe give each app its own Kubernetes service account.
 - **More IAM rights for the deploy identity:** it must be able to create per-app roles, limited by a permissions boundary and an IAM path, so it can't create a role with more access than itself.
 
-AWS ships before pod identity, without the object storage and models recipes.
+AWS ships before pod identity, without the object storage and models recipes. The models recipe will create no resource: it returns the regional Bedrock endpoint and a Bedrock model ID, because the type's default model isn't on Bedrock.
 
 ### Application graph
 
@@ -362,42 +356,23 @@ The changes land in small pull requests, with AWS hidden from users until a fina
 
 Two rules run through every case. Every check that can't change anything runs before the first write to AWS. A read that fails never leads to a write, so setup never replaces something it couldn't see.
 
-**Stopped before anything changes in AWS.** The developer fixes the cause and runs setup again.
+The checks and their messages are in each section above: the CLI and account checks, cluster modes, role ownership, the picker, the repository lock, **Repair**, token retries, and resources that fail at deploy. The cases below appear only here.
 
-- AWS CLI missing or older than 2.15.3: names the installed and required versions, and links to the installer.
-- No CLI session: shows **Sign in to AWS CLI**.
-- CLI signed in to another account: names both accounts.
+**Stopped before anything changes in AWS.**
+
 - Discovery is denied, or finds nothing: each list says whether the account has none or the signed-in identity can't read them. The namespace still accepts a typed name.
-- Cluster in `CONFIG_MAP` mode: the cluster can't be selected, and the list shows the command its owner runs.
 - GitHub environment already set up for Azure: asks for another environment name.
-- A role with the proposed name isn't Radius's: the developer can pick that role or choose another name.
-- Picked role is in another account, or tagged for another repository: rejected in the picker.
-- Trust policy can't be read: stops without writing.
 
 **Stopped part way.** The **Setup didn't finish** card lists what was created, and offers **Roll back** and **Retry**.
 
 - GitHub identity provider can't be created: shows the `aws iam create-open-id-connect-provider` command for an IAM administrator.
 - Role creation denied: suggests picking an existing role or asking for `iam:CreateRole`.
 - Picked role can't be changed by the signed-in identity: names the change that was denied, and leaves the role as it was.
-- A size limit is reached: names the limit and quotes AWS's error.
-- Access entry fails while a new role spreads: retried for up to a minute, then stops quoting AWS's error.
-- The app restarts during setup: the setup is marked interrupted.
 - GitHub write fails after the AWS steps succeeded: reported as a failure of the **Configure environment** stage. Retry continues from there.
-
-**Waits.**
-
-- Another setup in this repository holds the lock: setup waits. A lock older than 10 minutes is treated as abandoned.
 
 **Found after setup.**
 
 - Verify credentials fails: says whether GitHub couldn't assume the deploy identity, couldn't reach the cluster, or couldn't push to GHCR, and links to the run. A cluster reachable only from a private network fails here, the same as on Azure.
-- Another repository's setup dropped this environment's subject: verify fails, and a deploy that can't assume the deploy identity offers **Repair**.
-
-**During a deploy.**
-
-- A token refresh fails: retried every 15 seconds while the current token is still valid. If a token expires anyway, the failed resource shows the authorization error.
-- The app uses a type the pack doesn't have yet: that resource fails with Radius's error, and the rest of the app still deploys.
-- A recipe fails: the deployed graph marks that resource failed and shows its error. The resources that succeeded stay marked as succeeded.
 
 **At delete.**
 
@@ -409,11 +384,8 @@ Two rules run through every case. Every check that can't change anything runs be
 
 - **No stored secrets.** Deploys use GitHub's OIDC token, and the profile and GitHub environment hold only IDs.
 - **Scoped trust.** Each subject names one repository and one GitHub environment, so a workflow in another repository, or outside a GitHub environment, can't assume the deploy identity.
-- **No escalation.** The deploy identity can't change IAM, except creating the service-linked roles its services need, and can't create access entries. It can't make itself an administrator or cluster-admin elsewhere.
 - **Shared reach.** One deploy identity per repository means a workflow running in `dev` also has `prod`'s permissions and cluster access. Azure works the same way, because all environments share one app registration. Teams that need separation use separate AWS accounts, which get separate deploy identities.
 - **The lock is not access control.** It only orders setups in one repository. Anyone who can change the role in IAM can still change its trust policy.
-- **Other teams' roles are left alone.** Radius never tags or deletes a picked role, and never removes a trust statement it didn't add.
-- **Nothing usable is left behind.** Once the last environment is deleted, the trust policy accepts no subject.
 
 ## Test plan
 
@@ -463,14 +435,10 @@ One role per environment avoids the lock and the shared limits. But every new en
 ### Other alternatives
 
 - **One shared policy per deploy identity for the statements every environment repeats:** it would raise the limit to about 30 environments, but adds one more object that setup, rollback, and delete have to manage, and that every environment depends on.
-- **Narrowing the deploy identity by tag, permissions boundary, or a list of services:** see [Permissions](#permissions).
 - **One managed policy per environment:** managed policy names are unique across the account, so two repositories with a `dev` environment would collide. A role also holds at most 20 managed policies, and `PowerUserAccess` would use one.
 - **Attaching `PowerUserAccess` and denying other regions per environment:** deny statements from different environments add up, so a second region would block the first.
-- **Deleting the deploy identity with its last environment:** Azure never deletes the app registration, and a role picked from a platform team must never be deleted.
 - **Always keeping the access entry:** a deploy identity still used by an environment on another cluster would keep cluster-admin on a cluster it no longer needs.
 - **Keeping the AWS recipes in ai-extensions and publishing them to each user's registry at deploy:** this needs a registry secret copied into the control plane, and a hard-coded recipe list for the planned graph. One versioned pack in `resource-types-contrib` works like the Azure pack.
-- **Letting the developer choose another VPC:** each recipe would need its own security group in that VPC, which Radius can't redeploy yet, plus peering or a transit gateway that Radius doesn't create.
-- **Blocking a deploy that uses a type the pack doesn't have:** it would also block types the repository's own custom recipes supply, and a deploy that fails on that resource is safe.
 - **Long-lived access keys for app credentials:** the recipe would create an IAM user and return its key. The key never expires, copies end up in recipe state, a Kubernetes secret, and the app, and the deploy identity would need rights to create IAM users, which lets it create an admin.
 - **Generic credential fields on the Radius types, such as `accessKeyId`:** still needs long-lived keys, and changing the types affects Azure apps.
 - **The cluster's node role for app credentials:** every pod on those nodes gets the same access, and it changes the user's cluster.
