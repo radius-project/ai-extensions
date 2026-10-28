@@ -277,7 +277,7 @@ case "${1:-} ${2:-}" in
             echo "Error: unknown flag: --preview" >&2
             exit 64
         fi
-        printf '%s\n' '[{"name":"aks-dev"}]'
+        printf '%s\n' "${RAD_ENV_LIST_JSON-[{\"name\":\"aks-dev\"\}]}"
         ;;
     *)
         printf '{}\n'
@@ -408,6 +408,12 @@ assert_status_file_contains() {
 $(cat "${file}")"
 }
 
+assert_environment_list() {
+    local actual
+    actual="$(sed '1,/^# rad env list$/d' "${STATUS_DIR}/deploy-controlplane.log")"
+    assert_equals "environment listing" "${actual}" "$1"
+}
+
 assert_status_files_differ() {
     if cmp -s "${STATUS_DIR}/$1" "${STATUS_DIR}/$2"; then
         fail "'$1' and '$2' must carry distinct content"
@@ -501,6 +507,7 @@ reset_environment() {
     export APP_FILE="${LITERAL_APP_FILE}"
     unset RAD_GRAPH_SHOULD_FAIL RAD_APP_LIST_NAME
     unset RAD_RESOURCE_LIST_SHOULD_FAIL
+    unset RAD_ENV_LIST_JSON
     printf '{"outcome":"success","exitCode":0}\n' >"${RESULT_FILE}"
 }
 
@@ -574,7 +581,7 @@ progress_jq 'any(.resources[]; .name == "queue"
 assert_status_file_contains "deploy-activity.log" '"outcome":"success"'
 assert_status_file_contains "deploy-controlplane.log" "# rad version"
 assert_status_file_contains "deploy-controlplane.log" "# rad env list"
-assert_status_file_contains "deploy-controlplane.log" "aks-dev"
+assert_environment_list '[{"name":"aks-dev"}]'
 assert_status_file_contains "deploy-state.txt" "state=success"
 assert_status_file_contains "deploy-state.txt" "application=todolist"
 assert_status_file_contains "deploy-state.txt" "sha=deadbeefcafe"
@@ -587,6 +594,17 @@ jq -e 'all(.resources[]?; (.properties.containers // {}) |
 assert_status_files_differ "deploy-progress.json" "deploy-activity.log"
 assert_status_files_differ "deploy-progress.json" "deploy-controlplane.log"
 assert_status_files_differ "deploy-activity.log" "deploy-controlplane.log"
+
+for empty_list in '[]' 'null'; do
+    reset_environment
+    export RAD_ENV_LIST_JSON="${empty_list}"
+    run_publisher
+    assert_exit_zero "empty environment list: ${empty_list}"
+    assert_step_outputs "radius-deploy-status-aks-dev-todolist" "true"
+    assert_environment_list "${empty_list}"
+    assert_progress_contract
+    assert_run_state "succeeded"
+done
 
 # A successful live publisher checkpoint hands the terminal publisher the next
 # sequence, so the fixed-name artifact always wins over live ring snapshots.
