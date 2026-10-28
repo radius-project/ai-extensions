@@ -278,7 +278,7 @@ jobs:
           # namespace; it must be lowercase.
           BUILD_REGISTRY=$(echo "$RADIUS_BUILD_REGISTRY" | tr '[:upper:]' '[:lower:]')
           REGISTRY_SECRET_NAME="radius-ghcr-registry-creds"
-          PACK_NAME="azure-avm"
+          PACK_NAME="azure-aks"
 
           # Place generated deployment inputs next to the app file so `rad deploy`
           # resolves the repo's own bicepconfig.json (which declares the `radius`
@@ -315,7 +315,7 @@ jobs:
           echo "✅ Environment '$ENVIRONMENT' created."
 
           # Resolve the pack-only artifact from deploy/manifest/defaults.yaml.
-          RECIPE_PACK_URL="$(radius_contrib_recipe_pack_url azure aks-recipepack.bicep)"
+          RECIPE_PACK_URL="$(radius_contrib_recipe_pack_url azure-aks azure-aks.bicep)"
           echo "Downloading recipe pack from $RECIPE_PACK_URL"
           curl -fsSL "$RECIPE_PACK_URL" -o "$RECIPE_PACK_BICEP"
 
