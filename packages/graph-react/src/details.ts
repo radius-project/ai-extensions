@@ -159,8 +159,7 @@ function cloudRows(data: GraphNodeData): DetailRow[] {
     const href = producerUrl || consoleUrl;
     const label =
       name || (type ? type.split("/").pop() || "" : "") || "resource";
-    const consoleName =
-      consoleNameForUrl(href) || consoleNameForUrl(consoleUrl);
+    const consoleName = consoleNameForUrl(href) || "portal";
     rows.push(externalRow("link", `${label} in ${consoleName}`, href, false));
   }
   return rows;
