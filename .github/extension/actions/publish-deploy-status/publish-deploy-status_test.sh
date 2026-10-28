@@ -277,7 +277,7 @@ case "${1:-} ${2:-}" in
             echo "Error: unknown flag: --preview" >&2
             exit 64
         fi
-        printf '%s\n' "${RAD_ENV_LIST_JSON-[{\"name\":\"aks-dev\"}]}"
+        printf '%s\n' "${RAD_ENV_LIST_JSON-[{\"name\":\"aks-dev\"\}]}"
         ;;
     *)
         printf '{}\n'
@@ -406,6 +406,12 @@ assert_status_file_contains() {
     grep -qF -- "$2" "${file}" ||
         fail "expected '$1' to contain '$2', got:
 $(cat "${file}")"
+}
+
+assert_environment_list() {
+    local actual
+    actual="$(sed '1,/^# rad env list$/d' "${STATUS_DIR}/deploy-controlplane.log")"
+    assert_equals "environment listing" "${actual}" "$1"
 }
 
 assert_status_files_differ() {
@@ -575,7 +581,7 @@ progress_jq 'any(.resources[]; .name == "queue"
 assert_status_file_contains "deploy-activity.log" '"outcome":"success"'
 assert_status_file_contains "deploy-controlplane.log" "# rad version"
 assert_status_file_contains "deploy-controlplane.log" "# rad env list"
-assert_status_file_contains "deploy-controlplane.log" "aks-dev"
+assert_environment_list '[{"name":"aks-dev"}]'
 assert_status_file_contains "deploy-state.txt" "state=success"
 assert_status_file_contains "deploy-state.txt" "application=todolist"
 assert_status_file_contains "deploy-state.txt" "sha=deadbeefcafe"
@@ -595,7 +601,7 @@ for empty_list in '[]' 'null'; do
     run_publisher
     assert_exit_zero "empty environment list: ${empty_list}"
     assert_step_outputs "radius-deploy-status-aks-dev-todolist" "true"
-    assert_status_file_contains "deploy-controlplane.log" "${empty_list}"
+    assert_environment_list "${empty_list}"
     assert_progress_contract
     assert_run_state "succeeded"
 done
