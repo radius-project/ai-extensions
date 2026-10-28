@@ -124,9 +124,9 @@ describe("buildDeployRadCommand", () => {
 });
 
 describe("buildAppGraphRadCommand", () => {
-  it("includes the required preview and icon flags", () => {
+  it("selects the deployed application and includes resource icons", () => {
     expect(buildAppGraphRadCommand("my-app")).toBe(
-      "app graph --application my-app --preview --include-icons"
+      "app graph --application my-app --include-icons"
     );
   });
 });
