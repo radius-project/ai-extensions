@@ -108,7 +108,7 @@ describe("AWS infrastructure rules", () => {
   });
 });
 
-function page() {
+function page(omit: readonly string[] = []) {
   const browser = createFakeBrowser();
   const cluster = createFakeSelect("aws-cluster-select");
   cluster.setOptions([{ value: "shop" }, { value: "other" }]);
@@ -122,7 +122,7 @@ function page() {
     warning: createFakeElement("aws-infra-warning")
   };
   for (const element of [cluster, vpc, ...Object.values(elements)]) {
-    browser.document.add(element);
+    if (!omit.includes(element.id)) browser.document.add(element);
   }
   const scope = beginEntry(browser.context, "aws-infra-test");
   if (!scope) throw new Error("Expected an entry scope.");
@@ -139,6 +139,25 @@ describe("initializeAwsInfrastructure", () => {
   it("is invalid until discovery lands", () => {
     const { handle } = page();
     expect(handle.validationError()).toBe(AWS_SUBNET_ZONES_ERROR);
+  });
+
+  it("checks the subnet selection on a page without its message elements", () => {
+    const { handle, boxes, elements, onChange } = page([
+      "aws-subnets-error",
+      "aws-subnets-note",
+      "aws-infra-warning"
+    ]);
+    handle.setDiscovered(
+      [{ id: "shop", vpcId: "vpc-1", authenticationMode: "API", usable: true }],
+      subnets
+    );
+    const [, second] = boxes();
+    Object.assign(second, { checked: false });
+    second.dispatch("change");
+    expect(handle.validationError()).toBe(AWS_SUBNET_ZONES_ERROR);
+    expect(elements.list.getAttribute("aria-invalid")).toBe("true");
+    expect(elements.error.textContent).toBe("");
+    expect(onChange).toHaveBeenCalled();
   });
 
   it("follows the cluster's VPC and checks its private subnets", () => {

@@ -31,7 +31,8 @@ function page(
     options: AppPickerOptions
   ) => Promise<AppPickerChoice> = async () => ({
     appId: ROLE_ARN
-  })
+  }),
+  omit: readonly string[] = []
 ) {
   const browser = createFakeBrowser();
   const name = createFakeInput(
@@ -45,7 +46,7 @@ function page(
   const clear = createFakeElement("aws-clear-role-link");
   const use = createFakeElement("aws-use-existing-role-link");
   for (const element of [name, arn, help, note, clear, use]) {
-    browser.document.add(element);
+    if (!omit.includes(element.id)) browser.document.add(element);
   }
   const scope = beginEntry(browser.context, "aws-identity-test");
   if (!scope) throw new Error("Expected an entry scope.");
@@ -224,6 +225,20 @@ describe("initializeAwsDeployIdentity", () => {
     expect(view.note.textContent).toBe(message);
     expect(view.use.textContent).toBe("use an existing role…");
     expect(view.promptRoleSelection).not.toHaveBeenCalled();
+  });
+
+  it("pins a picked role on a page without the clear link", async () => {
+    const view = page(undefined, ["aws-clear-role-link"]);
+    view.browser.net.handle(`${LIST_AWS_ROLES_ENDPOINT}?accountId=`, () =>
+      json({ roles: [{ arn: ROLE_ARN }] })
+    );
+    view.use.dispatch("click");
+    await flush();
+    expect(view.handle.request()).toEqual({
+      roleName: "",
+      existingRoleArn: ROLE_ARN
+    });
+    expect(view.name.disabled).toBe(true);
   });
 
   it("works with only its two inputs", () => {
