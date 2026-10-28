@@ -49,11 +49,11 @@ runs:
         # Install the CLI from a pinned stable Radius release; `rad install kubernetes`
         # then installs the control plane for the CLI's release. Verify the install
         # script's checksum before running it, rather than piping from main.
-        RADIUS_INSTALL_REF: v0.61.1
+        RADIUS_INSTALL_REF: v0.62.0
         # Immutable commit of RADIUS_INSTALL_REF; load-contrib-catalog fetches the
         # recipe catalog at this commit so a moved tag cannot change recipes.
-        RADIUS_INSTALL_COMMIT: b913c13618039677b8727a2063cc853142cdb7c9
-        RADIUS_INSTALL_SHA256: bf2fdf0248b39ac2a0222326f8458824924872816737a08af3558bddd16c392b
+        RADIUS_INSTALL_COMMIT: 37a8cbd33e990886460f4fd1987d6a4fefd901c5
+        RADIUS_INSTALL_SHA256: 483ed038411c8550ef20a0ad06edfe79b41ae73f321d59f88fb06c67dbdb730f
       run: |
         curl -sSL "https://raw.githubusercontent.com/radius-project/radius/${RADIUS_INSTALL_REF}/deploy/install.sh" -o install-rad.sh
         echo "${RADIUS_INSTALL_SHA256}  install-rad.sh" | sha256sum -c -

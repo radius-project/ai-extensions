@@ -2,7 +2,7 @@
 //
 // Deploy into an existing Environment, then associate the pack:
 //   rad deploy recipe-packs/kubernetes/default.bicep --environment default
-//   rad env update default --recipe-packs default --preview
+//   rad env update default --recipe-packs default
 //
 // This mirrors /planes/radius/local/resourceGroups/default/providers/Radius.Core/recipePacks/default
 

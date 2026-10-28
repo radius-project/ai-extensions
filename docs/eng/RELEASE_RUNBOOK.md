@@ -36,7 +36,15 @@ Edge needs nothing from you. The rest of this page is the stable release.
 
   Triage a failure with the [Cloud E2E runbook](./CLOUD_E2E_RUNBOOK.md) before you release.
 
-Each of these is enforced by the workflow, so a mistake here fails fast rather than shipping something wrong.
+Environment readiness and the Radius version check below require maintainer review.
+
+### Verify the Radius release pin
+
+1. Compare the [latest stable Radius tag](https://github.com/radius-project/radius/releases/latest) with `tag` in [`radius-release.json`](../../packages/adapter-shared/src/radius-release.json) and `RADIUS_INSTALL_REF` in [`setup-control-plane`](../../.github/extension/actions/setup-control-plane/action.yml).
+2. If either pin is behind, run **Actions → Update Radius installer → Run workflow** from `main`, or use its existing automated PR. Review the checks and **merge the update PR before starting the ai-extensions release**.
+3. If the update landed after release preparation, rerun **Release** from `main` to refresh the release PR before merging it.
+
+Releases bundle the CLI pin and reference workflow actions at their exact source commit. Later updates on `main` require a new extension release; existing application workflows must also be regenerated and committed.
 
 ## Cut the release
 
