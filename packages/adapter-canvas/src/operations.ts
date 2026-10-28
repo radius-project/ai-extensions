@@ -682,10 +682,11 @@ export function providerRecoveryManualGuidance(op: any): string | null {
       entry.kind === "github_branch.delete" && entry.status === "not_applied"
   );
   if (unappliedBranchDeletion) {
-    return (
-      unappliedBranchDeletion.evidence ||
-      "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again."
-    );
+    const guidance =
+      "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again.";
+    return unappliedBranchDeletion.evidence ?
+        `${guidance} Details: ${unappliedBranchDeletion.evidence}`
+      : guidance;
   }
   return null;
 }

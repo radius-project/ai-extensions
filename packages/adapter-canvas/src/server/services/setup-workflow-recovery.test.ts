@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import path from "node:path";
 import { ProviderMutationRecoveryError as CoreRecoveryError } from "@radius-project/core";
+import {
+  createFileOperationStore,
+  PERSISTED_OPERATIONS_VERSION
+} from "../../operation-store.js";
 import { createSetupWorkflowRecoveryPort } from "./setup-workflow-recovery.js";
 import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import {
@@ -7,11 +13,11 @@ import {
   providerMutationRecord,
   settleProviderMutation,
   createOperation,
-  reconcileRestoredOperation,
+  createRegistry,
   providerRecoveryManualGuidance,
   canStartRollback,
   toPersistedOperation,
-  fromPersistedOperation
+  toClientView
 } from "../../operations.js";
 
 describe("Canvas setup workflow recovery binding", () => {
@@ -63,9 +69,9 @@ describe("Canvas setup workflow recovery binding", () => {
     expect(saves).toBe(1);
   });
 
-  it.each([null, "GitHub refused the recorded branch deletion."])(
+  it.each([undefined, null, "", "HTTP 403"])(
     "blocks rollback from saved non-applied branch deletion evidence %j",
-    (evidence) => {
+    async (evidence) => {
       const operation = createOperation({
         operationId: "op_branch_removal",
         repo: "fixture/app",
@@ -80,24 +86,51 @@ describe("Canvas setup workflow recovery binding", () => {
         operation,
         mutation.mutationId,
         "not_applied",
-        evidence
+        evidence ?? null
       );
       operation.providerRecovery.state = "rollback_pending";
-      const restored = fromPersistedOperation(toPersistedOperation(operation));
-      reconcileRestoredOperation(restored);
-      expect(restored).toMatchObject({
-        state: "failed_partial",
-        requiresDurableRewrite: true,
-        failure: { code: "provider-reconciliation-manual-required" }
-      });
-      expect(providerRecoveryManualGuidance(restored)).toBe(
-        evidence ||
-          "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again."
+      const saved = toPersistedOperation(operation);
+      if (evidence === undefined) {
+        delete saved.providerRecovery.mutations[0].evidence;
+      }
+      const directory = await mkdtemp(
+        path.join(process.cwd(), ".radius-recovery-guidance-")
       );
-      expect(canStartRollback(restored)).toMatchObject({
-        ok: false,
-        code: "rollback-provider-outcome-unknown"
-      });
+      try {
+        const store = createFileOperationStore({
+          filePath: path.join(directory, "operations.json")
+        });
+        await store.save({
+          schemaVersion: PERSISTED_OPERATIONS_VERSION,
+          operations: [saved]
+        });
+        const guidance =
+          "Radius has not confirmed removal of the recovered setup branch. It will not repeat the delete or remove the remaining setup resources. Review the recorded branch before starting setup again." +
+          (evidence ? ` Details: ${evidence}` : "");
+        for (let restart = 0; restart < 2; restart++) {
+          const registry = createRegistry({ store });
+          await registry.hydrate();
+          const restored = registry.get(operation.operationId);
+          expect(restored).toMatchObject({
+            state: "failed_partial",
+            failure: {
+              code: "provider-reconciliation-manual-required",
+              message: guidance
+            }
+          });
+          expect(providerRecoveryManualGuidance(restored)).toBe(guidance);
+          expect(toClientView(restored)).toMatchObject({
+            failure: { message: guidance }
+          });
+          expect(canStartRollback(restored)).toMatchObject({
+            ok: false,
+            code: "rollback-provider-outcome-unknown",
+            detail: guidance
+          });
+        }
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     }
   );
 
