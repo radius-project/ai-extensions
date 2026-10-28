@@ -151,6 +151,44 @@ afterEach(() => {
 });
 
 describe("real server and fake SDK runtime ownership", () => {
+  it.each(["setup", "verification", "cleanup"] as const)(
+    "never invokes a queued %s runner for a replacement record",
+    async (kind) => {
+      const runtime = await composition();
+      const register = vi.spyOn(runtime.accountContext, "registerExecutor");
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockResolvedValue(undefined);
+      const op = runtime.recoverDelete();
+      op.kind = "create";
+      if (kind === "setup")
+        runtime.server.setupExecution.scheduleEnvironmentOperation(op);
+      else
+        runtime.server.setupExecution.scheduleCommandTask(
+          kind === "verification" ? "verification_retry" : "rollback",
+          op,
+          "old-command"
+        );
+      const replacement = runtime.recoverDelete();
+      replacement.kind = "create";
+      const before = structuredClone(replacement);
+      const completed = new Promise<void>((resolve) => {
+        const stop = runtime.owner.onEnvironmentTasksSettled(undefined, () => {
+          stop();
+          resolve();
+        });
+      });
+      try {
+        await runtime.settle();
+        await completed;
+        expect(register).not.toHaveBeenCalled();
+        expect(persist).not.toHaveBeenCalled();
+        expect(replacement).toEqual(before);
+      } finally {
+        await runtime.cleanup();
+      }
+    }
+  );
   it("refuses a pending resume without an original attachment", async () => {
     const runtime = await composition();
     const op = newOperation();
@@ -167,7 +205,10 @@ describe("real server and fake SDK runtime ownership", () => {
     try {
       expect(
         await runtime.server.operationResume(
-          { operationId: op.operationId, code: "app-selection-required" },
+          {
+            operationId: op.operationId,
+            code: "app-selection-required"
+          },
           async () => ({
             repo: String(op.repo),
             environment: String(op.environment),
@@ -877,7 +918,12 @@ describe("real server and fake SDK runtime ownership", () => {
       const result =
         action === "resume" ?
           await runtime.operationResume(
-            { operationId: op.operationId, code: "app-selection-required" },
+            {
+              operationId: op.operationId,
+              code: "app-selection-required",
+              isCurrent: () => !owner.isShuttingDown(),
+              schedule: runtime.setupExecution.scheduleEnvironmentOperation
+            },
             async () => ({
               repo: op.repo,
               environment: op.environment,
@@ -1053,6 +1099,17 @@ describe("real server and fake SDK runtime ownership", () => {
           ["issued", "prepared", "delay"].map((boundary) => [stage, boundary])
         )
       )
+      .concat(
+        ["ghcr-head", "ghcr-post", "ghcr-put", "ghcr-manifest"].map((stage) => [
+          stage,
+          "issued"
+        ])
+      )
+      .concat(
+        ["azure", "environment"].flatMap((stage) =>
+          ["throw", "timeout"].map((boundary) => [stage, boundary])
+        )
+      )
   )(
     "retains the %s %s journal and account through shutdown",
     async (stage, boundary) => {
@@ -1064,6 +1121,8 @@ describe("real server and fake SDK runtime ownership", () => {
       const appId = "22222222-2222-4222-8222-222222222222";
       const callerId = "44444444-4444-4444-8444-444444444444";
       const azureStage = stage.startsWith("azure");
+      const ghcrStage = stage.startsWith("ghcr");
+      const unknownBoundary = boundary === "throw" || boundary === "timeout";
       const azureRetry = stage === "azure-owner" || stage === "azure-tags";
       const rejected = deferred();
       let azureAttempts = 0;
@@ -1071,6 +1130,20 @@ describe("real server and fake SDK runtime ownership", () => {
       const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
       const variableValues = new Map<string, string>();
       let acknowledged = false;
+      let writeSettled = false;
+      const finishWrite = (stdout = "") => {
+        writeSettled = true;
+        if (boundary === "throw") throw new Error("Lost write response");
+        if (boundary === "timeout")
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "Write timed out",
+            timedOut: true
+          };
+        acknowledged = true;
+        return success(stdout);
+      };
       const run = vi.fn(async (args: string[]) => {
         if (
           stage !== "azure" &&
@@ -1100,8 +1173,7 @@ describe("real server and fake SDK runtime ownership", () => {
         if (stage === "environment" && args.includes("PUT")) {
           entered.resolve();
           await writeGate.promise;
-          acknowledged = true;
-          return success('{"name":"dev","id":17}');
+          return finishWrite('{"name":"dev","id":17}');
         }
         const endpoint = args[1]?.replace(/^\//, "");
         if (endpoint === "user") return success('{"login":"saved-account"}');
@@ -1144,8 +1216,7 @@ describe("real server and fake SDK runtime ownership", () => {
         if ((stage === "azure" && command === "ad app create") || retryTarget) {
           entered.resolve();
           await writeGate.promise;
-          acknowledged = true;
-          return success(stage === "azure" ? appId : "");
+          return finishWrite(stage === "azure" ? appId : "");
         }
         if (azureRetry && command === "ad app create") return success(appId);
         if (azureRetry && args.slice(0, 4).join(" ") === "ad app owner add")
@@ -1171,16 +1242,22 @@ describe("real server and fake SDK runtime ownership", () => {
                 result.code === 0 ?
                   null
                 : Object.assign(new Error(result.stderr), {
-                    code: result.code
+                    code: result.code,
+                    killed: boundary === "timeout"
                   }),
                 result.stdout,
                 result.stderr
               ),
             (error: unknown) =>
               callback(
-                error instanceof Error ? error : new Error(String(error)),
+                Object.assign(
+                  error instanceof Error ? error : new Error(String(error)),
+                  {
+                    killed: unknownBoundary
+                  }
+                ),
                 "",
-                ""
+                error instanceof Error ? error.message : String(error)
               )
           );
           return new ChildProcess();
@@ -1198,6 +1275,21 @@ describe("real server and fake SDK runtime ownership", () => {
           throw new Error(`Unexpected fetch: ${url.href}`);
         }
         const response = await ghcr.fetchImpl(url.href, options);
+        if (
+          (stage === "ghcr-head" &&
+            options?.method === "HEAD" &&
+            url.pathname.includes("/manifests/")) ||
+          (stage === "ghcr-post" && options?.method === "POST") ||
+          (stage === "ghcr-put" &&
+            options?.method === "PUT" &&
+            url.pathname.startsWith("/uploads/")) ||
+          (stage === "ghcr-manifest" &&
+            options?.method === "PUT" &&
+            url.pathname.includes("/manifests/"))
+        ) {
+          entered.resolve();
+          await writeGate.promise;
+        }
         return {
           ok: response.ok,
           status: response.status,
@@ -1306,7 +1398,7 @@ describe("real server and fake SDK runtime ownership", () => {
           persisted.resolve();
           await persistGate.promise;
         }
-        if (acknowledged) {
+        if (acknowledged || writeSettled) {
           persisted.resolve();
           await persistGate.promise;
         }
@@ -1353,8 +1445,8 @@ describe("real server and fake SDK runtime ownership", () => {
         writeGate.resolve();
         if (boundary === "delay") await vi.advanceTimersByTimeAsync(2000);
         else await Promise.race([persisted.promise, completed]);
-        expect(acknowledged).toBe(boundary === "issued");
-        if (boundary !== "delay")
+        expect(acknowledged).toBe(boundary === "issued" && !ghcrStage);
+        if (boundary !== "delay" && !ghcrStage)
           expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         persistGate.resolve();
         await completed;
@@ -1369,20 +1461,24 @@ describe("real server and fake SDK runtime ownership", () => {
             .every(([args]) => args[0] === "api" && !args.includes("--method"))
         ).toBe(true);
         expect(ghcr.calls.slice(callsAtShutdown.fetch)).toEqual([]);
-        expect(snapshots.at(-1)?.providerRecovery.mutations).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              kind:
-                stage === "azure" ? "azure_application.create"
-                : stage === "azure-owner" ? "azure_app_owner.add"
-                : stage === "azure-tags" ? "azure_app_tags.patch"
-                : stage === "environment" ? "github_environment.put"
-                : "github_environment_variable.put",
-              status: boundary === "issued" ? "confirmed" : "not_applied"
-            })
-          ])
-        );
-        if (boundary === "issued")
+        if (!ghcrStage)
+          expect(snapshots.at(-1)?.providerRecovery.mutations).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                kind:
+                  stage === "azure" ? "azure_application.create"
+                  : stage === "azure-owner" ? "azure_app_owner.add"
+                  : stage === "azure-tags" ? "azure_app_tags.patch"
+                  : stage === "environment" ? "github_environment.put"
+                  : "github_environment_variable.put",
+                status:
+                  boundary === "issued" ? "confirmed"
+                  : unknownBoundary ? "outcome_unknown"
+                  : "not_applied"
+              })
+            ])
+          );
+        if (boundary === "issued" && !ghcrStage)
           expect(snapshots.at(-1)?.setupArtifacts).toMatchObject(
             azureStage ?
               {
@@ -1413,6 +1509,14 @@ describe("real server and fake SDK runtime ownership", () => {
             op.providerRecovery.mutations.at(-1)?.reconcileAttempts ?? 0
           ).toBe(0);
         }
+        if (unknownBoundary) {
+          expect(
+            op.providerRecovery.mutations.at(-1)?.reconcileAttempts ?? 0
+          ).toBe(0);
+          expect(op.providerRecovery.mutations.at(-1)?.finalDiagnostic).toMatch(
+            /Lost write response|Write timed out/
+          );
+        }
         expect(runtime.servers.size).toBe(0);
         const released = await coordinator.withSelectedAccount(
           executor.login,
@@ -1434,11 +1538,17 @@ describe("real server and fake SDK runtime ownership", () => {
 
   it.each(
     ["azure", "github"].flatMap((provider) =>
-      [0, 11].map((attempts) => ({ provider, attempts }))
+      [0, 11].flatMap((attempts) =>
+        ["response", "rejection"].map((outcome) => ({
+          provider,
+          attempts,
+          outcome
+        }))
+      )
     )
   )(
-    "preserves unresolved $provider evidence at $attempts attempts when shutdown prevents reread",
-    async ({ provider, attempts }) => {
+    "preserves unresolved $provider evidence at $attempts attempts after late $outcome",
+    async ({ provider, attempts, outcome }) => {
       vi.spyOn(gh, "fetchFileFromRepoResult").mockImplementation(
         async (repo, path, ref) => {
           if (
@@ -1503,6 +1613,8 @@ describe("real server and fake SDK runtime ownership", () => {
         ) {
           entered.resolve();
           await gate.promise;
+          if (outcome === "rejection")
+            throw new Error("Late GitHub read failed");
           return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
         }
         throw new Error(`Unexpected GitHub read or write: ${args.join(" ")}`);
@@ -1514,6 +1626,8 @@ describe("real server and fake SDK runtime ownership", () => {
         ) {
           entered.resolve();
           await gate.promise;
+          if (outcome === "rejection")
+            throw new Error("Late Azure read failed");
           return success("[]");
         }
         if (args.slice(0, 2).join(" ") === "account set") return success();
@@ -1754,7 +1868,12 @@ describe("real server and fake SDK runtime ownership", () => {
     let completed: Promise<void> | undefined;
     try {
       const result = await runtime.server.operationResume(
-        { operationId: op.operationId, code: "app-selection-required" },
+        {
+          operationId: op.operationId,
+          code: "app-selection-required",
+          isCurrent: () => !runtime.owner.isShuttingDown(),
+          schedule: runtime.server.setupExecution.scheduleEnvironmentOperation
+        },
         async () => ({
           repo: op.repo,
           environment: op.environment,
@@ -2306,12 +2425,15 @@ describe("real server and fake SDK runtime ownership", () => {
         appId: "chosen-app"
       })
     );
-    expect(resumed.status).toBe(202);
-    expect(pending.request.azure.appId).toBe("chosen-app");
-    expect(pending.state).toBe("failed");
-    expect(pending.failure.code).toBe("operation-scheduling-failed");
-    expect(persist).toHaveBeenCalledTimes(4);
-    expect(log).toHaveBeenCalledTimes(2);
+    expect(resumed).toMatchObject({
+      status: 409,
+      body: { code: "operation-resume-mismatch" }
+    });
+    expect(pending.request.azure.appId).toBeUndefined();
+    expect(pending.inputRequired?.code).toBe("app-selection-required");
+    expect(pending.failure).toBeNull();
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(log).toHaveBeenCalledOnce();
     expect(fetcher).not.toHaveBeenCalled();
     expect(runtime.servers.size).toBe(0);
   });

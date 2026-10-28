@@ -303,8 +303,10 @@ async function reconcileMutation<T>(
   reconcile: () => Promise<ProviderMutationReconciliation<T>>,
   persist: () => Promise<void>,
   onConfirmed?: (value: T, recovered: boolean) => void,
-  rethrowReconciliationError?: (error: unknown) => boolean
+  rethrowReconciliationError?: (error: unknown) => boolean,
+  assertActive?: () => void
 ): Promise<RecoverableMutationResult<T>> {
+  assertActive?.();
   // `settleProviderMutation` normalizes the whole recovery record, so the entry
   // it leaves behind is a different object from the one passed in here. The
   // attempt counter has to be written to that live entry or it is discarded.
@@ -323,6 +325,7 @@ async function reconcileMutation<T>(
     outcome = await reconcile();
   } catch (error) {
     if (rethrowReconciliationError?.(error)) throw error;
+    assertActive?.();
     return recordProviderReconciliationFailure(
       operation,
       mutation,
@@ -660,7 +663,8 @@ export async function executeRecoverableMutation<T>(
         input.reconcile,
         input.persist,
         input.onConfirmed,
-        input.rethrowReconciliationError
+        input.rethrowReconciliationError,
+        input.assertActive
       );
     }
     // Ambiguity is read before success. A command that timed out, was killed,
@@ -697,7 +701,8 @@ export async function executeRecoverableMutation<T>(
         input.reconcile,
         input.persist,
         input.onConfirmed,
-        input.rethrowReconciliationError
+        input.rethrowReconciliationError,
+        input.assertActive
       );
     }
     if (result.code === 0 || result.code === "0") {
@@ -761,7 +766,8 @@ export async function executeRecoverableMutation<T>(
       input.reconcile,
       input.persist,
       input.onConfirmed,
-      input.rethrowReconciliationError
+      input.rethrowReconciliationError,
+      input.assertActive
     );
   }
   if (mutation.status === "manual_required") {

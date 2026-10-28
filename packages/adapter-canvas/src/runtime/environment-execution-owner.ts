@@ -21,6 +21,12 @@ interface TaskRecord {
   promise: Promise<void>;
 }
 
+interface ReconciliationIdentity {
+  operation: object;
+  repo?: string;
+  environment?: string;
+}
+
 const productionClock: EnvironmentExecutionClock = {
   deferTask: () =>
     new Promise<void>((resolve) => {
@@ -59,7 +65,10 @@ export function createEnvironmentExecutionOwner(
   const currentAttachments = new Map<string | undefined, number>();
   const automaticRollbacks = new Map<string, symbol>();
   const verificationMonitors = new Map<string, symbol>();
-  const reconciliationTimers = new Map<string, { cancel: () => void }>();
+  const reconciliationTimers = new Map<
+    string,
+    { cancel: () => void; identity?: ReconciliationIdentity }
+  >();
   const shutdownListeners = new Set<{ listener: () => void }>();
   let shuttingDown = false;
   let generation = 0;
@@ -268,10 +277,24 @@ export function createEnvironmentExecutionOwner(
           reportFinalizationError(operationId, error);
         });
       },
-      scheduleReconciliation(operationId: string, callback: () => void): void {
+      scheduleReconciliation(
+        operationId: string,
+        callback: () => void,
+        identity?: ReconciliationIdentity
+      ): void {
         if (shuttingDown) return;
-        if (reconciliationTimers.has(operationId)) return;
+        const prior = reconciliationTimers.get(operationId);
+        if (prior) {
+          if (
+            prior.identity?.operation === identity?.operation &&
+            prior.identity?.repo === identity?.repo &&
+            prior.identity?.environment === identity?.environment
+          )
+            return;
+          prior.cancel();
+        }
         const registration = {
+          identity: identity && { ...identity },
           cancel: clock.reconciliationTimer(() => {
             if (reconciliationTimers.get(operationId) !== registration) return;
             reconciliationTimers.delete(operationId);

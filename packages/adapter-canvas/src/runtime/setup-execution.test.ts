@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { assertSetupExecutionActive } from "@radius-project/core";
 import {
   acceptCommand,
   createOperation,
@@ -140,6 +141,113 @@ describe("runtime setup execution construction", () => {
 });
 
 describe("runtime setup execution", () => {
+  it("propagates runner interruption without publishing a task failure", async () => {
+    const { ports, operation, settled } = fixture();
+    const op = operation();
+    ports.runOperation.mockImplementation(async () => {
+      assertSetupExecutionActive(() => true);
+    });
+    createSetupExecution(ports).scheduleEnvironmentOperation(op);
+    await settled();
+    expect(op.endedAt).toBeNull();
+    expect(ports.persist).not.toHaveBeenCalled();
+    expect(ports.report).not.toHaveBeenCalled();
+  });
+  it.each(
+    ["operationId", "repo", "environment"].flatMap((field) =>
+      ["success", "failure"].map((outcome) => [field, outcome])
+    )
+  )(
+    "does not settle issued %s work into a retargeted record after %s",
+    async (field, outcome) => {
+      const { ports, operation, settled, timers } = fixture();
+      const op = operation();
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let start = () => {};
+      const entered = new Promise<void>((resolve) => {
+        start = resolve;
+      });
+      ports.runOperation.mockImplementation(async () => {
+        start();
+        await gate;
+        if (outcome === "failure") throw new Error("Lost response");
+      });
+      createSetupExecution(ports).scheduleEnvironmentOperation(op);
+      await entered;
+      Object.assign(op, { [field]: "retargeted" });
+      const before = structuredClone(op);
+      release();
+      await settled();
+      expect(op).toEqual(before);
+      expect(ports.persist).not.toHaveBeenCalled();
+      expect(ports.report).not.toHaveBeenCalled();
+      expect(timers).toEqual([]);
+    }
+  );
+
+  it.each(
+    ["setup", "verification", "cleanup", "recovery"].flatMap((kind) =>
+      [
+        "current",
+        "replaced",
+        "removed",
+        "id",
+        "repo",
+        "environment",
+        "shutdown"
+      ].map((change) => [kind, change])
+    )
+  )("fences queued %s execution when identity is %s", async (kind, change) => {
+    const { owner, ports, records, operation, settled } = fixture();
+    const op = operation();
+    const id = op.operationId;
+    op.currentStage = STAGE_VERIFY;
+    op.recoveryState = "verification_pending";
+    ports.runOperation.mockResolvedValue(undefined);
+    ports.runVerificationRetry.mockResolvedValue(undefined);
+    ports.runCleanup.mockResolvedValue(undefined);
+    ports.observeRecoveredVerification.mockResolvedValue(undefined);
+    const releases: Array<ReturnType<typeof vi.fn>> = [];
+    ports.claimVerificationMonitor.mockImplementation((operationId) => {
+      const release = owner.claimVerificationMonitor(operationId);
+      if (!release) return undefined;
+      const tracked = vi.fn(release);
+      releases.push(tracked);
+      return tracked;
+    });
+    const execution = createSetupExecution(ports);
+    if (kind === "setup") execution.scheduleEnvironmentOperation(op);
+    else if (kind === "verification")
+      execution.scheduleCommandTask("verification_retry", op, "command");
+    else if (kind === "cleanup")
+      execution.scheduleCommandTask("rollback", op, "command");
+    else execution.recoverOperation(op);
+    if (change === "replaced") operation();
+    if (change === "removed") records.delete(id);
+    if (change === "id") op.operationId = "retargeted";
+    if (change === "repo") op.repo = "fixture/other";
+    if (change === "environment") op.environment = "prod";
+    if (change === "shutdown") owner.shutdown();
+    const before = structuredClone(records.get(id));
+    await settled();
+    const runner =
+      kind === "setup" ? ports.runOperation
+      : kind === "verification" ? ports.runVerificationRetry
+      : kind === "cleanup" ? ports.runCleanup
+      : ports.observeRecoveredVerification;
+    expect(runner).toHaveBeenCalledTimes(change === "current" ? 1 : 0);
+    if (change !== "current") expect(records.get(id)).toEqual(before);
+    expect(ports.persist).not.toHaveBeenCalled();
+    expect(ports.report).not.toHaveBeenCalled();
+    for (const release of releases) expect(release).toHaveBeenCalledOnce();
+    const release = owner.claimVerificationMonitor(id);
+    expect(release).toBeTypeOf("function");
+    release?.();
+  });
+
   it.each(["current", "replaced", "removed", "shutdown"])(
     "re-evaluates only the deferred runtime admission when it is %s",
     async (change) => {
@@ -176,7 +284,6 @@ describe("runtime setup execution", () => {
       "rollback",
       "terminal",
       "removed",
-      "missing",
       "shutdown"
     ].flatMap((replacement) =>
       ["success", "failure"].map((outcome) => [replacement, outcome])
@@ -187,7 +294,6 @@ describe("runtime setup execution", () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       const { ports, operation, records, settled, scope, timers } = fixture();
       const old = operation();
-      if (replacement === "missing") records.delete(old.operationId);
       let release = () => {};
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -242,6 +348,51 @@ describe("runtime setup execution", () => {
     }
   );
 
+  it.each([
+    "current",
+    "replaced",
+    "removed",
+    "id",
+    "repo",
+    "environment",
+    "shutdown"
+  ])(
+    "binds delayed reconciliation to its %s operation and target",
+    async (change) => {
+      const { owner, ports, records, operation, settled, timers } = fixture();
+      const op = operation();
+      const id = op.operationId;
+      prepareProviderMutation(op, {
+        kind: "azure_app.create",
+        target: "fixture-app"
+      });
+      ports.runOperation
+        .mockRejectedValueOnce(new Error("Lost write"))
+        .mockResolvedValue(undefined);
+      createSetupExecution(ports).scheduleEnvironmentOperation(op);
+      await settled();
+      expect(timers).toHaveLength(1);
+      const callback = timers[0];
+      if (change === "replaced") {
+        prepareProviderMutation(operation(), {
+          kind: "azure_app.create",
+          target: "replacement"
+        });
+      }
+      if (change === "removed") records.delete(id);
+      if (change === "id") op.operationId = "retargeted";
+      if (change === "repo") op.repo = "fixture/other";
+      if (change === "environment") op.environment = "prod";
+      if (change === "shutdown") owner.shutdown();
+      const before = structuredClone(records.get(id));
+      callback();
+      await settled();
+      expect(ports.runOperation).toHaveBeenCalledTimes(
+        change === "current" ? 2 : 1
+      );
+      if (change !== "current") expect(records.get(id)).toEqual(before);
+    }
+  );
   it("ignores a reconciliation callback delivered after the execution scope stops", async () => {
     const { ports, operation, settled, scope } = fixture();
     const op = operation();
@@ -273,7 +424,7 @@ describe("runtime setup execution", () => {
     scope.markShuttingDown();
     await settled();
     expect(ports.observeRecoveredVerification).not.toHaveBeenCalled();
-    expect(op.executionActive).toBe(false);
+    expect(op.executionActive).toBe(true);
     expect(op.endedAt).toBeNull();
     const release = ports.claimVerificationMonitor(op.operationId);
     expect(release).toEqual(expect.any(Function));

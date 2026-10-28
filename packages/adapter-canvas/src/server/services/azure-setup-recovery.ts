@@ -1,5 +1,6 @@
 import {
   assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
   type AzureRecoveryPort
 } from "@radius-project/core";
 import {
@@ -26,6 +27,7 @@ export function createAzureRecoveryPort(
         ...input,
         operation,
         persist,
+        rethrowReconciliationError: isSetupExecutionInterrupted,
         assertActive: () => {
           assertSetupExecutionActive(isStopped);
           input.assertActive?.();

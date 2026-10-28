@@ -130,17 +130,37 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
     task: () => Promise<void>,
     cancelled?: () => void
   ): boolean {
-    if (ports.isShuttingDown(operationId)) return false;
-    let reconciliationNeeded = false;
     const op = ports.getOperation(operationId);
+    const repo = op?.repo;
+    const environment = op?.environment;
+    const isIdentityCurrent = () =>
+      op != null &&
+      ports.getOperation(operationId) === op &&
+      op.operationId === operationId &&
+      op.repo === repo &&
+      op.environment === environment;
     const isCurrent = () =>
-      op != null && ports.getOperation(operationId) === op;
-    if (op) setExecutionActive(op, true);
+      isIdentityCurrent() && !ports.isShuttingDown(operationId);
+    const releaseSkipped = () => {
+      cancelled?.();
+    };
+    if (!isCurrent()) {
+      releaseSkipped();
+      return false;
+    }
+    let reconciliationNeeded = false;
+    setExecutionActive(op, true);
     ports.scope.schedule(operationId, {
-      run: task,
-      cancelled,
+      run: async () => {
+        if (!isCurrent()) {
+          releaseSkipped();
+          return;
+        }
+        await task();
+      },
+      cancelled: releaseSkipped,
       failed: async (error) => {
-        if (!isCurrent()) return;
+        if (!isIdentityCurrent()) return;
         const current = ports.getOperation(operationId);
         if (isSetupExecutionInterrupted(error)) return;
         if (ports.isShuttingDown(operationId)) {
@@ -183,12 +203,16 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
         }
       },
       settling: () => {
-        if (!isCurrent()) return;
+        if (
+          !isIdentityCurrent() ||
+          (op?.kind !== "delete" && ports.isShuttingDown(operationId))
+        )
+          return;
         const current = op;
         if (current && !current.endedAt) setExecutionActive(current, false);
       },
       settled: () => {
-        if (!isCurrent() || ports.isShuttingDown(operationId)) return;
+        if (!isCurrent()) return;
         const current = op;
         if (
           current?.endedAt &&
@@ -202,26 +226,40 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
           !current.endedAt &&
           unresolvedProviderMutations(current).length > 0
         ) {
-          scheduleProviderReconciliation(operationId);
+          scheduleProviderReconciliation(current);
         }
       }
     });
     return true;
   }
 
-  function scheduleProviderReconciliation(operationId: string): void {
-    ports.scope.scheduleReconciliation(operationId, () => {
-      if (ports.isShuttingDown(operationId)) return;
-      const operation = ports.getOperation(operationId);
-      if (
-        !operation ||
-        operation.endedAt ||
-        unresolvedProviderMutations(operation).length === 0
-      ) {
-        return;
-      }
-      scheduleRecoveredProviderMutation(operation);
-    });
+  function scheduleProviderReconciliation(
+    operation: SetupExecutionOperation
+  ): void {
+    const operationId = operation.operationId;
+    const identity = {
+      operation,
+      repo: operation.repo,
+      environment: operation.environment
+    };
+    ports.scope.scheduleReconciliation(
+      operationId,
+      () => {
+        if (ports.isShuttingDown(operationId)) return;
+        if (
+          ports.getOperation(operationId) !== operation ||
+          operation.operationId !== operationId ||
+          operation.repo !== identity.repo ||
+          operation.environment !== identity.environment ||
+          operation.endedAt ||
+          unresolvedProviderMutations(operation).length === 0
+        ) {
+          return;
+        }
+        scheduleRecoveredProviderMutation(operation);
+      },
+      identity
+    );
   }
 
   function scheduleAutomaticRecoveryRollback(operationId: string): void {
@@ -338,9 +376,8 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
   function scheduleEnvironmentOperation(operation: {
     operationId: string;
   }): boolean {
-    return schedule(operation.operationId, () =>
-      ports.runOperation(operation.operationId)
-    );
+    const operationId = operation.operationId;
+    return schedule(operationId, () => ports.runOperation(operationId));
   }
 
   function scheduleCommandTask(
@@ -348,12 +385,13 @@ export function createSetupExecution(ports: SetupExecutionPorts) {
     operation: { operationId: string },
     commandId: string
   ): boolean {
-    return schedule(operation.operationId, () =>
+    const operationId = operation.operationId;
+    return schedule(operationId, () =>
       kind === "verification_monitor" ?
-        ports.runVerificationContinuation(operation.operationId, commandId)
+        ports.runVerificationContinuation(operationId, commandId)
       : kind === "verification_retry" ?
-        ports.runVerificationRetry(operation.operationId, commandId)
-      : ports.runCleanup(kind, operation.operationId, commandId)
+        ports.runVerificationRetry(operationId, commandId)
+      : ports.runCleanup(kind, operationId, commandId)
     );
   }
 
