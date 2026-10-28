@@ -4,8 +4,8 @@
 // It asks the extension-managed `rad` binary for the exact Radius commit,
 // downloads that release's generated Bicep definitions from a pinned source,
 // converts them into compact model-facing schemas, includes exact matching
-// definitions from the release-pinned Azure Recipe pack, and wires the matching
-// Radius extension into the staged bicepconfig.json.
+// registrations and digest-verified implementations from the release-pinned Azure
+// Recipe pack, and wires the matching Radius extension into staged bicepconfig.json.
 //
 // This is executable code rather than prompt guidance so release selection,
 // source confinement, cache safety, schema validation, and staged config
@@ -26,6 +26,7 @@ import {
   radiusVersionFromExtensionRef
 } from "../../../../../packages/adapter-shared/src/rad-release.ts";
 import { compareRadiusVersions } from "../../../../../packages/core/src/modeling/radius-version.ts";
+import { resolveRecipeImplementation } from "../../../../../packages/adapter-shared/src/recipe-implementation.ts";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -975,7 +976,12 @@ export async function resolveRadiusTypes(selectors, options = {}) {
                   repository: pack.repository,
                   commit: pack.commit,
                   path: pack.path,
-                  definition
+                  definition,
+                  packDefinition: pack.source,
+                  implementation: await resolveRecipeImplementation(
+                    definition,
+                    options
+                  )
                 };
           } catch (error) {
             const detail = message(error);

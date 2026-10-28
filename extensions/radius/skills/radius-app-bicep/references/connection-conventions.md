@@ -11,7 +11,7 @@ Connection projection is compatibility-specific. Depending on the managed modeli
 - relationship metadata; and/or
 - no sensitive outputs.
 
-Use the required managed `show-radius-type.mjs` result for `Radius.Compute/containers` before relying on a projection shape. Support is established when `recipe.status` is `available` and the returned `recipe.definition` identifies the Kubernetes Container Recipe. An explicit target Recipe supplied in the user brief, managed context, or a repository-pinned local file may establish the same support when it identifies that Recipe. The skill handoff itself and a resolved resource schema alone are insufficient. Inspect only the returned definition or supplied local artifact. Do not execute `rad`, fetch versions or Recipe metadata, or visit external links to discover compatibility, and do not follow references from the definition.
+Use the required managed `show-radius-type.mjs` result for `Radius.Compute/containers` before relying on a projection shape. Support is established when `recipe.status` is `available` and the returned `recipe.definition` identifies the Kubernetes Container Recipe, with an available `recipe.implementation.template` proving the projection behavior. An explicit target Recipe supplied in the user brief, managed context, or a repository-pinned local file may establish the same support when its implementation proves that behavior. The skill handoff itself and a resolved resource schema alone are insufficient. Inspect only the returned evidence or supplied local artifact. Do not execute `rad`, fetch versions or Recipe metadata, or visit external links to discover compatibility, and do not follow references from the definition.
 
 ## Compatibility and gradual adoption
 

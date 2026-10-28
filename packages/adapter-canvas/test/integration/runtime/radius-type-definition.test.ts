@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -76,6 +77,11 @@ const recipePackPath = "recipe-packs/azure/aks-recipepack.bicep";
 const azureAksRecipePackPath = "recipe-packs/azure-aks/azure-aks.bicep";
 const defaultsCachePath = "managed-recipes/defaults.json";
 const recipePackCachePath = `managed-recipes/azure/${resourceTypesContribCommit}/aks-recipepack.json`;
+const avmManifestUrl =
+  "https://mcr.microsoft.com/v2/bicep/avm/res/db-for-postgre-sql/flexible-server/manifests/0.15.2";
+const offlineNetwork = `data:text/javascript,${encodeURIComponent(
+  "globalThis.fetch = async () => { throw new Error('Offline test: network disabled'); };"
+)}`;
 
 assert.ok(fs.existsSync(script), `resolver script not found: ${script}`);
 
@@ -748,7 +754,7 @@ describe("network and cache behavior", () => {
     expect(attempts).toBe(1);
   });
 
-  it("uses a valid cache without network access", async () => {
+  it("keeps cached schemas and registration when implementation evidence is offline", async () => {
     const cacheRoot = temporaryDirectory();
     seedCache(cacheRoot);
     const contract = await resolver.resolveRadiusTypes(
@@ -770,7 +776,12 @@ describe("network and cache behavior", () => {
       repository: "radius-project/resource-types-contrib",
       commit: resourceTypesContribCommit,
       path: recipePackPath,
-      definition: fixturePostgreSqlRecipeDefinition
+      definition: fixturePostgreSqlRecipeDefinition,
+      packDefinition: fixtureRecipePack,
+      implementation: {
+        status: "unavailable",
+        message: expect.stringContaining("supply the exact implementation")
+      }
     });
   });
 
@@ -805,7 +816,12 @@ describe("network and cache behavior", () => {
       repository: "radius-project/resource-types-contrib",
       commit: resourceTypesContribCommit,
       path: azureAksRecipePackPath,
-      definition: fixturePostgreSqlRecipeDefinition
+      definition: fixturePostgreSqlRecipeDefinition,
+      packDefinition: fixtureRecipePack,
+      implementation: {
+        status: "unavailable",
+        message: expect.stringContaining("HTTP 404")
+      }
     });
     expect(
       fs.existsSync(
@@ -832,7 +848,10 @@ describe("network and cache behavior", () => {
       }
     );
 
-    expect(calls).toEqual([`${generatedRoot}/${commit}/${defaultsPath}`]);
+    expect(calls).toEqual([
+      `${generatedRoot}/${commit}/${defaultsPath}`,
+      avmManifestUrl
+    ]);
     expect(contract.resources[0].recipe.status).toBe("available");
   });
 
@@ -891,7 +910,8 @@ describe("network and cache behavior", () => {
     );
 
     expect(calls).toEqual([
-      `https://raw.githubusercontent.com/radius-project/resource-types-contrib/${resourceTypesContribCommit}/${recipePackPath}`
+      `https://raw.githubusercontent.com/radius-project/resource-types-contrib/${resourceTypesContribCommit}/${recipePackPath}`,
+      avmManifestUrl
     ]);
     expect(contract.resources[0].recipe.status).toBe("available");
   });
@@ -1119,7 +1139,7 @@ describe("network and cache behavior", () => {
       ["Radius.Compute/containers", "Radius.Core/applications"],
       options
     );
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(5);
     expect(
       contract.resources.map((resource: { type: string }) => resource.type)
     ).toEqual(["Radius.Compute/containers", "Radius.Core/applications"]);
@@ -1129,7 +1149,7 @@ describe("network and cache behavior", () => {
       )
     ).toEqual(["available", "notFound"]);
     await resolver.resolveRadiusTypes(["Radius.Compute/containers"], options);
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(6);
   });
 
   it("returns selectors that resolve to the same API version only once", async () => {
@@ -1186,9 +1206,99 @@ describe("network and cache behavior", () => {
       repository: "radius-project/resource-types-contrib",
       commit: resourceTypesContribCommit,
       path: recipePackPath,
-      definition: fixturePostgreSqlRecipeDefinition
+      definition: fixturePostgreSqlRecipeDefinition,
+      packDefinition: fixtureRecipePack,
+      implementation: {
+        status: "unavailable",
+        message: expect.stringContaining("HTTP 404")
+      }
     });
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(5);
+  });
+
+  it("returns OCI implementation evidence separately from missing registration and unavailable implementation", async () => {
+    const calls: string[] = [];
+    const sourceFetch = fixtureFetch(calls);
+    const template = {
+      $schema:
+        "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+      parameters: {
+        registry: { type: "string" },
+        registrySecretName: { type: "string", defaultValue: "" }
+      },
+      variables: {
+        tag: "[coalesce(tryGet(parameters('context').resource.properties, 'tag'), 'latest')]"
+      },
+      resources: { build: { type: "batch/Job@v1" } },
+      outputs: {
+        result: {
+          value: { values: { image: "[variables('image')]" }, secrets: {} }
+        }
+      }
+    };
+    const text = JSON.stringify(template);
+    const digest = `sha256:${createHash("sha256").update(text).digest("hex")}`;
+    const manifest = JSON.stringify({
+      schemaVersion: 2,
+      layers: [
+        {
+          mediaType: "application/vnd.ms.bicep.module.layer.v1+json",
+          digest,
+          size: Buffer.byteLength(text)
+        }
+      ]
+    });
+    const manifestDigest = `sha256:${createHash("sha256").update(manifest).digest("hex")}`;
+    const contract = await resolver.resolveRadiusTypes(
+      [
+        "Radius.Compute/containerImages",
+        "Radius.Core/applications",
+        "Radius.Data/postgreSqlDatabases"
+      ],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot: temporaryDirectory(),
+        fetchImpl: async (url: string) => {
+          if (url.startsWith("https://ghcr.io/token?"))
+            return Response.json({ token: "anonymous-fixture" });
+          if (
+            url ===
+            "https://ghcr.io/v2/radius-project/kube-recipes/containerimages/manifests/latest"
+          )
+            return new Response(manifest);
+          if (
+            url ===
+            `https://ghcr.io/v2/radius-project/kube-recipes/containerimages/blobs/${digest}`
+          )
+            return new Response(text);
+          return sourceFetch(url);
+        }
+      }
+    );
+    expect(contract.resources[0].recipe).toMatchObject({
+      status: "available",
+      definition: expect.stringContaining("containerimages:latest"),
+      packDefinition: fixtureRecipePack,
+      implementation: {
+        status: "available",
+        source: "ghcr.io/radius-project/kube-recipes/containerimages:latest",
+        resolvedSource: `ghcr.io/radius-project/kube-recipes/containerimages@${manifestDigest}`,
+        sourceIsDigest: false,
+        manifestDigest,
+        templateDigest: digest,
+        template
+      }
+    });
+    expect(contract.resources[1].recipe.status).toBe("notFound");
+    expect(contract.resources[1].recipe).not.toHaveProperty("implementation");
+    expect(contract.resources[2].recipe).toMatchObject({
+      status: "available",
+      implementation: {
+        status: "unavailable",
+        message: expect.stringContaining("HTTP 404")
+      }
+    });
+    expect(contract.notFound).toEqual([]);
   });
 
   it("returns an all-missing batch without loading Recipe data", async () => {
@@ -1438,7 +1548,7 @@ describe("network and cache behavior", () => {
     );
 
     expect(contract.resources[0].recipe.status).toBe("available");
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(5);
     expect(warnings).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/could not cache Radius definitions/u),
@@ -2381,6 +2491,8 @@ describe("command boundary", () => {
     const result = spawnSync(
       process.execPath,
       [
+        "--import",
+        offlineNetwork,
         script,
         "--staging",
         staging,
@@ -2452,6 +2564,8 @@ describe("command boundary", () => {
     const result = spawnSync(
       process.execPath,
       [
+        "--import",
+        offlineNetwork,
         script,
         "--staging",
         staging,
@@ -2475,7 +2589,7 @@ describe("command boundary", () => {
     );
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).not.toContain("\n");
-    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThan(20 * 1024);
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThan(128 * 1024);
     const contract = JSON.parse(result.stdout);
     expect(contract.radius).toBeUndefined();
     expect(contract.extension).toBeUndefined();
@@ -2502,6 +2616,10 @@ describe("command boundary", () => {
     expect(contract.resources[0].recipe.definition).toContain(
       "'Radius.Data/postgreSqlDatabases': {"
     );
+    expect(contract.resources[0].recipe.implementation).toMatchObject({
+      status: "unavailable",
+      message: expect.stringContaining("supply the exact implementation")
+    });
     expect(
       JSON.parse(
         fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
