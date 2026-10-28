@@ -75,6 +75,46 @@ function fixture(overrides: Partial<OperationsControlDependencies> = {}) {
 }
 
 describe("direct operation control service", () => {
+  it("propagates registry unavailability after the Stop save without guessing workflow status", async () => {
+    const operation = newOperation();
+    operation.context = { githubLogin: "alice" };
+    operation.resumeRequest = {
+      environment: {
+        repo: operation.repo,
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    enterStage(operation, STAGE_VERIFY);
+    operation.verification = { runId: "42", workflowState: "active" };
+    pauseForProviderRestart(operation);
+    let saved = false;
+    const { dependencies } = fixture({
+      get: () => {
+        if (saved) throw new Error("registry unavailable");
+        return operation;
+      },
+      persistOperations: vi.fn(async () => {
+        saved = true;
+      })
+    });
+    const announce = vi.fn();
+    onOperationTerminal(announce);
+    await expect(
+      createOperationsControlService(dependencies)({
+        operationId: operation.operationId,
+        command: "stop"
+      })
+    ).rejects.toThrow("registry unavailable");
+    expect(operation.state).toBe("cancelled");
+    expect(operation.verification).toEqual({
+      runId: "42",
+      workflowState: "active"
+    });
+    expect(dependencies.persistOperations).toHaveBeenCalledTimes(1);
+    expect(announce).not.toHaveBeenCalled();
+  });
+
   it.each(
     [
       "run",
