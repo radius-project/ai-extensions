@@ -1,5 +1,6 @@
 import {
   assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
   ensureGitHubEnvironment as ensureCoreGitHubEnvironment,
   type EnsureGitHubEnvironmentInput,
   type GitHubEnvironmentCommandResult
@@ -250,6 +251,7 @@ export async function ensureGitHubEnvironment(
               ...mutation,
               operation: mutationRecovery.operation,
               persist: mutationRecovery.persist,
+              rethrowReconciliationError: isSetupExecutionInterrupted,
               assertActive: () => {
                 assertSetupExecutionActive(mutationRecovery.isStopped);
                 mutation.assertActive?.();

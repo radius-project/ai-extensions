@@ -1,4 +1,5 @@
 import {
+  assertSetupExecutionActive,
   runSetupCoordinator,
   type SetupCoordinatorPorts
 } from "@radius-project/core";
@@ -141,6 +142,7 @@ async function failResolution(
   dependencies: EnvironmentOperationWorkflowDependencies,
   error: unknown
 ): Promise<{ shouldMonitor: false }> {
+  assertSetupExecutionActive(dependencies.isStopped);
   const unresolvedMutation = unresolvedProviderMutations(operation)[0];
   if (unresolvedMutation) {
     return recordProviderReconciliationFailure(
@@ -317,6 +319,7 @@ export function createSetupCoordinatorPorts(
       );
     },
     reconcileFailure: (mutationId, error) => {
+      assertSetupExecutionActive(dependencies.isStopped);
       const live = unresolvedProviderMutations(operation).find(
         (mutation) => mutation.mutationId === mutationId
       );

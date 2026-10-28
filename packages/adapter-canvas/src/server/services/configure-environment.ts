@@ -98,6 +98,7 @@ export interface ConfigureEnvironmentDependencies
     targetRepository: string;
     registry: string;
     credentials: unknown;
+    assertActive(): void;
   }): Promise<{ visibility: string | undefined }>;
   stateRegistryForEnvironment(repo: string, environment: string): string;
 

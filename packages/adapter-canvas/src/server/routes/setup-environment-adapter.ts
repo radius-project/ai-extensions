@@ -166,7 +166,8 @@ export function createSetupEnvironmentPorts(input: {
       return d.bootstrapGHCRStatePackage({
         targetRepository: request.targetRepository,
         registry: request.registry,
-        credentials: packagePreflight.credentials
+        credentials: packagePreflight.credentials,
+        assertActive: request.assertActive
       });
     },
     workflowFiles: ({ runGh, runGhWorkflow }) =>
