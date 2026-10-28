@@ -116,9 +116,13 @@ describe("names and identifiers", () => {
   it("round-trips role ARNs, including role paths", () => {
     expect(awsRoleArn(ACCOUNT, "r")).toBe(`arn:aws:iam::${ACCOUNT}:role/r`);
     expect(parseAwsRoleArn(`arn:aws:iam::${ACCOUNT}:role/team/r`)).toEqual({
+      partition: "aws",
       accountId: ACCOUNT,
       roleName: "r"
     });
+    expect(
+      parseAwsRoleArn(`arn:aws-us-gov:iam::${ACCOUNT}:role/r`)?.partition
+    ).toBe("aws-us-gov");
     expect(parseAwsRoleArn("arn:aws:iam::1:user/x")).toBeNull();
   });
 
@@ -177,6 +181,99 @@ describe("trust policy", () => {
     expect(merged.kept).toBe(1);
     expect(merged.changed).toBe(true);
     expect(trustedGitHubSubjects(merged.policy, ACCOUNT)).toEqual([DEV, PROD]);
+  });
+
+  const statementWith = (condition: unknown) => ({
+    Effect: "Allow",
+    Principal: { Federated: githubOidcProviderArn(ACCOUNT) },
+    Action: "sts:AssumeRoleWithWebIdentity",
+    ...(condition === undefined ? {} : { Condition: condition })
+  });
+
+  it.each([
+    [
+      "a custom audience",
+      {
+        StringEquals: {
+          "token.actions.githubusercontent.com:aud": "custom",
+          "token.actions.githubusercontent.com:sub": DEV
+        }
+      }
+    ],
+    [
+      "an extra condition Radius cannot read",
+      {
+        StringEquals: { "token.actions.githubusercontent.com:sub": DEV },
+        StringLike: {
+          "token.actions.githubusercontent.com:job_workflow_ref": "x/*"
+        }
+      }
+    ],
+    [
+      "an operator Radius cannot read",
+      { ForAnyValue: { "token.actions.githubusercontent.com:sub": DEV } }
+    ],
+    ["a malformed condition", "StringEquals"],
+    ["a malformed operator block", { StringEquals: "x" }]
+  ])(
+    "adds its own statement instead of relying on one with %s",
+    (_label, condition) => {
+      const existing = parsePolicyDocument({
+        Statement: [statementWith(condition)]
+      });
+      const merged = mergeGitHubTrustSubject(existing, ACCOUNT, DEV);
+      expect(merged.changed).toBe(true);
+      expect(merged.policy.Statement).toHaveLength(2);
+      expect(merged.policy.Statement[0]).toEqual(existing.Statement[0]);
+      expect(merged.policy.Statement[1]).toEqual(
+        buildGitHubTrustPolicy(ACCOUNT, [DEV]).Statement[0]
+      );
+    }
+  );
+
+  it.each([
+    [
+      "a wildcard audience",
+      {
+        StringLike: {
+          "token.actions.githubusercontent.com:aud": "*",
+          "token.actions.githubusercontent.com:sub": DEV
+        }
+      }
+    ],
+    [
+      "the AWS audience in a list",
+      {
+        StringEquals: {
+          "token.actions.githubusercontent.com:aud": [
+            "custom",
+            "sts.amazonaws.com"
+          ],
+          "token.actions.githubusercontent.com:sub": DEV
+        }
+      }
+    ]
+  ])(
+    "treats a subject trusted with %s as already trusted",
+    (_label, condition) => {
+      const existing = parsePolicyDocument({
+        Statement: [statementWith(condition)]
+      });
+      expect(mergeGitHubTrustSubject(existing, ACCOUNT, DEV).changed).toBe(
+        false
+      );
+    }
+  );
+
+  it("adds a subject statement beside one with no condition", () => {
+    const existing = parsePolicyDocument({
+      Statement: [statementWith(undefined)]
+    });
+    const merged = mergeGitHubTrustSubject(existing, ACCOUNT, DEV);
+    expect(merged.policy.Statement).toEqual([
+      existing.Statement[0],
+      buildGitHubTrustPolicy(ACCOUNT, [DEV]).Statement[0]
+    ]);
   });
 
   it("leaves the policy unchanged when the subject is already trusted", () => {
