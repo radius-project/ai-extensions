@@ -178,7 +178,7 @@ The profile stores no secrets. Deleting a profile never changes anything in AWS,
 
 Radius never tags or deletes a picked role, and only adds and removes what each environment needs.
 
-### Trust
+### Which GitHub environments can use the deploy identity
 
 The trust policy has one statement for the account's GitHub identity provider, listing every accepted subject, as in the example under [Problem](#problem). Setup adds the environment's subject to that list, and leaves any statement that doesn't name the GitHub identity provider unchanged. Setup builds the subject with the same code Azure uses, so it matches what GitHub sends.
 
@@ -188,7 +188,7 @@ Someone can still change the trust policy by hand, outside Radius. The verify wo
 
 If the trust policy can't be read, setup stops without writing, so it never replaces a policy it couldn't see.
 
-### Permissions
+### What the deploy identity can change in AWS
 
 Each environment adds an inline policy named `radius-<environment>-<hash>`. The hash is the first 8 characters of a SHA-256 hash of `owner/repo:environment`, so two repositories that share a picked role, each with a `dev` environment, don't overwrite each other's policy. A long environment name is shortened to fit IAM's 128-character limit for policy names, and the hash keeps it unique.
 
@@ -214,7 +214,7 @@ Two kinds of actions aren't granted:
 
 When either limit is reached, setup stops at that step, naming the limit and quoting AWS's error, the same as Azure when an app registration has 20 federated credentials. Each environment keeps its own policy, so adding or deleting one never changes another's permissions. Raising the limit, for example by splitting environments across roles, is a question for both clouds and is separate work.
 
-### Cluster access
+### Access to the EKS cluster
 
 Setup adds an access entry for the deploy identity on the selected cluster, with AWS's `AmazonEKSClusterAdminPolicy`. That matches Azure, which assigns AKS RBAC Cluster Admin. Setup tags the access entry it creates, so delete can tell it from one someone else made.
 
@@ -281,7 +281,7 @@ Each recipe that creates a VPC-based service builds a subnet group from the envi
 
 **Types the pack doesn't have yet.** The canvas doesn't block a deploy that uses one, such as object storage before pod identity. The planned graph shows that node as unresolved before the deploy. If the developer deploys anyway, that resource fails with Radius's error, the deployed graph marks it failed, and the rest of the app still deploys. A check before deploy would also block types that the repository's own custom recipes supply.
 
-### App credentials
+### How apps get AWS credentials
 
 On Azure, a recipe returns a key, such as a storage account key, and the app uses it. Amazon S3 and Amazon Bedrock accept only IAM credentials, which a recipe can't hand back as a key today. We'll use **EKS Pod Identity**: a role per app, with access to only its own resources, linked to the app's pod. The other options are under [Alternatives considered](#other-alternatives).
 
