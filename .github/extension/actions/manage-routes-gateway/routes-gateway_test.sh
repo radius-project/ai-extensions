@@ -1278,12 +1278,20 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
         fail "${workflow}: explicit Gateway boolean is not preserved"
 done
 
-grep -qF "radius_contrib_kube_recipe_source Radius.Compute/routes routes" \
+# The AWS pack's routes Recipe is the Radius default OCI recipe, pinned from
+# the catalog like every other Kubernetes recipe in the pack, and its Gateway
+# comes from the same variable and managed default as Azure's.
+# shellcheck disable=SC2016
+grep -qF 'pinned_source="$(radius_contrib_kube_recipe_source "$resource_type" "$recipe")"' \
     "${AWS_WORKFLOW}" ||
     fail "AWS route recipe must use the Radius default OCI recipe"
-grep -qF "gatewayName: '\${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}'" \
+grep -qF "RADIUS_ROUTES_GATEWAY_NAME: \${{ vars.RADIUS_ROUTES_GATEWAY_NAME || 'radius' }}" \
     "${AWS_WORKFLOW}" ||
     fail "AWS route recipe is missing the managed Gateway default"
+# shellcheck disable=SC2016
+grep -qF -- '--parameters routesGatewayName="$RADIUS_ROUTES_GATEWAY_NAME"' \
+    "${AWS_WORKFLOW}" ||
+    fail "AWS recipe pack does not receive the routes Gateway name"
 
 for workflow in \
     "${REPO_ROOT}/.github/extension/delete-azure.yml" \
