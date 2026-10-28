@@ -112,7 +112,7 @@ describe("setup command admission", () => {
         });
         await admitSetupCommand(policy, ports);
         expect(ports.publish).toHaveBeenCalledExactlyOnceWith({
-          state: "persist-failed",
+          state: "stale-unwind-failed",
           error
         });
         expect(ports.reportPersistenceFailure).toHaveBeenCalledExactlyOnceWith(
