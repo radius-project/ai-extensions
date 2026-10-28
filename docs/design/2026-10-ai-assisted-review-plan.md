@@ -2,82 +2,92 @@
 
 This document explores what practices we can adopt for AI assisted code review in ai-extensions. These practices are inspired by [Solving code review at Anthropic](https://claude.dev/blog/solving-code-review-at-anthropic/).
 
-The goal is to speed up our code review process with automation where ever practical, while continuing to require human code review for high risk changes. When human code review is required, AI automation will direct the reviewer's attention to the parts of pull requests that require their input.
-
 ## Summary
 
-Human code review is currently our biggest bottleneck on the ai-extensions repo. It will remain necessary for some changes, but it isn't necessary for all changes *from trusted contributors*. Smaller, docs only pull requests or verifiably low risk changes which pass all automated checks should not require human approval.
+Not every change needs a human reviewer. A pull request from a trusted contributor (a member of the maintainers or approvers team) can merge without human approval if it passes every required check and is clearly low risk, such as a docs-only or tests-only change.
 
-Pull requests that do require human review should automatically surface high risk portions of the pull request so that the reviewer can immediately focus their attention on those areas.
+Every other pull request still needs a human reviewer. For those, automation should point out the riskiest parts of the diff, so the reviewer can start there instead of reading the whole change.
 
 ## Current Status
 
-We already have several AI assisted code review checks in our repo:
+We already run several review checks, some AI-assisted and some ordinary CI:
 
-- [`radius-code-quality`](https://github.com/radius-project/ai-extensions/blob/main/.github/skills/radius-code-quality/SKILL.md)- which is run manually be a human or agent (and invoked by [`code-quality.instructions.md`](https://github.com/radius-project/ai-extensions/blob/main/.github/instructions/code-quality.instructions.md))
-- [`code-review.prompt.md`](https://github.com/radius-project/ai-extensions/blob/main/.github/prompts/code-review.prompt.md)- which is run manually by a human
-- [Copilot code review](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review) - which the [main ruleset](https://github.com/radius-project/ai-extensions/rules/18178381) requests automatically on every non-draft pull request when it opens (and which can be requested manually on drafts and later pushes). It reads [`code-quality.instructions.md`](https://github.com/radius-project/ai-extensions/blob/main/.github/instructions/code-quality.instructions.md) for TypeScript files, runs at the Balanced effort level unless someone picks another, and ends each review with an approval assessment. Copilot approvals are off, so that assessment does not count toward merge.
-- [`build-gate`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/build.yml#L268)- which runs in CI (but does not block merge)
-- [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml)- which runs in CI (but does not block merge)
+- [`code-review.prompt.md`](https://github.com/radius-project/ai-extensions/blob/main/.github/prompts/code-review.prompt.md): a detailed review prompt. It runs only when someone invokes it by hand.
+- [`radius-code-quality`](https://github.com/radius-project/ai-extensions/blob/main/.github/skills/radius-code-quality/SKILL.md): a skill that people or agents run while making a change. [`code-quality.instructions.md`](https://github.com/radius-project/ai-extensions/blob/main/.github/instructions/code-quality.instructions.md) points agents to it for TypeScript and JavaScript files.
+- [Copilot code review](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review): the [main ruleset](https://github.com/radius-project/ai-extensions/rules/18178381) requests it when a non-draft pull request opens. It reads `code-quality.instructions.md` for TypeScript files.
+- [`build-gate`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/build.yml#L268): runs in CI but doesn't block merge.
+- [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml): runs in CI but doesn't block merge.
 
-While useful individually, these checks are not wired together. The code review prompt is only run manually on demand, it's not run automatically. The code quality instructions are only automatically run when the pull request is opened. If changes are made to the pull request, re-review must be requested manually.
+These checks don't work together:
 
-Additionally, all changes currently face the same approval bar. A one word docs fix requires the same review and manual approval as more in depth, risky changes.
+- Copilot reviews only the first version of a pull request. Later pushes get a review only if someone asks for one.
+- Copilot never sees the code-review prompt, our most detailed list of what to look for.
+- Only `DCO` and `Visual comparisons` block merge, so a broken build or a vulnerable dependency can still merge.
+
+Every change also faces the same approval bar. A one-word docs fix needs the same human review as a risky change to shared code.
 
 ## How do we improve our process?
 
-In order to improve the review bottleneck to allow us to move both with more speed but also with care (recklessness is not an option), we must:
+We want reviews to move faster without getting careless. That means five changes:
 
-- \*\*Build confidence in our automated tools\*\* to catch regressions, security issues, and more when scanning our code. This will include testing before a PR is opened, after a PR is opened, and after every change pushed to a PR (rather than just the initial set of changes when the PR is opened)
-- \*\*Create standards for automatically assessing the risk of changes\*\* based on the size and area of the changes (for example, a one line doc update or a 100 line test addition would be low risk, a large scale change to the core shared libraries would be higher risk)
-- \*\*Build skills to automatically flag high risk areas of change to human reviewers\*\* - human reviewers should immediately be able to tell what parts of a PR need their focus and what does not
-- \*\*Establish a list of trusted contributors\*\* whom are eligible for automated approvals of low risk changes (we already somewhat do this with teams in our GitHub organization). PRs from untrusted contributors always require human review.
-- **Understand that this is a constantly evolving proce**ss and that we will not get it completely right at first.The models and tools available to us are also rapidly evolving- we will need to update our processes as they change.
+- **Build trust in our automated checks.** They should catch regressions, security issues, and broken builds at three points: before a pull request opens, when it opens, and on every later push.
+- **Classify each change's risk automatically.** Base the tier on which paths a change touches. A docs fix or a new test file is low risk; a change to `packages/core` or to the workflow generators is high risk.
+- **Show human reviewers where to look.** When a pull request needs a human, automation should flag its riskiest parts so the reviewer starts there.
+- **Define trusted contributors.** Only members of the maintainers and approvers teams can merge low-risk changes on automated approval. Everyone else's pull requests always get human review.
+- **Expect to revise this.** We won't get it right the first time, and the models and tools keep changing, so we'll keep adjusting the process.
 
 ## Phase 1: Building confidence in our automated tools
 
-### 1. Add `.github/copilot-instructions.md`
+### Step 1.1: Add `.github/copilot-instructions.md`
 
-Write a file of about 60 lines that tells Copilot what the project is: a pnpm monorepo in which `packages/core` stays free of UI concerns and `packages/adapter-canvas` owns the Copilot and webview wiring; `.artifacts/` is generated and never edited by hand; and the commands in the [radius-code-quality skill's verification section](https://github.com/radius-project/ai-extensions/blob/main/.github/skills/radius-code-quality/SKILL.md#verification) verify a change. Link to `CONTRIBUTING.md`, the skills, and `docs/architecture/` for everything else.
+We need to give Copilot context about our repo that it automatically loads with every session.
+In [Anthropic's process](https://claude.dev/blog/solving-code-review-at-anthropic/), this kind of project context file (`CLAUDE.md`) is the base every other review layer builds on. Our version of this file is `copilot-instructions.md`.
 
-Copilot code review reads this file automatically, as do the cloud agent and Copilot CLI. Linking to the verification section, not copying the commands, keeps the two from drifting apart.
+The content of `copilot-instructions.md` should include:
 
-### Step 1.2: Turn the review prompt into review instructions
+- **Repo Layout:** it's a pnpm monorepo. `packages/core` stays free of UI code, and `packages/adapter-canvas` owns the Copilot and webview wiring.
+- **Generated file rules:** `.artifacts/` is generated. Never edit it by hand.
+- **Verification instructions:** link to the commands in the `radius-code-quality` [verification section](https://github.com/radius-project/ai-extensions/blob/main/.github/skills/radius-code-quality/SKILL.md#verification). Don't copy them, so the two lists can't drift apart.
+- **Links to more information:** link to `CONTRIBUTING.md`, the skills, and `docs/architecture/`.
 
-Create `.github/instructions/code-review.instructions.md`. Copy the content of `code-review.prompt.md` into this new file. Add some additional content based on Anthropic's best practices.
+### Step 1.2: Give Copilot code review the same review rules that we use for manual review
 
-- Cap nits at three style comments per pull request, forbid style comments on anything that Prettier or ESLint already checks
-- List paths to skip: `.artifacts/**`, `pnpm-lock.yaml`, `plugins/**` outside release branches, and visual baseline images.
-- Add a summary pull request comment with a count of findings and say plainly when there is nothing to fix.
+Our most detailed review guidance lives in `code-review.prompt.md`. Currently, he Copilot reviewer (the one that runs on pull requests) never reads or runs it.  We need to move it where Copilot will find it and use it with every review.
 
-Keep `code-review.prompt.md` for deep local reviews, and point it at the new file so the two cannot drift apart.
+First, we need to move the content within `code-review.prompt.md` to a new skill at **`.github/skills/radius-code-review/SKILL.md`**. We will keep `code-review.prompt.md` for local reviews, but have it point to the skill.
 
-Copilot code review now also loads repository [agent skills](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#mcp-servers-and-agent-skills-for-code-review) when they are relevant, and it favors skills whose directory names say they are for review. Split the content by how it is used:
+Next, we will create **`.github/instructions/code-review.instructions.md`** to hold the high-level rules for every review. The file should:
 
-- Always-on rules (the nit cap, paths to skip, the summary comment) go in `code-review.instructions.md`.
-- The deeper checklist from `code-review.prompt.md` becomes a `.github/skills/radius-code-review/SKILL.md` skill. Pull-request review, Copilot CLI's `/review`, the pre-PR skill (Step 1.3), and the eval set (Step 5.1) then all draw on one source.
-
-Copilot reads instructions and skills from the pull request's head branch, so a pull request can test changes to them before merge. The same behavior lets a fork rewrite them, which Step 4.7 addresses.
+- Tell Copilot to apply the `radius-code-review` skill to every pull request. Copilot code review loads skills only when it judges them relevant, but it reads this file on every review, so the pointer makes the skill far more likely to be used. GitHub doesn't document whether an instruction can force a skill to load, so check one pull request's review to confirm it did.
+- Skip `.artifacts/**`, `pnpm-lock.yaml`, `plugins/**` outside release branches, and visual baseline images.
+- End with a summary comment that counts findings and says plainly when there's nothing to fix.
 
 ### Step 1.3: Add a pre-PR self-review skill
 
-Write a `radius-pre-pr-review` skill that an agent runs before it opens a pull request.
+Add a `radius-pre-pr-review` skill at `.github/skills/radius-pre-pr-review/SKILL.md` for agents to run before they open a pull request. The skill has the agent:
 
-This skill should make the agent run:
-the commands in the [radius-code-quality skill's verification section](https://github.com/radius-project/ai-extensions/blob/main/.github/skills/radius-code-quality/SKILL.md#verification) and paste their output.
+1. Run the commands in the `radius-code-quality` [verification section](https://github.com/radius-project/ai-extensions/blob/main/.github/skills/radius-code-quality/SKILL.md#verification) and paste their output.
+2. Hand the diff to a `code-review` subagent with fresh context, which reviews it against the rules and skill from Step 1.2.
+3. Make a second pass to remove dead code, unnecessary helpers, and edits outside the task.
+4. Run the visual baseline check if the change touches the canvas.
 
-A `code-review` subagent with fresh context then reviews the diff against `code-review.instructions.md`. A second pass strips dead code, needless helpers, and edits outside the task. If the change touches the canvas, the agent also runs the visual baseline check.
-Anthropic now does most review before a pull request exists, and it names a runnable check as the practice that improves agent output most. `radius-code-quality` already demands test evidence. It lacks a second reader: an agent reviewing its own work in the same context tends to agree with itself, while a subagent that sees only the diff and the rules does not. A bug caught here costs no CI run and no reviewer's time.
-Put the skill at `.github/skills/radius-pre-pr-review/SKILL.md` and reference it from the "Before you open a pull request" section of `CONTRIBUTING.md` and from `copilot-instructions.md`. Copilot CLI's built-in `code-review` agent and `/review` command can act as the reviewer. Authors who want a second opinion from other models can run the reviewer on [Copilot Fusion](https://docs.github.com/en/copilot/concepts/models/copilot-fusion) High or Max, whose critique pattern has several models review a draft in parallel.
+Link to the skill from the "Before you open a pull request" section of `CONTRIBUTING.md` and from `copilot-instructions.md`.
 
-### Step 1.4: Consider agent hooks for formatting
+**Why:** Anthropic now catches most problems before a pull request exists, and it found that giving an agent a check it can run improves its output more than anything else. `radius-code-quality` already asks for test evidence, but it has no second reader. An agent reviewing its own work in the same context tends to agree with itself; a subagent that sees only the diff and the rules doesn't. A bug caught here costs no CI run and no reviewer time.
 
-Copilot CLI and the Copilot coding agent can run commands at fixed points in a session. A hook could run Prettier and ESLint with `--fix` on every file an agent edits.
-Formatting comments add nothing to a review, and Anthropic drops style-only findings entirely. Fixing format as the agent writes removes those comments and the review rounds they cause. The step is optional, because CI lint already catches the same problems.
+Copilot CLI's built-in `code-review` agent and `/review` command can act as the reviewer. For a second opinion from other models, run it on [Copilot Fusion](https://docs.github.com/en/copilot/concepts/models/copilot-fusion) High or Max, where several models critique the draft in parallel.
 
-### Step 1.5: Check Copilot Memory for the repository
+### Step 1.4 (optional): Format code as agents write it
 
-Confirm whether [Copilot Memory](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-memory) is on for ai-extensions. When it is, Copilot code review stores repository-level facts, such as "`.artifacts/` is generated," and uses them in later reviews, so the instructions file need not grow to hold every one. Before relying on it, find out who can see and correct the stored facts.
+Copilot CLI and the Copilot coding agent can run hooks at fixed points in a session. A hook can run Prettier and ESLint with `--fix` on every file an agent edits. This step is optional because CI lint already catches the same problems.
+
+**Why:** Formatting comments are pure noise. Each one takes a reviewer's attention and usually costs another push and another review round to fix. Anthropic doesn't post style-only findings at all. Fixing formatting as the agent writes means those problems never reach a review, and the time saved grows as agents open more of our pull requests.
+
+### Step 1.5: Check whether Copilot Memory is on
+
+If [Copilot Memory](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-memory) is on for ai-extensions, Copilot code review remembers repo facts, such as "`.artifacts/` is generated," and uses them in later reviews. Before relying on it, find out who can see and correct what it stores.
+
+**Why:** Some facts the reviewer needs only show up during review, such as a file that looks hand-written but is generated. Without memory, a person corrects the same mistaken comment on pull request after pull request, or we keep adding to the instructions file, which every review loads. Memory lets Copilot learn each fact once. A fact stored wrong, though, would quietly steer every later review, which is why we need to know who can audit it.
 
 ## The ideas worth borrowing
 
