@@ -116,6 +116,7 @@ const EXPECTED_FUNCTIONS = [
   "isKubernetesNamespace",
   "isAwsAccountId",
   "isAwsRegion",
+  "isAwsCommercialRegion",
   "isAwsRoleName",
   "parseAwsCliVersion",
   "checkAwsCliVersion",
