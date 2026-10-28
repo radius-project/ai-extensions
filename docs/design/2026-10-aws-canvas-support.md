@@ -99,30 +99,22 @@ Sharing one role causes problems that Azure's separate objects avoid:
 
 ### Goals
 
-1. A developer can connect an AWS account and region, checked against their AWS CLI session.
-2. A developer can create an AWS environment on an existing EKS cluster without opening the AWS console.
-3. A developer can use an IAM role their platform team owns, and Radius never deletes it.
-4. A second environment in the same account reuses the repository's deploy identity and leaves the first one working, even when both are set up at once.
-5. A deploy runs the app's backing services as AWS managed services.
-6. A deploy that runs longer than the GitHub and EKS token lifetimes still succeeds.
-7. The deployed graph shows each AWS resource's status and links it to the AWS console.
-8. Deleting an environment removes only what that environment added in AWS.
-9. Setup that stops part way can be rolled back or retried.
-10. Users don't see AWS until all of the above ships.
+1. A developer can connect an AWS account, create an environment on an existing EKS cluster, deploy, see the deployed graph, and delete, through the same screens as Azure.
+2. A developer can use an IAM role their platform team owns, and Radius never deletes it.
+3. A second environment in the same account reuses the repository's deploy identity and leaves the first one working, even when both are set up at once.
+4. A deploy runs the app's backing services as AWS managed services.
+5. A deploy that runs longer than the GitHub and EKS token lifetimes still succeeds.
+6. Deleting an environment removes only what that environment added in AWS.
+7. Setup that stops part way can be rolled back or retried.
 
 ### Non-goals
 
 1. **App credentials for S3 and Bedrock.** This doc records the choice of EKS Pod Identity. The work, and the recipes for those two types, are designed and built separately.
-2. **Kafka on AWS in the first release.** Radius can't yet read Amazon MSK's broker addresses.
+2. **Kafka on AWS in the first release.** Radius can't yet read Amazon MSK's broker addresses, and no Kubernetes Kafka recipe exists for any cloud.
 3. **AWS resource coverage in Radius Bicep.** That's the full AWS coverage design.
 4. **Creating or changing EKS clusters, VPCs, or subnets.** The canvas only discovers them, the same as for AKS.
 5. **Deploying to a VPC other than the cluster's.** Each recipe puts its service in the cluster's security group, which belongs to the cluster's VPC.
 6. **Clusters whose API is reachable only from a private network.** GitHub's runners can't reach them. They're handled the same as on Azure, and a check for both clouds is separate work.
-7. **Compute outside EKS, such as Amazon ECS or AWS Fargate.** Radius runs containers on Kubernetes.
-8. **Testing EKS Auto Mode.** These clusters can be selected, but they're untested.
-9. **Choosing an AWS CLI profile in the canvas.** The canvas uses the CLI's default credentials and checks the account matches.
-10. **Terraform recipes.** Terraform can't be used in Radius.
-11. **Deleting the deploy identity.** Azure never deletes the app registration, because other environments or services may use it.
 
 ## Design overview
 
@@ -157,7 +149,7 @@ A credential profile holds an AWS account ID and a region, and no role. **Verify
 - **No session:** the canvas shows **Sign in to AWS CLI**, which runs `aws sso login`.
 - **CLI missing, or older than 2.15.3:** stops, naming the installed and required versions and linking to the installer. Access entries need 2.15.3 or later.
 
-The profile stores no secrets. Deleting a profile never changes anything in AWS, and environments keep working, because each environment keeps its own copy of the values.
+The canvas uses the AWS CLI's default credentials, and checks that their account matches the profile. The profile stores no secrets. Deleting a profile never changes anything in AWS, and environments keep working, because each environment keeps its own copy of the values.
 
 ### The deploy identity
 
@@ -303,7 +295,7 @@ The deployed graph shows each resource's status from the deploy, the same as Azu
 
 **A deployment.** `delete-aws.yml` deletes the app, the same flow as Azure. Radius deletes AWS resources through the AWS Cloud Control API, which removes an RDS database without a final snapshot. The delete confirmation already names each resource it deletes.
 
-**An environment.** `delete-environment-aws.yml` refuses while apps are still deployed, and then deletes the Radius environment. After that, the canvas takes the lock on the deploy identity, removes this environment's subject from the trust policy, and deletes its inline policy. Trust statements Radius didn't add stay as they are. If removing the subject leaves no statements, the canvas writes a single deny statement, because IAM rejects an empty trust policy. The canvas keeps the deploy identity and the GitHub identity provider.
+**An environment.** `delete-environment-aws.yml` refuses while apps are still deployed, and then deletes the Radius environment. After that, the canvas takes the lock on the deploy identity, removes this environment's subject from the trust policy, and deletes its inline policy. Trust statements Radius didn't add stay as they are. If removing the subject leaves no statements, the canvas writes a single deny statement, because IAM rejects an empty trust policy. The canvas keeps the deploy identity and the GitHub identity provider, the same as Azure keeps the app registration, because other environments or services may use them.
 
 Whether it keeps the access entry depends on who owns the deploy identity:
 
@@ -394,7 +386,7 @@ The checks and their messages are in each section above: the CLI and account che
   - The access entry rules at environment delete, for a Radius-created and a picked deploy identity.
 - **Browser tests**: the deploy identity section, the role picker, subnet checks and warnings, and that AWS stays hidden with the switch off.
 - **Workflow tests**: the token refresher in AWS mode, including retries after a failed refresh, removing the dispatcher's AWS job, and the delete guard in `delete-environment-aws.yml`.
-- **Cloud end-to-end tests**: AWS joins the daily Cloud E2E run that Azure already uses. It runs in a dedicated AWS account, never on pull requests, on a shared EKS cluster created ahead of time.
+- **Cloud end-to-end tests**: AWS joins the daily Cloud E2E run that Azure already uses. It runs in a dedicated AWS account, on a shared EKS cluster created ahead of time. It never runs on pull requests, because pull requests from forks would get access to the AWS identity, the same reason Azure's cloud tests don't.
   - Create two environments in two regions on one deploy identity.
   - Deploy an RDS database and a container in a deploy longer than 15 minutes, with a Kubernetes operation after the first EKS token expires.
   - Check that a pod can connect to every managed service the `aws-eks` pack has. Each new recipe adds its service.
@@ -424,16 +416,8 @@ One role per environment avoids the lock and the shared limits. But every new en
 
 - **One shared policy per deploy identity for the statements every environment repeats:** it would raise the limit to about 30 environments, but adds one more object that setup, rollback, and delete have to manage, and that every environment depends on.
 - **One managed policy per environment:** managed policy names are unique across the account, so two repositories with a `dev` environment would collide. A role also holds at most 20 managed policies, and `PowerUserAccess` would use one.
-- **Attaching `PowerUserAccess` and denying other regions per environment:** deny statements from different environments add up, so a second region would block the first.
 - **Always keeping the access entry:** a deploy identity still used by an environment on another cluster would keep cluster-admin on a cluster it no longer needs.
 - **Keeping the AWS recipes in ai-extensions and publishing them to each user's registry at deploy:** this needs a registry secret copied into the control plane, and a hard-coded recipe list for the planned graph. One versioned pack in `resource-types-contrib` works like the Azure pack.
-- **Long-lived access keys for app credentials:** the recipe would create an IAM user and return its key. The key never expires, copies end up in recipe state, a Kubernetes secret, and the app, and the deploy identity would need rights to create IAM users, which lets it create an admin.
-- **Generic credential fields on the Radius types, such as `accessKeyId`:** still needs long-lived keys, and changing the types affects Azure apps.
-- **The cluster's node role for app credentials:** every pod on those nodes gets the same access, and it changes the user's cluster.
-- **Separate Radius types per cloud:** the same app definition could no longer deploy to both clouds.
-- **IAM roles for service accounts (IRSA):** works, but needs an OIDC provider per cluster, and each role's trust policy grows with every cluster.
-- **Shipping S3 and Bedrock recipes before pod identity:** apps would deploy and then fail to connect, with nothing explaining why.
-- **Waiting for pod identity before shipping AWS:** it would hold back the other catalog types by the weeks pod identity takes.
-- **Kafka on the cluster for the first release:** no Kubernetes Kafka recipe exists for any cloud, so it's new work, and MSK is the AWS answer once Radius can read its broker addresses.
-- **A per-deploy Kubernetes service account token instead of refreshing EKS tokens:** it covers single long operations, but creates objects on the user's cluster. It's the fallback if long operations prove common.
-- **Running the AWS cloud tests on pull requests:** pull requests from forks would get access to the AWS identity, which is why Azure's cloud tests don't run on them either.
+- **Other ways for apps to get AWS credentials:** long-lived access keys never expire and need rights to create IAM users, the cluster's node role gives every pod the same access, and IAM roles for service accounts need an OIDC provider per cluster. New credential fields or separate Radius types per cloud would change the types that Azure apps use.
+- **Shipping S3 and Bedrock recipes before pod identity, or waiting for pod identity before shipping AWS:** the first leaves apps unable to connect, with nothing explaining why. The second holds back every other type by the weeks pod identity takes.
+- **A per-deploy Kubernetes service account token instead of refreshing EKS tokens:** it creates objects on the user's cluster. It's the fallback if refreshing proves unreliable.
