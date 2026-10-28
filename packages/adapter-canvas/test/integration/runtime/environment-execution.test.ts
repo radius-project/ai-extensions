@@ -1640,19 +1640,13 @@ describe("real server and fake SDK runtime ownership", () => {
         )
       )
     ),
-    ...["ghcr-head", "ghcr-post", "ghcr-put", "ghcr-manifest"].map((stage) => [
-      stage,
-      "issued",
-      "service",
-      "shutdown"
-    ]),
+    ...["ghcr-head", "ghcr-post", "ghcr-put", "ghcr-manifest"].map(
+      (stage) => [stage, "issued", "service", "shutdown"] as const
+    ),
     ...["azure", "environment"].flatMap((stage) =>
-      ["throw", "timeout"].map((boundary) => [
-        stage,
-        boundary,
-        "service",
-        "shutdown"
-      ])
+      ["throw", "timeout"].map(
+        (boundary) => [stage, boundary, "service", "shutdown"] as const
+      )
     ),
     ...["azure-owner", "azure-tags"].flatMap((stage) =>
       ["issued", "prepared", "delay", "inner-delay"].map(

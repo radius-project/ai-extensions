@@ -28,11 +28,14 @@ import {
   recordCommitState,
   toPersistedOperation,
   requireInput,
+  pauseForProviderRestart,
+  onOperationTerminal,
   STAGE_VERIFY
 } from "../../../src/operations.js";
 import type { EnvironmentToolResult } from "../../../src/runtime/environment-tool-result.js";
 
 afterEach(() => {
+  onOperationTerminal(null);
   operations.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -53,6 +56,7 @@ async function composition(
     confirm?: (message: string) => Promise<boolean>;
     permissionsFailure?: boolean;
     beforeResume?: () => Promise<void>;
+    duringResumeRead?: () => Promise<void>;
     realSetup?: boolean;
     beforeLease?: () => Promise<void>;
     leaseLogin?: string;
@@ -202,7 +206,16 @@ async function composition(
       ...runtime.environmentServices,
       resume: async (...args) => {
         await options.beforeResume?.();
-        return runtime.operationResume(...args);
+        const [input, read, publish] = args;
+        return runtime.operationResume(
+          input,
+          async () => {
+            const value = await read();
+            await options.duringResumeRead?.();
+            return value;
+          },
+          publish
+        );
       },
       owner,
       session: fake.deps.session,
@@ -266,6 +279,279 @@ async function composition(
 }
 
 describe("registered environment tools with production runtime services", () => {
+  it.each(["shutdown", "target", "issued-success", "issued-error"] as const)(
+    "preserves registered bypass authority and settlement at %s",
+    async (boundary) => {
+      const h = await composition({
+        permissionsFailure: true,
+        confirm: async () => true
+      });
+      const op = createOperation({ ...target, provider: "azure" });
+      op.context.githubLogin = h.executor.login;
+      op.currentStage = STAGE_VERIFY;
+      op.verification = {
+        runId: "42",
+        workflow: "verify.yml",
+        ref: "feature/current",
+        environment: "dev",
+        dispatchedAt: Date.now()
+      };
+      operations.put(op);
+      const gate = deferred();
+      const entered = deferred();
+      const original = h.executor.run;
+      h.executor.run = async (args, options) => {
+        if (args[0] !== "variable") return original(args, options);
+        if (boundary.startsWith("issued")) {
+          const result = await original(args, options);
+          entered.resolve();
+          await gate.promise;
+          if (boundary === "issued-error") throw new Error("write unavailable");
+          return result;
+        }
+        entered.resolve();
+        await gate.promise;
+        return original(args, options);
+      };
+      try {
+        const pending = h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action: "bypass-verification"
+        });
+        await entered.promise;
+        if (boundary === "target") op.verification.runId = "43";
+        else await h.extension.shutdown();
+        gate.resolve();
+        expect(await pending).toMatchObject({
+          kind: boundary === "issued-success" ? "accepted" : "unavailable",
+          ...(boundary === "shutdown" || boundary === "target" ?
+            { code: "workflow-observation-stopped" }
+          : {})
+        });
+        expect(
+          h.run.mock.calls.filter(([args]) => args[0] === "variable")
+        ).toHaveLength(boundary.startsWith("issued") ? 1 : 0);
+        expect(h.accountContext.getExecutor(op.operationId)).toBeUndefined();
+      } finally {
+        gate.resolve();
+        await h.extension.shutdown();
+      }
+    }
+  );
+
+  it("preserves transient busy guidance for registered continuation while the stopped task settles", async () => {
+    const h = await composition();
+    const op = stoppedSetup({ repo: target.repo });
+    op.context = { githubLogin: h.executor.login };
+    operations.put(op);
+    const gate = deferred();
+    const done = deferred();
+    h.owner.attachRuntime().schedule(op.operationId, {
+      run: () => gate.promise,
+      failed: async () => {
+        throw new Error("Unexpected failure");
+      },
+      settling() {},
+      settled: done.resolve
+    });
+    const input = {
+      ...target,
+      operationId: op.operationId,
+      action: "continue"
+    };
+    try {
+      expect(await h.invoke("radius_environment_control", input)).toMatchObject(
+        {
+          kind: "refused",
+          code: "operation-task-busy",
+          message: expect.stringContaining("Wait for it to finish, then retry")
+        }
+      );
+      expect(h.persist).not.toHaveBeenCalled();
+      gate.resolve();
+      await done.promise;
+      expect(await h.invoke("radius_environment_control", input)).toMatchObject(
+        { kind: "accepted" }
+      );
+      await h.settled();
+      expect(h.runner).toHaveBeenCalledOnce();
+    } finally {
+      gate.resolve();
+      await done.promise;
+      await h.extension.shutdown();
+    }
+  });
+
+  it.each(
+    ["shutdown", "run"].flatMap((change) =>
+      [false, true].map((reject) => ({ change, reject }))
+    )
+  )(
+    "refuses stale registered Stop observation after $change reject=$reject",
+    async ({ change, reject }) => {
+      const entered = deferred();
+      const gate = deferred();
+      const h = await composition({
+        cancellationRun: async () => {
+          entered.resolve();
+          await gate.promise;
+          if (reject) throw new Error("late status error");
+          return { code: 0, stdout: '{"status":"completed"}', stderr: "" };
+        }
+      });
+      const op = createOperation({ ...target, provider: "azure" });
+      op.context.githubLogin = h.executor.login;
+      op.verification = { runId: "42", workflowState: "active" };
+      op.resumeRequest = { environment: { ...target, provider: "azure" } };
+      op.currentStage = STAGE_VERIFY;
+      pauseForProviderRestart(op);
+      operations.put(op);
+      const announce = vi.fn();
+      onOperationTerminal(announce);
+      try {
+        const pending = h.invoke("radius_environment_control", {
+          ...target,
+          operationId: op.operationId,
+          action: "stop"
+        });
+        await entered.promise;
+        if (change === "shutdown") await h.extension.shutdown();
+        else op.verification = { runId: "43", workflowState: "active" };
+        gate.resolve();
+        expect(await pending).toMatchObject({
+          kind: change === "shutdown" ? "unavailable" : "refused",
+          code:
+            change === "shutdown" ?
+              "operation-shutting-down"
+            : "operation-context-changed",
+          message: expect.stringContaining("Stop request was saved")
+        });
+        expect(op.verification).toEqual({
+          runId: change === "run" ? "43" : "42",
+          workflowState: "active"
+        });
+        expect(op.state).toBe("cancelled");
+        expect(h.persist).toHaveBeenCalledTimes(1);
+        expect(announce).not.toHaveBeenCalled();
+        expect(h.accountContext.getExecutor(op.operationId)).toBeUndefined();
+      } finally {
+        gate.resolve();
+        await h.extension.shutdown();
+      }
+    }
+  );
+
+  it.each(
+    ["read", "save"].flatMap((boundary) =>
+      [
+        "shutdown",
+        "target",
+        "replacement",
+        "save-error",
+        "correction-error"
+      ].map((change) => ({ boundary, change }))
+    )
+  )(
+    "guards registered resume across held $boundary after $change",
+    async ({ boundary, change }) => {
+      const entered = deferred();
+      const gate = deferred();
+      const h = await composition({
+        duringResumeRead:
+          boundary === "read" ?
+            async () => {
+              entered.resolve();
+              await gate.promise;
+            }
+          : undefined
+      });
+      const op = createOperation({ ...target, provider: "azure" });
+      op.context.githubLogin = h.executor.login;
+      op.request = { azure: {} };
+      requireInput(op, {
+        code: "service-management-reference-required",
+        checkpoint: "reference"
+      });
+      operations.put(op);
+      let saves = 0;
+      h.persist.mockImplementation(async () => {
+        saves++;
+        if (boundary === "save" && saves === 1) {
+          entered.resolve();
+          await gate.promise;
+        }
+        if (
+          (change === "save-error" && saves === 1) ||
+          change === "correction-error"
+        )
+          throw new Error("fixture save failed");
+      });
+      try {
+        const identity = { ...target, operationId: op.operationId };
+        const status = await h.invoke("radius_environment_status", identity);
+        if (!("interaction" in status) || !status.interaction)
+          throw new Error("Missing prompt");
+        const command = {
+          ...identity,
+          action: "resume",
+          provider: "azure",
+          checkpoint: "reference",
+          interactionId: status.interaction.interactionId,
+          answer: {
+            code: "service-management-reference-required",
+            serviceManagementReference: "approved"
+          }
+        };
+        const pending = h.invoke("radius_environment_control", command);
+        await entered.promise;
+        const replacement = structuredClone(op);
+        if (change === "replacement") operations.put(replacement);
+        if (change === "target") op.environment = "other";
+        if (change === "shutdown") h.owner.shutdown();
+        gate.resolve();
+        const correctionFails = change === "correction-error";
+        expect(await pending).toMatchObject({
+          kind:
+            (
+              change === "save-error" ||
+              correctionFails ||
+              change === "shutdown"
+            ) ?
+              "unavailable"
+            : "refused",
+          code:
+            correctionFails ? "operation-resume-recovery-persist-failed"
+            : change === "save-error" ? "operation-resume-persist-failed"
+            : change === "shutdown" ? "operation-shutting-down"
+            : "operation-resume-mismatch"
+        });
+        expect(h.runner).not.toHaveBeenCalled();
+        expect(h.runtime.servers.size).toBe(0);
+        if (change === "replacement")
+          expect(operations.get(op.operationId)).toEqual(replacement);
+        if (change === "target") expect(op.environment).toBe("other");
+        if (
+          (change === "shutdown" && boundary === "read") ||
+          change === "save-error"
+        ) {
+          expect(op.state).toBe("input_required");
+          expect(op.request.azure.serviceManagementReference).toBeUndefined();
+        }
+        if (change === "shutdown" && boundary === "save") {
+          expect(op.state).toBe("running");
+          expect(op.request.azure.serviceManagementReference).toBe("approved");
+        }
+        const claim = h.owner.claimAdmission(op.operationId);
+        expect(claim === null).toBe(correctionFails);
+        claim?.release();
+      } finally {
+        gate.resolve();
+        await h.extension.shutdown();
+      }
+    }
+  );
+
   it.each(["active", "unknown"])(
     "refuses a mismatched leased executor for %s workflow",
     async (state) => {
@@ -621,7 +907,7 @@ describe("registered environment tools with production runtime services", () => 
       gate.resolve();
       expect(await pending).toMatchObject({
         kind: "unavailable",
-        code: "operation-continue-persist-failed",
+        code: "operation-control-recovery-persist-failed",
         message: expect.stringContaining(
           "inspect the saved operation before recovery"
         )

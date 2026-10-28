@@ -92,6 +92,83 @@ function fixture() {
 }
 
 describe("run-bound workflow cancellation", () => {
+  it.each(
+    ["preexisting", "new"].flatMap((task) =>
+      ["shutdown", "target", "correction-failure"].map((change) => ({
+        task,
+        change
+      }))
+    )
+  )(
+    "corrects only unissued owned projection with $task task after $change",
+    async ({ task, change }) => {
+      const h = fixture();
+      const scope = h.owner.attachRuntime();
+      let release = () => {};
+      let settled = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const done = new Promise<void>((resolve) => {
+        settled = resolve;
+      });
+      const schedule = () =>
+        scope.schedule(h.operation.operationId, {
+          run: () => gate,
+          failed: async () => {
+            throw new Error("Unexpected task failure");
+          },
+          settling() {},
+          settled
+        });
+      if (task === "preexisting") schedule();
+      h.run.mockImplementationOnce(async () => {
+        if (task === "new") schedule();
+        h.operation.failure = {
+          code: null,
+          message: "independent task evidence"
+        };
+        if (change === "target")
+          h.operation.verification = { runId: "43", workflowState: "active" };
+        else h.owner.shutdown();
+        return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+      });
+      if (change === "correction-failure")
+        h.persist
+          .mockResolvedValueOnce()
+          .mockRejectedValueOnce(new Error("correction offline"));
+      try {
+        const result = await h.control(h.input);
+        expect(result.status).toBe(
+          change === "correction-failure" ? 500
+          : change === "target" ? 409
+          : 503
+        );
+        expect(h.operation.failure).toEqual({
+          code: null,
+          message: "independent task evidence"
+        });
+        expect(h.operation.control.commands).toHaveLength(
+          task === "preexisting" ? 0 : 1
+        );
+        expect(h.operation.verification).toEqual({
+          runId: change === "target" ? "43" : "42",
+          workflowState:
+            change === "target" || task === "preexisting" ?
+              "active"
+            : "cancelling"
+        });
+        expect(h.run).toHaveBeenCalledTimes(1);
+        const claim = h.owner.claimAdmission(h.operation.operationId);
+        expect(claim === null).toBe(change === "correction-failure");
+        claim?.release();
+      } finally {
+        release();
+        await done;
+      }
+    }
+  );
+
   it("propagates an unavailable currentness check without accepting or issuing work", async () => {
     const h = fixture();
     const isCurrent = vi
