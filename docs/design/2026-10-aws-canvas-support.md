@@ -9,7 +9,13 @@ The Radius canvas deploys apps only to Azure today. A developer whose team runs 
 
 This design adds AWS as a second provider with the same journey and the same screens as Azure: connect an account, create an environment on an existing EKS cluster, deploy, see the deployed graph, and delete. Backing services such as MySQL run as AWS managed services, such as Amazon RDS, through an AWS recipe pack in Bicep.
 
-Most of the journey maps one to one from Azure. The hard part is the IAM role that GitHub Actions uses to deploy, called the deploy identity. Azure gives each environment its own federated credential and role assignment. AWS has no equivalent per-environment object, so environments share one role and its size limits, and two setups can overwrite each other's changes to it. This design settles how environments share that role safely, how deletes remove only what an environment added, and how long deploys survive short-lived tokens.
+Most of the journey maps one to one from Azure. The hard part is the IAM role that GitHub Actions uses to deploy, called the deploy identity. Azure gives each environment its own federated credential and role assignment. AWS has no equivalent per-environment object, so environments share one role and its size limits, and two setups can overwrite each other's changes to it. This design settles those, and the spec's open engineering questions, with these decisions:
+
+- **One deploy identity per repository per AWS account,** shared by its environments, the same as one app registration on Azure.
+- **One inline policy per environment,** with `PowerUserAccess` limited to the environment's region. A deploy identity holds about 17 environments, close to Azure's 20.
+- **A lock per repository for trust policy updates,** plus **Repair** when another repository's setup drops a subject.
+- **Bicep recipes in a `resource-types-contrib` pack,** with EKS Pod Identity for apps that need AWS credentials.
+- **Tokens refreshed every 2 minutes** during deploys.
 
 A working prototype deployed a real app to EKS with MySQL on Amazon RDS, and this doc is based on what it showed. AWS stays hidden from users until all of it ships.
 
@@ -194,6 +200,12 @@ Each environment adds an inline policy named `radius-<environment>-<hash>`. The 
 
 The policy has the statements of AWS's `PowerUserAccess`, with every action limited to the environment's region by the `aws:RequestedRegion` condition. A few global read actions, such as listing regions, stay unlimited. The deploy identity can therefore act in exactly the regions its environments use, and deleting an environment removes that region again.
 
+**Why not narrower.** Within its region, the deploy identity can create any AWS service, the same breadth Azure gives it with Contributor on the environment's resource group. The narrower options don't work:
+
+- **Limiting by tag:** many AWS create calls can't be limited by a tag condition, and every recipe would have to tag everything it creates.
+- **A permissions boundary:** it caps what the role can do, but doesn't narrow it below `PowerUserAccess` on its own.
+- **A policy that lists only the pack's services:** it would break the repository's own custom recipes, which can use any AWS type.
+
 Two kinds of actions are kept from the deploy identity:
 
 | Actions                                                                                                                                                           | How                                                                                                                                                                                                                                                                                                                                | Why                                                                                                                  |
@@ -201,12 +213,12 @@ Two kinds of actions are kept from the deploy identity:
 | `iam:*`, `organizations:*`, `account:*`                                                                                                                           | Not granted, except a few global reads and `iam:CreateServiceLinkedRole`. That one is limited to the services the recipe pack uses, such as RDS and OpenSearch, which need it the first time they're used in an account. `iam:DeleteServiceLinkedRole` isn't granted, because a service-linked role is shared by the whole account | The deploy identity can't give itself or anyone else more access                                                     |
 | EKS access entry actions (`eks:CreateAccessEntry`, `eks:UpdateAccessEntry`, `eks:DeleteAccessEntry`, `eks:AssociateAccessPolicy`, `eks:DisassociateAccessPolicy`) | Denied                                                                                                                                                                                                                                                                                                                             | Without this, `PowerUserAccess` would let the deploy identity make itself cluster-admin on any cluster in the region |
 
-**Limits.** The limits are close to Azure's limit of 20 federated credentials per app registration.
+**Limits.** Each environment's permissions are an inline policy, so the limit that matters is the inline policies' total size. The limit of 20 attached managed policies per role doesn't apply. The limits are close to Azure's limit of 20 federated credentials per app registration.
 
 - **Inline policies:** a role's inline policies share 10,240 characters, and each environment's policy is about 580, so a deploy identity holds about 17 environments.
 - **Trust policy:** it allows 2,048 characters by default, and 8,192 with a quota increase, which is about 30 subjects.
 
-When either limit is reached, setup stops at that step, naming the limit and quoting AWS's error.
+When either limit is reached, setup stops at that step, naming the limit and quoting AWS's error, the same as Azure when an app registration has 20 federated credentials. Each environment keeps its own policy, so adding or deleting one never changes another's permissions. Raising the limit, for example by splitting environments across roles, is a question for both clouds and is separate work.
 
 ### Cluster access
 
@@ -304,7 +316,7 @@ AWS ships before pod identity, without the object storage and models recipes.
 
 The planned graph reads the `aws-eks` recipe pack, and shows each node with its AWS service name, such as "Amazon RDS for MySQL".
 
-The deployed graph shows each resource's status from the deploy, the same as Azure, including the resource's own error when it fails. A deployed AWS resource links to its service's list in the AWS console, in the environment's region, for example the RDS databases list. Kubernetes resources, unknown types, and regions in China get no link, because a link to the wrong page is worse than none.
+The deployed graph shows each resource's status from the deploy, the same as Azure, including the resource's own error when it fails. A deployed AWS resource links to its service's list in the AWS console, in the environment's region, for example the RDS databases list. Kubernetes resources, unknown types, and regions in China get no link, because a link to the wrong page is worse than none. Unlike Azure, whose portal opens any resource from its ID, each AWS service has its own console address, so `aws-console.ts` in core maps each AWS type to its console list. Each new AWS recipe adds its types to that mapping. A type that's missing gets no link, not a wrong one.
 
 ### Deleting
 
@@ -431,10 +443,6 @@ Two rules run through every case. Every check that can't change anything runs be
   - The existing cleanup job removes anything a failed run leaves behind.
 - **Azure regression**: the Azure end-to-end tests pass with the AWS switch both off and on.
 
-## Open questions
-
-- **One shared policy per deploy identity.** Each environment's policy repeats the same global statements, so a deploy identity holds about 17 environments. Moving those statements into one shared inline policy per deploy identity raises that to about 30, where the trust policy becomes the limit. Setup, rollback, and delete would then have to manage the shared policy too.
-
 ## Alternatives considered
 
 ### One deploy identity per environment
@@ -454,6 +462,8 @@ One role per environment avoids the lock and the shared limits. But every new en
 
 ### Other alternatives
 
+- **One shared policy per deploy identity for the statements every environment repeats:** it would raise the limit to about 30 environments, but adds one more object that setup, rollback, and delete have to manage, and that every environment depends on.
+- **Narrowing the deploy identity by tag, permissions boundary, or a list of services:** see [Permissions](#permissions).
 - **One managed policy per environment:** managed policy names are unique across the account, so two repositories with a `dev` environment would collide. A role also holds at most 20 managed policies, and `PowerUserAccess` would use one.
 - **Attaching `PowerUserAccess` and denying other regions per environment:** deny statements from different environments add up, so a second region would block the first.
 - **Deleting the deploy identity with its last environment:** Azure never deletes the app registration, and a role picked from a platform team must never be deleted.
