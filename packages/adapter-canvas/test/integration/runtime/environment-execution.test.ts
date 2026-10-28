@@ -135,6 +135,118 @@ afterEach(() => {
 });
 
 describe("real server and fake SDK runtime ownership", () => {
+  it("refuses a pending resume without an original attachment", async () => {
+    const runtime = await composition();
+    const op = newOperation();
+    op.request = { azure: {} };
+    requireInput(op, {
+      code: "app-selection-required",
+      checkpoint: "saved-input"
+    });
+    operations.put(op);
+    const before = structuredClone(op);
+    const persist = vi
+      .spyOn(operations, "persist")
+      .mockResolvedValue(undefined);
+    try {
+      expect(
+        await runtime.server.operationResume(
+          { operationId: op.operationId, code: "app-selection-required" },
+          async () => ({
+            repo: String(op.repo),
+            environment: String(op.environment),
+            provider: String(op.provider),
+            checkpoint: "saved-input",
+            appId: "chosen-app"
+          })
+        )
+      ).toMatchObject({
+        status: 409,
+        body: { code: "operation-resume-mismatch" }
+      });
+      expect(op).toEqual(before);
+      expect(persist).not.toHaveBeenCalled();
+      expect(runtime.owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+    } finally {
+      await runtime.cleanup();
+    }
+  });
+  it.each(["input", "save", "save-rejection"] as const)(
+    "does not transfer a pending resume to a same-ID replacement attachment during %s",
+    async (phase) => {
+      const runtime = await composition();
+      const entered = deferred();
+      const gate = deferred();
+      let writes = 0;
+      let saved: unknown;
+      const persist = vi
+        .spyOn(operations, "persist")
+        .mockImplementation(async () => {
+          writes++;
+          const envelope = toPersistedOperation(op);
+          if (writes === 1 && phase !== "input") {
+            entered.resolve();
+            await gate.promise;
+          }
+          saved = structuredClone(envelope);
+          if (writes === 1 && phase === "save-rejection")
+            throw new Error("write rejected");
+        });
+      const op = newOperation();
+      op.request = { azure: {} };
+      requireInput(op, {
+        code: "app-selection-required",
+        checkpoint: "saved-input"
+      });
+      const before = structuredClone(op);
+      try {
+        await runtime.canvas.open(context());
+        operations.put(op);
+        const pending = runtime.server.operationResume(
+          {
+            operationId: op.operationId,
+            instanceId: "panel",
+            code: "app-selection-required"
+          },
+          async () => {
+            if (phase === "input") {
+              entered.resolve();
+              await gate.promise;
+            }
+            return {
+              repo: String(op.repo),
+              environment: String(op.environment),
+              provider: String(op.provider),
+              checkpoint: "saved-input",
+              appId: "chosen-app"
+            };
+          }
+        );
+        await entered.promise;
+        await runtime.server.stopServer("panel", true);
+        await runtime.canvas.open(context());
+        gate.resolve();
+        expect(await pending).toMatchObject({
+          status: 409,
+          body: { code: "operation-resume-mismatch" }
+        });
+        expect(op).toEqual(before);
+        expect(runtime.owner.hasActiveEnvironmentTasks("panel")).toBe(false);
+        expect(
+          runtime.accountContext.getExecutor(op.operationId)
+        ).toBeUndefined();
+        expect(persist).toHaveBeenCalledTimes(phase === "input" ? 0 : 2);
+        if (phase !== "input")
+          expect(saved).toMatchObject({
+            state: "input_required",
+            inputRequired: before.inputRequired
+          });
+      } finally {
+        gate.resolve();
+        await runtime.cleanup();
+      }
+    }
+  );
   it("does not repeat another operation's provider recovery when held admission releases", async () => {
     const runtime = await composition();
     const entered = deferred();

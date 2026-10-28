@@ -36,11 +36,16 @@ export type SetupInputResumeResult<
         | "accepted";
     }
   | { state: "expired"; operation: Operation; message: unknown }
-  | { state: "persist-failed"; error: unknown };
+  | { state: "persist-failed" | "recovery-persist-failed"; error: unknown };
 
 export interface SetupInputResumePorts<Operation extends SetupResumeOperation> {
   isStopped?(): boolean;
   isCurrent(operation: Operation): boolean;
+  captureRecovery(operation: Operation): {
+    prepared(): void;
+    restore(): boolean;
+    failed(error: unknown): void;
+  };
   readInput(): Promise<SetupResumeInput>;
   canResumeInput(
     operation: Operation,
@@ -53,7 +58,6 @@ export interface SetupInputResumePorts<Operation extends SetupResumeOperation> {
     }
   ): boolean;
   resumeAfterInput(operation: Operation): void;
-  requireInput(operation: Operation, input: unknown): void;
   persist(): Promise<void>;
   accepted(): void;
   schedule(operation: Operation): boolean;
@@ -92,51 +96,55 @@ export async function resumeSetupInput<Operation extends SetupResumeOperation>(
     })
   )
     return { state: "mismatch" };
-  if (!operation.request && operation.resumeRequest) {
-    operation.request = structuredClone(operation.resumeRequest);
-  }
-  const snapshot = {
-    inputRequired: structuredClone(operation.inputRequired),
-    request:
-      operation.request !== undefined ?
-        structuredClone(operation.request)
-      : undefined,
-    resumeRequest:
-      operation.resumeRequest ?
-        structuredClone(operation.resumeRequest)
-      : undefined
-  };
-  if (!isSetupRequest(operation.request))
-    return { state: "request-unavailable" };
-  const request = operation.request;
+  const request = operation.request || operation.resumeRequest;
+  if (!isSetupRequest(request)) return { state: "request-unavailable" };
+  if (
+    code !== "service-management-reference-required" &&
+    code !== "app-selection-required"
+  )
+    return { state: "unsupported" };
+  const recovery = ports.captureRecovery(operation);
+  if (!operation.request) operation.request = structuredClone(request);
   if (code === "service-management-reference-required") {
-    request.azure.serviceManagementReference =
+    operation.request.azure.serviceManagementReference =
       data.serviceManagementReference || "";
     if (operation.resumeRequest?.azure) {
       operation.resumeRequest.azure.serviceManagementReference =
         data.serviceManagementReference || "";
     }
-  } else if (code === "app-selection-required") {
-    request.azure.appId = data.appId || "";
-    request.azure.createNew = data.createNew === true;
+  } else {
+    operation.request.azure.appId = data.appId || "";
+    operation.request.azure.createNew = data.createNew === true;
     if (operation.resumeRequest?.azure) {
       operation.resumeRequest.azure.appId = data.appId || "";
       operation.resumeRequest.azure.createNew = data.createNew === true;
     }
-  } else return { state: "unsupported" };
+  }
   ports.resumeAfterInput(operation);
+  recovery.prepared();
+  const correct = async (
+    result: SetupInputResumeResult<Operation>
+  ): Promise<SetupInputResumeResult<Operation>> => {
+    if (!recovery.restore()) return { state: "mismatch" };
+    try {
+      await ports.persist();
+      return result;
+    } catch (error) {
+      recovery.failed(error);
+      return { state: "recovery-persist-failed", error };
+    }
+  };
   try {
     await ports.persist();
   } catch (error) {
-    if (!ports.isCurrent(operation)) return { state: "mismatch" };
-    operation.request = snapshot.request;
-    if (snapshot.resumeRequest === undefined) delete operation.resumeRequest;
-    else operation.resumeRequest = snapshot.resumeRequest;
-    ports.requireInput(operation, snapshot.inputRequired);
-    return { state: "persist-failed", error };
+    return correct(
+      ports.isCurrent(operation) ?
+        { state: "persist-failed", error }
+      : { state: "mismatch" }
+    );
   }
   if (ports.isStopped?.()) return { state: "stopped" };
-  if (!ports.isCurrent(operation)) return { state: "mismatch" };
+  if (!ports.isCurrent(operation)) return correct({ state: "mismatch" });
   ports.accepted();
   if (!ports.schedule(operation)) await ports.schedulingFailed(operation);
   return { state: "accepted" };

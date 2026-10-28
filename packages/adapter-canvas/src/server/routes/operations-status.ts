@@ -1,4 +1,5 @@
 import type { CanvasRequestContext } from "../request-context.js";
+import type { EnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import {
   KUBERNETES_NAMESPACE_ERROR,
   isAwsAccountId,
@@ -139,6 +140,7 @@ export interface OperationActionRecord extends OperationRecord {
 }
 
 export interface OperationActionDependencies {
+  claimAdmission: EnvironmentExecutionOwner["claimAdmission"];
   getOperation(operationId: string): OperationActionRecord | null | undefined;
   canResumeInput(
     operation: OperationActionRecord,

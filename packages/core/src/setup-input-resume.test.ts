@@ -38,10 +38,20 @@ function fixture(
       current.state = "running";
       current.inputRequired = null;
     }),
-    requireInput: vi.fn((current, input) => {
-      current.state = "input_required";
-      current.inputRequired = input;
-    }),
+    captureRecovery: (current) => {
+      const before = structuredClone(current);
+      return {
+        prepared: () => {},
+        restore: () => {
+          if (!ports.isCurrent(current)) return false;
+          for (const key of Object.keys(current))
+            Reflect.deleteProperty(current, key);
+          Object.assign(current, before);
+          return true;
+        },
+        failed: vi.fn()
+      };
+    },
     persist: vi.fn(async () => {}),
     accepted: vi.fn(),
     schedule: vi.fn(() => true),
@@ -52,6 +62,38 @@ function fixture(
 }
 
 describe("setup input continuation", () => {
+  it.each([false, true])(
+    "reports whether correcting a possibly written initial save failed (correction fails=%s)",
+    async (fails) => {
+      const initial = new Error("initial save rejected");
+      const correction = new Error("correction rejected");
+      const failed = vi.fn();
+      const restore = vi.fn(() => true);
+      const { operation, ports } = fixture({
+        captureRecovery: () => ({ prepared: () => {}, restore, failed }),
+        persist:
+          fails ?
+            vi
+              .fn()
+              .mockRejectedValueOnce(initial)
+              .mockRejectedValueOnce(correction)
+          : vi
+              .fn()
+              .mockRejectedValueOnce(initial)
+              .mockResolvedValueOnce(undefined)
+      });
+      expect(await resumeSetupInput(operation, selectionCode, ports)).toEqual({
+        state: fails ? "recovery-persist-failed" : "persist-failed",
+        error: fails ? correction : initial
+      });
+      expect(restore).toHaveBeenCalledOnce();
+      expect(ports.persist).toHaveBeenCalledTimes(2);
+      expect(failed).toHaveBeenCalledTimes(fails ? 1 : 0);
+      expect(ports.accepted).not.toHaveBeenCalled();
+      expect(ports.schedule).not.toHaveBeenCalled();
+    }
+  );
+
   it.each(["input", "persist", "persist-rejection"] as const)(
     "refuses stale work after %s without later mutation, restoration or scheduling",
     async (phase) => {
@@ -82,7 +124,6 @@ describe("setup input continuation", () => {
         held.resolve();
         expect(await pending).toEqual({ state: "mismatch" });
         expect(operation).toEqual(before);
-        expect(ports.requireInput).not.toHaveBeenCalled();
         expect(ports.accepted).not.toHaveBeenCalled();
         expect(ports.schedule).not.toHaveBeenCalled();
         expect(ports.schedulingFailed).not.toHaveBeenCalled();
@@ -264,9 +305,10 @@ describe("setup input continuation", () => {
     async (legacy) => {
       const error = new Error("save refused");
       const { operation, ports } = fixture({
-        persist: async () => {
-          throw error;
-        }
+        persist: vi
+          .fn()
+          .mockRejectedValueOnce(error)
+          .mockResolvedValue(undefined)
       });
       if (legacy) operation.resumeRequest = { azure: { appId: "old" } };
       const before = structuredClone(operation);

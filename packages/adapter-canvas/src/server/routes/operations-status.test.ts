@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
@@ -194,6 +195,7 @@ function actionDependencies(
   overrides: Partial<OperationActionDependencies> = {}
 ): OperationActionDependencies {
   return {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     getOperation: () => {
       throw new Error("getOperation not stubbed");
     },
@@ -2126,7 +2128,9 @@ describe("operation resume and abandon actions", () => {
         },
         persistOperations: () => {
           order.push("persist");
-          return Promise.reject(new Error("disk unavailable"));
+          return order.length === 2 ?
+              Promise.reject(new Error("disk unavailable"))
+            : Promise.resolve();
         },
         requireInput: (restored, input) => {
           order.push("restore");
@@ -2136,7 +2140,7 @@ describe("operation resume and abandon actions", () => {
         errorMessage: (error) => (error as Error).message
       })
     );
-    expect(order).toEqual(["resume", "persist", "restore"]);
+    expect(order).toEqual(["resume", "persist", "persist"]);
     expect(operation.request).toEqual(requestBefore);
     expect(operation.resumeRequest).toBeUndefined();
     expect(operation.inputRequired).toEqual(originalInput);

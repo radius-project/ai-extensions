@@ -2,6 +2,7 @@ export type SetupCommandAdmissionResult =
   | { state: "conflict"; operationId: string }
   | { state: "duplicate"; commandId: string }
   | { state: "persist-failed"; error: unknown }
+  | { state: "stale-unwind-failed"; error: unknown }
   | { state: "unscheduled" }
   | { state: "stopped" }
   | { state: "stale" }
@@ -34,7 +35,7 @@ export async function admitSetupCommand(
       ports.publish({ state: "stale" });
     } catch (error) {
       ports.reportPersistenceFailure(error);
-      ports.publish({ state: "persist-failed", error });
+      ports.publish({ state: "stale-unwind-failed", error });
     }
   };
   if (!ports.isCurrent()) {

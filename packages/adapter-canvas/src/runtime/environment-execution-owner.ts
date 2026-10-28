@@ -174,17 +174,21 @@ export function createEnvironmentExecutionOwner(
     claimAdmission(operationId: string) {
       if (admissions.has(operationId) || blockedAdmissions.has(operationId))
         return null;
+      const hadTask = [...activeTasks.values()].some((tasks) =>
+        tasks.has(operationId)
+      );
       const admission = {
-        started: [...activeTasks.values()].some((tasks) =>
-          tasks.has(operationId)
-        ),
+        started: false,
         blocked: false,
         recovery: new Set<(operationId: string) => void>()
       };
       admissions.set(operationId, admission);
       return {
-        canRestore: () =>
-          admissions.get(operationId) === admission && !admission.started,
+        hadTask,
+        canRestore: (options?: { allowPreexistingTask: boolean }) =>
+          admissions.get(operationId) === admission &&
+          !admission.started &&
+          (!hadTask || options?.allowPreexistingTask === true),
         blockRecovery: () => {
           admission.blocked = true;
         },
