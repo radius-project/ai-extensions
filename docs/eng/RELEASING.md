@@ -109,6 +109,7 @@ graph LR
 
 ### Prerequisites and constraints
 
+- **Verify the latest stable Radius pin before preparing a Radius plugin release.** If an update is needed, merge it first; follow [Verify the Radius release pin](./RELEASE_RUNBOOK.md#verify-the-radius-release-pin).
 - Immutable releases are optional. With no repository variable, stable releases may remain mutable and retries reconcile their assets. To enforce immutability later, enable GitHub immutable releases and set `REQUIRE_IMMUTABLE_RELEASES=true`; preparation and publication then fail closed if protection is absent.
 - The repository automation GitHub App identified by `RADIUS_RELEASE_BOT_CLIENT_ID` and `RADIUS_RELEASE_BOT_PRIVATE_KEY` needs Contents and Pull requests write permissions. It opens the version pull request and writes every release commit and ref. Administration read is additionally required only when `REQUIRE_IMMUTABLE_RELEASES=true`.
 - **Every tag resolves to a Verified commit.** A runner holds no signing key. GitHub signs commits created through the GitHub API as the App, but the Git tag-object API does not add a server signature. [`scripts/verified-git.mjs`](../../scripts/verified-git.mjs) therefore creates lightweight tag refs only after GitHub reports their target commit as verified, and checks the target again when reusing a tag. Existing cryptographically verified annotated tags remain valid when their target commit is also verified. Reusing an install branch likewise re-checks its commit. The version commit is already API-created by the Changesets action for the same reason.
