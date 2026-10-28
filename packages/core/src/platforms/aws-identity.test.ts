@@ -265,6 +265,80 @@ describe("trust policy", () => {
     }
   );
 
+  describe("a statement that restricts the subject with more than one operator", () => {
+    const AUD = "token.actions.githubusercontent.com:aud";
+    const SUB = "token.actions.githubusercontent.com:sub";
+    const both = (equals: string[], like: string[]) =>
+      parsePolicyDocument({
+        Statement: [
+          statementWith({
+            StringEquals: { [AUD]: "sts.amazonaws.com", [SUB]: equals },
+            StringLike: { [SUB]: like }
+          })
+        ]
+      });
+
+    it("keeps it unchanged and adds a separate exact statement for a new subject", () => {
+      const existing = both([PROD], [PROD]);
+      const merged = mergeGitHubTrustSubject(existing, ACCOUNT, DEV);
+      expect(merged.changed).toBe(true);
+      expect(merged.policy.Statement).toEqual([
+        existing.Statement[0],
+        buildGitHubTrustPolicy(ACCOUNT, [DEV]).Statement[0]
+      ]);
+    });
+
+    it("does not count a subject named in only one of the operators as trusted", () => {
+      const existing = both([PROD, DEV], [PROD]);
+      const merged = mergeGitHubTrustSubject(existing, ACCOUNT, DEV);
+      expect(merged.changed).toBe(true);
+      expect(merged.policy.Statement[1]).toEqual(
+        buildGitHubTrustPolicy(ACCOUNT, [DEV]).Statement[0]
+      );
+    });
+
+    it("counts a subject every operator accepts as trusted", () => {
+      const existing = both([PROD, DEV], ["repo:octo/shop:environment:*"]);
+      const merged = mergeGitHubTrustSubject(existing, ACCOUNT, DEV);
+      expect(merged.changed).toBe(false);
+      expect(merged.policy).toBe(existing);
+    });
+  });
+
+  it.each([
+    ["a wildcard", "repo:octo/shop:environment:*", false],
+    ["a single-character wildcard", "repo:octo/shop:environment:de?", false],
+    [
+      "a pattern for another environment",
+      "repo:octo/shop:environment:pro?",
+      true
+    ],
+    ["an exact pattern for another environment", PROD, true],
+    ["a literal dot", "repo:octo.shop:environment:dev", true]
+  ])("evaluates a StringLike subject with %s", (_label, pattern, changed) => {
+    const existing = parsePolicyDocument({
+      Statement: [
+        statementWith({
+          StringLike: { "token.actions.githubusercontent.com:sub": pattern }
+        })
+      ]
+    });
+    const merged = mergeGitHubTrustSubject(
+      existing,
+      ACCOUNT,
+      "repo:octo/shop:environment:dev"
+    );
+    expect(merged.changed).toBe(changed);
+    if (changed) {
+      // A StringLike statement is never extended; a new exact one is added.
+      expect(merged.policy.Statement).toEqual([
+        existing.Statement[0],
+        buildGitHubTrustPolicy(ACCOUNT, ["repo:octo/shop:environment:dev"])
+          .Statement[0]
+      ]);
+    }
+  });
+
   it("adds a subject statement beside one with no condition", () => {
     const existing = parsePolicyDocument({
       Statement: [statementWith(undefined)]
