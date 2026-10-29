@@ -99,9 +99,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    defaults:
-      run:
-        working-directory: .github/extension/actions/deploy-progress/artifact-uploader
+    env:
+      UPLOADER_DIRECTORY: .github/extension/actions/deploy-progress/artifact-uploader
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,28 +116,28 @@ jobs:
         with:
           node-version-file: .node-version
 
-      # The uploader is a standalone package with its own lockfile, deliberately
-      # outside the root pnpm workspace. `--ignore-workspace` keeps pnpm from
-      # walking up to the repo workspace and installing the whole monorepo.
+      # Use pnpm installed above from the repository root's packageManager.
+      # --dir and --ignore-workspace preserve the uploader's standalone lockfile.
       - name: Install uploader dependencies
-        run: pnpm install --frozen-lockfile --ignore-workspace
+        run: pnpm --dir "$UPLOADER_DIRECTORY" install --frozen-lockfile --ignore-workspace
 
       - name: Test uploader
-        run: pnpm run test
+        run: pnpm --dir "$UPLOADER_DIRECTORY" run test
 
       - name: Rebuild uploader bundle
-        run: pnpm run build
+        run: pnpm --dir "$UPLOADER_DIRECTORY" run build
 
       # The `dist/` bundle is committed (force-added past .gitignore) so user
       # repos can run the action without a build step. Fail if the rebuilt output
       # drifts from what is checked in, i.e. someone edited `src/` without
       # committing the regenerated bundle.
       - name: Verify committed bundle is up to date
+        working-directory: ${{ env.UPLOADER_DIRECTORY }}
         shell: bash
         run: |
           set -euo pipefail
           if ! git diff --exit-code -- dist; then
-            echo "::error::dist/ is stale; run 'pnpm run build' in the" \
-              "artifact-uploader package and commit the result."
+            echo "::error::dist/ is stale; run 'pnpm --dir $UPLOADER_DIRECTORY run build'" \
+              "from the repository root and commit the result."
             exit 1
           fi

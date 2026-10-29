@@ -72,6 +72,7 @@ import {
   type CloudFixture,
   type RoleAssignmentRecord
 } from "./support/cloud-fixture.js";
+import { configureCloudRadiusRelease } from "./support/cloud-radius-release.js";
 import {
   CREATE_OPERATION_TIMEOUT_MS,
   CREATE_TEST_TIMEOUT_MS,
@@ -1015,6 +1016,12 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       roleAssignments = await cloud.assertRoleAssignmentExists(principalId);
 
       await cloud.assertGitHubEnvironmentExists();
+      await configureCloudRadiusRelease(
+        ports.commands,
+        cloud.repository,
+        cloud.environmentName,
+        process.env.RADIUS_CLOUD_E2E_RELEASE
+      );
       const variables = readEnvironmentVariables(
         await runGh(
           ports.commands,
@@ -1918,6 +1925,12 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         await cloud.assertFederatedCredentialExists(subject);
 
       await cloud.assertGitHubEnvironmentExists();
+      await configureCloudRadiusRelease(
+        ports.commands,
+        cloud.repository,
+        cloud.environmentName,
+        process.env.RADIUS_CLOUD_E2E_RELEASE
+      );
       const variables = readEnvironmentVariables(
         await runGh(
           ports.commands,
