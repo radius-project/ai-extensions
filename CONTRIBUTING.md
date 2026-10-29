@@ -24,7 +24,24 @@ fixes, features) as long as they follow a few guidelines:
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) 24 (the active major is recorded in [`.node-version`](./.node-version))
-- [pnpm](https://pnpm.io/) `>= 9` (this repo uses `pnpm@9.15.9`)
+- [pnpm](https://pnpm.io/), using the exact version selected by `packageManager` in the root [`package.json`](./package.json)
+
+From the repository root, install the declared package manager with npm. This command works in Bash and PowerShell:
+
+```bash
+npm install --global "$(node -p "require('./package.json').packageManager")"
+pnpm --version
+```
+
+Keep the pnpm version only in the root `packageManager` field; do not duplicate it in installation commands, nested manifests, or documentation. The [npm installation method](https://pnpm.io/installation#using-npm) installs pnpm's native executable. If an existing Corepack shim shadows that executable, run `corepack disable pnpm` before reinstalling. GitHub Actions reads the root field through `pnpm/action-setup` without a `version` input, and the canonical visual Dockerfile reads the same field when installing pnpm.
+
+The deploy-progress artifact uploader has a separate workspace and lockfile, but uses pnpm installed from the root manifest rather than maintaining another pin. After the installation above, run its commands from the repository root with `--dir` to keep its dependencies isolated:
+
+```bash
+pnpm --dir .github/extension/actions/deploy-progress/artifact-uploader install --frozen-lockfile --ignore-workspace
+pnpm --dir .github/extension/actions/deploy-progress/artifact-uploader run test
+pnpm --dir .github/extension/actions/deploy-progress/artifact-uploader run build
+```
 
 ## Repository layout
 

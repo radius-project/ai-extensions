@@ -1,5 +1,35 @@
 # radius
 
+## 0.3.0
+
+### Minor Changes
+
+- [#1035](https://github.com/radius-project/ai-extensions/pull/1035) [@kachawla](https://github.com/kachawla) - **Added:** Regenerate the application model after a plugin update moves to a newer Radius version, and move the Radius extension pin in `.radius/bicepconfig.json` with it when modeling wrote that pin. A pin set by hand is left unchanged, and an older Radius CLI shows a note to update the plugin instead of regenerating.
+
+### Patch Changes
+
+- [#1058](https://github.com/radius-project/ai-extensions/pull/1058) [@kachawla](https://github.com/kachawla) - **Security:** Update the deploy progress artifact uploader to patched brace-expansion and undici releases.
+
+- [#1046](https://github.com/radius-project/ai-extensions/pull/1046) [@kachawla](https://github.com/kachawla) - **Fixed:** Stop modeling from falling back to a Kubernetes recipe for a custom resource type that cannot be provisioned on Azure. Modeling now reports the unsupported dependency instead.
+
+- [#1047](https://github.com/radius-project/ai-extensions/pull/1047) [@kachawla](https://github.com/kachawla) - **Fixed:** Show the deployed graph after a deployment instead of falling back to the planned graph when the deployment artifact download failed on a fractional timeout.
+
+- [#1044](https://github.com/radius-project/ai-extensions/pull/1044) [@kachawla](https://github.com/kachawla) - **Fixed:** Force deleting an application now runs a forced delete instead of silently falling back to a normal delete.
+
+- [#1072](https://github.com/radius-project/ai-extensions/pull/1072) [@kachawla](https://github.com/kachawla) - **Fixed:** Open the application graph view before generating a missing model when you ask to see the graph, without stopping the rest of your request.
+
+- [#1068](https://github.com/radius-project/ai-extensions/pull/1068) [@kachawla](https://github.com/kachawla) - **Fixed:** Clarify that graph previews use saved models for the current workspace without a commit or push, while other repository or branch selections read models from GitHub.
+
+- [#1045](https://github.com/radius-project/ai-extensions/pull/1045) [@kachawla](https://github.com/kachawla) - **Fixed:** Correct the environment form's namespace help to say a new namespace is created on the first deploy, not during environment setup.
+
+- [#1084](https://github.com/radius-project/ai-extensions/pull/1084) [@AzureMike](https://github.com/AzureMike) - **Fixed:** Radius app modeling now reads credential sensitivity only from the printed type schema, which marks nested values such as an authored Secret's data values. The skill tells the model not to use the staged summary that only the checker reads.
+
+- [#1019](https://github.com/radius-project/ai-extensions/pull/1019) [@nellshamrell](https://github.com/nellshamrell) - **Fixed:** Report unexpected environment setup failures instead of leaving the request unanswered, without retrying failed cleanup.
+
+- [#1040](https://github.com/radius-project/ai-extensions/pull/1040) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Keep the correct environment verification status when more than 100 newer workflow runs exist. Look up only runs linked to the environment's recent deployments instead of reading the full repository history.
+
+  For a GitHub App that cannot write workflow files, show how to grant the missing Workflows permission and renew the installation token instead of suggesting an OAuth scope refresh.
+
 ## 0.2.3
 
 ### Patch Changes
