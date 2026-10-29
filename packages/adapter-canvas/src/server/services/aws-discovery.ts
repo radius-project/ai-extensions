@@ -1,11 +1,13 @@
 import {
+  eksAcceptsAccessEntries,
+  eksAuthenticationMode,
   isAwsRegion,
   parseAwsSubnets,
   parseAwsVpcs,
   parsePolicyDocument,
   trustedGitHubSubjects
 } from "@radius-project/core";
-import type { DiscoveryDependencies, DiscoveryResult } from "./discovery.js";
+import type { AwsDiscoveryResult, DiscoveryDependencies } from "./discovery.js";
 
 // AWS half of environment-wizard discovery. Every query is scoped to the
 // credential profile's region; the account is whatever the signed-in CLI
@@ -35,14 +37,6 @@ export interface AwsClusterItem {
   usable: boolean;
 }
 
-export interface AwsSubnetItem {
-  id: string;
-  name: string;
-  vpcId: string;
-  availabilityZone: string;
-  public: boolean;
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -52,7 +46,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function recordError(
-  result: DiscoveryResult,
+  result: AwsDiscoveryResult,
   facet: string,
   error: unknown
 ): void {
@@ -78,18 +72,13 @@ export function parseAwsCluster(name: string, output: unknown): AwsClusterItem {
     isRecord(output) && isRecord(output.cluster) ? output.cluster : {};
   const vpcConfig =
     isRecord(cluster.resourcesVpcConfig) ? cluster.resourcesVpcConfig : {};
-  const accessConfig =
-    isRecord(cluster.accessConfig) ? cluster.accessConfig : {};
-  const authenticationMode =
-    typeof accessConfig.authenticationMode === "string" ?
-      accessConfig.authenticationMode
-    : "CONFIG_MAP";
+  const authenticationMode = eksAuthenticationMode(output);
   return {
     id: name,
     name,
     vpcId: typeof vpcConfig.vpcId === "string" ? vpcConfig.vpcId : "",
     authenticationMode,
-    usable: authenticationMode !== "CONFIG_MAP"
+    usable: eksAcceptsAccessEntries(authenticationMode)
   };
 }
 
@@ -135,8 +124,8 @@ async function discoverNamespaces(
 export async function discoverAwsResources(
   data: AwsDiscoveryRequest,
   dependencies: DiscoveryDependencies
-): Promise<DiscoveryResult | (DiscoveryResult & { error: string })> {
-  const result: DiscoveryResult = {
+): Promise<AwsDiscoveryResult | (AwsDiscoveryResult & { error: string })> {
+  const result: AwsDiscoveryResult = {
     clusters: [],
     resourceGroups: [],
     namespaces: [],
@@ -245,9 +234,11 @@ export interface AwsRoleCandidate {
  * picker. Service-linked roles are left out because they cannot be assumed
  * from GitHub.
  */
+export type AwsRoleListDependencies = Pick<DiscoveryDependencies, "runCli">;
+
 export async function listAwsRoles(
   data: { accountId?: string },
-  dependencies: Pick<DiscoveryDependencies, "runCli">
+  dependencies: AwsRoleListDependencies
 ): Promise<AwsRoleCandidate[]> {
   const accountId = typeof data.accountId === "string" ? data.accountId : "";
   const out = await dependencies.runCli(

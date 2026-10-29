@@ -141,12 +141,11 @@ async function run(
 }
 
 describe("azure-discovery routes (SU-08)", () => {
-  it("declares exactly the four routes it owns", () => {
+  it("declares exactly the three routes it owns", () => {
     expect(Object.keys(createAzureDiscoveryRoutes(dependencies()))).toEqual([
       "GET /api/list-azure-app-registrations",
       "GET /api/azure-app-serves-repos",
-      "POST /api/discover",
-      "GET /api/list-aws-roles"
+      "POST /api/discover"
     ]);
   });
 
@@ -286,84 +285,6 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         error: "az exploded",
         code: "app-list-failed"
-      });
-    });
-  });
-
-  describe("GET /api/list-aws-roles", () => {
-    const LIST_ROLES = "aws iam list-roles --output json";
-
-    function rolesCli(result: string | Error) {
-      const calls: string[] = [];
-      const runCli: AzureDiscoveryDependencies["runCli"] = (command, args) => {
-        const line = [command, ...args].join(" ");
-        calls.push(line);
-        if (line !== LIST_ROLES)
-          throw new Error(`unscripted cli call: ${line}`);
-        return result instanceof Error ?
-            Promise.reject(result)
-          : Promise.resolve(result);
-      };
-      return { calls, runCli };
-    }
-
-    it("answers the visible roles through the route registry", async () => {
-      const cli = rolesCli(
-        JSON.stringify({
-          Roles: [
-            {
-              RoleName: "radius-deploy-octo-app",
-              Arn: "arn:aws:iam::123456789012:role/radius-deploy-octo-app",
-              Path: "/",
-              AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] }
-            }
-          ]
-        })
-      );
-      const routes = createAzureDiscoveryRoutes(
-        dependencies({ runCli: cli.runCli })
-      );
-
-      const recording = await run(
-        "/api/list-aws-roles?accountId=123456789012",
-        async (context) => {
-          await routes["GET /api/list-aws-roles"](context);
-        },
-        dependencies()
-      );
-
-      expect(recording.status).toBe(200);
-      expect(JSON.parse(recording.body)).toEqual({
-        roles: [
-          {
-            arn: "arn:aws:iam::123456789012:role/radius-deploy-octo-app",
-            name: "radius-deploy-octo-app",
-            trustedSubjects: []
-          }
-        ]
-      });
-      expect(cli.calls).toEqual([LIST_ROLES]);
-    });
-
-    it("answers 400 with an empty role list when listing fails", async () => {
-      const cli = rolesCli(new Error("AccessDenied"));
-      const routes = createAzureDiscoveryRoutes(
-        dependencies({ runCli: cli.runCli })
-      );
-
-      const recording = await run(
-        "/api/list-aws-roles",
-        async (context) => {
-          await routes["GET /api/list-aws-roles"](context);
-        },
-        dependencies()
-      );
-
-      expect(recording.status).toBe(400);
-      expect(JSON.parse(recording.body)).toEqual({
-        error: "Failed to list IAM roles: AccessDenied",
-        code: "aws-role-list-failed",
-        roles: []
       });
     });
   });

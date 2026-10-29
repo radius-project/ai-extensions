@@ -103,6 +103,8 @@ const EXPECTED_FUNCTIONS = [
   "evaluateAppSource",
   "ambiguousAppSourceBrief",
   "dockerfileDirectories",
+  "eksAcceptsAccessEntries",
+  "eksAuthenticationMode",
   "findWorkspaceManifests",
   "unsupportedAppSourceReport",
   "fetchBicepFromRepo",

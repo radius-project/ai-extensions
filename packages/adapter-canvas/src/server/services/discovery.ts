@@ -1,4 +1,5 @@
-import { discoverAwsResources } from "./aws-discovery.js";
+import type { AwsSubnet, AwsVpc } from "@radius-project/core";
+import { discoverAwsResources, type AwsClusterItem } from "./aws-discovery.js";
 import {
   remediationView,
   type RemediationView
@@ -8,24 +9,33 @@ export interface DiscoveryItem {
   id: string;
   name: string;
   resourceGroup?: string;
-  // AWS only: a cluster's VPC and auth mode, a subnet's VPC, zone, and
-  // whether its route table reaches an internet gateway.
-  vpcId?: string;
-  authenticationMode?: string;
-  usable?: boolean;
-  availabilityZone?: string;
-  public?: boolean;
 }
 
-export interface DiscoveryResult {
-  clusters: DiscoveryItem[];
+interface DiscoveryResultFacets<Cluster, Network, Subnet> {
+  clusters: Cluster[];
   resourceGroups: DiscoveryItem[];
   namespaces: string[];
-  vpcs: DiscoveryItem[];
-  subnets: DiscoveryItem[];
+  vpcs: Network[];
+  subnets: Subnet[];
   errors?: Record<string, string>;
   remediation?: RemediationView;
 }
+
+export type AzureDiscoveryResult = DiscoveryResultFacets<
+  DiscoveryItem,
+  DiscoveryItem,
+  DiscoveryItem
+>;
+
+// AWS answers typed items: a cluster's VPC and auth mode, and a subnet's VPC,
+// zone, and whether its route table reaches an internet gateway.
+export type AwsDiscoveryResult = DiscoveryResultFacets<
+  AwsClusterItem,
+  AwsVpc,
+  AwsSubnet
+>;
+
+export type DiscoveryResult = AzureDiscoveryResult | AwsDiscoveryResult;
 
 export interface DiscoveryRequest {
   subscriptionId?: string;

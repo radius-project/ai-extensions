@@ -8,8 +8,12 @@ import {
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
   buildGitHubTrustPolicy,
+  AWS_CLI_MINIMUM_VERSION,
+  awsRoleArn,
   checkAwsCliVersion,
   configMapClusterMessage,
+  eksAcceptsAccessEntries,
+  eksAuthenticationMode,
   createGitHubOidcProviderCommand,
   githubOidcProviderArn,
   isAwsCommercialRegion,
@@ -101,6 +105,41 @@ const ACCESS_DENIED = /AccessDenied|UnauthorizedOperation|not authorized/i;
 const NO_SUCH_ENTITY = /NoSuchEntity/;
 const RESOURCE_IN_USE = /ResourceInUseException/;
 
+const LIMIT_EXCEEDED = /LimitExceeded/;
+
+// Whether an existing access entry was created for the current role, judged
+// by whether it is newer than the role.
+async function accessEntryOwner(
+  ports: AwsDeployIdentityPorts,
+  entryArgs: readonly string[],
+  roleCreatedAt: unknown
+): Promise<"current role" | "earlier role" | "unknown"> {
+  const describeEntry = await ports.runAws([
+    "eks",
+    "describe-access-entry",
+    ...entryArgs,
+    "--output",
+    "json"
+  ]);
+  const entry = parseJson(describeEntry.stdout);
+  const entryCreatedAt = Date.parse(
+    (
+      isRecord(entry) &&
+        isRecord(entry.accessEntry) &&
+        typeof entry.accessEntry.createdAt === "string"
+    ) ?
+      entry.accessEntry.createdAt
+    : ""
+  );
+  const roleTime = Date.parse(
+    typeof roleCreatedAt === "string" ? roleCreatedAt : ""
+  );
+  if (!succeeded(describeEntry) || isNaN(entryCreatedAt) || isNaN(roleTime)) {
+    return "unknown";
+  }
+  return entryCreatedAt >= roleTime ? "current role" : "earlier role";
+}
+
 export async function setupAwsDeployIdentity(
   request: AwsDeployIdentityRequest,
   ports: AwsDeployIdentityPorts
@@ -135,7 +174,9 @@ export async function setupAwsDeployIdentity(
       : versionCheck.message
     );
   }
-  ports.step(`✅ AWS CLI ${versionCheck.version} meets the 2.15.3 minimum.`);
+  ports.step(
+    `✅ AWS CLI ${versionCheck.version} meets the ${AWS_CLI_MINIMUM_VERSION} minimum.`
+  );
 
   const identity = await ports.runAws([
     "sts",
@@ -176,20 +217,8 @@ export async function setupAwsDeployIdentity(
       `Could not read EKS cluster ${cluster} in ${region}: ${detail(describe)}`
     );
   }
-  const clusterRecord = parseJson(describe.stdout);
-  const accessConfig =
-    (
-      isRecord(clusterRecord) &&
-      isRecord(clusterRecord.cluster) &&
-      isRecord(clusterRecord.cluster.accessConfig)
-    ) ?
-      clusterRecord.cluster.accessConfig
-    : {};
-  const authenticationMode =
-    typeof accessConfig.authenticationMode === "string" ?
-      accessConfig.authenticationMode
-    : "CONFIG_MAP";
-  if (authenticationMode === "CONFIG_MAP") {
+  const authenticationMode = eksAuthenticationMode(parseJson(describe.stdout));
+  if (!eksAcceptsAccessEntries(authenticationMode)) {
     return fail(
       "aws-cluster-config-map",
       configMapClusterMessage(cluster, region)
@@ -359,6 +388,7 @@ export async function setupAwsDeployIdentity(
 
   let roleArn: string;
   let roleCreated = false;
+  let roleCreatedAt: unknown = role?.CreateDate;
   if (!trust) {
     const createRole = await ports.runAws([
       "iam",
@@ -393,15 +423,19 @@ export async function setupAwsDeployIdentity(
         typeof createdRole.Role.Arn === "string"
       ) ?
         createdRole.Role.Arn
-      : `arn:aws:iam::${accountId}:role/${roleName}`;
+      : awsRoleArn(accountId, roleName);
     roleCreated = true;
+    roleCreatedAt =
+      isRecord(createdRole) && isRecord(createdRole.Role) ?
+        createdRole.Role.CreateDate
+      : undefined;
     created.push(`IAM role ${roleName}`);
     ports.step(`✅ Created IAM role ${roleName}.`);
   } else {
     roleArn =
       role && typeof role.Arn === "string" ?
         role.Arn
-      : `arn:aws:iam::${accountId}:role/${roleName}`;
+      : awsRoleArn(accountId, roleName);
     ports.step(
       pickedArn ?
         `✅ Using the selected IAM role ${roleName}.`
@@ -422,10 +456,15 @@ export async function setupAwsDeployIdentity(
         JSON.stringify(trust.policy)
       ]);
       if (!succeeded(updateTrust)) {
-        return fail(
-          "aws-role-trust-denied",
-          `Failed to update the role's trust policy: ${detail(updateTrust)}`
-        );
+        return LIMIT_EXCEEDED.test(updateTrust.stderr) ?
+            fail(
+              "aws-role-limit-exceeded",
+              `IAM role ${roleName} cannot trust another environment: its trust policy is at IAM's size limit (${detail(updateTrust)}). Nothing was changed on the role. Delete an environment that no longer uses this role, choose another role, or ask an AWS administrator to raise the "Role trust policy length" quota (up to 8,192 characters).`
+            )
+          : fail(
+              "aws-role-trust-denied",
+              `Failed to update the role's trust policy: ${detail(updateTrust)}`
+            );
       }
       created.push(`trust for ${request.subject} on ${roleName}`);
     }
@@ -443,42 +482,88 @@ export async function setupAwsDeployIdentity(
     JSON.stringify(buildAwsEnvironmentPermissionPolicy(region))
   ]);
   if (!succeeded(putPolicy)) {
-    return fail(
-      "aws-role-policy-failed",
-      `Failed to attach the deploy permission policy: ${detail(putPolicy)}`
-    );
+    return LIMIT_EXCEEDED.test(putPolicy.stderr) ?
+        fail(
+          "aws-role-limit-exceeded",
+          `IAM role ${roleName} cannot hold another environment's permission policy: its inline policies are at IAM's 10,240-character limit, which cannot be raised (${detail(putPolicy)}). Delete an environment that no longer uses this role, or choose another role.`
+        )
+      : fail(
+          "aws-role-policy-failed",
+          `Failed to attach the deploy permission policy: ${detail(putPolicy)}`
+        );
   }
   created.push(`policy ${policyName} on ${roleName}`);
   ports.step(
     `✅ Attached deploy permission policy ${policyName}, limited to ${region}.`
   );
 
-  const createEntryArgs = [
-    "eks",
-    "create-access-entry",
+  const entryArgs = [
     "--cluster-name",
     cluster,
     "--principal-arn",
     roleArn,
-    "--type",
-    "STANDARD",
     ...regionArgs
   ];
-  let createEntry = await ports.runAws(createEntryArgs);
-  for (const delay of ACCESS_ENTRY_RETRY_DELAYS_MS) {
-    if (
-      succeeded(createEntry) ||
-      !PRINCIPAL_NOT_YET_VISIBLE.test(createEntry.stderr)
-    ) {
-      break;
+  const createAccessEntry = async (): Promise<AwsCommandResult> => {
+    const args = [
+      "eks",
+      "create-access-entry",
+      ...entryArgs,
+      "--type",
+      "STANDARD"
+    ];
+    let result = await ports.runAws(args);
+    for (const delay of ACCESS_ENTRY_RETRY_DELAYS_MS) {
+      if (succeeded(result) || !PRINCIPAL_NOT_YET_VISIBLE.test(result.stderr)) {
+        break;
+      }
+      ports.step(
+        `ℹ️ EKS does not see role ${roleName} yet. Retrying in ${delay / 1000}s.`
+      );
+      await ports.sleep(delay);
+      result = await ports.runAws(args);
     }
-    ports.step(
-      `ℹ️ EKS does not see role ${roleName} yet. Retrying in ${delay / 1000}s.`
-    );
-    await ports.sleep(delay);
-    createEntry = await ports.runAws(createEntryArgs);
+    return result;
+  };
+  let createEntry = await createAccessEntry();
+  let replacedEntry = false;
+  if (!succeeded(createEntry) && RESOURCE_IN_USE.test(createEntry.stderr)) {
+    // EKS ties an access entry to the role's unique ID, not its ARN. An entry
+    // left by an earlier role with this name grants the current role nothing,
+    // so it is only kept when it was created after the current role.
+    const owner =
+      roleCreated ? "earlier role" : (
+        await accessEntryOwner(ports, entryArgs, roleCreatedAt)
+      );
+    if (owner === "unknown") {
+      return fail(
+        "aws-access-entry-unverified",
+        `Cluster ${cluster} already has an access entry for ${roleArn}, and Radius could not confirm it was created for the current role ${roleName}. An entry left by an earlier role with this name does not grant access. Delete it, then retry: aws eks delete-access-entry --cluster-name ${cluster} --principal-arn ${roleArn} --region ${region}`
+      );
+    }
+    if (owner === "earlier role") {
+      const deleteEntry = await ports.runAws([
+        "eks",
+        "delete-access-entry",
+        ...entryArgs
+      ]);
+      if (!succeeded(deleteEntry)) {
+        return fail(
+          "aws-access-entry-failed",
+          `Cluster ${cluster} has an access entry left by an earlier IAM role named ${roleName}, and Radius could not delete it: ${detail(deleteEntry)}`
+        );
+      }
+      ports.step(
+        `ℹ️ Deleted the access entry on ${cluster} left by an earlier IAM role named ${roleName}.`
+      );
+      replacedEntry = true;
+      createEntry = await createAccessEntry();
+    }
   }
-  if (!succeeded(createEntry) && !RESOURCE_IN_USE.test(createEntry.stderr)) {
+  if (
+    !succeeded(createEntry) &&
+    (replacedEntry || !RESOURCE_IN_USE.test(createEntry.stderr))
+  ) {
     return fail(
       "aws-access-entry-failed",
       `Failed to create the cluster access entry: ${detail(createEntry)}`

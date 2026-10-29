@@ -537,6 +537,43 @@ export function createGitHubOidcProviderCommand(): string {
   return `aws iam create-open-id-connect-provider --url ${GITHUB_OIDC_PROVIDER_URL} --client-id-list ${GITHUB_OIDC_AUDIENCE} --thumbprint-list ${GITHUB_OIDC_THUMBPRINT}`;
 }
 
+/**
+ * The authentication mode in `aws eks describe-cluster` output. A cluster that
+ * reports none predates access entries, so it is treated as `CONFIG_MAP`.
+ */
+export function eksAuthenticationMode(describeCluster: unknown): string {
+  const cluster =
+    (
+      typeof describeCluster === "object" &&
+      describeCluster !== null &&
+      "cluster" in describeCluster
+    ) ?
+      describeCluster.cluster
+    : undefined;
+  const accessConfig =
+    (
+      typeof cluster === "object" &&
+      cluster !== null &&
+      "accessConfig" in cluster
+    ) ?
+      cluster.accessConfig
+    : undefined;
+  const mode =
+    (
+      typeof accessConfig === "object" &&
+      accessConfig !== null &&
+      "authenticationMode" in accessConfig
+    ) ?
+      accessConfig.authenticationMode
+    : undefined;
+  return typeof mode === "string" && mode ? mode : "CONFIG_MAP";
+}
+
+/** Whether a cluster in this authentication mode accepts access entries. */
+export function eksAcceptsAccessEntries(authenticationMode: string): boolean {
+  return authenticationMode !== "CONFIG_MAP";
+}
+
 /** The command that switches a cluster to accept access entries. */
 export function enableAccessEntriesCommand(
   cluster: string,
