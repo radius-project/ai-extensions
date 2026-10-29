@@ -128,7 +128,11 @@ exec /usr/bin/sed "$@"
 STUB
     fi
     chmod +x "${STUB_BIN}"/*
-    cat >"${CATALOG_HELPER}" <<'STUB'
+    # The real helper pins the pack; only the catalog lookup is stubbed.
+    cat >"${CATALOG_HELPER}" <<STUB
+source "${REPO_ROOT}/.github/extension/scripts/contrib-catalog.sh"
+STUB
+    cat >>"${CATALOG_HELPER}" <<'STUB'
 radius_contrib_kube_recipe_source() {
     printf 'ghcr.io/radius-project/kube-recipes/%s:pinned0123\n' "$2"
 }
