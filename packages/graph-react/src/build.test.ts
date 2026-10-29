@@ -1009,6 +1009,50 @@ describe("planned and deploying graphs", () => {
     );
   });
 
+  it("gives an Azure card no fallback link outside resolved mode", () => {
+    const id =
+      "/subscriptions/s1/resourceGroups/rg/providers/Microsoft.DBforMySQL/flexibleServers/mysql";
+    const resources: GraphResource[] = [
+      {
+        id: "mysql",
+        name: "mysql",
+        outputResources: [
+          { id, name: "server", type: "Microsoft.DBforMySQL/flexibleServers" }
+        ]
+      }
+    ];
+    const modeled = buildGraph(settings(), resources);
+    expect(modeled.dataById.mysql.portalUrl).toBe("");
+    // The output keeps its own Azure portal row, as it does on main.
+    expect(modeled.dataById["mysql/output/0/server"].cloudId).toBe(id);
+  });
+
+  it("links an AWS card to its first linkable output outside resolved mode", () => {
+    const scope =
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers";
+    const modeled = buildGraph(settings(), [
+      {
+        id: "db",
+        name: "db",
+        outputResources: [
+          {
+            id: `${scope}/AWS.IAM/Role/db-role`,
+            name: "db-role",
+            type: "AWS.IAM/Role"
+          },
+          {
+            id: `${scope}/AWS.RDS/DBInstance/db`,
+            name: "db",
+            type: "AWS.RDS/DBInstance"
+          }
+        ]
+      }
+    ]);
+    expect(modeled.dataById.db.portalUrl).toBe(
+      "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2#databases:"
+    );
+  });
+
   it("gives an unrecognized AWS resource no console link", () => {
     const built = buildGraph(settings({ deployMode: true }), [
       {

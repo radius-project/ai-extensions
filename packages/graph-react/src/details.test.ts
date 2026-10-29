@@ -533,7 +533,7 @@ describe("detail rows", () => {
     ]);
   });
 
-  it("names an Azure portal URL and gives an unrecognized cloud id no row", () => {
+  it("keeps the generic label on an Azure portal URL and gives an unrecognized cloud id no row", () => {
     const portalUrl = "https://portal.azure.com/#@tenant/resource/exact";
     expect(
       buildDetailRows(
@@ -548,8 +548,32 @@ describe("detail rows", () => {
       {
         kind: "external",
         icon: "link",
-        label: "View in Azure portal",
+        label: "View in portal",
         href: portalUrl,
+        showUrl: false
+      }
+    ]);
+  });
+
+  it("keeps the Azure portal name on an Azure resource whatever link its producer gave", () => {
+    const rows = buildDetailRows(
+      settings(),
+      node({
+        cloudResources: JSON.stringify([
+          {
+            name: "db",
+            id: "/subscriptions/s/rg/db",
+            portalUrl: "https://producer.test/db"
+          }
+        ])
+      })
+    );
+    expect(rows.slice(2)).toEqual([
+      {
+        kind: "external",
+        icon: "link",
+        label: "db in Azure portal",
+        href: "https://producer.test/db",
         showUrl: false
       }
     ]);
