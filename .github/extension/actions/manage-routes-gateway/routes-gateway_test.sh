@@ -1009,11 +1009,13 @@ assert_failure "malformed application discovery"
 assert_output "invalid JSON"
 assert_no_call "kubectl delete"
 
-reset_case
-APP_LIST_JSON='null'
-export APP_LIST_JSON
-run_action cleanup
-assert_success "empty application discovery"
+for empty_list in '[]' 'null'; do
+    reset_case
+    APP_LIST_JSON="${empty_list}"
+    export APP_LIST_JSON
+    run_action cleanup
+    assert_success "empty application discovery: ${empty_list}"
+done
 
 reset_case
 APP_LIST_JSON="$(jq -nc '[{name:"empty"}]')"

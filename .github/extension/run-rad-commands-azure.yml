@@ -128,6 +128,8 @@ jobs:
 
       - name: Set up control plane
         uses: radius-project/ai-extensions/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
+        with:
+          release-override: ${{ vars.RADIUS_RELEASE_OVERRIDE }}
 
       - name: Load Radius contrib catalog
         uses: radius-project/ai-extensions/.github/extension/actions/load-contrib-catalog@{{RADIUS_REF}}

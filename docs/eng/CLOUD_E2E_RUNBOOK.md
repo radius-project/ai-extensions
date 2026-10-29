@@ -153,6 +153,22 @@ Two boundaries worth knowing before you go looking for a gap:
 
 Do not cancel a Cloud E2E run. Cancelling mid-flight can strand a deployment, an Entra application, and GitHub state, converting one slow run into a failure on the next one. The workflow is configured never to cancel itself for this reason. If a CI run must be stopped, dispatch the cleanup workflow after cancellation completes. If cleanup reports that Radius deletion failed, do not remove its retained identity or GitHub state manually; those are the recovery inputs needed to retry deletion. Cleanup always preserves the shared resource group and AKS cluster.
 
+## Select a Radius version
+
+Set the optional `radius-version` dispatch input to an exact published Radius tag. Stable releases and release candidates are supported:
+
+```bash
+gh workflow run cloud-e2e.yml --repo radius-project/ai-extensions -f radius-version=v0.63.0-rc.1
+```
+
+Omit the input, or leave it blank, to use the checked-in Radius pin. Scheduled runs keep that pin. Combine `radius-version` with `canvas-host=copilot-app` to test the same version in the desktop app.
+
+The workflow resolves the tag to its commit, downloads the installer from that commit, and computes its SHA-256 checksum. A missing release, draft release, invalid tag, or failed download stops version selection. It does not fall back to another version. The run summary records the selected tag, commit, and checksum.
+
+Selection changes only the runner checkout and the test environment. The local managed CLI uses the selected pin. After the product creates the GitHub Environment, the fixture adds `RADIUS_RELEASE_OVERRIDE` with the selected tag, commit, and checksum. The deploy and delete runners use that value to install the matching CLI and control plane, verify the installer checksum, and load the recipe catalog from the same commit. The fixture sets the value again after environment recreation. Environment deletion removes it. No repository-wide variable or source commit is changed.
+
+The cloud workflow pins remote templates and actions to its own source commit, so both hosts use the matching workflow support. Older Radius versions must still support the commands, chart options, recipes, and application model used by the journey. Version selection does not add compatibility for removed or missing Radius features.
+
 ## Run the journey in the GitHub Copilot app
 
 By default, the suite drives this checkout's canvas in headless Chromium on Linux. This is the production path. Scheduled runs use it unless the optional host variable selects the app. The workflow gives both hosts 340 minutes; the harness keeps its existing Playwright test and suite limits.

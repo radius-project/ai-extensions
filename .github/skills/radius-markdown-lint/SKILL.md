@@ -18,7 +18,7 @@ Markdown quality is enforced by two tools, both installed as dev dependencies in
 
 ## Prerequisites
 
-1. **Node.js + pnpm**: pnpm is pinned via the `packageManager` field in `package.json`. If pnpm is missing, run `corepack enable pnpm`.
+1. **Node.js + pnpm**: use the root `package.json`'s `packageManager` field as the only pnpm version pin. Follow [the contributor prerequisites](../../../CONTRIBUTING.md#prerequisites) to install the declared package manager from the repository root.
 2. **Install dependencies**: run `pnpm install --frozen-lockfile` from the repository root so the tool binaries are available.
 
 ## Procedure

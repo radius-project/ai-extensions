@@ -187,6 +187,45 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
 });
 
 describe("cloud-e2e.yml", () => {
+  it("selects an optional published Radius version before either host starts", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const dispatch = workflow.on?.workflow_dispatch as {
+      inputs?: Record<string, unknown>;
+    };
+    expect(dispatch.inputs?.["radius-version"]).toMatchObject({
+      type: "string",
+      required: false,
+      default: ""
+    });
+    const jobSteps = steps(workflow.jobs?.["cloud-e2e"]);
+    expect(workflow.jobs?.["cloud-e2e"]?.env?.RADIUS_SOURCE_REF).toBe(
+      "${{ github.sha }}"
+    );
+    const selection = jobSteps.find(
+      (step) => step.name === "Select the Radius release"
+    );
+    expect(selection?.if).toBe(
+      "steps.fixture.outputs.configured == 'true' && inputs.radius-version != ''"
+    );
+    expect(selection?.env?.REQUESTED_RADIUS_VERSION).toBe(
+      "${{ inputs.radius-version }}"
+    );
+    expect(selection?.run).toContain(
+      'build/scripts/update-radius-installer.sh --version "$REQUESTED_RADIUS_VERSION"'
+    );
+    expect(selection?.run).toContain("RADIUS_CLOUD_E2E_RELEASE=$release");
+    expect(selection?.run).not.toContain("${{");
+    const selectedIndex = jobSteps.findIndex((step) => step === selection);
+    for (const name of [
+      "Install the GitHub Copilot app",
+      "Run the cloud create-environment journey"
+    ]) {
+      expect(selectedIndex).toBeLessThan(
+        jobSteps.findIndex((step) => step.name === name)
+      );
+    }
+  });
+
   it("omits merge_group, so the merge queue never waits on Azure", async () => {
     // Deferred rather than rejected, matching the design note: a `merge_group`
     // run makes the merge queue - and therefore every merge - depend on Azure
