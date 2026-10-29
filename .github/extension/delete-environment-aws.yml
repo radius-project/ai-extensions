@@ -121,6 +121,8 @@ jobs:
 
       - name: Set up control plane
         uses: radius-project/ai-extensions/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
+        with:
+          release-override: ${{ vars.RADIUS_RELEASE_OVERRIDE }}
 
       - name: Project cloud OIDC tokens into Radius pods
         env:
