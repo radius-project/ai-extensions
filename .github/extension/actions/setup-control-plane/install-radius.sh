@@ -5,7 +5,8 @@ set -euo pipefail
 # The override is one environment-scoped value so the release identity and
 # installer checksum cannot be selected independently. The tag is a release or
 # `edge`. Edge floats with Radius main: the commit pins only the installer and
-# the contrib catalog, not the CLI or the control-plane images.
+# the contrib catalog, not the CLI or the control-plane images. Only callers that
+# set RADIUS_ALLOW_EDGE=true (the AWS templates) may select edge.
 if [[ -n "${RADIUS_RELEASE_OVERRIDE:-}" ]]; then
     jq -se '
         length == 1 and (.[0] |
@@ -18,6 +19,10 @@ if [[ -n "${RADIUS_RELEASE_OVERRIDE:-}" ]]; then
         exit 1
     }
     RADIUS_INSTALL_REF="$(jq -r .tag <<<"${RADIUS_RELEASE_OVERRIDE}")"
+    if [[ "${RADIUS_INSTALL_REF}" == edge && "${RADIUS_ALLOW_EDGE:-}" != true ]]; then
+        echo "::error::RADIUS_RELEASE_OVERRIDE selects edge, which this workflow does not allow. Use a release tag." >&2
+        exit 1
+    fi
     RADIUS_INSTALL_COMMIT="$(jq -r .commit <<<"${RADIUS_RELEASE_OVERRIDE}")"
     RADIUS_INSTALL_SHA256="$(jq -r .checksum <<<"${RADIUS_RELEASE_OVERRIDE}")"
 fi

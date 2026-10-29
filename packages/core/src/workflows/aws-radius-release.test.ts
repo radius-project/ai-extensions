@@ -48,8 +48,8 @@ const remove = generateDeleteWorkflow(
 );
 const generated: Record<string, string> = { ...deploy, ...remove };
 
-// The `release-override` each setup-control-plane step in a generated file passes.
-function releaseOverrides(file: string): unknown[] {
+// The given input each setup-control-plane step in a generated file passes.
+function controlPlaneInputs(file: string, input: string): unknown[] {
   const workflow = parseYaml(generated[file] ?? "") as {
     jobs?: Record<
       string,
@@ -59,9 +59,12 @@ function releaseOverrides(file: string): unknown[] {
   return Object.values(workflow.jobs ?? {}).flatMap((job) =>
     (job.steps ?? [])
       .filter((step) => step.uses?.includes("/setup-control-plane@"))
-      .map((step) => step.with?.["release-override"])
+      .map((step) => step.with?.[input])
   );
 }
+
+const releaseOverrides = (file: string): unknown[] =>
+  controlPlaneInputs(file, "release-override");
 
 // GitHub's `a || 'b'` yields `a` when it is a non-empty string and `b`
 // otherwise. Evaluate the one shape the AWS workflows use.
@@ -96,6 +99,8 @@ describe("the AWS Radius runtime default", () => {
       expect(evaluate(expression ?? "", "")).toBe(AWS_RADIUS_RELEASE_OVERRIDE);
       const chosen = '{"tag":"v0.63.0","commit":"c","checksum":"d"}';
       expect(evaluate(expression ?? "", chosen)).toBe(chosen);
+      // install-radius.sh refuses edge unless the caller opts in.
+      expect(controlPlaneInputs(file, "allow-edge")).toEqual(["true"]);
     }
   );
 
@@ -106,6 +111,7 @@ describe("the AWS Radius runtime default", () => {
         "${{ vars.RADIUS_RELEASE_OVERRIDE }}"
       ]);
       expect(generated[file]).not.toContain(AWS_RADIUS_RELEASE.commit);
+      expect(controlPlaneInputs(file, "allow-edge")).toEqual([undefined]);
     }
   );
 

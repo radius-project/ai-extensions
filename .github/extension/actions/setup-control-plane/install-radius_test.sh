@@ -67,7 +67,10 @@ grep -Fq "/${RADIUS_INSTALL_COMMIT}/deploy/install.sh" "${CURL_LOG}" ||
 grep -Fxq "RADIUS_INSTALL_COMMIT=${RADIUS_INSTALL_COMMIT}" "${GITHUB_ENV}" ||
     fail "default install did not export the catalog commit"
 
-for tag in v1.2.4 v1.3.0-rc.1 edge; do
+# Edge is accepted only when the caller opts in. Releases need no opt-in.
+for case in v1.2.4: v1.3.0-rc.1: v1.2.4:false edge:true; do
+    tag="${case%%:*}"
+    export RADIUS_ALLOW_EDGE="${case#*:}"
     export RADIUS_RELEASE_OVERRIDE
     RADIUS_RELEASE_OVERRIDE="$(jq -cn --arg tag "${tag}" --arg checksum "${RADIUS_INSTALL_SHA256}" \
         '{tag: $tag, commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", checksum: $checksum}')"
@@ -83,6 +86,21 @@ for tag in v1.2.4 v1.3.0-rc.1 edge; do
 done
 
 valid_override="${RADIUS_RELEASE_OVERRIDE}"
+for allow in "" false TRUE 1 " true"; do
+    output="$(RADIUS_ALLOW_EDGE="${allow}" run_install 2>&1)" &&
+        fail "accepted edge with RADIUS_ALLOW_EDGE='${allow}'"
+    grep -Fq "selects edge, which this workflow does not allow" <<<"${output}" ||
+        fail "edge refusal with RADIUS_ALLOW_EDGE='${allow}' did not explain why"
+    [[ ! -s "${CURL_LOG}" && ! -s "${INSTALL_LOG}" && ! -s "${GITHUB_ENV}" ]] ||
+        fail "edge without RADIUS_ALLOW_EDGE='${allow}' reached installation"
+done
+(
+    unset RADIUS_ALLOW_EDGE
+    run_install >/dev/null 2>&1
+) && fail "accepted edge without RADIUS_ALLOW_EDGE"
+[[ ! -s "${CURL_LOG}" && ! -s "${INSTALL_LOG}" && ! -s "${GITHUB_ENV}" ]] ||
+    fail "edge without RADIUS_ALLOW_EDGE reached installation"
+
 for value in 'not-json' null '[]' '{}' \
     "$(jq -c '.tag = "latest"' <<<"${valid_override}")" \
     "$(jq -c '.tag = "main"' <<<"${valid_override}")" \

@@ -154,9 +154,11 @@ jobs:
         # of AWS responses. Edge floats with Radius main. The extension fills this
         # from AWS_RADIUS_RELEASE in its core package; #1130 replaces it with the
         # first release that has the fix and the aws-eks catalog entry. An
-        # environment's RADIUS_RELEASE_OVERRIDE variable still wins.
+        # environment's RADIUS_RELEASE_OVERRIDE variable still wins. Only AWS
+        # templates allow edge; Azure stays on a release.
         with:
           release-override: ${{ vars.RADIUS_RELEASE_OVERRIDE || '{{AWS_RADIUS_RELEASE_OVERRIDE}}' }}
+          allow-edge: "true"
 
       - name: Project cloud OIDC tokens into Radius pods
         run: |

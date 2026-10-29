@@ -4,7 +4,8 @@
 # run-rad-commands-azure.yml. Installs the runner tooling, stands up the ephemeral
 # k3d control-plane cluster, stores the target-cluster kubeconfig as a Secret, and
 # installs Radius. Reads RADIUS_TARGET_KUBECONFIG from the job environment (exported
-# via $GITHUB_ENV by the caller). The optional release override is an input.
+# via $GITHUB_ENV by the caller). The optional release override is an input;
+# it may select edge only when the caller also sets allow-edge.
 name: Radius - Set up control plane
 description: Install tooling, create the ephemeral k3d control plane, and install Radius.
 
@@ -13,6 +14,10 @@ inputs:
     description: Optional JSON object with the Radius release tag, source commit, and installer checksum.
     required: false
     default: ""
+  allow-edge:
+    description: Set to "true" to let release-override select the edge tag. Only the AWS templates set it.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -68,6 +73,7 @@ runs:
         RADIUS_INSTALL_COMMIT: 37a8cbd33e990886460f4fd1987d6a4fefd901c5
         RADIUS_INSTALL_SHA256: 483ed038411c8550ef20a0ad06edfe79b41ae73f321d59f88fb06c67dbdb730f
         RADIUS_RELEASE_OVERRIDE: ${{ inputs.release-override }}
+        RADIUS_ALLOW_EDGE: ${{ inputs.allow-edge }}
       run: |
         bash "${GITHUB_ACTION_PATH}/install-radius.sh"
 

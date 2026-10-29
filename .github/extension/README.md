@@ -93,7 +93,7 @@ By default, `setup-control-plane` installs the checked-in stable Radius pin. AWS
 
 The setup action downloads the installer from that commit, verifies its checksum, and installs the CLI and control plane for the selected tag. The recipe catalog uses the same commit. Deploy and delete workflows read the same environment variable. Invalid metadata, failed downloads, and checksum errors stop setup; they do not select another release.
 
-The tag can also be `edge`. Edge floats with Radius `main`: the commit pins the installer, by its checksum, and the recipe catalog, but not the CLI or the control-plane images.
+In AWS workflows the tag can also be `edge`. Edge floats with Radius `main`: the commit pins the installer, by its checksum, and the recipe catalog, but not the CLI or the control-plane images. Only the AWS templates pass `allow-edge: "true"` to `setup-control-plane`, so an Azure environment whose override selects `edge` fails setup.
 
 AWS workflows (`run-rad-commands-aws.yml`, `delete-aws.yml`, and `delete-environment-aws.yml`) default to edge at Radius commit `15ca204a`, which the extension fills in from `AWS_RADIUS_RELEASE` in `packages/core`. This default exists because no Radius release yet has the fix that keeps request secrets such as an RDS `MasterUserPassword` out of AWS responses (radius-project/radius#13465), or the `aws-eks` catalog entry (radius-project/radius#13542). #1130 replaces it with the first release that has both before AWS is turned on for users. An environment's `RADIUS_RELEASE_OVERRIDE` variable still takes precedence. Azure workflows use the shared default.
 
