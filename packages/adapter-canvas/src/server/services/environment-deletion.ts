@@ -31,7 +31,10 @@
 // Azure argv/parse helpers are imported directly so the runner stays unit-
 // testable against real OperationRecords with a handful of fakes.
 
-import { stateRegistryForEnvironment } from "@radius-project/core";
+import {
+  parseAwsRoleArn,
+  stateRegistryForEnvironment
+} from "@radius-project/core";
 import {
   enterStage,
   addStep,
@@ -578,7 +581,8 @@ export async function runEnvironmentDeletion(
 
   if (stagePending(op, STAGE_REVIEW_IAM_ROLE)) {
     enterStage(op, STAGE_REVIEW_IAM_ROLE);
-    const roleName = roleArn.slice(roleArn.lastIndexOf("/") + 1);
+    // A malformed ARN is shown whole rather than guessed at.
+    const roleName = parseAwsRoleArn(roleArn)?.roleName ?? roleArn;
     addStep(op, {
       stage: STAGE_REVIEW_IAM_ROLE,
       kind: "observation",

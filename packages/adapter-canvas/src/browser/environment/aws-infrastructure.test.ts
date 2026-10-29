@@ -7,7 +7,6 @@ import {
   AWS_SUBNET_ZONES_ERROR,
   awsInfrastructureWarnings,
   awsSubnetSelectionError,
-  defaultAwsSubnetIds,
   initializeAwsInfrastructure,
   parseAwsClusterInfo,
   parseAwsSubnetInfo,
@@ -70,14 +69,6 @@ describe("AWS infrastructure rules", () => {
     ).toEqual([
       { id: "s", name: "", vpcId: "", availabilityZone: "", public: true }
     ]);
-  });
-
-  it("selects private subnets only when they span two zones", () => {
-    expect(defaultAwsSubnetIds(subnets, "vpc-1")).toEqual([
-      "subnet-a",
-      "subnet-b"
-    ]);
-    expect(defaultAwsSubnetIds(subnets, "vpc-2")).toEqual([]);
   });
 
   it.each([

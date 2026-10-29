@@ -24,6 +24,7 @@ import type {
   EnvironmentFormPreset
 } from "./environments.js";
 import type { RemediationView } from "@radius-project/core/remediations";
+import { isAwsAccountId, isAwsRegion } from "@radius-project/core/platforms";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
@@ -71,10 +72,10 @@ export function awsProfileFieldError(
   accountId: string,
   region: string
 ): string {
-  if (!/^\d{12}$/.test(accountId)) {
+  if (!isAwsAccountId(accountId)) {
     return `Account ID "${accountId}" is not valid. Enter the 12-digit AWS account ID.`;
   }
-  if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(region)) {
+  if (!isAwsRegion(region)) {
     return `Region "${region}" is not valid. Enter an AWS region such as us-west-2.`;
   }
   return "";

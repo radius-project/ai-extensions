@@ -489,6 +489,27 @@ describe("runEnvironmentDeletion — AWS", () => {
     );
   });
 
+  it.each([
+    ["arn:aws:iam::123456789012:role/team/deploy", "Left IAM role deploy "],
+    ["arn:aws:iam::1:role/team/x", "Left IAM role arn:aws:iam::1:role/team/x "]
+  ])("names the kept role from %s", async (roleArn, label) => {
+    const op = makeAwsOp();
+    op.request = { ...op.request, roleArn };
+    await runEnvironmentDeletion(
+      op,
+      makePorts({
+        removeAwsEnvironmentAccess: vi.fn(async () => ({
+          ok: true as const,
+          removed: [],
+          kept: []
+        }))
+      })
+    );
+    expect(
+      op.steps.some((step: { label: string }) => step.label.startsWith(label))
+    ).toBe(true);
+  });
+
   it("reports a role that held nothing for the environment", async () => {
     const op = makeAwsOp();
     const ports = makePorts({

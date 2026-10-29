@@ -106,11 +106,7 @@ pnpm typecheck       # typecheck core + shared + canvas
 
 ### AWS developer switch
 
-AWS environments are hidden from users while they are being built. To work on
-them, start the Copilot app with `RADIUS_CANVAS_AWS=1` in its environment. The
-extension reads the switch once at startup. With it on, the canvas offers AWS
-credential profiles, creates and deletes AWS environments, and commits the AWS
-workflows to the repository. Any other value, or no value, keeps AWS hidden.
+AWS environments are hidden from users while they are being built. To work on them, start the Copilot app with `RADIUS_CANVAS_AWS=1` in its environment. The extension reads the switch once at startup. With it on, the canvas offers AWS credential profiles, creates and deletes AWS environments, and commits the AWS workflows to the repository. Any other value, or no value, keeps AWS hidden.
 
 ## Testing
 
