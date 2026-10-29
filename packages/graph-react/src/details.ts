@@ -112,13 +112,6 @@ export function cloudConsoleUrl(id: string): string {
     : awsConsoleUrl(id);
 }
 
-// "View in AWS console" or "View in Azure portal", named from where the link
-// actually goes; a URL from neither console keeps the generic label.
-function viewInLabel(url: string): string {
-  const name = consoleNameForUrl(url);
-  return name ? `View in ${name}` : "View in portal";
-}
-
 // The producer's portal link keeps its generic "View in portal" label, as it
 // always has for Azure. Only an AWS console link is named, since AWS links are
 // new and "portal" is the Azure term.
@@ -263,9 +256,14 @@ export function buildDetailRows(
       )
     );
   }
-  const cloudIdUrl = data.cloudId ? cloudConsoleUrl(data.cloudId) : "";
+  const cloudId = data.cloudId || "";
+  const cloudIdUrl = cloudId ? cloudConsoleUrl(cloudId) : "";
   if (cloudIdUrl) {
-    rows.push(externalRow("link", viewInLabel(cloudIdUrl), cloudIdUrl, false));
+    // cloudConsoleUrl links an ARM ID to the Azure portal and anything else it
+    // recognizes to the AWS console.
+    const consoleName =
+      cloudId.startsWith("/subscriptions/") ? "Azure portal" : "AWS console";
+    rows.push(externalRow("link", `View in ${consoleName}`, cloudIdUrl, false));
   }
   rows.push(...cloudRows(data));
   if (rows.length === 0) rows.push({ kind: "empty" });
