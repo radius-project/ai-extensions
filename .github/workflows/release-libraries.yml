@@ -23,7 +23,7 @@ jobs:
 
   candidate:
     needs: validate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -92,7 +92,7 @@ jobs:
 
   publish:
     needs: candidate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: npm
     permissions:
       contents: write

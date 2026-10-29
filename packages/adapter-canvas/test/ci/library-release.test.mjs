@@ -264,6 +264,11 @@ describe("npm release workflow boundary", () => {
   );
   const { validate, candidate, publish } = workflow.jobs;
 
+  it("pins candidate qualification and publication to Ubuntu 24.04", () => {
+    expect(candidate["runs-on"]).toBe("ubuntu-24.04");
+    expect(publish["runs-on"]).toBe("ubuntu-24.04");
+  });
+
   it("admits only manual main-branch releases through the full shared gate", () => {
     expect(workflow.on).toEqual({ workflow_dispatch: null });
     expect(workflow.permissions).toEqual({});
