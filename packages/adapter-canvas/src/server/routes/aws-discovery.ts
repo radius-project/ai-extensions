@@ -22,7 +22,10 @@ export async function handleListAwsRoles(
 ): Promise<void> {
   try {
     const roles = await listAwsRoles(
-      { accountId: context.url.searchParams.get("accountId") || "" },
+      {
+        accountId: context.url.searchParams.get("accountId") || "",
+        repo: context.url.searchParams.get("repo") || ""
+      },
       dependencies
     );
     context.json(200, { roles });

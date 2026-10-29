@@ -58,7 +58,6 @@ export function parseAwsRoleCandidates(payload: unknown): AwsRoleCandidate[] {
 
 export interface AwsDeployIdentityDeps {
   readonly repo: string;
-  readonly defaultRoleName: string;
   environmentName(): string;
   promptRoleSelection(options: AppPickerOptions): Promise<AppPickerChoice>;
 }
@@ -112,7 +111,9 @@ export function initializeAwsDeployIdentity(
   const clearPin = (): void => {
     arnInput.value = "";
     nameInput.disabled = false;
-    nameInput.value = deps.defaultRoleName;
+    // The server renders the default name, because only it can hash a long
+    // repository name into one.
+    nameInput.value = nameInput.getAttribute("data-default-name") ?? "";
     if (clearLink) clearLink.style.display = "none";
     showNote("", false);
   };
@@ -136,7 +137,7 @@ export function initializeAwsDeployIdentity(
     let candidates: AwsRoleCandidate[];
     try {
       const response = await context.net.fetch(
-        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${encodeURIComponent(lookupAccount)}`
+        `${LIST_AWS_ROLES_ENDPOINT}?accountId=${encodeURIComponent(lookupAccount)}&repo=${encodeURIComponent(deps.repo)}`
       );
       const payload = await response.json();
       if (!scope.active) return;
@@ -159,7 +160,10 @@ export function initializeAwsDeployIdentity(
       return;
     }
     if (candidates.length === 0) {
-      showNote("The signed-in identity cannot see any IAM roles.", true);
+      showNote(
+        "No IAM role in this account can be used for this repository.",
+        true
+      );
       return;
     }
     let choice: AppPickerChoice;

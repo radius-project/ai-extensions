@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { buildGitHubTrustPolicy } from "@radius-project/core";
 import {
   discoverAwsResources,
   listAwsRoles,
@@ -239,6 +240,9 @@ describe("listAwsRoles", () => {
 
   it("lists assumable roles with the GitHub subjects they trust", async () => {
     const { dependencies } = fakes({
+      "aws iam get-role --role-name zeta --output json": JSON.stringify({
+        Role: { RoleName: "zeta" }
+      }),
       "aws iam list-roles": JSON.stringify({
         Roles: [
           {
@@ -285,14 +289,14 @@ describe("listAwsRoles", () => {
       await listAwsRoles({ accountId: "123456789012" }, dependencies)
     ).toEqual([
       {
-        arn: "arn:aws:iam::123456789012:role/alpha",
-        name: "alpha",
-        trustedSubjects: []
-      },
-      {
         arn: "arn:aws:iam::123456789012:role/zeta",
         name: "zeta",
         trustedSubjects: ["repo:octo/other:environment:dev"]
+      },
+      {
+        arn: "arn:aws:iam::123456789012:role/alpha",
+        name: "alpha",
+        trustedSubjects: []
       }
     ]);
   });
@@ -304,5 +308,166 @@ describe("listAwsRoles", () => {
     await expect(listAwsRoles({}, dependencies)).rejects.toThrow(
       "AccessDenied"
     );
+  });
+});
+
+describe("listAwsRoles exclusions", () => {
+  const ACCOUNT = "123456789012";
+  const PROVIDER = `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`;
+  const roleArn = (name: string, account = ACCOUNT) =>
+    `arn:aws:iam::${account}:role/${name}`;
+  const githubRole = (name: string, subjects: string[]) => ({
+    RoleName: name,
+    Arn: roleArn(name),
+    AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects)
+  });
+  const getRole = (name: string) =>
+    `aws iam get-role --role-name ${name} --output json`;
+  const tagged = (repo: string) =>
+    JSON.stringify({
+      Role: {
+        Tags: [
+          { Key: "Radius-Managed", Value: "true" },
+          { Key: "radius-repository", Value: repo }
+        ]
+      }
+    });
+
+  it("reads tags only for GitHub roles, leaves out another repository's, and lists GitHub roles first", async () => {
+    const { calls, dependencies } = fakes({
+      "aws iam list-roles": JSON.stringify({
+        Roles: [
+          {
+            RoleName: "app-runtime",
+            Arn: roleArn("app-runtime"),
+            AssumeRolePolicyDocument: {
+              Statement: [
+                {
+                  Effect: "Allow",
+                  Principal: { Service: "ec2.amazonaws.com" },
+                  Action: "sts:AssumeRole"
+                }
+              ]
+            }
+          },
+          {
+            RoleName: "radius-deploy-octo-old",
+            Arn: roleArn("radius-deploy-octo-old"),
+            AssumeRolePolicyDocument: {
+              Statement: [
+                {
+                  Effect: "Deny",
+                  Principal: { Federated: PROVIDER },
+                  Action: "sts:AssumeRoleWithWebIdentity"
+                }
+              ]
+            }
+          },
+          githubRole("zeta-ci", ["repo:octo/shop:environment:ci"]),
+          githubRole("radius-deploy-octo-shop", [
+            "repo:octo/shop:environment:dev"
+          ]),
+          githubRole("radius-deploy-octo-api", [
+            "repo:octo/api:environment:dev"
+          ])
+        ]
+      }),
+      [getRole("radius-deploy-octo-old")]: tagged("octo/old"),
+      [getRole("zeta-ci")]: JSON.stringify({ Role: { Tags: [] } }),
+      [getRole("radius-deploy-octo-shop")]: tagged("Octo/Shop"),
+      [getRole("radius-deploy-octo-api")]: tagged("octo/api")
+    });
+    const roles = await listAwsRoles(
+      { accountId: ACCOUNT, repo: "octo/shop" },
+      dependencies
+    );
+    expect(roles.map((role) => role.name)).toEqual([
+      "radius-deploy-octo-shop",
+      "zeta-ci",
+      "app-runtime"
+    ]);
+    expect(calls.filter((line) => line.includes("get-role"))).toEqual([
+      getRole("radius-deploy-octo-old"),
+      getRole("zeta-ci"),
+      getRole("radius-deploy-octo-shop"),
+      getRole("radius-deploy-octo-api")
+    ]);
+  });
+
+  it("leaves out every Radius role when the repository is unknown", async () => {
+    const { dependencies } = fakes({
+      "aws iam list-roles": JSON.stringify({
+        Roles: [githubRole("radius-deploy-octo-api", ["repo:octo/api:x"])]
+      }),
+      [getRole("radius-deploy-octo-api")]: tagged("octo/api")
+    });
+    expect(await listAwsRoles({ accountId: ACCOUNT }, dependencies)).toEqual(
+      []
+    );
+  });
+
+  it.each([
+    ["an AWS error", new Error("AccessDenied")],
+    ["unreadable JSON", "{"],
+    ["a non-object answer", "[]"]
+  ])("keeps a GitHub role when %s hides its tags", async (_l, answer) => {
+    const { dependencies } = fakes({
+      "aws iam list-roles": JSON.stringify({
+        Roles: [githubRole("deploy", ["repo:octo/shop:x"])]
+      }),
+      [getRole("deploy")]: answer
+    });
+    const roles = await listAwsRoles(
+      { accountId: ACCOUNT, repo: "octo/shop" },
+      dependencies
+    );
+    expect(roles.map((role) => role.name)).toEqual(["deploy"]);
+  });
+
+  it.each([
+    ["another account", roleArn("deploy", "999988887777")],
+    ["an ARN that is not a role ARN", "arn:aws:iam::123456789012:user/deploy"]
+  ])(
+    "leaves out a role in %s without reading its tags",
+    async (_label, arn) => {
+      const { calls, dependencies } = fakes({
+        "aws iam list-roles": JSON.stringify({
+          Roles: [{ ...githubRole("deploy", ["repo:octo/shop:x"]), Arn: arn }]
+        })
+      });
+      expect(
+        await listAwsRoles(
+          { accountId: ACCOUNT, repo: "octo/shop" },
+          dependencies
+        )
+      ).toEqual([]);
+      expect(calls).toEqual(["aws iam list-roles --output json"]);
+    }
+  );
+
+  it("reads at most four roles' tags at once", async () => {
+    let running = 0;
+    let peak = 0;
+    const names = ["a", "b", "c", "d", "e", "f"];
+    const roles = await listAwsRoles(
+      { accountId: ACCOUNT, repo: "octo/shop" },
+      {
+        ...fakes({}).dependencies,
+        async runCli(_command, args) {
+          if (args[1] === "list-roles") {
+            return JSON.stringify({
+              Roles: names.map((name) => githubRole(name, ["repo:o/r:x"]))
+            });
+          }
+          running += 1;
+          peak = Math.max(peak, running);
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          running -= 1;
+          return "{}";
+        }
+      }
+    );
+    expect(roles.map((role) => role.name)).toEqual(names);
+    expect(peak).toBe(4);
   });
 });

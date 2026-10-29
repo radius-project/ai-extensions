@@ -18,9 +18,11 @@ import {
   isAwsRoleName,
   isRadiusManagedRole,
   mergeGitHubTrustSubject,
+  namesGitHubProvider,
   parseAwsCliVersion,
   parseAwsRoleArn,
   parsePolicyDocument,
+  radiusRoleRepository,
   removeGitHubTrustSubject,
   trustedGitHubSubjects
 } from "./aws-identity.js";
@@ -76,19 +78,43 @@ describe("AWS CLI version gate", () => {
 });
 
 describe("names and identifiers", () => {
+  const unusedHash = (): string => {
+    throw new Error("A name that fits must not be hashed.");
+  };
+  const DIGEST =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
   it("proposes radius-deploy-<owner>-<repo>", () => {
-    expect(buildAwsDeployRoleName("contoso/storefront")).toBe(
+    expect(buildAwsDeployRoleName("contoso/storefront", unusedHash)).toBe(
       "radius-deploy-contoso-storefront"
     );
   });
 
-  it("truncates the role name to 64 characters without a trailing dash", () => {
-    const name = buildAwsDeployRoleName(
-      `owner/${"a".repeat(48)}-${"b".repeat(20)}`
-    );
-    expect(name.length).toBeLessThanOrEqual(64);
-    expect(name.endsWith("-")).toBe(false);
+  it("keeps a name of exactly 64 characters as it is", () => {
+    const name = buildAwsDeployRoleName(`o/${"a".repeat(48)}`, unusedHash);
+    expect(name).toBe(`radius-deploy-o-${"a".repeat(48)}`);
+    expect(name).toHaveLength(64);
+  });
+
+  it("shortens a longer name to 57 characters, a dash, and 6 hash characters", () => {
+    const hashed: string[] = [];
+    const name = buildAwsDeployRoleName(`o/${"a".repeat(49)}`, (text) => {
+      hashed.push(text);
+      return DIGEST;
+    });
+    expect(name).toBe(`radius-deploy-o-${"a".repeat(41)}-012345`);
+    expect(name).toHaveLength(64);
     expect(isAwsRoleName(name)).toBe(true);
+    expect(hashed).toEqual([`o/${"a".repeat(49)}`]);
+  });
+
+  it("hashes the repository in lowercase, as GitHub and IAM ignore case", () => {
+    const hashed: string[] = [];
+    buildAwsDeployRoleName(`Octo/${"A".repeat(60)}`, (text) => {
+      hashed.push(text);
+      return DIGEST;
+    });
+    expect(hashed).toEqual([`octo/${"a".repeat(60)}`]);
   });
 
   it("names the environment policy after the environment only", () => {
@@ -470,6 +496,88 @@ describe("permissions and provenance", () => {
       )
     ).toBe(false);
     expect(isRadiusManagedRole(null, "octo/shop")).toBe(false);
+  });
+
+  it("reads Radius's tags whatever their key case, as IAM role tag keys ignore case", () => {
+    const role = {
+      Tags: [
+        { Key: "Radius-Managed", Value: "true" },
+        { Key: "RADIUS-REPOSITORY", Value: "octo/api" }
+      ]
+    };
+    expect(radiusRoleRepository(role)).toBe("octo/api");
+    expect(isRadiusManagedRole(role, "octo/api")).toBe(true);
+  });
+
+  it.each([
+    ["no tags", { Tags: [] }],
+    ["no managed tag", { Tags: [{ Key: "radius-repository", Value: "o/r" }] }],
+    [
+      "a managed tag that is not true",
+      {
+        Tags: [
+          { Key: "radius-managed", Value: "false" },
+          { Key: "radius-repository", Value: "o/r" }
+        ]
+      }
+    ],
+    [
+      "an empty repository tag",
+      {
+        Tags: [
+          { Key: "radius-managed", Value: "true" },
+          { Key: "radius-repository", Value: "" }
+        ]
+      }
+    ],
+    ["a value that is not a role", "role"]
+  ])("names no repository for a role with %s", (_label, role) => {
+    expect(radiusRoleRepository(role)).toBeNull();
+  });
+});
+
+describe("namesGitHubProvider", () => {
+  it("finds a role that trusts this account's GitHub provider", () => {
+    expect(
+      namesGitHubProvider(buildGitHubTrustPolicy(ACCOUNT, [DEV]), ACCOUNT)
+    ).toBe(true);
+  });
+
+  it("finds a Radius role whose last GitHub subject was removed", () => {
+    const { policy } = removeGitHubTrustSubject(
+      buildGitHubTrustPolicy(ACCOUNT, [DEV]),
+      ACCOUNT,
+      DEV
+    );
+    expect(trustedGitHubSubjects(policy, ACCOUNT)).toEqual([]);
+    expect(namesGitHubProvider(policy, ACCOUNT)).toBe(true);
+  });
+
+  it.each([
+    ["another account's provider", "999988887777"],
+    ["an unknown account", ""]
+  ])("ignores %s", (_label, account) => {
+    expect(
+      namesGitHubProvider(buildGitHubTrustPolicy(ACCOUNT, [DEV]), account)
+    ).toBe(false);
+  });
+
+  it("ignores a role only a service can assume", () => {
+    expect(
+      namesGitHubProvider(
+        {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { Service: "ec2.amazonaws.com" },
+              Action: "sts:AssumeRole"
+            }
+          ]
+        },
+        ACCOUNT
+      )
+    ).toBe(false);
   });
 });
 

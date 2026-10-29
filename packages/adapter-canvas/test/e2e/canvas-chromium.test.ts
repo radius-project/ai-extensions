@@ -1,7 +1,6 @@
 import {
   DELETE_RADIUS_REF,
   RADIUS_REF,
-  buildAwsDeployRoleName,
   redactCredentials
 } from "@radius-project/core";
 import { promises as fs, type Dirent } from "node:fs";
@@ -33,6 +32,7 @@ import {
 } from "@radius-project/core";
 import { pendingEnvironment } from "@radius-project/adapter-shared/test-support/workflow-observation";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+import { defaultAwsDeployRoleName } from "../../src/aws-deploy-role-name.js";
 import {
   generateDeleteWorkflow,
   generateDeployWorkflow,
@@ -3844,7 +3844,7 @@ test.describe("Radius Canvas in Chromium", () => {
 
       const roleName = page.getByLabel("IAM role");
       await expect(roleName).toBeVisible();
-      await expect(roleName).toHaveValue(buildAwsDeployRoleName(REPOSITORY));
+      await expect(roleName).toHaveValue(defaultAwsDeployRoleName(REPOSITORY));
       await expect(page.getByLabel("EKS Cluster")).toHaveValue("eks-1");
       await expect(page.getByLabel("VPC")).toHaveValue("vpc-1");
 
@@ -3916,7 +3916,7 @@ test.describe("Radius Canvas in Chromium", () => {
       await backToDefault.focus();
       await page.keyboard.press("Enter");
       await expect(roleName).toBeEnabled();
-      await expect(roleName).toHaveValue(buildAwsDeployRoleName(REPOSITORY));
+      await expect(roleName).toHaveValue(defaultAwsDeployRoleName(REPOSITORY));
       expect(roleLookups).toBe(2);
       expect(operationPosts).toBe(0);
     });
