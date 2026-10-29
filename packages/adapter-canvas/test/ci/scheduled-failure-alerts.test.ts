@@ -13,7 +13,8 @@ const WORKFLOWS_DIRECTORY = path.resolve(
 
 const LABELED_WORKFLOWS = [
   "canvas-functional.yml",
-  "canvas-reliability.yml"
+  "canvas-reliability.yml",
+  "copilot-cli-modeling.yml"
 ] as const;
 
 const ISSUE_CREATE = /gh issue create\b[^\n]*/g;

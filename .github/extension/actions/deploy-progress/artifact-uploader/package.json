@@ -3,7 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.28.5",
   "scripts": {
     "build": "ncc build src/upload.ts -o dist --minify --license third-party-licenses.txt && node -e \"const fs = require('node:fs'); const path = 'dist/third-party-licenses.txt'; fs.writeFileSync(path, fs.readFileSync(path, 'utf8').replace(/[\\t ]+$/gm, ''))\"",
     "test": "node --experimental-strip-types --test src/upload_test.ts"
