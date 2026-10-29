@@ -1,7 +1,6 @@
 import {
   buildAwsDeployRoleName,
-  buildEnvironmentSuffix,
-  buildOidcSubject
+  buildEnvironmentSuffix
 } from "@radius-project/core";
 import {
   resolveOidcSubject,
@@ -16,8 +15,9 @@ import {
 } from "./aws-deploy-identity.js";
 
 // Connects the AWS deploy identity to an environment operation: it resolves the
-// GitHub OIDC subject the environment's workflows present, reports progress on
-// the operation, and turns a failure into the answer the setup workflow shows.
+// GitHub OIDC subjects the environment's workflows may present, reports
+// progress on the operation, and turns a failure into the answer the setup
+// workflow shows.
 
 export interface AwsEnvironmentAccessDependencies<Operation> {
   // Run `aws <args>`. Never throws; a spawn failure is a non-zero result.
@@ -39,7 +39,7 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
 }
 
 export type AwsEnvironmentSetupResult =
-  | { ok: true; roleArn: string }
+  | { ok: true; roleArn: string; subjects: readonly string[] }
   | { ok: false; status: number; error: string; code: string };
 
 export interface AwsEnvironmentAccess<Operation> {
@@ -49,11 +49,14 @@ export interface AwsEnvironmentAccess<Operation> {
     input: Record<string, unknown>,
     executor: SelectedGhExecutor
   ): Promise<AwsEnvironmentSetupResult>;
-  // Remove what one environment added to the shared deploy role.
+  // Remove what one environment added to the shared deploy role. `trustSubjects`
+  // are the subjects setup recorded; without them the subjects are resolved
+  // from the repository's current name and IDs.
   remove(input: {
     repo: string;
     environment: string;
     roleArn: string;
+    trustSubjects?: readonly string[];
   }): Promise<AwsDeployIdentityRemovalResult>;
 }
 
@@ -66,24 +69,23 @@ export function createAwsEnvironmentAccess<Operation>(
 ): AwsEnvironmentAccess<Operation> {
   const { operations, stageAuthorizeIdentity: stage } = dependencies;
 
-  // The same subject string Azure's federated credential trusts.
-  async function resolveSubject(
+  // The same subjects Azure's federated credentials trust: one for a
+  // repository that uses immutable subjects, otherwise the name-based and the
+  // ID-based form.
+  async function resolveSubjects(
     repo: string,
     environment: string,
     executor?: SelectedGhExecutor
-  ): Promise<string> {
-    const suffix = buildEnvironmentSuffix(environment);
+  ): Promise<string[]> {
     const oidc = await resolveOidcSubject(
-      { targetRepo: repo, envName: environment, suffix },
+      {
+        targetRepo: repo,
+        envName: environment,
+        suffix: buildEnvironmentSuffix(environment)
+      },
       (apiPath) => dependencies.runGitHubJson(apiPath, executor)
     );
-    return buildOidcSubject({
-      repoFullName: oidc.fullName,
-      ownerId: oidc.ownerId,
-      repoId: oidc.repoId,
-      suffix,
-      subjectConfig: oidc.subjectConfig
-    });
+    return oidc.federatedCredentials.map((credential) => credential.subject);
   }
 
   return {
@@ -91,9 +93,9 @@ export function createAwsEnvironmentAccess<Operation>(
       operations.enterStage(operation, stage);
       const repo = text(input.repo);
       const environment = text(input.environment);
-      let subject: string;
+      let subjects: string[];
       try {
-        subject = await resolveSubject(repo, environment, executor);
+        subjects = await resolveSubjects(repo, environment, executor);
       } catch (error) {
         return {
           ok: false,
@@ -111,7 +113,7 @@ export function createAwsEnvironmentAccess<Operation>(
           cluster: text(input.cluster),
           roleName: text(input.roleName) || buildAwsDeployRoleName(repo),
           existingRoleArn: text(input.existingRoleArn),
-          subject
+          subjects
         },
         {
           runAws: dependencies.runAws,
@@ -133,16 +135,22 @@ export function createAwsEnvironmentAccess<Operation>(
           code: result.code
         };
       }
-      operations.setContext(operation, { awsRoleArn: result.roleArn });
-      return { ok: true, roleArn: result.roleArn };
+      operations.setContext(operation, {
+        awsRoleArn: result.roleArn,
+        awsTrustSubjects: subjects
+      });
+      return { ok: true, roleArn: result.roleArn, subjects };
     },
 
-    async remove({ repo, environment, roleArn }) {
+    async remove({ repo, environment, roleArn, trustSubjects = [] }) {
       return removeAwsEnvironmentFromRole(
         {
           roleArn,
           environment,
-          subject: await resolveSubject(repo, environment)
+          subjects:
+            trustSubjects.length > 0 ?
+              trustSubjects
+            : await resolveSubjects(repo, environment)
         },
         { runAws: dependencies.runAws }
       );

@@ -71,10 +71,15 @@ function operation(): EnvironmentOperationRecord {
 
 const NOW = Date.parse("2026-08-25T01:06:05.000Z");
 const AWS_ROLE_ARN = "arn:aws:iam::123456789012:role/r";
+const AWS_SUBJECTS = ["repo:octo/shop:environment:dev"];
 
 function awsIdentityReady(): Partial<EnvironmentOperationWorkflowDependencies> {
   return {
-    setupAwsDeployIdentity: async () => ({ ok: true, roleArn: AWS_ROLE_ARN })
+    setupAwsDeployIdentity: async () => ({
+      ok: true,
+      roleArn: AWS_ROLE_ARN,
+      subjects: AWS_SUBJECTS
+    })
   };
 }
 
@@ -1111,6 +1116,7 @@ describe("runEnvironmentOperationWorkflow", () => {
           provider: "aws",
           operationId: op.operationId,
           roleArn: AWS_ROLE_ARN,
+          trustSubjects: AWS_SUBJECTS,
           clientId: ""
         }
       }
@@ -1142,7 +1148,7 @@ describe("runEnvironmentOperationWorkflow", () => {
         expect(received).toBe(executor);
         test.events.push("aws-identity");
         identityCalls.push(request);
-        return { ok: true, roleArn: AWS_ROLE_ARN };
+        return { ok: true, roleArn: AWS_ROLE_ARN, subjects: AWS_SUBJECTS };
       }
     });
 
@@ -1173,7 +1179,8 @@ describe("runEnvironmentOperationWorkflow", () => {
         data: expect.objectContaining({
           provider: "aws",
           environment: "Production",
-          roleArn: AWS_ROLE_ARN
+          roleArn: AWS_ROLE_ARN,
+          trustSubjects: AWS_SUBJECTS
         })
       }
     ]);
@@ -1286,7 +1293,11 @@ describe("runEnvironmentOperationWorkflow", () => {
         })
     });
     const test = dependencies(op, {
-      setupAwsDeployIdentity: async () => ({ ok: true, roleArn: AWS_ROLE_ARN })
+      setupAwsDeployIdentity: async () => ({
+        ok: true,
+        roleArn: AWS_ROLE_ARN,
+        subjects: AWS_SUBJECTS
+      })
     });
 
     expect(

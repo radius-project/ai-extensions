@@ -1,3 +1,4 @@
+import { AWS_TRUST_SUBJECTS_VARIABLE } from "@radius-project/core";
 import {
   classifyProvider,
   parseGitHubEnvironmentVariables
@@ -12,6 +13,25 @@ export interface EnvironmentTarget {
   repoId: number;
   // AWS only: the shared deploy role the environment's trust lives on.
   roleArn: string;
+  // AWS only: the subjects setup added to that role's trust. Empty for an
+  // environment created before setup recorded them, or when the variable is
+  // unreadable; deletion then resolves them from the repository.
+  trustSubjects: string[];
+}
+
+function parseTrustSubjects(value: string | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return (
+        Array.isArray(parsed) &&
+          parsed.every((subject) => typeof subject === "string" && subject)
+      ) ?
+        parsed
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 export type EnvironmentTargetCommandRunner = (
@@ -64,7 +84,8 @@ export function createEnvironmentTargetReader(
       clientId: vars.AZURE_CLIENT_ID || "",
       tenantId: vars.AZURE_TENANT_ID || "",
       repoId,
-      roleArn: vars.AWS_ROLE_ARN || ""
+      roleArn: vars.AWS_ROLE_ARN || "",
+      trustSubjects: parseTrustSubjects(vars[AWS_TRUST_SUBJECTS_VARIABLE])
     };
   };
 }
