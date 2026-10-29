@@ -1207,21 +1207,7 @@ describe("registered environment tools with production runtime services", () => 
         expect(op.endedAt).toBeNull();
         expect(op.failure).toBeNull();
         expect(h.run).toHaveBeenCalledTimes(callsBeforeShutdown.gh);
-        expect(runAz.mock.calls.slice(callsBeforeShutdown.az)).toEqual([
-          [
-            [
-              "ad",
-              "sp",
-              "show",
-              "--id",
-              answer.answer.appId,
-              "--query",
-              "id",
-              "-o",
-              "tsv"
-            ]
-          ]
-        ]);
+        expect(runAz).toHaveBeenCalledTimes(callsBeforeShutdown.az);
         expect(
           await h.invoke("radius_environment_status", identity)
         ).toMatchObject({
