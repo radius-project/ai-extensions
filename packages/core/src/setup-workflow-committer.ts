@@ -9,6 +9,7 @@ import type {
   SetupWorkflowMutation
 } from "./setup-workflow-recovery.js";
 import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import type { ProviderMutationReconciliation } from "./setup-azure-recovery.js";
 export interface WorkflowTempFilePort {
   // Writes the request body for `gh api --input` and returns its path.
   write(contents: string): string;
@@ -39,7 +40,8 @@ export interface WorkflowFileCommitterPorts {
   ): { repo: string; branch: string; baseSha: string } | null;
   proveBranchAbsent(
     repo: string,
-    branch: string
+    branch: string,
+    assertActive: () => void
   ): Promise<
     | { state: "absent"; evidence: string }
     | { state: "unknown" | "present"; detail: string }
@@ -156,9 +158,21 @@ export function createWorkflowFileCommitter(
   let prState: PullRequestBranchState | undefined;
   let atomicFallbackWrite = false;
 
+  const assertActive = () => ports.mutationRecovery?.assertActive();
+  const reconcileWhileActive =
+    <T extends ProviderMutationReconciliation<unknown>>(
+      reconcile: () => Promise<T>
+    ) =>
+    async (): Promise<T> => {
+      const result = await reconcile();
+      if (result.state !== "applied") assertActive();
+      return result;
+    };
+
   const readBranchHead = async (
     branch: string
   ): Promise<{ state: "absent" } | { state: "present"; sha: string }> => {
+    assertActive();
     const result = await ports.runGh([
       "api",
       `/repos/${target.targetRepo}/git/ref/heads/${encodeURIComponent(branch)}`
@@ -193,9 +207,12 @@ export function createWorkflowFileCommitter(
   };
 
   const beginPrFallback = async (): Promise<PullRequestBranchState> => {
+    assertActive();
     const base = await ports.getDefaultBranch(target.targetRepo);
-    if (!base)
+    if (!base) {
+      assertActive();
       throw new Error("could not resolve the repository default branch");
+    }
     // The commit this branch was cut from is part of the mutation's identity
     // and is also what a later delete compares the branch head against. Reading
     // it fresh on every attempt would move that identity whenever the default
@@ -207,11 +224,16 @@ export function createWorkflowFileCommitter(
       target.targetRepo,
       ports.parseBranchTarget
     );
-    const baseSha =
-      recorded?.baseSha ||
-      (await ports.getBranchHeadSha(target.targetRepo, base));
-    if (!baseSha)
+    let baseSha = recorded?.baseSha;
+    if (!baseSha) {
+      assertActive();
+      baseSha =
+        (await ports.getBranchHeadSha(target.targetRepo, base)) || undefined;
+    }
+    if (!baseSha) {
+      assertActive();
       throw new Error(`could not resolve head of base branch "${base}"`);
+    }
     const branch =
       recorded?.branch ||
       setupWorkflowBranchName(
@@ -277,7 +299,7 @@ export function createWorkflowFileCommitter(
           };
         },
         accept: () => ({ branch, base }),
-        reconcile: async () => {
+        reconcile: reconcileWhileActive(async () => {
           const current = await readBranchHead(branch);
           if (current.state === "absent") {
             // A bare 404 is what GitHub answers both for a ref that is gone and
@@ -288,7 +310,8 @@ export function createWorkflowFileCommitter(
             // two paths reach different conclusions about the same branch.
             const proof = await ports.proveBranchAbsent(
               target.targetRepo,
-              branch
+              branch,
+              assertActive
             );
             if (proof.state !== "absent") {
               throw new Error(
@@ -314,7 +337,7 @@ export function createWorkflowFileCommitter(
             evidence:
               "The exact operation-specific branch exists at the saved base commit."
           };
-        }
+        })
       });
       if (creation.state === "cancelled") {
         throw new WorkflowCommitCancelledError(
@@ -350,7 +373,7 @@ export function createWorkflowFileCommitter(
             "It did not repeat the delete and did not start setup deletion, because deleting other resources while leaving this branch behind would report work it has not done. " +
             "Remove that exact branch yourself, then start setup again.",
           accept: () => true,
-          reconcile: async () => {
+          reconcile: reconcileWhileActive(async () => {
             // A 404 from the ref endpoint is not the branch being gone: GitHub
             // answers the same way for a ref this token is not allowed to see.
             // The proof is the ref listing the account can actually enumerate,
@@ -359,7 +382,8 @@ export function createWorkflowFileCommitter(
             // reach different conclusions about the same branch.
             const proof = await ports.proveBranchAbsent(
               target.targetRepo,
-              branch
+              branch,
+              assertActive
             );
             if (proof.state === "absent") {
               return {
@@ -382,7 +406,7 @@ export function createWorkflowFileCommitter(
                   `Recovered branch "${branch}" now points to a different commit. Radius will not delete it because it may contain replacement work.`
                 : `Recovered branch "${branch}" still exists after Radius's single deletion request. Radius will not repeat the delete blindly. Delete that exact branch manually before retrying setup.`
             };
-          }
+          })
         });
         if (removal.state !== "applied") {
           const diagnostic =
@@ -451,6 +475,7 @@ export function createWorkflowFileCommitter(
     }
   > => {
     const refQ = branch ? "?ref=" + encodeURIComponent(branch) : "";
+    assertActive();
     const shaRes = await ports.runGh([
       "api",
       "/repos/" + target.targetRepo + "/contents/" + path + refQ,
@@ -553,6 +578,7 @@ export function createWorkflowFileCommitter(
       ...(branch ? { branch } : {}),
       ...(sha ? { sha } : {})
     };
+    assertActive();
     const tmp = ports.tempFile.write(JSON.stringify(bodyObj));
     const args = [
       "api",
@@ -588,7 +614,8 @@ export function createWorkflowFileCommitter(
               ),
             mutate: () => ports.runGhWorkflow(args),
             accept: (result) => result,
-            reconcile: async () => {
+            reconcile: reconcileWhileActive(async () => {
+              assertActive();
               const current = await ports.runGh([
                 "api",
                 "/repos/" + target.targetRepo + "/contents/" + path + refQ
@@ -680,6 +707,7 @@ export function createWorkflowFileCommitter(
                   `/repos/${target.targetRepo}/commits?` +
                   `${branch ? `sha=${encodeURIComponent(branch)}&` : ""}` +
                   `per_page=100&page=${page}`;
+                assertActive();
                 const commits = await ports.runGh(["api", commitsPath]);
                 if (commits.code !== 0 && commits.code !== "0") {
                   return unreadableHistory();
@@ -742,7 +770,7 @@ export function createWorkflowFileCommitter(
                 evidence:
                   "The workflow path, branch, blob identity, and content digest matched."
               };
-            }
+            })
           });
         if (mutation.state === "cancelled") {
           cancelled = true;

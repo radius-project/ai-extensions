@@ -107,6 +107,7 @@ export function azurePorts(runAz: AzureApplicationPorts["runAz"]) {
       events.push(event);
     },
     recovery: {
+      assertActive: () => {},
       find: () => null,
       willWrite: () => true,
       unresolved: () => [],

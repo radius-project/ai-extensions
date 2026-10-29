@@ -24,7 +24,9 @@ export function createSetupWorkflowRecoveryPort(
   persist: () => Promise<void>,
   isStopped: () => boolean
 ): SetupWorkflowRecoveryPort {
+  const assertActive = () => assertSetupExecutionActive(isStopped);
   return {
+    assertActive,
     operationId: operation.operationId,
     find: (kind, target) => providerMutationRecord(operation, kind, target),
     byKind: (kind) => providerMutationsByKind(operation, kind),
@@ -38,7 +40,7 @@ export function createSetupWorkflowRecoveryPort(
         persist,
         rethrowReconciliationError: isSetupExecutionInterrupted,
         assertActive: () => {
-          assertSetupExecutionActive(isStopped);
+          assertActive();
           input.assertActive?.();
         }
       }),

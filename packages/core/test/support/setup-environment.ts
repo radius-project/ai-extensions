@@ -21,6 +21,7 @@ export function setupEnvironmentHarness(
   let stopped = false;
   const credential = Symbol("package-credential");
   const recovery: SetupWorkflowRecoveryPort = {
+    assertActive: () => {},
     operationId: "op_setup",
     find: (kind, target) =>
       mutations.find(

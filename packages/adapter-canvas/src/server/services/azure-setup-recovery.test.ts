@@ -34,6 +34,37 @@ function deferred() {
   return { promise, resolve };
 }
 
+it("interrupts service-principal reconciliation when shutdown wins its inner delay", async () => {
+  const operation = createOperation({ operationId: "principal-inner-delay" });
+  let stopped = false;
+  let reads = 0;
+  const runAz = vi.fn(async (args: string[]) => {
+    if (args[2] === "create") return command("", 1, "ECONNRESET");
+    reads++;
+    return reads < 3 ?
+        command("", 1, "Request_ResourceNotFound")
+      : command("principal-object");
+  });
+  let unknown: unknown;
+  const persist = vi.fn(async () => {});
+  await expect(
+    ensureAzureServicePrincipal(
+      clientId,
+      runAz,
+      createAzureRecoveryPort(operation, persist, () => stopped),
+      async () => true,
+      async () => {
+        unknown = structuredClone(operation.providerRecovery);
+        stopped = true;
+      }
+    )
+  ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+  expect(operation.providerRecovery).toEqual(unknown);
+  expect(reads).toBe(2);
+  expect(runAz).toHaveBeenCalledTimes(3);
+  expect(persist).toHaveBeenCalledTimes(2);
+});
+
 function retryFixture(kind: "owner" | "tags") {
   let stopped = false;
   let attempts = 0;
@@ -121,6 +152,120 @@ function retryFixture(kind: "owner" | "tags") {
     }
   };
 }
+
+describe.each(["new", 0, 11] as const)(
+  "service-principal nested reconciliation (%s prior attempts)",
+  (attempts) => {
+    it.each([
+      "delay",
+      "empty",
+      "denied",
+      "exhausted",
+      "long-delay",
+      "rejection",
+      "positive"
+    ] as const)(
+      "preserves the journal when shutdown wins %s",
+      async (boundary) => {
+        let operation = createOperation({
+          operationId: "op_principal-nested",
+          repo: "octo/app",
+          environment: "dev",
+          provider: "azure"
+        });
+        if (attempts !== "new") {
+          const mutation = prepareProviderMutation(operation, {
+            kind: "azure_service_principal.create",
+            target: clientId
+          });
+          settleProviderMutation(
+            operation,
+            mutation.mutationId,
+            "outcome_unknown",
+            "Lost acknowledgement"
+          );
+          operation.providerRecovery.mutations[0].reconcileAttempts = attempts;
+          operation = fromPersistedOperation(toPersistedOperation(operation));
+          expect(
+            operation.providerRecovery.mutations[0].reconcileAttempts ?? 0
+          ).toBe(attempts);
+        }
+        let stopped = false;
+        let reads = 0;
+        let writes = 0;
+        let unknown: unknown;
+        let savesAtShutdown = 0;
+        const entered = deferred();
+        const gate = deferred();
+        const persist = vi.fn(async () => {});
+        const hold = async () => {
+          unknown = structuredClone(operation.providerRecovery);
+          savesAtShutdown = persist.mock.calls.length;
+          entered.resolve();
+          await gate.promise;
+        };
+        const runAz = vi.fn(async (args: string[]) => {
+          if (args[2] === "create") {
+            writes++;
+            return command("", 1, "ECONNRESET");
+          }
+          reads++;
+          if (reads === 1 || (boundary === "exhausted" && reads < 7))
+            return command("", 1, "Request_ResourceNotFound");
+          if (boundary === "delay")
+            return command("", 1, "Request_ResourceNotFound");
+          await hold();
+          if (boundary === "rejection") throw new Error("Read rejected");
+          if (boundary === "positive") return command("principal-object");
+          if (boundary === "empty") return command();
+          return command(
+            "",
+            1,
+            boundary === "denied" ? "Authorization_RequestDenied"
+            : boundary === "long-delay" ? "HTTP 429\nRetry-After: 9999"
+            : "Request_ResourceNotFound"
+          );
+        });
+        const pending = ensureAzureServicePrincipal(
+          clientId,
+          runAz,
+          createAzureRecoveryPort(operation, persist, () => stopped),
+          async () => true,
+          async () => {
+            if (boundary === "delay") await hold();
+          }
+        );
+        const checked =
+          boundary === "positive" ?
+            expect(pending).resolves.toEqual({
+              ok: true,
+              state: "created_candidate",
+              origin: "unknown",
+              objectId: "principal-object"
+            })
+          : expect(pending).rejects.toMatchObject({
+              code: "setup-execution-interrupted"
+            });
+        await entered.promise;
+        const calls = runAz.mock.calls.length;
+        stopped = true;
+        gate.resolve();
+        await checked;
+        expect(runAz).toHaveBeenCalledTimes(calls);
+        expect(writes).toBe(attempts === "new" ? 1 : 0);
+        if (boundary === "positive") {
+          expect(operation.providerRecovery.mutations[0]).toMatchObject({
+            status: "confirmed",
+            providerId: "principal-object"
+          });
+        } else {
+          expect(operation.providerRecovery).toEqual(unknown);
+          expect(persist).toHaveBeenCalledTimes(savesAtShutdown);
+        }
+      }
+    );
+  }
+);
 
 describe.each(["owner", "tags"] as const)(
   "Azure %s propagation through the journal",

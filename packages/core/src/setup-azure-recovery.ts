@@ -96,6 +96,7 @@ export interface AzureMutationRecord {
   createdByOperation?: boolean;
 }
 export interface AzureRecoveryPort {
+  assertActive(): void;
   find(kind: string, target: string): AzureMutationRecord | null;
   willWrite(kind: string, target: string): boolean;
   unresolved(): readonly AzureMutationRecord[];
