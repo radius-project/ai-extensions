@@ -17,21 +17,21 @@ The canvas runs on the developer's machine and uses their `az` and `gh` sessions
 
 ### What changes on AWS
 
-| What it's for                                        | Azure                                     | AWS                                                                           |
-|------------------------------------------------------|-------------------------------------------|-------------------------------------------------------------------------------|
-| Where the environment lives                          | Subscription                              | Account and region                                                            |
-| The identity GitHub Actions signs in as to deploy    | App registration                          | IAM role, the deploy identity                                                 |
-| Lets one GitHub environment sign in as that identity | Federated credential, one per environment | A subject in the role's trust policy. All environments share one trust policy |
-| What the deploy is allowed to change                 | Role assignment, one per environment      | An inline policy on the role. All environments share the role's size limit    |
-| Admin access to the cluster's Kubernetes API         | AKS RBAC Cluster Admin                    | An EKS access entry with `AmazonEKSClusterAdminPolicy`                        |
-| What the canvas discovers to deploy into             | Resource group and AKS cluster            | EKS cluster, VPC, and subnets                                                 |
-| Maps each Radius type to the recipe that creates it  | `azure-aks` recipe pack                   | `aws-eks` recipe pack                                                         |
+| What it's for                                        | Azure                                     | AWS                                                                                     |
+|------------------------------------------------------|-------------------------------------------|-----------------------------------------------------------------------------------------|
+| Where the environment lives                          | Subscription                              | Account and region                                                                      |
+| The identity GitHub Actions signs in as to deploy    | App registration                          | IAM role, the deploy identity                                                           |
+| Lets one GitHub environment sign in as that identity | Federated credential, one per environment | One or two subjects in the role's trust policy. All environments share one trust policy |
+| What the deploy is allowed to change                 | Role assignment, one per environment      | An inline policy on the role. All environments share the role's size limit              |
+| Admin access to the cluster's Kubernetes API         | AKS RBAC Cluster Admin                    | An EKS access entry with `AmazonEKSClusterAdminPolicy`                                  |
+| What the canvas discovers to deploy into             | Resource group and AKS cluster            | EKS cluster, VPC, and subnets                                                           |
+| Maps each Radius type to the recipe that creates it  | `azure-aks` recipe pack                   | `aws-eks` recipe pack                                                                   |
 
 The last three rows are close matches. The first rows are where AWS differs: the per-environment objects Azure creates become edits to one shared role.
 
 ### Terms
 
-- **Subject**: the text in GitHub's OIDC token that names the repository and environment, such as `repo:contoso/storefront:environment:dev`.
+- **Subject**: the text in GitHub's OIDC token that names the repository and environment. A new repository's subject uses the owner's and repository's IDs, such as `repo:contoso@1001/storefront@2002:environment:dev`. An older repository can also use the name-based form, such as `repo:contoso/storefront:environment:dev`.
 - **GitHub identity provider**: the account-level IAM object that lets AWS accept GitHub's OIDC tokens. One serves every repository in the account.
 - **Recipe pack**: the list that maps each Radius resource type to the recipe that creates it.
 
@@ -39,7 +39,7 @@ The last three rows are close matches. The first rows are where AWS differs: the
 
 This example is used through the rest of the doc. The repository `contoso/storefront` has an app with a container and a MySQL database. The team wants two environments in AWS account `111122223333`: `dev` in `us-west-2` on the EKS cluster `storefront-dev`, and `prod` in `us-east-1` on `storefront-prod`.
 
-Both environments use one deploy identity, `radius-deploy-contoso-storefront`. Its trust policy lists both subjects:
+Both environments use one deploy identity, `radius-deploy-contoso-storefront`. The repository is new, so its trust policy lists one subject per environment:
 
 ```json
 {
@@ -50,8 +50,8 @@ Both environments use one deploy identity, `radius-deploy-contoso-storefront`. I
     "StringEquals": {
       "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
       "token.actions.githubusercontent.com:sub": [
-        "repo:contoso/storefront:environment:dev",
-        "repo:contoso/storefront:environment:prod"
+        "repo:contoso@1001/storefront@2002:environment:dev",
+        "repo:contoso@1001/storefront@2002:environment:prod"
       ]
     }
   }
@@ -60,7 +60,7 @@ Both environments use one deploy identity, `radius-deploy-contoso-storefront`. I
 
 Sharing one role causes problems that Azure's separate objects avoid:
 
-**Two setups can overwrite each other.** Setup reads the trust policy, adds its subject, and writes the policy back. If `dev` and `prod` are set up at the same moment, both read the policy before either writes, and the later write drops the other's subject. IAM has no conditional write to prevent this. The lost environment's deploys then fail to sign in.
+**Two setups can overwrite each other.** Setup reads the trust policy, adds its subjects, and writes the policy back. If `dev` and `prod` are set up at the same moment, both read the policy before either writes, and the later write drops the other's subjects. IAM has no conditional write to prevent this. The lost environment's deploys then fail to sign in.
 
 **Permissions must be scoped per environment.** `dev` should deploy only to `us-west-2`, and `prod` only to `us-east-1`. Attaching AWS's `PowerUserAccess` policy would allow every region. Adding a deny for other regions per environment doesn't work either, because denies add up: `dev`'s deny of `us-east-1` would also block `prod`.
 
@@ -97,7 +97,7 @@ Each AWS environment adds four things to AWS, all on the repository's one deploy
 
 | What                                                                       | Shared by                                          | Removed when the environment is deleted                                          |
 |----------------------------------------------------------------------------|----------------------------------------------------|----------------------------------------------------------------------------------|
-| The environment's subject in the deploy identity's trust policy            | All environments in the repository                 | Yes                                                                              |
+| The environment's subjects in the deploy identity's trust policy           | All environments in the repository                 | Yes                                                                              |
 | An inline policy with the environment's permissions, limited to its region | Nothing, one per environment                       | Yes                                                                              |
 | An access entry on the environment's EKS cluster                           | Environments in the repository on the same cluster | When no other environment uses it, and only for a deploy identity Radius created |
 | The GitHub identity provider and the deploy identity                       | The whole account, and the whole repository        | Never                                                                            |
@@ -147,7 +147,12 @@ Radius never tags or deletes a picked role, and only adds and removes what each 
 
 ### Which GitHub environments can use the deploy identity
 
-The trust policy has one statement for the account's GitHub identity provider, listing every accepted subject, as in the example under [Problem](#problem). Setup adds the environment's subject to that list, and leaves any statement that doesn't name the GitHub identity provider unchanged. Setup builds the subject with the same code Azure uses, so it matches what GitHub sends.
+The trust policy has one statement for the account's GitHub identity provider, listing every accepted subject, as in the example under [Problem](#problem). Setup adds the environment's subjects to that list, and leaves any statement that doesn't name the GitHub identity provider unchanged. Setup trusts every subject GitHub may send for the environment, the same as Azure. It asks GitHub which form the repository uses, and builds the subjects with Azure's code:
+
+| Repository                                 | Subjects setup adds                                                          | Why                                                                                                                                                            |
+|--------------------------------------------|------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| New, which GitHub reports uses the ID form | One, `repo:owner@<ownerId>/repo@<repoId>:environment:<env>`                  | GitHub sends only this form                                                                                                                                    |
+| Older                                      | Two, the name-based `repo:owner/repo:environment:<env>` and the ID-based one | GitHub moves a repository to the ID-based form when it's renamed or transferred. Trusting only the name-based form would break every AWS deploy after a rename |
 
 **Two setups at once.** Setup, delete, rollback, and **Repair** each take a lock on the deploy identity before they read its trust policy. Setup holds it until **Configure environment** has written the GitHub environment, so a delete or rollback that checks which environments use a cluster always sees an environment that's being set up. The lock is an IAM policy named `radius-lock-<role>`: AWS refuses to create a policy whose name already exists, so only one holder can create it, and deleting it releases the lock. It lives in AWS, so every repository that uses the role shares it, even when the role was picked. A second setup waits for the lock.
 
@@ -155,7 +160,7 @@ The trust policy has one statement for the account's GitHub identity provider, l
 
 Each holder also checks that it still owns the lock. AWS gives every new policy a new policy ID, even when its name and ARN are reused. The holder records the ID of the lock it created, and checks the lock still has that ID before each write to the deploy identity and before releasing it. A setup that resumes after its lock was removed stops without writing, and can't delete the next holder's lock.
 
-Someone can still change the trust policy by hand, outside Radius. The verify workflow fails when GitHub can't assume the deploy identity, and a deploy that fails for the same reason offers **Repair**, which adds the subject back.
+Someone can still change the trust policy by hand, outside Radius. The verify workflow fails when GitHub can't assume the deploy identity, and a deploy that fails for the same reason offers **Repair**, which adds the missing subjects back.
 
 If the trust policy can't be read, setup stops without writing, so it never replaces a policy it couldn't see.
 
@@ -178,10 +183,12 @@ Two kinds of actions aren't granted:
 | `iam:*`, `organizations:*`, `account:*`                                                                                                                           | Not granted, except a few global reads and `iam:CreateServiceLinkedRole`. That one is limited to the services the recipe pack uses, such as RDS and OpenSearch, which need it the first time they're used in an account. `iam:DeleteServiceLinkedRole` isn't granted, because a service-linked role is shared by the whole account | The deploy identity can't change IAM directly                                                                    |
 | EKS access entry actions (`eks:CreateAccessEntry`, `eks:UpdateAccessEntry`, `eks:DeleteAccessEntry`, `eks:AssociateAccessPolicy`, `eks:DisassociateAccessPolicy`) | Not granted. They're left out of the policy's allowed actions, not denied, because a deny on a picked role would also block other repositories that use that role to manage access entries                                                                                                                                         | Otherwise `PowerUserAccess` would let the deploy identity make itself cluster-admin on any cluster in the region |
 
-**Limits.** Each environment's permissions are an inline policy, so the limit that matters is the inline policies' total size. The limit of 20 attached managed policies per role doesn't apply.
+**Limits.** Two IAM size limits cap how many environments one deploy identity holds. The limit of 20 attached managed policies per role doesn't apply, because each environment's permissions are an inline policy.
 
 - **Inline policies:** a role's inline policies share 10,240 characters, and each environment's policy is about 580, so a deploy identity holds about 17 environments.
-- **Trust policy:** it allows 2,048 characters by default, and 8,192 with a quota increase, which is about 30 subjects.
+- **Trust policy:** it allows 2,048 characters by default. That holds about 20 environments for a new repository, and about 12 for an older one, which needs two subjects each. A quota increase raises it to 8,192 characters.
+
+So a deploy identity holds about 17 environments for a new repository, and about 12 for an older one.
 
 When either limit is reached, setup stops at that step, naming the limit and quoting AWS's error. Each environment keeps its own policy, so adding or deleting one never changes another's permissions. Raising the limit, for example by splitting environments across roles, is a question for both clouds and is separate work.
 
@@ -215,7 +222,7 @@ sequenceDiagram
   C->>AWS: Create GitHub identity provider if missing
   C->>AWS: Create, reuse, or use picked deploy identity
   C->>AWS: Take the lock on the deploy identity
-  C->>AWS: Read trust policy, add subject, write it
+  C->>AWS: Read trust policy, add subjects, write it
   C->>AWS: Write the environment's inline policy
   C->>AWS: Create or reuse the access entry
   C->>GH: Write environment variables, commit AWS workflows
@@ -228,7 +235,7 @@ Setup runs in three stages: **Authorize deploy identity** makes the AWS changes,
 
 The AWS workflows are committed only when the repository creates its first AWS environment. Until then, the deploy dispatcher keeps its AWS job removed, so a repository that only uses Azure never sees AWS files.
 
-**Setup record.** Setup records each AWS change in the existing setup operation record: role created, subject added, policy written, access entry created. If a step fails after earlier steps wrote to AWS, the **Setup didn't finish** card lists what was created, and **Roll back** takes the lock and undoes those steps in reverse order. It removes an access entry only by the same rule as delete, so it never removes one that another environment reused. Rollback never deletes the GitHub identity provider, or a role Radius didn't create. If the app restarts during setup, the setup is marked interrupted, and **Retry** runs every step again, skipping what already exists.
+**Setup record.** Setup records each AWS change in the existing setup operation record: role created, subjects added, policy written, access entry created. If a step fails after earlier steps wrote to AWS, the **Setup didn't finish** card lists what was created, and **Roll back** takes the lock and undoes those steps in reverse order. It removes an access entry only by the same rule as delete, so it never removes one that another environment reused. Rollback never deletes the GitHub identity provider, or a role Radius didn't create. If the app restarts during setup, the setup is marked interrupted, and **Retry** runs every step again, skipping what already exists.
 
 ### Deploying
 
@@ -274,7 +281,7 @@ The deployed graph shows each resource's status from the deploy, including the r
 
 **A deployment.** `delete-aws.yml` deletes the app. Radius deletes AWS resources through the AWS Cloud Control API. When it deletes an RDS database, AWS first takes a final snapshot, which needs `rds:CreateDBSnapshot`, and the permission policy grants it. The snapshot has a random name and no tags, so nothing removes it: it keeps the database's data, and AWS bills for it until someone deletes it. Letting Radius skip this snapshot is tracked as a Radius issue. The delete confirmation already names each resource it deletes.
 
-**An environment.** `delete-environment-aws.yml` refuses while apps are still deployed, and then deletes the Radius environment. After that, the canvas takes the lock on the deploy identity, removes this environment's subject from the trust policy, and deletes its inline policy. Trust statements Radius didn't add stay as they are. If removing the subject leaves no statements, the canvas writes a single deny statement, because IAM rejects an empty trust policy. The canvas keeps the deploy identity and the GitHub identity provider, because other environments or services may use them.
+**An environment.** `delete-environment-aws.yml` refuses while apps are still deployed, and then deletes the Radius environment. After that, the canvas takes the lock on the deploy identity, removes all of this environment's subjects from the trust policy, and deletes its inline policy. Trust statements Radius didn't add stay as they are. If removing them leaves no statements, the canvas writes a single deny statement, because IAM rejects an empty trust policy. The canvas keeps the deploy identity and the GitHub identity provider, because other environments or services may use them.
 
 Whether it keeps the access entry depends on who owns the deploy identity:
 
@@ -336,8 +343,8 @@ The checks and their messages are in each section above: the CLI and account che
 
 **At delete.**
 
-- The trust policy can't be read: the canvas stops without writing, and tells the developer to remove the subject by hand.
-- Removing the subject or the policy fails: the canvas says which one is left, and **Retry** removes what's still there.
+- The trust policy can't be read: the canvas stops without writing, and tells the developer to remove the subjects by hand.
+- Removing the subjects or the policy fails: the canvas says which one is left, and **Retry** removes what's still there.
 - The deploy identity is already gone: reported as already gone, and the delete continues.
 
 ## Security
@@ -353,6 +360,7 @@ The checks and their messages are in each section above: the CLI and account che
   - Role names, including the hash for long names.
   - Policy names, including the repository hash and long environment names.
   - Adding and removing subjects, keeping statements Radius didn't add, and the deny-only trust policy.
+  - One ID-based subject for a new repository, both forms for an older one, and delete removing both.
   - The permission policy's region condition, its service-linked role limit, and the actions it leaves out.
   - Public and private subnet labels, and the two-zone rule.
   - Console links for each type, including GovCloud and China regions.
@@ -382,19 +390,19 @@ The checks and their messages are in each section above: the CLI and account che
 
 Create a new IAM role for each environment, so each has its own trust policy and permissions.
 
-|                                                  | One per environment                                | One per repository (this design)         |
-|--------------------------------------------------|----------------------------------------------------|------------------------------------------|
-| Roles in the example                             | `radius-deploy-contoso-storefront-dev` and `-prod` | `radius-deploy-contoso-storefront`       |
-| Two setups at once                               | No conflict                                        | A lock on the deploy identity            |
-| Size limits                                      | Per role                                           | Shared: about 17 environments per role   |
-| Rights the developer needs for a new environment | `iam:CreateRole` every time                        | `iam:CreateRole` once                    |
-| A role from the platform team                    | One per environment to request                     | One for the repository                   |
-| Matches Azure                                    | No                                                 | Yes, one app registration per repository |
+|                                                  | One per environment                                | One per repository (this design)                                   |
+|--------------------------------------------------|----------------------------------------------------|--------------------------------------------------------------------|
+| Roles in the example                             | `radius-deploy-contoso-storefront-dev` and `-prod` | `radius-deploy-contoso-storefront`                                 |
+| Two setups at once                               | No conflict                                        | A lock on the deploy identity                                      |
+| Size limits                                      | Per role                                           | Shared: about 17 environments per role, 12 for an older repository |
+| Rights the developer needs for a new environment | `iam:CreateRole` every time                        | `iam:CreateRole` once                                              |
+| A role from the platform team                    | One per environment to request                     | One for the repository                                             |
+| Matches Azure                                    | No                                                 | Yes, one app registration per repository                           |
 
 One role per environment avoids the lock and the shared limits. But every new environment needs rights to create IAM roles, which many developers don't have, and a platform team that hands out roles would have to create one per environment. The functional spec chose one per repository to match Azure, and the lock and the policy names make sharing safe.
 
 ### Other alternatives
 
-- **One shared policy per deploy identity for the statements every environment repeats:** it would raise the limit to about 30 environments, but adds one more object that setup, rollback, and delete have to manage, and that every environment depends on.
+- **One shared policy per deploy identity for the statements every environment repeats:** the inline policies would hold about 30 environments, but the trust policy would still stop a deploy identity at about 20, or 12 for an older repository. It also adds one more object that setup, rollback, and delete have to manage, and that every environment depends on.
 - **One managed policy per environment:** managed policy names are unique across the account, so two repositories with a `dev` environment would collide. A role also holds at most 20 managed policies, and `PowerUserAccess` would use one.
 - **Keeping the AWS recipes in ai-extensions and publishing them to each user's registry at deploy:** this needs a registry secret copied into the control plane, and a hard-coded recipe list for the planned graph. One versioned pack in `resource-types-contrib` is how the other packs work.
