@@ -86,6 +86,10 @@ The managed Contour Gateway supports HTTP and TLS routes. TCP and UDP routes req
 
 - `AWS_ACCOUNT_ID`, `RADIUS_VPC_ID`, `RADIUS_SUBNET_IDS`
 
+**AWS**, recorded for environment deletion (not read by any workflow):
+
+- `AWS_TRUST_SUBJECTS`: JSON array of the GitHub OIDC subjects setup added to the IAM role's trust policy. Deleting the environment removes exactly these, even if the repository was renamed. Without it, deletion resolves the subjects from the repository's current name and IDs.
+
 **Azure** — read by `verify-azure.yml`:
 
 - `AZURE_CLIENT_ID` — AAD application (client) ID
