@@ -319,6 +319,7 @@ import {
 } from "./server/services/github-environment-variable-rollback.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
+import { createAwsDiscoveryRoutes } from "./server/routes/aws-discovery.js";
 import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
 import { createAzureSetupService } from "./server/services/azure-setup.js";
@@ -735,6 +736,10 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
   parseServedReposFromSubjects: (subjects) =>
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });
+
+// Composition root for the `aws-discovery` routes: the same trimmed-stdout CLI
+// runner the discovery enumeration uses.
+const awsDiscoveryRoutes = createAwsDiscoveryRoutes({ runCli: runCommand });
 
 // Composition root for the auth/verify half of the `identity-credentials`
 // family. Eight narrow function seams: the CLI runner from `gh.ts`, and the
@@ -6511,6 +6516,7 @@ export function createProductionCanvasServerRuntime(
     ...repositoriesRoutes,
     ...deploymentsRoutes,
     ...azureDiscoveryRoutes,
+    ...awsDiscoveryRoutes,
     ...azureAutoSetupRoutes,
     ...identityProfilesRoutes,
     ...identityAuthRoutes,
