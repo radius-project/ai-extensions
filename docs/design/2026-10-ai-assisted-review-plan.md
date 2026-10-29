@@ -28,13 +28,20 @@ Every change also faces the same approval bar. A one-word docs fix needs the sam
 
 ## How do we improve our process?
 
-We want reviews to move faster without getting careless. That means five changes:
+We want reviews to move faster without getting careless. In order to do this, we must:
 
 - **Build trust in our automated checks.** They should catch regressions, security issues, and broken builds at three points: before a pull request opens, when it opens, and on every later push.
 - **Classify each change's risk automatically.** Base the tier on which paths a change touches. A docs fix or a new test file is low risk; a change to `packages/core` or to the workflow generators is higher risk.
 - **Show human reviewers where to look.** When a pull request needs a human, automation should flag its riskiest parts so the reviewer starts there.
-- **Define trusted contributors.** Only members of the maintainers and approvers teams can merge low-risk changes on automated approval. Everyone else's pull requests always get human review.
+- **Define trusted contributors.** Only members of the maintainers and approvers teams should merge low-risk changes on automated approval. Everyone else's pull requests always get human review.
 - **Expect to revise this.** We won't get it right the first time, and the models and tools keep changing, so we'll keep adjusting the process.
+
+We can implement this work in four phases:
+
+1. [Phase 1: Building confidence in our automated tools](#phase-1-building-confidence-in-our-automated-tools)
+2. [Phase 2: Copilot code review on every push](#phase-2-copilot-code-review-on-every-push)
+3. [Phase 3: Blocking security review](#phase-3-blocking-security-review)
+4. [Phase 4: Scaling human approval to risk](#phase-4-scale-human-approval-to-risk)
 
 ## Phase 1: Building confidence in our automated tools
 
@@ -65,7 +72,7 @@ Next, we should create **`.github/instructions/code-review.instructions.md`** to
 
 ### Step 1.3: Add a pre-PR self-review skill
 
-We need agents to review their own work before they open a pull request. Anthropic now catches most problems at this stage, and it found that giving an agent a check it can run improves its output more than anything else. `radius-code-quality` already asks agents for test evidence, but nothing checks their work with fresh eyes. An agent reviewing its own work in the same session tends to agree with itself; a separate reviewer that sees only the diff and the rules doesn't.
+We need agents to review their own work before they open a pull request. `radius-code-quality` already asks agents for test evidence, but nothing checks their work with fresh eyes. An agent reviewing its own work in the same session tends to agree with itself; a separate reviewer that sees only the diff and the rules doesn't.
 
 We should add a `radius-pre-pr-review` skill at `.github/skills/radius-pre-pr-review/SKILL.md`. The skill should have the agent:
 
@@ -169,7 +176,7 @@ Write a short `docs/eng/REVIEW_POLICY.md` that assigns each change a tier by wha
 | --- | --- | --- |
 | Low | Docs, copy, tests only, changesets, visual baseline updates | Copilot approval for trusted authors |
 | Medium | Ordinary changes to `packages/core` and `packages/adapter-canvas` | One |
-| High | `.github/workflows/**`, `.github/extension/**`, workflow-YAML generators in `packages/core/src/platforms` and `src/workflows`, release and publish paths | Two, including a maintainer |
+| High | `.github/workflows/**`, `.github/extension/**`, workflow-YAML generators in `packages/core/src/platforms` and `src/workflows`, release and publish paths | Two |
 
 The high tier also calls for a Max level code review from copilot - which the author or directing human would need to request by hand. (Copilot picks the effort level per repository, not per path, and we should keep the default effort set on Balanced).
 
