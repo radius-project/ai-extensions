@@ -407,22 +407,24 @@ describe("listAwsRoles exclusions", () => {
   });
 
   it.each([
-    ["an AWS error", new Error("AccessDenied")],
-    ["unreadable JSON", "{"],
-    ["a non-object answer", "[]"]
-  ])("keeps a GitHub role when %s hides its tags", async (_l, answer) => {
-    const { dependencies } = fakes({
-      "aws iam list-roles": JSON.stringify({
-        Roles: [githubRole("deploy", ["repo:octo/shop:x"])]
-      }),
-      [getRole("deploy")]: answer
-    });
-    const roles = await listAwsRoles(
-      { accountId: ACCOUNT, repo: "octo/shop" },
-      dependencies
-    );
-    expect(roles.map((role) => role.name)).toEqual(["deploy"]);
-  });
+    ["an AWS error", new Error("AccessDenied"), "AccessDenied"],
+    ["unreadable JSON", "{", SyntaxError],
+    ["a non-object answer", "[]", "get-role returned no role for deploy."],
+    ["no role", '{"Role":null}', "get-role returned no role for deploy."]
+  ])(
+    "fails the listing when %s hides a GitHub role's tags",
+    async (_label, answer, error) => {
+      const { dependencies } = fakes({
+        "aws iam list-roles": JSON.stringify({
+          Roles: [githubRole("deploy", ["repo:octo/shop:x"])]
+        }),
+        [getRole("deploy")]: answer
+      });
+      await expect(
+        listAwsRoles({ accountId: ACCOUNT, repo: "octo/shop" }, dependencies)
+      ).rejects.toThrow(error);
+    }
+  );
 
   it.each([
     ["another account", roleArn("deploy", "999988887777")],
@@ -448,8 +450,16 @@ describe("listAwsRoles exclusions", () => {
   it("reads at most four roles' tags at once", async () => {
     let running = 0;
     let peak = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let fourStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fourStarted = resolve;
+    });
     const names = ["a", "b", "c", "d", "e", "f"];
-    const roles = await listAwsRoles(
+    const listing = listAwsRoles(
       { accountId: ACCOUNT, repo: "octo/shop" },
       {
         ...fakes({}).dependencies,
@@ -461,13 +471,16 @@ describe("listAwsRoles exclusions", () => {
           }
           running += 1;
           peak = Math.max(peak, running);
-          await new Promise((resolve) => setTimeout(resolve, 1));
+          if (running === 4) fourStarted();
+          await gate;
           running -= 1;
-          return "{}";
+          return JSON.stringify({ Role: {} });
         }
       }
     );
-    expect(roles.map((role) => role.name)).toEqual(names);
+    await started;
+    release();
+    expect((await listing).map((role) => role.name)).toEqual(names);
     expect(peak).toBe(4);
   });
 });

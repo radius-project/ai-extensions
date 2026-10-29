@@ -103,7 +103,9 @@ function iamSafe(value: string): string {
  * The default deploy role for a repository: `radius-deploy-<owner>-<repo>`.
  * IAM role names allow 64 characters, so a longer name keeps its first 57,
  * then `-` and the first 6 hex characters of the SHA-256 of `owner/repo`.
- * Truncating alone would give two long repositories the same role.
+ * Truncating alone would give two long repositories the same role. The hash
+ * makes that unlikely, not impossible. On a clash, setup finds the other
+ * repository's tags on the role and stops without changing it.
  *
  * `sha256Hex` is injected because this package cannot import `node:crypto`
  * (see app-origin.ts). The repository is hashed in lowercase because GitHub

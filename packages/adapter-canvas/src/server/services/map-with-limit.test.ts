@@ -1,25 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { mapWithLimit } from "./map-with-limit.js";
 
+function gate() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { open, opened };
+}
+
 describe("mapWithLimit", () => {
   it("returns results in input order even when calls finish out of order", async () => {
-    const delays = [30, 0, 10, 0, 20];
-    const results = await mapWithLimit(delays, 2, async (delay) => {
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      return delay * 2;
+    const gates = [0, 1, 2, 3, 4].map(() => gate());
+    const results = mapWithLimit([0, 1, 2, 3, 4], 2, async (item) => {
+      await gates[item].opened;
+      return item * 2;
     });
-    expect(results).toEqual([60, 0, 20, 0, 40]);
+    for (const { open } of [...gates].reverse()) open();
+    expect(await results).toEqual([0, 2, 4, 6, 8]);
   });
 
   it("never runs more calls at once than the limit", async () => {
+    const release = gate();
+    const threeStarted = gate();
     let running = 0;
     let peak = 0;
-    await mapWithLimit([1, 2, 3, 4, 5, 6, 7], 3, async () => {
+    const done = mapWithLimit([1, 2, 3, 4, 5, 6, 7], 3, async () => {
       running += 1;
       peak = Math.max(peak, running);
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      if (running === 3) threeStarted.open();
+      await release.opened;
       running -= 1;
     });
+    await threeStarted.opened;
+    release.open();
+    await done;
     expect(peak).toBe(3);
   });
 

@@ -241,25 +241,22 @@ export type AwsRoleListDependencies = Pick<DiscoveryDependencies, "runCli">;
 // account does not run into IAM's request throttling.
 const ROLE_TAG_READ_CONCURRENCY = 4;
 
-// A role whose tags cannot be read stays in the list, because setup reads the
-// picked role's tags again before any AWS write.
 async function managedForAnotherRepository(
   roleName: string,
   repo: string,
   dependencies: AwsRoleListDependencies
 ): Promise<boolean> {
-  try {
-    const out = await dependencies.runCli(
-      "aws",
-      ["iam", "get-role", "--role-name", roleName, "--output", "json"],
-      { timeout: AWS_CLI_TIMEOUT_MS }
-    );
-    const parsed: unknown = JSON.parse(out);
-    const owner = radiusRoleRepository(isRecord(parsed) ? parsed.Role : null);
-    return owner !== null && owner.toLowerCase() !== repo.toLowerCase();
-  } catch {
-    return false;
+  const out = await dependencies.runCli(
+    "aws",
+    ["iam", "get-role", "--role-name", roleName, "--output", "json"],
+    { timeout: AWS_CLI_TIMEOUT_MS }
+  );
+  const parsed: unknown = JSON.parse(out);
+  if (!isRecord(parsed) || !isRecord(parsed.Role)) {
+    throw new Error(`get-role returned no role for ${roleName}.`);
   }
+  const owner = radiusRoleRepository(parsed.Role);
+  return owner !== null && owner.toLowerCase() !== repo.toLowerCase();
 }
 
 /**
@@ -269,7 +266,9 @@ async function managedForAnotherRepository(
  * Roles that already trust GitHub come first.
  *
  * Only roles whose trust names the account's GitHub provider get their tags
- * read, because Radius creates every role it owns with that trust.
+ * read, because Radius creates every role it owns with that trust. If one of
+ * those reads fails, the whole listing fails, because the picker cannot tell
+ * whether another repository owns that role.
  */
 export async function listAwsRoles(
   data: { accountId?: string; repo?: string },
