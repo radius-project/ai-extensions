@@ -12,6 +12,6 @@ Shutdown before rereading an unresolved request preserves its original evidence 
 
 Shutdown after a lost write response or while a provider read fails also preserves unresolved evidence without consuming recovery attempts. GHCR bootstrap stops before the next HTTP request, upload step or retry, while responses already issued retain their actual outcome.
 
-Azure owner and provenance-tag propagation retries stop issuing requests after shutdown. Rejected attempts retain their diagnostics, while user Stop still completes the current logical mutation.
+Azure owner and provenance-tag propagation retries stop issuing writes and reads after shutdown, including when shutdown interrupts a read delay. Incomplete or failed late reads preserve unresolved evidence instead of triggering failure cleanup or manual recovery; positive responses already in flight can still confirm the request. Rejected attempts retain their diagnostics, while user Stop still completes the current logical mutation.
 
 Verification dispatch and automatic run discovery stop further reads and monitoring after shutdown, without turning a late response into a setup failure. Sent requests retain their actual outcome; uncertain dispatches require inspection before another run can be sent, including after restart. Storage failures remain explicit.

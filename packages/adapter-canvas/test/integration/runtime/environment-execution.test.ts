@@ -1096,7 +1096,10 @@ describe("real server and fake SDK runtime ownership", () => {
       )
       .concat(
         ["azure-owner", "azure-tags"].flatMap((stage) =>
-          ["issued", "prepared", "delay"].map((boundary) => [stage, boundary])
+          ["issued", "prepared", "delay", "inner-delay"].map((boundary) => [
+            stage,
+            boundary
+          ])
         )
       )
       .concat(
@@ -1124,6 +1127,9 @@ describe("real server and fake SDK runtime ownership", () => {
       const ghcrStage = stage.startsWith("ghcr");
       const unknownBoundary = boundary === "throw" || boundary === "timeout";
       const azureRetry = stage === "azure-owner" || stage === "azure-tags";
+      const innerDelay = boundary === "inner-delay";
+      const delayBoundary = boundary === "delay" || innerDelay;
+      let innerReads = 0;
       const rejected = deferred();
       let azureAttempts = 0;
       let retryPrepared = false;
@@ -1211,7 +1217,11 @@ describe("real server and fake SDK runtime ownership", () => {
             args.includes("PATCH");
         if (retryTarget && ++azureAttempts === 1) {
           rejected.resolve();
-          return { code: 1, stdout: "", stderr: "Directory_ObjectNotFound" };
+          return {
+            code: 1,
+            stdout: "",
+            stderr: innerDelay ? "ECONNRESET" : "Directory_ObjectNotFound"
+          };
         }
         if ((stage === "azure" && command === "ad app create") || retryTarget) {
           entered.resolve();
@@ -1221,8 +1231,22 @@ describe("real server and fake SDK runtime ownership", () => {
         if (azureRetry && command === "ad app create") return success(appId);
         if (azureRetry && args.slice(0, 4).join(" ") === "ad app owner add")
           return success();
-        if (azureRetry && args.slice(0, 4).join(" ") === "ad app owner list")
+        if (azureRetry && args.slice(0, 4).join(" ") === "ad app owner list") {
+          if (innerDelay && stage === "azure-owner") {
+            innerReads++;
+            return success("[]");
+          }
           return success(callerId);
+        }
+        if (
+          innerDelay &&
+          stage === "azure-tags" &&
+          command === "ad app show" &&
+          args.includes("tags")
+        ) {
+          innerReads++;
+          return success("[]");
+        }
         if (args.slice(0, 2).join(" ") === "account set") return success();
         if (args.slice(0, 2).join(" ") === "account show")
           return success(
@@ -1418,13 +1442,15 @@ describe("real server and fake SDK runtime ownership", () => {
           await Promise.race([rejected.promise, completed]);
           await vi.advanceTimersByTimeAsync(0);
           expect(op.providerRecovery.mutations.at(-1)).toMatchObject({
-            status: "not_applied",
-            evidence: "Directory_ObjectNotFound"
+            status: innerDelay ? "outcome_unknown" : "not_applied",
+            evidence:
+              innerDelay ?
+                "The provider request ended without an answer Radius could trust."
+              : "Directory_ObjectNotFound"
           });
-          if (boundary !== "delay") await vi.advanceTimersByTimeAsync(2000);
+          if (!delayBoundary) await vi.advanceTimersByTimeAsync(2000);
         }
-        if (boundary !== "delay")
-          await Promise.race([entered.promise, completed]);
+        if (!delayBoundary) await Promise.race([entered.promise, completed]);
         const diagnostics = JSON.stringify({
           failure: op.failure,
           gh: run.mock.calls,
@@ -1434,6 +1460,9 @@ describe("real server and fake SDK runtime ownership", () => {
         expect(accountContext.getExecutor(op.operationId), diagnostics).toBe(
           executor
         );
+        const unresolvedBeforeShutdown =
+          innerDelay ? structuredClone(op.providerRecovery) : undefined;
+        if (innerDelay) expect(innerReads).toBe(1);
         await extension.shutdown();
         expect(switchAccount).not.toHaveBeenCalled();
         expect(accountContext.getExecutor(op.operationId)).toBe(executor);
@@ -1443,10 +1472,10 @@ describe("real server and fake SDK runtime ownership", () => {
           fetch: ghcr.calls.length
         };
         writeGate.resolve();
-        if (boundary === "delay") await vi.advanceTimersByTimeAsync(2000);
+        if (delayBoundary) await vi.advanceTimersByTimeAsync(2000);
         else await Promise.race([persisted.promise, completed]);
         expect(acknowledged).toBe(boundary === "issued" && !ghcrStage);
-        if (boundary !== "delay" && !ghcrStage)
+        if (!delayBoundary && !ghcrStage)
           expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         persistGate.resolve();
         await completed;
@@ -1461,6 +1490,13 @@ describe("real server and fake SDK runtime ownership", () => {
             .every(([args]) => args[0] === "api" && !args.includes("--method"))
         ).toBe(true);
         expect(ghcr.calls.slice(callsAtShutdown.fetch)).toEqual([]);
+        if (innerDelay) {
+          expect(innerReads).toBe(1);
+          expect(op.providerRecovery).toEqual(unresolvedBeforeShutdown);
+          expect(snapshots.at(-1)?.providerRecovery).toEqual(
+            unresolvedBeforeShutdown
+          );
+        }
         if (!ghcrStage)
           expect(snapshots.at(-1)?.providerRecovery.mutations).toEqual(
             expect.arrayContaining([
@@ -1473,7 +1509,7 @@ describe("real server and fake SDK runtime ownership", () => {
                   : "github_environment_variable.put",
                 status:
                   boundary === "issued" ? "confirmed"
-                  : unknownBoundary ? "outcome_unknown"
+                  : unknownBoundary || innerDelay ? "outcome_unknown"
                   : "not_applied"
               })
             ])
@@ -1502,7 +1538,7 @@ describe("real server and fake SDK runtime ownership", () => {
           expect(azureAttempts).toBe(boundary === "issued" ? 2 : 1);
           expect(op.providerRecovery.mutations.at(-1)).toMatchObject({
             initialDiagnostic: expect.stringContaining(
-              "Directory_ObjectNotFound"
+              innerDelay ? "ECONNRESET" : "Directory_ObjectNotFound"
             )
           });
           expect(

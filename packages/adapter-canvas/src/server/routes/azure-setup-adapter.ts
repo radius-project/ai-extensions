@@ -2,6 +2,7 @@ import type {
   AzureApplicationPorts,
   AzureCredentialPorts
 } from "@radius-project/core";
+import { assertSetupExecutionActive } from "@radius-project/core";
 import type {
   AzureAutoSetupApplicationInput,
   AzureAutoSetupCredentialInput,
@@ -46,6 +47,7 @@ export function createAzureApplicationPorts(
   const { operations } = dependencies;
   return {
     ...execution(workflow, () => operations.persist(), dependencies.sleep),
+    assertActive: () => assertSetupExecutionActive(workflow.isStopped),
     get environment() {
       return operation.environment;
     },

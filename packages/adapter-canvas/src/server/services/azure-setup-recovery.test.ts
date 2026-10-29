@@ -86,6 +86,8 @@ function retryFixture(kind: "owner" | "tags") {
   const recovery = createAzureRecoveryPort(operation, persist, () => stopped);
   fixture.application.operationId = operation.operationId;
   fixture.application.recovery = recovery;
+  fixture.application.assertActive = () =>
+    assertSetupExecutionActive(() => stopped);
   fixture.application.checkpoint = vi.fn(async () => {
     assertSetupExecutionActive(() => stopped);
     return true;
@@ -123,6 +125,92 @@ function retryFixture(kind: "owner" | "tags") {
 describe.each(["owner", "tags"] as const)(
   "Azure %s propagation through the journal",
   (kind) => {
+    it.each([
+      "delay",
+      "final-incomplete",
+      "final-failed",
+      "failed",
+      "positive"
+    ] as const)(
+      "preserves issued-read evidence across shutdown during %s",
+      async (boundary) => {
+        const test = retryFixture(kind);
+        test.write.mockResolvedValue(command("", 1, "ECONNRESET"));
+        const entered = deferred();
+        const gate = deferred();
+        const run = test.application.runAz;
+        let reads = 0;
+        test.application.runAz = async (args) => {
+          const target =
+            kind === "owner" ?
+              args.slice(0, 4).join(" ") === "ad app owner list"
+            : args.slice(0, 3).join(" ") === "ad app show" &&
+              args.includes("tags");
+          if (!target) return run(args);
+          reads++;
+          if (boundary === "delay")
+            return reads === 1 ? command("[]") : run(args);
+          if (
+            (boundary === "final-incomplete" || boundary === "final-failed") &&
+            reads < 6
+          )
+            return command("[]");
+          entered.resolve();
+          await gate.promise;
+          return (
+            boundary === "positive" ? run(args)
+            : boundary === "failed" || boundary === "final-failed" ?
+              command("", 1, "AuthorizationFailed")
+            : command("[]")
+          );
+        };
+        test.application.sleep = async () => {
+          if (boundary === "delay") {
+            entered.resolve();
+            await gate.promise;
+          }
+        };
+        const finalizer = vi.spyOn(test.application, "finalizeFailure");
+        const pending = test.run();
+        const interrupted = expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+        let before: ReturnType<typeof test.record>;
+        let savedBefore: typeof test.saved;
+        try {
+          await entered.promise;
+          before = structuredClone(test.record());
+          savedBefore = structuredClone(test.saved);
+          test.shutdown();
+        } finally {
+          gate.resolve();
+        }
+        await interrupted;
+        expect(before).toMatchObject({
+          status: "outcome_unknown",
+          initialDiagnostic: expect.stringContaining("ECONNRESET")
+        });
+        expect(reads).toBe(
+          boundary === "final-incomplete" || boundary === "final-failed" ? 6 : 1
+        );
+        expect(test.write).toHaveBeenCalledOnce();
+        expect(finalizer).not.toHaveBeenCalled();
+        expect(test.operation.failure).toBeNull();
+        expect(test.operation.endedAt).toBeNull();
+        expect(test.operation.providerRecovery.state).not.toBe(
+          "rollback_pending"
+        );
+        if (boundary === "positive") {
+          expect(test.record()?.status).toBe("confirmed");
+          expect(test.saved.at(-1)?.status).toBe("confirmed");
+        } else {
+          expect(test.record()).toEqual(before);
+          expect(test.saved).toEqual(savedBefore);
+          expect(test.recovery.unresolved()).toEqual([before]);
+        }
+      }
+    );
+
     it.each(["delay", "prepared", "validation"] as const)(
       "prevents the retry when shutdown wins during %s",
       async (boundary) => {

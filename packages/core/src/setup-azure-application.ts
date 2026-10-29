@@ -240,6 +240,7 @@ export async function resolveAzureAutoSetupApplication({
       stderr: "App Registration owners were not read."
     };
     for (let attempt = 1; attempt <= APP_PROPAGATION_ATTEMPTS; attempt++) {
+      ports.assertActive();
       result = await runAz(buildAppOwnerListArgs({ appId }));
       const succeeded = result.code === 0 || result.code === "0";
       if (
@@ -250,6 +251,7 @@ export async function resolveAzureAutoSetupApplication({
       ) {
         return result;
       }
+      ports.assertActive();
       const detail = result.stderr || result.stdout;
       if (
         !(
@@ -277,12 +279,14 @@ export async function resolveAzureAutoSetupApplication({
       stderr: "App Registration tags were not read."
     };
     for (let attempt = 1; attempt <= APP_PROPAGATION_ATTEMPTS; attempt++) {
+      ports.assertActive();
       result = await runAz(buildAppTagShowArgs({ appId }));
       const succeeded = result.code === 0 || result.code === "0";
       const tags = succeeded ? parseAppTags(result.stdout) : null;
       if (tags && missingRequiredAppTags(tags, requiredTags).length === 0) {
         return result;
       }
+      ports.assertActive();
       const detail = result.stderr || result.stdout;
       if (
         !(
@@ -847,7 +851,7 @@ export async function resolveAzureAutoSetupApplication({
               target: ownerMutationTarget,
               providerIdempotencyKey: ownerMutationTarget,
               // Stop applies to the logical mutation, not propagation retries.
-              // The recovery port still fences runtime shutdown on every request.
+              // Recovery fences each write; the propagation readers fence each read.
               beforeMutation:
                 attempt === 1 ?
                   () => stopBoundary("before-app-registration-owner-add")
