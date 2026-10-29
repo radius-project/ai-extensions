@@ -1,3 +1,5 @@
+export const AWS_TRUST_SUBJECTS_VARIABLE = "AWS_TRUST_SUBJECTS";
+
 export interface SetupProviderConfigurationInput {
   clientId?: string;
   tenantId?: string;
@@ -12,6 +14,8 @@ export interface SetupProviderConfigurationInput {
   accountId?: string;
   vpcId?: string;
   subnetIds?: string;
+  // AWS only: the GitHub OIDC subjects setup added to the role's trust.
+  trustSubjects?: readonly string[];
 }
 
 export interface SetupProviderCredentialPorts {
@@ -157,6 +161,14 @@ export async function applySetupProviderConfiguration(
   await ports.setEnvironmentVariable("RADIUS_VPC_ID", data.vpcId);
   await ports.setEnvironmentVariable("RADIUS_SUBNET_IDS", data.subnetIds);
   await ports.setEnvironmentVariable("KUBERNETES_NAMESPACE", data.namespace);
+  // The exact subjects setup trusted, so environment deletion removes those even
+  // after the repository is renamed.
+  if (data.trustSubjects && data.trustSubjects.length > 0) {
+    await ports.setEnvironmentVariable(
+      AWS_TRUST_SUBJECTS_VARIABLE,
+      JSON.stringify(data.trustSubjects)
+    );
+  }
   if (!status.credentialsComplete) {
     ports.report({ kind: "credentials-missing", provider: "aws" });
   }

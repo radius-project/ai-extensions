@@ -112,11 +112,13 @@ export function cloudConsoleUrl(id: string): string {
     : awsConsoleUrl(id);
 }
 
-// "View in AWS console" or "View in Azure portal", named from where the link
-// actually goes; a URL from neither console keeps the generic label.
-function viewInLabel(url: string): string {
-  const name = consoleNameForUrl(url);
-  return name ? `View in ${name}` : "View in portal";
+// The producer's portal link keeps its generic "View in portal" label, as it
+// always has for Azure. Only an AWS console link is named, since AWS links are
+// new and "portal" is the Azure term.
+function producerLinkLabel(url: string): string {
+  return consoleNameForUrl(url) === "AWS console" ?
+      "View in AWS console"
+    : "View in portal";
 }
 
 function definitionUrl(settings: GraphSettings, data: GraphNodeData): string {
@@ -159,7 +161,12 @@ function cloudRows(data: GraphNodeData): DetailRow[] {
     const href = producerUrl || consoleUrl;
     const label =
       name || (type ? type.split("/").pop() || "" : "") || "resource";
-    const consoleName = consoleNameForUrl(href) || "portal";
+    // An Azure resource keeps its "in Azure portal" label whichever link the
+    // producer supplied; an AWS one is named from where its link goes.
+    const consoleName =
+      id.startsWith("/subscriptions/") ? "Azure portal" : (
+        consoleNameForUrl(href) || "portal"
+      );
     rows.push(externalRow("link", `${label} in ${consoleName}`, href, false));
   }
   return rows;
@@ -241,12 +248,22 @@ export function buildDetailRows(
   }
   if (safeExternalUrl(data.portalUrl)) {
     rows.push(
-      externalRow("link", viewInLabel(data.portalUrl), data.portalUrl, false)
+      externalRow(
+        "link",
+        producerLinkLabel(data.portalUrl),
+        data.portalUrl,
+        false
+      )
     );
   }
-  const cloudIdUrl = data.cloudId ? cloudConsoleUrl(data.cloudId) : "";
+  const cloudId = data.cloudId || "";
+  const cloudIdUrl = cloudId ? cloudConsoleUrl(cloudId) : "";
   if (cloudIdUrl) {
-    rows.push(externalRow("link", viewInLabel(cloudIdUrl), cloudIdUrl, false));
+    // cloudConsoleUrl links an ARM ID to the Azure portal and anything else it
+    // recognizes to the AWS console.
+    const consoleName =
+      cloudId.startsWith("/subscriptions/") ? "Azure portal" : "AWS console";
+    rows.push(externalRow("link", `View in ${consoleName}`, cloudIdUrl, false));
   }
   rows.push(...cloudRows(data));
   if (rows.length === 0) rows.push({ kind: "empty" });

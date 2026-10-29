@@ -5,7 +5,6 @@ import {
   type DiscoveryDependencies,
   type DiscoveryRequest
 } from "../services/discovery.js";
-import { listAwsRoles } from "../services/aws-discovery.js";
 
 // Shaped exactly like the `runCliCommand` result in `server.ts`. Reproduced
 // structurally rather than imported because that interface is module-local to
@@ -187,28 +186,6 @@ export async function handleDiscover(
   }
 }
 
-// IAM roles the signed-in AWS identity can see, for the wizard's
-// `use an existing role…` picker. Each lists the GitHub subjects it trusts so
-// the picker can say which repositories already use it.
-export async function handleListAwsRoles(
-  context: CanvasRequestContext,
-  dependencies: AzureDiscoveryDependencies
-): Promise<void> {
-  try {
-    const roles = await listAwsRoles(
-      { accountId: context.url.searchParams.get("accountId") || "" },
-      dependencies
-    );
-    context.json(200, { roles });
-  } catch (e) {
-    context.json(400, {
-      error: "Failed to list IAM roles: " + errorMessage(e),
-      code: "aws-role-list-failed",
-      roles: []
-    });
-  }
-}
-
 export function createAzureDiscoveryRoutes(
   dependencies: AzureDiscoveryDependencies
 ): RouteHandlerRegistry {
@@ -217,8 +194,6 @@ export function createAzureDiscoveryRoutes(
       handleListAzureAppRegistrations(context, dependencies),
     "GET /api/azure-app-serves-repos": (context) =>
       handleAzureAppServesRepos(context, dependencies),
-    "POST /api/discover": (context) => handleDiscover(context, dependencies),
-    "GET /api/list-aws-roles": (context) =>
-      handleListAwsRoles(context, dependencies)
+    "POST /api/discover": (context) => handleDiscover(context, dependencies)
   };
 }

@@ -92,7 +92,22 @@ afterEach(() => {
 });
 
 vi.mock("./gh.js", () => ({
-  cliExec: () => {},
+  // Answers `gh api .../contents/<path>?ref=<branch> --jq .sha` from the
+  // committed files, the way the branch publisher checks for a workflow.
+  cliExec: (
+    _command: string,
+    args: string[],
+    _options: unknown,
+    callback: (error: Error | null, stdout: string) => void
+  ) => {
+    const match = /^\/repos\/[^/]+\/[^/]+\/contents\/(.+)\?ref=(.+)$/.exec(
+      args[1] ?? ""
+    );
+    const files =
+      match ? h.committed[decodeURIComponent(match[2] ?? "")] : null;
+    const present = !!(match && files && (match[1] ?? "") in files);
+    callback(present ? null : new Error("HTTP 404"), present ? "abc123\n" : "");
+  },
   fetchFileFromRepoResult: async (repo: string, path: string, ref: string) => {
     h.fetches.push({ repo, path, ref });
     const file = path.split("/").pop();
@@ -133,7 +148,8 @@ const {
   deployWorkflowFiles,
   deleteApplicationWorkflowFiles,
   deleteEnvironmentWorkflowFiles,
-  workflowTemplates
+  workflowTemplates,
+  ensureDeployWorkflowsOnBranch
 } = await import("./infra.js");
 const { hasVerificationOperationMarker } =
   await import("./verification-run-identity.js");
@@ -1408,5 +1424,146 @@ describe("with the AWS switch on", () => {
     expect(
       Object.keys(h.committed.main).filter((path) => path.includes("aws"))
     ).toEqual([]);
+  });
+});
+
+describe("publishing deploy workflows to a working branch", () => {
+  beforeEach(() => {
+    h.committed = {};
+    h.commits = [];
+    h.failCommits = false;
+    h.noopCommits = false;
+    h.upstream = { ...BASE_UPSTREAM };
+    expireTemplateCache();
+  });
+
+  it.each([
+    [
+      true,
+      [
+        "run-rad-commands.yml",
+        "run-rad-commands-azure.yml",
+        "run-rad-commands-aws.yml"
+      ]
+    ],
+    [false, ["run-rad-commands.yml", "run-rad-commands-azure.yml"]]
+  ])(
+    "commits every workflow the dispatch needs (AWS switch on: %s)",
+    async (includeAws, expected) => {
+      const written: string[] = [];
+      const log = vi.fn();
+
+      await ensureDeployWorkflowsOnBranch(
+        includeAws,
+        "octo/shop",
+        "feature/x",
+        "dev",
+        log,
+        (file) => written.push(file)
+      );
+
+      expect(written).toEqual(expected);
+      expect(h.commits.map(({ branch }) => branch)).toEqual(
+        expected.map(() => "feature/x")
+      );
+      expect(h.commits[0]?.message).toBe(
+        "Add Radius deploy workflow (run-rad-commands.yml) to feature/x for worktree-consistent deploy"
+      );
+      expect(
+        h.committed["feature/x"]?.[".github/workflows/run-rad-commands.yml"]
+      ).toContain(
+        includeAws ? "run-rad-commands-aws.yml" : "run-rad-commands-azure.yml"
+      );
+      expect(
+        /^ {2}aws:/m.test(
+          h.committed["feature/x"]?.[
+            ".github/workflows/run-rad-commands.yml"
+          ] ?? ""
+        )
+      ).toBe(includeAws);
+      expect(log).toHaveBeenCalledWith(
+        `Publishing deploy workflow(s) to branch "feature/x": ${expected.join(", ")}`
+      );
+    }
+  );
+
+  it("adds only the AWS provider workflow to a branch that has the others", async () => {
+    h.committed["feature/x"] = {
+      ".github/workflows/run-rad-commands.yml": "existing",
+      ".github/workflows/run-rad-commands-azure.yml": "existing"
+    };
+    const written: string[] = [];
+
+    await ensureDeployWorkflowsOnBranch(
+      true,
+      "octo/shop",
+      "feature/x",
+      "dev",
+      () => {},
+      (file) => written.push(file)
+    );
+
+    expect(written).toEqual(["run-rad-commands-aws.yml"]);
+    expect(
+      h.committed["feature/x"]?.[".github/workflows/run-rad-commands.yml"]
+    ).toBe("existing");
+  });
+
+  it("leaves a branch that already has every workflow alone", async () => {
+    h.committed["feature/x"] = Object.fromEntries(
+      deployWorkflowFiles(true).map((file) => [
+        `.github/workflows/${file}`,
+        "existing"
+      ])
+    );
+    const log = vi.fn();
+
+    await ensureDeployWorkflowsOnBranch(
+      true,
+      "octo/shop",
+      "feature/x",
+      "dev",
+      log,
+      () => {}
+    );
+
+    expect(h.commits).toEqual([]);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["", "feature/x"],
+    ["octo/shop", ""]
+  ])(
+    "does nothing without a repository and branch (%j, %j)",
+    async (repo, branch) => {
+      await ensureDeployWorkflowsOnBranch(
+        true,
+        repo,
+        branch,
+        "dev",
+        () => {
+          throw new Error("unexpected log");
+        },
+        () => {}
+      );
+      expect(h.commits).toEqual([]);
+    }
+  );
+
+  it("reports only the files a commit actually wrote", async () => {
+    h.noopCommits = true;
+    const written: string[] = [];
+
+    await ensureDeployWorkflowsOnBranch(
+      false,
+      "octo/shop",
+      "feature/x",
+      "dev",
+      () => {},
+      (file) => written.push(file)
+    );
+
+    expect(written).toEqual([]);
   });
 });

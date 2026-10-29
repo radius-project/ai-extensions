@@ -117,7 +117,7 @@ export interface EnvironmentOperationWorkflowDependencies {
     request: Record<string, unknown>,
     executor: SelectedGhExecutor
   ): Promise<
-    | { ok: true; roleArn: string }
+    | { ok: true; roleArn: string; subjects: readonly string[] }
     | { ok: false; status: number; error: string; code: string }
   >;
   instanceId: string;
@@ -348,7 +348,11 @@ export function createSetupCoordinatorPorts(
         executor
       );
       return result.ok ?
-          { kind: "completed", roleArn: result.roleArn }
+          {
+            kind: "completed",
+            roleArn: result.roleArn,
+            trustSubjects: result.subjects
+          }
         : {
             kind: "failed",
             error: {

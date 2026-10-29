@@ -16,6 +16,8 @@ const ROLE = "radius-deploy-octo-shop";
 const ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role/${ROLE}`;
 const DEV = "repo:octo/shop:environment:dev";
 const PROD = "repo:octo/shop:environment:prod";
+// The ID-based form a repository without immutable subjects also presents.
+const DEV_ID = "repository_owner_id:11:repository_id:22:environment:dev";
 
 const ok = (stdout: unknown = ""): AwsCommandResult => ({
   code: 0,
@@ -36,12 +38,17 @@ const request: AwsDeployIdentityRequest = {
   cluster: "shop",
   roleName: ROLE,
   existingRoleArn: "",
-  subject: DEV
+  subjects: [DEV]
 };
+
+const ROLE_CREATED_AT = "2026-10-01T00:00:00+00:00";
+const entryCreatedAt = (createdAt: string) =>
+  ok({ accessEntry: { principalArn: ROLE_ARN, createdAt } });
 
 const managedRole = (subjects: string[]) => ({
   Role: {
     Arn: ROLE_ARN,
+    CreateDate: ROLE_CREATED_AT,
     AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects),
     Tags: [
       { Key: "radius-managed", Value: "true" },
@@ -50,7 +57,8 @@ const managedRole = (subjects: string[]) => ({
   }
 });
 
-type Script = Record<string, AwsCommandResult>;
+// A list answers successive calls in order, repeating its last entry.
+type Script = Record<string, AwsCommandResult | AwsCommandResult[]>;
 
 // Answers each `aws` command by its first three words, and throws on any
 // command the scenario did not script.
@@ -66,7 +74,13 @@ function fakeAws(script: Script) {
       async runAws(args: string[]) {
         calls.push(args);
         const key = args.slice(0, 2).join(" ");
-        const result = script[key];
+        const scripted = script[key];
+        const result =
+          Array.isArray(scripted) ?
+            scripted.length > 1 ?
+              scripted.shift()
+            : scripted[0]
+          : scripted;
         if (!result) throw new Error(`unexpected aws ${args.join(" ")}`);
         return result;
       },
@@ -154,10 +168,13 @@ describe("setupAwsDeployIdentity", () => {
       ...existingProvider,
       "iam update-assume-role-policy": ok(),
       "eks create-access-entry": fail("ResourceInUseException: exists"),
+      "eks describe-access-entry": entryCreatedAt("2026-10-02T00:00:00Z"),
       "eks associate-access-policy": fail("ResourceInUseException: exists")
     });
     const result = await setupAwsDeployIdentity(request, aws.ports);
     expect(result).toEqual({ ok: true, roleArn: ROLE_ARN, roleCreated: false });
+    // The entry is newer than the role, so it is the role's own and stays.
+    expect(aws.find("eks delete-access-entry")).toBeUndefined();
     expect(aws.steps).toContain(
       `✅ Reusing the Radius-managed IAM role ${ROLE}`
     );
@@ -171,6 +188,62 @@ describe("setupAwsDeployIdentity", () => {
       JSON.parse(update[update.indexOf("--policy-document") + 1] ?? "{}")
     );
     expect(trustedGitHubSubjects(merged, ACCOUNT)).toEqual([PROD, DEV]);
+  });
+
+  it("trusts every subject the environment may present on a new role", async () => {
+    const aws = fakeAws(happyPath);
+    const result = await setupAwsDeployIdentity(
+      { ...request, subjects: [DEV, DEV_ID] },
+      aws.ports
+    );
+    expect(result).toEqual({ ok: true, roleArn: ROLE_ARN, roleCreated: true });
+    expect(aws.steps).toContain(
+      `ℹ️ Deploy identity will trust ${DEV}, ${DEV_ID}`
+    );
+    const createRole = aws.find("iam create-role") ?? [];
+    const trust = parsePolicyDocument(
+      JSON.parse(
+        createRole[createRole.indexOf("--assume-role-policy-document") + 1] ??
+          "{}"
+      )
+    );
+    expect(trustedGitHubSubjects(trust, ACCOUNT)).toEqual([DEV, DEV_ID]);
+  });
+
+  it("adds only the subjects a reused role does not trust yet", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-role": ok(managedRole([PROD, DEV])),
+      ...existingProvider,
+      "iam update-assume-role-policy": ok()
+    });
+    const result = await setupAwsDeployIdentity(
+      { ...request, subjects: [DEV, DEV_ID] },
+      aws.ports
+    );
+    expect(result).toMatchObject({ ok: true });
+    expect(aws.steps).toContain(
+      "ℹ️ Keeping 1 subject(s) already trusted by this role"
+    );
+    const update = aws.find("iam update-assume-role-policy") ?? [];
+    const merged = parsePolicyDocument(
+      JSON.parse(update[update.indexOf("--policy-document") + 1] ?? "{}")
+    );
+    expect(trustedGitHubSubjects(merged, ACCOUNT)).toEqual([PROD, DEV, DEV_ID]);
+  });
+
+  it("leaves a role that already trusts every subject unchanged", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-role": ok(managedRole([DEV, DEV_ID])),
+      ...existingProvider
+    });
+    const result = await setupAwsDeployIdentity(
+      { ...request, subjects: [DEV, DEV_ID] },
+      aws.ports
+    );
+    expect(result).toMatchObject({ ok: true });
+    expect(aws.find("iam update-assume-role-policy")).toBeUndefined();
   });
 
   it("adds to a picked existing role without requiring Radius tags", async () => {
@@ -510,15 +583,209 @@ describe("setupAwsDeployIdentity failure paths", () => {
     ],
     [
       "the deploy permission policy cannot be attached",
-      { ...happyPath, "iam put-role-policy": fail("LimitExceeded") },
+      {
+        ...happyPath,
+        "iam put-role-policy": fail("MalformedPolicyDocument: bad")
+      },
       "aws-role-policy-failed",
-      "Failed to attach the deploy permission policy: LimitExceeded"
+      "Failed to attach the deploy permission policy: MalformedPolicyDocument"
     ]
   ])("fails when %s", async (_label, script, code, message) => {
     const aws = fakeAws(script);
     const result = await setupAwsDeployIdentity(request, aws.ports);
     expect(result).toMatchObject({ ok: false, code });
     expect(!result.ok && result.message).toContain(message);
+  });
+
+  describe("a role at IAM's size limits", () => {
+    it.each([[[DEV]], [[DEV, DEV_ID]]])(
+      "reports a full trust policy with next steps and writes nothing else (subjects %j)",
+      async (subjects) => {
+        const aws = fakeAws({
+          ...happyPath,
+          "iam get-role": ok(managedRole([PROD])),
+          ...existingProvider,
+          "iam update-assume-role-policy": fail(
+            "An error occurred (LimitExceeded) when calling the UpdateAssumeRolePolicy operation: Cannot exceed quota for ACLSizePerRole: 2048"
+          )
+        });
+        const result = await setupAwsDeployIdentity(
+          { ...request, subjects },
+          aws.ports
+        );
+        expect(result).toMatchObject({
+          ok: false,
+          code: "aws-role-limit-exceeded",
+          created: []
+        });
+        const message = !result.ok ? result.message : "";
+        expect(message).toContain(
+          `IAM role ${ROLE} cannot trust another environment`
+        );
+        expect(message).toContain("ACLSizePerRole: 2048");
+        expect(message).toContain(
+          "Delete an environment that no longer uses this role"
+        );
+        expect(message).toContain("choose another role");
+        expect(message).toContain(
+          '"Role trust policy length" quota (up to 8,192 characters)'
+        );
+        expect(aws.find("iam put-role-policy")).toBeUndefined();
+      }
+    );
+
+    it("reports full inline policies after naming the trust it already added", async () => {
+      const aws = fakeAws({
+        ...happyPath,
+        "iam get-role": ok(managedRole([PROD])),
+        ...existingProvider,
+        "iam update-assume-role-policy": ok(),
+        "iam put-role-policy": fail(
+          "An error occurred (LimitExceeded) when calling the PutRolePolicy operation: Maximum policy size of 10240 bytes exceeded for role radius-deploy-octo-shop"
+        )
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "aws-role-limit-exceeded",
+        created: [`trust for ${DEV} on ${ROLE}`]
+      });
+      const message = !result.ok ? result.message : "";
+      expect(message).toContain(
+        `IAM role ${ROLE} cannot hold another environment's permission policy`
+      );
+      expect(message).toContain(
+        "10,240-character limit, which cannot be raised"
+      );
+      expect(message).toContain("Maximum policy size of 10240 bytes exceeded");
+      expect(message).toContain(
+        "Delete an environment that no longer uses this role, or choose another role."
+      );
+      expect(aws.find("eks create-access-entry")).toBeUndefined();
+    });
+  });
+
+  describe("an access entry that already exists", () => {
+    const inUse = fail(
+      "ResourceInUseException: The specified access entry resource is already in use on this cluster."
+    );
+
+    it("replaces the entry left by an earlier role when setup created the role", async () => {
+      const aws = fakeAws({
+        ...happyPath,
+        "eks create-access-entry": [inUse, ok()],
+        "eks delete-access-entry": ok()
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toEqual({
+        ok: true,
+        roleArn: ROLE_ARN,
+        roleCreated: true
+      });
+      expect(aws.find("eks describe-access-entry")).toBeUndefined();
+      expect(aws.find("eks delete-access-entry")).toEqual(
+        expect.arrayContaining([
+          "--principal-arn",
+          ROLE_ARN,
+          "--region",
+          "us-west-2"
+        ])
+      );
+      expect(
+        aws.calls.filter((args) => args[1] === "create-access-entry")
+      ).toHaveLength(2);
+      expect(aws.steps).toContain(
+        `ℹ️ Deleted the access entry on shop left by an earlier IAM role named ${ROLE}.`
+      );
+      expect(aws.steps.at(-1)).toBe(
+        "✅ Granted the role cluster-admin on shop."
+      );
+    });
+
+    it("replaces an entry older than an existing role", async () => {
+      const aws = fakeAws({
+        ...happyPath,
+        "iam get-role": ok(managedRole([DEV])),
+        ...existingProvider,
+        "eks create-access-entry": [inUse, ok()],
+        "eks describe-access-entry": entryCreatedAt("2026-09-01T00:00:00.000Z"),
+        "eks delete-access-entry": ok()
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({ ok: true, roleCreated: false });
+      expect(aws.find("eks delete-access-entry")).toBeDefined();
+      expect(aws.steps).toContain(
+        `ℹ️ Deleted the access entry on shop left by an earlier IAM role named ${ROLE}.`
+      );
+    });
+
+    it.each([
+      ["the entry cannot be read", fail("AccessDeniedException")],
+      ["the entry has no creation time", ok({ accessEntry: {} })]
+    ])("does not report success when %s", async (_label, describeEntry) => {
+      const aws = fakeAws({
+        ...happyPath,
+        "iam get-role": ok(managedRole([DEV])),
+        ...existingProvider,
+        "eks create-access-entry": inUse,
+        "eks describe-access-entry": describeEntry
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "aws-access-entry-unverified"
+      });
+      expect(!result.ok && result.message).toContain(
+        `aws eks delete-access-entry --cluster-name shop --principal-arn ${ROLE_ARN} --region us-west-2`
+      );
+      expect(aws.find("eks delete-access-entry")).toBeUndefined();
+      expect(aws.find("eks associate-access-policy")).toBeUndefined();
+    });
+
+    it("does not report success when a role without a creation time finds an entry", async () => {
+      const role = managedRole([DEV]);
+      const aws = fakeAws({
+        ...happyPath,
+        "iam get-role": ok({ Role: { ...role.Role, CreateDate: undefined } }),
+        ...existingProvider,
+        "eks create-access-entry": inUse,
+        "eks describe-access-entry": entryCreatedAt("2026-10-02T00:00:00Z")
+      });
+      expect(await setupAwsDeployIdentity(request, aws.ports)).toMatchObject({
+        ok: false,
+        code: "aws-access-entry-unverified"
+      });
+    });
+
+    it("stops when the stale entry cannot be deleted", async () => {
+      const aws = fakeAws({
+        ...happyPath,
+        "eks create-access-entry": inUse,
+        "eks delete-access-entry": fail("AccessDeniedException: denied")
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "aws-access-entry-failed"
+      });
+      expect(!result.ok && result.message).toContain(
+        `left by an earlier IAM role named ${ROLE}, and Radius could not delete it: AccessDeniedException: denied`
+      );
+    });
+
+    it("stops when an entry is still in use after the stale one was deleted", async () => {
+      const aws = fakeAws({
+        ...happyPath,
+        "eks create-access-entry": inUse,
+        "eks delete-access-entry": ok()
+      });
+      const result = await setupAwsDeployIdentity(request, aws.ports);
+      expect(result).toMatchObject({
+        ok: false,
+        code: "aws-access-entry-failed"
+      });
+      expect(aws.find("eks associate-access-policy")).toBeUndefined();
+    });
   });
 
   it("does not write the role's trust when it already trusts the environment", async () => {
@@ -637,7 +904,7 @@ describe("setupAwsDeployIdentity safety gates", () => {
     });
     expect(
       await removeAwsEnvironmentFromRole(
-        { roleArn: ROLE_ARN, environment: "dev", subject: DEV },
+        { roleArn: ROLE_ARN, environment: "dev", subjects: [DEV] },
         removal.ports
       )
     ).toMatchObject({ ok: false });
@@ -654,7 +921,7 @@ describe("setupAwsDeployIdentity safety gates", () => {
     const failing = fakeAws({
       ...happyPath,
       "iam create-open-id-connect-provider": fail("EntityAlreadyExists"),
-      "iam put-role-policy": fail("LimitExceeded")
+      "iam put-role-policy": fail("MalformedPolicyDocument")
     });
     expect(await setupAwsDeployIdentity(request, failing.ports)).toMatchObject({
       ok: false,
@@ -800,7 +1067,7 @@ describe("setupAwsDeployIdentity safety gates", () => {
 });
 
 describe("removeAwsEnvironmentFromRole", () => {
-  const removal = { roleArn: ROLE_ARN, environment: "dev", subject: DEV };
+  const removal = { roleArn: ROLE_ARN, environment: "dev", subjects: [DEV] };
   const signedIn: Script = {
     "sts get-caller-identity": ok({ Account: ACCOUNT })
   };
@@ -824,6 +1091,51 @@ describe("removeAwsEnvironmentFromRole", () => {
     );
     expect(trustedGitHubSubjects(remaining, ACCOUNT)).toEqual([PROD]);
     expect(aws.calls.map((args) => args[1])).not.toContain("delete-role");
+  });
+
+  it("removes every subject the environment recorded in one update", async () => {
+    const aws = fakeAws({
+      ...signedIn,
+      "iam get-role": ok(managedRole([DEV, PROD, DEV_ID])),
+      "iam update-assume-role-policy": ok(),
+      "iam delete-role-policy": ok()
+    });
+    const result = await removeAwsEnvironmentFromRole(
+      { ...removal, subjects: [DEV, DEV_ID] },
+      aws.ports
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      removed: [
+        `trust subject ${DEV}`,
+        `trust subject ${DEV_ID}`,
+        "policy radius-deploy-dev"
+      ]
+    });
+    expect(
+      aws.calls.filter((args) => args[1] === "update-assume-role-policy")
+    ).toHaveLength(1);
+    const update = aws.find("iam update-assume-role-policy") ?? [];
+    const remaining = parsePolicyDocument(
+      JSON.parse(update[update.indexOf("--policy-document") + 1] ?? "{}")
+    );
+    expect(trustedGitHubSubjects(remaining, ACCOUNT)).toEqual([PROD]);
+  });
+
+  it("names only the subjects it removed when one was already gone", async () => {
+    const aws = fakeAws({
+      ...signedIn,
+      "iam get-role": ok(managedRole([DEV_ID, PROD])),
+      "iam update-assume-role-policy": fail("AccessDenied")
+    });
+    const result = await removeAwsEnvironmentFromRole(
+      { ...removal, subjects: [DEV, DEV_ID] },
+      aws.ports
+    );
+    expect(result).toMatchObject({ ok: false });
+    expect(!result.ok && result.message).toContain(
+      `Failed to remove ${DEV_ID} from the role's trust policy`
+    );
   });
 
   it("reports a role that is already gone and continues", async () => {

@@ -469,7 +469,8 @@ describe("runEnvironmentDeletion — AWS", () => {
     expect(ports.removeAwsEnvironmentAccess).toHaveBeenCalledWith({
       repo: "octo/app",
       environment: "dev",
-      roleArn: ROLE_ARN
+      roleArn: ROLE_ARN,
+      trustSubjects: []
     });
     expect(ports.runAz).not.toHaveBeenCalled();
     expect(op.stages.map((s: { id: string }) => s.id)).toEqual([
@@ -487,6 +488,46 @@ describe("runEnvironmentDeletion — AWS", () => {
     expect(labels).toContain(
       "Left IAM role radius-deploy-octo-app and the account's GitHub identity provider in place. The role serves every environment in this repository. Remove it in the AWS console if nothing needs it."
     );
+  });
+
+  it("passes the trust subjects setup recorded to the role cleanup", async () => {
+    const op = makeAwsOp();
+    op.request = {
+      ...op.request,
+      trustSubjects: ["repo:octo/app:environment:dev", 7, "id-subject"]
+    };
+    const removeAwsEnvironmentAccess = vi.fn(async () => ({
+      ok: true as const,
+      removed: [],
+      kept: []
+    }));
+    await runEnvironmentDeletion(op, makePorts({ removeAwsEnvironmentAccess }));
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        trustSubjects: ["repo:octo/app:environment:dev", "id-subject"]
+      })
+    );
+  });
+
+  it.each([
+    ["arn:aws:iam::123456789012:role/team/deploy", "Left IAM role deploy "],
+    ["arn:aws:iam::1:role/team/x", "Left IAM role arn:aws:iam::1:role/team/x "]
+  ])("names the kept role from %s", async (roleArn, label) => {
+    const op = makeAwsOp();
+    op.request = { ...op.request, roleArn };
+    await runEnvironmentDeletion(
+      op,
+      makePorts({
+        removeAwsEnvironmentAccess: vi.fn(async () => ({
+          ok: true as const,
+          removed: [],
+          kept: []
+        }))
+      })
+    );
+    expect(
+      op.steps.some((step: { label: string }) => step.label.startsWith(label))
+    ).toBe(true);
   });
 
   it("reports a role that held nothing for the environment", async () => {

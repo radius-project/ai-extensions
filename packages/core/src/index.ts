@@ -44,6 +44,7 @@ export {
 } from "./setup-github-environment-provenance.js";
 
 export {
+  AWS_TRUST_SUBJECTS_VARIABLE,
   applySetupProviderConfiguration,
   azureRoleScope,
   cloudCredentialsComplete,

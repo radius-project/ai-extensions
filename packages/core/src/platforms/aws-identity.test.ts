@@ -10,6 +10,8 @@ import {
   checkAwsCliVersion,
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
+  eksAcceptsAccessEntries,
+  eksAuthenticationMode,
   githubOidcProviderArn,
   isAwsAccountId,
   isAwsRegion,
@@ -468,5 +470,34 @@ describe("permissions and provenance", () => {
       )
     ).toBe(false);
     expect(isRadiusManagedRole(null, "octo/shop")).toBe(false);
+  });
+});
+
+describe("EKS authentication mode", () => {
+  it.each([
+    [{ cluster: { accessConfig: { authenticationMode: "API" } } }, "API"],
+    [
+      {
+        cluster: { accessConfig: { authenticationMode: "API_AND_CONFIG_MAP" } }
+      },
+      "API_AND_CONFIG_MAP"
+    ],
+    [{ cluster: { accessConfig: { authenticationMode: "" } } }, "CONFIG_MAP"],
+    [{ cluster: { accessConfig: { authenticationMode: 7 } } }, "CONFIG_MAP"],
+    [{ cluster: { accessConfig: {} } }, "CONFIG_MAP"],
+    [{ cluster: { accessConfig: null } }, "CONFIG_MAP"],
+    [{ cluster: {} }, "CONFIG_MAP"],
+    [{ cluster: null }, "CONFIG_MAP"],
+    [{}, "CONFIG_MAP"],
+    [null, "CONFIG_MAP"],
+    ["text", "CONFIG_MAP"]
+  ])("reads %j as %s", (output, mode) => {
+    expect(eksAuthenticationMode(output)).toBe(mode);
+  });
+
+  it("accepts access entries in every mode except CONFIG_MAP", () => {
+    expect(eksAcceptsAccessEntries("API")).toBe(true);
+    expect(eksAcceptsAccessEntries("API_AND_CONFIG_MAP")).toBe(true);
+    expect(eksAcceptsAccessEntries("CONFIG_MAP")).toBe(false);
   });
 });

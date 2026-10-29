@@ -33,7 +33,8 @@ import {
   fetchFileFromRepo,
   getDefaultBranch,
   getBranchHeadSha,
-  commitFileToRepo
+  commitFileToRepo,
+  cliExec
 } from "./gh.js";
 
 // Removed from target repos so it cannot double-trigger beside the dispatcher.
@@ -667,6 +668,70 @@ export async function generateDeleteWorkflow(
     );
   }
   return generated;
+}
+
+// Ensure the deploy workflow files exist on `branch` so that dispatching
+// `run-rad-commands.yml` with `--ref branch` resolves — both the dispatcher
+// itself and the provider workflow it pulls in via a local-path `uses:`. The
+// env-creation flow commits these to the repo's DEFAULT branch only (the GitHub
+// contents API commit is branch-less), so a feature/worktree branch usually
+// lacks them. Missing files are generated from the pinned upstream templates and
+// committed onto `branch`; existing ones are left untouched. Best-effort per
+// file — a commit failure is surfaced by the caller, not thrown here.
+export async function ensureDeployWorkflowsOnBranch(
+  includeAws: boolean,
+  repo: string,
+  branch: string,
+  envName: string,
+  log: (message: string) => void,
+  onWorkflowWritten: (file: string) => void
+): Promise<void> {
+  if (!repo || !branch) return;
+  // A `--ref` dispatch needs the dispatcher and every provider workflow it
+  // `uses:` on the branch.
+  const wanted = deployWorkflowFiles(includeAws);
+  const existsOnBranch = (file: string): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      cliExec(
+        "gh",
+        [
+          "api",
+          `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(
+            branch
+          )}`,
+          "--jq",
+          ".sha"
+        ],
+        { timeout: 15000 },
+        (err, stdout) => resolve(!err && stdout.trim() !== "")
+      );
+    });
+  const presence = await Promise.all(wanted.map(existsOnBranch));
+  const missing = wanted.filter((_, i) => !presence[i]);
+  if (missing.length === 0) return;
+  log(
+    'Publishing deploy workflow(s) to branch "' +
+      branch +
+      '": ' +
+      missing.join(", ")
+  );
+  const generated = await generateDeployWorkflow(envName, ".radius/app.bicep", {
+    includeAws
+  });
+  for (const file of missing) {
+    const written = await commitFileToRepo(
+      repo,
+      ".github/workflows/" + file,
+      generated[file],
+      branch,
+      "Add Radius deploy workflow (" +
+        file +
+        ") to " +
+        branch +
+        " for worktree-consistent deploy"
+    );
+    if (written) onWorkflowWritten(file);
+  }
 }
 
 export interface WorkflowTemplates {
