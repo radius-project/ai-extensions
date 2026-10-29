@@ -21,7 +21,9 @@ import {
   mergeGitHubTrustSubject,
   parseAwsRoleArn,
   parsePolicyDocument,
-  removeGitHubTrustSubject
+  removeGitHubTrustSubject,
+  trustedGitHubSubjects,
+  type PolicyDocument
 } from "@radius-project/core";
 
 // Sets up the AWS deploy identity for one environment: the account's GitHub
@@ -62,8 +64,10 @@ export interface AwsDeployIdentityRequest {
   roleName: string;
   // A role the developer picked deliberately. Radius adds to it but never owns it.
   existingRoleArn: string;
-  // The GitHub OIDC subject this environment's workflows present.
-  subject: string;
+  // Every GitHub OIDC subject this environment's workflows may present: one for
+  // a repository that uses immutable subjects, otherwise the name-based and
+  // the ID-based form. At least one.
+  subjects: readonly string[];
 }
 
 export type AwsDeployIdentityResult =
@@ -138,6 +142,26 @@ async function accessEntryOwner(
     return "unknown";
   }
   return entryCreatedAt >= roleTime ? "current role" : "earlier role";
+}
+
+// Add each subject in turn. `kept` counts the subjects the role trusted before
+// that are not among the ones being added.
+function mergeGitHubTrustSubjects(
+  existing: PolicyDocument,
+  accountId: string,
+  subjects: readonly string[]
+): { policy: PolicyDocument; kept: number; changed: boolean } {
+  let policy = existing;
+  let changed = false;
+  for (const subject of subjects) {
+    const merge = mergeGitHubTrustSubject(policy, accountId, subject);
+    policy = merge.policy;
+    changed ||= merge.changed;
+  }
+  const kept = trustedGitHubSubjects(existing, accountId).filter(
+    (subject) => !subjects.includes(subject)
+  ).length;
+  return { policy, kept, changed };
 }
 
 export async function setupAwsDeployIdentity(
@@ -282,13 +306,13 @@ export async function setupAwsDeployIdentity(
 
   // Read the existing role's trust before anything is written, so a policy
   // Radius cannot read stops setup with nothing created.
-  let trust: ReturnType<typeof mergeGitHubTrustSubject> | null = null;
+  let trust: ReturnType<typeof mergeGitHubTrustSubjects> | null = null;
   if (!roleMissing) {
     try {
-      trust = mergeGitHubTrustSubject(
+      trust = mergeGitHubTrustSubjects(
         parsePolicyDocument(role?.AssumeRolePolicyDocument),
         accountId,
-        request.subject
+        request.subjects
       );
     } catch (error) {
       return fail(
@@ -384,7 +408,8 @@ export async function setupAwsDeployIdentity(
     );
   }
 
-  ports.step(`ℹ️ Deploy identity will trust ${request.subject}`);
+  const subjectList = request.subjects.join(", ");
+  ports.step(`ℹ️ Deploy identity will trust ${subjectList}`);
 
   let roleArn: string;
   let roleCreated = false;
@@ -398,7 +423,7 @@ export async function setupAwsDeployIdentity(
       "--description",
       `Radius deploy identity for ${request.repo}`,
       "--assume-role-policy-document",
-      JSON.stringify(buildGitHubTrustPolicy(accountId, [request.subject])),
+      JSON.stringify(buildGitHubTrustPolicy(accountId, request.subjects)),
       "--tags",
       `Key=${AWS_MANAGED_TAG},Value=true`,
       `Key=${AWS_REPOSITORY_TAG},Value=${request.repo}`,
@@ -466,7 +491,7 @@ export async function setupAwsDeployIdentity(
               `Failed to update the role's trust policy: ${detail(updateTrust)}`
             );
       }
-      created.push(`trust for ${request.subject} on ${roleName}`);
+      created.push(`trust for ${subjectList} on ${roleName}`);
     }
   }
 
@@ -598,7 +623,7 @@ export async function setupAwsDeployIdentity(
 export interface AwsDeployIdentityRemovalRequest {
   roleArn: string;
   environment: string;
-  subject: string;
+  subjects: readonly string[];
 }
 
 export type AwsDeployIdentityRemovalResult =
@@ -696,35 +721,39 @@ export async function removeAwsEnvironmentFromRole(
       message: `IAM returned ${typeof role.Arn === "string" ? role.Arn : "no role ARN"} for ${request.roleArn}, so Radius did not change it.`
     };
   }
-  let trust;
+  let policy: PolicyDocument;
+  const removedSubjects: string[] = [];
   try {
-    trust = removeGitHubTrustSubject(
-      parsePolicyDocument(role.AssumeRolePolicyDocument),
-      accountId,
-      request.subject
-    );
+    policy = parsePolicyDocument(role.AssumeRolePolicyDocument);
+    for (const subject of request.subjects) {
+      const removal = removeGitHubTrustSubject(policy, accountId, subject);
+      policy = removal.policy;
+      if (removal.removed) removedSubjects.push(subject);
+    }
   } catch (error) {
     return {
       ok: false,
       message: `Could not read the trust policy of IAM role ${roleName}: ${error instanceof Error ? error.message : String(error)}`
     };
   }
-  if (trust.removed) {
+  if (removedSubjects.length > 0) {
     const update = await ports.runAws([
       "iam",
       "update-assume-role-policy",
       "--role-name",
       roleName,
       "--policy-document",
-      JSON.stringify(trust.policy)
+      JSON.stringify(policy)
     ]);
     if (!succeeded(update)) {
       return {
         ok: false,
-        message: `Failed to remove ${request.subject} from the role's trust policy: ${detail(update)}`
+        message: `Failed to remove ${removedSubjects.join(", ")} from the role's trust policy: ${detail(update)}`
       };
     }
-    removed.push(`trust subject ${request.subject}`);
+    removed.push(
+      ...removedSubjects.map((subject) => `trust subject ${subject}`)
+    );
   }
   const policyName = buildAwsEnvironmentPolicyName(request.environment);
   const deletePolicy = await ports.runAws([
