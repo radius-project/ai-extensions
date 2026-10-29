@@ -25,7 +25,8 @@ export type SetupCoordinatorStageResult =
   | { kind: "reconciling"; message?: unknown };
 
 export type SetupCoordinatorAwsResult =
-  { kind: "completed"; roleArn: string } | { kind: "failed"; error: unknown };
+  | { kind: "completed"; roleArn: string; trustSubjects: readonly string[] }
+  | { kind: "failed"; error: unknown };
 
 export type SetupCoordinatorFailure =
   | { kind: "repository-access" | "package-access" }
@@ -247,6 +248,7 @@ export async function runSetupCoordinator(
   }
   const environmentRequest = record(request.environment);
   let awsRoleArn = "";
+  let awsTrustSubjects: readonly string[] = [];
   if (target.provider === "aws" && !outstanding) {
     const aws = await ports.authorizeAws({
       ...environmentRequest,
@@ -265,12 +267,21 @@ export async function runSetupCoordinator(
       return { shouldMonitor: false };
     }
     awsRoleArn = aws.roleArn;
+    awsTrustSubjects = aws.trustSubjects;
   }
   const clientId =
     setupResult && "clientId" in setupResult ? setupResult.clientId : undefined;
   const liveContext = ports.operation().context;
   if (!awsRoleArn && typeof liveContext?.awsRoleArn === "string") {
     awsRoleArn = liveContext.awsRoleArn;
+  }
+  if (
+    awsTrustSubjects.length === 0 &&
+    Array.isArray(liveContext?.awsTrustSubjects)
+  ) {
+    awsTrustSubjects = liveContext.awsTrustSubjects.filter(
+      (subject): subject is string => typeof subject === "string"
+    );
   }
   const environmentResult = await invoke(() =>
     ports.configureEnvironment({
@@ -281,6 +292,9 @@ export async function runSetupCoordinator(
       provider: target.provider,
       operationId: target.operationId,
       ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
+      ...(awsTrustSubjects.length > 0 ?
+        { trustSubjects: awsTrustSubjects }
+      : {}),
       clientId:
         (typeof clientId === "string" && clientId) ||
         (typeof liveContext?.clientId === "string" && liveContext.clientId) ||

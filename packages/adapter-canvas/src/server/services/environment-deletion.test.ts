@@ -469,7 +469,8 @@ describe("runEnvironmentDeletion — AWS", () => {
     expect(ports.removeAwsEnvironmentAccess).toHaveBeenCalledWith({
       repo: "octo/app",
       environment: "dev",
-      roleArn: ROLE_ARN
+      roleArn: ROLE_ARN,
+      trustSubjects: []
     });
     expect(ports.runAz).not.toHaveBeenCalled();
     expect(op.stages.map((s: { id: string }) => s.id)).toEqual([
@@ -486,6 +487,25 @@ describe("runEnvironmentDeletion — AWS", () => {
     );
     expect(labels).toContain(
       "Left IAM role radius-deploy-octo-app and the account's GitHub identity provider in place. The role serves every environment in this repository. Remove it in the AWS console if nothing needs it."
+    );
+  });
+
+  it("passes the trust subjects setup recorded to the role cleanup", async () => {
+    const op = makeAwsOp();
+    op.request = {
+      ...op.request,
+      trustSubjects: ["repo:octo/app:environment:dev", 7, "id-subject"]
+    };
+    const removeAwsEnvironmentAccess = vi.fn(async () => ({
+      ok: true as const,
+      removed: [],
+      kept: []
+    }));
+    await runEnvironmentDeletion(op, makePorts({ removeAwsEnvironmentAccess }));
+    expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        trustSubjects: ["repo:octo/app:environment:dev", "id-subject"]
+      })
     );
   });
 

@@ -239,6 +239,7 @@ export async function handleDeleteEnvironment(
       tenantId: string;
       repoId: number;
       roleArn?: string;
+      trustSubjects?: string[];
     };
     try {
       target = await dependencies.discoverEnvironmentTarget(repo, envName);
@@ -302,7 +303,12 @@ export async function handleDeleteEnvironment(
       provider,
       clientId,
       tenantId: target.tenantId,
-      ...(includeAwsCleanup ? { roleArn: target.roleArn || "" } : {})
+      ...(includeAwsCleanup ?
+        {
+          roleArn: target.roleArn || "",
+          trustSubjects: target.trustSubjects
+        }
+      : {})
     };
     const started = dependencies.startOperation(op);
     if (!started.ok) {

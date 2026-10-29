@@ -17,6 +17,10 @@ import {
 } from "../test/support/azure-setup.js";
 
 const ROLE_ARN = "arn:aws:iam::111111111111:role/radius-deploy";
+const SUBJECTS = [
+  "repo:owner/repo:environment:dev",
+  "repository_owner_id:1:repository_id:2:environment:dev"
+];
 
 function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
   const target: SetupCoordinatorTarget = {
@@ -90,7 +94,7 @@ function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
     },
     authorizeAws: async (request) => {
       transcript.push(["aws", request]);
-      return { kind: "completed", roleArn: ROLE_ARN };
+      return { kind: "completed", roleArn: ROLE_ARN, trustSubjects: SUBJECTS };
     },
     configureEnvironment: async (request) => {
       transcript.push(["configure", request]);
@@ -329,6 +333,7 @@ describe("runSetupCoordinator", () => {
             ...test.target,
             operationEnvironment: "dev",
             roleArn: ROLE_ARN,
+            trustSubjects: SUBJECTS,
             clientId: ""
           }
         ]
@@ -397,13 +402,16 @@ describe("runSetupCoordinator", () => {
         })
       });
       test.mutations.push({ mutationId: "pending", kind: "github_variable" });
-      test.operation.context = { awsRoleArn: ROLE_ARN };
+      test.operation.context = {
+        awsRoleArn: ROLE_ARN,
+        awsTrustSubjects: [...SUBJECTS, 7]
+      };
       expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
         shouldMonitor: true
       });
       expect(test.transcript).toContainEqual([
         "configure",
-        expect.objectContaining({ roleArn: ROLE_ARN })
+        expect.objectContaining({ roleArn: ROLE_ARN, trustSubjects: SUBJECTS })
       ]);
     });
 
@@ -423,6 +431,9 @@ describe("runSetupCoordinator", () => {
       expect(configure).toBeDefined();
       expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
         "roleArn"
+      );
+      expect(Array.isArray(configure) && configure[1]).not.toHaveProperty(
+        "trustSubjects"
       );
     });
   });

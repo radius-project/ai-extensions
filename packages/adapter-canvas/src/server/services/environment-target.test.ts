@@ -24,10 +24,49 @@ describe("reading the environment a deletion targets", () => {
       clientId: "",
       tenantId: "",
       repoId: 0,
-      roleArn: "arn:aws:iam::123456789012:role/deployer"
+      roleArn: "arn:aws:iam::123456789012:role/deployer",
+      trustSubjects: []
     });
     expect(run.mock.calls).toEqual([["gh", VARIABLES, { timeout: 15000 }]]);
   });
+
+  it("returns the trust subjects setup recorded", async () => {
+    const subjects = [
+      "repo:octo/shop:environment:dev",
+      "repository_owner_id:7:repository_id:42:environment:dev"
+    ];
+    const run = vi.fn(async () =>
+      [
+        "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
+        `AWS_TRUST_SUBJECTS\t${JSON.stringify(subjects)}`
+      ].join("\n")
+    );
+    expect(
+      (await createEnvironmentTargetReader(run)("octo/shop", "dev one"))
+        .trustSubjects
+    ).toEqual(subjects);
+  });
+
+  it.each([
+    ["not JSON", "{"],
+    ["not a list", '"repo:octo/shop:environment:dev"'],
+    ["a list with a non-string", '["repo:octo/shop:environment:dev", 7]'],
+    ["a list with an empty subject", '[""]']
+  ])(
+    "leaves deletion to resolve the subjects when the variable is %s",
+    async (_label, value) => {
+      const run = vi.fn(async () =>
+        [
+          "AWS_ROLE_ARN\tarn:aws:iam::123456789012:role/deployer",
+          `AWS_TRUST_SUBJECTS\t${value}`
+        ].join("\n")
+      );
+      expect(
+        (await createEnvironmentTargetReader(run)("octo/shop", "dev one"))
+          .trustSubjects
+      ).toEqual([]);
+    }
+  );
 
   it("reads the repository ID for an Azure environment", async () => {
     const run = vi
@@ -42,7 +81,8 @@ describe("reading the environment a deletion targets", () => {
       clientId: "client",
       tenantId: "tenant",
       repoId: 42,
-      roleArn: ""
+      roleArn: "",
+      trustSubjects: []
     });
     expect(run).toHaveBeenLastCalledWith(
       "gh",
@@ -73,7 +113,8 @@ describe("reading the environment a deletion targets", () => {
       clientId: "",
       tenantId: "",
       repoId: 0,
-      roleArn: ""
+      roleArn: "",
+      trustSubjects: []
     });
     expect(run).toHaveBeenCalledOnce();
   });

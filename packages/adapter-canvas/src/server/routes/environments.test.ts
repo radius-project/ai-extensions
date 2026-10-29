@@ -819,7 +819,8 @@ describe("environments — delete-environment refusal ladder", () => {
             clientId: "",
             tenantId: "",
             repoId: 7,
-            roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r"
+            roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r",
+            trustSubjects: ["repo:o/r:environment:dev"]
           }),
         createOperation,
         buildDeleteStages,
@@ -850,7 +851,8 @@ describe("environments — delete-environment refusal ladder", () => {
       clientId: "",
       tenantId: "",
       repoId: 7,
-      roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r"
+      roleArn: "arn:aws:iam::123456789012:role/radius-deploy-o-r",
+      trustSubjects: ["repo:o/r:environment:dev"]
     });
     expect(recording.status).toBe(202);
     expect(JSON.parse(recording.body).operationId).toBe("op-del-aws");
