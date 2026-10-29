@@ -231,7 +231,7 @@ sequenceDiagram
   GH->>AWS: Assume deploy identity, reach the cluster
 ```
 
-Setup runs in three stages: **Authorize deploy identity** makes the AWS changes, **Configure environment** writes the GitHub environment variables (`AWS_ROLE_ARN`, `AWS_REGION`, `AWS_ACCOUNT_ID`, `AWS_EKS_CLUSTER_NAME`, `RADIUS_VPC_ID`, `RADIUS_SUBNET_IDS`, and `KUBERNETES_NAMESPACE`) and commits the AWS workflows, and **Verify credentials** runs `verify-aws.yml`. Verify assumes the deploy identity from GitHub, reaches the cluster, and checks it can push to GHCR. Every check that can't change anything runs before the first write to AWS.
+Setup runs in three stages: **Authorize deploy identity** makes the AWS changes, **Configure environment** writes the GitHub environment variables (`AWS_ROLE_ARN`, `AWS_REGION`, `AWS_ACCOUNT_ID`, `AWS_EKS_CLUSTER_NAME`, `RADIUS_VPC_ID`, `RADIUS_SUBNET_IDS`, `KUBERNETES_NAMESPACE`, and `AWS_TRUST_SUBJECTS`, a JSON array of the exact subjects setup added) and commits the AWS workflows, and **Verify credentials** runs `verify-aws.yml`. Verify assumes the deploy identity from GitHub, reaches the cluster, and checks it can push to GHCR. Every check that can't change anything runs before the first write to AWS.
 
 The AWS workflows are committed only when the repository creates its first AWS environment. Until then, the deploy dispatcher keeps its AWS job removed, so a repository that only uses Azure never sees AWS files.
 
@@ -281,7 +281,7 @@ The deployed graph shows each resource's status from the deploy, including the r
 
 **A deployment.** `delete-aws.yml` deletes the app. Radius deletes AWS resources through the AWS Cloud Control API. When it deletes an RDS database, AWS first takes a final snapshot, which needs `rds:CreateDBSnapshot`, and the permission policy grants it. The snapshot has a random name and no tags, so nothing removes it: it keeps the database's data, and AWS bills for it until someone deletes it. Letting Radius skip this snapshot is tracked as a Radius issue. The delete confirmation already names each resource it deletes.
 
-**An environment.** `delete-environment-aws.yml` refuses while apps are still deployed, and then deletes the Radius environment. After that, the canvas takes the lock on the deploy identity, removes all of this environment's subjects from the trust policy, and deletes its inline policy. Trust statements Radius didn't add stay as they are. If removing them leaves no statements, the canvas writes a single deny statement, because IAM rejects an empty trust policy. The canvas keeps the deploy identity and the GitHub identity provider, because other environments or services may use them.
+**An environment.** `delete-environment-aws.yml` refuses while apps are still deployed, and then deletes the Radius environment. After that, the canvas takes the lock on the deploy identity, removes the subjects listed in `AWS_TRUST_SUBJECTS` from the trust policy, and deletes its inline policy. The saved list means an older repository renamed since setup still loses its old name-based subject. If the variable is missing, the canvas builds the subjects from the repository's current name and IDs, so a name-based subject from before a rename stays. Trust statements Radius didn't add stay as they are. If removing the subjects leaves no statements, the canvas writes a single deny statement, because IAM rejects an empty trust policy. The canvas keeps the deploy identity and the GitHub identity provider, because other environments or services may use them.
 
 Whether it keeps the access entry depends on who owns the deploy identity:
 
@@ -360,7 +360,7 @@ The checks and their messages are in each section above: the CLI and account che
   - Role names, including the hash for long names.
   - Policy names, including the repository hash and long environment names.
   - Adding and removing subjects, keeping statements Radius didn't add, and the deny-only trust policy.
-  - One ID-based subject for a new repository, both forms for an older one, and delete removing both.
+  - One ID-based subject for a new repository, both forms for an older one, and delete removing the subjects in `AWS_TRUST_SUBJECTS`, including after a rename, or the current ones when the variable is missing.
   - The permission policy's region condition, its service-linked role limit, and the actions it leaves out.
   - Public and private subnet labels, and the two-zone rule.
   - Console links for each type, including GovCloud and China regions.
