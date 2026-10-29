@@ -1,5 +1,11 @@
 import type { CanvasRequestContext } from "../request-context.js";
-import { KUBERNETES_NAMESPACE_ERROR } from "@radius-project/core";
+import {
+  KUBERNETES_NAMESPACE_ERROR,
+  isAwsAccountId,
+  isAwsRegion,
+  isAwsRoleName,
+  parseAwsRoleArn
+} from "@radius-project/core";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import { setupStartConflictResponse } from "./operation-start-conflict.js";
 import {
@@ -530,15 +536,13 @@ export async function handleCreateOperation(
       return;
     }
   } else if (
-    !/^\d{12}$/.test(String(data.accountId || "")) ||
-    !/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(String(data.region || "")) ||
+    !isAwsAccountId(String(data.accountId || "")) ||
+    !isAwsRegion(String(data.region || "")) ||
     !String(data.cluster || "").trim() ||
     !String(data.vpcId || "").trim() ||
     !String(data.subnetIds || "").trim() ||
-    (!/^[A-Za-z0-9+=,.@_-]{1,64}$/.test(String(data.roleName || "")) &&
-      !/^arn:aws[a-z-]*:iam::\d{12}:role\/\S+$/.test(
-        String(data.existingRoleArn || "")
-      ))
+    (!isAwsRoleName(String(data.roleName || "")) &&
+      parseAwsRoleArn(String(data.existingRoleArn || "")) === null)
   ) {
     jsonError(context, 400, {
       error:

@@ -3,6 +3,12 @@
 // and Subnets is a checklist limited to that VPC that states each subnet's
 // availability zone and whether it is public. A selection must span two zones.
 
+import {
+  AWS_MINIMUM_SUBNET_ZONES,
+  awsSubnetZones,
+  defaultAwsSubnetSelection,
+  type AwsSubnet
+} from "@radius-project/core/platforms";
 import { isRecord, readString } from "../json.js";
 import type { EntryScope } from "../lifecycle.js";
 import type { BrowserContext, DomInputElement } from "../ports.js";
@@ -30,13 +36,7 @@ export interface AwsClusterInfo {
   readonly usable: boolean;
 }
 
-export interface AwsSubnetInfo {
-  readonly id: string;
-  readonly name: string;
-  readonly vpcId: string;
-  readonly availabilityZone: string;
-  readonly public: boolean;
-}
+export type AwsSubnetInfo = Readonly<AwsSubnet>;
 
 export function parseAwsClusterInfo(
   items: readonly unknown[]
@@ -71,35 +71,11 @@ export function parseAwsSubnetInfo(items: readonly unknown[]): AwsSubnetInfo[] {
   });
 }
 
-export function awsSubnetZones(
-  subnets: readonly AwsSubnetInfo[],
-  selected: readonly string[]
-): string[] {
-  const zones = new Set<string>();
-  for (const subnet of subnets) {
-    if (selected.includes(subnet.id) && subnet.availabilityZone !== "") {
-      zones.add(subnet.availabilityZone);
-    }
-  }
-  return [...zones].sort();
-}
-
-/** The VPC's private subnets, or none when they do not span two zones. */
-export function defaultAwsSubnetIds(
-  subnets: readonly AwsSubnetInfo[],
-  vpcId: string
-): string[] {
-  const privateIds = subnets
-    .filter((subnet) => subnet.vpcId === vpcId && !subnet.public)
-    .map((subnet) => subnet.id);
-  return awsSubnetZones(subnets, privateIds).length >= 2 ? privateIds : [];
-}
-
 export function awsSubnetSelectionError(
   subnets: readonly AwsSubnetInfo[],
   selected: readonly string[]
 ): string {
-  return awsSubnetZones(subnets, selected).length >= 2 ?
+  return awsSubnetZones(subnets, selected).length >= AWS_MINIMUM_SUBNET_ZONES ?
       ""
     : AWS_SUBNET_ZONES_ERROR;
 }
@@ -253,7 +229,7 @@ export function initializeAwsInfrastructure(
   };
 
   const applyVpcDefaults = (): void => {
-    selected = defaultAwsSubnetIds(subnets, currentVpcId());
+    selected = defaultAwsSubnetSelection(subnets, currentVpcId());
     noPrivateZones =
       selected.length === 0 &&
       subnets.some(

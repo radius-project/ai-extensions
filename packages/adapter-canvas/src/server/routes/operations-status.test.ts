@@ -1102,6 +1102,13 @@ describe("handleCreateOperation (POST /api/operations)", () => {
         roleName: "",
         existingRoleArn: "arn:aws:iam::123456789012:user/r"
       }
+    ],
+    [
+      "existingRoleArn ends in a slash and roleName is missing",
+      {
+        roleName: "",
+        existingRoleArn: "arn:aws:iam::123456789012:role/team/"
+      }
     ]
   ])("rejects aws setup with 400 when %s", async (_label, fields) => {
     const recording = await runCreate(

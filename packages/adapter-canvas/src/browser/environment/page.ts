@@ -40,6 +40,7 @@ import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
 import {
   KUBERNETES_NAMESPACE_ERROR,
   buildAwsDeployRoleName,
+  isAwsRoleName,
   isKubernetesNamespace
 } from "@radius-project/core/platforms";
 
@@ -579,10 +580,7 @@ export function initializeEnvironmentPage(
         showFormError(infrastructureError);
         return;
       }
-      if (
-        awsRole.existingRoleArn === "" &&
-        !/^[A-Za-z0-9+=,.@_-]{1,64}$/.test(awsRole.roleName)
-      ) {
+      if (awsRole.existingRoleArn === "" && !isAwsRoleName(awsRole.roleName)) {
         showFormError(
           "Enter an IAM role name of up to 64 letters, digits, or + = , . @ _ - characters."
         );
