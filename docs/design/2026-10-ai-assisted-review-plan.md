@@ -1,16 +1,13 @@
 # Adopting layered, AI-assisted code review in ai-extensions
 
-This document proposes automated  practices for ai-extensions. They draw on [Solving code review at Anthropic](https://claude.dev/blog/solving-code-review-at-anthropic/) and on the [Copilot features announced at GitHub Universe 2026](https://github.blog/news-insights/company-news/github-universe-2026-evolving-every-layer-of-the-stack/).
+- **Author**: Nell Shamrell-Harrington (@nellshamrell)
+- **Date**: 2026-10
 
-There is also an open issue to [explore AI Personas by Component in Radius](https://github.com/radius-project/radius/issues/13345). This document is not intended to supercede or conflict with that issue in any way. Instead, it is focused on using tools which already exist in our ai-extensions repository today and that are built into GitHub.
+This document proposes automated review practices for ai-extensions. They draw on [Solving code review at Anthropic](https://claude.dev/blog/solving-code-review-at-anthropic/) and on the [Copilot features announced at GitHub Universe 2026](https://github.blog/news-insights/company-news/github-universe-2026-evolving-every-layer-of-the-stack/).
 
-## Summary
+There is also an open issue to [explore AI Personas by Component in Radius](https://github.com/radius-project/radius/issues/13345). This document is not intended to supersede or conflict with that issue in any way. Instead, it is focused on using tools which already exist in our ai-extensions repository today and that are built into GitHub.
 
-Not every change needs a human reviewer. A pull request from a trusted contributor (a member of the maintainers or approvers team) can merge without human approval when it passes every required check and *is plainly low risk*, such as a docs-only or tests-only change.
-
-Every other pull request still needs a human. For those, automation should point to the riskiest parts of the diff, so the reviewer starts there instead of reading the whole change.
-
-## Current Status
+## Current state
 
 We already run several review checks. Some use AI and some are through ordinary CI:
 
@@ -28,7 +25,22 @@ The majority of these checks don't work together:
 
 Every change also faces the same approval bar. A one-word docs fix needs the same human review as a risky change to shared code.
 
-## How do we improve our process?
+## Proposal
+
+Not every change needs a human reviewer. A pull request from a trusted contributor (a member of the maintainers or approvers team) can merge without human approval when it passes every required check and *is plainly low risk*, such as a docs-only or tests-only change.
+
+Every other pull request still needs a human. For those, automation should point to the riskiest parts of the diff, so the reviewer starts there instead of reading the whole change.
+
+We can do this work in four phases:
+
+1. [Phase 1: Building confidence in our automated tools](#phase-1-building-confidence-in-our-automated-tools)
+2. [Phase 2: Copilot code review on every push](#phase-2-copilot-code-review-on-every-push)
+3. [Phase 3: Blocking security and build checks](#phase-3-blocking-security-and-build-checks)
+4. [Phase 4: Scaling human approval to risk](#phase-4-scale-human-approval-to-risk)
+
+## Objectives
+
+### Goals
 
 We want reviews to move faster without getting careless. To get there, we must:
 
@@ -38,16 +50,15 @@ We want reviews to move faster without getting careless. To get there, we must:
 - **Define trusted contributors.** Only members of the maintainers and approvers teams may merge low-risk changes on an automated approval. Everyone else's pull requests must get human review.
 - **Expect to revise this.** We won't get it right the first time and will need to revise as the tools and models available to us change.
 
-We can do this work in four phases:
+### Non-goals
 
-1. [Phase 1: Building confidence in our automated tools](#phase-1-building-confidence-in-our-automated-tools)
-2. [Phase 2: Copilot code review on every push](#phase-2-copilot-code-review-on-every-push)
-3. [Phase 3: Blocking security and build checks](#phase-3-blocking-security-and-build-checks)
-4. [Phase 4: Scaling human approval to risk](#phase-4-scale-human-approval-to-risk)
+We will not let any change merge without a human approval until Step 4.5's trial succeeds and its other conditions are met. After that, only low-risk changes from trusted authors may merge on a Copilot approval. As we continue to gather data and iterate on our process, we may consider whether we will allow Copilot approvals on medium risk changes from trusted contributors.
 
-## Phase 1: Building confidence in our automated tools
+## Design
 
-### Step 1.1: Add `.github/copilot-instructions.md`
+### Phase 1: Building confidence in our automated tools
+
+#### Step 1.1: Add `.github/copilot-instructions.md`
 
 We need to give Copilot facts about our repo that it loads in every session. In [Anthropic's process](https://claude.dev/blog/solving-code-review-at-anthropic/), a project context file (`CLAUDE.md`) is the base every other review layer builds on. Our version is `copilot-instructions.md`.
 
@@ -58,7 +69,7 @@ The file should cover:
 - **Verification instructions:** link to the commands in the `radius-code-quality` [verification section](https://github.com/radius-project/ai-extensions/blob/main/.github/skills/radius-code-quality/SKILL.md#verification). Link rather than copy, so the two lists can't drift apart.
 - **Links to more information:** `CONTRIBUTING.md`, the skills, and `docs/architecture/`.
 
-### Step 1.2: Give Copilot code review the same review rules that we use for manual review
+#### Step 1.2: Give Copilot code review the same review rules that we use for manual review
 
 Our most detailed review guidance lives in `code-review.prompt.md`, and the Copilot reviewer that runs on pull requests never reads it. We need to move that guidance where Copilot will find it on every review.
 
@@ -71,7 +82,7 @@ Next, we should create **`.github/instructions/code-review.instructions.md`** to
 - End with a summary comment that counts findings and says plainly when there's nothing to fix.
 - In that summary, name the two or three changes a human should read first and say why each is risky (for example, a new shell command, a changed security check, or a public API change).
 
-### Step 1.3: Add a pre-PR self-review skill
+#### Step 1.3: Add a pre-PR self-review skill
 
 We need agents to review their own work before they open a pull request. `radius-code-quality` already asks agents for test evidence, but no one checks their work with fresh eyes. An agent reviewing its own work in the same session tends to agree with itself; a separate reviewer that sees only the diff and the rules doesn't.
 
@@ -86,7 +97,7 @@ We should link to the skill from the "Before you open a pull request" section of
 
 Copilot CLI's and the Copilot app's built-in `code-review` agent or `/review` command can serve as the fresh-context reviewer. For a second opinion from other models, authors can run it on [Copilot Fusion](https://docs.github.com/en/copilot/concepts/models/copilot-fusion) High or Max, where several models critique the draft in parallel.
 
-### Step 1.4 (optional): Format code as agents write it
+#### Step 1.4 (optional): Format code as agents write it
 
 We need formatting problems fixed before they reach review. Each formatting comment takes a reviewer's attention and usually costs another push and another review round. Anthropic doesn't post style-only findings at all.
 
@@ -94,7 +105,7 @@ Copilot CLI and the Copilot coding agent can run hooks at fixed points in a sess
 
 This step is optional because CI lint already catches the same problems. The hook catches them sooner.
 
-### Step 1.5 (optional): Check whether Copilot Memory is on
+#### Step 1.5 (optional): Check whether Copilot Memory is on
 
 We need to know whether Copilot code review can remember facts about our repo. Some facts surface only during review, such as a file that looks hand-written but is generated. Without memory, someone corrects the same mistaken comment on pull request after pull request, or we keep growing the instructions file that every review loads.
 
@@ -103,9 +114,9 @@ We need to know whether Copilot code review can remember facts about our repo. S
 - Check whether Copilot Memory is on for ai-extensions.
 - Find out who can see and correct what it stores. A wrong fact would quietly steer every later review, so someone must be able to audit it.
 
-## Phase 2: Copilot code review on every push
+### Phase 2: Copilot code review on every push
 
-### Step 2.1: Have Copilot re-review new pushes
+#### Step 2.1: Have Copilot re-review new pushes
 
 We need Copilot to review every push to a pull request that is ready for review, not just its first version. A fix pushed after the first review can bring a new bug, and today only a human reviewer stands between that bug and `main` unless someone manually asks Copilot to look again.
 
@@ -118,11 +129,11 @@ Copilot code review is billed in AI credits, to the pull request author by defau
 
 The ruleset reviews only pull requests [created by people with access to Copilot](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#automatic-pull-request-reviews). An outside contributor without a Copilot license gets no automatic review, so a maintainer must request one by hand, and the maintainer will pay for it.
 
-### Step 2.2: Keep every finding answered
+#### Step 2.2: Keep every finding answered
 
 Our `main` ruleset already requires every review thread to be resolved before merge. We should keep that rule.
 
-### Step 2.3: Add review-convergence rules
+#### Step 2.3: Add review-convergence rules
 
 We need reviews to converge instead of looping forever. One of Anthropic's pull requests went through more than fifty rounds of review and fixes overnight. When the team traced what the reviewer kept flagging, 59% of it was code present at the first review: the reviewer was handing out old findings a few at a time instead of catching new bugs.
 
@@ -132,9 +143,9 @@ We should add three rules to `code-review.instructions.md`:
 - Never repeat a finding already posted.
 - After three rounds of automated review, stop and ask the pull request author to step in.
 
-## Phase 3: Blocking security and build checks
+### Phase 3: Blocking security and build checks
 
-### Step 3.1: Turn on CodeQL and Copilot Autofix
+#### Step 3.1: Turn on CodeQL and Copilot Autofix
 
 We need a security reviewer that can block merge. Our review prompt already lists the risks that matter most here: shell strings built from interpolated values, unescaped webview HTML, unpinned actions, and secrets passed as inputs. Today nothing blocks merge on any of them.
 
@@ -146,7 +157,7 @@ We should:
 - Turn on Copilot Autofix.
 - Add a rule to the `main` ruleset that blocks merge on any new high or critical alert.
 
-### Step 3.2: Make Dependency Review and the build jobs required checks
+#### Step 3.2: Make Dependency Review and the build jobs required checks
 
 We need failing builds and vulnerable dependencies to block merge. Today the Dependency Review job and the build jobs in [`build.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/build.yml) report failures, but none is required, so a pull request that adds a vulnerable package or breaks the build can still merge.
 
@@ -160,27 +171,13 @@ We should add these as required status checks in the `main` ruleset, using the c
 
 Once the tests job is required, violations of the 100% coverage thresholds already in `vitest.config.ts` block merge too.
 
-We should require these jobs directly rather than `build-gate`. `build-gate` waits on the same jobs, but when one of them fails GitHub skips the gate instead of failing it, and a skipped required check counts as passed. Requiring the jobs directly avoids changing `build-gate`, which `publish.yml` and `release.yml` rely on. The cost is upkeep: when we rename, add, or reshard one of these jobs, we must update the ruleset to match.
+We should require these jobs directly rather than `build-gate`. `build-gate` waits on the same jobs, but when one of them fails GitHub skips the gate instead of failing it, and a skipped required check counts as passed. Requiring the jobs directly avoids changing `build-gate`, which `publish.yml` and `release.yml` rely on. The cost is upkeep: when we rename, add, or reshard one of these jobs, we must update the ruleset to match. [Alternatives considered](#alternatives-considered) covers the other option.
 
 This list leaves out the per-plugin `Build <plugin> dist` jobs. Their check names come from a matrix that grows as we add plugins, so a fixed ruleset can't list them. As it stands, a pull request that breaks one plugin's build can still merge.
 
-**Alternative solution:** fix `build-gate` and require it instead of the individual jobs. The fix would add `if: ${{ !cancelled() }}` so the gate runs when a job it needs fails, plus a step, before the artifact upload, that fails the gate unless every needed job succeeded.
+### Phase 4: Scale human approval to risk
 
-Pros:
-
-- The ruleset lists one check, so renaming, adding, or resharding a build job needs no ruleset change.
-- Adding the plugin build jobs to the gate's `needs` would close the plugin build gap.
-
-Cons:
-
-- It changes a job that `publish.yml` and `release.yml` depend on. A mistake in the new condition could let a release go out after a failed build, or quietly let broken pull requests merge.
-- Adding the plugin build jobs to `needs` would let one broken plugin block every plugin's release. `publish.yml` deliberately keeps plugins independent of each other.
-
-We chose to require the jobs directly because it leaves the release path untouched. If ruleset upkeep becomes a burden, we can add a separate `pr-gate` job for merges and leave `build-gate` for releases.
-
-## Phase 4: Scale human approval to risk
-
-### Step 4.1: Write down risk tiers
+#### Step 4.1: Write down risk tiers
 
 We should write a short `docs/eng/REVIEW_POLICY.md` that assigns each change a tier by what it touches.
 
@@ -201,17 +198,17 @@ For all four, passing tests don't show a change is safe. Tests check that the co
 
 The high tier also calls for a Max code review from Copilot, which the author or the human directing the agent must request by hand. Copilot sets the default effort level per repository, not per path, and we should keep that default at Balanced.
 
-### Step 4.2: Label pull requests by tier automatically
+#### Step 4.2: Label pull requests by tier automatically
 
 We should add a workflow that uses `actions/labeler` to apply `risk:low`, `risk:medium`, or `risk:high` from the changed paths, and that posts how many approvals the pull request needs.
 
-### Step 4.3: Enforce the high tier
+#### Step 4.3: Enforce the high tier
 
 We should propose a section of sensitive paths in the synced `CODEOWNERS` template in `radius-project/.github`, so a code owner must approve any high-tier change.
 
 A ruleset sets one approval count for the whole branch, and `CODEOWNERS` requires only one code-owner approval, so neither can demand two approvals for some paths and one for others. To enforce two approvals on the high tier, we should add a required status check that passes only when a `risk:high` pull request has two human approvals of its current commit, not counting Copilot.
 
-### Step 4.4: Point human reviewers at the riskiest changes
+#### Step 4.4: Point human reviewers at the riskiest changes
 
 We need human reviewers on medium- and high-tier pull requests to start with the parts most likely to hide a bug. A reviewer who reads a large diff top to bottom spends the same attention on a renamed variable as on a changed workflow permission. Automation already knows which paths are sensitive and which changes Copilot found risky, so it should tell the reviewer where to look.
 
@@ -220,18 +217,18 @@ We should:
 - Extend the labeling workflow from Step 4.2 so its comment also lists every changed file that matches a high-tier path. The list comes from the paths alone, so it's the same every time.
 - Rely on Copilot's summary comment (Step 1.2) for the judgment calls: the changes it thinks are riskiest, and why.
 
-### Step 4.5: Let Copilot approve low-tier changes, after a trial
+#### Step 4.5: Let Copilot approve low-tier changes, after a trial
 
 [Copilot approvals](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-approvals) became generally available on October 28, 2026. An admin can list up to 15 path globs, and a Copilot approval counts toward merge only when every changed file matches one of them. A new push dismisses Copilot's approval.
 
 We should roll it out in four parts:
 
-- **Trial.** For at least four weeks and at least 30 low-tier pull requests, **leave approvals off and record Copilot's approval assessment for each pull request next to the human decision on the same commit**. Could any false approvals (where Copilot would approve, but a human asks for a real fix). Turn approvals on only if there are no false approvals in the trial period. If there are false approvals, update the review instructions and skills, then run a new trial.
+- **Trial.** For at least four weeks and at least 30 low-tier pull requests, **leave approvals off and record Copilot's approval assessment for each pull request next to the human decision on the same commit**. Count any false approvals (where Copilot would approve, but a human asks for a real fix). Turn approvals on only if there are no false approvals in the trial period. If there are false approvals, update the review instructions and skills, then run a new trial.
 - **Allow-list.** Use the low tier's paths as the globs. Never include `.github/**`, any `AGENTS.md` or `copilot-instructions.md`, or any glob that overlaps a high-tier path.
 - **Code owners.** The synced `CODEOWNERS` assigns every path (`*`) to our teams, and the ruleset requires a code-owner review. GitHub doesn't document whether a Copilot approval satisfies that rule. We should test it on a scratch repository first. If it doesn't, we should propose upstream `CODEOWNERS` entries with no owners for the low-tier paths.
 - **Trusted authors.** Copilot approvals don't check who wrote the change. We should add a required status check that passes when the pull request has a human approval of the current commit, or when its author is a member of the maintainers or approvers teams. An agent's pull request counts as trusted only when the check can confirm from GitHub's own records, not the pull request template, that a team member started the agent. Outside contributions therefore still need a human, and the check fails when it can't tell.
 
-### Step 4.6: Guard review instructions against fork pull requests
+#### Step 4.6: Guard review instructions against fork pull requests
 
 Copilot code review reads instructions and skills from the pull request's head branch, including `AGENTS.md` files anywhere in the tree. A fork can therefore rewrite `code-review.instructions.md` in the same pull request it wants approved. These changes keep such a pull request from earning a Copilot approval:
 
@@ -241,6 +238,20 @@ Copilot code review reads instructions and skills from the pull request's head b
 
 These guards stop a tampered review from approving a pull request, but not from shaping what Copilot says. A fork that rewrites the instructions can still get a review that calls a risky change safe, and that comment can sway the human who reviews it. We should have the Step 4.2 labeler add a `review-instructions-changed` label and a comment whenever a pull request touches the instruction, skill, prompt, or `AGENTS.md` paths, telling the human reviewer to set Copilot's review aside and read the change themselves.
 
-## What we are not adopting yet
+## Alternatives considered
 
-We will not let any change merge without a human approval until Step 4.5's trial succeeds and its other conditions are met. After that, only low-risk changes from trusted authors may merge on a Copilot approval. As we continue to gather data and iterate on our process, we may consider whether we will allow Copilot approvals on medium risk changes from trusted contributors.
+### Require a fixed `build-gate` instead of the individual build jobs
+
+We could fix `build-gate` and require it instead of the individual jobs. The fix would add `if: ${{ !cancelled() }}` so the gate runs when a job it needs fails, plus a step, before the artifact upload, that fails the gate unless every needed job succeeded.
+
+Advantages:
+
+- The ruleset lists one check, so renaming, adding, or resharding a build job needs no ruleset change.
+- Adding the plugin build jobs to the gate's `needs` would close the plugin build gap.
+
+Disadvantages:
+
+- It changes a job that `publish.yml` and `release.yml` depend on. A mistake in the new condition could let a release go out after a failed build, or quietly let broken pull requests merge.
+- Adding the plugin build jobs to `needs` would let one broken plugin block every plugin's release. `publish.yml` deliberately keeps plugins independent of each other.
+
+We chose to require the jobs directly because it leaves the release path untouched. If ruleset upkeep becomes a burden, we can add a separate `pr-gate` job for merges and leave `build-gate` for releases.
