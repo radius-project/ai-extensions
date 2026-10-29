@@ -272,7 +272,7 @@ The deployed graph shows each resource's status from the deploy, including the r
 
 ### Deleting
 
-**A deployment.** `delete-aws.yml` deletes the app. Radius deletes AWS resources through the AWS Cloud Control API, which removes an RDS database without a final snapshot. The delete confirmation already names each resource it deletes.
+**A deployment.** `delete-aws.yml` deletes the app. Radius deletes AWS resources through the AWS Cloud Control API. When it deletes an RDS database, AWS first takes a final snapshot, which needs `rds:CreateDBSnapshot`, and the permission policy grants it. The snapshot has a random name and no tags, so nothing removes it: it keeps the database's data, and AWS bills for it until someone deletes it. Letting Radius skip this snapshot is tracked as a Radius issue. The delete confirmation already names each resource it deletes.
 
 **An environment.** `delete-environment-aws.yml` refuses while apps are still deployed, and then deletes the Radius environment. After that, the canvas takes the lock on the deploy identity, removes this environment's subject from the trust policy, and deletes its inline policy. Trust statements Radius didn't add stay as they are. If removing the subject leaves no statements, the canvas writes a single deny statement, because IAM rejects an empty trust policy. The canvas keeps the deploy identity and the GitHub identity provider, because other environments or services may use them.
 
