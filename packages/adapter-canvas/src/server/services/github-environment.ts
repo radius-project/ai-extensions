@@ -232,6 +232,29 @@ export async function ensureGitHubEnvironment(
   }
 ) {
   const { mutationRecovery, ...request } = input;
+  let recovery: EnsureGitHubEnvironmentInput["recovery"];
+  if (mutationRecovery) {
+    const assertActive = () =>
+      assertSetupExecutionActive(mutationRecovery.isStopped);
+    recovery = {
+      assertActive,
+      find: (kind, target) =>
+        providerMutationRecord(mutationRecovery.operation, kind, target),
+      willWrite: (kind, target) =>
+        providerMutationWillWrite(mutationRecovery.operation, kind, target),
+      execute: (mutation) =>
+        executeRecoverableMutation({
+          ...mutation,
+          operation: mutationRecovery.operation,
+          persist: mutationRecovery.persist,
+          rethrowReconciliationError: isSetupExecutionInterrupted,
+          assertActive: () => {
+            assertActive();
+            mutation.assertActive?.();
+          }
+        })
+    };
+  }
   return ensureCoreGitHubEnvironment({
     ...request,
     now: input.now ?? Date.now,
@@ -239,25 +262,6 @@ export async function ensureGitHubEnvironment(
       input.sleep ??
       ((milliseconds) =>
         new Promise((resolve) => setTimeout(resolve, milliseconds))),
-    recovery:
-      mutationRecovery ?
-        {
-          find: (kind, target) =>
-            providerMutationRecord(mutationRecovery.operation, kind, target),
-          willWrite: (kind, target) =>
-            providerMutationWillWrite(mutationRecovery.operation, kind, target),
-          execute: (mutation) =>
-            executeRecoverableMutation({
-              ...mutation,
-              operation: mutationRecovery.operation,
-              persist: mutationRecovery.persist,
-              rethrowReconciliationError: isSetupExecutionInterrupted,
-              assertActive: () => {
-                assertSetupExecutionActive(mutationRecovery.isStopped);
-                mutation.assertActive?.();
-              }
-            })
-        }
-      : undefined
+    recovery
   });
 }

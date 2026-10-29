@@ -14,4 +14,6 @@ Shutdown after a lost write response or while a provider read fails also preserv
 
 Azure owner and provenance-tag propagation retries stop issuing writes and reads after shutdown, including when shutdown interrupts a read delay. Incomplete or failed late reads preserve unresolved evidence instead of triggering failure cleanup or manual recovery; positive responses already in flight can still confirm the request. Rejected attempts retain their diagnostics, while user Stop still completes the current logical mutation.
 
+Service-principal, GitHub environment and workflow recovery also stop nested retries, commit-history pages and branch-absence reads after shutdown. Incomplete evidence stays unresolved rather than claiming absence or requiring manual recovery. Complete proof from a request already in flight can still settle; matching workflow content alone cannot authorize another history read.
+
 Verification dispatch and automatic run discovery stop further reads and monitoring after shutdown, without turning a late response into a setup failure. Sent requests retain their actual outcome; uncertain dispatches require inspection before another run can be sent, including after restart. Storage failures remain explicit.
