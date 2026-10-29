@@ -44,10 +44,14 @@ describe("generatePortalUrl", () => {
     expect(url).toContain("flexibleServers");
   });
 
-  it("returns an aws console URL for a known aws resource type", () => {
-    const url = generatePortalUrl("aws_db_instance", "aws");
-    expect(url).toContain("us-east-1.console.aws.amazon.com");
-    expect(url).toContain("rds");
+  it("returns an aws console URL in the region the resource ID names", () => {
+    const url = generatePortalUrl(
+      "/planes/aws/aws/accounts/123456789012/regions/us-west-2/providers/AWS.RDS/DBInstance/db",
+      "aws"
+    );
+    expect(url).toBe(
+      "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2#databases:"
+    );
   });
 
   it("uses the placeholder subscription and resource group for azure links", () => {
@@ -56,9 +60,8 @@ describe("generatePortalUrl", () => {
     expect(url).toContain("radius-rg");
   });
 
-  it("uses the placeholder region for aws links", () => {
-    const url = generatePortalUrl("aws_db_instance", "aws");
-    expect(url).toContain("us-east-1");
+  it("gives an aws resource type without an ID no placeholder-region link", () => {
+    expect(generatePortalUrl("aws_db_instance", "aws")).toBe("");
   });
 
   it("returns empty string for an unknown provider", () => {
@@ -90,10 +93,13 @@ describe("generatePortalUrl", () => {
     expect(url).toContain("radius-rg/resources");
   });
 
-  it("handles aws ECR resource type", () => {
-    const url = generatePortalUrl("aws_ecr", "aws");
-    expect(url).toContain("ecr/repositories");
-    expect(url).toContain("us-east-1");
+  it("links an aws ECR repository ID to the ECR console in its region", () => {
+    const url = generatePortalUrl(
+      "/planes/aws/aws/accounts/123456789012/regions/eu-west-1/providers/AWS.ECR/Repository/app",
+      "aws"
+    );
+    expect(url).toContain("ecr/private-registry/repositories");
+    expect(url).toContain("region=eu-west-1");
   });
 
   // No cluster name is supplied, so azure kubernetes types cannot deep link to
@@ -105,8 +111,7 @@ describe("generatePortalUrl", () => {
     expect(url).toContain("radius-rg/resources");
   });
 
-  it("handles kubernetes resource types on aws (links to EKS)", () => {
-    const url = generatePortalUrl("core/Service", "aws");
-    expect(url).toContain("eks");
+  it("gives kubernetes resource types on aws no link, since they name no region", () => {
+    expect(generatePortalUrl("core/Service", "aws")).toBe("");
   });
 });
