@@ -3,16 +3,18 @@
 set -euo pipefail
 
 # The override is one environment-scoped value so the release identity and
-# installer checksum cannot be selected independently.
+# installer checksum cannot be selected independently. The tag is a release or
+# `edge`. Edge floats with Radius main: the commit pins only the installer and
+# the contrib catalog, not the CLI or the control-plane images.
 if [[ -n "${RADIUS_RELEASE_OVERRIDE:-}" ]]; then
     jq -se '
         length == 1 and (.[0] |
         type == "object" and
-        (.tag | type == "string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?\\z")) and
+        (.tag | type == "string" and test("^(edge|v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?)\\z")) and
         (.commit | type == "string" and test("^[0-9a-f]{40}\\z")) and
         (.checksum | type == "string" and test("^[0-9a-f]{64}\\z")))
     ' <<<"${RADIUS_RELEASE_OVERRIDE}" >/dev/null || {
-        echo "::error::RADIUS_RELEASE_OVERRIDE must contain a release tag, a 40-character commit, and a 64-character installer checksum." >&2
+        echo "::error::RADIUS_RELEASE_OVERRIDE must contain a release tag or edge, a 40-character commit, and a 64-character installer checksum." >&2
         exit 1
     }
     RADIUS_INSTALL_REF="$(jq -r .tag <<<"${RADIUS_RELEASE_OVERRIDE}")"

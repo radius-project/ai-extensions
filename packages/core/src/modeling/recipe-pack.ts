@@ -15,14 +15,13 @@
 export const RECIPE_PACK_REPO = "radius-project/resource-types-contrib";
 export const RECIPE_PACK_REF = "main";
 
-// The AWS `aws-eks` recipe pack is not in Radius's contrib catalog yet
-// (radius-project/radius#13495), so both the AWS deploy workflow and the planned
-// graph read it from this pinned resource-types-contrib commit, the merge of
-// radius-project/resource-types-contrib#442. The deploy also pins the pack's
-// aws-eks recipes to this commit's image tag, so it must be a main commit that
-// published them. This is the one place to move it, later to the catalog.
-// Users don't get this pack until the Radius runtime pinned in
-// .github/extension/actions/setup-control-plane has radius-project/radius#13465.
+// The AWS deploy workflow and the planned graph read the `aws-eks` recipe pack
+// from this pinned resource-types-contrib commit, the merge of
+// radius-project/resource-types-contrib#442. No Radius release's catalog has the
+// pack yet (radius-project/radius#13542 added it on main, at this same commit).
+// The deploy also pins the pack's aws-eks recipes to this commit's image tag, so
+// it must be a main commit that published them. This is the one place to move
+// it; #1130 moves it to the catalog with the first Radius release that has it.
 export const AWS_EKS_RECIPE_PACK = {
   ref: "b81d0e9a59f20ea5c22fd8bb1338dad40eb4d473",
   path: "recipe-packs/aws-eks/aws-eks.bicep"

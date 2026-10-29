@@ -56,12 +56,12 @@ runs:
         # then installs the control plane for the CLI's release. Verify the install
         # script's checksum before running it, rather than piping from main.
         #
-        # AWS gate: in this release the AWS create and update controller copies
-        # request properties, including an RDS MasterUserPassword, into its
-        # response (radius-project/radius#13457). AWS stays behind the developer
-        # switch, and the aws-eks recipe pack isn't adopted for users, until this
-        # pins a release with radius-project/radius#13465 and a known test
-        # password is absent from create, update, and unchanged-operation responses.
+        # AWS workflows don't use this default. In this release the AWS create
+        # and update controller copies request properties, including an RDS
+        # MasterUserPassword, into its response (radius-project/radius#13457),
+        # and its catalog has no aws-eks pack. No release has the fix yet, so the
+        # AWS templates pass their own edge default (AWS_RADIUS_RELEASE in the
+        # core package). #1130 moves AWS to the first release with both.
         RADIUS_INSTALL_REF: v0.62.0
         # Immutable commit of RADIUS_INSTALL_REF; load-contrib-catalog fetches the
         # recipe catalog at this commit so a moved tag cannot change recipes.

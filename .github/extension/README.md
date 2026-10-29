@@ -89,9 +89,13 @@ The deploy flow generates the dispatcher and both provider workflows, commits th
 
 ### Select a Radius release
 
-By default, `setup-control-plane` installs the checked-in stable Radius pin. To test another published release, set the GitHub Environment variable `RADIUS_RELEASE_OVERRIDE` to a JSON object with `tag`, `commit`, and `checksum` fields. Use the exact release tag, its 40-character source commit, and the 64-character SHA-256 checksum of `deploy/install.sh` at that commit. Release candidates are supported.
+By default, `setup-control-plane` installs the checked-in stable Radius pin. AWS workflows are the exception, see below. To test another published release, set the GitHub Environment variable `RADIUS_RELEASE_OVERRIDE` to a JSON object with `tag`, `commit`, and `checksum` fields. Use the exact release tag, its 40-character source commit, and the 64-character SHA-256 checksum of `deploy/install.sh` at that commit. Release candidates are supported.
 
 The setup action downloads the installer from that commit, verifies its checksum, and installs the CLI and control plane for the selected tag. The recipe catalog uses the same commit. Deploy and delete workflows read the same environment variable. Invalid metadata, failed downloads, and checksum errors stop setup; they do not select another release.
+
+The tag can also be `edge`. Edge floats with Radius `main`: the commit pins the installer, by its checksum, and the recipe catalog, but not the CLI or the control-plane images.
+
+AWS workflows (`run-rad-commands-aws.yml`, `delete-aws.yml`, and `delete-environment-aws.yml`) default to edge at Radius commit `15ca204a`, which the extension fills in from `AWS_RADIUS_RELEASE` in `packages/core`. This default exists because no Radius release yet has the fix that keeps request secrets such as an RDS `MasterUserPassword` out of AWS responses (radius-project/radius#13465), or the `aws-eks` catalog entry (radius-project/radius#13542). #1130 replaces it with the first release that has both before AWS is turned on for users. An environment's `RADIUS_RELEASE_OVERRIDE` variable still takes precedence. Azure workflows use the shared default.
 
 This variable changes the runner's Radius version, not the extension's local modeling CLI. The [Cloud E2E version input](../../docs/eng/CLOUD_E2E_RUNBOOK.md#select-a-radius-version) selects both. Leave the variable unset to retain the default pin. Do not change versions between deploy and delete unless the selected Radius release supports the saved state and application resources.
 

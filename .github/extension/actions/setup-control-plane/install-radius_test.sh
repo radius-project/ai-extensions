@@ -67,7 +67,7 @@ grep -Fq "/${RADIUS_INSTALL_COMMIT}/deploy/install.sh" "${CURL_LOG}" ||
 grep -Fxq "RADIUS_INSTALL_COMMIT=${RADIUS_INSTALL_COMMIT}" "${GITHUB_ENV}" ||
     fail "default install did not export the catalog commit"
 
-for tag in v1.2.4 v1.3.0-rc.1; do
+for tag in v1.2.4 v1.3.0-rc.1 edge; do
     export RADIUS_RELEASE_OVERRIDE
     RADIUS_RELEASE_OVERRIDE="$(jq -cn --arg tag "${tag}" --arg checksum "${RADIUS_INSTALL_SHA256}" \
         '{tag: $tag, commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", checksum: $checksum}')"
@@ -84,7 +84,12 @@ done
 
 valid_override="${RADIUS_RELEASE_OVERRIDE}"
 for value in 'not-json' null '[]' '{}' \
-    '{"tag":"edge","commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","checksum":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
+    "$(jq -c '.tag = "latest"' <<<"${valid_override}")" \
+    "$(jq -c '.tag = "main"' <<<"${valid_override}")" \
+    "$(jq -c '.tag = "Edge"' <<<"${valid_override}")" \
+    "$(jq -c '.tag = "edge-1"' <<<"${valid_override}")" \
+    "$(jq -c '.tag = " edge"' <<<"${valid_override}")" \
+    "$(jq -c '.tag = "1.2.3"' <<<"${valid_override}")" \
     "$(jq -c '.commit = "short"' <<<"${valid_override}")" \
     "$(jq -c '.checksum = "short"' <<<"${valid_override}")" \
     "$(jq -c '.tag += "\n"' <<<"${valid_override}")" \

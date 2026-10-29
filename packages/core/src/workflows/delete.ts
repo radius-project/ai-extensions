@@ -1,5 +1,6 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 import { RADIUS_REF } from "./deploy.js";
+import { AWS_RADIUS_RELEASE_OVERRIDE } from "./aws-radius-release.js";
 
 // Release builds replace this environment read with their exact source commit.
 // Source and live-test runs may override it to validate another revision.
@@ -46,7 +47,7 @@ export type DeleteWorkflowFiles = Record<string, string>;
  * `delete-environment-aws.yml` for the
  * environment-delete path. The dispatchers only fill `{{ENV}}` (the dispatch
  * default); the provider workflows also pin their composite actions to
- * `{{RADIUS_REF}}`.
+ * `{{RADIUS_REF}}`, and the AWS ones fill `{{AWS_RADIUS_RELEASE_OVERRIDE}}`.
  *
  * `templates` maps the committed file name to the raw template body fetched
  * from `radius-project/ai-extensions`. The caller must supply every file;
@@ -84,11 +85,13 @@ export function generateDeleteWorkflow(
     }),
     [DELETE_ENV_AWS_FILE]: fillTemplate(pick(DELETE_ENV_AWS_FILE), {
       ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF
+      RADIUS_REF: DELETE_RADIUS_REF,
+      AWS_RADIUS_RELEASE_OVERRIDE
     }),
     [DELETE_AWS_FILE]: fillTemplate(pick(DELETE_AWS_FILE), {
       ENV: env,
-      RADIUS_REF: DELETE_RADIUS_REF
+      RADIUS_REF: DELETE_RADIUS_REF,
+      AWS_RADIUS_RELEASE_OVERRIDE
     })
   };
   for (const [file, body] of Object.entries(files)) {
