@@ -2,6 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { RADIUS_REF } from "@radius-project/core";
+import { buildRadiusAppProvenanceTags } from "../../../src/azure-oidc.js";
+import { generateVerifyWorkflow } from "../../../src/infra.js";
+import {
+  encodeWorkflowContent,
+  workflowContentDigest
+} from "@radius-project/adapter-shared";
 import { createHarness } from "@radius-project/adapter-shared/test-support/ghcr-bootstrap";
 import * as gh from "../../../src/gh.js";
 import { createGitHubAccountCoordinator } from "../../../src/server/services/github-account-coordinator.js";
@@ -9,6 +15,8 @@ import { bootstrapRadiusExtension } from "../../../src/runtime/bootstrap.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
+import { configureEnvironmentFixture } from "../../support/server/configure-environment.js";
+import { createConfigureEnvironmentService } from "../../../src/server/services/configure-environment.js";
 import { createRadiusExtension } from "../../../src/runtime/create-radius-extension.js";
 import { createTestCanvasServerRuntime } from "../../support/server/production-runtime.js";
 import {
@@ -1108,6 +1116,10 @@ describe("real server and fake SDK runtime ownership", () => {
           "issued"
         ])
       )
+      .concat([
+        ["azure-principal", "inner-delay"],
+        ["environment", "inner-delay"]
+      ])
       .concat(
         ["azure", "environment"].flatMap((stage) =>
           ["throw", "timeout"].map((boundary) => [stage, boundary])
@@ -1126,12 +1138,17 @@ describe("real server and fake SDK runtime ownership", () => {
       const azureStage = stage.startsWith("azure");
       const ghcrStage = stage.startsWith("ghcr");
       const unknownBoundary = boundary === "throw" || boundary === "timeout";
-      const azureRetry = stage === "azure-owner" || stage === "azure-tags";
+      const azureRetry =
+        stage === "azure-owner" ||
+        stage === "azure-tags" ||
+        stage === "azure-principal";
       const innerDelay = boundary === "inner-delay";
+      const environmentDelay = stage === "environment" && innerDelay;
       const delayBoundary = boundary === "delay" || innerDelay;
       let innerReads = 0;
       const rejected = deferred();
       let azureAttempts = 0;
+      let environmentAttempts = 0;
       let retryPrepared = false;
       const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
       const variableValues = new Map<string, string>();
@@ -1177,6 +1194,11 @@ describe("real server and fake SDK runtime ownership", () => {
         if (args[0] !== "api")
           throw new Error(`Unexpected GitHub command: ${args.join(" ")}`);
         if (stage === "environment" && args.includes("PUT")) {
+          if (environmentDelay) {
+            environmentAttempts++;
+            rejected.resolve();
+            return { code: 1, stdout: "", stderr: "ECONNRESET" };
+          }
           entered.resolve();
           await writeGate.promise;
           return finishWrite('{"name":"dev","id":17}');
@@ -1187,6 +1209,14 @@ describe("real server and fake SDK runtime ownership", () => {
           return success(
             '{"id":23,"name":"app","full_name":"fixture/app","default_branch":"main","owner":{"id":11,"login":"fixture","type":"User"},"permissions":{"admin":true}}'
           );
+        if (
+          endpoint === "repos/fixture/app/environments/dev" &&
+          environmentDelay &&
+          environmentAttempts > 0
+        ) {
+          innerReads++;
+          return { code: 1, stdout: "", stderr: "HTTP 500" };
+        }
         if (endpoint === "repos/fixture/app/environments/dev")
           return stage === "environment" && !acknowledged ?
               { code: 1, stdout: "", stderr: "HTTP 404: Not Found" }
@@ -1212,6 +1242,7 @@ describe("real server and fake SDK runtime ownership", () => {
         const retryTarget =
           stage === "azure-owner" ?
             args.slice(0, 4).join(" ") === "ad app owner add"
+          : stage === "azure-principal" ? command === "ad sp create"
           : stage === "azure-tags" &&
             args[0] === "rest" &&
             args.includes("PATCH");
@@ -1231,6 +1262,23 @@ describe("real server and fake SDK runtime ownership", () => {
         if (azureRetry && command === "ad app create") return success(appId);
         if (azureRetry && args.slice(0, 4).join(" ") === "ad app owner add")
           return success();
+        if (stage === "azure-principal") {
+          if (args[0] === "rest" && args.includes("PATCH")) return success();
+          if (command === "ad app show" && args.includes("tags"))
+            return success(
+              JSON.stringify(
+                buildRadiusAppProvenanceTags({
+                  repo: "fixture/app",
+                  environment: "dev",
+                  operationId: "shutdown-write"
+                })
+              )
+            );
+          if (command === "ad sp show") {
+            if (azureAttempts > 0) innerReads++;
+            return { code: 1, stdout: "", stderr: "Request_ResourceNotFound" };
+          }
+        }
         if (azureRetry && args.slice(0, 4).join(" ") === "ad app owner list") {
           if (innerDelay && stage === "azure-owner") {
             innerReads++;
@@ -1399,6 +1447,8 @@ describe("real server and fake SDK runtime ownership", () => {
           stage === "azure" ? mutation?.kind === "azure_application.create"
           : stage === "azure-owner" ? mutation?.kind === "azure_app_owner.add"
           : stage === "azure-tags" ? mutation?.kind === "azure_app_tags.patch"
+          : stage === "azure-principal" ?
+            mutation?.kind === "azure_service_principal.create"
           : stage === "environment" ?
             mutation?.kind === "github_environment.put"
           : mutation?.kind === "github_environment_variable.put" &&
@@ -1429,7 +1479,7 @@ describe("real server and fake SDK runtime ownership", () => {
       });
       let completed = Promise.resolve();
       try {
-        if (azureRetry)
+        if (azureRetry || environmentDelay)
           vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
         runtime.setupExecution.scheduleEnvironmentOperation(op);
         completed = new Promise<void>((resolve) => {
@@ -1438,7 +1488,7 @@ describe("real server and fake SDK runtime ownership", () => {
             resolve();
           });
         });
-        if (azureRetry) {
+        if (azureRetry || environmentDelay) {
           await Promise.race([rejected.promise, completed]);
           await vi.advanceTimersByTimeAsync(0);
           expect(op.providerRecovery.mutations.at(-1)).toMatchObject({
@@ -1505,6 +1555,8 @@ describe("real server and fake SDK runtime ownership", () => {
                   stage === "azure" ? "azure_application.create"
                   : stage === "azure-owner" ? "azure_app_owner.add"
                   : stage === "azure-tags" ? "azure_app_tags.patch"
+                  : stage === "azure-principal" ?
+                    "azure_service_principal.create"
                   : stage === "environment" ? "github_environment.put"
                   : "github_environment_variable.put",
                 status:
@@ -1573,7 +1625,15 @@ describe("real server and fake SDK runtime ownership", () => {
   );
 
   it.each(
-    ["azure", "github"].flatMap((provider) =>
+    [
+      "azure",
+      "github",
+      "github-content",
+      "github-history",
+      "environment-read",
+      "branch-page",
+      "branch-exact"
+    ].flatMap((provider) =>
       [0, 11].flatMap((attempts) =>
         ["response", "rejection"].map((outcome) => ({
           provider,
@@ -1611,6 +1671,21 @@ describe("real server and fake SDK runtime ownership", () => {
       const gate = deferred();
       const success = (stdout = "") => ({ code: 0, stdout, stderr: "" });
       const workflowPath = ".github/workflows/radius-verify-credentials.yml";
+      const content =
+        provider === "github-content" || provider === "github-history" ?
+          encodeWorkflowContent(
+            await generateVerifyWorkflow("dev", "azure", undefined, {
+              setupPushOperationMarker: "resumed-shutdown"
+            })
+          )
+        : "";
+      const branch = "radius/setup-dev-workflows-resumed";
+      let environmentReads = 0;
+      const heldRead = async () => {
+        entered.resolve();
+        await gate.promise;
+        if (outcome === "rejection") throw new Error("Late nested read failed");
+      };
       const run = vi.fn(async (args: string[]) => {
         const endpoint = args[1]?.replace(/^\//, "");
         if (
@@ -1629,6 +1704,13 @@ describe("real server and fake SDK runtime ownership", () => {
           args.includes(".content")
         )
           return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        if (
+          endpoint === "repos/fixture/app/environments/dev" &&
+          provider === "environment-read"
+        ) {
+          if (++environmentReads === 2) await heldRead();
+          return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        }
         if (endpoint === "repos/fixture/app/environments/dev")
           return success('{"name":"dev","id":17}');
         if (args.includes("/repos/fixture/app/environments?per_page=100"))
@@ -1644,14 +1726,52 @@ describe("real server and fake SDK runtime ownership", () => {
           return success('{"use_default":true,"use_immutable_subject":false}');
         }
         if (
-          provider === "github" &&
+          (provider === "github" ||
+            provider === "github-content" ||
+            provider === "github-history") &&
           endpoint === `repos/fixture/app/contents/${workflowPath}`
         ) {
+          if (provider !== "github" && args.includes("--jq"))
+            return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+          if (provider === "github-history")
+            return success(JSON.stringify({ sha: "blob-1", content }));
           entered.resolve();
           await gate.promise;
           if (outcome === "rejection")
             throw new Error("Late GitHub read failed");
+          if (provider === "github-content")
+            return success(JSON.stringify({ sha: "blob-1", content }));
           return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        }
+        if (provider === "github-history" && endpoint?.includes("/commits?")) {
+          await heldRead();
+          return success(
+            JSON.stringify(
+              Array.from({ length: 100 }, (_, i) => ({
+                sha: String(i).padStart(40, "0"),
+                commit: { message: "unrelated" }
+              }))
+            )
+          );
+        }
+        if (provider.startsWith("branch-")) {
+          if (
+            endpoint ===
+            `repos/fixture/app/git/ref/heads/${encodeURIComponent(branch)}`
+          )
+            return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+          if (endpoint?.includes("/git/matching-refs/")) {
+            await heldRead();
+            return success(
+              JSON.stringify(
+                provider === "branch-page" ?
+                  Array.from({ length: 100 }, (_, i) => ({
+                    ref: `refs/heads/${branch}-${i}`
+                  }))
+                : []
+              )
+            );
+          }
         }
         throw new Error(`Unexpected GitHub read or write: ${args.join(" ")}`);
       });
@@ -1734,22 +1854,37 @@ describe("real server and fake SDK runtime ownership", () => {
           subscriptionId: "11111111-1111-4111-8111-111111111111"
         }
       };
-      recordGitHubEnvironment(op, {
-        state: "reused",
-        origin: "pre_existing",
-        repo: op.repo,
-        environment: op.environment,
-        providerId: "17"
-      });
+      if (provider !== "environment-read")
+        recordGitHubEnvironment(op, {
+          state: "reused",
+          origin: "pre_existing",
+          repo: op.repo,
+          environment: op.environment,
+          providerId: "17"
+        });
       const mutation = prepareProviderMutation(op, {
         kind:
-          provider === "azure" ?
-            "azure_application.create"
+          provider === "azure" ? "azure_application.create"
+          : provider === "environment-read" ? "github_environment.put"
+          : provider.startsWith("branch-") ? "github_branch.create"
           : "github_workflow.put",
         target:
-          provider === "azure" ?
-            "fixture/app:dev:radius-deploy-fixture-app"
-          : `fixture/app:<default>:${workflowPath}`
+          provider === "azure" ? "fixture/app:dev:radius-deploy-fixture-app"
+          : provider === "environment-read" ? "fixture/app:dev"
+          : provider.startsWith("branch-") ? `fixture/app\0${branch}\0base-sha`
+          : `fixture/app:<default>:${workflowPath}`,
+        ...(content ?
+          {
+            intent: {
+              branch: "<default>",
+              path: workflowPath,
+              previousBlobSha: null,
+              previousBlobKnown: true,
+              contentSha256: workflowContentDigest(content),
+              operationMarker: `radius-operation:resumed-shutdown:workflow:${workflowPath}:${workflowContentDigest(content).slice(0, 16)}`
+            }
+          }
+        : {})
       });
       settleProviderMutation(
         op,
@@ -1757,7 +1892,8 @@ describe("real server and fake SDK runtime ownership", () => {
         "outcome_unknown",
         "Original provider acknowledgement was lost"
       );
-      op.providerRecovery.mutations[0].reconcileAttempts = attempts;
+      if (attempts > 0)
+        op.providerRecovery.mutations[0].reconcileAttempts = attempts;
       const original = structuredClone(op.providerRecovery);
       operations.put(op);
       const snapshots: (typeof original)[] = [];
@@ -1821,6 +1957,75 @@ describe("real server and fake SDK runtime ownership", () => {
         gate.resolve();
         await completed;
         owner.shutdown();
+        await extension.shutdown();
+      }
+    }
+  );
+
+  it.each([0, 11])(
+    "fences configuration-stage environment reconciliation after SDK shutdown at %s attempts",
+    async (attempts) => {
+      const test = configureEnvironmentFixture();
+      const owner = createEnvironmentExecutionOwner();
+      const runtime = createTestCanvasServerRuntime({ executionOwner: owner });
+      const fake = createFakeDependencies();
+      const extension = await bootstrapRadiusExtension(
+        { ...fake.deps, ...runtime, executionOwner: owner },
+        {
+          createCanvas: (declaration) => declaration,
+          joinSession: async () => createFakeSession()
+        }
+      );
+      const entered = deferred();
+      const gate = deferred();
+      const mutation = prepareProviderMutation(test.operation, {
+        kind: "github_environment.put",
+        target: "octo/app:dev"
+      });
+      settleProviderMutation(
+        test.operation,
+        mutation.mutationId,
+        "outcome_unknown",
+        "Lost acknowledgement"
+      );
+      if (attempts > 0)
+        test.operation.providerRecovery.mutations[0].reconcileAttempts =
+          attempts;
+      const original = structuredClone(test.operation.providerRecovery);
+      test.dependencies.isShuttingDown = owner.isShuttingDown;
+      test.dependencies.now = () => 1700000000000;
+      let reads = 0;
+      const read = vi.fn(async (path: string) => {
+        if (path === "/repos/octo/app") return { ok: true, json: {} };
+        if (++reads === 2) {
+          entered.resolve();
+          await gate.promise;
+          return { ok: true, json: { name: "dev", id: 17 } };
+        }
+        return { ok: false, status: 404 };
+      });
+      test.dependencies.readGitHubJson = read;
+      const pending = createConfigureEnvironmentService(test.dependencies)({
+        data: test.data
+      });
+      const checked = expect(pending).rejects.toMatchObject({
+        code: "setup-execution-interrupted"
+      });
+      try {
+        await Promise.race([entered.promise, pending]);
+        expect(reads).toBe(2);
+        await extension.shutdown();
+        gate.resolve();
+        await checked;
+        expect(read).toHaveBeenCalledTimes(3);
+        expect(test.operation.providerRecovery).toEqual(original);
+        expect(test.dependencies.persistOperations).not.toHaveBeenCalled();
+        expect(test.finalize).not.toHaveBeenCalled();
+        expect(test.operation.failure).toBeNull();
+        expect(test.operation.endedAt).toBeNull();
+      } finally {
+        gate.resolve();
+        await checked;
         await extension.shutdown();
       }
     }

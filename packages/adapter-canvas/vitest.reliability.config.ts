@@ -25,6 +25,7 @@ export default defineConfig({
       "../core/src/setup-recovery-error.test.ts",
       "src/server/services/{cleanup-deletion-journal,workflow-rollback,recovered-branch-delete}.test.ts",
       "src/server/services/setup-workflow-recovery.test.ts",
+      "src/server/services/github-environment.test.ts",
       "src/server/services/verification-{status,retry,retry-runner,dispatch}.test.ts",
       "src/server/services/automatic-verification-run.test.ts",
       "../core/src/verify-failure-classification.test.ts",

@@ -97,14 +97,19 @@ export function bindWorkflowFileCommitterPorts(
     contentDigest: workflowContentDigest,
     blobSha: workflowBlobSha,
     parseBranchTarget: parseBranchDeleteTarget,
-    proveBranchAbsent: (repo, branch) =>
+    proveBranchAbsent: (repo, branch, assertActive) =>
       proveBranchAbsent({
         repo,
         branch,
         ports: {
-          listBranchRefs: (page) =>
-            ports.runGh(branchRefListingArgs(repo, branch, page)),
-          readBranchRef: () => ports.runGh(branchRefReadArgs(repo, branch))
+          listBranchRefs: (page) => {
+            assertActive();
+            return ports.runGh(branchRefListingArgs(repo, branch, page));
+          },
+          readBranchRef: () => {
+            assertActive();
+            return ports.runGh(branchRefReadArgs(repo, branch));
+          }
         }
       }),
     report: ({ branch, base }) =>

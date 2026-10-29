@@ -17,7 +17,9 @@ export function createAzureRecoveryPort(
   persist: () => Promise<void>,
   isStopped: () => boolean
 ): AzureRecoveryPort {
+  const assertActive = () => assertSetupExecutionActive(isStopped);
   return {
+    assertActive,
     find: (kind, target) => providerMutationRecord(operation, kind, target),
     willWrite: (kind, target) =>
       providerMutationWillWrite(operation, kind, target),
@@ -29,7 +31,7 @@ export function createAzureRecoveryPort(
         persist,
         rethrowReconciliationError: isSetupExecutionInterrupted,
         assertActive: () => {
-          assertSetupExecutionActive(isStopped);
+          assertActive();
           input.assertActive?.();
         }
       })

@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createOperation,
+  fromPersistedOperation,
   prepareProviderMutation,
-  settleProviderMutation
+  settleProviderMutation,
+  toPersistedOperation
 } from "../../operations.js";
 import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import {
@@ -40,6 +42,141 @@ function readResult(
 }
 
 describe("ensureGitHubEnvironment", () => {
+  describe.each(["new", 0, 11] as const)(
+    "nested reads (%s prior attempts)",
+    (attempts) => {
+      it.each([
+        "delay",
+        "absent",
+        "present",
+        "malformed",
+        "denied",
+        "exhausted",
+        "long-delay",
+        "rejection"
+      ] as const)(
+        "does not settle inconclusive evidence after shutdown during %s",
+        async (boundary) => {
+          let operation = createOperation({
+            operationId: "op_environment-nested",
+            repo: "octo/app",
+            environment: "dev",
+            provider: "azure"
+          });
+          if (attempts !== "new") {
+            const mutation = prepareProviderMutation(operation, {
+              kind: "github_environment.put",
+              target: "octo/app:dev"
+            });
+            settleProviderMutation(
+              operation,
+              mutation.mutationId,
+              "outcome_unknown",
+              "Lost acknowledgement"
+            );
+            operation.providerRecovery.mutations[0].reconcileAttempts =
+              attempts;
+            operation = fromPersistedOperation(toPersistedOperation(operation));
+            expect(
+              operation.providerRecovery.mutations[0].reconcileAttempts ?? 0
+            ).toBe(attempts);
+          }
+          let stopped = false;
+          let reads = 0;
+          let unknown: unknown;
+          let savesAtShutdown = 0;
+          const persist = vi.fn(async () => {});
+          const shutdown = () => {
+            unknown = structuredClone(operation.providerRecovery);
+            savesAtShutdown = persist.mock.calls.length;
+            stopped = true;
+          };
+          const read = vi.fn(async (path: string) => {
+            if (path === "/repos/octo/app") return readResult();
+            reads++;
+            if (reads === 1) return readResult({ ok: false, status: 404 });
+            if ((boundary === "exhausted" && reads < 4) || boundary === "delay")
+              return readResult({ ok: false, status: 500 });
+            shutdown();
+            if (boundary === "rejection") throw new Error("Read rejected");
+            if (boundary === "present")
+              return readResult({ json: { name: "dev", id: 17 } });
+            if (boundary === "malformed") return readResult({ json: {} });
+            return readResult({
+              ok: false,
+              status:
+                boundary === "absent" ? 404
+                : boundary === "denied" ? 403
+                : 429,
+              stderr:
+                boundary === "long-delay" ? "Retry-After: 9999" : "read failed"
+            });
+          });
+          const write = vi.fn(async () =>
+            result({ code: 1, stderr: "ECONNRESET" })
+          );
+          await expect(
+            ensureGitHubEnvironment({
+              repo: "octo/app",
+              requestedName: "dev",
+              readGitHubJson: read,
+              runGh: write,
+              sleep: async () => {
+                if (boundary === "delay") shutdown();
+              },
+              mutationRecovery: { operation, persist, isStopped: () => stopped }
+            })
+          ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+          expect(operation.providerRecovery).toEqual(unknown);
+          expect(persist).toHaveBeenCalledTimes(savesAtShutdown);
+          expect(read).toHaveBeenCalledTimes(boundary === "exhausted" ? 5 : 3);
+          expect(write).toHaveBeenCalledTimes(attempts === "new" ? 1 : 0);
+        }
+      );
+    }
+  );
+
+  it("interrupts reconciliation when shutdown wins the inner retry delay", async () => {
+    const operation = createOperation({
+      operationId: "environment-inner-delay"
+    });
+    let stopped = false;
+    let reads = 0;
+    let writes = 0;
+    let unknown: unknown;
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "dev",
+        readGitHubJson: async (path) => {
+          if (path === "/repos/octo/app") return readResult();
+          reads++;
+          return readResult({
+            ok: false,
+            status: reads === 2 ? 500 : 404,
+            stderr: reads === 2 ? "HTTP 500" : "HTTP 404"
+          });
+        },
+        runGh: async () => {
+          writes++;
+          return result({ code: 1, stderr: "ECONNRESET" });
+        },
+        sleep: async () => {
+          unknown = structuredClone(operation.providerRecovery);
+          stopped = true;
+        },
+        mutationRecovery: {
+          operation,
+          isStopped: () => stopped,
+          persist: async () => {}
+        }
+      })
+    ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+    expect(operation.providerRecovery).toEqual(unknown);
+    expect(reads).toBe(2);
+    expect(writes).toBe(1);
+  });
+
   it("returns GitHub's canonical name without mutating an existing environment", async () => {
     const calls: string[] = [];
     const ensured = await ensureGitHubEnvironment({
