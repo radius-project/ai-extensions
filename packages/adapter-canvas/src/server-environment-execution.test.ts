@@ -573,24 +573,44 @@ describe("production coordinator scheduling scopes", () => {
     }
   );
 
-  it.each([false, true])(
-    "hands an AWS operation to the AWS identity setup with its account (shutting down: %s)",
-    async (shuttingDown) => {
-      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+  it.each([
+    { shuttingDown: false, stopped: false, saveFailure: false },
+    { shuttingDown: true, stopped: false, saveFailure: false },
+    { shuttingDown: false, stopped: true, saveFailure: false },
+    { shuttingDown: false, stopped: true, saveFailure: true }
+  ])(
+    "keeps AWS setup bound to its account and honors its outcome: %j",
+    async ({ shuttingDown, stopped, saveFailure }) => {
       const owner = createEnvironmentExecutionOwner();
       const op = createOperation({
-        operationId: "op-aws",
+        operationId: "op_aws",
         repo: "fixture/app",
         environment: "dev",
         provider: "aws"
       });
       operations.put(op);
       op.context.githubLogin = "saved-account";
+      const savedStates: unknown[] = [];
+      vi.spyOn(operations, "persist").mockImplementation(async () => {
+        if (saveFailure && op.control?.stop.boundary)
+          throw new Error("AWS stop checkpoint could not be saved.");
+        savedStates.push(structuredClone(toPersistedOperation(op)));
+      });
+      const report = vi
+        .spyOn(operations, "report")
+        .mockImplementation(() => {});
+      const announce = vi.fn();
+      onOperationTerminal(announce);
       op.request = {
+        github: { login: "different-panel-account" },
         environment: {
           accountId: "123456789012",
           region: "us-west-2",
-          cluster: "shop"
+          cluster: "shop",
+          roleName: "radius-deploy",
+          existingRoleArn: "arn:aws:iam::123456789012:role/existing",
+          vpcId: "vpc-fixture",
+          subnetIds: ["subnet-a", "subnet-b"]
         }
       };
       const run = vi.fn(async (args: string[]) => {
@@ -631,12 +651,22 @@ describe("production coordinator scheduling scopes", () => {
           resetIdentityCache: () => {}
         })
       );
-      const setup = vi.fn(async () => ({
-        ok: false as const,
-        status: 400,
-        error: "AWS CLI not found. Nothing was created in AWS.",
-        code: "aws-cli-missing"
-      }));
+      const setup = vi.fn<
+        Parameters<
+          typeof createInstanceRequestCoordinator
+        >[3]["awsEnvironmentAccess"]["setup"]
+      >(async () => {
+        if (stopped) {
+          requestStop(op);
+          return { ok: false, stopped: true };
+        }
+        return {
+          ok: false,
+          status: 400,
+          error: "AWS CLI not found. Nothing was created in AWS.",
+          code: "aws-cli-missing"
+        };
+      });
       const configureEnvironment = vi.fn(unavailable);
       const handler = coordinator(
         owner,
@@ -665,16 +695,39 @@ describe("production coordinator scheduling scopes", () => {
             environment: "dev",
             accountId: "123456789012",
             region: "us-west-2",
-            cluster: "shop"
+            cluster: "shop",
+            roleName: "radius-deploy",
+            existingRoleArn: "arn:aws:iam::123456789012:role/existing",
+            vpcId: "vpc-fixture",
+            subnetIds: ["subnet-a", "subnet-b"]
           }),
           executor
         );
-        expect(op.failure).toMatchObject({
-          code: "aws-cli-missing",
-          message: expect.stringContaining("Nothing was created in AWS.")
-        });
+        if (stopped) {
+          expect(op.control.stop.boundary).toBe("after-aws-deploy-identity");
+          expect(op.state).toBe("cancelled");
+          expect(op.failure).toBeNull();
+          expect(announce).toHaveBeenCalledTimes(saveFailure ? 0 : 1);
+          expect(
+            savedStates.some(
+              (saved) =>
+                fromPersistedOperation(saved).control.stop.boundary ===
+                "after-aws-deploy-identity"
+            )
+          ).toBe(!saveFailure);
+          if (saveFailure)
+            expect(report).toHaveBeenCalledWith(
+              expect.objectContaining({ code: "operation-store-write-failed" })
+            );
+        } else {
+          expect(op.failure).toMatchObject({
+            code: "aws-cli-missing",
+            message: expect.stringContaining("Nothing was created in AWS.")
+          });
+        }
         expect(op.state).not.toBe("succeeded");
       }
+      expect(context.getExecutor(op.operationId)).toBeUndefined();
     }
   );
 
