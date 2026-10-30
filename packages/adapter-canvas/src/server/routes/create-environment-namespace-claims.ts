@@ -20,6 +20,7 @@ import {
   classifyProvider,
   parseGitHubEnvironmentVariables
 } from "../../provider-classification.js";
+import { mapWithLimit } from "../services/map-with-limit.js";
 
 export interface NamespaceClaimant {
   readonly environment: string;
@@ -371,27 +372,6 @@ function claimsPortsFrom(
 // when a read fails. Reads still resolve into name order, so which failure is
 // reported does not depend on which call happens to return first.
 const CLAIM_READ_CONCURRENCY = 4;
-
-async function mapWithLimit<T, R>(
-  items: readonly T[],
-  limit: number,
-  map: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    async () => {
-      for (;;) {
-        const index = next++;
-        if (index >= items.length) return;
-        results[index] = await map(items[index]);
-      }
-    }
-  );
-  await Promise.all(workers);
-  return results;
-}
 
 export async function loadNamespaceClaims(
   repo: string,

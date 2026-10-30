@@ -24,6 +24,7 @@ export const AWS_MANAGED_TAG = "radius-managed";
 export const AWS_REPOSITORY_TAG = "radius-repository";
 
 const ROLE_NAME_MAX = 64;
+const ROLE_NAME_HASH_LENGTH = 6;
 const INLINE_POLICY_NAME_MAX = 128;
 const SUB_CLAIM = `${GITHUB_OIDC_HOST}:sub`;
 const AUD_CLAIM = `${GITHUB_OIDC_HOST}:aud`;
@@ -99,13 +100,29 @@ function iamSafe(value: string): string {
 }
 
 /**
- * The default deploy role for a repository: `radius-deploy-<owner>-<repo>`,
- * truncated to the 64-character IAM role name limit.
+ * The default deploy role for a repository: `radius-deploy-<owner>-<repo>`.
+ * IAM role names allow 64 characters, so a longer name keeps its first 57,
+ * then `-` and the first 6 hex characters of the SHA-256 of `owner/repo`.
+ * Truncating alone would give two long repositories the same role. The hash
+ * makes that unlikely, not impossible. On a clash, setup finds the other
+ * repository's tags on the role and stops without changing it.
+ *
+ * `sha256Hex` is injected because this package cannot import `node:crypto`
+ * (see app-origin.ts). The repository is hashed in lowercase because GitHub
+ * repository names and IAM role names both ignore case.
  */
-export function buildAwsDeployRoleName(repoFullName: string): string {
+export function buildAwsDeployRoleName(
+  repoFullName: string,
+  sha256Hex: (text: string) => string
+): string {
   const [owner = "", repo = ""] = repoFullName.split("/");
   const name = iamSafe(`radius-deploy-${owner}-${repo}`);
-  return name.slice(0, ROLE_NAME_MAX).replace(/-+$/, "");
+  if (name.length <= ROLE_NAME_MAX) return name;
+  const suffix = sha256Hex(`${owner}/${repo}`.toLowerCase()).slice(
+    0,
+    ROLE_NAME_HASH_LENGTH
+  );
+  return `${name.slice(0, ROLE_NAME_MAX - ROLE_NAME_HASH_LENGTH - 1)}-${suffix}`;
 }
 
 /** Whether a value is a valid IAM role name. */
@@ -293,6 +310,21 @@ export function trustedGitHubSubjects(
     (statement) =>
       statement.Effect === "Allow" && isGitHubStatement(statement, providerArn)
   ).flatMap(subjectsOf);
+}
+
+/**
+ * Whether any statement in this trust policy names the account's GitHub
+ * provider. Unlike `trustedGitHubSubjects`, this also finds a Radius role
+ * whose last environment was removed, which keeps only a Deny statement.
+ */
+export function namesGitHubProvider(
+  policy: PolicyDocument,
+  accountId: string
+): boolean {
+  const providerArn = githubOidcProviderArn(accountId);
+  return policy.Statement.some((statement) =>
+    isGitHubStatement(statement, providerArn)
+  );
 }
 
 function githubTrustStatement(
@@ -519,16 +551,30 @@ export function awsRoleTags(role: unknown): Record<string, string> {
   return tags;
 }
 
+// IAM role tag keys ignore case and preserve it, so `Radius-Managed` is the
+// same tag as `radius-managed`.
+function roleTag(role: unknown, key: string): string {
+  const tags = awsRoleTags(role);
+  const match = Object.keys(tags).find((name) => name.toLowerCase() === key);
+  return match === undefined ? "" : tags[match];
+}
+
+/**
+ * The repository Radius created this role for, or null when Radius did not
+ * tag it as one of its own.
+ */
+export function radiusRoleRepository(role: unknown): string | null {
+  if (roleTag(role, AWS_MANAGED_TAG) !== "true") return null;
+  return roleTag(role, AWS_REPOSITORY_TAG) || null;
+}
+
 /** Whether Radius created this role for this repository. */
 export function isRadiusManagedRole(
   role: unknown,
   repoFullName: string
 ): boolean {
-  const tags = awsRoleTags(role);
   return (
-    tags[AWS_MANAGED_TAG] === "true" &&
-    (tags[AWS_REPOSITORY_TAG] || "").toLowerCase() ===
-      repoFullName.toLowerCase()
+    radiusRoleRepository(role)?.toLowerCase() === repoFullName.toLowerCase()
   );
 }
 

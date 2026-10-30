@@ -3,10 +3,8 @@
 // and failure panels the client script drives.
 
 import { escapeHtml } from "../../shared.js";
-import {
-  KUBERNETES_NAMESPACE_PATTERN,
-  buildAwsDeployRoleName
-} from "@radius-project/core/platforms";
+import { KUBERNETES_NAMESPACE_PATTERN } from "@radius-project/core/platforms";
+import { defaultAwsDeployRoleName } from "../../aws-deploy-role-name.js";
 
 export interface EnvironmentsPaneOptions {
   activeSubtab: string;
@@ -393,9 +391,9 @@ export function environmentsPaneMarkup(
       <div class="rad-field" id="env-identity-aws" style="display:none; max-width:560px;">
         <label for="aws-role-name-input">IAM role</label>
         <input id="aws-role-name-input" type="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="radius-deploy-owner-repo" value="${escapeHtml(
-          buildAwsDeployRoleName(ctxRepo || "")
+          defaultAwsDeployRoleName(ctxRepo || "")
         )}" data-default-name="${escapeHtml(
-          buildAwsDeployRoleName(ctxRepo || "")
+          defaultAwsDeployRoleName(ctxRepo || "")
         )}" />
         <input type="hidden" id="aws-selected-role-arn" value="" />
         <div class="rad-field__help"><span id="aws-role-help">Created in your AWS account, trusted over OIDC by <code>repo:${escapeHtml(
