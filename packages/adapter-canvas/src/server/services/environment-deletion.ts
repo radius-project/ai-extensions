@@ -361,12 +361,17 @@ export async function runEnvironmentDeletion(
   // lock. Non-Azure environments have no federated credential to retire, so
   // their GitHub delete needs no lock.
   const roleArn = String(op.request?.roleArn || "");
-  const recordedSubjects = op.request?.trustSubjects;
+  // All or nothing: a damaged list falls back to resolving the subjects from
+  // GitHub rather than removing a partial set.
+  const recordedSubjects: unknown = op.request?.trustSubjects;
   const trustSubjects =
-    Array.isArray(recordedSubjects) ?
-      recordedSubjects.filter(
-        (subject): subject is string => typeof subject === "string"
+    (
+      Array.isArray(recordedSubjects) &&
+      recordedSubjects.every(
+        (subject) => typeof subject === "string" && subject !== ""
       )
+    ) ?
+      (recordedSubjects as string[])
     : [];
   if (stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS)) {
     enterStage(op, STAGE_DELETE_AWS_ROLE_ACCESS);

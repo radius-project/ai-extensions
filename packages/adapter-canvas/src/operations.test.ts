@@ -3764,6 +3764,28 @@ describe("startup reconciliation", () => {
     expect(toPersistedOperation(create).deleteRecovery).toBeUndefined();
   });
 
+  it("persists the AWS role and an exact trust subject list for delete recovery", () => {
+    const subjects = [
+      "repo:contoso/store:environment:dev",
+      "repo:contoso@1/store@2:environment:dev"
+    ];
+    const del = newDeleteOp({
+      provider: "aws",
+      roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+      trustSubjects: subjects
+    });
+    expect(toPersistedOperation(del).deleteRecovery).toMatchObject({
+      roleArn: "arn:aws:iam::123456789012:role/radius-deploy",
+      trustSubjects: subjects
+    });
+    for (const damaged of [[], [""], ["repo:x", 7], "repo:x"]) {
+      expect(
+        toPersistedOperation(newDeleteOp({ trustSubjects: damaged }))
+          .deleteRecovery
+      ).not.toHaveProperty("trustSubjects");
+    }
+  });
+
   it("keeps a mid-stage delete operation live so the recovery scheduler resumes it", () => {
     const op = newDeleteOp();
     enterStage(op, STAGE_DELETE_CREDENTIAL);

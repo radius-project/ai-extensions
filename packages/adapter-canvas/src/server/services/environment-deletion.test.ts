@@ -11,7 +11,13 @@ import {
   STAGE_DELETE_STATE_PACKAGE,
   STAGE_REVIEW_APP_REGISTRATION,
   STAGE_DELETE_AWS_ROLE_ACCESS,
-  STAGE_REVIEW_IAM_ROLE
+  STAGE_REVIEW_IAM_ROLE,
+  canRetryDeletion,
+  enterStage,
+  fromPersistedOperation,
+  reconcileRestoredOperation,
+  setStageState,
+  toPersistedOperation
 } from "../../operations.js";
 import {
   runEnvironmentDeletion,
@@ -490,12 +496,22 @@ describe("runEnvironmentDeletion — AWS", () => {
     );
   });
 
-  it("passes the trust subjects setup recorded to the role cleanup", async () => {
+  it.each([
+    [
+      "the recorded subjects",
+      ["repo:octo/app:environment:dev", "id-subject"],
+      ["repo:octo/app:environment:dev", "id-subject"]
+    ],
+    [
+      "no subjects for a damaged list",
+      ["repo:octo/app:environment:dev", 7],
+      []
+    ],
+    ["no subjects for an empty entry", [""], []],
+    ["no subjects when none were recorded", undefined, []]
+  ])("passes %s to the role cleanup", async (_label, recorded, expected) => {
     const op = makeAwsOp();
-    op.request = {
-      ...op.request,
-      trustSubjects: ["repo:octo/app:environment:dev", 7, "id-subject"]
-    };
+    op.request = { ...op.request, trustSubjects: recorded };
     const removeAwsEnvironmentAccess = vi.fn(async () => ({
       ok: true as const,
       removed: [],
@@ -503,10 +519,69 @@ describe("runEnvironmentDeletion — AWS", () => {
     }));
     await runEnvironmentDeletion(op, makePorts({ removeAwsEnvironmentAccess }));
     expect(removeAwsEnvironmentAccess).toHaveBeenCalledWith(
-      expect.objectContaining({
-        trustSubjects: ["repo:octo/app:environment:dev", "id-subject"]
-      })
+      expect.objectContaining({ trustSubjects: expected })
     );
+  });
+
+  it("keeps the role and recorded subjects across a restart and a retry", async () => {
+    const subjects = [
+      "repo:octo/app:environment:dev",
+      "repo:octo@7/app@42:environment:dev"
+    ];
+    const restart = (record: unknown) =>
+      reconcileRestoredOperation(
+        fromPersistedOperation(
+          JSON.parse(JSON.stringify(toPersistedOperation(record)))
+        )
+      );
+    const op = makeAwsOp();
+    op.request = { ...op.request, trustSubjects: subjects };
+    // The extension stops after the Radius environment is gone, inside the
+    // role cleanup stage.
+    setStageState(op, STAGE_DELETE_RADIUS_ENV, "succeeded");
+    enterStage(op, STAGE_DELETE_AWS_ROLE_ACCESS);
+
+    const resumed = restart(op);
+    expect(resumed.state).toBe("running");
+    const removeAwsEnvironmentAccess = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false as const, message: "AccessDenied" })
+      .mockResolvedValue({
+        ok: true as const,
+        removed: subjects.map((subject) => `trust subject ${subject}`),
+        kept: []
+      });
+    const ports = makePorts({ removeAwsEnvironmentAccess });
+    await runEnvironmentDeletion(resumed, ports);
+    expect(resumed.state).toBe("failed_partial");
+    expect(ports.deleteRadiusEnvironment).not.toHaveBeenCalled();
+
+    // Another restart, then Retry deletion.
+    const retried = restart(resumed);
+    expect(canRetryDeletion(retried).ok).toBe(true);
+    beginRetryAttempt(retried, "deletion");
+    applyDeletionRetry(retried);
+    await runEnvironmentDeletion(retried, ports);
+
+    expect(retried.state).toBe("succeeded");
+    expect(removeAwsEnvironmentAccess.mock.calls).toEqual([
+      [
+        {
+          repo: "octo/app",
+          environment: "dev",
+          roleArn: ROLE_ARN,
+          trustSubjects: subjects
+        }
+      ],
+      [
+        {
+          repo: "octo/app",
+          environment: "dev",
+          roleArn: ROLE_ARN,
+          trustSubjects: subjects
+        }
+      ]
+    ]);
   });
 
   it.each([
