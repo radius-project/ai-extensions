@@ -27,7 +27,7 @@ Every change also faces the same approval bar. A one-word docs fix needs the sam
 
 ## Proposal
 
-Not every change needs a human reviewer. A pull request from a trusted contributor (a member of the maintainers or approvers team) can merge without human approval when it passes every required check and *is plainly low risk*, such as a docs-only or tests-only change.
+Not every change needs a human reviewer. A pull request from a trusted contributor (a member of the maintainers or approvers team) can merge without human approval when it passes every required check and *is plainly low risk*, such as a docs change or a test that runs without credentials.
 
 Every other pull request still needs a human. For those, automation should point to the riskiest parts of the diff, so the reviewer starts there instead of reading the whole change.
 
@@ -45,7 +45,7 @@ We can do this work in four phases:
 We want reviews to move faster without getting careless. To get there, we must:
 
 - **Build trust in our automated checks.** They should catch regressions, security bugs, and broken builds at three points: before a pull request opens, when it opens, and on every later push.
-- **Classify each change's risk automatically.** The paths a change touches set its tier. A docs fix or a new test file is low risk; a change to `packages/core` or to the workflow generators is higher.
+- **Classify each change's risk automatically.** The paths a change touches set its tier. A docs fix or a new unit test is low risk; a change to `packages/core` or to the workflow generators is higher.
 - **Show human reviewers where to look.** When a pull request needs a human, automation should flag its riskiest parts so the reviewer starts there.
 - **Define trusted contributors.** Only members of the maintainers and approvers teams may merge low-risk changes on an automated approval. Everyone else's pull requests must get human review.
 - **Expect to revise this.** We won't get it right the first time and will need to revise as the tools and models available to us change.
@@ -149,7 +149,7 @@ We should add three rules to `code-review.instructions.md`:
 
 We need a security reviewer that can block merge. Our review prompt already lists the risks that matter most here: shell strings built from interpolated values, unescaped webview HTML, unpinned actions, and secrets passed as inputs. Today nothing blocks merge on any of them.
 
-CodeQL can detect several of these risks, including workflow injection, but its coverage depends on the selected query suite. The high/critical merge rule below will not block medium-severity findings such as unpinned actions. Copilot Autofix can propose patches for supported findings; it does not support every Actions query.
+CodeQL catches several of these risks on every run, and its Actions queries flag the same workflow problems a linter like zizmor would (injection in `run:` steps, unpinned actions, risky triggers). Copilot Autofix proposes a patch for each CodeQL finding.
 
 We should:
 
@@ -163,7 +163,7 @@ We need failing builds and vulnerable dependencies to block merge. Today the Dep
 
 We should add these as required status checks in the `main` ruleset, using the check name each job reports:
 
-- `dependency-review / dependency-review` (from [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml))
+- `dependency-review` (from [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml))
 - `Static checks`
 - `Windows process integration`
 - `Canvas Chromium (shard 1)` and `Canvas Chromium (shard 2)`
@@ -183,18 +183,19 @@ We should write a short `docs/eng/REVIEW_POLICY.md` that assigns each change a t
 
 | Tier | Examples in this repo | Human approvals | Why |
 | --- | --- | --- | --- |
-| Low | Docs, copy, tests only, changesets, visual baseline updates | Copilot approval for trusted authors, one human approval for all other authors | Nothing here runs with credentials or ships as code. A mistake is visible in the diff and cheap to revert. |
+| Low | Docs, copy, changesets, visual baseline updates, and tests that run without credentials (unit, integration, browser) | Copilot approval for trusted authors, one human approval for all other authors | Nothing here runs with credentials or ships as code. A mistake is visible in the diff and cheap to revert. |
 | Medium | Ordinary changes to `packages/core` and `packages/adapter-canvas` | One | This code ships to users, but CI, coverage, and Copilot review catch most mistakes, and a bad release can be fixed with the next one. |
-| High | `.github/workflows/**`, `.github/extension/**`, `packages/core/src/platforms/**`, `packages/core/src/workflows/**`, and the release scripts (`scripts/plugins.mjs`, `scripts/version.mjs`, `scripts/release-version.mjs`, `scripts/release-plan.mjs`, `scripts/verified-git.mjs`, `scripts/validate-plugin-dist.mjs`) | One | These run with credentials, act outside this repo, and are hard to undo. Passing tests don't show they're safe (more info below). |
+| High | `.github/workflows/**`, `.github/extension/**`, `packages/core/src/platforms/**`, `packages/core/src/workflows/**`, the cloud test suite (`packages/adapter-canvas/test/e2e-cloud/**` and `packages/adapter-canvas/playwright.cloud.config.ts`), and the release scripts (`scripts/plugins.mjs`, `scripts/version.mjs`, `scripts/release-version.mjs`, `scripts/release-plan.mjs`, `scripts/verified-git.mjs`, `scripts/validate-plugin-dist.mjs`) | One | These run with credentials, act outside this repo, and are hard to undo. Passing tests don't show they're safe (more info below). |
 
 Each high-tier path is there for a specific reason:
 
 - **Our workflows** in `.github/workflows/**` run in CI with write tokens and secrets, and they enforce our merge rules. One change can weaken a required check, pull in an unpinned action, or let a pull request title inject a shell command.
 - **The workflows we ship to users** in `.github/extension/**` run in users' repositories. Several request `id-token: write` to get cloud credentials through OIDC, and some delete real AWS or Azure resources.
 - **The generators** in `packages/core/src/platforms` and `packages/core/src/workflows` write that workflow YAML and build the OIDC subject that a user's cloud account checks before it hands out credentials. A subject that's too broad lets more workflows get those credentials. Reviewers read the generator, not the YAML it produces, so a risky change is easy to miss.
+- **The cloud test suite** in `packages/adapter-canvas/test/e2e-cloud/**` runs from `cloud-e2e.yml` with an Azure identity and a GitHub App token, and it creates and deletes real Azure resources. That workflow runs only nightly and on manual dispatch, never on a pull request, to keep fork code away from those credentials. So a change to these tests or their `support/` helpers first runs with credentials after it merges, and no pull request check exercises it beforehand. Tests elsewhere, including the `*.live.test.ts` files that `live-tests.yml` runs with a read-only token, stay in the low tier.
 - **The release scripts**, called by `publish.yml` and `release.yml`, decide what reaches users. A compromise there is a supply-chain attack, and a published version can't be cleanly taken back.
 
-For all four, passing tests don't show a change is safe. Tests check that the code does what we intended; the danger in these paths is what the code could also be made to do. A workflow that grants `contents: write` where `read` would do passes every test, and so does a generator that writes a wider OIDC subject, if we update the expected output along with it. A shell step that interpolates a pull request title works fine until someone opens a pull request with a malicious title. And our pull request CI can't run the real thing: it has no cloud credentials and doesn't publish, so the deploy, delete, and release steps first run for real after merge. Only a reviewer who reads for least privilege, scope, and untrusted input can catch these.
+For all five, passing tests don't show a change is safe. Tests check that the code does what we intended; the danger in these paths is what the code could also be made to do. A workflow that grants `contents: write` where `read` would do passes every test, and so does a generator that writes a wider OIDC subject, if we update the expected output along with it. A shell step that interpolates a pull request title works fine until someone opens a pull request with a malicious title. And our pull request CI can't run the real thing: it has no cloud credentials and doesn't publish, so the deploy, delete, and release steps first run for real after merge. Only a reviewer who reads for least privilege, scope, and untrusted input can catch these.
 
 The high tier also calls for a Max code review from Copilot, which the author or the human directing the agent must request by hand. Copilot sets the default effort level per repository, not per path, and we should keep that default at Balanced.
 
@@ -206,7 +207,7 @@ We should add a workflow that uses `actions/labeler` to apply `risk:low`, `risk:
 
 We should propose a section of sensitive paths in the synced `CODEOWNERS` template in `radius-project/.github`, so a code owner must approve any high-tier change.
 
-A ruleset sets one approval count for the whole branch, and `CODEOWNERS` requires one code-owner approval. Since high-tier changes should require only one human approval, the code-owner requirement is sufficient; we do not need a separate approval-count check for high-tier pull requests.
+A ruleset sets one approval count for the whole branch, and `CODEOWNERS` requires only one code-owner approval, so neither can demand two approvals for some paths and one for others. To enforce two approvals on the high tier, we should add a required status check that passes only when a `risk:high` pull request has two human approvals of its current commit, not counting Copilot.
 
 #### Step 4.4: Point human reviewers at the riskiest changes
 
@@ -223,7 +224,7 @@ We should:
 
 - **Allow Copilot to approve pull requests** lets Copilot submit an approving review.
 - **Allow Copilot approvals to count toward merge requirements** lets that approval satisfy the ruleset's required approval, the same way a teammate's would.
-- **File paths** optionally limits which pull requests that applies to. The admin enters up to 15 file globs, one per line, such as `docs/**` or `**/*.test.ts`. Copilot's approval counts toward merge only when every changed file in the pull request matches at least one glob. If the list is blank, it counts for every file.
+- **File paths** optionally limits which pull requests that applies to. The admin enters up to 15 file globs, one per line, such as `docs/**` or `.changeset/**`. Copilot's approval counts toward merge only when every changed file in the pull request matches at least one glob. If the list is blank, it counts for every file. A glob can only add paths, not exclude them, so each one must avoid matching any high-tier path.
 
 For example, with the globs `docs/**` and `**/*.md`, a pull request that changes `docs/setup.md` and `README.md` can merge on Copilot's approval. If it also changes `packages/core/src/index.ts`, it still needs a human approval.
 
@@ -232,7 +233,7 @@ The globs don't change which pull requests Copilot reviews. The `main` ruleset s
 We should roll it out in four parts:
 
 - **Trial.** For at least four weeks and at least 30 low-tier pull requests, **leave approvals off and record Copilot's approval assessment for each pull request next to the human decision on the same commit**. Count any false approvals (where Copilot would approve, but a human asks for a real fix). Turn approvals on only if there are no false approvals in the trial period. If there are false approvals, update the review instructions and skills, then run a new trial.
-- **Allow-list.** Use the low tier's paths as the globs. Never include `.github/**`, any `AGENTS.md` or `copilot-instructions.md`, or any glob that overlaps a high-tier path.
+- **Allow-list.** Use the low tier's paths as the globs. Never include `.github/**`, any `AGENTS.md` or `copilot-instructions.md`, or any glob that overlaps a high-tier path. That rules out broad test globs such as `**/*.test.ts`, which would match the `*.test.ts` files under `packages/adapter-canvas/test/e2e-cloud/`; list the low-tier test folders by name instead.
 - **Code owners.** The synced `CODEOWNERS` assigns every path (`*`) to our teams, and the ruleset requires a code-owner review. GitHub doesn't document whether a Copilot approval satisfies that rule. We should test it on a scratch repository first. If it doesn't, we should propose upstream `CODEOWNERS` entries with no owners for the low-tier paths.
 - **Trusted authors.** Copilot approvals don't check who wrote the change. We should add a required status check that passes when the pull request has a human approval of the current commit, or when its author is a member of the maintainers or approvers teams. An agent's pull request counts as trusted only when the check can confirm from GitHub's own records, not the pull request template, that a team member started the agent. Outside contributions therefore still need a human, and the check fails when it can't tell.
 
