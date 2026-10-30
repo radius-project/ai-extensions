@@ -24,6 +24,20 @@ inputs:
     description: Periodically refresh the Azure workload identity token while deletion runs.
     required: false
     default: "false"
+  aws-role-arn:
+    description: >-
+      AWS deploy role. When set, the GitHub OIDC token, and the EKS token when
+      aws-eks-cluster-name is set, are refreshed while deletion runs.
+    required: false
+    default: ""
+  aws-eks-cluster-name:
+    description: EKS cluster whose token is refreshed. Requires aws-role-arn.
+    required: false
+    default: ""
+  aws-region:
+    description: Region of the EKS cluster. Required with aws-role-arn.
+    required: false
+    default: ""
   force:
     description: >-
       Pass --force so the delete proceeds even when a resource is stranded in a non-terminal
@@ -41,6 +55,9 @@ runs:
         RESOURCE_TYPE: ${{ inputs.resource-type }}
         RESOURCE_NAME: ${{ inputs.name }}
         REFRESH_AZURE_OIDC_TOKEN: ${{ inputs.azure-oidc-token-refresh }}
+        RADIUS_AWS_ROLE_ARN: ${{ inputs.aws-role-arn }}
+        RADIUS_AWS_EKS_CLUSTER_NAME: ${{ inputs.aws-eks-cluster-name }}
+        RADIUS_AWS_REGION: ${{ inputs.aws-region }}
         FORCE_DELETE: ${{ inputs.force }}
       run: |
         # pipefail so a failed `rad` whose output is piped through `tee` is detected
@@ -135,6 +152,17 @@ runs:
             exit 1
           fi
           bash "$TOKEN_REFRESH_SCRIPT" --watch &
+          OIDC_REFRESH_PID=$!
+        fi
+
+        if [ -n "$RADIUS_AWS_ROLE_ARN" ]; then
+          AWS_TOKEN_REFRESH_SCRIPT="$GITHUB_ACTION_PATH/../../scripts/refresh-aws-tokens.sh"
+          if ! bash "$AWS_TOKEN_REFRESH_SCRIPT" --prepare; then
+            OUTCOME="failed"
+            EXIT=1
+            exit 1
+          fi
+          bash "$AWS_TOKEN_REFRESH_SCRIPT" --watch &
           OIDC_REFRESH_PID=$!
         fi
 
