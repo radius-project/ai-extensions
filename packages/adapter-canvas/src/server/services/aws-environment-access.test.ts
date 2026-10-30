@@ -1,0 +1,475 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildGitHubTrustPolicy,
+  parsePolicyDocument,
+  trustedGitHubSubjects
+} from "@radius-project/core";
+import type { GitHubJsonResponse } from "../../azure-oidc.js";
+import type { SelectedGhExecutor } from "../../gh.js";
+import type { AwsCommandResult } from "./aws-deploy-identity.js";
+import { createAwsEnvironmentAccess } from "./aws-environment-access.js";
+
+const ACCOUNT = "123456789012";
+const ROLE = "radius-deploy-octo-shop";
+const ROLE_ARN = `arn:aws:iam::${ACCOUNT}:role/${ROLE}`;
+const DEV = "repo:octo/shop:environment:dev";
+const PROD = "repo:octo/shop:environment:prod";
+// The ID-based form GitHub issues for octo (owner 7) / shop (repository 42).
+const DEV_ID = "repo:octo@7/shop@42:environment:dev";
+const STAGE = "authorize-identity";
+const EXECUTOR = { login: "saved-account" } as unknown as SelectedGhExecutor;
+
+const ok = (stdout: unknown = ""): AwsCommandResult => ({
+  code: 0,
+  stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout),
+  stderr: ""
+});
+const fail = (stderr: string): AwsCommandResult => ({
+  code: 254,
+  stdout: "",
+  stderr
+});
+
+const happyPath: Record<string, AwsCommandResult> = {
+  "--version": ok("aws-cli/2.17.0 Python/3.11 Darwin/23"),
+  "sts get-caller-identity": ok({ Account: ACCOUNT }),
+  "eks describe-cluster": ok({
+    cluster: { accessConfig: { authenticationMode: "API" } }
+  }),
+  "iam get-role": fail("An error occurred (NoSuchEntity) when calling GetRole"),
+  "iam list-open-id-connect-providers": ok({ OpenIDConnectProviderList: [] }),
+  "iam create-open-id-connect-provider": ok(),
+  "iam create-role": ok({ Role: { Arn: ROLE_ARN } }),
+  "iam put-role-policy": ok(),
+  "eks create-access-entry": ok(),
+  "eks associate-access-policy": ok()
+};
+
+// GitHub answers for octo/shop with the default subject, as github.com
+// reports it: an older repository has `use_immutable_subject: false` and its
+// tokens may carry either form, a new one has `true` and only the ID-based form.
+function githubSubjects(
+  useImmutableSubject: boolean
+): Record<string, GitHubJsonResponse> {
+  return {
+    "/repos/octo/shop": {
+      ok: true,
+      status: 200,
+      json: { full_name: "octo/shop", id: 42, owner: { id: 7 } }
+    },
+    "/repos/octo/shop/actions/oidc/customization/sub": {
+      ok: true,
+      status: 200,
+      json: {
+        use_default: true,
+        use_immutable_subject: useImmutableSubject,
+        ...(useImmutableSubject ?
+          { sub_claim_prefix: "repo:octo@7/shop@42" }
+        : {})
+      }
+    }
+  };
+}
+const defaultSubject = githubSubjects(false);
+
+interface Operation {
+  id: string;
+}
+
+function harness(
+  aws: Record<string, AwsCommandResult>,
+  github: Record<string, GitHubJsonResponse> = defaultSubject,
+  // The customer pauses while this AWS command, or the last GitHub read, runs.
+  pauseDuring?: string
+) {
+  let stopRequested = false;
+  const awsCalls: string[][] = [];
+  const githubCalls: Array<{
+    path: string;
+    executor: SelectedGhExecutor | undefined;
+  }> = [];
+  const events: unknown[][] = [];
+  const access = createAwsEnvironmentAccess<Operation>({
+    async runAws(args) {
+      awsCalls.push(args);
+      const command = args.slice(0, 2).join(" ");
+      const result = aws[command];
+      if (!result) throw new Error(`unexpected aws ${args.join(" ")}`);
+      if (command === pauseDuring) stopRequested = true;
+      return result;
+    },
+    async runGitHubJson(path, executor) {
+      githubCalls.push({ path, executor });
+      const response = github[path];
+      if (!response) throw new Error(`unexpected GitHub read ${path}`);
+      if (pauseDuring === "github" && path.endsWith("/customization/sub")) {
+        stopRequested = true;
+      }
+      return response;
+    },
+    isStopRequested: () => stopRequested,
+    async sleep(milliseconds) {
+      events.push(["sleep", milliseconds]);
+    },
+    operations: {
+      enterStage: (operation, stage) => {
+        events.push(["enterStage", operation.id, stage]);
+      },
+      addLegacyStep: (operation, text, stage) => {
+        events.push(["step", operation.id, text, stage]);
+      },
+      setContext: (operation, patch) => {
+        events.push(["setContext", operation.id, patch]);
+      }
+    },
+    store: {
+      persist: async () => {
+        events.push(["persist"]);
+      }
+    },
+    stageAuthorizeIdentity: STAGE,
+    errorMessage: (error) =>
+      error instanceof Error ? error.message : String(error)
+  });
+  const find = (command: string) =>
+    awsCalls.find((args) => args.slice(0, 2).join(" ") === command);
+  return { access, awsCalls, githubCalls, events, find };
+}
+
+const operation: Operation = { id: "op-1" };
+const input = {
+  repo: " octo/shop ",
+  environment: "dev",
+  accountId: ACCOUNT,
+  region: "us-west-2",
+  cluster: "shop",
+  roleName: ""
+};
+
+describe("AWS environment access setup", () => {
+  it.each([
+    [false, [DEV, DEV_ID]],
+    [true, [DEV_ID]]
+  ])(
+    "authorizes a new role for every subject GitHub may present (use_immutable_subject %s)",
+    async (useImmutableSubject, subjects) => {
+      const h = harness(happyPath, githubSubjects(useImmutableSubject));
+
+      const result = await h.access.setup(operation, input, EXECUTOR);
+
+      expect(result).toEqual({ ok: true, roleArn: ROLE_ARN, subjects });
+      expect(h.githubCalls).toEqual([
+        { path: "/repos/octo/shop", executor: EXECUTOR },
+        {
+          path: "/repos/octo/shop/actions/oidc/customization/sub",
+          executor: EXECUTOR
+        }
+      ]);
+      // No role name was given, so the repository's default role is created.
+      expect(h.find("iam create-role")).toEqual(
+        expect.arrayContaining(["--role-name", ROLE])
+      );
+      const createRole = h.find("iam create-role") ?? [];
+      const trust = parsePolicyDocument(
+        JSON.parse(
+          createRole[createRole.indexOf("--assume-role-policy-document") + 1] ??
+            "{}"
+        )
+      );
+      expect(trustedGitHubSubjects(trust, ACCOUNT)).toEqual(subjects);
+      expect(h.events[0]).toEqual(["enterStage", "op-1", STAGE]);
+      expect(h.events).toContainEqual([
+        "step",
+        "op-1",
+        `ℹ️ Deploy identity will trust ${subjects.join(", ")}`,
+        STAGE
+      ]);
+      // Progress is saved before the role and its subjects are recorded.
+      expect(h.events.slice(-2)).toEqual([
+        ["persist"],
+        [
+          "setContext",
+          "op-1",
+          { awsRoleArn: ROLE_ARN, awsTrustSubjects: subjects }
+        ]
+      ]);
+    }
+  );
+
+  it("adds the environment to a role the developer picked", async () => {
+    const picked = `arn:aws:iam::${ACCOUNT}:role/team-deployer`;
+    const h = harness({
+      ...happyPath,
+      "iam get-role": ok({
+        Role: {
+          Arn: picked,
+          AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [PROD])
+        }
+      }),
+      "iam list-open-id-connect-providers": ok({
+        OpenIDConnectProviderList: [
+          {
+            Arn: `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`
+          }
+        ]
+      }),
+      "iam get-open-id-connect-provider": ok({
+        ClientIDList: ["sts.amazonaws.com"]
+      }),
+      "iam update-assume-role-policy": ok()
+    });
+
+    const result = await h.access.setup(
+      operation,
+      { ...input, roleName: "ignored", existingRoleArn: ` ${picked} ` },
+      EXECUTOR
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      roleArn: picked,
+      subjects: [DEV, DEV_ID]
+    });
+    expect(h.find("iam get-role")).toEqual(
+      expect.arrayContaining(["--role-name", "team-deployer"])
+    );
+    expect(h.find("iam create-role")).toBeUndefined();
+  });
+
+  it("stops before AWS when GitHub cannot resolve the subject", async () => {
+    const h = harness(happyPath, {
+      "/repos/octo/shop": { ok: false, status: 404, json: null }
+    });
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 400,
+      code: "oidc-subject-unresolved"
+    });
+    expect("error" in result && result.error).toContain(
+      'Could not read repository "octo/shop"'
+    );
+    expect(h.awsCalls).toEqual([]);
+    expect(h.events).toEqual([["enterStage", "op-1", STAGE]]);
+  });
+
+  it("says nothing was created when setup stops before writing to AWS", async () => {
+    const h = harness({
+      ...happyPath,
+      "--version": fail("aws: command not found")
+    });
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toMatchObject({ ok: false, status: 400 });
+    expect("error" in result && result.error).toMatch(
+      / Nothing was created in AWS\.$/
+    );
+    expect(h.events.at(-1)).toEqual(["persist"]);
+    expect(h.events.some(([kind]) => kind === "setContext")).toBe(false);
+  });
+
+  it("names what setup created before it stopped", async () => {
+    const h = harness({
+      ...happyPath,
+      "iam put-role-policy": fail("AccessDenied: iam:PutRolePolicy")
+    });
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result.ok).toBe(false);
+    expect("error" in result && result.error).toContain(
+      `Created before setup stopped: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}. Remove them in the AWS console if you will not retry.`
+    );
+    expect(h.events.some(([kind]) => kind === "setContext")).toBe(false);
+  });
+});
+
+describe("pausing AWS environment access setup", () => {
+  const WRITES = [
+    "iam create-open-id-connect-provider",
+    "iam create-role",
+    "iam put-role-policy",
+    "eks create-access-entry",
+    "eks associate-access-policy"
+  ];
+  const writesRun = (h: ReturnType<typeof harness>) =>
+    h.awsCalls
+      .map((args) => args.slice(0, 2).join(" "))
+      .filter((command) => WRITES.includes(command));
+  const steps = (h: ReturnType<typeof harness>) =>
+    h.events.filter(([kind]) => kind === "step").map(([, , text]) => text);
+
+  it.each([
+    ["while GitHub reports the subjects", "github"],
+    ["during a preflight read", "eks describe-cluster"],
+    [
+      "during the last read before the first write",
+      "iam list-open-id-connect-providers"
+    ]
+  ])("stops with nothing written in AWS when paused %s", async (_label, at) => {
+    const h = harness(happyPath, defaultSubject, at);
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toEqual({ ok: false, stopped: true });
+    expect(writesRun(h)).toEqual([]);
+    expect(steps(h).at(-1)).toBe(
+      "⏸️ Paused before any AWS change. Nothing was created in AWS."
+    );
+    expect(h.events.at(-1)).toEqual(["persist"]);
+    expect(h.events.some(([kind]) => kind === "setContext")).toBe(false);
+  });
+
+  it("finishes the write in flight, records it, and runs no later write", async () => {
+    const h = harness(
+      happyPath,
+      defaultSubject,
+      "iam create-open-id-connect-provider"
+    );
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toEqual({ ok: false, stopped: true });
+    expect(writesRun(h)).toEqual(["iam create-open-id-connect-provider"]);
+    expect(steps(h).at(-1)).toBe(
+      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}.`
+    );
+    expect(h.events.at(-1)).toEqual(["persist"]);
+    expect(h.events.some(([kind]) => kind === "setContext")).toBe(false);
+  });
+
+  it("records the role when the pause arrives during the last write", async () => {
+    const h = harness(happyPath, defaultSubject, "eks associate-access-policy");
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toEqual({ ok: false, stopped: true });
+    expect(writesRun(h)).toEqual(WRITES);
+    expect(h.events).toContainEqual([
+      "setContext",
+      "op-1",
+      { awsRoleArn: ROLE_ARN, awsTrustSubjects: [DEV, DEV_ID] }
+    ]);
+    expect(steps(h).at(-1)).toBe(
+      `⏸️ Paused after AWS setup finished. ${ROLE_ARN} is ready for this environment.`
+    );
+    expect(h.events.at(-1)).toEqual(["persist"]);
+  });
+
+  it("runs every write when no pause is requested", async () => {
+    const h = harness(happyPath);
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+    expect(writesRun(h)).toEqual(WRITES);
+  });
+});
+
+describe("AWS environment access removal", () => {
+  const roleTrusting = (subjects: string[]) => ({
+    "sts get-caller-identity": ok({ Account: ACCOUNT }),
+    "iam get-role": ok({
+      Role: {
+        Arn: ROLE_ARN,
+        AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, subjects)
+      }
+    }),
+    "iam update-assume-role-policy": ok(),
+    "iam delete-role-policy": ok()
+  });
+  const remainingTrust = (h: ReturnType<typeof harness>) => {
+    const update = h.find("iam update-assume-role-policy") ?? [];
+    return trustedGitHubSubjects(
+      parsePolicyDocument(
+        JSON.parse(update[update.indexOf("--policy-document") + 1] ?? "{}")
+      ),
+      ACCOUNT
+    );
+  };
+
+  it("removes exactly the subjects setup recorded without asking GitHub", async () => {
+    const h = harness(roleTrusting([DEV, DEV_ID, PROD]));
+
+    const result = await h.access.remove({
+      repo: "octo/shop",
+      environment: "dev",
+      roleArn: ROLE_ARN,
+      trustSubjects: [DEV, DEV_ID]
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      removed: [
+        `trust subject ${DEV}`,
+        `trust subject ${DEV_ID}`,
+        "policy radius-deploy-dev"
+      ],
+      kept: [`IAM role ${ROLE}`, "the account's GitHub identity provider"]
+    });
+    expect(h.githubCalls).toEqual([]);
+    expect(remainingTrust(h)).toEqual([PROD]);
+  });
+
+  it("removes the recorded subjects after the repository is renamed", async () => {
+    // Setup recorded octo/shop's subjects; GitHub now reports octo/store.
+    const h = harness(roleTrusting([DEV, DEV_ID, PROD]), {
+      "/repos/octo/store": {
+        ok: true,
+        status: 200,
+        json: { full_name: "octo/store", id: 42, owner: { id: 7 } }
+      }
+    });
+
+    const result = await h.access.remove({
+      repo: "octo/store",
+      environment: "dev",
+      roleArn: ROLE_ARN,
+      trustSubjects: [DEV, DEV_ID]
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      removed: [
+        `trust subject ${DEV}`,
+        `trust subject ${DEV_ID}`,
+        "policy radius-deploy-dev"
+      ]
+    });
+    expect(remainingTrust(h)).toEqual([PROD]);
+  });
+
+  it.each([
+    ["has no recorded subjects", { trustSubjects: [] }],
+    ["predates recorded subjects", {}]
+  ])(
+    "resolves both subjects from GitHub when the environment %s",
+    async (_label, recorded) => {
+      const h = harness(roleTrusting([DEV, DEV_ID, PROD]));
+
+      const result = await h.access.remove({
+        repo: "octo/shop",
+        environment: "dev",
+        roleArn: ROLE_ARN,
+        ...recorded
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        removed: [
+          `trust subject ${DEV}`,
+          `trust subject ${DEV_ID}`,
+          "policy radius-deploy-dev"
+        ]
+      });
+      // Read with the ambient account: deletion has no selected executor.
+      expect(h.githubCalls.map(({ executor }) => executor)).toEqual([
+        undefined,
+        undefined
+      ]);
+      expect(remainingTrust(h)).toEqual([PROD]);
+    }
+  );
+});

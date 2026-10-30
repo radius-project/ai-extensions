@@ -24,9 +24,16 @@ export type SetupCoordinatorStageResult =
   | { kind: "completed" | "input-required"; clientId?: unknown }
   | { kind: "reconciling"; message?: unknown };
 
+export type SetupCoordinatorAwsResult =
+  | { kind: "completed"; roleArn: string; trustSubjects: readonly string[] }
+  | { kind: "failed"; error: unknown }
+  // A pause arrived during AWS setup, which recorded what it changed and ran
+  // nothing after the pause.
+  | { kind: "stopped" };
+
 export type SetupCoordinatorFailure =
   | { kind: "repository-access" | "package-access" }
-  | { kind: "environment-resolution"; error: unknown };
+  | { kind: "environment-resolution" | "aws-authorization"; error: unknown };
 
 export type SetupCoordinatorEvent =
   | { kind: "environment-owned" | "environment-resolved"; name: string }
@@ -69,6 +76,13 @@ export interface SetupCoordinatorPorts {
       operationId: string;
     }
   ): Promise<SetupCoordinatorStageResult>;
+  authorizeAws(
+    request: Record<string, unknown> & {
+      repo: string;
+      environment: string;
+      reused: boolean;
+    }
+  ): Promise<SetupCoordinatorAwsResult>;
   configureEnvironment(
     request: Record<string, unknown> &
       SetupCoordinatorTarget & {
@@ -236,9 +250,59 @@ export async function runSetupCoordinator(
     return { shouldMonitor: false };
   }
   const environmentRequest = record(request.environment);
+  let awsRoleArn = "";
+  let awsTrustSubjects: readonly string[] = [];
+  if (target.provider === "aws" && !outstanding) {
+    const aws = await ports.authorizeAws({
+      ...environmentRequest,
+      repo: target.repo,
+      environment: ensured.name,
+      reused: ensured.state === "reused"
+    });
+    if (aws.kind === "stopped") {
+      // The pause is still requested, so this boundary stops the operation.
+      // Should it not, finish as a failure rather than configure the
+      // environment without a deploy identity.
+      if (await ports.stopBoundary("after-aws-deploy-identity")) {
+        await ports.finalizeFailure({
+          kind: "aws-authorization",
+          error: {
+            status: 409,
+            message:
+              "AWS setup stopped for a pause before the deploy identity was ready.",
+            code: "aws-setup-interrupted"
+          }
+        });
+      }
+      return { shouldMonitor: false };
+    }
+    if (aws.kind === "failed") {
+      if (!(await ports.stopBoundary("before-setup-failure-cleanup"))) {
+        return { shouldMonitor: false };
+      }
+      await ports.finalizeFailure({
+        kind: "aws-authorization",
+        error: aws.error
+      });
+      return { shouldMonitor: false };
+    }
+    awsRoleArn = aws.roleArn;
+    awsTrustSubjects = aws.trustSubjects;
+  }
   const clientId =
     setupResult && "clientId" in setupResult ? setupResult.clientId : undefined;
   const liveContext = ports.operation().context;
+  if (!awsRoleArn && typeof liveContext?.awsRoleArn === "string") {
+    awsRoleArn = liveContext.awsRoleArn;
+  }
+  if (
+    awsTrustSubjects.length === 0 &&
+    Array.isArray(liveContext?.awsTrustSubjects)
+  ) {
+    awsTrustSubjects = liveContext.awsTrustSubjects.filter(
+      (subject): subject is string => typeof subject === "string"
+    );
+  }
   const environmentResult = await invoke(() =>
     ports.configureEnvironment({
       ...environmentRequest,
@@ -247,6 +311,10 @@ export async function runSetupCoordinator(
       operationEnvironment: target.environment,
       provider: target.provider,
       operationId: target.operationId,
+      ...(awsRoleArn ? { roleArn: awsRoleArn } : {}),
+      ...(awsTrustSubjects.length > 0 ?
+        { trustSubjects: awsTrustSubjects }
+      : {}),
       clientId:
         (typeof clientId === "string" && clientId) ||
         (typeof liveContext?.clientId === "string" && liveContext.clientId) ||

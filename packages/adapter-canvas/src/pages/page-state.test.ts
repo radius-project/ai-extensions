@@ -50,6 +50,7 @@ const states = {
     repo: "octo/app",
     branch: "feature/x",
     activeSubtab: "environments",
+    awsEnabled: false,
     mutationNonce: "fixture-nonce"
   }
 } satisfies PageStateById;

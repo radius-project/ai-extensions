@@ -22,6 +22,8 @@ export const DELETE_ENV_DISPATCHER_FILE = "delete-environment.yml";
 // The environment-delete Azure provider workflow. Static, ai-extensions-owned,
 // and committed alongside the environment dispatcher.
 export const DELETE_ENV_AZURE_FILE = "delete-environment-azure.yml";
+// The environment-delete AWS provider workflow, carrying the same guard.
+export const DELETE_ENV_AWS_FILE = "delete-environment-aws.yml";
 
 // The exact name of the guard step inside `delete-environment-azure.yml` that
 // fails when applications are still deployed to the environment. The canvas
@@ -40,7 +42,8 @@ export type DeleteWorkflowFiles = Record<string, string>;
  * Returns the files committed to the target repo's `.github/workflows/`: the
  * `delete-application.yml` and `delete-environment.yml` dispatchers plus the
  * reusable provider workflows — `delete-azure.yml` / `delete-aws.yml` for the
- * application-delete path and `delete-environment-azure.yml` for the
+ * application-delete path and `delete-environment-azure.yml` /
+ * `delete-environment-aws.yml` for the
  * environment-delete path. The dispatchers only fill `{{ENV}}` (the dispatch
  * default); the provider workflows also pin their composite actions to
  * `{{RADIUS_REF}}`.
@@ -76,6 +79,10 @@ export function generateDeleteWorkflow(
       RADIUS_REF: DELETE_RADIUS_REF
     }),
     [DELETE_AZURE_FILE]: fillTemplate(pick(DELETE_AZURE_FILE), {
+      ENV: env,
+      RADIUS_REF: DELETE_RADIUS_REF
+    }),
+    [DELETE_ENV_AWS_FILE]: fillTemplate(pick(DELETE_ENV_AWS_FILE), {
       ENV: env,
       RADIUS_REF: DELETE_RADIUS_REF
     }),

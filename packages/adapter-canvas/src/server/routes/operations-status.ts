@@ -1,5 +1,11 @@
 import type { CanvasRequestContext } from "../request-context.js";
-import { KUBERNETES_NAMESPACE_ERROR } from "@radius-project/core";
+import {
+  KUBERNETES_NAMESPACE_ERROR,
+  isAwsAccountId,
+  isAwsRegion,
+  isAwsRoleName,
+  parseAwsRoleArn
+} from "@radius-project/core";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import { setupStartConflictResponse } from "./operation-start-conflict.js";
 import {
@@ -78,6 +84,8 @@ export type OperationStartConflict = Extract<
 // under one interface keeps the composition root readable without turning any
 // of them into a broad port object.
 export interface CreateOperationDependencies {
+  // The developer-only AWS switch. Off, AWS environments are refused.
+  awsEnabled: boolean;
   // Pure guards and factories. Injected rather than imported so the module
   // spawns nothing and the boundary of what this route can reach stays visible.
   isValidRepoSlug(value: unknown): boolean;
@@ -470,6 +478,13 @@ export async function handleCreateOperation(
     });
     return;
   }
+  if (provider === "aws" && !dependencies.awsEnabled) {
+    jsonError(context, 400, {
+      error: `Creating AWS environments isn't supported yet. "${environment}" was not created.`,
+      code: "provider-unsupported"
+    });
+    return;
+  }
   const namespace =
     (
       data.namespace === undefined ||
@@ -521,13 +536,17 @@ export async function handleCreateOperation(
       return;
     }
   } else if (
-    !String(data.roleArn || "").trim() ||
-    !String(data.accountId || "").trim() ||
-    !String(data.region || "").trim() ||
-    !String(data.cluster || "").trim()
+    !isAwsAccountId(String(data.accountId || "")) ||
+    !isAwsRegion(String(data.region || "")) ||
+    !String(data.cluster || "").trim() ||
+    !String(data.vpcId || "").trim() ||
+    !String(data.subnetIds || "").trim() ||
+    (!isAwsRoleName(String(data.roleName || "")) &&
+      parseAwsRoleArn(String(data.existingRoleArn || "")) === null)
   ) {
     jsonError(context, 400, {
-      error: "AWS setup requires roleArn, accountId, region, and cluster.",
+      error:
+        "AWS setup requires a valid accountId, region, cluster, vpcId, subnetIds, and either an IAM role name or an existing role ARN.",
       code: "invalid-aws-operation-input"
     });
     return;
@@ -560,7 +579,7 @@ export async function handleCreateOperation(
       repo,
       environment,
       stages: dependencies.buildStages({
-        includeIdentity: needsAzureCredentials
+        includeIdentity: needsAzureCredentials || provider === "aws"
       }),
       journey: {
         origin: data.origin || null,
@@ -590,7 +609,8 @@ export async function handleCreateOperation(
       appId: data.appId || "",
       createNew: data.createNew === true,
       serviceManagementReference: data.serviceManagementReference || "",
-      roleArn: data.roleArn || "",
+      roleName: data.roleName || "",
+      existingRoleArn: data.existingRoleArn || "",
       accountId: data.accountId || "",
       region: data.region || "",
       vpcId: data.vpcId || "",

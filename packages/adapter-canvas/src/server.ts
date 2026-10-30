@@ -39,7 +39,6 @@ import { WORKFLOW_READ_LIMITS } from "@radius-project/core";
 import type { Remediation, RemediationView } from "@radius-project/core";
 import {
   buildGraphViaRad,
-  createWorkflowReadSession,
   type WorkflowReadRequest
 } from "@radius-project/adapter-shared";
 import {
@@ -78,7 +77,6 @@ import {
   github,
   cliExec,
   runCommand,
-  commitFileToRepo,
   getDefaultBranch,
   getBranchHeadSha,
   createBranchRef,
@@ -114,13 +112,14 @@ import {
   isResourceGroupName,
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
+import {
+  createAwsEnvironmentAccess,
+  type AwsEnvironmentAccess
+} from "./server/services/aws-environment-access.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
-import {
-  classifyProvider,
-  parseGitHubEnvironmentVariables
-} from "./provider-classification.js";
+import { createEnvironmentTargetReader } from "./server/services/environment-target.js";
 import {
   appParams,
   resolveDeployParams,
@@ -234,14 +233,13 @@ import {
 } from "./source-refs.js";
 import {
   generateVerifyWorkflow,
-  generateDeployWorkflow,
-  generateDeleteWorkflow,
   generatePortalUrl,
   syncRepoWorkflows,
-  DEPLOY_DISPATCHER_FILE,
-  DEPLOY_AZURE_FILE,
-  DELETE_ENV_DISPATCHER_FILE,
-  DELETE_ENV_AZURE_FILE,
+  deployWorkflowFiles,
+  deleteApplicationWorkflowFiles,
+  deleteEnvironmentWorkflowFiles,
+  workflowTemplates,
+  ensureDeployWorkflowsOnBranch,
   LEGACY_DEPLOY_WORKFLOW_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
@@ -359,10 +357,12 @@ import {
 import { createEnvironmentsRoutes } from "./server/routes/environments.js";
 import { createDeployRequestService } from "./server/services/deploy-request.js";
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
-import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
+import {
+  createDeployDispatchService,
+  type DeployDispatchDependencies
+} from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
-import { shouldRetryWithKeyringCredential } from "./server/services/workflow-credential-fallback.js";
-import { verifyWorkflowFilesMatchSource } from "./server/services/delete-environment-workflow-verification.js";
+import { createRadiusEnvironmentWorkflowDeletion } from "./server/services/radius-environment-workflow-deletion.js";
 import {
   ProviderMutationRecoveryError,
   recordProviderReconciliationFailure
@@ -426,16 +426,15 @@ import {
   clearEnvironmentCredentialProvenance,
   withCredentialProvenanceLock
 } from "./credential-provenance.js";
-import { classifyCompletedDeleteEnvRun } from "./server/services/delete-env-run-classifier.js";
-import type {
-  RadiusEnvDeletionOutcome,
-  GitHubEnvDeletionOutcome
-} from "./server/services/environment-deletion.js";
+import type { GitHubEnvDeletionOutcome } from "./server/services/environment-deletion.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
 import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
-import type { RemediationReference } from "./server/services/environment-operation.js";
+import type {
+  EnvironmentOperationRecord,
+  RemediationReference
+} from "./server/services/environment-operation.js";
 import {
   monitorVerificationWithSelectedAccount,
   verificationAcquisitionExpiredCopy,
@@ -524,6 +523,10 @@ function runCliCommand(
     });
     endChildInput(child);
   });
+}
+
+function runAwsCli(args: string[]): Promise<CommandResult> {
+  return runCliCommand("aws", args);
 }
 
 interface ManagedEnvironment {
@@ -826,57 +829,6 @@ function triggerGraphRepairHandoff(
 const ENV_LIST_TTL_MS = 15000;
 const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 
-// Reads the environment's stored GitHub variables to determine its provider and
-// the app registration id the delete cleanup targets. Kept beside the
-// `environments` composition root because it is only used by that route's
-// delete flow. Throws on an API/permission failure so the route fails closed.
-async function discoverEnvironmentTarget(
-  repo: string,
-  environment: string
-): Promise<{
-  provider: string;
-  clientId: string;
-  tenantId: string;
-  repoId: number;
-}> {
-  const out = await runCommand(
-    "gh",
-    [
-      "api",
-      `/repos/${repo}/environments/${encodeURIComponent(
-        environment
-      )}/variables?per_page=100`,
-      "--jq",
-      '.variables[] | .name + "\\t" + (.value // "")'
-    ],
-    { timeout: 15000 }
-  );
-  const vars = parseGitHubEnvironmentVariables(out);
-  // Classify the provider by the presence of a canonical, exact-named
-  // configuration variable (see classifyProvider) rather than a regex over
-  // every variable name, and share that logic with the environment listing so
-  // the two paths never disagree about the same environment.
-  const provider = classifyProvider(vars);
-  let repoId = 0;
-  if (provider === "azure") {
-    const repoIdOutput = await runCommand(
-      "gh",
-      ["api", `/repos/${repo}`, "--jq", ".id"],
-      { timeout: 15000 }
-    );
-    repoId = Number(repoIdOutput.trim());
-    if (!Number.isFinite(repoId) || repoId <= 0) {
-      throw new Error("GitHub returned an invalid repository id.");
-    }
-  }
-  return {
-    provider,
-    clientId: vars.AZURE_CLIENT_ID || "",
-    tenantId: vars.AZURE_TENANT_ID || "",
-    repoId
-  };
-}
-
 // Reads what the repository's environments already claim, for the create
 // route's namespace rung. The read runs as the GitHub account pinned to that
 // operation, the same account every other step of the setup uses, so a customer
@@ -1135,6 +1087,7 @@ const workflowSyncState = new Map<string, number>();
 // the session worktree branch (when it matches the repo) so the sync updates
 // both the default branch and the branch a worktree-consistent deploy runs.
 function kickoffWorkflowSync(
+  includeAws: boolean,
   repo: string,
   managedEnvironments: ManagedEnvironment[],
   workingBranch: string
@@ -1148,6 +1101,7 @@ function kickoffWorkflowSync(
   workflowSyncState.set(key, Date.now());
   syncRepoWorkflows(repo, managedEnvironments, {
     workingBranch: workingBranch || "",
+    includeAws,
     log: (m) => console.error(`[radius workflow-sync] ${repo}: ${m}`)
   })
     .then((r) => {
@@ -1184,6 +1138,7 @@ function kickoffWorkflowSync(
 // matches the repo) is synced alongside the default branch so a
 // worktree-consistent run uses current files on both.
 async function ensureWorkflowsCurrent(
+  includeAws: boolean,
   repo: string,
   environment: string,
   provider: string,
@@ -1208,6 +1163,7 @@ async function ensureWorkflowsCurrent(
         // the default branch, so a never-committed (or wrongly-refed) file 404s;
         // creating it here makes the dispatch self-healing.
         create: true,
+        includeAws,
         log: (m) => console.error(`[radius workflow-presync] ${repo}: ${m}`)
       }
     );
@@ -1912,179 +1868,6 @@ function runGhWithStdinForDeploy(
   });
 }
 
-// Dispatch the just-committed delete-environment workflow and wait for its run
-// to finish. Tearing down the Radius environment needs cluster access, so it
-// runs on the ephemeral control plane the workflow spins up (authenticating with
-// the environment's still-present federated credential — hence this must run
-// before the credential is removed). Best-effort: a dispatch or run failure is
-// reported as a `failed` outcome the runner records as a warning, never a throw.
-async function deleteRadiusEnvironmentViaWorkflow(
-  repo: string,
-  environment: string,
-  onHeartbeat?: () => void | Promise<void>
-): Promise<RadiusEnvDeletionOutcome> {
-  const sync = await ensureWorkflowsCurrent(repo, environment, "", [
-    DELETE_ENV_DISPATCHER_FILE,
-    DELETE_ENV_AZURE_FILE
-  ]);
-  // Committing the workflows is best-effort and can silently no-op (a protected
-  // branch, or an exception `ensureWorkflowsCurrent` swallows), and the delete
-  // dispatcher `uses:` the reusable provider file that carries the "no deployed
-  // applications" safety guard. `gh workflow run` resolves BOTH files from the
-  // default branch, so before dispatching we read BOTH back from that branch and
-  // confirm they match the packaged source. Any file that is missing, stale, or
-  // unreadable stops the deletion here — a stale provider means a stale guard,
-  // and dispatching against it could tear down an environment that still has
-  // deployed applications. (The narrow `sync.failed` list only names files whose
-  // commit definitely failed; the read-back is the authoritative gate because it
-  // also catches a swallowed sync exception that reports no failure at all.)
-  let expectedDeleteWorkflows: Record<string, string>;
-  try {
-    expectedDeleteWorkflows = await generateDeleteWorkflow(environment);
-  } catch (error) {
-    return {
-      outcome: "failed",
-      detail: `Could not build the delete-environment workflow templates to verify them: ${errorMessage(
-        error
-      )}`
-    };
-  }
-  const workflowVerification = await verifyWorkflowFilesMatchSource(
-    [DELETE_ENV_DISPATCHER_FILE, DELETE_ENV_AZURE_FILE].map((file) => ({
-      file,
-      path: `.github/workflows/${file}`,
-      expected: expectedDeleteWorkflows[file] || ""
-    })),
-    {
-      defaultBranch: async () => (await getDefaultBranch(repo)) || "",
-      readFile: (path, branch) => fetchFileFromRepo(repo, path, branch),
-      errorMessage
-    }
-  );
-  if (!workflowVerification.ok) {
-    return {
-      outcome: "failed",
-      detail: `${workflowVerification.detail} Radius did not start the deletion of "${environment}" in ${repo}.`
-    };
-  }
-  const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
-    const first = await runGhForDeploy(args);
-    if (first.code === 0) return first;
-    const env = process.env;
-    // Dispatching a workflow requires the `workflow` scope, which an injected
-    // GH_TOKEN often lacks. Retry with it stripped ONLY when that fallback is
-    // safe: the failure positively names the missing scope, and the dispatch did
-    // not time out. A timed-out (or otherwise killed) dispatch may already have
-    // been accepted by GitHub, so re-running it would start the destructive
-    // delete workflow a SECOND time; and the retry runs as whichever account the
-    // keyring holds, so it must never be entered on an unknown failure.
-    const retryAllowed = shouldRetryWithKeyringCredential({
-      stderr: first.stderr,
-      timedOut: first.timedOut === true,
-      hasInjectedToken: Boolean(
-        env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
-      )
-    });
-    if (!retryAllowed) return first;
-    const fallbackEnv = { ...env };
-    delete fallbackEnv.GH_TOKEN;
-    delete fallbackEnv.GITHUB_TOKEN;
-    const retry = await runGhForDeploy(args, { env: fallbackEnv });
-    return retry.code === 0 ? retry : first;
-  };
-  const justCreated = sync.created.some(
-    (p) => p.split("/").pop() === DELETE_ENV_DISPATCHER_FILE
-  );
-  const dispatchedAt = Date.now();
-  // A unique id echoed into the run's display name (via the dispatcher's
-  // `run-name:`) so the specific run this call started can be matched exactly —
-  // never a concurrent or manual deletion of a different environment.
-  const correlationId = `del-${dispatchedAt.toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 10)}`;
-  const dispatchArgs = [
-    "workflow",
-    "run",
-    DELETE_ENV_DISPATCHER_FILE,
-    "-f",
-    "environment=" + environment,
-    "-f",
-    "correlation_id=" + correlationId,
-    "--repo",
-    repo
-  ];
-  let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
-  const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
-  if (justCreated) await sleepMs(3000);
-  for (const delay of dispatchDelays) {
-    if (delay > 0) await sleepMs(delay);
-    dispatch = await ghWorkflow(dispatchArgs);
-    if (dispatch.code === 0) break;
-    if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
-  }
-  if (dispatch.code !== 0) {
-    return {
-      outcome: "failed",
-      detail:
-        (dispatch.stderr || "").trim() ||
-        `Failed to start ${DELETE_ENV_DISPATCHER_FILE} on ${repo}.`
-    };
-  }
-  // Resolve and monitor the dispatched run so credential removal only starts
-  // after the Radius environment is actually gone.
-  let runId: number | string | null = null;
-  for (const delay of [0, 2000, 4000]) {
-    if (delay > 0) await sleepMs(delay);
-    runId = await findWorkflowRun(
-      repo,
-      DELETE_ENV_DISPATCHER_FILE,
-      dispatchedAt,
-      null,
-      undefined,
-      undefined,
-      correlationId
-    );
-    if (runId) break;
-  }
-  if (!runId) {
-    return {
-      outcome: "failed",
-      detail:
-        "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
-    };
-  }
-  const deadline = Date.now() + 30 * 60 * 1000;
-  const reads = createWorkflowReadSession();
-  let delayMs = 5000;
-  while (Date.now() < deadline) {
-    const detail = await getRunDetail(repo, runId, undefined, {
-      identity: "ambient",
-      context: reads.observe(WORKFLOW_READ_LIMITS.runMs)
-    });
-    if (detail && detail.status === "completed") {
-      const classified = classifyCompletedDeleteEnvRun(
-        detail.conclusion,
-        detail.steps || []
-      );
-      return classified;
-    }
-    if (onHeartbeat) {
-      try {
-        await onHeartbeat();
-      } catch {
-        // A heartbeat failure must never abort an in-flight deletion.
-      }
-    }
-    await sleepMs(Math.min(delayMs, 15000));
-    delayMs = Math.min(Math.ceil(delayMs * 1.5), 15000);
-  }
-  return {
-    outcome: "failed",
-    detail:
-      "The delete-environment workflow did not complete within 30 minutes."
-  };
-}
-
 // Delete the GitHub Environment. Idempotent: a 404 (already gone) is reported as
 // `not_found`, not a failure, so a re-run after a partial deletion converges.
 // The classification and cache-invalidation logic is the shared cleanup
@@ -2140,10 +1923,9 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
   errorMessage
 });
 
-const deployDispatchService = createDeployDispatchService({
+const deployDispatchDependencies = {
   ghCommandPresentation: GH_COMMAND_PRESENTATION,
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
-  deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
   oidcSubjectMissingKind: DEPLOY_OIDC_SUBJECT_MISSING_KIND,
   oidcSubjectCaseMismatchKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
@@ -2174,8 +1956,6 @@ const deployDispatchService = createDeployDispatchService({
   extractAppName,
   buildDeployRadCommand,
   buildAppGraphRadCommand,
-  ensureDeployWorkflowsOnBranch,
-  ensureWorkflowsCurrent,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   latestWorkflowRunId,
   classifyDeployDispatchFailure,
@@ -2188,7 +1968,25 @@ const deployDispatchService = createDeployDispatchService({
   },
   errorMessage,
   now: () => Date.now()
-});
+} satisfies Omit<
+  DeployDispatchDependencies,
+  | "deployWorkflowFiles"
+  | "ensureDeployWorkflowsOnBranch"
+  | "ensureWorkflowsCurrent"
+>;
+
+// A deploy needs the dispatcher and every provider workflow the switch publishes.
+function productionDeployDispatchService(includeAws: boolean) {
+  return createDeployDispatchService({
+    ...deployDispatchDependencies,
+    deployWorkflowFiles: deployWorkflowFiles(includeAws),
+    ensureDeployWorkflowsOnBranch: ensureDeployWorkflowsOnBranch.bind(
+      undefined,
+      includeAws
+    ),
+    ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, includeAws)
+  });
+}
 
 const deployOutcomeService = createDeployOutcomeService({
   projectSafeGraphResources: (graph) =>
@@ -3955,70 +3753,6 @@ async function deleteLegacyDeployWorkflow(
   });
 }
 
-// Ensure the deploy workflow files exist on `branch` so that dispatching
-// `run-rad-commands.yml` with `--ref branch` resolves — both the dispatcher
-// itself and the provider workflow it pulls in via a local-path `uses:`. The
-// env-creation flow commits these to the repo's DEFAULT branch only (the GitHub
-// contents API commit is branch-less), so a feature/worktree branch usually
-// lacks them. Missing files are generated from the pinned upstream templates and
-// committed onto `branch`; existing ones are left untouched. Best-effort per
-// file — a commit failure is surfaced by the caller, not thrown here.
-async function ensureDeployWorkflowsOnBranch(
-  repo: string,
-  branch: string,
-  envName: string,
-  log: (message: string) => void,
-  onWorkflowWritten: (file: string) => void
-): Promise<void> {
-  if (!repo || !branch) return;
-  // Only the dispatcher + the Azure provider workflow are published to target
-  // repos today (the AWS provider file is intentionally withheld, matching the
-  // env-creation commit step), so those are the two a `--ref` dispatch needs.
-  const wanted = [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE];
-  const existsOnBranch = (file: string): Promise<boolean> =>
-    new Promise<boolean>((resolve) => {
-      cliExec(
-        "gh",
-        [
-          "api",
-          `/repos/${repo}/contents/.github/workflows/${file}?ref=${encodeURIComponent(
-            branch
-          )}`,
-          "--jq",
-          ".sha"
-        ],
-        { timeout: 15000 },
-        (err, stdout) => resolve(!err && !!(stdout || "").trim())
-      );
-    });
-  const presence = await Promise.all(wanted.map(existsOnBranch));
-  const missing = wanted.filter((_, i) => !presence[i]);
-  if (missing.length === 0) return;
-  log(
-    'Publishing deploy workflow(s) to branch "' +
-      branch +
-      '": ' +
-      missing.join(", ")
-  );
-  const generated = await generateDeployWorkflow(envName, ".radius/app.bicep");
-  for (const file of missing) {
-    const content = generated && generated[file];
-    if (!content) continue;
-    const written = await commitFileToRepo(
-      repo,
-      ".github/workflows/" + file,
-      content,
-      branch,
-      "Add Radius deploy workflow (" +
-        file +
-        ") to " +
-        branch +
-        " for worktree-consistent deploy"
-    );
-    if (written) onWorkflowWritten(file);
-  }
-}
-
 function accessForSelection(
   entry: { state: CanvasState },
   repo: string,
@@ -4136,14 +3870,29 @@ export type EnvironmentDeletionCoordinatorPorts = Omit<
   "reportStatePackageDeletionFailure"
 >;
 
-function productionEnvironmentDeletionPorts(): EnvironmentDeletionCoordinatorPorts {
+function productionEnvironmentDeletionPorts(
+  includeAws: boolean,
+  awsEnvironmentAccess: AwsEnvironmentAccess<EnvironmentOperationRecord>
+): EnvironmentDeletionCoordinatorPorts {
   return {
-    deleteRadiusEnvironment: (input, onHeartbeat) =>
-      deleteRadiusEnvironmentViaWorkflow(
-        input.repo,
-        input.environment,
-        onHeartbeat
+    deleteRadiusEnvironment: createRadiusEnvironmentWorkflowDeletion({
+      workflowFiles: deleteEnvironmentWorkflowFiles(includeAws),
+      ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(
+        undefined,
+        includeAws
       ),
+      generateDeleteWorkflow: workflowTemplates(includeAws).delete,
+      getDefaultBranch,
+      fetchFileFromRepo,
+      runGh: runGhForDeploy,
+      processEnv: process.env,
+      findWorkflowRun,
+      getRunDetail,
+      sleep: sleepMs,
+      now: Date.now,
+      random: Math.random,
+      errorMessage
+    }),
     runAz: (args) => runCliCommand("az", args),
     readAzureIdentity: async (clientId) => {
       const tenant = await runCliCommand("az", [
@@ -4181,6 +3930,7 @@ function productionEnvironmentDeletionPorts(): EnvironmentDeletionCoordinatorPor
         applicationObjectId: application.stdout.trim()
       };
     },
+    removeAwsEnvironmentAccess: awsEnvironmentAccess.remove,
     deleteGitHubEnvironment: (input) =>
       deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
     deleteStatePackage: createStatePackageDeletion({
@@ -4207,6 +3957,11 @@ export function createInstanceRequestCoordinator(
   resolveBaseUrl: () => string,
   environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts,
   dependencies: {
+    awsEnabled: boolean;
+    awsEnvironmentAccess: Pick<
+      AwsEnvironmentAccess<EnvironmentOperationRecord>,
+      "setup"
+    >;
     executionOwner: EnvironmentExecutionOwner;
     accountContext: EnvironmentAccountContext;
     setupServices: SetupServices;
@@ -4214,10 +3969,22 @@ export function createInstanceRequestCoordinator(
     environmentOperationRunner?: EnvironmentOperationRunner;
   }
 ) {
-  const { executionOwner, accountContext, servers, setupServices } =
-    dependencies;
+  const {
+    awsEnabled,
+    awsEnvironmentAccess,
+    executionOwner,
+    accountContext,
+    servers,
+    setupServices
+  } = dependencies;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
+  if (typeof awsEnabled !== "boolean")
+    throw new Error("Missing request coordinator dependency: awsEnabled");
+  if (typeof awsEnvironmentAccess?.setup !== "function")
+    throw new Error(
+      "Missing request coordinator dependency: awsEnvironmentAccess"
+    );
   for (const name of ["authorizeAzure", "configureEnvironment"] as const) {
     if (typeof setupServices?.[name] !== "function") {
       throw new Error(
@@ -4636,6 +4403,15 @@ export function createInstanceRequestCoordinator(
                   projectionInstanceId
                 );
               }
+            },
+            setupAwsDeployIdentity: (operation, input, selectedExecutor) => {
+              if (executionOwner.isShuttingDown(instanceId))
+                throw new Error("Setup execution is shutting down.");
+              return awsEnvironmentAccess.setup(
+                operation,
+                input,
+                selectedExecutor
+              );
             },
             now: () => Date.now()
           });
@@ -5528,6 +5304,7 @@ export function createInstanceRequestCoordinator(
       state.activeSubtab =
         page === "credentials" ? "credentials" : "environments";
     }
+    state.awsEnabled = awsEnabled;
     if (renderer) {
       res.writeHead(200);
       res.end(renderer(state));
@@ -5630,6 +5407,10 @@ export interface ProductionCanvasServerRuntimeOptions {
   accountContext: EnvironmentAccountContext;
   environmentOperationRunner?: EnvironmentOperationRunner;
   environmentDeletionPorts?: EnvironmentDeletionCoordinatorPorts;
+  // The developer-only AWS switch, read once by the composition root. Off, AWS
+  // stays hidden: no AWS provider, no AWS environment create or delete, and no
+  // AWS workflows committed to the repository.
+  awsEnabled: boolean;
   serverDependencies?: Pick<
     CanvasServerDependencyOverrides,
     | "createHttpServer"
@@ -5647,12 +5428,27 @@ export function createProductionCanvasServerRuntime(
     executionOwner,
     accountContext,
     environmentDeletionPorts,
-    serverDependencies
+    serverDependencies,
+    awsEnabled
   } = options;
   if (!executionOwner)
     throw new Error("Missing canvas server dependency: executionOwner");
+  if (typeof awsEnabled !== "boolean")
+    throw new Error("Missing canvas server dependency: awsEnabled");
   if (!accountContext)
     throw new Error("Missing canvas server dependency: accountContext");
+  const templates = workflowTemplates(awsEnabled);
+  const awsEnvironmentAccess =
+    createAwsEnvironmentAccess<EnvironmentOperationRecord>({
+      runAws: runAwsCli,
+      runGitHubJson: runGitHubJsonRequest,
+      sleep: sleepMs,
+      isStopRequested: shouldStop,
+      operations: { enterStage, addLegacyStep, setContext },
+      store: operations,
+      stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
+      errorMessage
+    });
   const githubAccountCoordinator = accountContext.coordinator;
   const githubAccountReadiness = createGitHubAccountReadinessService(
     githubAccountCoordinator,
@@ -5768,6 +5564,7 @@ export function createProductionCanvasServerRuntime(
       now: () => Date.now()
     },
     {
+      awsEnabled,
       isValidRepoSlug,
       isResourceGroupName,
       isAksClusterName,
@@ -5912,8 +5709,8 @@ export function createProductionCanvasServerRuntime(
     deploymentStatusBlocksMutation,
     localDeploymentBlocksMutation: (state) =>
       localDeploymentBlocksMutation(state),
-    ensureWorkflowsCurrent: (repo, environment, provider, only) =>
-      ensureWorkflowsCurrent(repo, environment, provider, only),
+    ensureWorkflowsCurrent: ensureWorkflowsCurrent.bind(undefined, awsEnabled),
+    deleteApplicationWorkflowFiles: deleteApplicationWorkflowFiles(awsEnabled),
     findWorkflowRun,
     runGh: (args, timeout = 20000, extraEnv) =>
       new Promise((resolve) => {
@@ -6241,6 +6038,7 @@ export function createProductionCanvasServerRuntime(
   // and are injected rather than moved, so the route module spawns nothing and
   // reads no module-level mutable state.
   const environmentsRoutes = createEnvironmentsRoutes({
+    awsEnabled,
     errorMessage,
     redactDiagnostic: (value) => redactGhCredentials(value),
     repoMatchesWorkspace,
@@ -6253,8 +6051,7 @@ export function createProductionCanvasServerRuntime(
     resolveEnvDeployment: (repo, environment, appName) =>
       resolveEnvDeployment(repo, environment, appName),
     logError: (message) => console.error(message),
-    discoverEnvironmentTarget: (repo, environment) =>
-      discoverEnvironmentTarget(repo, environment),
+    discoverEnvironmentTarget: createEnvironmentTargetReader(runCommand),
     activeDeleteOperation: (repo, environment) => {
       return matchDeleteOperationEnvironment(
         operations.running(repo),
@@ -6290,8 +6087,7 @@ export function createProductionCanvasServerRuntime(
     },
     envListCacheGeneration: (repo) => envListCache.generation(repo),
     envListTtlMs: ENV_LIST_TTL_MS,
-    kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
-      kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
+    kickoffWorkflowSync: kickoffWorkflowSync.bind(undefined, awsEnabled),
     now: () => Date.now(),
     getOperation: (operationId) => operations.get(operationId),
     getSelectedGitHubExecutor: (operationId) =>
@@ -6450,10 +6246,8 @@ export function createProductionCanvasServerRuntime(
       generateVerifyWorkflow(environment, provider, undefined, {
         setupPushOperationMarker
       }),
-    generateDeployWorkflow: (environment, appFile) =>
-      generateDeployWorkflow(environment, appFile),
-    generateDeleteWorkflow: (environment) =>
-      generateDeleteWorkflow(environment),
+    generateDeployWorkflow: templates.deploy,
+    generateDeleteWorkflow: templates.delete,
     recordCommittedWorkflowFile: (operation, entry) => {
       recordCommittedWorkflowFile(operation, entry);
     },
@@ -6545,8 +6339,14 @@ export function createProductionCanvasServerRuntime(
           const coordinator = createInstanceRequestCoordinator(
             instanceId,
             () => baseUrl,
-            environmentDeletionPorts ?? productionEnvironmentDeletionPorts(),
+            environmentDeletionPorts ??
+              productionEnvironmentDeletionPorts(
+                awsEnabled,
+                awsEnvironmentAccess
+              ),
             {
+              awsEnabled,
+              awsEnvironmentAccess,
               executionOwner,
               accountContext,
               setupServices,
@@ -6643,7 +6443,7 @@ export function createProductionCanvasServerRuntime(
 
   const deployMonitorService = createDeployMonitorService({
     plannedGraph: deployPlannedGraphService,
-    dispatch: deployDispatchService,
+    dispatch: productionDeployDispatchService(awsEnabled),
     outcome: deployOutcomeService,
     deployRadCommandsStep: DEPLOY_RAD_COMMANDS_STEP,
     unconfirmedRunKind: DEPLOY_RUN_UNCONFIRMED_KIND,

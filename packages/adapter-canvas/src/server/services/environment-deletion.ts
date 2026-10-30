@@ -31,7 +31,10 @@
 // Azure argv/parse helpers are imported directly so the runner stays unit-
 // testable against real OperationRecords with a handful of fakes.
 
-import { stateRegistryForEnvironment } from "@radius-project/core";
+import {
+  parseAwsRoleArn,
+  stateRegistryForEnvironment
+} from "@radius-project/core";
 import {
   enterStage,
   addStep,
@@ -44,7 +47,9 @@ import {
   STAGE_DELETE_CREDENTIAL,
   STAGE_DELETE_GITHUB_ENV,
   STAGE_DELETE_STATE_PACKAGE,
-  STAGE_REVIEW_APP_REGISTRATION
+  STAGE_REVIEW_APP_REGISTRATION,
+  STAGE_DELETE_AWS_ROLE_ACCESS,
+  STAGE_REVIEW_IAM_ROLE
 } from "../../operations.js";
 import {
   buildFederatedCredentialListArgs,
@@ -130,6 +135,18 @@ export interface EnvironmentDeletionPorts {
     repoId: number,
     environment: string
   ): Promise<void>;
+  // AWS only: remove the environment's trust subject and permission policy
+  // from the shared deploy role. The role itself is never deleted.
+  removeAwsEnvironmentAccess(input: {
+    repo: string;
+    environment: string;
+    roleArn: string;
+    // The subjects setup recorded; empty when it recorded none.
+    trustSubjects: readonly string[];
+  }): Promise<
+    | { ok: true; removed: readonly string[]; kept: readonly string[] }
+    | { ok: false; message: string }
+  >;
   // Durably record the operation after each state transition.
   persist(): Promise<void>;
   errorMessage(error: unknown): string;
@@ -176,6 +193,8 @@ interface DeletionOperation {
   request?: {
     clientId?: string;
     tenantId?: string;
+    roleArn?: string;
+    trustSubjects?: unknown;
     repoId?: number;
     [key: string]: unknown;
   };
@@ -341,6 +360,73 @@ export async function runEnvironmentDeletion(
   // stage is already done, so only the GitHub delete runs — still under the same
   // lock. Non-Azure environments have no federated credential to retire, so
   // their GitHub delete needs no lock.
+  const roleArn = String(op.request?.roleArn || "");
+  // All or nothing: a damaged list falls back to resolving the subjects from
+  // GitHub rather than removing a partial set.
+  const recordedSubjects: unknown = op.request?.trustSubjects;
+  const trustSubjects =
+    (
+      Array.isArray(recordedSubjects) &&
+      recordedSubjects.every(
+        (subject) => typeof subject === "string" && subject !== ""
+      )
+    ) ?
+      (recordedSubjects as string[])
+    : [];
+  if (stagePending(op, STAGE_DELETE_AWS_ROLE_ACCESS)) {
+    enterStage(op, STAGE_DELETE_AWS_ROLE_ACCESS);
+    addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: "mutation",
+      label: "Removing this environment's trust and policy from the IAM role",
+      state: "running"
+    });
+    await ports.persist();
+    let removal;
+    try {
+      removal = await ports.removeAwsEnvironmentAccess({
+        repo,
+        environment,
+        roleArn,
+        trustSubjects
+      });
+    } catch (error) {
+      removal = { ok: false as const, message: ports.errorMessage(error) };
+    }
+    if (!removal.ok) {
+      addStep(op, {
+        stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+        kind: "observation",
+        label: "Could not update the IAM role. Cleanup stopped.",
+        state: "failed"
+      });
+      setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "failed");
+      finish(op, "failed_partial", {
+        failure: {
+          code: "aws-role-access-delete-failed",
+          stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+          stepSeq: null,
+          message: `${removal.message} The GitHub environment was kept so deletion can be retried.`,
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await ports.persist();
+      return;
+    }
+    addStep(op, {
+      stage: STAGE_DELETE_AWS_ROLE_ACCESS,
+      kind: removal.removed.length > 0 ? "mutation" : "observation",
+      label:
+        removal.removed.length > 0 ?
+          `Removed ${removal.removed.join(" and ")} from the IAM role`
+        : "The IAM role held nothing for this environment",
+      state: "succeeded"
+    });
+    setStageState(op, STAGE_DELETE_AWS_ROLE_ACCESS, "succeeded");
+    await ports.persist();
+  }
+
   const clientId = String(op.request?.clientId || "");
   const tenantId = String(op.request?.tenantId || "");
   const repoId = Number(op.request?.repoId);
@@ -506,6 +592,20 @@ export async function runEnvironmentDeletion(
       state: "succeeded"
     });
     setStageState(op, STAGE_REVIEW_APP_REGISTRATION, "succeeded");
+    await ports.persist();
+  }
+
+  if (stagePending(op, STAGE_REVIEW_IAM_ROLE)) {
+    enterStage(op, STAGE_REVIEW_IAM_ROLE);
+    // A malformed ARN is shown whole rather than guessed at.
+    const roleName = parseAwsRoleArn(roleArn)?.roleName ?? roleArn;
+    addStep(op, {
+      stage: STAGE_REVIEW_IAM_ROLE,
+      kind: "observation",
+      label: `Left IAM role ${roleName} and the account's GitHub identity provider in place. The role serves every environment in this repository. Remove it in the AWS console if nothing needs it.`,
+      state: "succeeded"
+    });
+    setStageState(op, STAGE_REVIEW_IAM_ROLE, "succeeded");
     await ports.persist();
   }
 

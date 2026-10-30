@@ -190,6 +190,7 @@ function start(strictBrowserMutations = false): Harness {
         now: () => Date.parse("2026-08-27T11:00:00.000Z")
       },
       {
+        awsEnabled: false,
         claimSelectionHandle: () => ({
           ok: true,
           login: "octocat",

@@ -1053,6 +1053,10 @@ export const STAGE_DELETE_CREDENTIAL = "delete_federated_credential";
 export const STAGE_DELETE_GITHUB_ENV = "delete_github_environment";
 export const STAGE_DELETE_STATE_PACKAGE = "delete_state_package";
 export const STAGE_REVIEW_APP_REGISTRATION = "review_app_registration";
+// AWS counterparts: remove the environment's trust subject and permission
+// policy from the shared IAM role, then record that the role was retained.
+export const STAGE_DELETE_AWS_ROLE_ACCESS = "delete_aws_role_access";
+export const STAGE_REVIEW_IAM_ROLE = "review_iam_role";
 
 const STAGE_LABELS = {
   [STAGE_AUTHORIZE_IDENTITY]: "Authorize deploy identity",
@@ -1062,7 +1066,9 @@ const STAGE_LABELS = {
   [STAGE_DELETE_CREDENTIAL]: "Remove federated credential",
   [STAGE_DELETE_GITHUB_ENV]: "Delete GitHub environment",
   [STAGE_DELETE_STATE_PACKAGE]: "Delete GHCR state package",
-  [STAGE_REVIEW_APP_REGISTRATION]: "Review app registration"
+  [STAGE_REVIEW_APP_REGISTRATION]: "Review app registration",
+  [STAGE_DELETE_AWS_ROLE_ACCESS]: "Remove deploy identity trust",
+  [STAGE_REVIEW_IAM_ROLE]: "Review IAM role"
 };
 
 // The operation kinds. A create operation prepares credentials and an
@@ -1132,12 +1138,15 @@ export function buildStages({
  * present-and-skipped (the same checklist-honesty rule `buildStages` follows).
  */
 export function buildDeleteStages({
-  includeAzureCleanup = true
+  includeAzureCleanup = true,
+  includeAwsCleanup = false
 }: any = {}): any[] {
   const ids = [STAGE_DELETE_RADIUS_ENV];
   if (includeAzureCleanup) ids.push(STAGE_DELETE_CREDENTIAL);
+  if (includeAwsCleanup) ids.push(STAGE_DELETE_AWS_ROLE_ACCESS);
   ids.push(STAGE_DELETE_GITHUB_ENV, STAGE_DELETE_STATE_PACKAGE);
   if (includeAzureCleanup) ids.push(STAGE_REVIEW_APP_REGISTRATION);
+  if (includeAwsCleanup) ids.push(STAGE_REVIEW_IAM_ROLE);
   return ids.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" }));
 }
 
@@ -5568,13 +5577,16 @@ const PERSISTED_OPERATION_KEYS = new Set([
 // restart. The live delete op carries its inputs in a broad `op.request` (which
 // is deliberately NOT persisted — it can be large and may hold secrets), so a
 // hydrated delete op would otherwise lose the `clientId` its Azure-cleanup and
-// app-registration stages depend on. We persist only these scalar fields.
+// app-registration stages depend on, or the AWS role and trust subjects its
+// role cleanup depends on. We persist only these typed fields.
 interface PersistedDeleteRecovery {
   repo?: string;
   environment?: string;
   provider?: string;
   clientId?: string;
   tenantId?: string;
+  roleArn?: string;
+  trustSubjects?: string[];
   repoId?: number;
   credentialConsumerRetirementReady?: boolean;
 }
@@ -5587,9 +5599,22 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
     "environment",
     "provider",
     "clientId",
-    "tenantId"
+    "tenantId",
+    "roleArn"
   ] as const) {
     if (typeof request[key] === "string") out[key] = request[key];
+  }
+  // Kept only when every entry is a subject, so a damaged list falls back to
+  // resolving the subjects rather than removing a partial set.
+  const subjects = request.trustSubjects;
+  if (
+    Array.isArray(subjects) &&
+    subjects.length > 0 &&
+    subjects.every(
+      (subject: unknown) => typeof subject === "string" && subject !== ""
+    )
+  ) {
+    out.trustSubjects = [...subjects];
   }
   if (typeof request.credentialConsumerRetirementReady === "boolean") {
     out.credentialConsumerRetirementReady =

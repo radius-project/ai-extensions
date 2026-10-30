@@ -1163,6 +1163,13 @@ describe("matched direct-core and Canvas setup parity", () => {
         }),
       persistProviderMutation: d.persistOperations,
       finalizeEnvironmentResolutionFailure: unexpectedParityCall,
+      // The fixture's request already names the role the deploy identity
+      // setup would have prepared.
+      setupAwsDeployIdentity: async (_op, request) => ({
+        ok: true,
+        roleArn: String(request.roleArn),
+        subjects: []
+      }),
       getOperation: (id) =>
         id === operation.operationId ? operation : undefined,
       now: d.now,

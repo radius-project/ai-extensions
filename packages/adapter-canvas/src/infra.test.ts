@@ -45,10 +45,14 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
       "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
     "run-rad-commands-azure.yml":
       "name: deploy-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
+    "run-rad-commands-aws.yml":
+      "name: deploy-aws\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
     "delete-application.yml":
       "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/delete-azure.yml\n  aws:\n    uses: ./.github/workflows/delete-aws.yml\n",
     "delete-azure.yml":
-      "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
+      "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n",
+    "delete-aws.yml":
+      "name: delete-aws\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
   };
   return {
     BASE_UPSTREAM,
@@ -63,7 +67,11 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
   };
 });
 
-for (const file of ["delete-environment.yml", "delete-environment-azure.yml"]) {
+for (const file of [
+  "delete-environment.yml",
+  "delete-environment-azure.yml",
+  "delete-environment-aws.yml"
+]) {
   const body = readFileSync(
     new URL(`../../../.github/extension/${file}`, import.meta.url),
     "utf8"
@@ -84,7 +92,22 @@ afterEach(() => {
 });
 
 vi.mock("./gh.js", () => ({
-  cliExec: () => {},
+  // Answers `gh api .../contents/<path>?ref=<branch> --jq .sha` from the
+  // committed files, the way the branch publisher checks for a workflow.
+  cliExec: (
+    _command: string,
+    args: string[],
+    _options: unknown,
+    callback: (error: Error | null, stdout: string) => void
+  ) => {
+    const match = /^\/repos\/[^/]+\/[^/]+\/contents\/(.+)\?ref=(.+)$/.exec(
+      args[1] ?? ""
+    );
+    const files =
+      match ? h.committed[decodeURIComponent(match[2] ?? "")] : null;
+    const present = !!(match && files && (match[1] ?? "") in files);
+    callback(present ? null : new Error("HTTP 404"), present ? "abc123\n" : "");
+  },
   fetchFileFromRepoResult: async (repo: string, path: string, ref: string) => {
     h.fetches.push({ repo, path, ref });
     const file = path.split("/").pop();
@@ -121,7 +144,12 @@ const {
   generateDeployWorkflow,
   generateDeleteWorkflow,
   configureVerifyGhcrProbe,
-  configureVerifyOperationMarker
+  configureVerifyOperationMarker,
+  deployWorkflowFiles,
+  deleteApplicationWorkflowFiles,
+  deleteEnvironmentWorkflowFiles,
+  workflowTemplates,
+  ensureDeployWorkflowsOnBranch
 } = await import("./infra.js");
 const { hasVerificationOperationMarker } =
   await import("./verification-run-identity.js");
@@ -204,17 +232,18 @@ jobs:
 // environment, so tests can seed an "in sync" branch.
 async function expectedFilesFor(
   env: string,
-  provider: string
+  provider: string,
+  includeAws = false
 ): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   files[VERIFY_PATH] = await generateVerifyWorkflow(env, provider);
   for (const [name, body] of Object.entries(
-    await generateDeployWorkflow(env, ".radius/app.bicep")
+    await generateDeployWorkflow(env, ".radius/app.bicep", { includeAws })
   )) {
     files[`.github/workflows/${name}`] = body;
   }
   for (const [name, body] of Object.entries(
-    await generateDeleteWorkflow(env)
+    await generateDeleteWorkflow(env, { includeAws })
   )) {
     files[`.github/workflows/${name}`] = body;
   }
@@ -1107,5 +1136,434 @@ describe("syncRepoWorkflows", () => {
       ".github/workflows/delete-application.yml"
     ]);
     expect(h.commits).toEqual([]);
+  });
+});
+
+describe("with the AWS switch on", () => {
+  const includeAws = true;
+
+  beforeEach(() => {
+    h.committed = {};
+    h.commits = [];
+    h.failCommits = false;
+    h.noopCommits = false;
+    h.upstream = { ...BASE_UPSTREAM };
+    expireTemplateCache();
+  });
+
+  it.each([
+    [
+      deployWorkflowFiles,
+      ["run-rad-commands.yml", "run-rad-commands-azure.yml"],
+      "run-rad-commands-aws.yml"
+    ],
+    [
+      deleteApplicationWorkflowFiles,
+      ["delete-application.yml", "delete-azure.yml"],
+      "delete-aws.yml"
+    ],
+    [
+      deleteEnvironmentWorkflowFiles,
+      ["delete-environment.yml", "delete-environment-azure.yml"],
+      "delete-environment-aws.yml"
+    ]
+  ])(
+    "lists the AWS provider workflow only while the switch is on",
+    (list, azure, aws) => {
+      expect(list(false)).toEqual(azure);
+      expect(list(true)).toEqual([...azure, aws]);
+    }
+  );
+
+  it.each([false, true])(
+    "binds the switch (%s) into the templates a runtime commits",
+    async (switchOn) => {
+      const templates = workflowTemplates(switchOn);
+
+      const deploy = await templates.deploy("prod", ".radius/app.bicep");
+      const remove = await templates.delete("prod");
+
+      expect(deploy).toEqual(
+        await generateDeployWorkflow("prod", ".radius/app.bicep", {
+          includeAws: switchOn
+        })
+      );
+      expect(remove).toEqual(
+        await generateDeleteWorkflow("prod", { includeAws: switchOn })
+      );
+      expect("run-rad-commands-aws.yml" in deploy).toBe(switchOn);
+      expect("delete-environment-aws.yml" in remove).toBe(switchOn);
+      expect(/^\s+aws:/m.test(deploy["run-rad-commands.yml"] ?? "")).toBe(
+        switchOn
+      );
+    }
+  );
+
+  it("keeps the dispatchers' AWS jobs and emits every provider workflow", async () => {
+    const deploy = await generateDeployWorkflow("prod", ".radius/app.bicep", {
+      includeAws
+    });
+    const remove = await generateDeleteWorkflow("prod", { includeAws });
+
+    expect(Object.keys(deploy).sort()).toEqual([
+      "run-rad-commands-aws.yml",
+      "run-rad-commands-azure.yml",
+      "run-rad-commands.yml"
+    ]);
+    expect(Object.keys(remove).sort()).toEqual([
+      "delete-application.yml",
+      "delete-aws.yml",
+      "delete-azure.yml",
+      "delete-environment-aws.yml",
+      "delete-environment-azure.yml",
+      "delete-environment.yml"
+    ]);
+    expect(
+      parseDocument(deploy["run-rad-commands.yml"]).getIn([
+        "jobs",
+        "aws",
+        "uses"
+      ])
+    ).toBe("./.github/workflows/run-rad-commands-aws.yml");
+    expect(
+      parseDocument(remove["delete-application.yml"]).getIn([
+        "jobs",
+        "aws",
+        "uses"
+      ])
+    ).toBe("./.github/workflows/delete-aws.yml");
+    const envDispatcher = parseDocument(remove["delete-environment.yml"]);
+    expect(envDispatcher.getIn(["jobs", "azure", "uses"])).toBe(
+      "./.github/workflows/delete-environment-azure.yml"
+    );
+    expect(envDispatcher.getIn(["jobs", "aws", "uses"])).toBe(
+      "./.github/workflows/delete-environment-aws.yml"
+    );
+  });
+
+  it("strips the environment dispatcher's AWS job while the switch is off", async () => {
+    const remove = await generateDeleteWorkflow("prod");
+
+    const envDispatcher = parseDocument(remove["delete-environment.yml"]);
+    expect(envDispatcher.getIn(["jobs", "aws"])).toBeUndefined();
+    expect(envDispatcher.getIn(["jobs", "azure", "uses"])).toBe(
+      "./.github/workflows/delete-environment-azure.yml"
+    );
+    expect(remove["delete-environment-aws.yml"]).toBeUndefined();
+  });
+
+  it("accepts dispatcher drift that renames the AWS job but keeps its reference", async () => {
+    h.upstream["delete-application.yml"] = BASE_UPSTREAM[
+      "delete-application.yml"
+    ].replace("  aws:", "  cloud:");
+
+    await expect(
+      generateDeleteWorkflow("prod", { includeAws })
+    ).resolves.toHaveProperty("delete-application.yml");
+  });
+
+  it.each([
+    {
+      dispatcher: "run-rad-commands.yml",
+      provider: "run-rad-commands-aws.yml",
+      generate: () =>
+        generateDeployWorkflow("prod", ".radius/app.bicep", { includeAws })
+    },
+    {
+      dispatcher: "delete-application.yml",
+      provider: "delete-aws.yml",
+      generate: () => generateDeleteWorkflow("prod", { includeAws })
+    },
+    {
+      dispatcher: "delete-environment.yml",
+      provider: "delete-environment-aws.yml",
+      generate: () => generateDeleteWorkflow("prod", { includeAws })
+    }
+  ])(
+    "rejects $dispatcher drift that removes the $provider reference",
+    async ({ dispatcher, provider, generate }) => {
+      h.upstream[dispatcher] = BASE_UPSTREAM[dispatcher].replace(
+        `./.github/workflows/${provider}`,
+        "./.github/workflows/renamed.yml"
+      );
+
+      await expect(generate()).rejects.toThrow(
+        `workflow "${dispatcher}" failed trust validation: the dispatcher must invoke \`./.github/workflows/${provider}\`.`
+      );
+    }
+  );
+
+  it("keeps the guard step in the AWS environment provider", async () => {
+    const files = await generateDeleteWorkflow("dev", { includeAws });
+    expect(files["delete-environment-aws.yml"]).toContain(
+      "Guard - environment has no deployed applications"
+    );
+    expect(files["delete-environment-aws.yml"]).not.toContain("{{RADIUS_REF}}");
+  });
+
+  it("fails when the AWS environment-delete template cannot be fetched", async () => {
+    delete h.upstream["delete-environment-aws.yml"];
+
+    await expect(generateDeleteWorkflow("dev", { includeAws })).rejects.toThrow(
+      'Failed to fetch workflow template radius-project/ai-extensions/.github/extension/delete-environment-aws.yml at "main": no template delete-environment-aws.yml'
+    );
+  });
+
+  it("authors the missing AWS env-delete provider when its dispatcher is present", async () => {
+    const path = ".github/workflows/delete-environment-aws.yml";
+    h.committed.main = await expectedFilesFor("dev", "aws", includeAws);
+    delete h.committed.main[path];
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "aws" }],
+      { includeAws }
+    );
+
+    expect(res.created).toEqual([path]);
+    const expected = await generateDeleteWorkflow("dev", { includeAws });
+    expect(h.commits.find((c) => c.path === path)?.content).toBe(
+      expected["delete-environment-aws.yml"]
+    );
+  });
+
+  it("authors a missing deploy AWS provider when its dispatcher is on the branch", async () => {
+    h.committed.main = await expectedFilesFor("dev", "aws", includeAws);
+    delete h.committed.main[".github/workflows/run-rad-commands-aws.yml"];
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "aws" }],
+      { includeAws }
+    );
+
+    expect(res.created).toEqual([".github/workflows/run-rad-commands-aws.yml"]);
+  });
+
+  it.each([
+    ["run-rad-commands.yml", "run-rad-commands-aws.yml"],
+    ["delete-application.yml", "delete-aws.yml"],
+    ["delete-environment.yml", "delete-environment-aws.yml"]
+  ])(
+    "commits the AWS provider before updating the Azure-only %s it now references",
+    async (dispatcher, provider) => {
+      // An Azure-only repository from before the switch: its dispatchers have
+      // no AWS job and no AWS provider is committed.
+      h.committed.main = await expectedFilesFor("dev", "azure");
+      const res = await syncRepoWorkflows(
+        "acme/app",
+        [{ name: "dev", provider: "azure" }],
+        { includeAws }
+      );
+
+      const order = h.commits.map((commit) => commit.path);
+      expect(res.created).toContain(`.github/workflows/${provider}`);
+      expect(res.updated).toContain(`.github/workflows/${dispatcher}`);
+      expect(order.indexOf(`.github/workflows/${provider}`)).toBeLessThan(
+        order.indexOf(`.github/workflows/${dispatcher}`)
+      );
+    }
+  );
+
+  it("leaves a dispatcher unchanged and reports it when its AWS provider cannot be committed", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    h.failCommits = true;
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { includeAws }
+    );
+
+    expect(h.commits).toEqual([]);
+    expect(res.failed.map((failure) => failure.path).sort()).toEqual([
+      ".github/workflows/delete-application.yml",
+      ".github/workflows/delete-aws.yml",
+      ".github/workflows/delete-environment-aws.yml",
+      ".github/workflows/delete-environment.yml",
+      ".github/workflows/run-rad-commands-aws.yml",
+      ".github/workflows/run-rad-commands.yml"
+    ]);
+  });
+
+  it("checks a provider outside an `only` pass before writing its dispatcher", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { includeAws, only: ["run-rad-commands.yml"] }
+    );
+
+    expect(h.commits).toEqual([]);
+    expect(res.failed).toEqual([
+      { path: ".github/workflows/run-rad-commands.yml", branch: "main" }
+    ]);
+
+    h.committed.main[".github/workflows/run-rad-commands-aws.yml"] = (
+      await generateDeployWorkflow("dev", ".radius/app.bicep", { includeAws })
+    )["run-rad-commands-aws.yml"];
+    const ready = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { includeAws, only: ["run-rad-commands.yml"] }
+    );
+    expect(ready.updated).toEqual([".github/workflows/run-rad-commands.yml"]);
+  });
+
+  it("never commits AWS workflows while the switch is off", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { create: true }
+    );
+
+    expect(res.created).toEqual([]);
+    expect(
+      Object.keys(h.committed.main).filter((path) => path.includes("aws"))
+    ).toEqual([]);
+  });
+});
+
+describe("publishing deploy workflows to a working branch", () => {
+  beforeEach(() => {
+    h.committed = {};
+    h.commits = [];
+    h.failCommits = false;
+    h.noopCommits = false;
+    h.upstream = { ...BASE_UPSTREAM };
+    expireTemplateCache();
+  });
+
+  it.each([
+    [
+      true,
+      [
+        "run-rad-commands.yml",
+        "run-rad-commands-azure.yml",
+        "run-rad-commands-aws.yml"
+      ]
+    ],
+    [false, ["run-rad-commands.yml", "run-rad-commands-azure.yml"]]
+  ])(
+    "commits every workflow the dispatch needs (AWS switch on: %s)",
+    async (includeAws, expected) => {
+      const written: string[] = [];
+      const log = vi.fn();
+
+      await ensureDeployWorkflowsOnBranch(
+        includeAws,
+        "octo/shop",
+        "feature/x",
+        "dev",
+        log,
+        (file) => written.push(file)
+      );
+
+      expect(written).toEqual(expected);
+      expect(h.commits.map(({ branch }) => branch)).toEqual(
+        expected.map(() => "feature/x")
+      );
+      expect(h.commits[0]?.message).toBe(
+        "Add Radius deploy workflow (run-rad-commands.yml) to feature/x for worktree-consistent deploy"
+      );
+      expect(
+        h.committed["feature/x"]?.[".github/workflows/run-rad-commands.yml"]
+      ).toContain(
+        includeAws ? "run-rad-commands-aws.yml" : "run-rad-commands-azure.yml"
+      );
+      expect(
+        /^ {2}aws:/m.test(
+          h.committed["feature/x"]?.[
+            ".github/workflows/run-rad-commands.yml"
+          ] ?? ""
+        )
+      ).toBe(includeAws);
+      expect(log).toHaveBeenCalledWith(
+        `Publishing deploy workflow(s) to branch "feature/x": ${expected.join(", ")}`
+      );
+    }
+  );
+
+  it("adds only the AWS provider workflow to a branch that has the others", async () => {
+    h.committed["feature/x"] = {
+      ".github/workflows/run-rad-commands.yml": "existing",
+      ".github/workflows/run-rad-commands-azure.yml": "existing"
+    };
+    const written: string[] = [];
+
+    await ensureDeployWorkflowsOnBranch(
+      true,
+      "octo/shop",
+      "feature/x",
+      "dev",
+      () => {},
+      (file) => written.push(file)
+    );
+
+    expect(written).toEqual(["run-rad-commands-aws.yml"]);
+    expect(
+      h.committed["feature/x"]?.[".github/workflows/run-rad-commands.yml"]
+    ).toBe("existing");
+  });
+
+  it("leaves a branch that already has every workflow alone", async () => {
+    h.committed["feature/x"] = Object.fromEntries(
+      deployWorkflowFiles(true).map((file) => [
+        `.github/workflows/${file}`,
+        "existing"
+      ])
+    );
+    const log = vi.fn();
+
+    await ensureDeployWorkflowsOnBranch(
+      true,
+      "octo/shop",
+      "feature/x",
+      "dev",
+      log,
+      () => {}
+    );
+
+    expect(h.commits).toEqual([]);
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["", "feature/x"],
+    ["octo/shop", ""]
+  ])(
+    "does nothing without a repository and branch (%j, %j)",
+    async (repo, branch) => {
+      await ensureDeployWorkflowsOnBranch(
+        true,
+        repo,
+        branch,
+        "dev",
+        () => {
+          throw new Error("unexpected log");
+        },
+        () => {}
+      );
+      expect(h.commits).toEqual([]);
+    }
+  );
+
+  it("reports only the files a commit actually wrote", async () => {
+    h.noopCommits = true;
+    const written: string[] = [];
+
+    await ensureDeployWorkflowsOnBranch(
+      false,
+      "octo/shop",
+      "feature/x",
+      "dev",
+      () => {},
+      (file) => written.push(file)
+    );
+
+    expect(written).toEqual([]);
   });
 });

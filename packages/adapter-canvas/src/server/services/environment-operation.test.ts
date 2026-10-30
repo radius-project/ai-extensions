@@ -70,6 +70,18 @@ function operation(): EnvironmentOperationRecord {
 }
 
 const NOW = Date.parse("2026-08-25T01:06:05.000Z");
+const AWS_ROLE_ARN = "arn:aws:iam::123456789012:role/r";
+const AWS_SUBJECTS = ["repo:octo/shop:environment:dev"];
+
+function awsIdentityReady(): Partial<EnvironmentOperationWorkflowDependencies> {
+  return {
+    setupAwsDeployIdentity: async () => ({
+      ok: true,
+      roleArn: AWS_ROLE_ARN,
+      subjects: AWS_SUBJECTS
+    })
+  };
+}
 
 function dependencies(
   op: EnvironmentOperationRecord,
@@ -98,6 +110,9 @@ function dependencies(
     failures,
     posts,
     dependencies: {
+      setupAwsDeployIdentity: async () => {
+        throw new Error("unexpected AWS deploy identity setup");
+      },
       guardStopBoundary: async (_target, boundary) => {
         events.push(`stop:${boundary}`);
         return true;
@@ -245,6 +260,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     const nested = { value: "saved", omitted: undefined };
     op.request = { environment: { nested, optional: undefined } };
     const test = dependencies(op, {
+      ...awsIdentityReady(),
       instanceId: "own-panel",
       setupServices: {
         authorizeAzure: async () => {
@@ -696,7 +712,7 @@ describe("runEnvironmentOperationWorkflow", () => {
           : command({ code: 1, stderr: "HTTP 404" });
       }
     });
-    const test = dependencies(op);
+    const test = dependencies(op, awsIdentityReady());
 
     expect(
       await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
@@ -736,7 +752,7 @@ describe("runEnvironmentOperationWorkflow", () => {
           })
         : command({ code: 1, stderr: "HTTP 404" })
     });
-    const test = dependencies(op);
+    const test = dependencies(op, awsIdentityReady());
 
     expect(
       await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
@@ -1081,7 +1097,7 @@ describe("runEnvironmentOperationWorkflow", () => {
     op.provider = "aws";
     op.request = null;
     op.resumeRequest = null;
-    const test = dependencies(op);
+    const test = dependencies(op, awsIdentityReady());
     const executor = successfulSelectedGhExecutor({
       run: async () =>
         command({ stdout: JSON.stringify({ name: "Production" }) })
@@ -1099,11 +1115,268 @@ describe("runEnvironmentOperationWorkflow", () => {
           operationEnvironment: "production",
           provider: "aws",
           operationId: op.operationId,
+          roleArn: AWS_ROLE_ARN,
+          trustSubjects: AWS_SUBJECTS,
           clientId: ""
         }
       }
     ]);
   });
+
+  it("prepares the AWS deploy identity after the GitHub environment and passes its role to create-environment", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: {
+        environment: "production",
+        roleName: "radius-deploy-octo-app",
+        existingRoleArn: "",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "eks-1"
+      }
+    };
+    const identityCalls: Array<Record<string, unknown>> = [];
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    const test = dependencies(op, {
+      setupAwsDeployIdentity: async (target, request, received) => {
+        expect(target).toBe(op);
+        expect(received).toBe(executor);
+        test.events.push("aws-identity");
+        identityCalls.push(request);
+        return { ok: true, roleArn: AWS_ROLE_ARN, subjects: AWS_SUBJECTS };
+      }
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: true });
+
+    expect(identityCalls).toEqual([
+      {
+        environment: "Production",
+        roleName: "radius-deploy-octo-app",
+        existingRoleArn: "",
+        accountId: "123456789012",
+        region: "us-west-2",
+        cluster: "eks-1",
+        repo: "octo/app"
+      }
+    ]);
+    expect(test.events.indexOf("canonical:Production")).toBeLessThan(
+      test.events.indexOf("aws-identity")
+    );
+    expect(test.events.indexOf("aws-identity")).toBeLessThan(
+      test.events.indexOf("post:/api/create-environment")
+    );
+    expect(test.posts).toEqual([
+      {
+        pathname: "/api/create-environment",
+        data: expect.objectContaining({
+          provider: "aws",
+          environment: "Production",
+          roleArn: AWS_ROLE_ARN,
+          trustSubjects: AWS_SUBJECTS
+        })
+      }
+    ]);
+    expect(test.failures).toEqual([]);
+  });
+
+  it("stops at the AWS boundary when deploy identity setup is paused", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: { environment: "production" }
+    };
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    const test = dependencies(op, {
+      setupAwsDeployIdentity: async () => ({ ok: false, stopped: true })
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(test.events).toContain("stop:after-aws-deploy-identity");
+    expect(test.posts).toEqual([]);
+  });
+
+  it("finalizes an AWS deploy identity failure without creating the environment", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: { environment: "production" }
+    };
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    const test = dependencies(op, {
+      setupAwsDeployIdentity: async () => ({
+        ok: false,
+        status: 403,
+        error: "The signed-in AWS identity cannot create IAM roles.",
+        code: "aws-role-create-denied"
+      })
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(test.events).toContain("stop:before-setup-failure-cleanup");
+    expect(test.failures).toEqual([
+      expect.objectContaining({
+        status: 403,
+        error: "The signed-in AWS identity cannot create IAM roles.",
+        code: "aws-role-create-denied"
+      })
+    ]);
+    expect(test.posts).toEqual([]);
+  });
+
+  it.each([
+    [
+      "already set up for Azure",
+      () =>
+        command({
+          stdout: JSON.stringify({
+            variables: [{ name: "AZURE_CLIENT_ID", value: "app-1" }]
+          })
+        }),
+      409,
+      "github-environment-provider-conflict",
+      'GitHub environment "Production" is already set up for Azure. Radius did not change it or anything in AWS. Choose a different environment name, or delete the Azure environment first.'
+    ],
+    [
+      "unreadable",
+      () => command({ code: 1, stderr: "HTTP 500" }),
+      502,
+      "github-environment-variables-unreadable",
+      'Radius could not read the variables of GitHub environment "Production" to confirm it is not set up for Azure. Nothing was changed in AWS. Retry setup.'
+    ]
+  ])(
+    "refuses AWS setup on a reused GitHub environment that is %s",
+    async (_label, variablesResult, status, code, error) => {
+      const op = operation();
+      op.provider = "aws";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: { environment: "production" }
+      };
+      const executor = successfulSelectedGhExecutor({
+        run: async (args) =>
+          String(args[1]).includes("/variables") ?
+            variablesResult()
+          : command({ stdout: JSON.stringify({ name: "Production" }) })
+      });
+      const test = dependencies(op, {
+        setupAwsDeployIdentity: async () => {
+          throw new Error("AWS must not be touched");
+        }
+      });
+
+      expect(
+        await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+      ).toEqual({ shouldMonitor: false });
+
+      expect(test.events).toContain("stop:before-setup-failure-cleanup");
+      expect(test.failures).toEqual([
+        expect.objectContaining({ status, code, error })
+      ]);
+      expect(test.posts).toEqual([]);
+    }
+  );
+
+  it("lets an AWS setup reuse a GitHub environment that already holds AWS variables", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: { environment: "production" }
+    };
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) =>
+        command({
+          stdout: JSON.stringify(
+            String(args[1]).includes("/variables") ?
+              { variables: [{ name: "AWS_ROLE_ARN" }, "junk"] }
+            : { name: "Production" }
+          )
+        })
+    });
+    const test = dependencies(op, {
+      setupAwsDeployIdentity: async () => ({
+        ok: true,
+        roleArn: AWS_ROLE_ARN,
+        subjects: AWS_SUBJECTS
+      })
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: true });
+    expect(test.failures).toEqual([]);
+  });
+
+  it.each([
+    ["an AWS deploy identity failure", { name: "Production" }],
+    [
+      "an Azure variable conflict",
+      { name: "Production", variables: [{ name: "AZURE_CLIENT_ID" }] }
+    ]
+  ])(
+    "stops before cleanup when %s meets a stop request",
+    async (_label, body) => {
+      const op = operation();
+      op.provider = "aws";
+      op.request = {
+        needsAzureCredentials: false,
+        environment: { environment: "production" }
+      };
+      const executor = successfulSelectedGhExecutor({
+        run: async () => command({ stdout: JSON.stringify(body) })
+      });
+      const base = dependencies(op, {
+        setupAwsDeployIdentity: async () => ({
+          ok: false,
+          status: 400,
+          error: "denied",
+          code: "aws-denied"
+        })
+      });
+      const test = {
+        ...base,
+        dependencies: {
+          ...base.dependencies,
+          guardStopBoundary: async (
+            _target: EnvironmentOperationRecord,
+            boundary: string
+          ) => {
+            base.events.push(`stop:${boundary}`);
+            return boundary !== "before-setup-failure-cleanup";
+          }
+        }
+      };
+
+      expect(
+        await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+      ).toEqual({ shouldMonitor: false });
+
+      expect(base.failures).toEqual([]);
+      expect(base.posts).toEqual([]);
+    }
+  );
 });
 
 // A GitHub environment is addressed by a name the customer can delete and

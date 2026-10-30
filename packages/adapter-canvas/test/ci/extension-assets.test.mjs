@@ -135,6 +135,7 @@ describe(".github/extension release assets", () => {
     expect(callers.map(({ file }) => file).sort()).toEqual([
       "delete-aws.yml",
       "delete-azure.yml",
+      "delete-environment-aws.yml",
       "delete-environment-azure.yml",
       "run-rad-commands-aws.yml",
       "run-rad-commands-azure.yml"
