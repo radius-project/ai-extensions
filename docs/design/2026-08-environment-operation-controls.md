@@ -492,20 +492,21 @@ Rollback and Exit invalidate the repository-scoped environment-list cache before
 
 These routes are loopback Canvas APIs. Mutation routes require `X-Radius-Mutation-Nonce`. The retry handler is registered as one template route, `/api/operations/{operationId}/retry/{retryKind}`, where `retryKind` is `setup`, `verification`, or `cleanup`. The workflow-cancellation route is proposed by PR #599, and the diagnostic route is proposed by PR #580.
 
-| Method | Path                                              | Purpose                                                             |
-|--------|---------------------------------------------------|---------------------------------------------------------------------|
-| `POST` | `/api/operations`                                 | Start and persist a server-owned environment operation.             |
-| `GET`  | `/api/operations?repo={repo}`                     | Read the current operation for a repository.                        |
-| `GET`  | `/api/operations/{operationId}`                   | Read one operation.                                                 |
-| `POST` | `/api/operations/{operationId}/stop`              | Persist a cooperative Stop request.                                 |
-| `POST` | `/api/operations/{operationId}/continue`          | Continue an intentionally stopped setup.                            |
-| `POST` | `/api/operations/{operationId}/resume/{code}`     | Supply input for a persisted prompt.                                |
-| `POST` | `/api/operations/{operationId}/abandon`           | Legacy input-required cancellation; current browser flows use Stop. |
-| `POST` | `/api/operations/{operationId}/retry/{retryKind}` | Retry setup, verification, or cleanup.                              |
-| `POST` | `/api/operations/{operationId}/cancel-workflow`   | Cancel or recheck the exact saved verification run after Stop.      |
-| `POST` | `/api/operations/{operationId}/rollback`          | Start proven-owned cleanup.                                         |
-| `POST` | `/api/operations/{operationId}/exit`              | Close incomplete setup and clean disposable owned artifacts.        |
-| `GET`  | `/api/operations/{operationId}/diagnostics`       | Download the local allowlisted diagnostic attachment.               |
+| Method | Path                                              | Purpose                                                                |
+|--------|---------------------------------------------------|------------------------------------------------------------------------|
+| `POST` | `/api/operations`                                 | Start and persist a server-owned environment operation.                |
+| `GET`  | `/api/operations?repo={repo}`                     | Read the current operation for a repository.                           |
+| `GET`  | `/api/operations/{operationId}`                   | Read one operation.                                                    |
+| `POST` | `/api/operations/{operationId}/stop`              | Persist a cooperative Stop request.                                    |
+| `POST` | `/api/operations/{operationId}/continue`          | Continue an intentionally stopped setup.                               |
+| `POST` | `/api/operations/{operationId}/resume/{code}`     | Supply input for a persisted prompt.                                   |
+| `POST` | `/api/operations/{operationId}/abandon`           | Legacy input-required cancellation; current browser flows use Stop.    |
+| `POST` | `/api/operations/{operationId}/retry/{retryKind}` | Retry setup, verification, or cleanup.                                 |
+| `POST` | `/api/operations/{operationId}/cancel-workflow`   | Cancel or recheck the exact saved verification run after Stop.         |
+| `POST` | `/api/operations/{operationId}/rollback`          | Start proven-owned cleanup.                                            |
+| `POST` | `/api/operations/{operationId}/exit`              | Close incomplete setup and clean disposable owned artifacts.           |
+| `POST` | `/api/operations/{operationId}/aws-lock/remove`   | Remove the AWS deploy identity lock a live run has waited 10+ min for. |
+| `GET`  | `/api/operations/{operationId}/diagnostics`       | Download the local allowlisted diagnostic attachment.                  |
 
 Example accepted command response:
 

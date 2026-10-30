@@ -1170,6 +1170,7 @@ describe("matched direct-core and Canvas setup parity", () => {
         roleArn: String(request.roleArn),
         subjects: []
       }),
+      releaseAwsDeployIdentity: async () => {},
       getOperation: (id) =>
         id === operation.operationId ? operation : undefined,
       now: d.now,

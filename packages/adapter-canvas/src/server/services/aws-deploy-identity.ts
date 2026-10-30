@@ -48,7 +48,17 @@ export interface AwsDeployIdentityPorts {
   // Report one progress line under `Authorize deploy identity`.
   step(text: string): void;
   sleep(milliseconds: number): Promise<void>;
+  // Take the deploy identity lock for this role, waiting while another run
+  // holds it. The caller releases it, since setup holds it past this function.
+  acquireLock(role: {
+    accountId: string;
+    roleName: string;
+  }): Promise<AwsLockResult>;
 }
+
+export type AwsLockResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly code: string; readonly message: string };
 
 // A role IAM just created takes a few seconds to become visible to EKS, which
 // rejects it meanwhile as an invalid principal. Retry that one answer only.
@@ -273,6 +283,10 @@ export async function setupAwsDeployIdentity(
     );
   }
   const roleName = pickedArn ? pickedArn.roleName : request.roleName.trim();
+  // The lock is the first write, so a missing iam:CreatePolicy stops setup
+  // with nothing created, and it is held before the trust policy is read.
+  const locked = await ports.acquireLock({ accountId, roleName });
+  if (!locked.ok) return fail(locked.code, locked.message);
   const getRole = await ports.runAws([
     "iam",
     "get-role",
@@ -647,11 +661,12 @@ export type AwsDeployIdentityRemovalResult =
 /**
  * Remove what one environment added to the shared role: its trust subject and
  * its permission policy. The role, its access entry, and the account's GitHub
- * identity provider stay, because other environments may still need them.
+ * identity provider stay, because other environments may still need them. The
+ * lock is taken after the account check and released by the caller.
  */
 export async function removeAwsEnvironmentFromRole(
   request: AwsDeployIdentityRemovalRequest,
-  ports: Pick<AwsDeployIdentityPorts, "runAws">
+  ports: Pick<AwsDeployIdentityPorts, "runAws" | "acquireLock">
 ): Promise<AwsDeployIdentityRemovalResult> {
   const parsed = parseAwsRoleArn(request.roleArn);
   if (!parsed) {
@@ -694,6 +709,8 @@ export async function removeAwsEnvironmentFromRole(
     `IAM role ${roleName}`,
     "the account's GitHub identity provider"
   ];
+  const locked = await ports.acquireLock({ accountId, roleName });
+  if (!locked.ok) return { ok: false, message: locked.message };
   const getRole = await ports.runAws([
     "iam",
     "get-role",

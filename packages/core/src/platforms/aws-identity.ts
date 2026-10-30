@@ -634,3 +634,114 @@ export function configMapClusterMessage(
 ): string {
   return `Cluster ${cluster} uses CONFIG_MAP authentication, which does not support access entries. Radius grants cluster access through an access entry, so it cannot authorize the deploy role on this cluster. Run this command to enable access entries, then retry: ${enableAccessEntriesCommand(cluster, region)}`;
 }
+
+// The deploy identity lock. IAM has no conditional write for a trust policy,
+// but `CreatePolicy` refuses a name that already exists in the account, so
+// creating this policy is a test-and-set: one caller wins and the rest wait.
+// IAM names ignore case, as role names do, so one role always maps to one lock.
+
+const LOCK_POLICY_PREFIX = "radius-lock-";
+const LOCK_DESCRIPTION_MAX = 1000;
+
+/** How long a lock is held before a waiting run offers to remove it. */
+export const AWS_LOCK_REMOVABLE_AFTER_MS = 10 * 60 * 1000;
+
+export type AwsLockAction = "setup" | "delete" | "repair" | "rollback";
+
+const LOCK_ACTIONS: readonly AwsLockAction[] = [
+  "setup",
+  "delete",
+  "repair",
+  "rollback"
+];
+
+/** The Radius run that holds a deploy identity lock. */
+export interface AwsLockHolder {
+  readonly repo: string;
+  readonly environment: string;
+  readonly action: AwsLockAction;
+  readonly operationId: string;
+}
+
+/** The lock policy's name: `radius-lock-<role>`, at most 76 characters. */
+export function buildAwsLockPolicyName(roleName: string): string {
+  return `${LOCK_POLICY_PREFIX}${roleName}`;
+}
+
+export function awsLockPolicyArn(accountId: string, roleName: string): string {
+  return `arn:aws:iam::${accountId}:policy/${buildAwsLockPolicyName(roleName)}`;
+}
+
+/**
+ * The lock policy's document. It is never attached, and even if it were, it
+ * only denies passing the lock policy itself as a role, which matches nothing.
+ */
+export function buildAwsLockPolicyDocument(
+  accountId: string,
+  roleName: string
+): PolicyDocument {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "RadiusDeployIdentityLock",
+        Effect: "Deny",
+        Action: "iam:PassRole",
+        Resource: awsLockPolicyArn(accountId, roleName)
+      }
+    ]
+  };
+}
+
+/**
+ * The lock policy's description, naming the holder. IAM descriptions accept
+ * only Latin-1 characters, so anything else is written as a JSON escape.
+ */
+export function describeAwsLockHolder(holder: AwsLockHolder): string {
+  const text = JSON.stringify({
+    repo: holder.repo,
+    environment: holder.environment,
+    action: holder.action,
+    operationId: holder.operationId
+  }).replace(
+    /[^\x20-\x7e]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
+  );
+  return text.length <= LOCK_DESCRIPTION_MAX ?
+      text
+    : JSON.stringify({
+        action: holder.action,
+        operationId: holder.operationId
+      });
+}
+
+/** The holder a lock description names, or null when it names none. */
+export function parseAwsLockHolder(description: unknown): AwsLockHolder | null {
+  if (typeof description !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(description);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const action = LOCK_ACTIONS.find((value) => value === parsed.action);
+  if (!action) return null;
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  return {
+    repo: text(parsed.repo),
+    environment: text(parsed.environment),
+    action,
+    operationId: text(parsed.operationId)
+  };
+}
+
+/** How a waiting run names the lock's holder. */
+export function awsLockHolderLabel(holder: AwsLockHolder | null): string {
+  if (!holder) return "Another run";
+  const target =
+    holder.environment && holder.repo ?
+      `environment ${holder.environment} in ${holder.repo}`
+    : holder.repo || "an unnamed environment";
+  return `The ${holder.action} of ${target}`;
+}

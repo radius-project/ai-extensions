@@ -105,7 +105,9 @@ const productionHandlers = {
     inspectVerificationWorkflow: () => Promise.resolve("inactive"),
     cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: () => true,
-    invalidateEnvironmentListing: () => {}
+    invalidateEnvironmentListing: () => {},
+    removeAwsDeployIdentityLock: () =>
+      Promise.resolve({ ok: true, removed: true })
   }),
   ...createRepositoriesRoutes({
     cliExec: () => {},
@@ -531,7 +533,8 @@ describe("server route ownership boundary", () => {
       "POST /api/operations/:operationId/cancel-workflow",
       "POST /api/operations/:operationId/rollback",
       "POST /api/operations/:operationId/exit",
-      "POST /api/operations/:operationId/retry/:retryKind"
+      "POST /api/operations/:operationId/retry/:retryKind",
+      "POST /api/operations/:operationId/aws-lock/remove"
     ]);
     expect(() => assertRouteTable(table)).not.toThrow();
   });

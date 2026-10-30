@@ -3029,6 +3029,31 @@ describe("operation commands", () => {
     expect(bottomButtons(browser)).toHaveLength(0);
   });
 
+  it("shows Remove lock on a deletion that waits for an AWS lock", () => {
+    const browser = setup();
+    renderActions(
+      browser,
+      [
+        STOP_ACTION,
+        {
+          id: "remove-aws-lock",
+          kind: "remove_aws_lock",
+          label: "Remove lock",
+          description: "Remove it only after you confirm that run has stopped.",
+          path: "/api/operations/op-1/aws-lock/remove",
+          pending: false,
+          tone: "danger",
+          requiresConfirmation: true
+        }
+      ],
+      { kind: "delete" }
+    );
+
+    expect(buttons(browser).map((button) => button.textContent)).toEqual([
+      "Remove lock"
+    ]);
+  });
+
   it("renders deletion-specific failure details", () => {
     const browser = setup();
     renderActions(
@@ -3462,6 +3487,16 @@ describe("operation commands", () => {
         path: "/api/operations/op-1/retry/deletion"
       },
       "Retrying deletion…"
+    ],
+    [
+      "a lock removal",
+      {
+        id: "remove-aws-lock",
+        kind: "remove_aws_lock",
+        label: "Remove lock",
+        path: "/api/operations/op-1/aws-lock/remove"
+      },
+      "Removing the lock…"
     ],
     [
       "an unknown command with the general acceptance sentence",

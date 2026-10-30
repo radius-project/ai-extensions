@@ -55,7 +55,7 @@ function coordinator(
   },
   awsEnvironmentAccess: Parameters<
     typeof createInstanceRequestCoordinator
-  >[3]["awsEnvironmentAccess"] = { setup: unavailable }
+  >[3]["awsEnvironmentAccess"] = { setup: unavailable, release: unavailable }
 ) {
   return createInstanceRequestCoordinator(
     instanceId,
@@ -292,6 +292,7 @@ describe("production coordinator scheduling scopes", () => {
         error: "AWS CLI not found. Nothing was created in AWS.",
         code: "aws-cli-missing"
       }));
+      const release = vi.fn(async () => {});
       const configureEnvironment = vi.fn(unavailable);
       const handler = coordinator(
         owner,
@@ -299,13 +300,16 @@ describe("production coordinator scheduling scopes", () => {
         undefined,
         context,
         { authorizeAzure: unavailable, configureEnvironment },
-        { setup }
+        { setup, release }
       );
       const done = settled(owner, "panel");
       handler.scheduleEnvironmentOperation(op);
       await done;
 
       expect(configureEnvironment).not.toHaveBeenCalled();
+      // Released even when setup refused to start, since a lock left behind
+      // blocks every other run on the deploy identity.
+      expect(release).toHaveBeenCalledExactlyOnceWith(op);
       if (shuttingDown) {
         expect(setup).not.toHaveBeenCalled();
         expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
@@ -336,7 +340,7 @@ describe("production coordinator scheduling scopes", () => {
     (name) => {
       const dependencies = {
         awsEnabled: false,
-        awsEnvironmentAccess: { setup: unavailable },
+        awsEnvironmentAccess: { setup: unavailable, release: unavailable },
         executionOwner: createEnvironmentExecutionOwner(),
         accountContext: createEnvironmentAccountContext("runtime", {
           createReadOnlyExecutor: unavailable,

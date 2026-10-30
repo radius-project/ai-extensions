@@ -197,7 +197,8 @@ const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
   continue_setup: "Continuing setup…",
   retry_setup: "Retrying setup…",
   retry_deletion: "Retrying deletion…",
-  exit_setup: "Closing this setup and removing the resources Radius created…"
+  exit_setup: "Closing this setup and removing the resources Radius created…",
+  remove_aws_lock: "Removing the lock…"
 };
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set([
@@ -851,7 +852,10 @@ function visibleOperationActions(
 ): readonly OperationAction[] {
   if (operation === null) return [];
   if (operation.kind !== "delete") return operation.actions;
-  return operation.actions.filter((action) => action.kind === "retry_deletion");
+  return operation.actions.filter(
+    (action) =>
+      action.kind === "retry_deletion" || action.kind === "remove_aws_lock"
+  );
 }
 
 /**

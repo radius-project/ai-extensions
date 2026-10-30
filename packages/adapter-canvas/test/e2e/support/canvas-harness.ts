@@ -1728,6 +1728,43 @@ export class CanvasHarness {
     return restored.operationId;
   }
 
+  /**
+   * A live AWS setup waiting for a deploy identity lock another run has held
+   * long enough for Remove lock to be offered.
+   */
+  async seedAwsLockWait(lock: {
+    policyArn: string;
+    policyId: string;
+  }): Promise<string> {
+    const operationModule: OperationsModule =
+      await import("../../../src/operations.js");
+    const operation = operationModule.createOperation({
+      operationId: "op_chromium_aws_lock_wait",
+      provider: "aws",
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      stages: operationModule.buildStages({ includeIdentity: true }),
+      journey: { origin: "environments" }
+    });
+    operation.context = { githubLogin: "repo-user" };
+    operationModule.enterStage(
+      operation,
+      operationModule.STAGE_AUTHORIZE_IDENTITY
+    );
+    operationModule.setContext(operation, {
+      awsLockWait: {
+        ...lock,
+        holder: "The setup of environment prod in fixture/app",
+        since: "2026-10-30T11:00:00Z",
+        removable: true
+      }
+    });
+    operationModule.operations.put(operation);
+    await operationModule.operations.persist();
+    this.seededOperationIds.add(operation.operationId);
+    return operation.operationId;
+  }
+
   async operationRecord(operationId: string): Promise<Record<string, unknown>> {
     const operationModule: OperationsModule =
       await import("../../../src/operations.js");

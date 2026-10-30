@@ -476,7 +476,9 @@ describe("runEnvironmentDeletion — AWS", () => {
       repo: "octo/app",
       environment: "dev",
       roleArn: ROLE_ARN,
-      trustSubjects: []
+      trustSubjects: [],
+      operationId: op.operationId,
+      waiting: expect.any(Function)
     });
     expect(ports.runAz).not.toHaveBeenCalled();
     expect(op.stages.map((s: { id: string }) => s.id)).toEqual([
@@ -566,20 +568,22 @@ describe("runEnvironmentDeletion — AWS", () => {
     expect(retried.state).toBe("succeeded");
     expect(removeAwsEnvironmentAccess.mock.calls).toEqual([
       [
-        {
+        expect.objectContaining({
           repo: "octo/app",
           environment: "dev",
           roleArn: ROLE_ARN,
-          trustSubjects: subjects
-        }
+          trustSubjects: subjects,
+          operationId: retried.operationId
+        })
       ],
       [
-        {
+        expect.objectContaining({
           repo: "octo/app",
           environment: "dev",
           roleArn: ROLE_ARN,
-          trustSubjects: subjects
-        }
+          trustSubjects: subjects,
+          operationId: retried.operationId
+        })
       ]
     ]);
   });
@@ -603,6 +607,73 @@ describe("runEnvironmentDeletion — AWS", () => {
     expect(
       op.steps.some((step: { label: string }) => step.label.startsWith(label))
     ).toBe(true);
+  });
+
+  it("shows each new wait for the lock, keeps the deletion fresh, and clears the wait", async () => {
+    const op = makeAwsOp();
+    const wait = {
+      policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
+      policyId: "LOCK0",
+      holder: "Another run",
+      since: "",
+      removable: false
+    };
+    const seen: unknown[] = [];
+    const ports = makePorts({
+      removeAwsEnvironmentAccess: vi.fn(async ({ waiting }) => {
+        op.lastActivityAt = "2000-01-01T00:00:00.000Z";
+        await waiting(wait, "⏳ Waiting for the lock on IAM role deploy.");
+        seen.push(op.lastActivityAt, op.context?.awsLockWait);
+        await waiting({ ...wait, removable: true }, null);
+        seen.push(op.context?.awsLockWait);
+        return { ok: true as const, removed: [], kept: [] };
+      })
+    });
+
+    await runEnvironmentDeletion(op, ports);
+
+    expect(seen[0]).not.toBe("2000-01-01T00:00:00.000Z");
+    expect(seen[1]).toEqual(wait);
+    expect(seen[2]).toEqual({ ...wait, removable: true });
+    expect(op.context.awsLockWait).toBeNull();
+    const labels = op.steps.map((step: { label: string }) => step.label);
+    expect(labels.filter((label: string) => label.startsWith("⏳"))).toEqual([
+      "⏳ Waiting for the lock on IAM role deploy."
+    ]);
+    expect(op.state).toBe("succeeded");
+  });
+
+  it("finishes with a warning when the lock could not be released", async () => {
+    const op = makeAwsOp();
+    const ports = makePorts({
+      removeAwsEnvironmentAccess: vi.fn(async () => ({
+        ok: true as const,
+        removed: ["policy radius-deploy-dev"],
+        kept: [],
+        lockWarning: "not allowed iam:DeletePolicy"
+      }))
+    });
+
+    await runEnvironmentDeletion(op, ports);
+
+    const warning = op.steps.find(
+      (step: { label: string }) =>
+        step.label === "Could not release the lock on the IAM role"
+    );
+    expect(warning).toMatchObject({
+      state: "warning",
+      warning: {
+        code: "aws-lock-release-failed",
+        message: "not allowed iam:DeletePolicy"
+      }
+    });
+    expect(
+      op.stages.find(
+        (stage: { id: string }) => stage.id === STAGE_DELETE_AWS_ROLE_ACCESS
+      )?.state
+    ).toBe("warning");
+    expect(ports.deleteGitHubEnvironment).toHaveBeenCalled();
+    expect(op.state).toBe("succeeded_with_warnings");
   });
 
   it("reports a role that held nothing for the environment", async () => {

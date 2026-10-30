@@ -6481,6 +6481,9 @@ describe("environment deletion session reporting coordinator", () => {
         awsEnvironmentAccess: {
           setup: async () => {
             throw new Error("unexpected AWS setup");
+          },
+          release: async () => {
+            throw new Error("unexpected AWS lock release");
           }
         },
         executionOwner,

@@ -3920,6 +3920,102 @@ test.describe("Radius Canvas in Chromium", () => {
       expect(roleLookups).toBe(2);
       expect(operationPosts).toBe(0);
     });
+
+    test("removes an abandoned deploy identity lock only after confirmation, by keyboard @safety", async ({
+      page,
+      canvas
+    }) => {
+      const lockArn = `arn:aws:iam::${AWS_ACCOUNT}:policy/radius-lock-radius-deploy-fixture-app`;
+      const operationId = await canvas.seedAwsLockWait({
+        policyArn: lockArn,
+        policyId: "LOCK0"
+      });
+      const scenario = defaultFakeCliScenario();
+      scenario.commands.push(
+        {
+          tool: "aws",
+          args: [
+            "iam",
+            "get-policy",
+            "--policy-arn",
+            lockArn,
+            "--output",
+            "json"
+          ],
+          stdout: JSON.stringify({ Policy: { PolicyId: "LOCK0" } })
+        },
+        {
+          tool: "aws",
+          args: ["iam", "delete-policy", "--policy-arn", lockArn],
+          stdout: ""
+        }
+      );
+      await canvas.setScenario(scenario);
+      const deletedLock = async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "aws" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify(["iam", "delete-policy", "--policy-arn", lockArn])
+        );
+      await page.goto(
+        `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+      );
+
+      const removeLock = page.getByRole("button", { name: "Remove lock" });
+      await expect(removeLock).toBeVisible();
+      await expect(removeLock).toHaveAccessibleDescription(
+        "The setup of environment prod in fixture/app has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy."
+      );
+      await expect(
+        page.getByRole("button", { name: "Pause setup" })
+      ).toBeVisible();
+      await removeLock.focus();
+      await page.keyboard.press("Enter");
+
+      const dialog = page.locator("#env-rollback-modal");
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toHaveAccessibleName(
+        "Remove the lock on the deploy identity?"
+      );
+      await expectNoWcagViolations(page);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      await expect(removeLock).toBeFocused();
+      expect(await deletedLock()).toBe(false);
+
+      await page.keyboard.press("Enter");
+      await expect(dialog).toBeVisible();
+      await expect(dialog.locator("#env-rollback-title")).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(
+        dialog.getByRole("button", { name: "Keep waiting" })
+      ).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(
+        dialog.getByRole("button", { name: "Remove lock" })
+      ).toBeFocused();
+      await page.keyboard.press("Enter");
+
+      await expect.poll(deletedLock).toBe(true);
+      await expect(
+        page.getByRole("button", { name: "Remove lock" })
+      ).toHaveCount(0);
+      await expect
+        .poll(async () => {
+          const record = await canvas.operationRecord(operationId);
+          const context = record.context;
+          return (
+              typeof context === "object" &&
+                context !== null &&
+                "awsLockWait" in context
+            ) ?
+              context.awsLockWait
+            : null;
+        })
+        .toMatchObject({ policyId: "LOCK0", removable: false });
+      await expectNoWcagViolations(page);
+    });
   });
 
   test("keeps unsupported credential profiles out of environment creation @safety", async ({

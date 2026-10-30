@@ -4433,10 +4433,68 @@ export function projectOperationHeadline(op: any): any {
 
 const PAUSE_SETUP_LABEL = "Pause setup";
 
+/**
+ * The AWS deploy identity lock a live run is waiting for, once it has been held
+ * long enough to offer Remove lock. Null otherwise.
+ */
+export function removableAwsLockWait(op: any): {
+  policyArn: string;
+  policyId: string;
+  holder: string;
+  since: string;
+} | null {
+  const wait = op?.context?.awsLockWait;
+  if (
+    !op ||
+    isTerminalState(op.state) ||
+    !wait ||
+    wait.removable !== true ||
+    typeof wait.policyArn !== "string" ||
+    !wait.policyArn ||
+    typeof wait.policyId !== "string" ||
+    !wait.policyId
+  ) {
+    return null;
+  }
+  return {
+    policyArn: wait.policyArn,
+    policyId: wait.policyId,
+    since: typeof wait.since === "string" ? wait.since : "",
+    holder:
+      typeof wait.holder === "string" && wait.holder ?
+        wait.holder
+      : "Another run"
+  };
+}
+
+// Radius never takes a lock over by itself: a run that only looks stopped could
+// still send a write it already prepared. So a person confirms it stopped.
+function removeAwsLockAction(op: any, base: string): any | null {
+  const wait = removableAwsLockWait(op);
+  if (!wait) return null;
+  return {
+    id: "remove-aws-lock",
+    kind: "remove_aws_lock",
+    label: "Remove lock",
+    placement: "row",
+    tone: "danger",
+    requiresConfirmation: true,
+    confirmTitle: "Remove the lock on the deploy identity?",
+    confirmLabel: "Remove lock",
+    cancelLabel: "Keep waiting",
+    description: `${wait.holder} has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`,
+    method: "POST",
+    path: `${base}/aws-lock/remove`,
+    pending: false
+  };
+}
+
 export function projectOperationActions(op: any): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
   if (op.kind === OPERATION_KIND_DELETE) {
+    const removeLock = removeAwsLockAction(op, base);
+    if (removeLock) return [removeLock];
     // Delete work is not pausable and cannot be rolled back. While it is live,
     // project no setup controls; once it ends with unfinished work, offer only
     // the deletion-specific retry that resumes its idempotent stage sequence.
@@ -4498,7 +4556,9 @@ export function projectOperationActions(op: any): any[] {
     const active = activeCommandKind(op);
     if (active !== null && DISPOSAL_COMMAND_KINDS.includes(active)) return [];
     const waitingForInput = op.state === INPUT_REQUIRED_STATE;
+    const removeLock = removeAwsLockAction(op, base);
     return [
+      ...(removeLock ? [removeLock] : []),
       {
         id: "stop",
         kind: "stop",
