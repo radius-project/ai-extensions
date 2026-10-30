@@ -5443,6 +5443,7 @@ export function createProductionCanvasServerRuntime(
       runAws: runAwsCli,
       runGitHubJson: runGitHubJsonRequest,
       sleep: sleepMs,
+      isStopRequested: shouldStop,
       operations: { enterStage, addLegacyStep, setContext },
       store: operations,
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,

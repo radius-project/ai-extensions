@@ -374,6 +374,51 @@ describe("runSetupCoordinator", () => {
       ).toBe(false);
     });
 
+    it("honors a pause from AWS setup without configuring the environment", async () => {
+      const test = awsHarness({
+        authorizeAws: async () => ({ kind: "stopped" }),
+        stopBoundary: async (boundary) => {
+          test.transcript.push(["stop", boundary]);
+          return boundary !== "after-aws-deploy-identity";
+        }
+      });
+      expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
+        shouldMonitor: false
+      });
+      expect(test.transcript.at(-1)).toEqual([
+        "stop",
+        "after-aws-deploy-identity"
+      ]);
+      expect(
+        test.transcript.some(
+          (entry) =>
+            Array.isArray(entry) &&
+            (entry[0] === "configure" || entry[0] === "failure")
+        )
+      ).toBe(false);
+    });
+
+    it("fails rather than configures when a paused AWS setup is not stopped", async () => {
+      const test = awsHarness({
+        authorizeAws: async () => ({ kind: "stopped" })
+      });
+      expect(await runSetupCoordinator(test.target, test.ports)).toEqual({
+        shouldMonitor: false
+      });
+      expect(test.transcript.at(-1)).toEqual([
+        "failure",
+        {
+          kind: "aws-authorization",
+          error: expect.objectContaining({ code: "aws-setup-interrupted" })
+        }
+      ]);
+      expect(
+        test.transcript.some(
+          (entry) => Array.isArray(entry) && entry[0] === "configure"
+        )
+      ).toBe(false);
+    });
+
     it("stops without finalizing when the stop boundary declines after an AWS failure", async () => {
       const test = awsHarness({
         authorizeAws: async () => ({ kind: "failed", error: "denied" }),
