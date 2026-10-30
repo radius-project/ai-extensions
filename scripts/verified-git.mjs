@@ -37,9 +37,15 @@
 // Writes require a GitHub App installation token with contents write; verifies
 // require a token with contents read.
 // GITHUB_REPOSITORY and GITHUB_API_URL come from the workflow environment.
+//
+// GitHub sometimes answers a valid request with a transient 5xx. Reads and
+// object writes that move no ref (blobs, trees, commits) are retried a bounded
+// number of times. A ref write is made only once, because a lost response may
+// already have moved the ref. Rerun the workflow to reconcile it.
 
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -97,33 +103,72 @@ function credentials() {
   };
 }
 
+const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
+const ATTEMPTS = 4;
+const MAX_RETRY_AFTER_SECONDS = 60;
+const REPEATABLE_WRITE = /^POST \/git\/(?:blobs|trees|commits)$/;
+
+function repeatable(method, path) {
+  return method === "GET" || REPEATABLE_WRITE.test(`${method} ${path}`);
+}
+
+/**
+ * Seconds to wait before retrying a transient failure: GitHub's Retry-After
+ * when it gives one in seconds, otherwise exponential backoff. Undefined when
+ * GitHub asks for a longer wait than a release job should block for.
+ */
+function retryDelay(response, attempt) {
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  if (retryAfter === undefined || !/^\d+$/.test(retryAfter)) {
+    return 2 ** (attempt - 1);
+  }
+  const seconds = Number(retryAfter);
+  return seconds <= MAX_RETRY_AFTER_SECONDS ? seconds : undefined;
+}
+
 async function api(method, path, body, absentOn404 = false) {
   const { repository, token } = credentials();
-  let response;
-  try {
-    response = await fetch(`${apiUrl}/repos/${repository}${path}`, {
-      method,
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-        "x-github-api-version": "2022-11-28"
-      },
-      body: body === undefined ? undefined : JSON.stringify(body)
-    });
-  } catch (error) {
-    fail(`${method} ${path} could not reach GitHub: ${error.message}`);
-  }
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  const attempts = repeatable(method, path) ? ATTEMPTS : 1;
+  for (let attempt = 1; ; attempt++) {
+    let response;
+    try {
+      response = await fetch(`${apiUrl}/repos/${repository}${path}`, {
+        method,
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "x-github-api-version": "2022-11-28"
+        },
+        body: payload
+      });
+    } catch (error) {
+      fail(`${method} ${path} could not reach GitHub: ${error.message}`);
+    }
 
-  const text = await response.text();
-  if (absentOn404 && response.status === 404) return undefined;
-  if (!response.ok) {
-    fail(`${method} ${path} failed with ${response.status}: ${text}`);
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    return fail(`${method} ${path} did not return JSON: ${text}`);
+    const text = await response.text();
+    if (absentOn404 && response.status === 404) return undefined;
+    if (!response.ok) {
+      const delay =
+        attempt < attempts && TRANSIENT_STATUSES.has(response.status) ?
+          retryDelay(response, attempt)
+        : undefined;
+      if (delay !== undefined) {
+        console.error(
+          `warning: ${method} ${path} failed with ${response.status}; retrying in ${delay}s (attempt ${attempt + 1} of ${attempts})`
+        );
+        await sleep(delay * 1000);
+        continue;
+      }
+      const tries = attempt > 1 ? ` after ${attempt} attempts` : "";
+      fail(`${method} ${path} failed with ${response.status}${tries}: ${text}`);
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      return fail(`${method} ${path} did not return JSON: ${text}`);
+    }
   }
 }
 

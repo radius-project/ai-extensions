@@ -67,6 +67,7 @@ async function api({
   const calls = [];
   const existing = new Set([...refs, ...Object.keys(refTargets)]);
   let blobs = 0;
+  let failures = 0;
 
   const server = createServer((request, response) => {
     let raw = "";
@@ -80,13 +81,19 @@ async function api({
         body: raw === "" ? undefined : JSON.parse(raw)
       });
 
-      const send = (status, body) => {
-        response.writeHead(status, { "content-type": "application/json" });
+      const send = (status, body, headers = {}) => {
+        response.writeHead(status, {
+          "content-type": "application/json",
+          ...headers
+        });
         response.end(JSON.stringify(body));
       };
 
-      if (broken?.route === route) {
-        return send(broken.status, broken.body);
+      // `times` lets a failure clear after that many responses, the way a
+      // transient GitHub outage does; without it the route always fails.
+      if (broken?.route === route && failures < (broken.times ?? Infinity)) {
+        failures++;
+        return send(broken.status, broken.body, broken.headers);
       }
       if (route === "POST /git/blobs") {
         return send(201, { sha: (++blobs).toString(16).padStart(40, "e") });
@@ -1017,6 +1024,212 @@ describe("scripts/verified-git.mjs", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("could not reach GitHub");
+  });
+
+  describe("transient GitHub failures", () => {
+    const count = (calls, route) =>
+      calls.filter((call) => call.route === route).length;
+
+    it.each([
+      ["POST /git/blobs", 4],
+      ["POST /git/trees", 2],
+      ["POST /git/commits", 2]
+    ])("retries a transient failure of %s", async (route, expected) => {
+      const root = repository();
+      const { url, calls } = await api({
+        broken: {
+          route,
+          status: 500,
+          body: { message: "Unicorn!" },
+          headers: { "retry-after": "0" },
+          times: 1
+        }
+      });
+
+      const result = await run(root, url, commitArgs());
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ commit: COMMIT, tree: TREE });
+      expect(count(calls, route)).toBe(expected);
+      expect(result.stderr).toBe(
+        `warning: ${route} failed with 500; retrying in 0s (attempt 2 of 4)`
+      );
+    });
+
+    it("retries a transient failure of a read", async () => {
+      const root = repository();
+      const route = "GET /git/ref/tags/radius@1.2.0";
+      const { url, calls } = await api({
+        refs: ["refs/tags/radius@1.2.0"],
+        tagObject: { type: "commit", target: TARGET },
+        broken: {
+          route,
+          status: 502,
+          body: { message: "Bad Gateway" },
+          headers: { "retry-after": "0" },
+          times: 1
+        }
+      });
+
+      const result = await run(root, url, [
+        "verify-tag",
+        "--name",
+        "radius@1.2.0",
+        "--target",
+        TARGET
+      ]);
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(TARGET);
+      expect(count(calls, route)).toBe(2);
+    });
+
+    it("gives up after four attempts at a failure that persists", async () => {
+      const root = repository();
+      const { url, calls } = await api({
+        broken: {
+          route: "POST /git/blobs",
+          status: 503,
+          body: { message: "Service Unavailable" },
+          headers: { "retry-after": "0" }
+        }
+      });
+
+      const result = await run(root, url, commitArgs());
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(
+        "error: POST /git/blobs failed with 503 after 4 attempts"
+      );
+      expect(result.stderr).toContain("Service Unavailable");
+      expect(count(calls, "POST /git/blobs")).toBe(4);
+      expect(count(calls, "POST /git/trees")).toBe(0);
+    });
+
+    it("backs off exponentially when GitHub gives no Retry-After", async () => {
+      const root = repository();
+      const { url, calls } = await api({
+        broken: {
+          route: "POST /git/trees",
+          status: 504,
+          body: { message: "Gateway Timeout" },
+          times: 2
+        }
+      });
+
+      const result = await run(root, url, commitArgs());
+
+      expect(result.status).toBe(0);
+      expect(result.stderr.split("\n")).toEqual([
+        "warning: POST /git/trees failed with 504; retrying in 1s (attempt 2 of 4)",
+        "warning: POST /git/trees failed with 504; retrying in 2s (attempt 3 of 4)"
+      ]);
+      expect(count(calls, "POST /git/trees")).toBe(3);
+    });
+
+    it("backs off when Retry-After is not a number of seconds", async () => {
+      const root = repository();
+      const { url } = await api({
+        broken: {
+          route: "POST /git/trees",
+          status: 500,
+          body: { message: "Unicorn!" },
+          headers: { "retry-after": "Fri, 30 Oct 2026 23:32:52 GMT" },
+          times: 1
+        }
+      });
+
+      const result = await run(root, url, commitArgs());
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe(
+        "warning: POST /git/trees failed with 500; retrying in 1s (attempt 2 of 4)"
+      );
+    });
+
+    it("fails instead of waiting more than a minute for GitHub", async () => {
+      const root = repository();
+      const { url, calls } = await api({
+        broken: {
+          route: "POST /git/blobs",
+          status: 503,
+          body: { message: "Service Unavailable" },
+          headers: { "retry-after": "61" }
+        }
+      });
+
+      const result = await run(root, url, commitArgs());
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(
+        'error: POST /git/blobs failed with 503: {"message":"Service Unavailable"}'
+      );
+      expect(count(calls, "POST /git/blobs")).toBe(1);
+    });
+
+    // A lost response may already have moved the ref, so repeating the write
+    // could misreport it; rerunning the workflow reconciles it instead.
+    it.each([
+      [
+        "POST /git/refs",
+        {},
+        ["--name", "refs/heads/releases/radius/v1.2.0", "--sha", COMMIT]
+      ],
+      [
+        "PATCH /git/refs/heads/releases/radius/edge",
+        { refs: ["refs/heads/releases/radius/edge"] },
+        [
+          "--name",
+          "refs/heads/releases/radius/edge",
+          "--sha",
+          COMMIT,
+          "--force"
+        ]
+      ]
+    ])("does not repeat the ref write %s", async (route, options, args) => {
+      const root = repository();
+      const { url, calls } = await api({
+        ...options,
+        broken: {
+          route,
+          status: 500,
+          body: { message: "Unicorn!" },
+          headers: { "retry-after": "0" }
+        }
+      });
+
+      const result = await run(root, url, ["ref", ...args]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(
+        `error: ${route} failed with 500: {"message":"Unicorn!"}`
+      );
+      expect(count(calls, route)).toBe(1);
+    });
+
+    it.each([[401], [422], [501]])(
+      "does not repeat a request GitHub answered with %i",
+      async (status) => {
+        const root = repository();
+        const { url, calls } = await api({
+          broken: {
+            route: "POST /git/blobs",
+            status,
+            body: { message: "refused" },
+            headers: { "retry-after": "0" }
+          }
+        });
+
+        const result = await run(root, url, commitArgs());
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toBe(
+          `error: POST /git/blobs failed with ${status}: {"message":"refused"}`
+        );
+        expect(count(calls, "POST /git/blobs")).toBe(1);
+      }
+    );
   });
 
   it.each([["GITHUB_TOKEN"], ["GITHUB_REPOSITORY"]])(
