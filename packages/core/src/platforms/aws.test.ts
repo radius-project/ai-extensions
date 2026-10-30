@@ -7,7 +7,6 @@ function ctx(overrides: Partial<PortalContext> = {}): PortalContext {
   return {
     subscriptionId: "",
     resourceGroup: "",
-    region: "us-west-2",
     clusterName: "",
     ...overrides
   };
@@ -27,9 +26,7 @@ describe("aws.portalUrl", () => {
 
   it("links an AWS resource ID through the region-aware console mapping", () => {
     const id = `${scope}/AWS.RDS/DBInstance/db`;
-    expect(aws.portalUrl(id, ctx({ region: "us-east-1" }))).toBe(
-      awsConsoleUrl(id)
-    );
+    expect(aws.portalUrl(id, ctx())).toBe(awsConsoleUrl(id));
     expect(aws.portalUrl(id, ctx())).toBe(
       "https://us-west-2.console.aws.amazon.com/rds/home?region=us-west-2#databases:"
     );
