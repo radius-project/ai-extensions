@@ -24,6 +24,7 @@ export default defineConfig({
       "../adapter-shared/src/workflow-artifacts*.test.ts",
       "../adapter-shared/src/workflow-read*.test.ts",
       "../adapter-shared/src/rad.test.ts",
+      "../adapter-shared/src/recipe-implementation.test.ts",
       "../adapter-shared/src/workflow-run-response.test.ts",
       "../adapter-shared/src/workflow-observation.test.ts",
       "src/deploy.test.ts",
