@@ -149,7 +149,7 @@ We should add three rules to `code-review.instructions.md`:
 
 We need a security reviewer that can block merge. Our review prompt already lists the risks that matter most here: shell strings built from interpolated values, unescaped webview HTML, unpinned actions, and secrets passed as inputs. Today nothing blocks merge on any of them.
 
-CodeQL catches several of these risks on every run, and its Actions queries flag the same workflow problems a linter like zizmor would (injection in `run:` steps, unpinned actions, risky triggers). Copilot Autofix proposes a patch for each CodeQL finding.
+CodeQL can detect several of these risks, including workflow injection, but its coverage depends on the selected query suite. The high/critical merge rule below will not block medium-severity findings such as unpinned actions. Copilot Autofix can propose patches for supported findings; it does not support every Actions query.
 
 We should:
 
