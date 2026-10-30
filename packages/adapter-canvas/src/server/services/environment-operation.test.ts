@@ -120,6 +120,9 @@ function dependencies(
       setupAwsDeployIdentity: async () => {
         throw new Error("unexpected AWS deploy identity setup");
       },
+      releaseAwsDeployIdentity: async () => {
+        events.push("release-aws");
+      },
       guardStopBoundary: async (_target, boundary) => {
         events.push(`stop:${boundary}`);
         return true;
@@ -1278,6 +1281,9 @@ describe("runEnvironmentOperationWorkflow", () => {
       "eks describe-cluster": {
         cluster: { accessConfig: { authenticationMode: "API" } }
       },
+      "iam create-policy": { Policy: { PolicyId: "LOCK1" } },
+      "iam get-policy": { Policy: { PolicyId: "LOCK1" } },
+      "iam delete-policy": "",
       "iam get-role": {
         Role: {
           Arn: picked,
@@ -1322,8 +1328,15 @@ describe("runEnvironmentOperationWorkflow", () => {
         return answer;
       },
       sleep: async () => {},
+      now: () => NOW,
       isStopRequested: () => false,
-      operations: { enterStage, addLegacyStep, setContext },
+      operationId: (target) => target.operationId,
+      operations: {
+        enterStage,
+        addLegacyStep,
+        setContext,
+        touch: () => {}
+      },
       store: { persist: async () => {} },
       stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
       errorMessage: (error) =>
@@ -1331,7 +1344,8 @@ describe("runEnvironmentOperationWorkflow", () => {
     });
     const test = dependencies(op, {
       setupAwsDeployIdentity: (target, request, received) =>
-        access.setup(target, request, received)
+        access.setup(target, request, received),
+      releaseAwsDeployIdentity: (target) => access.release(target)
     });
 
     expect(
@@ -1346,11 +1360,15 @@ describe("runEnvironmentOperationWorkflow", () => {
           "Radius created IAM role radius-deploy-octo-web for octo/web, so it cannot be used for octo/app. Nothing was changed. Pick another role or let Radius create one. Nothing was created in AWS."
       })
     ]);
+    // The lock is the only write, and the refused setup releases it.
     expect(awsCalls).toEqual([
       "--version",
       "sts get-caller-identity",
       "eks describe-cluster",
-      "iam get-role"
+      "iam create-policy",
+      "iam get-role",
+      "iam get-policy",
+      "iam delete-policy"
     ]);
     expect(test.posts).toEqual([]);
   });

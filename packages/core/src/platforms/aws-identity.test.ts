@@ -1,15 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   AWS_CLI_MINIMUM_VERSION,
+  AWS_LOCK_REMOVABLE_AFTER_MS,
+  awsLockHolderLabel,
+  awsLockPolicyArn,
   awsRoleArn,
   awsRoleTags,
   buildAwsDeployRoleName,
   buildAwsEnvironmentPermissionPolicy,
   buildAwsEnvironmentPolicyName,
+  buildAwsLockPolicyDocument,
+  buildAwsLockPolicyName,
   buildGitHubTrustPolicy,
   checkAwsCliVersion,
   configMapClusterMessage,
   createGitHubOidcProviderCommand,
+  describeAwsLockHolder,
   eksAcceptsAccessEntries,
   eksAuthenticationMode,
   githubOidcProviderArn,
@@ -20,6 +26,7 @@ import {
   mergeGitHubTrustSubject,
   namesGitHubProvider,
   parseAwsCliVersion,
+  parseAwsLockHolder,
   parseAwsRoleArn,
   parsePolicyDocument,
   radiusRoleRepository,
@@ -607,5 +614,108 @@ describe("EKS authentication mode", () => {
     expect(eksAcceptsAccessEntries("API")).toBe(true);
     expect(eksAcceptsAccessEntries("API_AND_CONFIG_MAP")).toBe(true);
     expect(eksAcceptsAccessEntries("CONFIG_MAP")).toBe(false);
+  });
+});
+
+describe("deploy identity lock", () => {
+  const holder = {
+    repo: "octo/shop",
+    environment: "dev",
+    action: "setup" as const,
+    operationId: "op-1"
+  };
+
+  it("names the lock after the role, inside IAM's 128-character policy name limit", () => {
+    const longest = "r".repeat(64);
+    expect(buildAwsLockPolicyName("radius-deploy-octo-shop")).toBe(
+      "radius-lock-radius-deploy-octo-shop"
+    );
+    expect(buildAwsLockPolicyName(longest)).toHaveLength(76);
+    expect(awsLockPolicyArn(ACCOUNT, "shop")).toBe(
+      `arn:aws:iam::${ACCOUNT}:policy/radius-lock-shop`
+    );
+  });
+
+  it("writes a document that only denies passing the lock itself", () => {
+    expect(buildAwsLockPolicyDocument(ACCOUNT, "shop")).toEqual({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Sid: "RadiusDeployIdentityLock",
+          Effect: "Deny",
+          Action: "iam:PassRole",
+          Resource: `arn:aws:iam::${ACCOUNT}:policy/radius-lock-shop`
+        }
+      ]
+    });
+  });
+
+  it("round-trips the holder through the policy description", () => {
+    const description = describeAwsLockHolder(holder);
+    expect(description).toBe(
+      '{"repo":"octo/shop","environment":"dev","action":"setup","operationId":"op-1"}'
+    );
+    expect(parseAwsLockHolder(description)).toEqual(holder);
+  });
+
+  it("escapes characters IAM descriptions refuse and restores them on read", () => {
+    const unicode = { ...holder, environment: "prod-é-✓-😀" };
+    const description = describeAwsLockHolder(unicode);
+    expect(description).toMatch(/^[\x20-\x7e]*$/);
+    expect(parseAwsLockHolder(description)).toEqual(unicode);
+  });
+
+  it("drops the repository and environment when they would pass the 1,000-character limit", () => {
+    const description = describeAwsLockHolder({
+      ...holder,
+      environment: "é".repeat(255)
+    });
+    expect(description.length).toBeLessThanOrEqual(1000);
+    expect(parseAwsLockHolder(description)).toEqual({
+      repo: "",
+      environment: "",
+      action: "setup",
+      operationId: "op-1"
+    });
+  });
+
+  it.each([
+    [undefined],
+    [""],
+    ["not json"],
+    ["[]"],
+    ['{"action":"takeover"}'],
+    ['{"repo":"octo/shop"}']
+  ])("reads %j as no holder", (description) => {
+    expect(parseAwsLockHolder(description)).toBeNull();
+  });
+
+  it("reads missing text fields as empty", () => {
+    expect(parseAwsLockHolder('{"action":"delete","repo":7}')).toEqual({
+      repo: "",
+      environment: "",
+      action: "delete",
+      operationId: ""
+    });
+  });
+
+  it.each([
+    [holder, "The setup of environment dev in octo/shop"],
+    [
+      { ...holder, action: "delete" as const },
+      "The delete of environment dev in octo/shop"
+    ],
+    [{ ...holder, environment: "" }, "The setup of octo/shop"],
+    [
+      { ...holder, repo: "", environment: "" },
+      "The setup of an unnamed environment"
+    ],
+    [null, "Another run"]
+  ])("labels %j as %s", (value, label) => {
+    expect(awsLockHolderLabel(value)).toBe(label);
+  });
+
+  it("offers removal after ten minutes", () => {
+    expect(AWS_LOCK_REMOVABLE_AFTER_MS).toBe(600000);
   });
 });

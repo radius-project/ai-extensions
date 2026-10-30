@@ -15,6 +15,7 @@ import {
   requireInput,
   finish,
   operations,
+  setContext,
   OPERATION_SCHEMA_VERSION,
   setVerificationWorkflowState,
   STAGE_DELETE_RADIUS_ENV,
@@ -172,131 +173,91 @@ describe("production environment owner HTTP binding", () => {
   );
 
   it("runs the AWS CLI on PATH for AWS deploy identity setup", async () => {
-    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
-    const log = path.join(fakeBin, "calls.log");
-    const originalPath = process.env.PATH;
-    const originalPathExt = process.env.PATHEXT;
-    const originalLog = process.env.FAKE_AWS_LOG;
     // Answers the version check, then refuses the sign-in check so setup
     // stops before anything could be written.
-    await fs.writeFile(
-      path.join(fakeBin, "aws"),
-      [
-        "#!/bin/sh",
-        'printf "%s\\n" "$*" >> "$FAKE_AWS_LOG"',
-        'if [ "$1" = "--version" ]; then',
-        '  echo "aws-cli/2.17.0 Python/3.11 Linux/6"',
-        "  exit 0",
-        "fi",
-        'echo "fake aws: not signed in" >&2',
-        "exit 3",
-        ""
-      ].join("\n")
-    );
-    await fs.chmod(path.join(fakeBin, "aws"), 0o755);
-    await fs.writeFile(
-      path.join(fakeBin, "aws.cmd"),
-      [
-        "@echo off",
-        'echo %*>>"%FAKE_AWS_LOG%"',
-        'if "%1"=="--version" (',
-        "  echo aws-cli/2.17.0 Python/3.11 Windows/10",
-        "  exit /b 0",
-        ")",
-        "echo fake aws: not signed in 1>&2",
-        "exit /b 3",
-        ""
-      ].join("\r\n")
-    );
-    const run = vi.fn(async (args: string[]) => {
-      const command = args.join(" ");
-      if (command === "api user") {
-        return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
-      }
-      if (
-        command === "api /repos/fixture/app" ||
-        command === "api repos/fixture/app"
-      ) {
-        return {
-          code: 0,
-          stdout: JSON.stringify({
-            full_name: "fixture/app",
-            id: 42,
-            owner: { id: 7 },
-            permissions: { admin: true }
-          }),
-          stderr: ""
-        };
-      }
-      if (command === "api /repos/fixture/app/environments/dev") {
-        return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
-      }
-      if (
-        command ===
-        "api /repos/fixture/app/environments/dev/variables?per_page=100"
-      ) {
-        return { code: 0, stdout: '{"variables":[]}', stderr: "" };
-      }
-      if (command === "api /repos/fixture/app/actions/oidc/customization/sub") {
-        return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
-      }
-      throw new Error(`Unexpected selected command: ${command}`);
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" }
     });
-    const executor = successfulSelectedGhExecutor({
-      login: "saved-account",
-      requiresKeyringSwitch: false,
-      run
+    const runtime = awsSetupRuntime();
+    try {
+      const op = await runAwsSetup(runtime, "op_aws_cli");
+
+      expect(await aws.calls()).toEqual([
+        "--version",
+        "sts get-caller-identity --output json"
+      ]);
+      expect(op.state).toBe("failed");
+      expect(op.failure.message).toContain("fake aws: refused");
+      expect(op.failure.message).toContain("Nothing was created in AWS.");
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it("stops AWS setup before any write when the deploy identity cannot be locked", async () => {
+    const aws = await fakeAwsOnPath({
+      "--version": { stdout: "aws-cli/2.17.0 Python/3.11 Linux/6" },
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "eks describe-cluster": {
+        stdout: '{"cluster":{"accessConfig":{"authenticationMode":"API"}}}'
+      },
+      "iam create-policy": {
+        stderr: "An error occurred (AccessDenied) when calling CreatePolicy",
+        code: 254
+      }
     });
-    const accountContext = createEnvironmentAccountContext(
-      "runtime-aws-cli",
-      createGitHubAccountCoordinator({
-        createExecutor: async () => executor,
-        getActiveKeyringLogin: async () => "original",
-        switchKeyringAccount: async () => {
-          throw new Error("Unexpected switch");
-        },
-        resetIdentityCache: () => {}
-      })
-    );
-    const owner = createEnvironmentExecutionOwner();
+    const runtime = awsSetupRuntime();
+    try {
+      const op = await runAwsSetup(runtime, "op_aws_lock");
+
+      const calls = await aws.calls();
+      expect(calls.at(-1)).toMatch(
+        /^iam create-policy --policy-name radius-lock-radius-deploy-fixture-app --description \{"repo":"fixture\/app","environment":"dev","action":"setup","operationId":"op_aws_lock"\} /
+      );
+      expect(op.state).toBe("failed");
+      expect(op.failure.code).toBe("aws-lock-denied");
+      expect(op.failure.message).toContain("not allowed iam:CreatePolicy");
+      expect(op.failure.message).toContain("Nothing was created in AWS.");
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      await aws.restore();
+    }
+  });
+
+  it("removes exactly the AWS lock a waiting run was shown, through the AWS CLI on PATH", async () => {
+    const aws = await fakeAwsOnPath({
+      "sts get-caller-identity": { stdout: '{"Account":"123456789012"}' },
+      "iam get-policy": { stdout: '{"Policy":{"PolicyId":"LOCK0"}}' },
+      "iam delete-policy": { stdout: "" }
+    });
     const runtime = createTestCanvasServerRuntime({
-      executionOwner: owner,
-      accountContext,
+      executionOwner: createEnvironmentExecutionOwner(),
       awsEnabled: true
     });
     try {
-      process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
-      process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
-      process.env.FAKE_AWS_LOG = log;
       const entry = await runtime.getOrCreateServer("aws-panel", "environment");
       const op = createOperation({
-        operationId: "op_aws_cli",
+        operationId: "op_aws_wait",
         repo: "fixture/app",
         environment: "dev",
         provider: "aws"
       });
-      op.context.githubLogin = "saved-account";
-      op.currentStage = STAGE_AUTHORIZE_IDENTITY;
-      op.request = {
-        needsAzureCredentials: false,
-        azure: {},
-        environment: {
-          accountId: "123456789012",
-          region: "us-west-2",
-          cluster: "shop",
-          roleName: "radius-deploy-fixture-app"
+      const lockArn =
+        "arn:aws:iam::123456789012:policy/radius-lock-radius-deploy-fixture-app";
+      setContext(op, {
+        awsLockWait: {
+          policyArn: lockArn,
+          policyId: "LOCK0",
+          holder: "The setup of environment prod in fixture/app",
+          since: "2026-10-30T11:00:00Z",
+          removable: true
         }
-      };
-      // The resume transport is the server-owned way to schedule a saved
-      // operation from a test; the AWS path ignores the Azure answer.
-      requireInput(op, {
-        code: "app-selection-required",
-        message: "Choose an app.",
-        checkpoint: "azure-app-selection"
       });
       operations.put(op);
+
       const response = await fetch(
-        `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+        `${entry.baseUrl}/api/operations/${op.operationId}/aws-lock/remove`,
         {
           method: "POST",
           headers: {
@@ -305,36 +266,20 @@ describe("production environment owner HTTP binding", () => {
             "x-radius-mutation-nonce": String(entry.state.browserMutationNonce),
             "content-type": "application/json"
           },
-          body: JSON.stringify({
-            repo: op.repo,
-            environment: op.environment,
-            provider: op.provider,
-            checkpoint: "azure-app-selection",
-            createNew: true
-          })
+          body: "{}"
         }
       );
-      expect(response.status).toBe(202);
-      // The setup outlives the request, so wait for the operation to finish.
-      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
-        timeout: 15000
-      });
 
-      expect(
-        (await fs.readFile(log, "utf8")).split(/\r?\n/).filter(Boolean)
-      ).toEqual(["--version", "sts get-caller-identity --output json"]);
-      expect(op.state).toBe("failed");
-      expect(op.failure.message).toContain("fake aws: not signed in");
-      expect(op.failure.message).toContain("Nothing was created in AWS.");
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ code: "aws-lock-removed" });
+      expect(await aws.calls()).toEqual([
+        "sts get-caller-identity --output json",
+        `iam get-policy --policy-arn ${lockArn} --output json`,
+        `iam delete-policy --policy-arn ${lockArn}`
+      ]);
     } finally {
       await runtime.stopServer("aws-panel", true);
-      if (originalPath === undefined) delete process.env.PATH;
-      else process.env.PATH = originalPath;
-      if (originalPathExt === undefined) delete process.env.PATHEXT;
-      else process.env.PATHEXT = originalPathExt;
-      if (originalLog === undefined) delete process.env.FAKE_AWS_LOG;
-      else process.env.FAKE_AWS_LOG = originalLog;
-      await fs.rm(fakeBin, { recursive: true, force: true });
+      await aws.restore();
     }
   });
 
@@ -689,3 +634,209 @@ describe("production environment owner HTTP binding", () => {
     }
   });
 });
+
+interface FakeAwsAnswer {
+  stdout?: string;
+  stderr?: string;
+  code?: number;
+}
+
+/**
+ * Put a fake `aws` first on PATH. It logs every call and answers by its first
+ * two words; anything else is refused, so setup stops rather than writes.
+ */
+async function fakeAwsOnPath(answers: Record<string, FakeAwsAnswer>) {
+  const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
+  const log = path.join(fakeBin, "calls.log");
+  const originalPath = process.env.PATH;
+  const originalPathExt = process.env.PATHEXT;
+  const originalLog = process.env.FAKE_AWS_LOG;
+  const shCases = Object.entries(answers).map(([command, answer]) =>
+    [
+      `  ${JSON.stringify(command)})`,
+      ...(answer.stdout ? [`    printf '%s\\n' '${answer.stdout}'`] : []),
+      ...(answer.stderr ? [`    printf '%s\\n' '${answer.stderr}' >&2`] : []),
+      `    exit ${answer.code ?? 0} ;;`
+    ].join("\n")
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "aws"),
+    [
+      "#!/bin/sh",
+      'printf "%s\\n" "$*" >> "$FAKE_AWS_LOG"',
+      'key="$1"',
+      '[ -n "$2" ] && key="$1 $2"',
+      'case "$key" in',
+      ...shCases,
+      "esac",
+      'echo "fake aws: refused" >&2',
+      "exit 3",
+      ""
+    ].join("\n")
+  );
+  await fs.chmod(path.join(fakeBin, "aws"), 0o755);
+  const cmdEcho = (text: string) =>
+    text.replace(/[&|<>^%"]/g, (character) =>
+      character === "%" ? "%%" : `^${character}`
+    );
+  const cmdCases = Object.entries(answers).flatMap(([command, answer]) => {
+    const [first, second] = command.split(" ");
+    const test =
+      second ?
+        `if "%1 %2"=="${first} ${second}"`
+      : `if "%1"=="${first}" if "%2"==""`;
+    return [
+      `${test} (`,
+      ...(answer.stdout ? [`  echo ${cmdEcho(answer.stdout)}`] : []),
+      ...(answer.stderr ? [`  echo ${cmdEcho(answer.stderr)} 1>&2`] : []),
+      `  exit /b ${answer.code ?? 0}`,
+      ")"
+    ];
+  });
+  await fs.writeFile(
+    path.join(fakeBin, "aws.cmd"),
+    [
+      "@echo off",
+      'echo %*>>"%FAKE_AWS_LOG%"',
+      ...cmdCases,
+      "echo fake aws: refused 1>&2",
+      "exit /b 3",
+      ""
+    ].join("\r\n")
+  );
+  process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+  process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+  process.env.FAKE_AWS_LOG = log;
+  return {
+    calls: async () =>
+      (await fs.readFile(log, "utf8"))
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => line.trim()),
+    restore: async () => {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPathExt === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = originalPathExt;
+      if (originalLog === undefined) delete process.env.FAKE_AWS_LOG;
+      else process.env.FAKE_AWS_LOG = originalLog;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    }
+  };
+}
+
+// A canvas runtime with the AWS switch on whose GitHub account answers the
+// reads AWS setup makes for fixture/app.
+function awsSetupRuntime() {
+  const run = vi.fn(async (args: string[]) => {
+    const command = args.join(" ");
+    if (command === "api user") {
+      return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+    }
+    if (
+      command === "api /repos/fixture/app" ||
+      command === "api repos/fixture/app"
+    ) {
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          full_name: "fixture/app",
+          id: 42,
+          owner: { id: 7 },
+          permissions: { admin: true }
+        }),
+        stderr: ""
+      };
+    }
+    if (command === "api /repos/fixture/app/environments/dev") {
+      return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+    }
+    if (
+      command ===
+      "api /repos/fixture/app/environments/dev/variables?per_page=100"
+    ) {
+      return { code: 0, stdout: '{"variables":[]}', stderr: "" };
+    }
+    if (command === "api /repos/fixture/app/actions/oidc/customization/sub") {
+      return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+    }
+    throw new Error(`Unexpected selected command: ${command}`);
+  });
+  const executor = successfulSelectedGhExecutor({
+    login: "saved-account",
+    requiresKeyringSwitch: false,
+    run
+  });
+  return createTestCanvasServerRuntime({
+    executionOwner: createEnvironmentExecutionOwner(),
+    accountContext: createEnvironmentAccountContext(
+      "runtime-aws-cli",
+      createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => "original",
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected switch");
+        },
+        resetIdentityCache: () => {}
+      })
+    ),
+    awsEnabled: true
+  });
+}
+
+// Schedule a saved AWS setup through the server and wait for it to end.
+async function runAwsSetup(
+  runtime: ReturnType<typeof awsSetupRuntime>,
+  operationId: string
+) {
+  const entry = await runtime.getOrCreateServer("aws-panel", "environment");
+  const op = createOperation({
+    operationId,
+    repo: "fixture/app",
+    environment: "dev",
+    provider: "aws"
+  });
+  op.context.githubLogin = "saved-account";
+  op.currentStage = STAGE_AUTHORIZE_IDENTITY;
+  op.request = {
+    needsAzureCredentials: false,
+    azure: {},
+    environment: {
+      accountId: "123456789012",
+      region: "us-west-2",
+      cluster: "shop",
+      roleName: "radius-deploy-fixture-app"
+    }
+  };
+  // The resume transport is the server-owned way to schedule a saved
+  // operation from a test; the AWS path ignores the Azure answer.
+  requireInput(op, {
+    code: "app-selection-required",
+    message: "Choose an app.",
+    checkpoint: "azure-app-selection"
+  });
+  operations.put(op);
+  const response = await fetch(
+    `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+    {
+      method: "POST",
+      headers: {
+        origin: entry.baseUrl,
+        "sec-fetch-site": "same-origin",
+        "x-radius-mutation-nonce": String(entry.state.browserMutationNonce),
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        repo: op.repo,
+        environment: op.environment,
+        provider: op.provider,
+        checkpoint: "azure-app-selection",
+        createNew: true
+      })
+    }
+  );
+  expect(response.status).toBe(202);
+  // The setup outlives the request, so wait for the operation to finish.
+  await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), { timeout: 15000 });
+  return op;
+}

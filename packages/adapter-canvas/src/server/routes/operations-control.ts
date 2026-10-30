@@ -6,6 +6,7 @@ import {
 } from "../route-table.js";
 import {
   acceptCommand,
+  addStep,
   announceOperationTerminal,
   applyDeletionRetry,
   applySetupResumePoint,
@@ -25,8 +26,10 @@ import {
   getOperationControl,
   isProviderRestartDecision,
   markVerificationRetryAcquisition,
+  removableAwsLockWait,
   rollbackRetryAttempt,
   setCommandState,
+  setContext,
   setStageState,
   snapshotRetryState,
   stopProviderRestartDecision,
@@ -79,6 +82,8 @@ export const CANCEL_WORKFLOW_ROUTE =
   "/api/operations/:operationId/cancel-workflow";
 export const RETRY_OPERATION_ROUTE =
   "/api/operations/:operationId/retry/:retryKind";
+export const REMOVE_AWS_LOCK_ROUTE =
+  "/api/operations/:operationId/aws-lock/remove";
 
 // The three kinds a retry route may name: a retry repeats exactly one attempt,
 // so they are the model's attempt kinds rather than a parallel list.
@@ -170,6 +175,14 @@ export interface OperationsControlDependencies {
   cancelVerificationWorkflow(
     operation: OperationRecord
   ): Promise<"inactive" | "cancelling">;
+  // Delete the AWS deploy identity lock with exactly this policy ID.
+  removeAwsDeployIdentityLock(lock: {
+    policyArn: string;
+    policyId: string;
+  }): Promise<
+    | { ok: true; removed: boolean }
+    | { ok: false; code: string; message: string }
+  >;
 }
 
 // Typed views of the model's `any`-shaped exports, pinned once here so the
@@ -522,6 +535,81 @@ export async function handleStopOperation(
       result.outcome === "cancelled" ?
         "operation-stopped"
       : "operation-stop-pending",
+    statusUrl: statusUrlFor(operationId),
+    operation: clientView(operation)
+  });
+}
+
+/**
+ * Remove the AWS deploy identity lock a live setup or deletion is waiting for,
+ * after a person confirmed its holder stopped. Only the lock the run last saw
+ * is removed, so a lock another run took since then stays.
+ */
+export async function handleRemoveAwsLock(
+  context: CanvasRequestContext,
+  dependencies: OperationsControlDependencies
+): Promise<void> {
+  const resolved = await resolveOperation(
+    context,
+    REMOVE_AWS_LOCK_ROUTE,
+    dependencies,
+    { allowDelete: true }
+  );
+  if (!resolved) return;
+  const { operationId, operation } = resolved;
+  const wait = removableAwsLockWait(operation);
+  if (!wait) {
+    sendJson(context, 409, {
+      error:
+        "This run is not waiting for a lock that has been held long enough to remove.",
+      code: "aws-lock-not-removable",
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  let result: Awaited<
+    ReturnType<OperationsControlDependencies["removeAwsDeployIdentityLock"]>
+  >;
+  try {
+    result = await dependencies.removeAwsDeployIdentityLock({
+      policyArn: wait.policyArn,
+      policyId: wait.policyId
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      code: "aws-lock-remove-failed",
+      message: `Radius could not remove the lock: ${errorMessage(error)}`
+    };
+  }
+  if (!result.ok) {
+    sendJson(context, 409, {
+      error: result.message,
+      code: result.code,
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  // The waiting run takes a new lock at its next poll. Until then the panel
+  // must not offer to remove a lock that is already gone.
+  setContext(operation, { awsLockWait: { ...wait, removable: false } });
+  addStep(operation, {
+    kind: "mutation",
+    label: `Removed the lock on the deploy identity held by: ${wait.holder}.`,
+    state: "succeeded"
+  });
+  let detail: string | undefined;
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    detail = `The lock was removed, but Radius could not save that on this run: ${errorMessage(error)}`;
+  }
+  sendJson(context, 200, {
+    operationId,
+    code: result.removed ? "aws-lock-removed" : "aws-lock-already-removed",
+    ...(detail ? { detail } : {}),
     statusUrl: statusUrlFor(operationId),
     operation: clientView(operation)
   });
@@ -1327,6 +1415,8 @@ export function createOperationsControlRoutes(
     [`POST ${EXIT_OPERATION_ROUTE}`]: (context) =>
       runSerialized(context, EXIT_OPERATION_ROUTE, handleExitOperation),
     [`POST ${RETRY_OPERATION_ROUTE}`]: (context) =>
-      runSerialized(context, RETRY_OPERATION_ROUTE, handleRetryOperation)
+      runSerialized(context, RETRY_OPERATION_ROUTE, handleRetryOperation),
+    [`POST ${REMOVE_AWS_LOCK_ROUTE}`]: (context) =>
+      runSerialized(context, REMOVE_AWS_LOCK_ROUTE, handleRemoveAwsLock)
   };
 }

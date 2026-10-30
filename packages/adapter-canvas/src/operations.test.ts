@@ -87,6 +87,8 @@ import {
   projectCleanupSummary,
   projectNextTransition,
   projectOperationActions,
+  removableAwsLockWait,
+  setContext,
   projectOperationHeadline,
   pauseForProviderRestart,
   pendingWorkflowCommits,
@@ -8320,5 +8322,101 @@ describe("a finished cleanup verdict across a later interruption", () => {
     reconcileRestoredOperation(op);
 
     expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
+  });
+});
+
+describe("Remove lock for an AWS deploy identity lock", () => {
+  const LOCK = {
+    policyArn: "arn:aws:iam::123456789012:policy/radius-lock-deploy",
+    policyId: "LOCK0",
+    holder: "The setup of environment prod in octo/shop",
+    since: "2026-10-30T11:00:00Z"
+  };
+  const setup = (wait: unknown) => {
+    const op = createOperation({
+      provider: "aws",
+      repo: "octo/shop",
+      environment: "dev",
+      stages: buildStages({ includeIdentity: true })
+    });
+    setContext(op, { awsLockWait: wait });
+    return op;
+  };
+  const deletion = (wait: unknown) => {
+    const op = createOperation({
+      provider: "aws",
+      repo: "octo/shop",
+      environment: "dev",
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages({ includeAwsCleanup: true })
+    });
+    setContext(op, { awsLockWait: wait });
+    return op;
+  };
+
+  it("offers it ahead of Pause on a setup waiting for an old lock", () => {
+    const actions = projectOperationActions(
+      setup({ ...LOCK, removable: true })
+    );
+    expect(actions.map((action) => action.kind)).toEqual([
+      "remove_aws_lock",
+      "stop"
+    ]);
+    expect(actions[0]).toMatchObject({
+      label: "Remove lock",
+      tone: "danger",
+      requiresConfirmation: true,
+      confirmTitle: "Remove the lock on the deploy identity?",
+      confirmLabel: "Remove lock",
+      cancelLabel: "Keep waiting",
+      description: `${LOCK.holder} has held the lock for more than 10 minutes. Remove it only after you confirm that run has stopped. If it is still running, it and this run can overwrite each other's changes to the IAM role's trust policy.`
+    });
+    expect(actions[0].path).toMatch(/\/aws-lock\/remove$/);
+  });
+
+  it("offers it alone on a live deletion waiting for an old lock", () => {
+    expect(
+      projectOperationActions(deletion({ ...LOCK, removable: true })).map(
+        (action) => action.kind
+      )
+    ).toEqual(["remove_aws_lock"]);
+    expect(projectOperationActions(deletion(null))).toEqual([]);
+  });
+
+  it.each([
+    ["a lock not yet old enough", { ...LOCK, removable: false }],
+    ["no lock", null],
+    ["a lock with no ID", { ...LOCK, policyId: "", removable: true }],
+    ["a lock with no ARN", { ...LOCK, policyArn: 7, removable: true }],
+    ["a malformed wait", "waiting"]
+  ])("does not offer it for %s", (_label, wait) => {
+    expect(
+      projectOperationActions(setup(wait)).map((action) => action.kind)
+    ).toEqual(["stop"]);
+    expect(removableAwsLockWait(setup(wait))).toBeNull();
+  });
+
+  it("does not offer it once the run has ended", () => {
+    const op = setup({ ...LOCK, removable: true });
+    finish(op, "failed", {});
+    expect(removableAwsLockWait(op)).toBeNull();
+    expect(removableAwsLockWait(null)).toBeNull();
+  });
+
+  it("names an unknown holder and time plainly", () => {
+    expect(
+      removableAwsLockWait(
+        setup({
+          policyArn: LOCK.policyArn,
+          policyId: LOCK.policyId,
+          removable: true
+        })
+      )
+    ).toEqual({
+      policyArn: LOCK.policyArn,
+      policyId: LOCK.policyId,
+      holder: "Another run",
+      since: ""
+    });
   });
 });

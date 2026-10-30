@@ -286,6 +286,15 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "template",
     "json",
     "operations-status"
+  ),
+  // Removes the AWS deploy identity lock a live setup or deletion waits for,
+  // once a person confirmed its holder stopped.
+  declare(
+    "POST",
+    "/api/operations/:operationId/aws-lock/remove",
+    "template",
+    "json",
+    "operations-status"
   )
 ];
 

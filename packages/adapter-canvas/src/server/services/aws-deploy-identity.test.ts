@@ -8,7 +8,8 @@ import {
   removeAwsEnvironmentFromRole,
   setupAwsDeployIdentity,
   type AwsCommandResult,
-  type AwsDeployIdentityRequest
+  type AwsDeployIdentityRequest,
+  type AwsLockResult
 } from "./aws-deploy-identity.js";
 
 const ACCOUNT = "123456789012";
@@ -62,15 +63,23 @@ type Script = Record<string, AwsCommandResult | AwsCommandResult[]>;
 
 // Answers each `aws` command by its first three words, and throws on any
 // command the scenario did not script.
-function fakeAws(script: Script) {
+function fakeAws(script: Script, lockResult: AwsLockResult = { ok: true }) {
   const calls: string[][] = [];
   const steps: string[] = [];
   const sleeps: number[] = [];
+  // The roles locked, and how many AWS commands had run before each lock.
+  const locks: Array<{ roleName: string; after: number }> = [];
   return {
     calls,
     steps,
     sleeps,
+    locks,
     ports: {
+      async acquireLock(role: { accountId: string; roleName: string }) {
+        expect(role.accountId).toBe(ACCOUNT);
+        locks.push({ roleName: role.roleName, after: calls.length });
+        return lockResult;
+      },
       async runAws(args: string[]) {
         calls.push(args);
         const key = args.slice(0, 2).join(" ");
@@ -1328,5 +1337,124 @@ describe("removeAwsEnvironmentFromRole", () => {
       await removeAwsEnvironmentFromRole({ ...removal, roleArn: "" }, aws.ports)
     ).toMatchObject({ ok: false });
     expect(aws.calls).toEqual([]);
+  });
+});
+
+describe("deploy identity lock order", () => {
+  const LOCK_DENIED: AwsLockResult = {
+    ok: false,
+    code: "aws-lock-denied",
+    message: "not allowed iam:CreatePolicy"
+  };
+
+  it("locks the role after the read-only checks and before reading its trust policy", async () => {
+    const aws = fakeAws(happyPath);
+    await setupAwsDeployIdentity(request, aws.ports);
+    expect(aws.locks).toEqual([{ roleName: ROLE, after: 3 }]);
+    expect(
+      aws.calls.slice(0, 3).map((args) => args.slice(0, 2).join(" "))
+    ).toEqual(["--version", "sts get-caller-identity", "eks describe-cluster"]);
+    expect(aws.calls[3]?.slice(0, 2)).toEqual(["iam", "get-role"]);
+  });
+
+  it("locks the picked role by its own name", async () => {
+    const aws = fakeAws({
+      ...happyPath,
+      "iam get-role": ok({
+        Role: {
+          Arn: `arn:aws:iam::${ACCOUNT}:role/platform/team-deployer`,
+          AssumeRolePolicyDocument: buildGitHubTrustPolicy(ACCOUNT, [PROD])
+        }
+      }),
+      ...existingProvider,
+      "iam update-assume-role-policy": ok()
+    });
+    await setupAwsDeployIdentity(
+      {
+        ...request,
+        existingRoleArn: `arn:aws:iam::${ACCOUNT}:role/platform/team-deployer`
+      },
+      aws.ports
+    );
+    expect(aws.locks.map(({ roleName }) => roleName)).toEqual([
+      "team-deployer"
+    ]);
+  });
+
+  it("stops with nothing created when the lock cannot be taken", async () => {
+    const aws = fakeAws(happyPath, LOCK_DENIED);
+    const result = await setupAwsDeployIdentity(request, aws.ports);
+    expect(result).toEqual({
+      ok: false,
+      code: "aws-lock-denied",
+      message: "not allowed iam:CreatePolicy",
+      created: []
+    });
+    expect(aws.calls).toHaveLength(3);
+  });
+
+  it.each([
+    ["the CLI is too old", { "--version": ok("aws-cli/2.7.0 Python/3") }],
+    [
+      "the session is in another account",
+      { "sts get-caller-identity": ok({ Account: "999999999999" }) }
+    ],
+    [
+      "the cluster uses CONFIG_MAP",
+      { "eks describe-cluster": ok({ cluster: {} }) }
+    ]
+  ])("takes no lock when %s", async (_label, override) => {
+    const aws = fakeAws({ ...happyPath, ...override });
+    expect((await setupAwsDeployIdentity(request, aws.ports)).ok).toBe(false);
+    expect(aws.locks).toEqual([]);
+  });
+
+  it("takes no lock for a picked role in another account", async () => {
+    const aws = fakeAws(happyPath);
+    const result = await setupAwsDeployIdentity(
+      { ...request, existingRoleArn: "arn:aws:iam::999999999999:role/other" },
+      aws.ports
+    );
+    expect(result).toMatchObject({ ok: false, code: "aws-role-wrong-account" });
+    expect(aws.locks).toEqual([]);
+  });
+
+  it("locks delete after the account check and before reading the role", async () => {
+    const aws = fakeAws({
+      "sts get-caller-identity": ok({ Account: ACCOUNT }),
+      "iam get-role": ok(managedRole([DEV, PROD])),
+      "iam update-assume-role-policy": ok(),
+      "iam delete-role-policy": ok()
+    });
+    await removeAwsEnvironmentFromRole(
+      { roleArn: ROLE_ARN, environment: "dev", subjects: [DEV] },
+      aws.ports
+    );
+    expect(aws.locks).toEqual([{ roleName: ROLE, after: 1 }]);
+  });
+
+  it("changes nothing on delete when the lock cannot be taken", async () => {
+    const aws = fakeAws(
+      { "sts get-caller-identity": ok({ Account: ACCOUNT }) },
+      LOCK_DENIED
+    );
+    expect(
+      await removeAwsEnvironmentFromRole(
+        { roleArn: ROLE_ARN, environment: "dev", subjects: [DEV] },
+        aws.ports
+      )
+    ).toEqual({ ok: false, message: "not allowed iam:CreatePolicy" });
+    expect(aws.calls).toHaveLength(1);
+  });
+
+  it("takes no delete lock when the session is in another account", async () => {
+    const aws = fakeAws({
+      "sts get-caller-identity": ok({ Account: "999999999999" })
+    });
+    await removeAwsEnvironmentFromRole(
+      { roleArn: ROLE_ARN, environment: "dev", subjects: [DEV] },
+      aws.ports
+    );
+    expect(aws.locks).toEqual([]);
   });
 });
