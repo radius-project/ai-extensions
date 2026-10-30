@@ -10,6 +10,7 @@
 // Rows carry raw text, never markup. Escaping belongs to the renderer, so a
 // resource name from a provider cannot become markup no matter how it is used.
 
+import { awsConsoleUrl, consoleNameForUrl } from "@radius-project/core/domain";
 import { safeExternalUrl } from "./external-url.js";
 import { buildSourceUrl, githubSourceReferenceUrl } from "./model.js";
 import { isLocalSourceNode } from "./build.js";
@@ -100,6 +101,26 @@ export function azurePortalUrl(armId: string): string {
   return `https://portal.azure.com/#@/resource${encodeURI(armId)}/overview`;
 }
 
+/**
+ * The console link for a deployed cloud resource: the Azure portal for an ARM
+ * ID, or the service's AWS console list page for a recognized AWS type. Any
+ * other ID, including an unrecognized AWS type, has no link.
+ */
+export function cloudConsoleUrl(id: string): string {
+  return id.startsWith("/subscriptions/") ?
+      azurePortalUrl(id)
+    : awsConsoleUrl(id);
+}
+
+// The producer's portal link keeps its generic "View in portal" label, as it
+// always has for Azure. Only an AWS console link is named, since AWS links are
+// new and "portal" is the Azure term.
+function producerLinkLabel(url: string): string {
+  return consoleNameForUrl(url) === "AWS console" ?
+      "View in AWS console"
+    : "View in portal";
+}
+
 function definitionUrl(settings: GraphSettings, data: GraphNodeData): string {
   return buildSourceUrl(
     settings.repoUrl,
@@ -131,21 +152,22 @@ function cloudRows(data: GraphNodeData): DetailRow[] {
     const name = typeof record.name === "string" ? record.name : "";
     const type = typeof record.type === "string" ? record.type : "";
     const id = typeof record.id === "string" ? record.id : "";
-    if (!id.startsWith("/subscriptions/")) continue;
+    const consoleUrl = cloudConsoleUrl(id);
+    if (!consoleUrl) continue;
     const producerUrl =
       typeof record.portalUrl === "string" ?
         safeExternalUrl(record.portalUrl)
       : "";
+    const href = producerUrl || consoleUrl;
     const label =
       name || (type ? type.split("/").pop() || "" : "") || "resource";
-    rows.push(
-      externalRow(
-        "link",
-        label + " in Azure portal",
-        producerUrl || azurePortalUrl(id),
-        false
-      )
-    );
+    // An Azure resource keeps its "in Azure portal" label whichever link the
+    // producer supplied; an AWS one is named from where its link goes.
+    const consoleName =
+      id.startsWith("/subscriptions/") ? "Azure portal" : (
+        consoleNameForUrl(href) || "portal"
+      );
+    rows.push(externalRow("link", `${label} in ${consoleName}`, href, false));
   }
   return rows;
 }
@@ -225,17 +247,23 @@ export function buildDetailRows(
     });
   }
   if (safeExternalUrl(data.portalUrl)) {
-    rows.push(externalRow("link", "View in portal", data.portalUrl, false));
-  }
-  if (data.cloudId) {
     rows.push(
       externalRow(
         "link",
-        "View in Azure portal",
-        azurePortalUrl(data.cloudId),
+        producerLinkLabel(data.portalUrl),
+        data.portalUrl,
         false
       )
     );
+  }
+  const cloudId = data.cloudId || "";
+  const cloudIdUrl = cloudId ? cloudConsoleUrl(cloudId) : "";
+  if (cloudIdUrl) {
+    // cloudConsoleUrl links an ARM ID to the Azure portal and anything else it
+    // recognizes to the AWS console.
+    const consoleName =
+      cloudId.startsWith("/subscriptions/") ? "Azure portal" : "AWS console";
+    rows.push(externalRow("link", `View in ${consoleName}`, cloudIdUrl, false));
   }
   rows.push(...cloudRows(data));
   if (rows.length === 0) rows.push({ kind: "empty" });

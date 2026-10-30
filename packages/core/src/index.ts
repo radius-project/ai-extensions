@@ -44,6 +44,7 @@ export {
 } from "./setup-github-environment-provenance.js";
 
 export {
+  AWS_TRUST_SUBJECTS_VARIABLE,
   applySetupProviderConfiguration,
   azureRoleScope,
   cloudCredentialsComplete,
@@ -195,6 +196,8 @@ export {
   KUBERNETES_NAMESPACE_PATTERN,
   isKubernetesNamespace
 } from "./platforms/index.js";
+export * from "./platforms/aws-identity.js";
+export * from "./platforms/aws-network.js";
 export type {
   ComputePlatform,
   PortalContext,
@@ -219,6 +222,7 @@ export {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_ENV_GUARD_STEP_NAME,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE

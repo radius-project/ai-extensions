@@ -603,7 +603,7 @@ describe("identity-auth routes (SU-08)", () => {
     const { deps } = fakes(calls);
     const recording = await run(
       "/api/verify-aws-login",
-      '{"accountId":"ignored","region":"eu-west-1"}',
+      '{"accountId":"000011112222","region":"eu-west-1"}',
       handleVerifyAwsLogin,
       deps
     );
@@ -611,7 +611,6 @@ describe("identity-auth routes (SU-08)", () => {
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE(200));
     expect(JSON.parse(recording.body)).toEqual({
       success: true,
-      // The live account wins over the submitted one.
       accountId: AWS_IDENTITY.Account,
       arn: AWS_IDENTITY.Arn,
       user: "fixture-user",
@@ -622,7 +621,26 @@ describe("identity-auth routes (SU-08)", () => {
     ]);
   });
 
-  it("falls back to the submitted account when the identity has none", async () => {
+  it("fails verification and names both accounts when the session is in another account", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls);
+    const recording = await run(
+      "/api/verify-aws-login",
+      '{"accountId":"999988887777","region":"us-west-2"}',
+      handleVerifyAwsLogin,
+      deps
+    );
+    expect(recording.status).toBe(200);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        "Your AWS CLI session is signed in to account 000011112222, but this profile is for account 999988887777. Sign in to account 999988887777, or change the Account ID, then verify again.",
+      code: "aws-account-mismatch",
+      sessionAccountId: "000011112222",
+      accountId: "999988887777"
+    });
+  });
+
+  it("fails closed when the session reports no account", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
       commands: {
@@ -631,13 +649,32 @@ describe("identity-auth routes (SU-08)", () => {
     });
     const recording = await run(
       "/api/verify-aws-login",
-      '{"accountId":"submitted-account"}',
+      '{"accountId":"999988887777"}',
+      handleVerifyAwsLogin,
+      deps
+    );
+    expect(JSON.parse(recording.body)).toMatchObject({
+      code: "aws-account-mismatch",
+      sessionAccountId: ""
+    });
+  });
+
+  it("reports the session account when no account was submitted", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      commands: {
+        "aws sts get-caller-identity --output json": JSON.stringify({})
+      }
+    });
+    const recording = await run(
+      "/api/verify-aws-login",
+      "{}",
       handleVerifyAwsLogin,
       deps
     );
     expect(JSON.parse(recording.body)).toEqual({
       success: true,
-      accountId: "submitted-account",
+      accountId: "",
       arn: "",
       user: "",
       region: ""

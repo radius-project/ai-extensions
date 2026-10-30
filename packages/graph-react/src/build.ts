@@ -22,7 +22,8 @@ import {
   srcLineFromRef,
   srcPathFromRef
 } from "./model.js";
-import { azurePortalUrl } from "./details.js";
+import { cloudConsoleUrl } from "./details.js";
+import { awsConsoleUrl } from "@radius-project/core/domain";
 // Imported from the `graph` subpath rather than the package root: the root
 // barrel also re-exports the workflow modules, and `workflows/delete.ts` reads
 // `process.env` at module scope. Bundling that into a browser entry ships a
@@ -267,11 +268,22 @@ function resourceId(resource: GraphResource, index: number): string {
   return resource.id || resource.name || `resource-${index}`;
 }
 
-function cloudOutputsOf(resource: GraphResource): ResourceOutput[] {
-  const outputs = resource.outputResources || [];
-  const cloud: ResourceOutput[] = [];
+// A deployed output the canvas can link to; only those carry an ID here.
+type CloudOutput = ResourceOutput & { id: string };
+
+function firstAwsConsoleUrl(outputs: readonly CloudOutput[]): string {
   for (const output of outputs) {
-    if (output && output.id && output.id.indexOf("/subscriptions/") === 0) {
+    const url = awsConsoleUrl(output.id);
+    if (url) return url;
+  }
+  return "";
+}
+
+function cloudOutputsOf(resource: GraphResource): CloudOutput[] {
+  const outputs = resource.outputResources || [];
+  const cloud: CloudOutput[] = [];
+  for (const output of outputs) {
+    if (output && output.id && cloudConsoleUrl(output.id)) {
       cloud.push({
         name: output.name || "",
         type: output.type || "",
@@ -393,6 +405,7 @@ export function buildGraph(
       : settings.branch;
     const badgeKind = radiusDeployBadgeKind(resource.deployStatus);
     const resourceIcon = radiusResolveIconSource(resource);
+    const cloudOutputs = cloudOutputsOf(resource);
     pushNode(id, {
       borderColor: colors.border,
       borderWidth: 2.5,
@@ -426,13 +439,15 @@ export function buildGraph(
       // Radius publishes portalUrl on the concrete output resource, not its
       // modeled parent. Resolved graphs keep one parent node, so carry the same
       // representative output used for the type label onto that clickable card.
+      // An AWS card whose representative output has no console page (a subnet
+      // group, say) links to its first output that has one. Azure cards keep
+      // linking only through the resolved output.
       portalUrl:
         resource.portalUrl ||
         resolved?.portalUrl ||
-        (resolved?.id?.startsWith("/subscriptions/") ?
-          azurePortalUrl(resolved.id)
-        : ""),
-      cloudResources: JSON.stringify(cloudOutputsOf(resource)),
+        cloudConsoleUrl(resolved?.id ?? "") ||
+        firstAwsConsoleUrl(cloudOutputs),
+      cloudResources: JSON.stringify(cloudOutputs),
       provisioningState: resource.provisioningState
     });
 
@@ -490,10 +505,7 @@ export function buildGraph(
         diffStatus: "",
         deployStatus: output.deployStatus || "",
         portalUrl: output.portalUrl || "",
-        cloudId:
-          output.id && output.id.indexOf("/subscriptions/") === 0 ?
-            output.id
-          : "",
+        cloudId: output.id && cloudConsoleUrl(output.id) ? output.id : "",
         cloudResources: "[]"
       });
       pushEdge(id, outputId, true);

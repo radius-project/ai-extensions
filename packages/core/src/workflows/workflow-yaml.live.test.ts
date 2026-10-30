@@ -43,6 +43,7 @@ import {
 import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_AWS_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE,
@@ -95,7 +96,11 @@ async function fetchTemplates(
 }
 
 async function readLocalDeleteTemplates(): Promise<Record<string, string>> {
-  const files = [DELETE_ENV_DISPATCHER_FILE, DELETE_ENV_AZURE_FILE];
+  const files = [
+    DELETE_ENV_DISPATCHER_FILE,
+    DELETE_ENV_AZURE_FILE,
+    DELETE_ENV_AWS_FILE
+  ];
   const bodies = await Promise.all(
     files.map((file) =>
       readFile(

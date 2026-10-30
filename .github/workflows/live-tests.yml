@@ -104,7 +104,7 @@ jobs:
           # anonymous raw.githubusercontent.com.
           GITHUB_TOKEN: ${{ github.token }}
         working-directory: packages/core
-        run: pnpm exec vitest run src/workflows/workflow-yaml.live.test.ts src/workflows/oidc-environment-contract.live.test.ts
+        run: pnpm exec vitest run src/workflows/workflow-yaml.live.test.ts src/workflows/oidc-environment-contract.live.test.ts src/workflows/aws-radius-release.live.test.ts
 
       - name: Verify live contrib workflow consumers
         shell: bash

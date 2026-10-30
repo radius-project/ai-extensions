@@ -1,6 +1,7 @@
 import {
   DELETE_RADIUS_REF,
   RADIUS_REF,
+  buildAwsDeployRoleName,
   redactCredentials
 } from "@radius-project/core";
 import { promises as fs, type Dirent } from "node:fs";
@@ -3696,6 +3697,229 @@ test.describe("Radius Canvas in Chromium", () => {
           request.path === "/api/verify-azure-login"
       )
     ).toBe(false);
+  });
+
+  test.describe("with the AWS developer switch on", () => {
+    test.use({ awsEnabled: true });
+
+    const AWS_ACCOUNT = "123456789012";
+    const PICKED_ROLE_ARN = `arn:aws:iam::${AWS_ACCOUNT}:role/platform-deploy`;
+    const AWS_PROFILE = "fixture-aws";
+
+    async function routeAwsProfileAndDiscovery(page: Page): Promise<void> {
+      await page.route("**/api/credential-profiles**", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            profiles: [
+              {
+                name: AWS_PROFILE,
+                provider: "aws",
+                status: "verified",
+                accountId: AWS_ACCOUNT,
+                region: "us-west-2"
+              }
+            ]
+          })
+        });
+      });
+      await page.route("**/api/discover", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            clusters: [
+              {
+                id: "eks-1",
+                name: "eks-1",
+                vpcId: "vpc-1",
+                authenticationMode: "API",
+                usable: true
+              }
+            ],
+            resourceGroups: [],
+            namespaces: ["default", "shop"],
+            vpcs: [{ id: "vpc-1", name: "main (vpc-1)" }],
+            subnets: [
+              {
+                id: "subnet-a",
+                name: "private-a",
+                vpcId: "vpc-1",
+                availabilityZone: "us-west-2a",
+                public: false
+              },
+              {
+                id: "subnet-b",
+                name: "private-b",
+                vpcId: "vpc-1",
+                availabilityZone: "us-west-2b",
+                public: false
+              },
+              {
+                id: "subnet-c",
+                name: "public-a",
+                vpcId: "vpc-1",
+                availabilityZone: "us-west-2a",
+                public: true
+              }
+            ]
+          })
+        });
+      });
+    }
+
+    async function openAwsEnvironmentWizard(page: Page): Promise<void> {
+      const newEnvironment = page.locator("#new-env-btn");
+      await newEnvironment.focus();
+      await page.keyboard.press("Enter");
+      const profile = page.locator("#env-profile-button");
+      await expect(profile).toBeFocused();
+      await page.keyboard.press("Enter");
+      const option = page
+        .locator("#env-profile-menu")
+        .getByRole("option", { name: new RegExp(AWS_PROFILE) });
+      await option.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#env-profile-summary")).toHaveText(
+        `${AWS_PROFILE} (AWS)`
+      );
+      const next = page.locator("#env-step1-next");
+      await expect(next).toBeEnabled();
+      await next.focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#env-step-details")).toBeVisible();
+    }
+
+    test("offers AWS, checks subnet zones, and pins a picked role by keyboard", async ({
+      page,
+      canvas
+    }) => {
+      await routeAwsProfileAndDiscovery(page);
+      let roleLookups = 0;
+      await page.route("**/api/list-aws-roles**", async (route) => {
+        roleLookups += 1;
+        await route.fulfill({
+          status: roleLookups === 1 ? 400 : 200,
+          contentType: "application/json",
+          body: JSON.stringify(
+            roleLookups === 1 ?
+              {
+                error: "Failed to list IAM roles: AccessDenied",
+                code: "aws-role-list-failed",
+                roles: []
+              }
+            : {
+                roles: [
+                  {
+                    arn: PICKED_ROLE_ARN,
+                    name: "platform-deploy",
+                    trustedSubjects: ["repo:octo/api:environment:dev"]
+                  }
+                ]
+              }
+          )
+        });
+      });
+      let operationPosts = 0;
+      await page.route("**/api/operations", async (route) => {
+        if (route.request().method() === "POST") operationPosts += 1;
+        await route.continue();
+      });
+
+      await gotoCanvas(page, canvas, "credentials");
+      const provider = page
+        .getByLabel("Provider")
+        .locator('option[value="aws"]');
+      await expect(provider).toBeEnabled();
+      await expect(provider).toHaveText("AWS");
+      const row = page.getByRole("row").filter({ hasText: AWS_PROFILE });
+      await expect(
+        row.getByRole("button", { name: "Create Env" })
+      ).toBeEnabled();
+
+      await gotoCanvas(page, canvas, "environment");
+      await openAwsEnvironmentWizard(page);
+      await page.getByLabel("Environment name").fill("dev");
+
+      const roleName = page.getByLabel("IAM role");
+      await expect(roleName).toBeVisible();
+      await expect(roleName).toHaveValue(buildAwsDeployRoleName(REPOSITORY));
+      await expect(page.getByLabel("EKS Cluster")).toHaveValue("eks-1");
+      await expect(page.getByLabel("VPC")).toHaveValue("vpc-1");
+
+      const subnets = page.getByRole("group", { name: "Subnets" });
+      const subnetA = subnets.getByRole("checkbox", { name: /subnet-a/ });
+      const subnetB = subnets.getByRole("checkbox", { name: /subnet-b/ });
+      await expect(subnetA).toBeChecked();
+      await expect(subnetB).toBeChecked();
+      await expect(
+        subnets.getByRole("checkbox", { name: /subnet-c/ })
+      ).not.toBeChecked();
+
+      // One zone is not enough for RDS: the form says so, marks the group,
+      // and keeps Create Environment off until a second zone is back.
+      const subnetError = page.locator("#aws-subnets-error");
+      const create = page.locator("#deploy-btn");
+      await subnetB.focus();
+      await page.keyboard.press("Space");
+      await expect(subnetB).not.toBeChecked();
+      await expect(subnetError).toBeVisible();
+      await expect(subnetError).toHaveText(
+        "Select subnets in at least two availability zones."
+      );
+      await expect(subnets).toHaveAttribute("aria-invalid", "true");
+      await expect(create).toBeDisabled();
+      await expectNoWcagViolations(page);
+      await page.keyboard.press("Space");
+      await expect(subnetB).toBeChecked();
+      await expect(subnetError).toBeHidden();
+      await expect(subnets).toHaveAttribute("aria-invalid", "false");
+
+      // A role lookup that fails is reported beside the field, and the same
+      // link retries it.
+      const useExisting = page.getByRole("link", {
+        name: "use an existing role…"
+      });
+      const roleNote = page.locator("#aws-selected-role-note");
+      await useExisting.focus();
+      await page.keyboard.press("Enter");
+      await expect(roleNote).toHaveText(
+        "Failed to list IAM roles: AccessDenied"
+      );
+      await expect(page.locator("#env-appselect-modal")).toBeHidden();
+
+      await useExisting.focus();
+      await page.keyboard.press("Enter");
+      const picker = page.locator("#env-appselect-modal");
+      await expect(picker).toBeVisible();
+      await expect(page.locator("#env-appselect-intro")).toContainText(
+        `account ${AWS_ACCOUNT}`
+      );
+      const pickedRole = picker.getByRole("radio", { name: /platform-deploy/ });
+      await pickedRole.focus();
+      await page.keyboard.press("Space");
+      await expect(pickedRole).toBeChecked();
+      await expectNoWcagViolations(page);
+      await page.locator("#env-appselect-confirm").focus();
+      await page.keyboard.press("Enter");
+      await expect(picker).toBeHidden();
+
+      await expect(roleName).toHaveValue("platform-deploy");
+      await expect(roleName).toBeDisabled();
+      await expect(roleNote).toHaveText(
+        `Will use: platform-deploy (${PICKED_ROLE_ARN}).`
+      );
+      const backToDefault = page.getByRole("link", {
+        name: "Use a per-repo role instead"
+      });
+      await backToDefault.focus();
+      await page.keyboard.press("Enter");
+      await expect(roleName).toBeEnabled();
+      await expect(roleName).toHaveValue(buildAwsDeployRoleName(REPOSITORY));
+      expect(roleLookups).toBe(2);
+      expect(operationPosts).toBe(0);
+    });
   });
 
   test("keeps unsupported credential profiles out of environment creation @safety", async ({

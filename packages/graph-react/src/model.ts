@@ -537,7 +537,14 @@ const RADIUS_SUPPORTING_OUTPUT_KINDS: Record<string, boolean> = {
   roleassignments: true,
   privateendpoints: true,
   privatednszones: true,
-  userassignedidentities: true
+  userassignedidentities: true,
+  // AWS recipes declare these before the resource they support, such as an
+  // RDS instance's subnet and parameter groups.
+  dbsubnetgroup: true,
+  dbparametergroup: true,
+  dbclusterparametergroup: true,
+  subnetgroup: true,
+  securitygroupingress: true
 };
 
 export function radiusResolvedOutputRank(out: ResourceOutput): number {

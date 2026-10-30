@@ -378,6 +378,7 @@ async function successfulSetup(
           now: () => Date.now()
         },
         {
+          awsEnabled: false,
           isValidRepoSlug: () => true,
           isResourceGroupName: () => true,
           isAksClusterName: () => true,

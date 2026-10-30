@@ -561,6 +561,17 @@ function clickedOutside(target: unknown, comboSelector: string): boolean {
   return !isDomElement(target) || target.closest(comboSelector) === null;
 }
 
+// The two values discovery is scoped by: subscription and tenant on Azure,
+// account and region on AWS.
+export function profileDiscoveryScope(
+  profile: CredentialProfile,
+  provider: CredentialProvider
+): [string, string] {
+  return provider === "aws" ?
+      [profile.accountId ?? "", profile.region ?? ""]
+    : [profile.subscriptionId ?? "", profile.tenantId ?? ""];
+}
+
 export function initializeCredentialProfilesPanel(
   context: BrowserContext,
   deps: CredentialProfilesPanelDeps
@@ -675,6 +686,13 @@ export function initializeCredentialProfilesPanel(
     }
     if (identityAzureEl)
       identityAzureEl.style.display = provider === "azure" ? "" : "none";
+    const identityDesc = context.dom.byId("env-identity-desc");
+    if (identityDesc) {
+      identityDesc.textContent =
+        provider === "aws" ?
+          "The IAM role GitHub Actions assumes to deploy, over OIDC, with no stored secrets."
+        : "The Microsoft Entra app GitHub Actions signs in as — over OIDC, no stored secrets.";
+    }
     if (identityAwsEl)
       identityAwsEl.style.display = provider === "aws" ? "" : "none";
     if (panelAzureEl)
@@ -686,8 +704,7 @@ export function initializeCredentialProfilesPanel(
     deps.onProfileChange(selectedProfile);
     deps.discoverResources(
       provider,
-      selectedProfile.subscriptionId ?? "",
-      selectedProfile.tenantId ?? ""
+      ...profileDiscoveryScope(selectedProfile, provider)
     );
   };
 
@@ -1087,8 +1104,7 @@ export function initializeCredentialProfilesPanel(
         selectedProfile.provider === "aws" ? "aws" : "azure";
       deps.discoverResources(
         provider,
-        selectedProfile.subscriptionId ?? "",
-        selectedProfile.tenantId ?? ""
+        ...profileDiscoveryScope(selectedProfile, provider)
       );
     });
   }

@@ -132,6 +132,7 @@ function start(): Harness {
         now: () => 0
       },
       {
+        awsEnabled: false,
         isValidRepoSlug: (value) =>
           typeof value === "string" && /^[^/\s]+\/[^/\s]+$/.test(value),
         isResourceGroupName: () => true,

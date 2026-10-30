@@ -52,7 +52,10 @@ function coordinator(
   setupServices: SetupServices = {
     authorizeAzure: unavailable,
     configureEnvironment: unavailable
-  }
+  },
+  awsEnvironmentAccess: Parameters<
+    typeof createInstanceRequestCoordinator
+  >[3]["awsEnvironmentAccess"] = { setup: unavailable }
 ) {
   return createInstanceRequestCoordinator(
     instanceId,
@@ -61,6 +64,7 @@ function coordinator(
       deleteRadiusEnvironment: unavailable,
       runAz: unavailable,
       readAzureIdentity: unavailable,
+      removeAwsEnvironmentAccess: unavailable,
       deleteGitHubEnvironment: unavailable,
       deleteStatePackage: unavailable,
       withCredentialProvenanceLock: (work) => work(),
@@ -76,6 +80,8 @@ function coordinator(
       }
     },
     {
+      awsEnabled: false,
+      awsEnvironmentAccess,
       executionOwner: owner,
       accountContext,
       setupServices,
@@ -222,42 +228,151 @@ describe("production coordinator scheduling scopes", () => {
     }
   );
 
-  it("requires an explicit shared account context", () => {
-    const dependencies = {
-      executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createEnvironmentAccountContext("runtime", {
-        createReadOnlyExecutor: unavailable,
-        withSelectedAccount: unavailable
-      }),
-      servers: new Map(),
-      setupServices: {
-        authorizeAzure: unavailable,
-        configureEnvironment: unavailable
-      }
-    };
-    Reflect.deleteProperty(dependencies, "accountContext");
-    expect(() =>
-      createInstanceRequestCoordinator(
+  it.each([false, true])(
+    "hands an AWS operation to the AWS identity setup with its account (shutting down: %s)",
+    async (shuttingDown) => {
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      const owner = createEnvironmentExecutionOwner();
+      const op = createOperation({
+        operationId: "op-aws",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      operations.put(op);
+      op.context.githubLogin = "saved-account";
+      op.request = {
+        environment: {
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop"
+        }
+      };
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.join(" ");
+        if (command === "api user")
+          return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+        if (
+          command === "api repos/fixture/app" ||
+          command === "api /repos/fixture/app"
+        )
+          return {
+            code: 0,
+            stdout: '{"full_name":"fixture/app","permissions":{"admin":true}}',
+            stderr: ""
+          };
+        if (command === "api /repos/fixture/app/environments/dev") {
+          if (shuttingDown) owner.markEnvironmentInstanceShuttingDown("panel");
+          return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+        }
+        if (
+          command ===
+          "api /repos/fixture/app/environments/dev/variables?per_page=100"
+        )
+          return { code: 0, stdout: '{"variables":[]}', stderr: "" };
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        requiresKeyringSwitch: false,
+        run
+      });
+      const context = createEnvironmentAccountContext(
+        "runtime",
+        createGitHubAccountCoordinator({
+          createExecutor: async () => executor,
+          getActiveKeyringLogin: async () => "original",
+          switchKeyringAccount: unavailable,
+          resetIdentityCache: () => {}
+        })
+      );
+      const setup = vi.fn(async () => ({
+        ok: false as const,
+        status: 400,
+        error: "AWS CLI not found. Nothing was created in AWS.",
+        code: "aws-cli-missing"
+      }));
+      const configureEnvironment = vi.fn(unavailable);
+      const handler = coordinator(
+        owner,
         "panel",
-        () => "",
-        {
-          deleteRadiusEnvironment: unavailable,
-          runAz: unavailable,
-          readAzureIdentity: unavailable,
-          deleteGitHubEnvironment: unavailable,
-          deleteStatePackage: unavailable,
-          withCredentialProvenanceLock: (work) => work(),
-          readCredentialProvenance: () => [],
-          removeCredentialProvenance: unavailable,
-          clearEnvironmentCredentialProvenance: unavailable,
-          persist: unavailable,
-          errorMessage: String,
-          log: () => {}
-        },
-        dependencies
-      )
-    ).toThrow("Missing request coordinator dependency: accountContext");
-  });
+        undefined,
+        context,
+        { authorizeAzure: unavailable, configureEnvironment },
+        { setup }
+      );
+      const done = settled(owner, "panel");
+      handler.scheduleEnvironmentOperation(op);
+      await done;
+
+      expect(configureEnvironment).not.toHaveBeenCalled();
+      if (shuttingDown) {
+        expect(setup).not.toHaveBeenCalled();
+        expect(op.failure, JSON.stringify(run.mock.calls)).toBeNull();
+        expect(op.endedAt).toBeNull();
+      } else {
+        expect(setup).toHaveBeenCalledExactlyOnceWith(
+          op,
+          expect.objectContaining({
+            repo: "fixture/app",
+            environment: "dev",
+            accountId: "123456789012",
+            region: "us-west-2",
+            cluster: "shop"
+          }),
+          executor
+        );
+        expect(op.failure).toMatchObject({
+          code: "aws-cli-missing",
+          message: expect.stringContaining("Nothing was created in AWS.")
+        });
+        expect(op.state).not.toBe("succeeded");
+      }
+    }
+  );
+
+  it.each(["accountContext", "awsEnabled", "awsEnvironmentAccess"])(
+    "requires an explicit %s",
+    (name) => {
+      const dependencies = {
+        awsEnabled: false,
+        awsEnvironmentAccess: { setup: unavailable },
+        executionOwner: createEnvironmentExecutionOwner(),
+        accountContext: createEnvironmentAccountContext("runtime", {
+          createReadOnlyExecutor: unavailable,
+          withSelectedAccount: unavailable
+        }),
+        servers: new Map(),
+        setupServices: {
+          authorizeAzure: unavailable,
+          configureEnvironment: unavailable
+        }
+      };
+      Reflect.deleteProperty(dependencies, name);
+      expect(() =>
+        createInstanceRequestCoordinator(
+          "panel",
+          () => "",
+          {
+            deleteRadiusEnvironment: unavailable,
+            runAz: unavailable,
+            readAzureIdentity: unavailable,
+            removeAwsEnvironmentAccess: unavailable,
+            deleteGitHubEnvironment: unavailable,
+            deleteStatePackage: unavailable,
+            withCredentialProvenanceLock: (work) => work(),
+            readCredentialProvenance: () => [],
+            removeCredentialProvenance: unavailable,
+            clearEnvironmentCredentialProvenance: unavailable,
+            persist: unavailable,
+            errorMessage: String,
+            log: () => {}
+          },
+          dependencies
+        )
+      ).toThrow(`Missing request coordinator dependency: ${name}`);
+    }
+  );
 
   it("leases setup under the runtime key and saved account before honoring a stop", async () => {
     const owner = createEnvironmentExecutionOwner();

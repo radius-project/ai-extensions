@@ -119,9 +119,9 @@ jobs:
       - uses: radius-project/radius/.github/actions/delete-resource@{{RADIUS_REF}}
 `;
 
-// The environment-delete dispatcher and its Azure provider are static
+// The environment-delete dispatcher and its provider workflows are static
 // ai-extensions assets (not fetched from radius-project/radius), so the fixtures
-// mirror their shape: the dispatcher only fills `{{ENV}}`, and the provider
+// mirror their shape: the dispatcher only fills `{{ENV}}`, and each provider
 // carries the ai-extensions-owned guard step alongside a `{{RADIUS_REF}}`-pinned
 // composite action.
 export const DELETE_ENV_DISPATCHER_TEMPLATE = `name: Delete environment
@@ -138,9 +138,15 @@ jobs:
     needs: detect
     if: needs.detect.outputs.provider == 'azure'
     uses: ./.github/workflows/delete-environment-azure.yml
+  aws:
+    needs: detect
+    if: needs.detect.outputs.provider == 'aws'
+    uses: ./.github/workflows/delete-environment-aws.yml
 `;
 
-export const DELETE_ENV_PROVIDER_TEMPLATE = `name: Delete environment on Azure
+export const DELETE_ENV_PROVIDER_TEMPLATE = (
+  provider: string
+): string => `name: Delete environment on ${provider}
 on:
   workflow_call:
 jobs:

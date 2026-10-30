@@ -1,3 +1,5 @@
+import type { AwsSubnet, AwsVpc } from "@radius-project/core";
+import { discoverAwsResources, type AwsClusterItem } from "./aws-discovery.js";
 import {
   remediationView,
   type RemediationView
@@ -9,19 +11,37 @@ export interface DiscoveryItem {
   resourceGroup?: string;
 }
 
-export interface DiscoveryResult {
-  clusters: DiscoveryItem[];
+interface DiscoveryResultFacets<Cluster, Network, Subnet> {
+  clusters: Cluster[];
   resourceGroups: DiscoveryItem[];
   namespaces: string[];
-  vpcs: DiscoveryItem[];
-  subnets: DiscoveryItem[];
+  vpcs: Network[];
+  subnets: Subnet[];
   errors?: Record<string, string>;
   remediation?: RemediationView;
 }
 
+export type AzureDiscoveryResult = DiscoveryResultFacets<
+  DiscoveryItem,
+  DiscoveryItem,
+  DiscoveryItem
+>;
+
+// AWS answers typed items: a cluster's VPC and auth mode, and a subnet's VPC,
+// zone, and whether its route table reaches an internet gateway.
+export type AwsDiscoveryResult = DiscoveryResultFacets<
+  AwsClusterItem,
+  AwsVpc,
+  AwsSubnet
+>;
+
+export type DiscoveryResult = AzureDiscoveryResult | AwsDiscoveryResult;
+
 export interface DiscoveryRequest {
   subscriptionId?: string;
   tenantId?: string;
+  accountId?: string;
+  region?: string;
   provider?: string;
   resourceGroup?: string;
   cluster?: string;
@@ -294,63 +314,7 @@ export async function discoverResources(
       }
     }
   } else {
-    try {
-      const eksJson = await dependencies.runCli(
-        "aws",
-        ["eks", "list-clusters", "--query", "clusters", "--output", "json"],
-        { timeout: 15000 }
-      );
-      const clusterNames: unknown = JSON.parse(eksJson);
-      result.clusters =
-        Array.isArray(clusterNames) ?
-          clusterNames
-            .filter((name): name is string => typeof name === "string")
-            .map((name) => ({ id: name, name }))
-        : [];
-    } catch (e) {
-      result.clusters = [];
-      result.errors = result.errors || {};
-      result.errors.clusters = errorMessage(e).slice(0, 800);
-    }
-    try {
-      const vpcJson = await dependencies.runCli(
-        "aws",
-        [
-          "ec2",
-          "describe-vpcs",
-          "--query",
-          "Vpcs[].{id:VpcId, name:VpcId}",
-          "--output",
-          "json"
-        ],
-        { timeout: 15000 }
-      );
-      result.vpcs = discoveryItems(JSON.parse(vpcJson));
-    } catch (e) {
-      result.vpcs = [];
-      result.errors = result.errors || {};
-      result.errors.vpcs = errorMessage(e).slice(0, 800);
-    }
-    try {
-      const subnetJson = await dependencies.runCli(
-        "aws",
-        [
-          "ec2",
-          "describe-subnets",
-          "--query",
-          "Subnets[].{id:SubnetId, name:SubnetId}",
-          "--output",
-          "json"
-        ],
-        { timeout: 15000 }
-      );
-      result.subnets = discoveryItems(JSON.parse(subnetJson));
-    } catch (e) {
-      result.subnets = [];
-      result.errors = result.errors || {};
-      result.errors.subnets = errorMessage(e).slice(0, 800);
-    }
-    result.namespaces = ["default", "kube-system", "radius-system"];
+    return discoverAwsResources(data, dependencies);
   }
 
   return result;

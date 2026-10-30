@@ -8,8 +8,9 @@
 # .github/workflows/.
 #
 # It binds to the selected GitHub Environment so environment-scoped variables are
-# visible, confirms the environment is wired for Azure, then calls the reusable
-# delete-environment-azure.yml with resource_type=environment. Deleting runs on
+# visible, detects whether the environment is wired for Azure or AWS, then calls
+# the matching reusable delete-environment-azure.yml or delete-environment-aws.yml
+# with resource_type=environment. Deleting runs on
 # an ephemeral k3d control plane that restores the persisted Radius state, refuses
 # to proceed when applications are still deployed, runs `rad env delete`, and
 # persists the updated state again. The Radius environment name defaults to the
@@ -40,9 +41,9 @@ permissions:
 
 jobs:
   # Bind to the GitHub Environment so environment-scoped variables are visible and
-  # confirm it is configured for Azure. A job that calls a reusable workflow
-  # (`uses:`) can't bind an environment itself, so this check happens here first.
-  # Environment-deletion cleanup currently supports Azure only.
+  # pick the provider from whichever identifying variable is set. A job that calls
+  # a reusable workflow (`uses:`) can't bind an environment itself, so this check
+  # happens here first.
   detect:
     name: Detect provider
     runs-on: ubuntu-24.04
@@ -54,12 +55,14 @@ jobs:
         id: detect
         env:
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
         run: |
           if [ -n "$AZURE_CLIENT_ID" ]; then
             echo "provider=azure" >> "$GITHUB_OUTPUT"
+          elif [ -n "$AWS_ROLE_ARN" ]; then
+            echo "provider=aws" >> "$GITHUB_OUTPUT"
           else
-            echo "This environment is not configured for Azure (no AZURE_CLIENT_ID set)." >&2
-            echo "Environment-deletion cleanup currently supports Azure only." >&2
+            echo "No AZURE_CLIENT_ID or AWS_ROLE_ARN set on this environment." >&2
             echo "provider=none" >> "$GITHUB_OUTPUT"
             exit 1
           fi
@@ -69,6 +72,17 @@ jobs:
     needs: detect
     if: ${{ needs.detect.outputs.provider == 'azure' }}
     uses: ./.github/workflows/delete-environment-azure.yml
+    with:
+      environment: ${{ inputs.environment || '{{ENV}}' }}
+      resource_type: environment
+      name: ${{ inputs.environment_name || inputs.environment || '{{ENV}}' }}
+    secrets: inherit
+
+  aws:
+    name: AWS
+    needs: detect
+    if: ${{ needs.detect.outputs.provider == 'aws' }}
+    uses: ./.github/workflows/delete-environment-aws.yml
     with:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       resource_type: environment

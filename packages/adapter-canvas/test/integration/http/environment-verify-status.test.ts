@@ -54,6 +54,7 @@ function fullDeps(
   // return real values — a fully-formed test executor and "not an auth error" —
   // rather than a masking placeholder object.
   const base: EnvironmentsDependencies = {
+    awsEnabled: false,
     errorMessage: (error: unknown) =>
       error instanceof Error ? error.message : String(error),
     redactDiagnostic: unset("redactDiagnostic"),

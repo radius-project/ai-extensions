@@ -16,6 +16,7 @@ import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createOperationsControlRoutes } from "./routes/operations-control.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
+import { createAwsDiscoveryRoutes } from "./routes/aws-discovery.js";
 import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
@@ -52,6 +53,7 @@ const productionHandlers = {
       now: () => 0
     },
     {
+      awsEnabled: false,
       isValidRepoSlug: () => false,
       isResourceGroupName: () => false,
       isAksClusterName: () => false,
@@ -134,6 +136,7 @@ const productionHandlers = {
     deploymentStatusBlocksMutation: () => false,
     localDeploymentBlocksMutation: () => false,
     ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
+    deleteApplicationWorkflowFiles: [],
     findWorkflowRun: () => Promise.resolve(null),
     runGh: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     readProcessEnv: () => ({}),
@@ -166,6 +169,7 @@ const productionHandlers = {
     }),
     parseServedReposFromSubjects: () => []
   }),
+  ...createAwsDiscoveryRoutes({ runCli: () => Promise.resolve("") }),
   ...createAzureAutoSetupRoutes(createAzureAutoSetupTestDependencies()),
   ...createIdentityProfilesRoutes({
     listCredentialProfiles: () => [],
@@ -343,6 +347,7 @@ const productionHandlers = {
     })
   }),
   ...createEnvironmentsRoutes({
+    awsEnabled: false,
     errorMessage: (error) => String(error),
     redactDiagnostic: (value) => value,
     repoMatchesWorkspace: () => false,

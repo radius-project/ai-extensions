@@ -130,6 +130,10 @@ function dependencies(
     ensureWorkflowsCurrent: () => {
       throw new Error("ensureWorkflowsCurrent not stubbed");
     },
+    deleteApplicationWorkflowFiles: [
+      "delete-application.yml",
+      "delete-azure.yml"
+    ],
     findWorkflowRun: () => {
       throw new Error("findWorkflowRun not stubbed");
     },
@@ -1772,6 +1776,30 @@ describe("deployments routes (SU-06)", () => {
 
       expect(recording.status).toBe(200);
     });
+
+    it.each([
+      [["delete-application.yml", "delete-azure.yml"]],
+      [["delete-application.yml", "delete-azure.yml", "delete-aws.yml"]]
+    ])(
+      "syncs exactly the configured delete workflow files: %j",
+      async (files) => {
+        const { recording, context: ctx } = deleteContext();
+        const synced: unknown[][] = [];
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            deleteApplicationWorkflowFiles: files,
+            ensureWorkflowsCurrent: (...args) => {
+              synced.push(args);
+              return Promise.resolve({ created: [], failed: [] });
+            }
+          })
+        );
+
+        expect(recording.status).toBe(200);
+        expect(synced).toEqual([["octo/todolist", "dev", "", files]]);
+      }
+    );
 
     it("dispatches, evicts the cached listing and reports the run URL", async () => {
       const { recording, context: ctx } = deleteContext();

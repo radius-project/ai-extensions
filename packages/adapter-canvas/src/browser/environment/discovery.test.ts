@@ -56,6 +56,8 @@ interface DiscoveryPage {
   azureStatus: ReturnType<typeof createFakeElement>;
   azureRemediation: ReturnType<typeof createFakeElement>;
   awsStatus: ReturnType<typeof createFakeElement>;
+  awsSubnetsList: ReturnType<typeof createFakeElement>;
+  awsSubnetsError: ReturnType<typeof createFakeElement>;
   selectedAppId: ReturnType<typeof createFakeInput>;
   selectedAppNote: ReturnType<typeof createFakeElement>;
   clearPinLink: ReturnType<typeof createFakeElement>;
@@ -80,7 +82,12 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
   const browser = createFakeBrowser();
   const selects: Record<string, ReturnType<typeof createFakeSelect>> = {};
   const customs: Record<string, ReturnType<typeof createFakeInput>> = {};
-  for (const selectId of ["azure-rg-select", "azure-cluster-select"]) {
+  for (const selectId of [
+    "azure-rg-select",
+    "azure-cluster-select",
+    "aws-cluster-select",
+    "aws-vpc-select"
+  ]) {
     const select = createFakeSelect(selectId);
     selects[selectId] = select;
     if (!omit.includes(selectId)) browser.document.add(select);
@@ -96,6 +103,8 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
   const azureStatus = createFakeElement("azure-discover-status");
   const azureRemediation = createFakeElement("azure-discover-remediation");
   const awsStatus = createFakeElement("aws-discover-status");
+  const awsSubnetsList = createFakeElement("aws-subnets-list");
+  const awsSubnetsError = createFakeElement("aws-subnets-error");
   const selectedAppId = createFakeInput("az-selected-app-id");
   const selectedAppNote = createFakeElement("az-selected-app-note");
   const clearPinLink = createFakeElement("az-clear-pin-link");
@@ -118,6 +127,8 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
     azureStatus,
     azureRemediation,
     awsStatus,
+    awsSubnetsList,
+    awsSubnetsError,
     selectedAppId,
     selectedAppNote,
     clearPinLink,
@@ -146,6 +157,8 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
     azureStatus,
     azureRemediation,
     awsStatus,
+    awsSubnetsList,
+    awsSubnetsError,
     selectedAppId,
     selectedAppNote,
     clearPinLink,
@@ -169,6 +182,46 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
 
 function discoverResponse(data: Record<string, unknown>) {
   return jsonResponse(data);
+}
+
+function awsPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    clusters: [
+      {
+        id: "eks-1",
+        name: "eks-1",
+        vpcId: "vpc-1",
+        authenticationMode: "API_AND_CONFIG_MAP",
+        usable: true
+      }
+    ],
+    namespaces: ["default"],
+    vpcs: [{ id: "vpc-1", name: "vpc-1" }],
+    subnets: [
+      {
+        id: "subnet-a",
+        name: "private-a",
+        vpcId: "vpc-1",
+        availabilityZone: "us-west-2a",
+        public: false
+      },
+      {
+        id: "subnet-b",
+        name: "private-b",
+        vpcId: "vpc-1",
+        availabilityZone: "us-west-2b",
+        public: false
+      },
+      {
+        id: "subnet-c",
+        name: "public-c",
+        vpcId: "vpc-1",
+        availabilityZone: "us-west-2c",
+        public: true
+      }
+    ],
+    ...overrides
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +617,19 @@ describe("showAppPicker", () => {
     });
     await flushPromises();
     await flushPromises();
+    expect(fakeText(page.appselectList)).not.toContain("Serves:");
+  });
+
+  it("does not look up serves labels when the caller disables lazy serves", async () => {
+    const page = renderDiscoveryPage();
+    void showAppPicker(page.browser.context, {
+      candidates: [candidate({ appId: "app-1" })],
+      lazyServes: false
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(page.browser.net.calls).toHaveLength(0);
     expect(fakeText(page.appselectList)).not.toContain("Serves:");
   });
 
@@ -981,11 +1047,23 @@ describe("currentInfraSelection", () => {
   });
 
   it("returns an empty custom value when a supported custom input is missing", () => {
-    const page = renderDiscoveryPage(["aws-cluster-custom"]);
+    const page = renderDiscoveryPage(["aws-namespace-custom"]);
     const handle = initializeDiscoveryPanel(page.browser.context);
-    page.selects["aws-cluster-select"].value = "__custom__";
+    page.selects["aws-namespace-select"].value = "__custom__";
 
-    expect(handle?.currentInfraSelection("aws").cluster).toBe("");
+    expect(handle?.currentInfraSelection("aws").namespace).toBe("");
+  });
+
+  it("returns empty AWS values when the AWS selects are missing", () => {
+    const browser = createFakeBrowser();
+    const handle = initializeDiscoveryPanel(browser.context);
+
+    expect(handle?.currentInfraSelection("aws")).toEqual({
+      cluster: "",
+      namespace: "",
+      vpcId: "",
+      subnetIds: ""
+    });
   });
 });
 
@@ -1588,16 +1666,23 @@ describe("discoverResources", () => {
   it("ignores a saved aws selection whose fields are all empty", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse({ clusters: [{ id: "eks-1", name: "EKS One" }] })
+      discoverResponse(awsPayload())
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
     handle?.setPendingInfraSelection({}, "aws");
 
-    await handle?.discoverResources("aws", "", "");
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
 
-    expect(page.customs["aws-cluster-custom"].value).toBe("");
-    expect(page.customs["aws-vpc-custom"].value).toBe("");
-    expect(page.customs["aws-subnets-custom"].value).toBe("");
+    // An empty saved selection must leave the discovered defaults in place:
+    // the single cluster, its VPC, and its private subnets.
+    expect(page.customs["aws-namespace-custom"].value).toBe("");
+    expect(handle?.currentInfraSelection("aws")).toEqual(
+      expect.objectContaining({
+        cluster: "eks-1",
+        vpcId: "vpc-1",
+        subnetIds: "subnet-a,subnet-b"
+      })
+    );
   });
 
   it("does not let an azure response consume an aws pending selection", async () => {
@@ -1648,20 +1733,25 @@ describe("discoverResources", () => {
     expect(page.selects["azure-cluster-select"].value).toBe("");
   });
 
-  it("reports the current aws selection for a form that is being reopened", () => {
+  it("reports the current aws selection for a form that is being reopened", async () => {
     const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(awsPayload())
+    );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    page.selects["aws-cluster-select"].value = "eks-1";
-    page.selects["aws-vpc-select"].value = "vpc-1";
-    page.selects["aws-subnets-select"].value = "subnet-1";
 
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
+
+    // Discovery follows the single cluster's VPC and selects its private
+    // subnets, which span two availability zones.
     expect(handle?.currentInfraSelection("aws")).toEqual(
       expect.objectContaining({
         cluster: "eks-1",
         vpcId: "vpc-1",
-        subnetIds: "subnet-1"
+        subnetIds: "subnet-a,subnet-b"
       })
     );
+    expect(handle?.awsInfrastructureError()).toBe("");
   });
 
   it("reports the current azure selection for a form that is being reopened", () => {
@@ -1681,12 +1771,7 @@ describe("discoverResources", () => {
   it("restores a saved aws selection across every infrastructure field", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse({
-        clusters: [{ id: "eks-1", name: "EKS One" }],
-        namespaces: ["team-a"],
-        vpcs: [{ id: "vpc-1", name: "vpc-1" }],
-        subnets: [{ id: "subnet-1", name: "subnet-1" }]
-      })
+      discoverResponse(awsPayload({ namespaces: ["team-a"] }))
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
     handle?.setPendingInfraSelection(
@@ -1694,32 +1779,100 @@ describe("discoverResources", () => {
         cluster: "eks-1",
         namespace: "team-a",
         vpcId: "vpc-1",
-        subnetIds: "subnet-1"
+        subnetIds: "subnet-a"
       },
       "aws"
     );
 
-    await handle?.discoverResources("aws", "", "");
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
 
     expect(page.selects["aws-cluster-select"].value).toBe("eks-1");
     expect(page.selects["aws-namespace-select"].value).toBe("team-a");
     expect(page.selects["aws-vpc-select"].value).toBe("vpc-1");
-    expect(page.selects["aws-subnets-select"].value).toBe("subnet-1");
+    expect(handle?.currentInfraSelection("aws").subnetIds).toBe("subnet-a");
+    // The saved selection spans one zone, so Create Environment stays blocked.
+    expect(handle?.awsInfrastructureError()).toBe(
+      "Select subnets in at least two availability zones."
+    );
   });
 
-  it("restores an undiscovered AWS value through its supported custom input", async () => {
+  it("restores saved subnets without a VPC and a typed namespace", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse({ clusters: [{ id: "eks-1", name: "EKS One" }] })
+      discoverResponse(awsPayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      { namespace: "not-offered", subnetIds: "subnet-a,subnet-b" },
+      "aws"
+    );
+
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
+
+    expect(page.customs["aws-namespace-custom"].value).toBe("not-offered");
+    expect(page.customs["aws-namespace-custom"].style.display).toBe("");
+    expect(handle?.currentInfraSelection("aws").subnetIds).toBe(
+      "subnet-a,subnet-b"
+    );
+
+    handle?.setPendingInfraSelection({ namespace: "default" }, "aws");
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
+    expect(page.selects["aws-namespace-select"].value).toBe("default");
+    expect(page.customs["aws-namespace-custom"].style.display).toBe("none");
+  });
+
+  it("reports the subnet requirement when the cluster select is missing", () => {
+    const page = renderDiscoveryPage(["aws-cluster-select"]);
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    expect(handle?.awsInfrastructureError()).toBe(
+      "Select subnets in at least two availability zones."
+    );
+  });
+
+  it("blocks an AWS cluster that cannot take an access entry", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        awsPayload({
+          clusters: [
+            {
+              id: "legacy",
+              name: "legacy",
+              vpcId: "vpc-1",
+              authenticationMode: "CONFIG_MAP",
+              usable: false
+            }
+          ]
+        })
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
+    expect(handle?.awsInfrastructureError()).toContain(
+      "Cluster legacy uses CONFIG_MAP authentication"
+    );
+  });
+
+  it("does not invent an undiscovered AWS cluster on restore", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse({
+        clusters: [
+          { id: "eks-1", name: "EKS One" },
+          { id: "eks-2", name: "EKS Two" }
+        ]
+      })
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
     handle?.setPendingInfraSelection({ cluster: "eks-external" }, "aws");
 
     await handle?.discoverResources("aws", "", "");
 
-    expect(page.selects["aws-cluster-select"].value).toBe("__custom__");
-    expect(page.customs["aws-cluster-custom"].value).toBe("eks-external");
-    expect(page.customs["aws-cluster-custom"].style.display).toBe("");
+    const clusterSelect = page.selects["aws-cluster-select"];
+    expect(clusterSelect.value).toBe("");
+    expect(
+      Array.from(clusterSelect.options).map((option) => option.value)
+    ).toEqual(["", "eks-1", "eks-2"]);
   });
 
   it("renders an explicit empty namespaces array as no options, not the defaults", async () => {
@@ -1735,26 +1888,161 @@ describe("discoverResources", () => {
     ).toEqual(["", "__custom__"]);
   });
 
-  it("renders aws clusters, namespaces, VPCs, and subnets on success with a leading None option", async () => {
+  it("renders aws clusters, namespaces, VPCs, and a subnet checklist without custom or None options", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse({
-        clusters: [{ id: "eks-1", name: "EKS One" }],
-        vpcs: [{ id: "vpc-1", name: "VPC One" }],
-        subnets: [{ id: "subnet-1", name: "Subnet One" }]
-      })
+      discoverResponse(awsPayload())
     );
     const handle = initializeDiscoveryPanel(page.browser.context);
-    await handle?.discoverResources("aws", "", "");
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
 
     expect(page.awsStatus.textContent).toBe("Found 1 cluster(s), 1 VPC(s)");
+    const clusterSelect = page.selects["aws-cluster-select"];
+    expect(
+      Array.from(clusterSelect.options).map((option) => option.value)
+    ).toEqual(["", "eks-1"]);
     const vpcSelect = page.selects["aws-vpc-select"];
     expect(Array.from(vpcSelect.options).map((option) => option.value)).toEqual(
-      ["", "", "vpc-1", "__custom__"]
+      ["", "vpc-1"]
     );
     expect(
       Array.from(vpcSelect.options).map((option) => option.textContent)
-    ).toContain("None (optional)");
+    ).not.toContain("None (optional)");
+    const boxes = fakeTree(page.awsSubnetsList).filter(
+      (element) => element.tagName === "input"
+    );
+    expect(boxes.map((box) => box.id)).toEqual([
+      "aws-subnet-subnet-a",
+      "aws-subnet-subnet-b",
+      "aws-subnet-subnet-c"
+    ]);
+    expect(fakeText(page.awsSubnetsList)).toContain("us-west-2a");
+    expect(fakeText(page.awsSubnetsList)).toContain("public");
+  });
+
+  it("posts the AWS account and region instead of an Azure subscription and tenant", async () => {
+    const page = renderDiscoveryPage();
+    const bodies: unknown[] = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(init?.body ?? "{}"));
+      return discoverResponse(awsPayload());
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
+
+    expect(bodies).toEqual([
+      { provider: "aws", accountId: "123456789012", region: "us-west-2" }
+    ]);
+  });
+
+  it("labels an unusable CONFIG_MAP cluster and reports it as the infrastructure error", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        awsPayload({
+          clusters: [
+            {
+              id: "eks-1",
+              name: "eks-1",
+              vpcId: "vpc-1",
+              authenticationMode: "CONFIG_MAP",
+              usable: false
+            }
+          ]
+        })
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
+
+    const clusterSelect = page.selects["aws-cluster-select"];
+    expect(
+      Array.from(clusterSelect.options).map((option) => option.textContent)
+    ).toContain("eks-1 (CONFIG_MAP authentication, cannot be used)");
+    expect(clusterSelect.value).toBe("eks-1");
+    expect(handle?.awsInfrastructureError()).toBe(
+      "Cluster eks-1 uses CONFIG_MAP authentication, which does not support access entries, so Radius cannot grant the deploy role access to it."
+    );
+  });
+
+  it.each([
+    ["is still running", "pending"],
+    ["fails", "fails"]
+  ])(
+    "clears the AWS selection while discovery for a new profile %s",
+    async (_label, outcome) => {
+      const page = renderDiscoveryPage();
+      let answer: Promise<HttpResponse> = Promise.resolve(
+        discoverResponse(awsPayload())
+      );
+      page.browser.net.handle(DISCOVER_ENDPOINT, () => answer);
+      const onInfrastructureChange = vi.fn();
+      const handle = initializeDiscoveryPanel(page.browser.context, {
+        mutationNonce: "nonce",
+        onInfrastructureChange
+      });
+      await handle?.discoverResources("aws", "123456789012", "us-west-2");
+      expect(page.selects["aws-cluster-select"].value).toBe("eks-1");
+      expect(handle?.awsInfrastructureError()).toBe("");
+
+      let fail: (reason: unknown) => void = () => {};
+      answer = new Promise<HttpResponse>((_resolve, reject) => {
+        fail = reject;
+      });
+      onInfrastructureChange.mockClear();
+      const next = handle?.discoverResources(
+        "aws",
+        "999988887777",
+        "eu-west-1"
+      );
+
+      expect(page.selects["aws-cluster-select"].value).toBe("");
+      expect(page.selects["aws-vpc-select"].value).toBe("");
+      expect(handle?.currentInfraSelection("aws")).toMatchObject({
+        cluster: "",
+        vpcId: "",
+        subnetIds: ""
+      });
+      expect(handle?.awsInfrastructureError()).not.toBe("");
+      expect(onInfrastructureChange).toHaveBeenCalled();
+
+      if (outcome === "fails") {
+        fail(new Error("denied"));
+        await next;
+        expect(page.selects["aws-cluster-select"].value).toBe("");
+        expect(handle?.awsInfrastructureError()).not.toBe("");
+      } else {
+        fail(new Error("abandoned"));
+        await next;
+      }
+    }
+  );
+
+  it("requires a subnet selection before AWS discovery has run", () => {
+    const page = renderDiscoveryPage();
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    expect(handle?.awsInfrastructureError()).toBe(
+      "Select subnets in at least two availability zones."
+    );
+  });
+
+  it("notifies the page when the AWS infrastructure selection changes", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(awsPayload())
+    );
+    const onInfrastructureChange = vi.fn();
+    const handle = initializeDiscoveryPanel(page.browser.context, {
+      mutationNonce: "nonce",
+      onInfrastructureChange
+    });
+
+    await handle?.discoverResources("aws", "123456789012", "us-west-2");
+
+    expect(onInfrastructureChange).toHaveBeenCalled();
   });
 
   it("treats a malformed (non-array) clusters field as an empty result", async () => {

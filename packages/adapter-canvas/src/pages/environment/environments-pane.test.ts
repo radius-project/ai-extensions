@@ -32,15 +32,73 @@ describe("environmentsPaneMarkup", () => {
     const html = environmentsPaneMarkup(baseOptions);
     for (const [id, name] of [
       ["azure-namespace-custom", "Namespace (custom)"],
-      ["aws-cluster-custom", "EKS Cluster (custom)"],
-      ["aws-namespace-custom", "Namespace (custom)"],
-      ["aws-vpc-custom", "VPC (custom)"],
-      ["aws-subnets-custom", "Subnets (custom)"]
+      ["aws-namespace-custom", "Namespace (custom)"]
     ]) {
       const tag = new RegExp(`<input id="${id}"[^>]*>`).exec(html)?.[0] ?? "";
       expect(tag, `${id} should be rendered`).not.toBe("");
       expect(tag).toContain(`aria-label="${name}"`);
     }
+  });
+
+  it("requires discovered AWS infrastructure with a labelled subnet checklist", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    for (const id of [
+      "aws-cluster-custom",
+      "aws-vpc-custom",
+      "aws-subnets-select",
+      "aws-subnets-custom"
+    ]) {
+      expect(html).not.toContain(`id="${id}"`);
+    }
+    expect(html).toContain(
+      '<span id="aws-subnets-label" style="display:block; font-weight:600; font-size:12px; color:var(--rad-text-tertiary); margin:0 0 4px;">Subnets</span>'
+    );
+    expect(html).toMatch(
+      /<div id="aws-subnets-list" role="group" aria-labelledby="aws-subnets-label" aria-describedby="aws-subnets-note aws-subnets-error"/
+    );
+    expect(html).toContain(
+      '<div class="rad-field__help" id="aws-subnets-note">Two availability zones are required. Public subnets are reachable from the internet.</div>'
+    );
+    expect(html).toContain(
+      '<div id="aws-subnets-error" class="status error" role="alert" hidden></div>'
+    );
+    expect(html).toMatch(
+      /<div id="aws-infra-warning" class="status info" role="status" hidden/
+    );
+    expect(html).toContain(
+      "Managed data services need subnets in at least two availability zones."
+    );
+  });
+
+  it("proposes a per-repository IAM role as the AWS deploy identity", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      '<div class="rad-section__desc" id="env-identity-desc">The Microsoft Entra app GitHub Actions signs in as'
+    );
+    expect(html).toContain('<label for="aws-role-name-input">IAM role</label>');
+    expect(html).toMatch(
+      /<input id="aws-role-name-input"[^>]*maxlength="64"[^>]*value="radius-deploy-octo-app" data-default-name="radius-deploy-octo-app" \/>/
+    );
+    expect(html).toContain(
+      '<input type="hidden" id="aws-selected-role-arn" value="" />'
+    );
+    expect(html).toContain('<span id="aws-role-help">');
+    expect(html).toContain("<code>repo:octo/app</code>");
+    expect(html).toContain('id="aws-use-existing-role-link"');
+    expect(html).toContain('id="aws-selected-role-note"');
+    expect(html).toContain('id="aws-clear-role-link"');
+    expect(html).not.toContain(
+      "GitHub Actions assumes the IAM role from your credential profile"
+    );
+  });
+
+  it("escapes the repository in the AWS deploy identity markup", () => {
+    const html = environmentsPaneMarkup({
+      ...baseOptions,
+      ctxRepo: '<img src=x onerror="1">/app'
+    });
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("<code>repo:&lt;img");
   });
 
   it("requires discovered Azure infrastructure while explaining namespace creation", () => {

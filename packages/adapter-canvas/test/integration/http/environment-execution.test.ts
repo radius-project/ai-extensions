@@ -1,3 +1,6 @@
+import os from "node:os";
+import path from "node:path";
+import { promises as fs } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "../../../src/runtime/production-github-account-context.js";
@@ -168,6 +171,173 @@ describe("production environment owner HTTP binding", () => {
     }
   );
 
+  it("runs the AWS CLI on PATH for AWS deploy identity setup", async () => {
+    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-aws-"));
+    const log = path.join(fakeBin, "calls.log");
+    const originalPath = process.env.PATH;
+    const originalPathExt = process.env.PATHEXT;
+    const originalLog = process.env.FAKE_AWS_LOG;
+    // Answers the version check, then refuses the sign-in check so setup
+    // stops before anything could be written.
+    await fs.writeFile(
+      path.join(fakeBin, "aws"),
+      [
+        "#!/bin/sh",
+        'printf "%s\\n" "$*" >> "$FAKE_AWS_LOG"',
+        'if [ "$1" = "--version" ]; then',
+        '  echo "aws-cli/2.17.0 Python/3.11 Linux/6"',
+        "  exit 0",
+        "fi",
+        'echo "fake aws: not signed in" >&2',
+        "exit 3",
+        ""
+      ].join("\n")
+    );
+    await fs.chmod(path.join(fakeBin, "aws"), 0o755);
+    await fs.writeFile(
+      path.join(fakeBin, "aws.cmd"),
+      [
+        "@echo off",
+        'echo %*>>"%FAKE_AWS_LOG%"',
+        'if "%1"=="--version" (',
+        "  echo aws-cli/2.17.0 Python/3.11 Windows/10",
+        "  exit /b 0",
+        ")",
+        "echo fake aws: not signed in 1>&2",
+        "exit /b 3",
+        ""
+      ].join("\r\n")
+    );
+    const run = vi.fn(async (args: string[]) => {
+      const command = args.join(" ");
+      if (command === "api user") {
+        return { code: 0, stdout: '{"login":"saved-account"}', stderr: "" };
+      }
+      if (
+        command === "api /repos/fixture/app" ||
+        command === "api repos/fixture/app"
+      ) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            full_name: "fixture/app",
+            id: 42,
+            owner: { id: 7 },
+            permissions: { admin: true }
+          }),
+          stderr: ""
+        };
+      }
+      if (command === "api /repos/fixture/app/environments/dev") {
+        return { code: 0, stdout: '{"name":"dev","id":17}', stderr: "" };
+      }
+      if (
+        command ===
+        "api /repos/fixture/app/environments/dev/variables?per_page=100"
+      ) {
+        return { code: 0, stdout: '{"variables":[]}', stderr: "" };
+      }
+      if (command === "api /repos/fixture/app/actions/oidc/customization/sub") {
+        return { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      }
+      throw new Error(`Unexpected selected command: ${command}`);
+    });
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      requiresKeyringSwitch: false,
+      run
+    });
+    const accountContext = createEnvironmentAccountContext(
+      "runtime-aws-cli",
+      createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => "original",
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected switch");
+        },
+        resetIdentityCache: () => {}
+      })
+    );
+    const owner = createEnvironmentExecutionOwner();
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext,
+      awsEnabled: true
+    });
+    try {
+      process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+      process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+      process.env.FAKE_AWS_LOG = log;
+      const entry = await runtime.getOrCreateServer("aws-panel", "environment");
+      const op = createOperation({
+        operationId: "op_aws_cli",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "aws"
+      });
+      op.context.githubLogin = "saved-account";
+      op.currentStage = STAGE_AUTHORIZE_IDENTITY;
+      op.request = {
+        needsAzureCredentials: false,
+        azure: {},
+        environment: {
+          accountId: "123456789012",
+          region: "us-west-2",
+          cluster: "shop",
+          roleName: "radius-deploy-fixture-app"
+        }
+      };
+      // The resume transport is the server-owned way to schedule a saved
+      // operation from a test; the AWS path ignores the Azure answer.
+      requireInput(op, {
+        code: "app-selection-required",
+        message: "Choose an app.",
+        checkpoint: "azure-app-selection"
+      });
+      operations.put(op);
+      const response = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/resume/app-selection-required`,
+        {
+          method: "POST",
+          headers: {
+            origin: entry.baseUrl,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": String(entry.state.browserMutationNonce),
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            repo: op.repo,
+            environment: op.environment,
+            provider: op.provider,
+            checkpoint: "azure-app-selection",
+            createNew: true
+          })
+        }
+      );
+      expect(response.status).toBe(202);
+      // The setup outlives the request, so wait for the operation to finish.
+      await vi.waitFor(() => expect(op.endedAt).toBeTruthy(), {
+        timeout: 15000
+      });
+
+      expect(
+        (await fs.readFile(log, "utf8")).split(/\r?\n/).filter(Boolean)
+      ).toEqual(["--version", "sts get-caller-identity --output json"]);
+      expect(op.state).toBe("failed");
+      expect(op.failure.message).toContain("fake aws: not signed in");
+      expect(op.failure.message).toContain("Nothing was created in AWS.");
+    } finally {
+      await runtime.stopServer("aws-panel", true);
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPathExt === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = originalPathExt;
+      if (originalLog === undefined) delete process.env.FAKE_AWS_LOG;
+      else process.env.FAKE_AWS_LOG = originalLog;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    }
+  });
+
   it.each([false, true])(
     "uses saved operation ownership for workflow controls (account unavailable=%s)",
     async (unavailable) => {
@@ -321,7 +491,8 @@ describe("production environment owner HTTP binding", () => {
   it("refuses construction without the shared owner", () => {
     const options = {
       executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createProductionGitHubAccountContext()
+      accountContext: createProductionGitHubAccountContext(),
+      awsEnabled: false
     };
     Reflect.deleteProperty(options, "executionOwner");
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
@@ -332,11 +503,24 @@ describe("production environment owner HTTP binding", () => {
   it("refuses construction without the shared account context", () => {
     const options = {
       executionOwner: createEnvironmentExecutionOwner(),
-      accountContext: createProductionGitHubAccountContext()
+      accountContext: createProductionGitHubAccountContext(),
+      awsEnabled: false
     };
     Reflect.deleteProperty(options, "accountContext");
     expect(() => createProductionCanvasServerRuntime(options)).toThrow(
       "Missing canvas server dependency: accountContext"
+    );
+  });
+
+  it("refuses construction without the AWS switch", () => {
+    const options = {
+      executionOwner: createEnvironmentExecutionOwner(),
+      accountContext: createProductionGitHubAccountContext(),
+      awsEnabled: false
+    };
+    Reflect.deleteProperty(options, "awsEnabled");
+    expect(() => createProductionCanvasServerRuntime(options)).toThrow(
+      "Missing canvas server dependency: awsEnabled"
     );
   });
 

@@ -238,6 +238,8 @@ export async function handleDeleteEnvironment(
       clientId: string;
       tenantId: string;
       repoId: number;
+      roleArn?: string;
+      trustSubjects?: string[];
     };
     try {
       target = await dependencies.discoverEnvironmentTarget(repo, envName);
@@ -257,14 +259,14 @@ export async function handleDeleteEnvironment(
       return;
     }
     const provider = target.provider;
-    // Radius only supports deleting Azure-backed environments today. Stage 1's
-    // Radius-environment teardown dispatches the Azure-only delete workflow, so
-    // a non-Azure (e.g. AWS) environment cannot be torn down here and would fail
-    // deep in the runner with a generic error. Refuse up front with a clear,
-    // provider-specific message so the user knows the environment was left in
-    // place and can remove it manually, rather than starting an operation that
-    // is guaranteed to fail closed.
-    if (provider !== "azure") {
+    // Radius deletes Azure-backed environments, and AWS-backed ones while the
+    // developer-only AWS switch is on. Anything else has no delete workflow, so
+    // refuse up front, leaving the environment in place, rather than start an
+    // operation that is guaranteed to fail closed deep in the runner.
+    if (
+      provider !== "azure" &&
+      !(provider === "aws" && dependencies.awsEnabled)
+    ) {
       response.setHeader("Content-Type", "application/json");
       response.writeHead(400);
       response.end(
@@ -272,26 +274,27 @@ export async function handleDeleteEnvironment(
           error:
             provider === "aws" ?
               `Deleting AWS environments isn't supported yet. "${envName}" was not deleted. Remove its resources in AWS and delete the GitHub environment manually.`
-            : `Deleting this environment isn't supported: Radius can only delete Azure-backed environments today. "${envName}" was not deleted.`,
+            : `Deleting this environment isn't supported: Radius can only delete ${dependencies.awsEnabled ? "Azure- and AWS-backed" : "Azure-backed"} environments today. "${envName}" was not deleted.`,
           code: "provider-unsupported"
         })
       );
       return;
     }
     const clientId = target.clientId;
-    // Provider is guaranteed "azure" here (every other provider returned above),
-    // and an environment is only classified Azure when its canonical
-    // AZURE_CLIENT_ID variable is present, so the client id was readable and the
-    // Azure credential/app-registration cleanup stages always run. The flag is
-    // kept rather than inlined to `true` so the stage set stays explicit at the
-    // one place it is decided.
+    // An environment is only classified Azure when its canonical
+    // AZURE_CLIENT_ID variable is present, and AWS when AWS_ROLE_ARN is, so the
+    // identity each cleanup stage targets was readable.
     const includeAzureCleanup = provider === "azure";
+    const includeAwsCleanup = provider === "aws";
     const op = dependencies.createOperation({
       kind: "delete",
       provider,
       repo,
       environment: envName,
-      stages: dependencies.buildDeleteStages({ includeAzureCleanup })
+      stages: dependencies.buildDeleteStages({
+        includeAzureCleanup,
+        includeAwsCleanup
+      })
     });
     op.request = {
       repo,
@@ -299,7 +302,13 @@ export async function handleDeleteEnvironment(
       environment: envName,
       provider,
       clientId,
-      tenantId: target.tenantId
+      tenantId: target.tenantId,
+      ...(includeAwsCleanup ?
+        {
+          roleArn: target.roleArn || "",
+          trustSubjects: target.trustSubjects
+        }
+      : {})
     };
     const started = dependencies.startOperation(op);
     if (!started.ok) {
