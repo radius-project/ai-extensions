@@ -437,6 +437,9 @@ describe("P0-C built Radius extension artifact", () => {
     expect(radiusTypeResolver).not.toContain("@radius-project/adapter-shared");
     expect(radiusTypeResolver).not.toContain("packages/adapter-shared");
     expect(radiusTypeResolver).toContain("Managed Radius version query");
+    expect(radiusTypeResolver).toContain(
+      "Recipe template does not match its OCI size and digest."
+    );
     // The installed plugin has no workspace packages beside it, so every
     // surviving import must be a Node builtin or the script fails at runtime.
     const specifiers = [
