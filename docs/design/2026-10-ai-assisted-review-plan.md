@@ -206,7 +206,7 @@ We should add a workflow that uses `actions/labeler` to apply `risk:low`, `risk:
 
 We should propose a section of sensitive paths in the synced `CODEOWNERS` template in `radius-project/.github`, so a code owner must approve any high-tier change.
 
-A ruleset sets one approval count for the whole branch, and `CODEOWNERS` requires only one code-owner approval, so neither can demand two approvals for some paths and one for others. To enforce two approvals on the high tier, we should add a required status check that passes only when a `risk:high` pull request has two human approvals of its current commit, not counting Copilot.
+A ruleset sets one approval count for the whole branch, and `CODEOWNERS` requires one code-owner approval. Since high-tier changes should require only one human approval, the code-owner requirement is sufficient; we do not need a separate approval-count check for high-tier pull requests.
 
 #### Step 4.4: Point human reviewers at the riskiest changes
 
