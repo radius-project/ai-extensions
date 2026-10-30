@@ -27,6 +27,8 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
     executor?: SelectedGhExecutor
   ): Promise<GitHubJsonResponse>;
   sleep(milliseconds: number): Promise<void>;
+  // Whether the customer asked to pause this operation.
+  isStopRequested(operation: Operation): boolean;
   operations: {
     enterStage(operation: Operation, stage: string): void;
     addLegacyStep(operation: Operation, text: string, stage: string): void;
@@ -40,7 +42,18 @@ export interface AwsEnvironmentAccessDependencies<Operation> {
 
 export type AwsEnvironmentSetupResult =
   | { ok: true; roleArn: string; subjects: readonly string[] }
-  | { ok: false; status: number; error: string; code: string };
+  | { ok: false; status: number; error: string; code: string }
+  // A pause was requested. Every AWS change made before it is recorded on the
+  // operation; the caller honors the pause at its next boundary.
+  | { ok: false; stopped: true };
+
+// What a refused command answers. Setup treats it as a failure and stops before
+// any later command, so nothing after the pause is written.
+const PAUSED: AwsCommandResult = {
+  code: 1,
+  stdout: "",
+  stderr: "Radius did not run this AWS command because setup was paused."
+};
 
 export interface AwsEnvironmentAccess<Operation> {
   // `Authorize deploy identity` for an AWS environment.
@@ -88,6 +101,22 @@ export function createAwsEnvironmentAccess<Operation>(
     return oidc.federatedCredentials.map((credential) => credential.subject);
   }
 
+  // Record what exists in AWS, save it, and hand the pause to the caller.
+  async function paused(
+    operation: Operation,
+    line: string
+  ): Promise<AwsEnvironmentSetupResult> {
+    operations.addLegacyStep(operation, line, stage);
+    await dependencies.store.persist();
+    return { ok: false, stopped: true };
+  }
+
+  function pausedLine(created: readonly string[]): string {
+    return created.length > 0 ?
+        `⏸️ Paused before the next AWS change. Created before the pause: ${created.join(", ")}.`
+      : "⏸️ Paused before any AWS change. Nothing was created in AWS.";
+  }
+
   return {
     async setup(operation, input, executor) {
       operations.enterStage(operation, stage);
@@ -96,6 +125,9 @@ export function createAwsEnvironmentAccess<Operation>(
       let subjects: string[];
       try {
         subjects = await resolveSubjects(repo, environment, executor);
+        if (dependencies.isStopRequested(operation)) {
+          return paused(operation, pausedLine([]));
+        }
       } catch (error) {
         return {
           ok: false,
@@ -116,13 +148,32 @@ export function createAwsEnvironmentAccess<Operation>(
           subjects
         },
         {
-          runAws: dependencies.runAws,
+          // Checked before every AWS command, including after setup's waits,
+          // so a pause lets the command in flight finish and runs nothing
+          // after it. No rollback: what already exists is recorded below.
+          runAws: async (args) => {
+            if (dependencies.isStopRequested(operation)) return PAUSED;
+            return dependencies.runAws(args);
+          },
           step: (line) => {
             operations.addLegacyStep(operation, line, stage);
           },
           sleep: dependencies.sleep
         }
       );
+      if (dependencies.isStopRequested(operation)) {
+        if (result.ok) {
+          operations.setContext(operation, {
+            awsRoleArn: result.roleArn,
+            awsTrustSubjects: subjects
+          });
+          return paused(
+            operation,
+            `⏸️ Paused after AWS setup finished. ${result.roleArn} is ready for this environment.`
+          );
+        }
+        return paused(operation, pausedLine(result.created));
+      }
       await dependencies.store.persist();
       if (!result.ok) {
         return {

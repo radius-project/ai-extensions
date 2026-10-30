@@ -1187,6 +1187,29 @@ describe("runEnvironmentOperationWorkflow", () => {
     expect(test.failures).toEqual([]);
   });
 
+  it("stops at the AWS boundary when deploy identity setup is paused", async () => {
+    const op = operation();
+    op.provider = "aws";
+    op.request = {
+      needsAzureCredentials: false,
+      environment: { environment: "production" }
+    };
+    const executor = successfulSelectedGhExecutor({
+      run: async () =>
+        command({ stdout: JSON.stringify({ name: "Production" }) })
+    });
+    const test = dependencies(op, {
+      setupAwsDeployIdentity: async () => ({ ok: false, stopped: true })
+    });
+
+    expect(
+      await runEnvironmentOperationWorkflow(op, executor, test.dependencies)
+    ).toEqual({ shouldMonitor: false });
+
+    expect(test.events).toContain("stop:after-aws-deploy-identity");
+    expect(test.posts).toEqual([]);
+  });
+
   it("finalizes an AWS deploy identity failure without creating the environment", async () => {
     const op = operation();
     op.provider = "aws";
