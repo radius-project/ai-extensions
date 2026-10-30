@@ -1,5 +1,17 @@
 # radius
 
+## 0.4.0
+
+### Minor Changes
+
+- [#1124](https://github.com/radius-project/ai-extensions/pull/1124) [@nicolejms](https://github.com/nicolejms) - **Added:** Allow deployment workflows to select a Radius release, including a release candidate, through `RADIUS_RELEASE_OVERRIDE`, with a matching CLI, control plane, and recipe catalog.
+
+### Patch Changes
+
+- [#1123](https://github.com/radius-project/ai-extensions/pull/1123) [@nicolejms](https://github.com/nicolejms) - **Fixed:** Allow Azure environment deletion when Radius returns JSON `null` for an empty application list, while still stopping deletion on failed or invalid reads.
+
+- [#1126](https://github.com/radius-project/ai-extensions/pull/1126) [@ryanwaite](https://github.com/ryanwaite) - **Fixed:** Supply digest-verified Recipe implementations during app modeling, using deployment's release-selected Kubernetes versions, so OCI registrations can be checked for inputs, outputs, credentials, and runtime behavior without bypassing authoring safeguards.
+
 ## 0.3.0
 
 ### Minor Changes
