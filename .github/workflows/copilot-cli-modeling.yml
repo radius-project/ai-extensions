@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
 ---
 name: Copilot CLI Modeling
-run-name: Modeling ${{ inputs.model || 'scheduled models' }} with ${{ inputs.ai-extensions-ref || github.sha }}
+run-name: Modeling ${{ inputs.model || 'scheduled models' }} with ${{ inputs.ai-extensions-ref || github.sha }} (${{ inputs.case || inputs.case-set || 'daily' }})
 
 # Runs Copilot CLI with a built or published Radius plugin. The CLI uses the
 # version and the settings of the GitHub Copilot app. Each case sends the
@@ -47,6 +47,10 @@ on:
           - daily
           - evaluation
         default: daily
+      case:
+        description: Run only this case from the selected case set. Blank runs the whole set.
+        type: string
+        default: ""
 
 permissions: {}
 
@@ -78,6 +82,7 @@ jobs:
         env:
           MODEL: ${{ inputs.model }}
           CASE_SET: ${{ inputs.case-set || 'daily' }}
+          CASE_NAME: ${{ inputs.case }}
         shell: bash
         run: |
           set -euo pipefail
@@ -100,6 +105,13 @@ jobs:
           else
             echo "::error::Unknown case set."
             exit 1
+          fi
+          if [[ -n "$CASE_NAME" ]]; then
+            matrix="$(jq -c --arg name "$CASE_NAME" '{include: [.include[] | select(.case == $name)]}' <<< "$matrix")"
+            if ! jq -e '.include | length == 1' <<< "$matrix"; then
+              echo "::error::The selected case does not exist in this case set."
+              exit 1
+            fi
           fi
           {
             printf 'directory=%s\n' "$directory"

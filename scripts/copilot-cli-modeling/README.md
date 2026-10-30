@@ -60,6 +60,8 @@ Each directory in `cases` is one case. Its `case.yaml` pins a public app reposit
 
 For a manual full-dataset run, set `case-set` to `evaluation` and select a `model`. The workflow runs every case under `evaluation-cases` in parallel. That directory contains only copied `case.yaml` manifests. The workflow has no access to the private dataset repository or its golden `app.bicep` files. Use separate dispatches for each model and plugin version to compare them with the same runner, CLI, case set, and reasoning effort.
 
+Set `case` to a directory name, such as `dockersamples-example-voting-app`, to run only that case from the selected set. An unknown case fails before modeling starts.
+
 Expected models are not in this repository. This repository is public, and the agent must not see the answers.
 
 ## Workflow inputs
@@ -70,6 +72,7 @@ Expected models are not in this repository. This repository is public, and the a
 | `reasoning-effort`  | `medium` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, for every case.                            |
 | `ai-extensions-ref` | Blank    | Plugin branch, commit, or published tag such as `radius@0.2.3`. Blank builds the workflow's commit.       |
 | `case-set`          | `daily`  | `daily` uses the two scheduled cases. `evaluation` uses all copied evaluation cases and requires `model`. |
+| `case`              | Blank    | Run one named case from the selected set. Blank runs the whole set.                                       |
 
 Scheduled runs have no inputs, so they use each case's model and `medium`.
 
