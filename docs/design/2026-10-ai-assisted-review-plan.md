@@ -185,7 +185,7 @@ We should write a short `docs/eng/REVIEW_POLICY.md` that assigns each change a t
 | --- | --- | --- | --- |
 | Low | Docs, copy, tests only, changesets, visual baseline updates | Copilot approval for trusted authors, one human approval for all other authors | Nothing here runs with credentials or ships as code. A mistake is visible in the diff and cheap to revert. |
 | Medium | Ordinary changes to `packages/core` and `packages/adapter-canvas` | One | This code ships to users, but CI, coverage, and Copilot review catch most mistakes, and a bad release can be fixed with the next one. |
-| High | `.github/workflows/**`, `.github/extension/**`, `packages/core/src/platforms/**`, `packages/core/src/workflows/**`, and the release scripts (`scripts/plugins.mjs`, `scripts/version.mjs`, `scripts/release-version.mjs`, `scripts/release-plan.mjs`, `scripts/verified-git.mjs`, `scripts/validate-plugin-dist.mjs`) | Two | These run with credentials, act outside this repo, and are hard to undo. Passing tests don't show they're safe (more info below). |
+| High | `.github/workflows/**`, `.github/extension/**`, `packages/core/src/platforms/**`, `packages/core/src/workflows/**`, and the release scripts (`scripts/plugins.mjs`, `scripts/version.mjs`, `scripts/release-version.mjs`, `scripts/release-plan.mjs`, `scripts/verified-git.mjs`, `scripts/validate-plugin-dist.mjs`) | One | These run with credentials, act outside this repo, and are hard to undo. Passing tests don't show they're safe (more info below). |
 
 Each high-tier path is there for a specific reason:
 
@@ -219,7 +219,15 @@ We should:
 
 #### Step 4.5: Let Copilot approve low-tier changes, after a trial
 
-[Copilot approvals](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-approvals) became generally available on October 28, 2026. An admin can list up to 15 path globs, and a Copilot approval counts toward merge only when every changed file matches one of them. A new push dismisses Copilot's approval.
+[Copilot approvals](https://docs.github.com/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review#copilot-approvals) became generally available on October 28, 2026. A repository admin turns them on under [Settings > Copilot > Code review](https://docs.github.com/en/copilot/how-tos/copilot-on-github/set-up-copilot/configure-code-review#customizing-copilot-code-review-1), which has three Auto-approval settings:
+
+- **Allow Copilot to approve pull requests** lets Copilot submit an approving review.
+- **Allow Copilot approvals to count toward merge requirements** lets that approval satisfy the ruleset's required approval, the same way a teammate's would.
+- **File paths** optionally limits which pull requests that applies to. The admin enters up to 15 file globs, one per line, such as `docs/**` or `**/*.test.ts`. Copilot's approval counts toward merge only when every changed file in the pull request matches at least one glob. If the list is blank, it counts for every file.
+
+For example, with the globs `docs/**` and `**/*.md`, a pull request that changes `docs/setup.md` and `README.md` can merge on Copilot's approval. If it also changes `packages/core/src/index.ts`, it still needs a human approval.
+
+The globs don't change which pull requests Copilot reviews. The `main` ruleset still requests a review on every non-draft pull request, and every review still includes Copilot's approval assessment in its summary comment. A new push dismisses Copilot's approval.
 
 We should roll it out in four parts:
 
