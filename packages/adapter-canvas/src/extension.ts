@@ -17,7 +17,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, statSync, watch as fsWatch } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
@@ -106,10 +107,11 @@ import { bootstrapRadiusExtension } from "./runtime/bootstrap.js";
 import type { RadiusExtensionDependencies } from "./runtime/dependencies.js";
 import { createEnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
 import { createProductionGitHubAccountContext } from "./runtime/production-github-account-context.js";
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
+import { setupDevSelfReload } from "./runtime/dev-reload.js";
+import {
+  configureProcessLifecycle,
+  warmRadBinary
+} from "./runtime/process-lifecycle.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -122,17 +124,12 @@ const { servers, getOrCreateServer, stopServer, getLastWebviewActivityAt } =
 
 const ghCommandPresentation = resolveGhCommandPresentation();
 const dependencies: RadiusExtensionDependencies = {
-  logError: (message) => console.error(message),
+  logError: console.error.bind(console),
   session: sessionHolder,
   executionOwner,
   clock: {
-    now: () => Date.now(),
-    wait: (ms) =>
-      new Promise<void>((resolve) => {
-        // Unref'd so a pending wait cannot hold the extension process open at
-        // shutdown; everything it guards is fire-and-forget.
-        setTimeout(resolve, ms).unref?.();
-      })
+    now: Date.now,
+    wait: (ms) => delay(ms, undefined, { ref: false })
   },
   servers,
   getOrCreateServer,
@@ -157,10 +154,8 @@ const dependencies: RadiusExtensionDependencies = {
     filterGraphVisualizationResources
   },
   rad: {
-    buildGraphViaRad: (content, bicepRepoPath, options) =>
-      buildGraphViaRad(content, bicepRepoPath, options) as ReturnType<
-        RadiusExtensionDependencies["rad"]["buildGraphViaRad"]
-      >,
+    buildGraphViaRad:
+      buildGraphViaRad as RadiusExtensionDependencies["rad"]["buildGraphViaRad"],
     ensureRadBinary,
     runRadBicepPublishExtension,
     runRadBicepPublish,
@@ -195,10 +190,10 @@ const dependencies: RadiusExtensionDependencies = {
   },
   process: {
     existsSync,
-    execFile: (cmd, args, options) => execFileAsync(cmd, args, options)
+    execFile: execFileAsync
   },
   deploy: {
-    fetch: (...args: Parameters<typeof fetch>) => fetch(...args)
+    fetch
   },
   operations: {
     setupInFlight
@@ -210,7 +205,7 @@ const dependencies: RadiusExtensionDependencies = {
     workspaceSourceRevision,
     workspaceModelRecoverable,
     workspaceSourceChangedSince,
-    branchHeadCommit: (repo, branch) => getBranchHeadSha(repo, branch),
+    branchHeadCommit: getBranchHeadSha,
     modelingRunLastActivityAtMs,
     fetchWorkspaceFile,
     fetchRepoFile: (repo, branch, repoPath) =>
@@ -299,32 +294,12 @@ onOperationTerminal((op: any) => {
   }
 });
 
-function isShuttingDown(): boolean {
-  return radiusExtension.isShutDown();
-}
-
 // Prepare the `rad` binary once per extension load. This is the preferred place
 // to download/reconcile rad and run the `rad version --cli` check; doing it here
 // (fire-and-forget) keeps that work off the hot path of most graph builds.
 // If the warm-up has not finished yet (or no binary exists), the first graph
 // build may still await ensureRadBinary() as a fallback.
-ensureRadBinary({
-  log: (m) => {
-    try {
-      console.error(`[radius] ${m}`);
-    } catch {
-      /* ignore */
-    }
-  }
-}).catch((e) => {
-  try {
-    console.error(
-      `[radius] rad binary preparation failed (will retry on first use): ${errorMessage(e)}`
-    );
-  } catch {
-    /* ignore */
-  }
-});
+warmRadBinary(ensureRadBinary, console.error.bind(console));
 
 // The extension runs as a long-lived Node process that registers canvases/tools
 // with the host. Two failure modes were observed:
@@ -342,168 +317,42 @@ ensureRadBinary({
 // gracefully via radiusExtension.shutdown() — closing every canvas server and
 // leaving the session so the host can release the tool names before any
 // replacement process registers them.
-let gracefulShutdownStarted = false;
-
-async function gracefulShutdown(signal: string): Promise<void> {
-  if (gracefulShutdownStarted) return;
-  gracefulShutdownStarted = true;
-  await radiusExtension.shutdown(signal);
-  // Give async close callbacks a tick, then exit cleanly.
-  setTimeout(() => process.exit(0), 50);
-}
-
-for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-  try {
-    process.on(sig, () => {
-      gracefulShutdown(sig);
-    });
-  } catch {
-    /* signal may be unsupported on platform */
-  }
-}
-
-// Keep the process alive on otherwise-fatal async errors. Crashing here is what
-// triggers the respawn → "tool name clash" cascade, so we log and continue; the
-// single live registration stays valid and the user can retry the failed action.
-process.on("uncaughtException", (err) => {
-  try {
-    console.error(
-      `[radius] uncaughtException (ignored to stay alive): ${err?.stack || err}`
-    );
-  } catch {}
-});
-process.on("unhandledRejection", (reason) => {
-  try {
-    console.error(
-      `[radius] unhandledRejection (ignored to stay alive): ${
-        reason instanceof Error ?
-          reason.stack || reason.message
-        : String(reason)
-      }`
-    );
-  } catch {}
+const { gracefulShutdown, isShuttingDown } = configureProcessLifecycle({
+  extension: radiusExtension,
+  onSignal: (signal, handler) => {
+    process.on(signal as NodeJS.Signals, handler);
+  },
+  onUncaughtException: (handler) => {
+    process.on("uncaughtException", handler);
+  },
+  onUnhandledRejection: (handler) => {
+    process.on("unhandledRejection", handler);
+  },
+  setTimer: setTimeout,
+  exit: process.exit,
+  log: console.error.bind(console)
 });
 
-// ─── Dev self-reload (opt-in, off by default) ───────────────────────────────────
-// In development a fresh build can hot-reload without a manual restart: we watch
-// the installed extension.mjs and, when it changes, gracefully shut down so the
-// host respawns a fresh process with the new code. This uses the SAME safe
-// graceful-shutdown path as a host SIGTERM (close servers, leave the session) so
-// the host deregisters our tools/canvas cleanly.
-//
-// IMPORTANT: the installed extension.mjs is user-scoped and SHARED by every
-// session on this machine, so restarting the process reloads the extension in
-// ALL sessions — not just the one being edited. That makes auto-reload actively
-// harmful as a default: any `build --install` (from any session) would tear down
-// every other active session, which shows up as sessions "constantly stopping".
-//
-// So this is now OFF unless a developer explicitly opts in for the current
-// process with `RADIUS_CANVAS_DEV=1`. It is deliberately NOT armed by an
-// on-disk sentinel: a sentinel persists across installs and silently re-enables
-// the destructive behavior for everyone forever. With it off, new code is picked
-// up the normal, non-disruptive way — when a session next starts a fresh
-// process — rather than by killing running sessions. When explicitly enabled,
-// the quiesce logic below still defers the restart until the extension is idle.
-(function setupDevSelfReload() {
-  try {
-    const enabled = process.env.RADIUS_CANVAS_DEV === "1";
-    if (!enabled) return;
-    const extPath = process.env.EXTENSION_PATH || "";
-    if (!extPath || !existsSync(extPath)) return;
-    const extDir = dirname(extPath);
-    let lastSize = -1;
-    try {
-      lastSize = statSync(extPath).size;
-    } catch {}
-    let debounce: NodeJS.Timeout | null = null;
-    let triggered = false; // set once we commit to the actual restart
-    let reloadPending = false; // a deferral loop is already running
-    let reloadRequestedAt = 0; // when the pending reload was first requested
-
-    // Quiesce-before-reload tuning. A rebuild that overwrites the installed
-    // extension.mjs must NOT restart this process mid-flight — doing so
-    // deregisters our tools/canvas and leaves the host waiting on a
-    // vanished extension, which surfaces as "system unresponsive". So we
-    // defer the restart until the extension is idle:
-    //   • Never restart while a deploy is being monitored — the restart
-    //     would kill the in-process deploy monitor (no cap; a deploy is
-    //     worth waiting for).
-    //   • Defer while a canvas panel is ACTIVELY serving requests, up to a
-    //     cap. An idle-but-open panel only pings /api/ping every 5s, so a
-    //     window just under that cadence lets a merely-open panel reload
-    //     (brief reconnect) while genuine interaction bursts keep deferring.
-    const RELOAD_IDLE_WINDOW_MS = 4000; // "active" if a request was served within this
-    const RELOAD_DEFER_POLL_MS = 2000; // re-check cadence while deferring
-    const RELOAD_MAX_DEFER_MS = 60000; // cap deferral for panel activity (not deploys)
-
-    const reloadNow = () => {
-      if (triggered || isShuttingDown()) return;
-      triggered = true;
-      try {
-        console.error(
-          "[radius][dev] extension.mjs changed — restarting for hot reload…"
-        );
-      } catch {}
-      setTimeout(() => {
-        gracefulShutdown("DEV_RELOAD");
-      }, 250);
-    };
-    const maybeReload = () => {
-      if (triggered || isShuttingDown()) return;
-      let deploying = false;
-      try {
-        for (const [, entry] of servers) {
-          if (entry?.state?.deployStatus === "in_progress") {
-            deploying = true;
-            break;
-          }
-        }
-      } catch {}
-      const panelActive =
-        Date.now() - getLastWebviewActivityAt() < RELOAD_IDLE_WINDOW_MS;
-      const waited = Date.now() - reloadRequestedAt;
-      if (deploying || (panelActive && waited < RELOAD_MAX_DEFER_MS)) {
-        try {
-          console.error(
-            `[radius][dev] reload deferred (${deploying ? "deploy in flight" : "canvas panel active"}); retrying in ${RELOAD_DEFER_POLL_MS}ms…`
-          );
-        } catch {}
-        setTimeout(maybeReload, RELOAD_DEFER_POLL_MS);
-        return;
-      }
-      reloadNow();
-    };
-    const trigger = () => {
-      if (triggered || isShuttingDown()) return;
-      let size = lastSize;
-      try {
-        size = statSync(extPath).size;
-      } catch {}
-      if (size === lastSize) return;
-      lastSize = size;
-      // Coalesce a burst of rebuild writes into a single deferral loop; if
-      // one is already running it picks up the new state on its next poll.
-      if (reloadPending) return;
-      reloadPending = true;
-      reloadRequestedAt = Date.now();
-      maybeReload();
-    };
-    const watcher = fsWatch(extDir, { persistent: false }, (_evt, filename) => {
-      if (filename && filename !== "extension.mjs") return;
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(trigger, 300);
-    });
-    try {
-      watcher.unref?.();
-    } catch {}
-    try {
-      console.error(`[radius][dev] self-reload armed (watching ${extPath})`);
-    } catch {}
-  } catch (e) {
-    try {
-      console.error(
-        `[radius][dev] self-reload setup failed (ignored): ${errorMessage(e)}`
-      );
-    } catch {}
-  }
-})();
+setupDevSelfReload({
+  enabled: process.env.RADIUS_CANVAS_DEV === "1",
+  extensionPath: process.env.EXTENSION_PATH || "",
+  exists: existsSync,
+  fileSize: (path) => statSync(path).size,
+  watchDirectory: (path, listener) =>
+    fsWatch(path, { persistent: false }, (_event, filename) =>
+      listener(filename)
+    ),
+  isShuttingDown,
+  isDeploying: () => {
+    for (const [, entry] of servers) {
+      if (entry?.state?.deployStatus === "in_progress") return true;
+    }
+    return false;
+  },
+  getLastActivityAt: getLastWebviewActivityAt,
+  now: Date.now,
+  setTimer: setTimeout,
+  clearTimer: clearTimeout,
+  log: console.error.bind(console),
+  shutdown: gracefulShutdown
+});

@@ -607,6 +607,42 @@ test("pins keyring credential lookup to github.com", async () => {
   ]);
 });
 
+test.each([
+  { token: "", username: "octocat" },
+  { token: "token", username: "" }
+])(
+  "rejects an empty stored package credential",
+  async ({ token, username }) => {
+    await assert.rejects(
+      loadGhKeyringCredentials({
+        runKeyringCommand: async (args) =>
+          args[0] === "auth" ? token : username
+      }),
+      /stored GitHub CLI login/
+    );
+  }
+);
+
+test("withGhcrDockerConfig does not invoke the publish callback when credential loading fails", async () => {
+  let invoked = false;
+
+  await assert.rejects(
+    withGhcrDockerConfig(
+      async () => {
+        invoked = true;
+      },
+      {
+        loadCredentials: async () => {
+          throw new Error("credential unavailable");
+        }
+      }
+    ),
+    /credential unavailable/
+  );
+
+  assert.equal(invoked, false);
+});
+
 test("withGhcrDockerConfig hands rad a ghcr.io docker auth then removes it", async () => {
   const loadCredentials = async () => ({
     token: "ghp_secret",

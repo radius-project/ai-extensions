@@ -21,6 +21,8 @@ interface ScriptedResult {
   code?: number | string | null;
   stdout?: string;
   stderr?: string;
+  killed?: boolean;
+  signal?: NodeJS.Signals | null;
 }
 
 // `gh` isolates a real binary, so it stays a scripted fake that throws on any
@@ -49,7 +51,11 @@ function fakeCli(script: ScriptedResult[]): {
       const failed = "code" in next && next.code !== 0;
       callback(
         failed ?
-          Object.assign(new Error("gh failed"), { code: next.code ?? null })
+          Object.assign(new Error("gh failed"), {
+            code: next.code ?? null,
+            killed: next.killed,
+            signal: next.signal
+          })
         : null,
         next.stdout ?? "",
         next.stderr ?? ""
@@ -125,6 +131,51 @@ describe("the workflow-scope gh runner", () => {
     expect(calls).toEqual([["workflow", "run"]]);
   });
 
+  it("forwards natural command input and options through the pinned executor", async () => {
+    const calls: Array<{
+      args: string[];
+      options:
+        | {
+            timeout?: number;
+            env?: NodeJS.ProcessEnv;
+            stdin?: string;
+          }
+        | undefined;
+    }> = [];
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args, options) => {
+        calls.push({ args, options });
+        return { code: 0, stdout: "ok", stderr: "" };
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      target,
+      pinned
+    );
+
+    await runner.runGh(["api", "--input", "-"], "payload", {
+      timeout: 1250,
+      env: { GH_HOST: "github.example" }
+    });
+
+    expect(calls).toEqual([
+      {
+        args: ["api", "--input", "-"],
+        options: {
+          timeout: 1250,
+          env: { GH_HOST: "github.example" },
+          stdin: "payload"
+        }
+      }
+    ]);
+  });
+
   it("resolves the exit code, stdout and stderr of a failing command instead of rejecting", async () => {
     const { cliExec, calls } = fakeCli([
       { code: 3, stdout: "out", stderr: "boom" }
@@ -155,6 +206,47 @@ describe("the workflow-scope gh runner", () => {
     await expect(runner.runGh(["api", "/x"])).resolves.toMatchObject({
       code: 1
     });
+  });
+
+  it("reports a killed command as timed out", async () => {
+    const { cliExec } = fakeCli([
+      {
+        code: null,
+        stderr: "operation timed out",
+        killed: true,
+        signal: "SIGTERM"
+      }
+    ]);
+    const runner = createWorkflowScopeGhRunner(
+      { cliExec, readProcessEnv: () => ({}) },
+      target
+    );
+
+    await expect(runner.runGh(["api", "/slow"])).resolves.toMatchObject({
+      code: 1,
+      stderr: "operation timed out",
+      timedOut: true
+    });
+  });
+
+  it("handles supplied stdin when the child has no writable stdin", async () => {
+    const cliExec: CreateEnvironmentCliExec = (
+      _command,
+      _args,
+      _options,
+      callback
+    ) => {
+      queueMicrotask(() => callback(null, "ok", ""));
+      return {};
+    };
+    const runner = createWorkflowScopeGhRunner(
+      { cliExec, readProcessEnv: () => ({}) },
+      target
+    );
+
+    await expect(
+      runner.runGh(["api", "--input", "-"], "payload")
+    ).resolves.toMatchObject({ code: 0, stdout: "ok" });
   });
 
   describe("the selected GitHub executor test helper", () => {
@@ -285,6 +377,138 @@ describe("the workflow-scope gh runner", () => {
       }
     );
     expect(writes).toBe(0);
+    expect(operation.providerRecovery.mutations).toEqual([]);
+  });
+
+  it("requires an authorized immutable environment identity before writing", async () => {
+    const operation = createOperation({ operationId: "op_missing_identity" });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("GitHub must not run without an immutable identity");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        targetRepo: target.targetRepo,
+        envName: target.envName,
+        mutationRecovery: mutationRecovery(operation)
+      }
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      'GitHub did not report an immutable id for environment "dev"'
+    );
+    expect(operation.providerRecovery.mutations).toEqual([]);
+  });
+
+  it.each([
+    ["a JSON string", JSON.stringify("env-1")],
+    ["null JSON", "null"],
+    ["a JSON array", JSON.stringify([{ id: "env-1" }])],
+    ["an object without an id", JSON.stringify({ name: "dev" })],
+    ["a blank id", JSON.stringify({ id: "  " })]
+  ])(
+    "rejects %s as a malformed environment identity response",
+    async (_label, stdout) => {
+      const operation = createOperation({
+        operationId: `op_malformed_identity_${_label.replace(/\s+/g, "_")}`
+      });
+      const pinned = successfulSelectedGhExecutor({
+        run: async () => ({ code: 0, stdout, stderr: "" })
+      });
+      const runner = createWorkflowScopeGhRunner(
+        {
+          cliExec: () => {
+            throw new Error("ambient cli path must not run");
+          },
+          readProcessEnv: () => ({})
+        },
+        {
+          ...target,
+          mutationRecovery: mutationRecovery(operation)
+        },
+        pinned
+      );
+
+      await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+        "Radius did not write the variable"
+      );
+      expect(operation.providerRecovery.mutations).toEqual([]);
+    }
+  );
+
+  it.each([
+    ["a numeric id", JSON.stringify({ id: 42 }), "42"],
+    ["a node id", JSON.stringify({ node_id: " ENV_node " }), "ENV_node"]
+  ])(
+    "accepts %s from the environment identity response",
+    async (_label, stdout, environmentProviderId) => {
+      const operation = createOperation({
+        operationId: `op_identity_${environmentProviderId}`
+      });
+      const pinned = successfulSelectedGhExecutor({
+        run: async (args) => {
+          if (
+            args[0] === "api" &&
+            args[1] === "/repos/octo/app/environments/dev"
+          ) {
+            return { code: 0, stdout, stderr: "" };
+          }
+          if (args[0] === "api") {
+            return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+          }
+          return { code: 0, stdout: "", stderr: "" };
+        }
+      });
+      const runner = createWorkflowScopeGhRunner(
+        {
+          cliExec: () => {
+            throw new Error("ambient cli path must not run");
+          },
+          readProcessEnv: () => ({})
+        },
+        {
+          ...target,
+          environmentProviderId,
+          mutationRecovery: mutationRecovery(operation)
+        },
+        pinned
+      );
+
+      await expect(runner.setEnvironmentVariable("A", "1")).resolves.toBe(true);
+    }
+  );
+
+  it.each([
+    ["stdout detail", { code: 1, stdout: "HTTP 403: forbidden", stderr: "" }],
+    ["fallback detail", { code: 1, stdout: "", stderr: "" }]
+  ])("surfaces authorization failure using %s", async (_label, result) => {
+    const operation = createOperation({
+      operationId: `op_authorization_${_label.replace(/\s+/g, "_")}`
+    });
+    const pinned = successfulSelectedGhExecutor({
+      run: async () => result
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      _label === "stdout detail" ?
+        "HTTP 403: forbidden"
+      : "GitHub environment identity could not be read"
+    );
     expect(operation.providerRecovery.mutations).toEqual([]);
   });
 
