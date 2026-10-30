@@ -50,6 +50,7 @@ export {
 import {
   extractRecipeDefinition,
   parseAzureRecipePackPin,
+  parseResourceTypeCommit,
   validateAzureRecipePack
 } from "./radius-recipe-pack.mjs";
 
@@ -839,7 +840,7 @@ async function loadCachedText(
 }
 
 async function loadManagedAzureRecipePack(releaseCommit, options) {
-  const { validationResult: pin } = await loadCachedText(
+  const { text: defaults, validationResult: pin } = await loadCachedText(
     `${MANAGED_RECIPES_CACHE_PATH}/defaults.json`,
     releaseCommit,
     `${GENERATED_ROOT}/${releaseCommit}/${RADIUS_DEFAULTS_PATH}`,
@@ -858,6 +859,7 @@ async function loadManagedAzureRecipePack(releaseCommit, options) {
     repository: pin.repository,
     commit: pin.commit,
     path: pin.path,
+    defaults,
     source
   };
 }
@@ -980,7 +982,11 @@ export async function resolveRadiusTypes(selectors, options = {}) {
                   packDefinition: pack.source,
                   implementation: await resolveRecipeImplementation(
                     definition,
-                    options
+                    {
+                      ...options,
+                      resolveKubeRecipeCommit: () =>
+                        parseResourceTypeCommit(pack.defaults, resource.type)
+                    }
                   )
                 };
           } catch (error) {

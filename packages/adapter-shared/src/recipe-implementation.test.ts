@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveRecipeImplementation } from "./recipe-implementation.js";
 
-const source = "ghcr.io/radius-project/kube-recipes/rabbitmq:latest";
+const commit = "0123456789abcdef0123456789abcdef01234567";
+const source = `ghcr.io/radius-project/kube-recipes/rabbitmq:${commit}`;
 const avm =
   "mcr.microsoft.com/bicep/avm/res/db-for-postgre-sql/flexible-server:0.15.2";
 const template = {
@@ -47,6 +48,101 @@ afterEach(() => {
 });
 
 describe("resolveRecipeImplementation", () => {
+  it("selects the namespace commit before fetching latest and returns both sources", async () => {
+    const { fetchImpl } = fixture();
+    const latest = source.replace(commit, "latest");
+    const resolveKubeRecipeCommit = vi.fn(() => commit);
+    expect(
+      await resolveRecipeImplementation(registration(latest), {
+        fetchImpl,
+        resolveKubeRecipeCommit
+      })
+    ).toMatchObject({
+      status: "available",
+      source: latest,
+      selectedSource: source
+    });
+    expect(resolveKubeRecipeCommit).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toContain(
+      `https://ghcr.io/v2/radius-project/kube-recipes/rabbitmq/manifests/${commit}`
+    );
+    expect(
+      fetchImpl.mock.calls.some(([url]) => String(url).includes("latest"))
+    ).toBe(false);
+  });
+
+  it.each([
+    undefined,
+    "",
+    "latest",
+    "a".repeat(39),
+    "a".repeat(41),
+    "A".repeat(40)
+  ])(
+    "does not fetch latest when the namespace commit is invalid (%s)",
+    async (pin) => {
+      const { fetchImpl } = fixture();
+      expect(
+        await resolveRecipeImplementation(
+          registration(source.replace(commit, "latest")),
+          {
+            fetchImpl,
+            ...(pin === undefined ? {} : { resolveKubeRecipeCommit: () => pin })
+          }
+        )
+      ).toMatchObject({
+        status: "unavailable",
+        message: expect.stringContaining("namespace's release-pinned commit")
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  );
+
+  it("reports missing release evidence without requesting registry artifacts", async () => {
+    const { fetchImpl } = fixture();
+    expect(
+      await resolveRecipeImplementation(
+        registration(source.replace(commit, "latest")),
+        {
+          fetchImpl,
+          resolveKubeRecipeCommit: () => {
+            throw new Error(
+              "Recipe release defaults have no matching namespace."
+            );
+          }
+        }
+      )
+    ).toMatchObject({
+      status: "unavailable",
+      message: expect.stringContaining("no matching namespace")
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([avm, source, source.replace(commit, "1.2.3")])(
+    "preserves explicitly versioned references (%s)",
+    async (reference) => {
+      const { fetchImpl } = fixture();
+      const resolveKubeRecipeCommit = vi.fn(() => {
+        throw new Error("Must not select a namespace pin.");
+      });
+      expect(
+        await resolveRecipeImplementation(registration(reference), {
+          fetchImpl,
+          resolveKubeRecipeCommit
+        })
+      ).toMatchObject({
+        status: "available",
+        source: reference,
+        selectedSource: reference
+      });
+      expect(resolveKubeRecipeCommit).not.toHaveBeenCalled();
+      expect(fetchImpl.mock.calls.map(([url]) => String(url))).toContain(
+        `https://${reference.split("/")[0]}/v2/${reference.slice(reference.indexOf("/") + 1).replace(":", "/manifests/")}`
+      );
+    }
+  );
+
   it("retrieves behavior rather than treating an OCI registration as implementation evidence", async () => {
     const { fetchImpl, manifest, layer } = fixture();
     const result = await resolveRecipeImplementation(registration(), {
@@ -55,6 +151,7 @@ describe("resolveRecipeImplementation", () => {
     expect(result).toEqual({
       status: "available",
       source,
+      selectedSource: source,
       resolvedSource: `${source.split(":")[0]}@${sha(JSON.stringify(manifest))}`,
       sourceIsDigest: false,
       manifestDigest: sha(JSON.stringify(manifest)),

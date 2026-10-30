@@ -1133,7 +1133,12 @@ describe("network and cache behavior", () => {
     const options = {
       ...managedIdentityOptions(),
       cacheRoot,
-      fetchImpl: fixtureFetch(calls)
+      fetchImpl: fixtureFetch(calls, {
+        defaults: fixtureDefaults.replace(
+          "recipePacks:",
+          `  - name: Radius.Compute\n    ref: ${"b".repeat(40)}\nrecipePacks:`
+        )
+      })
     };
     const contract = await resolver.resolveRadiusTypes(
       ["Radius.Compute/containers", "Radius.Core/applications"],
@@ -1218,7 +1223,13 @@ describe("network and cache behavior", () => {
 
   it("returns OCI implementation evidence separately from missing registration and unavailable implementation", async () => {
     const calls: string[] = [];
-    const sourceFetch = fixtureFetch(calls);
+    const namespaceCommit = "b".repeat(40);
+    const defaults = fixtureDefaults.replace(
+      "recipePacks:",
+      `  - name: Radius.Compute\n    ref: ${namespaceCommit}\nrecipePacks:`
+    );
+    const sourceFetch = fixtureFetch(calls, { defaults });
+    const artifactCalls: string[] = [];
     const template = {
       $schema:
         "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
@@ -1259,11 +1270,12 @@ describe("network and cache behavior", () => {
         ...managedIdentityOptions(),
         cacheRoot: temporaryDirectory(),
         fetchImpl: async (url: string) => {
+          artifactCalls.push(url);
           if (url.startsWith("https://ghcr.io/token?"))
             return Response.json({ token: "anonymous-fixture" });
           if (
             url ===
-            "https://ghcr.io/v2/radius-project/kube-recipes/containerimages/manifests/latest"
+            `https://ghcr.io/v2/radius-project/kube-recipes/containerimages/manifests/${namespaceCommit}`
           )
             return new Response(manifest);
           if (
@@ -1282,6 +1294,7 @@ describe("network and cache behavior", () => {
       implementation: {
         status: "available",
         source: "ghcr.io/radius-project/kube-recipes/containerimages:latest",
+        selectedSource: `ghcr.io/radius-project/kube-recipes/containerimages:${namespaceCommit}`,
         resolvedSource: `ghcr.io/radius-project/kube-recipes/containerimages@${manifestDigest}`,
         sourceIsDigest: false,
         manifestDigest,
@@ -1299,6 +1312,39 @@ describe("network and cache behavior", () => {
       }
     });
     expect(contract.notFound).toEqual([]);
+    expect(artifactCalls).toContain(
+      `https://ghcr.io/v2/radius-project/kube-recipes/containerimages/manifests/${namespaceCommit}`
+    );
+    expect(artifactCalls.some((url) => url.endsWith("/manifests/latest"))).toBe(
+      false
+    );
+    expect(artifactCalls).not.toContain(
+      `https://ghcr.io/v2/radius-project/kube-recipes/containerimages/manifests/${resourceTypesContribCommit}`
+    );
+    expect(artifactCalls).toContain(avmManifestUrl);
+  });
+
+  it("keeps registration but refuses implementation when a latest Recipe has no namespace pin", async () => {
+    const calls: string[] = [];
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Compute/containerImages"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot: temporaryDirectory(),
+        fetchImpl: fixtureFetch(calls)
+      }
+    );
+    expect(contract.resources[0].recipe).toMatchObject({
+      status: "available",
+      definition: expect.stringContaining("containerimages:latest"),
+      implementation: {
+        status: "unavailable",
+        message: expect.stringContaining(
+          'resourceTypes entry for "Radius.Compute"'
+        )
+      }
+    });
+    expect(calls.some((url) => url.includes("ghcr.io"))).toBe(false);
   });
 
   it("returns an all-missing batch without loading Recipe data", async () => {

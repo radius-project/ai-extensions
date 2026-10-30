@@ -11,6 +11,7 @@ export type RecipeImplementation =
   | {
       status: "available";
       source: string;
+      selectedSource: string;
       resolvedSource: string;
       sourceIsDigest: boolean;
       manifestDigest: string;
@@ -21,6 +22,7 @@ export type RecipeImplementation =
   | { status: "unavailable"; message: string };
 
 interface Options {
+  resolveKubeRecipeCommit?: () => string;
   fetchImpl?: typeof fetch;
   fetchTimeoutMs?: number;
   maxResponseBytes?: number;
@@ -170,11 +172,25 @@ export async function resolveRecipeImplementation(
         source
       );
     const repository = match?.[1];
-    const reference = match?.[2] ?? match?.[3];
+    let reference = match?.[2] ?? match?.[3];
     if (!match || repository === undefined || reference === undefined)
       throw new Error(
         "Recipe source is not a supported public Radius or AVM OCI reference."
       );
+    if (
+      repository.startsWith("ghcr.io/radius-project/kube-recipes/") &&
+      reference === "latest"
+    ) {
+      const commit = options.resolveKubeRecipeCommit?.();
+      if (commit === undefined || !/^[0-9a-f]{40}$/u.test(commit)) {
+        throw new Error(
+          "Recipe latest reference requires its namespace's release-pinned commit."
+        );
+      }
+      reference = commit;
+    }
+    const selectedSource =
+      match[3] === undefined ? `${repository}:${reference}` : source;
     const separator = repository.indexOf("/");
     const host = repository.slice(0, separator);
     const name = repository.slice(separator + 1);
@@ -274,6 +290,7 @@ export async function resolveRecipeImplementation(
     return {
       status: "available",
       source,
+      selectedSource,
       resolvedSource: `${repository}@${manifestDigest}`,
       sourceIsDigest: match[3] !== undefined,
       manifestDigest,
