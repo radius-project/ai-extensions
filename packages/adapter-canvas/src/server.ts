@@ -320,7 +320,6 @@ import {
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
-import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
 import { createAzureSetupService } from "./server/services/azure-setup.js";
 import {
   createConfigureEnvironmentService,
@@ -347,7 +346,6 @@ import {
   graphRepairHandoffMessage,
   type GraphRepairRequest
 } from "./graph-model-repair.js";
-import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
 import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import type { EnvironmentAccountContext } from "./runtime/environment-account-context.js";
@@ -6055,15 +6053,6 @@ export function createProductionCanvasServerRuntime(
     stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY
   });
   const authorizeAzure = createAzureSetupService(azureSetupDependencies);
-  const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
-    {
-      ...azureSetupDependencies,
-      isServerOwnedRequest: (instanceId, request) =>
-        instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-        false
-    },
-    authorizeAzure
-  );
 
   const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
@@ -6224,8 +6213,7 @@ export function createProductionCanvasServerRuntime(
     workflows: graphPlanningWorkflows
   });
 
-  // route, `POST /api/create-environment`, is large enough to own a separate
-  // composition root below. Every seam is a narrow named function: the two subprocess
+  // Every seam is a narrow named function: the two subprocess
   // runners (`cliExec`, `runCommand`), the repo-file fetch and bicep param parse
   // for `app-params`, the app-name and active-deployment resolvers plus the
   // error logger for `delete-environment`, three narrow accessors over the
@@ -6346,13 +6334,7 @@ export function createProductionCanvasServerRuntime(
     stageVerify: STAGE_VERIFY
   });
 
-  // Composition root for `POST /api/create-environment`. The route's four seams
-  // live in `create-environment*.ts`; everything they touch is injected here, so
-  // the module spawns no process directly, imports no `node:fs`, and reads no
-  // module-level mutable state. `isServerOwnedRequest` is deliberately a
-  // per-request function rather than a value: the token is a per-instance
-  // `randomUUID()` held by that instance's request coordinator, and this route is
-  // used only by the retained HTTP adapter, not by the setup services.
+  // Direct environment setup retains the concrete adapters without an HTTP wrapper.
   const configureEnvironmentDependencies: ConfigureEnvironmentDependencies = {
     ghCommandPresentation: GH_COMMAND_PRESENTATION,
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
@@ -6493,15 +6475,6 @@ export function createProductionCanvasServerRuntime(
     configureEnvironment: (data, instanceId) =>
       configureEnvironment({ data }, instanceId)
   };
-  const createEnvironmentRoutes = createCreateEnvironmentRoutes(
-    {
-      ...configureEnvironmentDependencies,
-      isServerOwnedRequest: (instanceId, request) =>
-        instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
-        false
-    },
-    configureEnvironment
-  );
 
   // Built once per runtime so validation fails before opening any server.
   const serverRoutes = createServerRouteTable({
@@ -6511,15 +6484,13 @@ export function createProductionCanvasServerRuntime(
     ...repositoriesRoutes,
     ...deploymentsRoutes,
     ...azureDiscoveryRoutes,
-    ...azureAutoSetupRoutes,
     ...identityProfilesRoutes,
     ...identityAuthRoutes,
     ...remediationRoutes,
     ...graphsPlanningRoutes,
     ...graphsPlanningStreamRoutes,
     ...graphsPlanningWritesRoutes,
-    ...environmentsRoutes,
-    ...createEnvironmentRoutes
+    ...environmentsRoutes
   });
 
   // Coordinators retain transport and provider behavior. Task/claim storage lives

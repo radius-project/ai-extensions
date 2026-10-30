@@ -1,11 +1,10 @@
-import type { IncomingMessage } from "node:http";
 import type { ProviderMutationRecord } from "../../operations.js";
 import type {
   SetupOperationSnapshot,
   SetupStartResult
 } from "@radius-project/core";
 
-// Type surface for the `POST /api/create-environment` slice. Declarations only —
+// Type surface for environment configuration. Declarations only —
 // erased at compile time — so the four behavioral seams (refusal ladder, gh
 // runner, workflow committer, use case) each stay well under the decomposition
 // review line budget. Nothing here carries behavior.
@@ -128,14 +127,6 @@ export type OperationStartResult = SetupStartResult;
 export interface CreateEnvironmentRefusal {
   status: number;
   body: Record<string, unknown>;
-}
-
-// The request-scoped inputs. `isServerOwned` is deliberately a per-request value
-// rather than a construction-time dependency: the token is a per-instance
-// `randomUUID()` compared against this request's header.
-export interface CreateEnvironmentRequestInput {
-  isServerOwned: boolean;
-  request: IncomingMessage;
 }
 
 export interface GhcrPreflightFailure {

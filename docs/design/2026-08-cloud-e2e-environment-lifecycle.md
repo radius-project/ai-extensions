@@ -336,13 +336,13 @@ Keeping GitHub's default OIDC subject means the product creates the immutable re
 
 #### What the product writes into the GitHub Environment
 
-Stage one asserts these, so they are recorded here rather than rediscovered per layer. [`applyProviderConfiguration()`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-publisher.ts) writes seven values from the Azure environment form: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_AKS_CLUSTER_NAME`, `AZURE_LOCATION`, and `KUBERNETES_NAMESPACE`.
+Stage one asserts these, so they are recorded here rather than rediscovered per layer. [`applySetupProviderConfiguration()`](../../packages/core/src/setup-provider-configuration.ts) writes the Azure environment form values: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_AKS_CLUSTER_NAME`, `AZURE_AKS_RESOURCE_GROUP`, `AZURE_LOCATION`, and `KUBERNETES_NAMESPACE`.
 
-The lifecycle asserts six of those seven and deliberately not `AZURE_LOCATION`. The product writes it, but the deployment workflows do not consume it, and `AIEXT_CLOUD_E2E_AZURE_LOCATION` already validates the shared cluster's region before the journey starts. Not asserting a value is different from the product not writing it, so both facts are stated here.
+The lifecycle asserts seven of those eight and deliberately not `AZURE_LOCATION`. The product writes it, but the deployment workflows do not consume it, and `AIEXT_CLOUD_E2E_AZURE_LOCATION` already validates the shared cluster's region before the journey starts. Not asserting a value is different from the product not writing it, so both facts are stated here.
 
 The cluster variable is `AZURE_AKS_CLUSTER_NAME`, not `AKS_CLUSTER_NAME`. The shorter name is an easy assumption to write and a live run is the only thing that would catch it, which is precisely the feedback this tier is slowest to give.
 
-Those seven are not the whole set, and the omission matters beyond bookkeeping. [`handleCreateEnvironment()`](../../packages/adapter-canvas/src/server/routes/create-environment.ts) writes four more unconditionally — `RADIUS_MANAGED`, `RADIUS_STATE_BACKEND`, `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE` — plus `RADIUS_CREDENTIAL_PROFILE` when the environment was created from a named profile. The three `RADIUS_STATE_*` values form one backend contract and are written in a single mutation attempt for that reason: a backend selected without the registry and archive needed to read it is a broken environment, not a partially configured one.
+Those eight are not the whole set, and the omission matters beyond bookkeeping. [`configureSetupEnvironment()`](../../packages/core/src/setup-environment.ts) writes four more unconditionally — `RADIUS_MANAGED`, `RADIUS_STATE_BACKEND`, `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE` — plus `RADIUS_CREDENTIAL_PROFILE` when the environment was created from a named profile. The three `RADIUS_STATE_*` values form one backend contract and are written in a single mutation attempt for that reason: a backend selected without the registry and archive needed to read it is a broken environment, not a partially configured one.
 
 ### API design (if applicable)
 

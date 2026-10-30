@@ -67,15 +67,14 @@ export function setupHandlerFailure(
       message: errorMessage(error)
     });
   } catch {
-    // The HTTP failure boundary settles its public response even if reporting
-    // fails. Direct calls must retain that same public failure.
+    // Retain the public failure even when diagnostic reporting fails.
   }
   return {
     kind: "failed",
     status: 500,
     body: {
       error:
-        "Setup could not finish reporting its outcome. Inspect the operation before retrying.",
+        "Setup could not finish reporting its outcome. In the Environments panel, open Show details and select Download diagnostic snapshot to review the recorded status before deciding whether to retry.",
       code
     }
   };
