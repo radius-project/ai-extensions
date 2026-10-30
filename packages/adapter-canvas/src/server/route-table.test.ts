@@ -16,6 +16,7 @@ import { createOperationsStatusRoutes } from "./routes/operations-status.js";
 import { createOperationsControlRoutes } from "./routes/operations-control.js";
 import { createRepositoriesRoutes } from "./routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
+import { createAwsDiscoveryRoutes } from "./routes/aws-discovery.js";
 import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
@@ -166,6 +167,7 @@ const productionHandlers = {
     }),
     parseServedReposFromSubjects: () => []
   }),
+  ...createAwsDiscoveryRoutes({ runCli: () => Promise.resolve("") }),
   ...createAzureAutoSetupRoutes(createAzureAutoSetupTestDependencies()),
   ...createIdentityProfilesRoutes({
     listCredentialProfiles: () => [],

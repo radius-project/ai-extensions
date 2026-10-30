@@ -476,11 +476,15 @@ describe("azure-discovery routes (SU-08)", () => {
         azureDiscoveryContract({ cluster: "c", resourceGroup: "rg" })
           .namespaces!
       ),
-      eks: "aws eks list-clusters --query clusters --output json",
-      vpcs: "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json",
-      subnets:
-        "aws ec2 describe-subnets --query Subnets[].{id:SubnetId, name:SubnetId} --output json"
+      eks: "aws eks list-clusters --query clusters --region us-west-2 --output json",
+      describe: (name: string) =>
+        `aws eks describe-cluster --name ${name} --region us-west-2 --output json`,
+      vpcs: "aws ec2 describe-vpcs --region us-west-2 --output json",
+      subnets: "aws ec2 describe-subnets --region us-west-2 --output json",
+      routeTables:
+        "aws ec2 describe-route-tables --region us-west-2 --output json"
     };
+    const AWS_BODY = { provider: "aws", region: "us-west-2" };
 
     interface CliCall {
       line: string;
@@ -548,25 +552,22 @@ describe("azure-discovery routes (SU-08)", () => {
       }
     });
 
-    it("lets a scalar body fall through to the aws arm instead of refusing", async () => {
+    it("lets a scalar body fall through to the aws arm, which refuses its missing region", async () => {
       // Only `null` and `undefined` throw on a property read: reading
       // `.subscriptionId` off a number or a string boxes the primitive and
       // yields `undefined`, so the request proceeds as a provider-less
-      // discovery. Pinned because it looks like it should share the `null`
-      // refusal and does not.
+      // discovery. The aws arm then refuses it for lacking a region, before
+      // any CLI call (`runCli` stays unstubbed).
       for (const body of ["42", '"a string"']) {
-        const cli = cliFake({
-          [CLI.eks]: "[]",
-          [CLI.vpcs]: "[]",
-          [CLI.subnets]: "[]"
-        });
-        const recording = await discover(body, { runCli: cli.runCli });
+        const recording = await discover(body);
 
         expect(recording.status, body).toBe(200);
         expect(JSON.parse(recording.body), body).toEqual({
+          error:
+            'Invalid AWS region "". Select a credential profile with a region such as us-west-2.',
           clusters: [],
           resourceGroups: [],
-          namespaces: NS_TRIPLE,
+          namespaces: [],
           vpcs: [],
           subnets: []
         });
@@ -868,33 +869,97 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(Object.keys(parsed.errors)).toEqual(["clusters"]);
     });
 
-    it("takes the aws arm for every provider other than azure", async () => {
+    it("delegates every provider other than azure to the region-scoped aws discovery", async () => {
       for (const provider of [undefined, "aws", "AZURE", ""]) {
         const cli = cliFake({
-          [CLI.eks]: '["eks-1", 7, null]',
-          [CLI.vpcs]: JSON.stringify([{ id: "vpc-1", name: "vpc-1" }]),
-          [CLI.subnets]: JSON.stringify([{ id: "sn-1", name: "sn-1" }])
+          [CLI.eks]: '["eks-1", 7, null, "eks-2"]',
+          [CLI.describe("eks-1")]: JSON.stringify({
+            cluster: {
+              resourcesVpcConfig: { vpcId: "vpc-1" },
+              accessConfig: { authenticationMode: "API" }
+            }
+          }),
+          [CLI.describe("eks-2")]: JSON.stringify({
+            cluster: { resourcesVpcConfig: { vpcId: "vpc-1" } }
+          }),
+          [CLI.vpcs]: JSON.stringify({ Vpcs: [{ VpcId: "vpc-1" }] }),
+          [CLI.subnets]: JSON.stringify({
+            Subnets: [
+              {
+                SubnetId: "sn-1",
+                VpcId: "vpc-1",
+                AvailabilityZone: "us-west-2a"
+              }
+            ]
+          }),
+          [CLI.routeTables]: JSON.stringify({ RouteTables: [] })
         });
-        const recording = await discover(JSON.stringify({ provider }), {
-          runCli: cli.runCli
-        });
+        const recording = await discover(
+          JSON.stringify({ provider, region: "us-west-2" }),
+          { runCli: cli.runCli }
+        );
 
         expect(recording.status, String(provider)).toBe(200);
-        // EKS returns bare cluster names, so non-strings are filtered out
-        // rather than projected through `discoveryItems`.
+        // EKS returns bare cluster names, so non-strings are filtered out, and
+        // a cluster with no access config defaults to CONFIG_MAP, which cannot
+        // take an access entry.
         expect(JSON.parse(recording.body), String(provider)).toEqual({
-          clusters: [{ id: "eks-1", name: "eks-1" }],
+          clusters: [
+            {
+              id: "eks-1",
+              name: "eks-1",
+              vpcId: "vpc-1",
+              authenticationMode: "API",
+              usable: true
+            },
+            {
+              id: "eks-2",
+              name: "eks-2",
+              vpcId: "vpc-1",
+              authenticationMode: "CONFIG_MAP",
+              usable: false
+            }
+          ],
           resourceGroups: [],
           namespaces: NS_TRIPLE,
-          vpcs: [{ id: "vpc-1", name: "vpc-1", resourceGroup: "" }],
-          subnets: [{ id: "sn-1", name: "sn-1", resourceGroup: "" }]
+          vpcs: [{ id: "vpc-1", name: "vpc-1" }],
+          subnets: [
+            {
+              id: "sn-1",
+              name: "",
+              vpcId: "vpc-1",
+              availabilityZone: "us-west-2a",
+              public: false
+            }
+          ]
         });
         expect(cli.calls, String(provider)).toEqual([
-          { line: CLI.eks, timeout: 15000 },
-          { line: CLI.vpcs, timeout: 15000 },
-          { line: CLI.subnets, timeout: 15000 }
+          { line: CLI.eks, timeout: 20000 },
+          { line: CLI.describe("eks-1"), timeout: 20000 },
+          { line: CLI.describe("eks-2"), timeout: 20000 },
+          { line: CLI.vpcs, timeout: 20000 },
+          { line: CLI.subnets, timeout: 20000 },
+          { line: CLI.routeTables, timeout: 20000 }
         ]);
       }
+    });
+
+    it("refuses an aws discovery with an invalid region before any cli call", async () => {
+      // `runCli` stays unstubbed: the region is passed to argv, so a malformed
+      // one must never reach a spawn.
+      const recording = await discover(
+        JSON.stringify({ provider: "aws", region: "us-west-2 --profile x" })
+      );
+
+      expect(JSON.parse(recording.body)).toEqual({
+        error:
+          'Invalid AWS region "us-west-2 --profile x". Select a credential profile with a region such as us-west-2.',
+        clusters: [],
+        resourceGroups: [],
+        namespaces: [],
+        vpcs: [],
+        subnets: []
+      });
     });
 
     it("still refuses a bad subscriptionId on the aws arm", async () => {
@@ -915,9 +980,10 @@ describe("azure-discovery routes (SU-08)", () => {
       const cli = cliFake({
         [CLI.eks]: { throws: new Error("eks denied") },
         [CLI.vpcs]: { throws: new Error("vpcs denied") },
-        [CLI.subnets]: { throws: new Error("subnets denied") }
+        [CLI.subnets]: { throws: new Error("subnets denied") },
+        [CLI.routeTables]: JSON.stringify({ RouteTables: [] })
       });
-      const recording = await discover(JSON.stringify({ provider: "aws" }), {
+      const recording = await discover(JSON.stringify(AWS_BODY), {
         runCli: cli.runCli
       });
 
@@ -956,24 +1022,26 @@ describe("azure-discovery routes (SU-08)", () => {
 
       const aws = cliFake({
         [CLI.eks]: "[]",
-        [CLI.vpcs]: "[]",
-        [CLI.subnets]: { throws: new Error("subnets denied") }
+        [CLI.vpcs]: "{}",
+        [CLI.subnets]: "{}",
+        [CLI.routeTables]: { throws: new Error("route tables denied") }
       });
-      const awsRecording = await discover(JSON.stringify({ provider: "aws" }), {
+      const awsRecording = await discover(JSON.stringify(AWS_BODY), {
         runCli: aws.runCli
       });
       expect(
         (JSON.parse(awsRecording.body) as { errors: unknown }).errors
-      ).toEqual({ subnets: "subnets denied" });
+      ).toEqual({ subnets: "route tables denied" });
     });
 
     it("keeps a non-array eks payload as an empty cluster list with no error", async () => {
       const cli = cliFake({
         [CLI.eks]: '{"clusters":[]}',
         [CLI.vpcs]: "[]",
-        [CLI.subnets]: "[]"
+        [CLI.subnets]: "[]",
+        [CLI.routeTables]: "[]"
       });
-      const recording = await discover(JSON.stringify({ provider: "aws" }), {
+      const recording = await discover(JSON.stringify(AWS_BODY), {
         runCli: cli.runCli
       });
 
