@@ -8,6 +8,7 @@ import {
 import { Handle, Position } from "@xyflow/react";
 import type { CSSProperties, ReactElement, ReactNode, MouseEvent } from "react";
 import type { Node, NodeProps } from "@xyflow/react";
+import { consoleNameForUrl } from "@radius-project/core/domain";
 import { isLocalSourceNode } from "./build.js";
 import { safeExternalUrl } from "./external-url.js";
 import { browserCssMaskUrl } from "./html.js";
@@ -40,6 +41,16 @@ export function fitTypeLabel(element: MeasuredElement): number {
     element.style.fontSize = size + "px";
   }
   return size;
+}
+
+/**
+ * The accessible name of a deployed card's console link, named from where the
+ * link goes. Anything other than the AWS console keeps the Azure Portal copy.
+ */
+export function portalLinkLabel(name: string, url: string): string {
+  return consoleNameForUrl(url) === "AWS console" ?
+      `Open ${name} in AWS console`
+    : `Open ${name} in Azure Portal`;
 }
 
 export type ResourceFlowNode = Node<GraphNodeData, "rad">;
@@ -195,7 +206,7 @@ export function ResourceNode({
           href: portalUrl,
           target: "_blank",
           rel: "noopener noreferrer",
-          "aria-label": `Open ${data.nodeName} in Azure Portal`,
+          "aria-label": portalLinkLabel(data.nodeName, portalUrl),
           onClick: (event: MouseEvent) => event.stopPropagation()
         },
         head,
