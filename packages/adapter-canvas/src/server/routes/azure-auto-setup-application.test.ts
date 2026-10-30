@@ -117,6 +117,7 @@ function harness(
       throw new Error(`unscripted az call: ${args.join(" ")}`);
     });
   const workflow: AzureAutoSetupWorkflow = {
+    isStopped: () => false,
     operation,
     steps: [],
     respond: (status, payload) => responses.push({ status, payload }),

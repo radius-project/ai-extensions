@@ -16,6 +16,207 @@ import type { VerificationRetryOperation } from "./verification-retry.js";
 const NOW = Date.parse("2026-08-25T00:00:00Z");
 const TRACKING_WINDOW_MS = 45 * 60 * 1000;
 
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+describe("verification retry runtime shutdown", () => {
+  it.each(["baseline", "rejection"] as const)(
+    "holds the selected executor until late %s authorization settles",
+    async (phase) => {
+      const op = operation();
+      const entered = deferred();
+      const gate = deferred();
+      let stopped = false;
+      const dependencies = runnerDependencies({
+        isStopped: () => stopped,
+        run: async (args) => ({
+          code: phase === "baseline" || args[0] === "workflow" ? 1 : 0,
+          stdout: "[]",
+          stderr: "HTTP 403"
+        }),
+        selectedCommandAuthorizationError: async () => {
+          entered.resolve();
+          await gate.promise;
+          throw new SelectedGhAuthorizationError("alice", 403, "late denial");
+        }
+      });
+      const pending = runVerificationRetry(op, "retry", dependencies);
+      try {
+        await entered.promise;
+        stopped = true;
+        expect(dependencies.journal.unregistered).toEqual([]);
+      } finally {
+        gate.resolve();
+        await pending;
+      }
+      expect(dependencies.journal.monitored).toEqual([]);
+      expect(dependencies.journal.unregistered).toEqual([op.operationId]);
+      expect(op.endedAt).toBeNull();
+      expect(
+        dependencies.journal.commands.every(
+          (entry) => entry.state !== "finished"
+        )
+      ).toBe(true);
+    }
+  );
+  it("refuses a second command target after the first command left an unknown dispatch", async () => {
+    const op = operation();
+    let stopped = false;
+    const dependencies = runnerDependencies({
+      isStopped: () => stopped,
+      run: async (args) => {
+        if (args[0] === "run") return { code: 0, stdout: "[]", stderr: "" };
+        stopped = true;
+        return { code: 1, stdout: "", stderr: "timeout", timedOut: true };
+      }
+    });
+    await runVerificationRetry(op, "first-command", dependencies);
+    const firstTarget = op.verification?.dispatchMutationTarget;
+    expect(typeof firstTarget).toBe("string");
+    const first = providerMutationRecord(
+      op,
+      "github_workflow.dispatch_retry",
+      String(firstTarget)
+    );
+    expect(first?.status).toBe("outcome_unknown");
+    const second = runnerDependencies();
+    await runVerificationRetry(op, "second-command", second);
+    expect(second.journal.calls).toEqual([]);
+    expect(second.journal.monitored).toEqual([]);
+    expect(
+      providerMutationRecord(
+        op,
+        "github_workflow.dispatch_retry",
+        String(firstTarget)
+      )?.status
+    ).toBe("manual_required");
+    expect(second.journal.commands.at(-1)?.outcome).toBe("manual-required");
+  });
+  it.each([
+    "baseline",
+    "authorization",
+    "authorization-error",
+    "rejection-authorization",
+    "accepted-persist",
+    "accepted-persist-failed",
+    "known-persist"
+  ] as const)(
+    "retains resumability when shutdown reaches %s",
+    async (boundary) => {
+      const op = operation();
+      if (boundary === "known-persist")
+        op.verification = {
+          ...op.verification,
+          runId: "41",
+          accountUnavailablePhase: "monitor"
+        };
+      let stopped = false;
+      const dependencies = runnerDependencies({
+        isStopped: () => stopped,
+        run: async (args) => {
+          if (boundary === "baseline") {
+            stopped = true;
+            throw new SelectedGhAuthorizationError("alice", 403, "late denial");
+          }
+          if (args[0] === "run")
+            return {
+              code: boundary.startsWith("authorization") ? 1 : 0,
+              stdout: "[]",
+              stderr: "HTTP 403"
+            };
+          return {
+            code: boundary === "rejection-authorization" ? 1 : 0,
+            stdout: "https://github.com/contoso/store/actions/runs/41",
+            stderr: "HTTP 403"
+          };
+        },
+        selectedCommandAuthorizationError: async () => {
+          stopped = true;
+          if (boundary === "authorization-error")
+            throw new Error("late identity failure");
+          return new SelectedGhAuthorizationError("alice", 403, "denied");
+        }
+      });
+      const persist = dependencies.persist;
+      dependencies.persist = async (target) => {
+        const result = await persist(target);
+        if (dependencies.journal.persists === 2) {
+          stopped = true;
+          if (boundary === "accepted-persist-failed") return false;
+        }
+        return result;
+      };
+      await runVerificationRetry(op, "retry", dependencies);
+      expect(dependencies.journal.monitored).toEqual([]);
+      expect(dependencies.journal.unregistered).toEqual([op.operationId]);
+      if (boundary === "accepted-persist-failed")
+        expect(dependencies.journal.commands.at(-1)?.outcome).toBe(
+          "persistence-failed"
+        );
+      else {
+        expect(op.endedAt).toBeNull();
+        expect(
+          dependencies.journal.commands.every(
+            (entry) => entry.state !== "finished"
+          )
+        ).toBe(true);
+      }
+    }
+  );
+  it("leaves acquired-command recovery pending when account acquisition is stopped", async () => {
+    const op = operation();
+    let stopped = false;
+    const dependencies = runnerDependencies({
+      isStopped: () => stopped,
+      createExecutor: async () => {
+        stopped = true;
+        throw new Error("Session closed");
+      }
+    });
+    await runVerificationRetry(op, "retry", dependencies);
+    expect(op.endedAt).toBeNull();
+    expect(dependencies.journal.registered).toEqual([]);
+    expect(dependencies.journal.calls).toEqual([]);
+    expect(
+      dependencies.journal.commands.every((entry) => entry.state !== "finished")
+    ).toBe(true);
+  });
+
+  it.each([false, true])(
+    "does not finish a retry when its %s known-run monitor stops locally",
+    async (knownRun) => {
+      const op = operation();
+      if (knownRun)
+        op.verification = {
+          ...op.verification,
+          runId: "41",
+          accountUnavailablePhase: "monitor"
+        };
+      let stopped = false;
+      const dependencies = runnerDependencies({
+        isStopped: () => stopped,
+        monitor: async () => {
+          stopped = true;
+        }
+      });
+      await runVerificationRetry(op, "retry", dependencies);
+      expect(stopped).toBe(true);
+      expect(op.endedAt).toBeNull();
+      expect(dependencies.journal.unregistered).toEqual([op.operationId]);
+      expect(
+        dependencies.journal.commands.every(
+          (entry) => entry.state !== "finished"
+        )
+      ).toBe(true);
+    }
+  );
+});
+
 interface RunnerJournal {
   calls: Array<{ args: string[]; timeout?: number }>;
   registered: string[];
@@ -110,9 +311,9 @@ function runnerDependencies(
     createExecutor: () => Promise.resolve(executor),
     registerExecutor: (operationId) => {
       journal.registered.push(operationId);
-    },
-    unregisterExecutor: (operationId) => {
-      journal.unregistered.push(operationId);
+      return () => {
+        journal.unregistered.push(operationId);
+      };
     },
     stopBoundary: async ({ boundary }) => {
       journal.boundaries.push(boundary);

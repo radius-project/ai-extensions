@@ -40,8 +40,9 @@ export async function ensureAzureServicePrincipal(
     objectId: string;
     stderr: string;
   }> => {
+    recovery?.assertActive();
     const result = await runAz(showArgs);
-    return {
+    const read = {
       ok:
         result.timedOut !== true && (result.code === 0 || result.code === "0"),
       objectId: String(result.stdout || "").trim(),
@@ -50,6 +51,8 @@ export async function ensureAzureServicePrincipal(
           `ETIMEDOUT: Service Principal lookup timed out. ${String(result.stderr || "").trim()}`.trim()
         : String(result.stderr || "").trim()
     };
+    if (!read.ok || !read.objectId) recovery?.assertActive();
+    return read;
   };
   const pendingCreate =
     recovery ? recovery.find("azure_service_principal.create", clientId) : null;

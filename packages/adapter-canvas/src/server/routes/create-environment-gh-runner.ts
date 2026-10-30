@@ -21,10 +21,12 @@ export interface WorkflowScopeGhRunnerPorts {
 }
 
 export interface WorkflowScopeGhRunnerTarget {
+  isStopped?(): boolean;
   targetRepo: string;
   envName: string;
   environmentProviderId?: string | null;
   mutationRecovery?: {
+    isStopped(): boolean;
     operation: object & { operationId: string };
     persist(): Promise<void>;
     recordVariable(entry: {
@@ -113,11 +115,13 @@ export function createWorkflowScopeGhRunner(
       run: runGh,
       runOrThrow: runGhOrThrow,
       digest: setupValueDigest,
+      isStopped: target.isStopped,
       recovery:
         target.mutationRecovery ?
           createSetupWorkflowRecoveryPort(
             target.mutationRecovery.operation,
-            target.mutationRecovery.persist
+            target.mutationRecovery.persist,
+            target.mutationRecovery.isStopped
           )
         : undefined,
       recordVariable: (entry) => target.mutationRecovery?.recordVariable(entry)

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { verificationRunTitle } from "../../verification-run-identity.js";
 import { discoverAutomaticVerificationRun } from "./automatic-verification-run.js";
 
@@ -28,6 +28,48 @@ function result(value: unknown) {
 }
 
 describe("automatic verification run discovery", () => {
+  it.each([
+    "entry",
+    "boundary",
+    "wait",
+    "success",
+    "empty",
+    "malformed",
+    "denied",
+    "error"
+  ] as const)(
+    "interrupts automatic discovery at %s without another observation",
+    async (boundary) => {
+      let stopped = boundary === "entry";
+      const listRuns = vi.fn(async () => {
+        if (boundary === "wait") return result([]);
+        stopped = true;
+        if (boundary === "error") throw new Error("account unavailable");
+        return (
+          boundary === "denied" ? { code: 1, stdout: "", stderr: "HTTP 403" }
+          : boundary === "malformed" ? { code: 0, stdout: "{", stderr: "" }
+          : result(boundary === "success" ? [run()] : [])
+        );
+      });
+      await expect(
+        discoverAutomaticVerificationRun({
+          identity,
+          isStopped: () => stopped,
+          stopBoundary: async () => {
+            if (boundary === "boundary") stopped = true;
+            return true;
+          },
+          sleep: async () => {
+            stopped = true;
+          },
+          listRuns
+        })
+      ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+      expect(listRuns).toHaveBeenCalledTimes(
+        boundary === "entry" || boundary === "boundary" ? 0 : 1
+      );
+    }
+  );
   it("waits for delayed registration and returns the exact push run", async () => {
     const responses = [result([]), result([run()])];
     const sleeps: number[] = [];

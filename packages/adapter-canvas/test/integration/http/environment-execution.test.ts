@@ -9,6 +9,14 @@ import { createTestCanvasServerRuntime } from "../../support/server/production-r
 import {
   configureOperationStore,
   createOperation,
+  fromPersistedOperation,
+  toPersistedOperation,
+  reconcileRestoredOperation,
+  projectOperationActions,
+  recordGitHubEnvironment,
+  recordCommittedWorkflowFile,
+  recordCommitState,
+  recordAzureApp,
   requireInput,
   finish,
   operations,
@@ -31,9 +39,283 @@ afterEach(async () => {
   await configureOperationStore(disabledOperationStore());
 });
 
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe("production environment owner HTTP binding", () => {
+  it.each(["timeout", "confirmed"] as const)(
+    "refuses a fresh HTTP retry after shutdown and restored %s dispatch",
+    async (acknowledgement) => {
+      const owner = createEnvironmentExecutionOwner();
+      const entered = deferred();
+      const gate = deferred();
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] === "run" && args[1] === "list")
+          return { code: 0, stdout: "[]", stderr: "" };
+        if (args[0] !== "workflow")
+          throw new Error(`Unexpected command: ${args.join(" ")}`);
+        entered.resolve();
+        await gate.promise;
+        if (acknowledgement === "confirmed")
+          return {
+            code: 0,
+            stdout: "https://github.com/fixture/app/actions/runs/17",
+            stderr: ""
+          };
+        return { code: 1, stdout: "", stderr: "timeout", timedOut: true };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const account = createEnvironmentAccountContext("http-verify", {
+        createReadOnlyExecutor: async () => executor,
+        withSelectedAccount: async () => {
+          throw new Error("Unexpected account switch");
+        }
+      });
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext: account
+      });
+      const entry = await runtime.getOrCreateServer("verify", "environment");
+      const op = createOperation({
+        operationId: "op_http-verify",
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.currentStage = STAGE_VERIFY;
+      recordAzureApp(op, {
+        state: "reused",
+        appId: "11111111-1111-4111-8111-111111111111"
+      });
+      recordCommittedWorkflowFile(op, {
+        path: ".github/workflows/radius-verify-credentials.yml",
+        branch: "main",
+        mode: "default_branch",
+        commitSha: "c".repeat(40),
+        blobSha: "b".repeat(40),
+        contentSha256: "d".repeat(64),
+        previousBlobSha: null,
+        previousBlobKnown: true
+      });
+      recordCommitState(op, { mode: "default_branch", branch: "main" });
+      op.verification = {
+        workflow: "radius-verify-credentials.yml",
+        ref: "main",
+        environment: "dev",
+        operationMarker: op.operationId,
+        runId: "16"
+      };
+      finish(op, "failed_partial", {
+        failure: {
+          code: "verify-run-failed",
+          stage: STAGE_VERIFY,
+          message: "Failed verification",
+          classification: "user-fixable"
+        }
+      });
+      operations.put(op);
+      vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+      let done = Promise.resolve();
+      try {
+        const response = await fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/retry/verification`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        expect(response.status, JSON.stringify(await response.json())).toBe(
+          202
+        );
+        done = new Promise<void>((resolve) => {
+          const stop = owner.onEnvironmentTasksSettled("verify", () => {
+            stop();
+            resolve();
+          });
+        });
+        await Promise.race([entered.promise, done]);
+        expect(run).toHaveBeenCalledTimes(2);
+        owner.shutdown();
+        gate.resolve();
+        await done;
+        expect(run).toHaveBeenCalledTimes(2);
+        expect(op.endedAt).toBeNull();
+        expect(op.failure).toBeNull();
+        expect(op.providerRecovery.mutations.at(-1)?.status).toBe(
+          acknowledgement === "confirmed" ? "confirmed" : "outcome_unknown"
+        );
+        expect(account.getExecutor(op.operationId)).toBeUndefined();
+      } finally {
+        gate.resolve();
+        await done;
+        owner.shutdown();
+        await runtime.stopServer("verify", true);
+      }
+      const restored = fromPersistedOperation(toPersistedOperation(op));
+      reconcileRestoredOperation(restored);
+      operations.put(restored);
+      const commandsBeforeRetry = structuredClone(restored.control.commands);
+      if (acknowledgement === "confirmed") {
+        expect(restored).toMatchObject({
+          state: "action_required",
+          recoveryState: "provider_restart_decision",
+          terminal: { reason: "provider-restart-decision" },
+          verification: {
+            runId: "17",
+            runUrl: "https://github.com/fixture/app/actions/runs/17"
+          }
+        });
+        expect(
+          projectOperationActions(restored).map((action) => action.id)
+        ).toEqual(["continue-setup", "stop"]);
+      }
+      const restarted = createTestCanvasServerRuntime({
+        executionOwner: createEnvironmentExecutionOwner(),
+        accountContext: account
+      });
+      const restartedEntry = await restarted.getOrCreateServer(
+        "restored",
+        "environment"
+      );
+      try {
+        const response = await fetch(
+          `${restartedEntry.baseUrl}/api/operations/${op.operationId}/retry/verification`,
+          {
+            method: "POST",
+            headers: {
+              origin: restartedEntry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                restartedEntry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        const body = await response.json();
+        expect(response.status, JSON.stringify(body)).toBe(409);
+        expect(body.code).toBe("verification-retry-not-retryable");
+        expect(restored.providerRecovery.mutations.at(-1)?.status).toBe(
+          acknowledgement === "confirmed" ? "confirmed" : "manual_required"
+        );
+        expect(restored.control.commands).toEqual(commandsBeforeRetry);
+        expect(run).toHaveBeenCalledTimes(2);
+      } finally {
+        await restarted.stopServer("restored", true);
+      }
+    }
+  );
+
+  it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = () => {};
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const owner = createEnvironmentExecutionOwner();
+    const run = vi.fn(async (): Promise<never> => {
+      throw new Error("Unexpected cleanup command after shutdown");
+    });
+    const executor = successfulSelectedGhExecutor({
+      login: "saved-account",
+      run
+    });
+    const account = createEnvironmentAccountContext(
+      "http-cleanup",
+      createGitHubAccountCoordinator({
+        createExecutor: async () => {
+          entered();
+          await gate;
+          return executor;
+        },
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected keyring switch");
+        },
+        resetIdentityCache: () => {}
+      })
+    );
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: account
+    });
+    const entry = await runtime.getOrCreateServer("cleanup", "environment");
+    const op = createOperation({
+      operationId: "http-cleanup",
+      repo: "fixture/app",
+      environment: "dev",
+      provider: "azure"
+    });
+    op.context.githubLogin = executor.login;
+    recordGitHubEnvironment(op, {
+      state: "created",
+      origin: "this_operation",
+      repo: op.repo,
+      name: op.environment,
+      providerId: "17"
+    });
+    finish(op, "failed");
+    operations.put(op);
+    vi.spyOn(operations, "persist").mockResolvedValue(undefined);
+    let done = Promise.resolve();
+    try {
+      const response = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/rollback`,
+        {
+          method: "POST",
+          headers: {
+            origin: entry.baseUrl,
+            "sec-fetch-site": "same-origin",
+            "x-radius-mutation-nonce": String(entry.state.browserMutationNonce)
+          }
+        }
+      );
+      expect(response.status).toBe(202);
+      expect(await response.json()).toMatchObject({
+        operationId: op.operationId
+      });
+      done = new Promise<void>((resolve) => {
+        const stop = owner.onEnvironmentTasksSettled("cleanup", () => {
+          stop();
+          resolve();
+        });
+      });
+      await waiting;
+      owner.shutdown();
+      release();
+      await done;
+      expect(run).not.toHaveBeenCalled();
+      expect(op.endedAt).toBeNull();
+      expect(op.control.commands.at(-1)?.state).toBe("running");
+      expect(op.setupArtifacts.githubEnvironment.state).toBe("created");
+      expect(account.getExecutor(op.operationId)).toBeUndefined();
+    } finally {
+      release();
+      await done;
+      owner.shutdown();
+      await runtime.stopServer("cleanup", true);
+    }
+  });
+
   it.each(["open", "closed-before-account", "closed-during-read"] as const)(
-    "monitors directly with the existing panel observation lifetime (%s)",
+    "keeps shared verification observation alive across panel closure (%s)",
     async (lifetime) => {
       let release = () => {};
       const gate = new Promise<void>((resolve) => {
@@ -126,21 +408,9 @@ describe("production environment owner HTTP binding", () => {
         expect(persist).toHaveBeenCalledOnce();
         expect(account.getExecutor(op.operationId)).toBeUndefined();
         expect(entry.observation?.stopped).toBe(lifetime !== "open");
-        if (lifetime === "open") {
-          expect(op.state).toBe("succeeded");
-          expect(run).toHaveBeenCalledTimes(2);
-        } else {
-          expect(op.state).toBe("failed");
-          expect(op.failure).toMatchObject({
-            code: "server-owned-task-failed",
-            message:
-              lifetime === "closed-before-account" ?
-                "Workflow observation instance is unavailable."
-              : "Workflow observation stopped."
-          });
-          if (lifetime === "closed-before-account")
-            expect(run).not.toHaveBeenCalled();
-        }
+        expect(op.state).toBe("succeeded");
+        expect(op.failure).toBeNull();
+        expect(run).toHaveBeenCalledTimes(2);
         expect(runtime.getLastWebviewActivityAt()).toBe(0);
       } finally {
         release();

@@ -9,6 +9,7 @@ import type {
 } from "./setup-azure-recovery.js";
 
 export interface GitHubEnvironmentRecoveryPort {
+  assertActive(): void;
   find(
     kind: string,
     target: string
@@ -203,7 +204,9 @@ export async function ensureGitHubEnvironment(
       stderr: "The GitHub API lookup did not run."
     };
     for (let attempt = 0; attempt < attempts; attempt++) {
+      input.recovery?.assertActive();
       last = await input.readGitHubJson(apiPath);
+      if (!last.ok) input.recovery?.assertActive();
       const transportFailure =
         last.status == null &&
         /(?:ECONNRESET|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|network is unreachable|socket hang up|timed? ?out|error connecting to api\.github\.com|failed to connect|could not resolve host)/i.test(
@@ -346,6 +349,7 @@ export async function ensureGitHubEnvironment(
   }
   let created: GitHubEnvironmentCommandResult;
   if (input.recovery) {
+    const recovery = input.recovery;
     const recovered =
       await input.recovery.execute<GitHubEnvironmentCommandResult>({
         kind: mutationKind,
@@ -356,6 +360,7 @@ export async function ensureGitHubEnvironment(
         providerIdOf: (result) => parseCommandEnvironmentProviderId(result),
         reconcile: async () => {
           const reread = await readGitHubJson(path);
+          recovery.assertActive();
           if (!reread.ok) {
             if (reread.status === 404) {
               return {

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import {
   runEnvironmentOperationWorkflow,
   type EnvironmentOperationWorkflowDependencies
@@ -147,7 +148,11 @@ interface Harness {
   cleanupErrors: string[];
   /** Whether each finalizeSetupFailure was handed a pinned environment reader. */
   cleanupReaders: boolean[];
-  cleanupReads: Array<{ code: number; stdout: string; stderr: string }>;
+  cleanupReads: Array<{
+    code: number | string;
+    stdout: string;
+    stderr: string;
+  }>;
 }
 
 const TEMP_BODY_PATH = "/tmp/create-environment-body.json";
@@ -320,8 +325,11 @@ function start(script: Script = {}): Harness {
   const failures: Array<Record<string, unknown>> = [];
   const cleanupErrors: string[] = [];
   const cleanupReaders: boolean[] = [];
-  const cleanupReads: Array<{ code: number; stdout: string; stderr: string }> =
-    [];
+  const cleanupReads: Array<{
+    code: number | string;
+    stdout: string;
+    stderr: string;
+  }> = [];
   let persistCalls = 0;
 
   // `stages` and `steps` are present because the real stop guard closes the
@@ -649,7 +657,7 @@ function start(script: Script = {}): Harness {
       script.trace?.(["step", text]);
     },
     finalizeSetupFailure: async (_operation, input) => {
-      failures.push(input);
+      failures.push({ ...input });
       journal.push(`finalizeSetupFailure:${String(input.code)}`);
       // The cleanup's identity gate cannot run without a reader, and a reader
       // that is not the operation's own account answers for the wrong login.
@@ -701,6 +709,7 @@ function start(script: Script = {}): Harness {
     // Also the real helper: whether a stop is honored, and what the record and
     // the response look like when it is, is production behavior this suite
     // exercises over the socket rather than restates.
+    isShuttingDown: () => false,
     guardStopBoundary: (input) => {
       journal.push(`stopBoundary:${input.boundary}`);
       return guardStopBoundary(input);
@@ -1099,6 +1108,7 @@ describe("matched headless and panel-bound setup service parity", () => {
         respond: unexpectedParityCall
       });
     const dependencies: EnvironmentOperationWorkflowDependencies = {
+      isStopped: d.isShuttingDown,
       preflightRepoAdmin: d.preflightRepoAdmin,
       preflightGhcrPackageWriteAccess: d.preflightGhcrPackageWriteAccess,
       readGitHubJson: d.readGitHubJson,
@@ -1539,9 +1549,11 @@ describe("matched headless and panel-bound setup service parity", () => {
   );
 
   it.each(["present", "closed", "replaced"] as const)(
-    "projects direct configuration lazily into its own current panel (%s)",
+    "projects direct configuration only into its current attachment generation (%s)",
     async (state) => {
       const harness = start({ direct: true });
+      const owner = createEnvironmentExecutionOwner();
+      const attachment = owner.attach("own");
       const original = { state: {} as CanvasState };
       const replacement = { state: {} as CanvasState };
       const other = { state: {} as CanvasState };
@@ -1559,21 +1571,19 @@ describe("matched headless and panel-bound setup service parity", () => {
           if (state === "closed") entries.delete("own");
           if (state === "replaced") {
             entries.set("own", replacement);
+            owner.attach("own");
           }
         }
       });
       const outcome = await createConfigureEnvironmentService(
         harness.dependencies
-      )({ data: { repo: "octo/app" } }, "own");
+      )({ data: { repo: "octo/app" } }, "own", attachment.isCurrent);
       expect(outcome).toMatchObject({ kind: "completed", status: 200 });
-      expect(reads).toEqual(["own"]);
+      expect(reads).toEqual(state === "replaced" ? [] : ["own"]);
       expect(other.state).toEqual({});
-      if (state === "closed") expect(original.state).toEqual({});
-      else
-        expect(
-          (state === "replaced" ? replacement : original).state.verifyRunId
-        ).toBe("4242");
-      if (state === "replaced") expect(original.state).toEqual({});
+      if (state === "present") expect(original.state.verifyRunId).toBe("4242");
+      else expect(original.state).toEqual({});
+      expect(replacement.state).toEqual({});
       expect(harness.operation).toMatchObject({
         verification: { runId: "4242" }
       });
@@ -2328,6 +2338,67 @@ describe("environment configuration service: the refusal ladder", () => {
 });
 
 describe("environment configuration service: the seven-step workflow", () => {
+  it.each(["success", "timeout", "rejected", "persistence-error"] as const)(
+    "retains initial dispatch evidence without post-shutdown publication (%s)",
+    async (outcome) => {
+      const harness = start({
+        dispatchResults: [
+          {
+            code: outcome === "success" ? 0 : 1,
+            stdout:
+              outcome === "success" ?
+                "https://github.com/octo/app/actions/runs/4242"
+              : "",
+            stderr: outcome === "rejected" ? "HTTP 403" : "timeout",
+            timedOut: outcome === "timeout" || outcome === "persistence-error"
+          }
+        ]
+      });
+      let stopped = false;
+      harness.dependencies.isShuttingDown = () => stopped;
+      const guard = harness.dependencies.guardStopBoundary;
+      harness.dependencies.guardStopBoundary = async (input) => {
+        if (!stopped) return guard(input);
+        input.respond(503, { code: "setup-shutting-down" });
+        return false;
+      };
+      harness.setJournalHook((entry) => {
+        if (entry === "dispatchVerifyWorkflow") stopped = true;
+      });
+      const persist = harness.dependencies.persistOperations;
+      harness.dependencies.persistOperations = async () => {
+        await persist();
+        if (stopped && outcome === "persistence-error")
+          throw new Error("acknowledgement journal unavailable");
+      };
+      const pending = configure({ repo: "octo/app" });
+      if (outcome === "persistence-error")
+        await expect(pending).resolves.toMatchObject({
+          kind: "failed",
+          status: 500
+        });
+      else
+        await expect(pending).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+      expect(
+        harness.ghCalls.filter((call) => call.startsWith("run list "))
+      ).toHaveLength(1);
+      expect(
+        harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+      ).toHaveLength(1);
+      expect(harness.failures).toEqual([]);
+      expect(harness.finished).toEqual([]);
+      expect(
+        harness.operation.providerRecovery?.mutations?.at(-1)?.status
+      ).toBe(
+        outcome === "success" ? "confirmed"
+        : outcome === "rejected" ? "not_applied"
+        : "outcome_unknown"
+      );
+      expect(harness.state.verifyRunId).toBeUndefined();
+    }
+  );
   it.each([false, true])(
     "keeps an optional template failure nonfatal only without a pending workflow PUT: pending=%s",
     async (pending) => {
@@ -2790,6 +2861,43 @@ describe("environment configuration service: the seven-step workflow", () => {
     expect(harness.journal).toContain(
       "recordGitHubEnvironment:created_candidate"
     );
+  });
+
+  it("interrupts configuration-stage environment creation after a held intent save without cleanup", async () => {
+    const harness = start();
+    let stopped = false;
+    let entered = () => {};
+    let release = () => {};
+    const prepared = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const saved: string[] = [];
+    harness.dependencies.isShuttingDown = () => stopped;
+    harness.dependencies.persistOperations = async () => {
+      const mutation = harness.operation.providerRecovery?.mutations?.at(-1);
+      if (mutation?.kind !== "github_environment.put") return;
+      saved.push(mutation.status);
+      if (mutation.status === "prepared") {
+        entered();
+        await gate;
+      }
+    };
+    const pending = configure({ repo: "octo/app" });
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    await prepared;
+    const calls = [...harness.ghCalls];
+    stopped = true;
+    release();
+    await rejected;
+    expect(harness.ghCalls).toEqual(calls);
+    expect(saved).toEqual(["prepared", "not_applied"]);
+    expect(harness.failures).toEqual([]);
+    expect(harness.finished).toEqual([]);
   });
 
   it("fails before workflow mutation when the default branch cannot be resolved", async () => {
@@ -3946,6 +4054,39 @@ describe("environment configuration service: the protected-branch path", () => {
       runId: "4242",
       recoveryMarker: "preserved"
     });
+  });
+
+  it("stops automatic setup-branch discovery without publishing its late result", async () => {
+    let stopped = false;
+    const harness = start({
+      ...protectedScript,
+      onGhCommand: (command) => {
+        if (command.startsWith("run list ")) stopped = true;
+      }
+    });
+    harness.dependencies.isShuttingDown = () => stopped;
+    const guard = harness.dependencies.guardStopBoundary;
+    harness.dependencies.guardStopBoundary = async (input) => {
+      if (!stopped) return guard(input);
+      input.respond(503, { code: "setup-shutting-down" });
+      return false;
+    };
+    await expect(configure({ repo: "octo/app" })).rejects.toMatchObject({
+      code: "setup-execution-interrupted"
+    });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("run list "))
+    ).toHaveLength(1);
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("workflow run "))
+    ).toBe(false);
+    expect(harness.operation.verification).toMatchObject({
+      event: "push",
+      runId: null
+    });
+    expect(harness.state.verifyRunId).toBeUndefined();
+    expect(harness.failures).toEqual([]);
+    expect(harness.finished).toEqual([]);
   });
 
   it("keeps merge-required guidance when the default dispatcher has a legacy chain", async () => {

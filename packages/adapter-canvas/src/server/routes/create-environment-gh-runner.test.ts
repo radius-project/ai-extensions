@@ -75,6 +75,7 @@ const target = {
 
 function mutationRecovery(operation: ReturnType<typeof createOperation>) {
   return {
+    isStopped: () => false,
     operation,
     persist: async () => {},
     recordVariable: (
@@ -96,6 +97,129 @@ function environmentIdentity(args: string[]) {
 }
 
 describe("the workflow-scope gh runner", () => {
+  it.each([
+    "initial",
+    "identity",
+    "previous-value",
+    "prepared",
+    "validation-identity",
+    "validation-value",
+    "write",
+    "acknowledgement"
+  ] as const)(
+    "fences a journaled variable at %s without losing an acknowledged write",
+    async (boundary) => {
+      const operation = createOperation({ operationId: "fenced-variable" });
+      let stopped = boundary === "initial";
+      let reads = 0;
+      const calls: string[][] = [];
+      const saved: string[] = [];
+      const executor = successfulSelectedGhExecutor({
+        run: async (args) => {
+          calls.push(args);
+          if (args[0] === "variable") {
+            if (boundary === "write") stopped = true;
+            return { code: 0, stdout: "", stderr: "" };
+          }
+          reads++;
+          if (
+            (boundary === "identity" && reads === 1) ||
+            (boundary === "previous-value" && reads === 2) ||
+            (boundary === "validation-identity" && reads === 3) ||
+            (boundary === "validation-value" && reads === 4)
+          )
+            stopped = true;
+          return (
+            environmentIdentity(args) ?? {
+              code: 0,
+              stdout: JSON.stringify({ name: "NAME", value: "old" }),
+              stderr: ""
+            }
+          );
+        }
+      });
+      const runner = createWorkflowScopeGhRunner(
+        {
+          cliExec: () => {
+            throw new Error("Unexpected ambient command");
+          },
+          readProcessEnv: () => ({})
+        },
+        {
+          ...target,
+          isStopped: () => stopped,
+          mutationRecovery: {
+            ...mutationRecovery(operation),
+            isStopped: () => stopped,
+            persist: async () => {
+              const state = operation.providerRecovery.mutations[0].status;
+              saved.push(state);
+              if (
+                (boundary === "prepared" && state === "prepared") ||
+                (boundary === "acknowledgement" && state === "confirmed")
+              )
+                stopped = true;
+            }
+          }
+        },
+        executor
+      );
+      const result = runner.setEnvironmentVariable("NAME", "new");
+      const acknowledged =
+        boundary === "write" || boundary === "acknowledgement";
+      if (acknowledged) {
+        await expect(result).resolves.toBe(true);
+        expect(saved).toEqual(["prepared", "confirmed"]);
+        expect(operation.setupArtifacts.githubEnvironmentVariables).toEqual([
+          expect.objectContaining({
+            name: "NAME",
+            previousValue: "old",
+            state: "created"
+          })
+        ]);
+      } else {
+        await expect(result).rejects.toMatchObject({
+          code: "setup-execution-interrupted"
+        });
+      }
+      expect(calls.filter((args) => args[0] === "variable")).toHaveLength(
+        acknowledged ? 1 : 0
+      );
+      if (boundary === "prepared" || boundary.startsWith("validation")) {
+        expect(saved.at(-1)).toBe("not_applied");
+      }
+    }
+  );
+
+  it("stops a non-journaled variable batch after the in-flight write settles", async () => {
+    let stopped = false;
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      run: async (args) => {
+        calls.push(args);
+        stopped = true;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("Unexpected ambient command");
+        },
+        readProcessEnv: () => ({})
+      },
+      { ...target, isStopped: () => stopped },
+      executor
+    );
+    await expect(runner.setEnvironmentVariable("FIRST", "value")).resolves.toBe(
+      true
+    );
+    await expect(
+      runner.setEnvironmentVariable("SECOND", "value")
+    ).rejects.toMatchObject({ code: "setup-execution-interrupted" });
+    expect(calls).toHaveLength(1);
+  });
+
   it("routes selected-account commands through the pinned executor", async () => {
     const calls: string[][] = [];
     const pinned = successfulSelectedGhExecutor({

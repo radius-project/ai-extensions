@@ -7,6 +7,7 @@ import type {
   CreateEnvironmentOperation,
   GhcrPreflightResult
 } from "./create-environment-types.js";
+import type { SetupFailureInput } from "../services/setup-outcome.js";
 import {
   shouldStop,
   terminalizeProviderManualRequired
@@ -32,7 +33,8 @@ export function createSetupEnvironmentPorts(input: {
   dependencies: ConfigureEnvironmentDependencies;
   operation: CreateEnvironmentOperation;
   selectedExecutor: SelectedGhExecutor;
-  instanceId: string;
+  instanceId?: string;
+  isCurrentPresentation?: () => boolean;
   provider: string;
   steps: string[];
   stopBoundary(boundary: string): Promise<boolean>;
@@ -43,7 +45,7 @@ export function createSetupEnvironmentPorts(input: {
     code: string,
     extra: Record<string, unknown>
   ): Promise<"failed" | "stopped">;
-  finalize(input: Record<string, unknown>): Promise<"failed" | "stopped">;
+  finalize(input: SetupFailureInput): Promise<"failed" | "stopped">;
 }): SetupEnvironmentPorts {
   const {
     dependencies: d,
@@ -59,10 +61,13 @@ export function createSetupEnvironmentPorts(input: {
     steps.push(message);
   };
   return {
-    recovery: createSetupWorkflowRecoveryPort(operation, () =>
-      d.persistOperations()
+    recovery: createSetupWorkflowRecoveryPort(
+      operation,
+      () => d.persistOperations(),
+      d.isShuttingDown
     ),
     stopRequested: () => shouldStop(operation),
+    isExecutionStopped: d.isShuttingDown,
     stopBoundary: input.stopBoundary,
     checkpoint: input.checkpoint,
     preflightRepository: async (repo) => {
@@ -118,7 +123,11 @@ export function createSetupEnvironmentPorts(input: {
         requestedName,
         readGitHubJson: (path) => d.readGitHubJson(path, executor),
         runGh: (args) => executor.run(args),
-        mutationRecovery: { operation, persist: () => d.persistOperations() },
+        mutationRecovery: {
+          operation,
+          persist: () => d.persistOperations(),
+          isStopped: d.isShuttingDown
+        },
         beforeCreate,
         now: d.now
       }),
@@ -132,9 +141,11 @@ export function createSetupEnvironmentPorts(input: {
         d,
         {
           ...target,
+          isStopped: d.isShuttingDown,
           ...(journalVariables ?
             {
               mutationRecovery: {
+                isStopped: d.isShuttingDown,
                 operation,
                 persist: () => d.persistOperations(),
                 recordVariable: (entry) =>
@@ -155,7 +166,8 @@ export function createSetupEnvironmentPorts(input: {
       return d.bootstrapGHCRStatePackage({
         targetRepository: request.targetRepository,
         registry: request.registry,
-        credentials: packagePreflight.credentials
+        credentials: packagePreflight.credentials,
+        assertActive: request.assertActive
       });
     },
     workflowFiles: ({ runGh, runGhWorkflow }) =>
@@ -226,16 +238,28 @@ export function createSetupEnvironmentPorts(input: {
       d.planCredentialVerification(request),
     fetchFileFromRepo: (repo, path, branch) =>
       d.fetchFileFromRepo(repo, path, branch, executor),
-    discoverAutomaticVerificationRun,
+    discoverAutomaticVerificationRun: (request) =>
+      discoverAutomaticVerificationRun({
+        ...request,
+        isStopped: d.isShuttingDown
+      }),
     terminalizeManualRequired: (guidance) =>
       terminalizeProviderManualRequired(operation, guidance),
     runVerificationDispatch: (request) =>
-      runVerificationDispatch({ ...request, operation }),
+      runVerificationDispatch({
+        ...request,
+        operation,
+        ports: { ...request.ports, isStopped: d.isShuttingDown }
+      }),
     buildVerifyWorkflowDispatchArgs: (request) =>
       d.buildVerifyWorkflowDispatchArgs(request),
     enterVerifyStage: () => d.enterStage(operation, d.stageVerify),
     projectVerification: ({ dispatchedAt, verifyRunId, verifyRunUrl }) => {
-      const entry = d.readInstanceEntry(input.instanceId);
+      if (input.isCurrentPresentation && !input.isCurrentPresentation()) return;
+      const entry =
+        input.instanceId === undefined ?
+          undefined
+        : d.readInstanceEntry(input.instanceId);
       if (entry) {
         entry.state.deployDispatchedAt = dispatchedAt;
         entry.state.verifyRunId = verifyRunId;

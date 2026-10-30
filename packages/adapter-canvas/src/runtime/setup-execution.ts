@@ -1,0 +1,403 @@
+import {
+  addLegacyStep,
+  finish,
+  providerRecoveryManualGuidance,
+  reconcileRestoredOperation,
+  setExecutionActive,
+  STAGE_VERIFY,
+  unresolvedProviderMutations
+} from "../operations.js";
+import { planRecoveredSchedule } from "../server/services/recovered-cleanup-command.js";
+import type { CleanupCommandKind } from "../server/services/cleanup-commands.js";
+import type { EnvironmentExecutionOwner } from "./environment-execution-owner.js";
+import { errorMessage } from "./util.js";
+import { isSetupExecutionInterrupted } from "@radius-project/core";
+
+export interface SetupExecutionOperation {
+  operationId: string;
+  repo?: string;
+  environment?: string;
+  kind?: string;
+  endedAt?: unknown;
+  currentStage?: string | null;
+  steps: Array<{ label?: string }>;
+  recoveryState?: string | null;
+  providerRecovery?: { state?: string };
+  verification?: { retryCommandId?: string | null };
+  control?: {
+    commands?: Array<{ commandId?: string; kind?: string; state?: string }>;
+  };
+}
+
+export type SetupExecutionCommand =
+  "verification_monitor" | "verification_retry" | CleanupCommandKind;
+
+type TaskScope = Pick<
+  ReturnType<EnvironmentExecutionOwner["attach"]>,
+  "schedule" | "hasTask" | "scheduleReconciliation" | "claimAutomaticRollback"
+>;
+
+export interface SetupExecutionPorts {
+  deferAdmissionRecovery(
+    operationId: string,
+    recover: (operationId: string) => void
+  ): boolean;
+  scope: TaskScope;
+  getOperation(operationId: string): SetupExecutionOperation | null | undefined;
+  persist(): Promise<void>;
+  report(input: { scope: string; operationId: string; message: string }): void;
+  isShuttingDown(operationId: string): boolean;
+  deferRecovery(callback: () => void): void;
+  admitRecoveryRollback(
+    operationId: string,
+    isCurrent: () => boolean
+  ): Promise<void>;
+  claimVerificationMonitor(operationId: string): (() => void) | undefined;
+  runOperation(operationId: string): Promise<void>;
+  runVerificationRetry(operationId: string, commandId: string): Promise<void>;
+  runVerificationContinuation(
+    operationId: string,
+    commandId: string
+  ): Promise<void>;
+  observeRecoveredVerification(
+    operation: SetupExecutionOperation
+  ): Promise<void>;
+  runCleanup(
+    kind: CleanupCommandKind,
+    operationId: string,
+    commandId: string
+  ): Promise<void>;
+  recoverBranchDelete(operationId: string): Promise<void>;
+  recoverCleanup(operationId: string): Promise<void>;
+}
+
+export function reopenProviderReconciliation(operation: unknown): boolean {
+  if (!operation || unresolvedProviderMutations(operation).length === 0) {
+    return false;
+  }
+  reconcileRestoredOperation(operation);
+  setExecutionActive(operation, false);
+  return true;
+}
+
+export function createSetupExecution(ports: SetupExecutionPorts) {
+  for (const name of [
+    "deferAdmissionRecovery",
+    "getOperation",
+    "persist",
+    "report",
+    "isShuttingDown",
+    "deferRecovery",
+    "admitRecoveryRollback",
+    "claimVerificationMonitor",
+    "runOperation",
+    "runVerificationRetry",
+    "runVerificationContinuation",
+    "observeRecoveredVerification",
+    "runCleanup",
+    "recoverBranchDelete",
+    "recoverCleanup"
+  ] as const) {
+    if (typeof ports[name] !== "function") {
+      throw new Error(`Missing setup execution dependency: ${name}`);
+    }
+  }
+  for (const name of [
+    "schedule",
+    "hasTask",
+    "scheduleReconciliation",
+    "claimAutomaticRollback"
+  ] as const) {
+    if (typeof ports.scope?.[name] !== "function") {
+      throw new Error(`Missing setup execution dependency: scope.${name}`);
+    }
+  }
+
+  async function persistTaskState(operationId: string): Promise<void> {
+    try {
+      await ports.persist();
+    } catch (error) {
+      ports.report({
+        scope: "setup-task-persistence",
+        operationId,
+        message: errorMessage(error)
+      });
+    }
+  }
+
+  function schedule(
+    operationId: string,
+    task: () => Promise<void>,
+    cancelled?: () => void
+  ): boolean {
+    const op = ports.getOperation(operationId);
+    const repo = op?.repo;
+    const environment = op?.environment;
+    const isIdentityCurrent = () =>
+      op != null &&
+      ports.getOperation(operationId) === op &&
+      op.operationId === operationId &&
+      op.repo === repo &&
+      op.environment === environment;
+    const isCurrent = () =>
+      isIdentityCurrent() && !ports.isShuttingDown(operationId);
+    const releaseSkipped = () => {
+      cancelled?.();
+    };
+    if (!isCurrent()) {
+      releaseSkipped();
+      return false;
+    }
+    let reconciliationNeeded = false;
+    setExecutionActive(op, true);
+    ports.scope.schedule(operationId, {
+      run: async () => {
+        if (!isCurrent()) {
+          releaseSkipped();
+          return;
+        }
+        await task();
+      },
+      cancelled: releaseSkipped,
+      failed: async (error) => {
+        if (!isIdentityCurrent()) return;
+        const current = ports.getOperation(operationId);
+        if (isSetupExecutionInterrupted(error)) return;
+        if (ports.isShuttingDown(operationId)) {
+          ports.report({
+            scope: "setup-task-shutdown",
+            operationId,
+            message: errorMessage(error)
+          });
+          return;
+        }
+        if (current && reopenProviderReconciliation(current)) {
+          if (
+            !current.steps.some(
+              (step) =>
+                step.label ===
+                "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
+            )
+          ) {
+            addLegacyStep(
+              current,
+              "⏳ A provider step's outcome could not be confirmed. Radius is reconciling it without repeating the mutation."
+            );
+          }
+          reconciliationNeeded = true;
+          await persistTaskState(operationId);
+          return;
+        }
+        if (current && !current.endedAt) {
+          finish(current, "failed", {
+            failure: {
+              code: "server-owned-task-failed",
+              stage: current.currentStage,
+              stepSeq: null,
+              message: errorMessage(error),
+              classification: "unknown",
+              evidence: error instanceof Error ? error.stack || null : null
+            }
+          });
+          await persistTaskState(operationId);
+        }
+      },
+      settling: () => {
+        if (
+          !isIdentityCurrent() ||
+          (op?.kind !== "delete" && ports.isShuttingDown(operationId))
+        )
+          return;
+        const current = op;
+        if (current && !current.endedAt) setExecutionActive(current, false);
+      },
+      settled: () => {
+        if (!isCurrent()) return;
+        const current = op;
+        if (
+          current?.endedAt &&
+          current.providerRecovery?.state === "rollback_pending" &&
+          !providerRecoveryManualGuidance(current)
+        ) {
+          scheduleAutomaticRecoveryRollback(operationId);
+        } else if (
+          reconciliationNeeded &&
+          current &&
+          !current.endedAt &&
+          unresolvedProviderMutations(current).length > 0
+        ) {
+          scheduleProviderReconciliation(current);
+        }
+      }
+    });
+    return true;
+  }
+
+  function scheduleProviderReconciliation(
+    operation: SetupExecutionOperation
+  ): void {
+    const operationId = operation.operationId;
+    const identity = {
+      operation,
+      repo: operation.repo,
+      environment: operation.environment
+    };
+    ports.scope.scheduleReconciliation(
+      operationId,
+      () => {
+        if (ports.isShuttingDown(operationId)) return;
+        if (
+          ports.getOperation(operationId) !== operation ||
+          operation.operationId !== operationId ||
+          operation.repo !== identity.repo ||
+          operation.environment !== identity.environment ||
+          operation.endedAt ||
+          unresolvedProviderMutations(operation).length === 0
+        ) {
+          return;
+        }
+        scheduleRecoveredProviderMutation(operation);
+      },
+      identity
+    );
+  }
+
+  function scheduleAutomaticRecoveryRollback(operationId: string): void {
+    const release = ports.scope.claimAutomaticRollback(operationId);
+    if (!release) return;
+    const operation = ports.getOperation(operationId);
+    const repo = operation?.repo;
+    const environment = operation?.environment;
+    ports.deferRecovery(() => {
+      if (ports.isShuttingDown(operationId)) {
+        release();
+        return;
+      }
+      void ports
+        .admitRecoveryRollback(
+          operationId,
+          () =>
+            operation != null &&
+            ports.getOperation(operationId) === operation &&
+            operation.operationId === operationId &&
+            operation.repo === repo &&
+            operation.environment === environment
+        )
+        .catch((error: unknown) => {
+          ports.report({
+            scope: "provider-recovery-auto-rollback",
+            operationId,
+            message: errorMessage(error)
+          });
+        })
+        .finally(release);
+    });
+  }
+
+  function scheduleRecoveredProviderMutation(
+    operation: SetupExecutionOperation
+  ): void {
+    const next = planRecoveredSchedule(operation);
+    const operationId = operation.operationId;
+    if (next.kind === "branch_delete") {
+      schedule(operationId, () => ports.recoverBranchDelete(operationId));
+    } else if (next.kind === "cleanup") {
+      schedule(operationId, () => ports.recoverCleanup(operationId));
+    } else if (next.kind === "verification_retry") {
+      schedule(operationId, () =>
+        ports.runVerificationRetry(operationId, next.commandId)
+      );
+    } else {
+      scheduleEnvironmentOperation(operation);
+    }
+  }
+
+  function recoverCurrentOperation(operationId: string): void {
+    const current = ports.getOperation(operationId);
+    if (current) recoverOperation(current);
+  }
+
+  function recoverOperation(operation: SetupExecutionOperation): void {
+    const operationId = operation.operationId;
+    if (ports.deferAdmissionRecovery(operationId, recoverCurrentOperation))
+      return;
+    if (
+      ports.isShuttingDown(operation.operationId) ||
+      operation.kind === "delete" ||
+      ports.scope.hasTask(operation.operationId)
+    )
+      return;
+    if (
+      operation.endedAt &&
+      operation.providerRecovery?.state === "rollback_pending" &&
+      !providerRecoveryManualGuidance(operation)
+    ) {
+      scheduleAutomaticRecoveryRollback(operation.operationId);
+      return;
+    }
+
+    if (
+      operation.recoveryState === "provider_reconciliation_pending" &&
+      !operation.endedAt
+    ) {
+      scheduleRecoveredProviderMutation(operation);
+      return;
+    }
+    if (
+      (operation.recoveryState !== "verification_pending" &&
+        operation.recoveryState !== "verification_acquisition_pending") ||
+      operation.currentStage !== STAGE_VERIFY ||
+      operation.endedAt
+    ) {
+      return;
+    }
+    const release = ports.claimVerificationMonitor(operation.operationId);
+    if (!release) return;
+    schedule(
+      operation.operationId,
+      async () => {
+        try {
+          if (operation.recoveryState === "verification_acquisition_pending") {
+            await ports.runVerificationRetry(
+              operation.operationId,
+              String(operation.verification?.retryCommandId || "")
+            );
+          } else {
+            await ports.observeRecoveredVerification(operation);
+          }
+        } finally {
+          release();
+        }
+      },
+      release
+    );
+  }
+
+  function scheduleEnvironmentOperation(operation: {
+    operationId: string;
+  }): boolean {
+    const operationId = operation.operationId;
+    return schedule(operationId, () => ports.runOperation(operationId));
+  }
+
+  function scheduleCommandTask(
+    kind: SetupExecutionCommand,
+    operation: { operationId: string },
+    commandId: string
+  ): boolean {
+    const operationId = operation.operationId;
+    return schedule(operationId, () =>
+      kind === "verification_monitor" ?
+        ports.runVerificationContinuation(operationId, commandId)
+      : kind === "verification_retry" ?
+        ports.runVerificationRetry(operationId, commandId)
+      : ports.runCleanup(kind, operationId, commandId)
+    );
+  }
+
+  return {
+    recoverOperation,
+    scheduleEnvironmentOperation,
+    scheduleCommandTask
+  };
+}

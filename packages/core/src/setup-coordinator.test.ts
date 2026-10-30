@@ -102,6 +102,60 @@ function harness(overrides: Partial<SetupCoordinatorPorts> = {}) {
 }
 
 describe("runSetupCoordinator", () => {
+  it.each(["azure_application.create", "github_environment_variable.put"])(
+    "preserves interruption without counting a failed reread of %s",
+    async (kind) => {
+      const interruption = new ProviderMutationRecoveryError(
+        "Runtime stopped",
+        "setup-execution-interrupted"
+      );
+      const test = harness({
+        reconcileFailure: async () => {
+          throw new Error("No provider read occurred");
+        },
+        authorizeAzure: async () => {
+          throw interruption;
+        },
+        configureEnvironment: async () => {
+          throw interruption;
+        }
+      });
+      test.mutations.push({ mutationId: "pending", kind });
+      await expect(runSetupCoordinator(test.target, test.ports)).rejects.toBe(
+        interruption
+      );
+    }
+  );
+
+  it.each(["azure_application.create", "github_environment_variable.put"])(
+    "still accounts for genuine read failure while reconciling %s",
+    async (kind) => {
+      const failure = new Error("Provider read failed");
+      const reported = new ProviderMutationRecoveryError(
+        "Recovery remains unresolved",
+        "provider-mutation-outcome-unknown"
+      );
+      const calls: unknown[] = [];
+      const test = harness({
+        reconcileFailure: async (mutationId, error) => {
+          calls.push([mutationId, error]);
+          throw reported;
+        },
+        authorizeAzure: async () => {
+          throw failure;
+        },
+        configureEnvironment: async () => {
+          throw failure;
+        }
+      });
+      test.mutations.push({ mutationId: "pending", kind });
+      await expect(runSetupCoordinator(test.target, test.ports)).rejects.toBe(
+        reported
+      );
+      expect(calls).toEqual([["pending", failure]]);
+    }
+  );
+
   it("stops after the canonical environment checkpoint without invoking a provider", async () => {
     const test = harness({
       stopBoundary: async (boundary) => boundary !== "after-github-environment"

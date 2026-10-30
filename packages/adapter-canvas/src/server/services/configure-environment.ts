@@ -1,5 +1,6 @@
 import type { SelectedGhExecutor } from "../../gh.js";
 import type { CanvasState } from "../../shared.js";
+import { isSetupExecutionInterrupted } from "@radius-project/core";
 import {
   admitCreateEnvironmentRequest,
   type AdmissionPorts,
@@ -25,6 +26,7 @@ import { selectedEnvironmentReader } from "../services/github-environment.js";
 import type { WorkflowFileReadResult } from "../../verification-plan.js";
 import {
   setupHandlerFailure,
+  type SetupFailureInput,
   type SetupInput,
   type SetupOutcome
 } from "./setup-outcome.js";
@@ -38,6 +40,7 @@ export interface CreateEnvironmentInstanceEntry {
 
 export interface ConfigureEnvironmentDependencies
   extends AdmissionPorts, WorkflowScopeGhRunnerPorts {
+  isShuttingDown(): boolean;
   ghCommandPresentation?: GhCommandPresentation;
   // --- request scope ---
   getSelectedGitHubExecutor(
@@ -51,7 +54,7 @@ export interface ConfigureEnvironmentDependencies
   addLegacyStep(operation: CreateEnvironmentOperation, text: string): void;
   finalizeSetupFailure(
     operation: CreateEnvironmentOperation | null,
-    input: Record<string, unknown>
+    input: SetupFailureInput
   ): Promise<SetupFailureResponse>;
   persistMutationCheckpoint(input: {
     operation: CreateEnvironmentOperation | null;
@@ -95,6 +98,7 @@ export interface ConfigureEnvironmentDependencies
     targetRepository: string;
     registry: string;
     credentials: unknown;
+    assertActive(): void;
   }): Promise<{ visibility: string | undefined }>;
   stateRegistryForEnvironment(repo: string, environment: string): string;
 
@@ -285,6 +289,7 @@ const REQUIRED_BINDINGS = {
   persistMutationCheckpoint: "function",
   persistBestEffort: "function",
   guardStopBoundary: "function",
+  isShuttingDown: "function",
   runAzCommand: "function",
   preflightRepoAdmin: "function",
   preflightGhcrPackageWriteAccess: "function",
@@ -359,7 +364,8 @@ export function createConfigureEnvironmentService(
   validateDependencies(dependencies);
   return async (
     input: SetupInput<CreateEnvironmentRequestData>,
-    instanceId: string
+    instanceId?: string,
+    isCurrentPresentation?: () => boolean
   ): Promise<SetupOutcome> => {
     let outcome: SetupOutcome | undefined;
     const complete = (result: SetupOutcome) => {
@@ -370,12 +376,14 @@ export function createConfigureEnvironmentService(
         input,
         instanceId,
         dependencies,
-        complete
+        complete,
+        isCurrentPresentation
       );
       if (!outcome)
         throw new Error("Environment setup did not report an outcome.");
       return outcome;
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       return setupHandlerFailure(error, dependencies.reportOperationDiagnostic);
     }
   };
@@ -383,9 +391,10 @@ export function createConfigureEnvironmentService(
 
 async function runConfigureEnvironmentService(
   input: SetupInput<CreateEnvironmentRequestData>,
-  instanceId: string,
+  instanceId: string | undefined,
   dependencies: ConfigureEnvironmentDependencies,
-  complete: (outcome: SetupOutcome) => void
+  complete: (outcome: SetupOutcome) => void,
+  isCurrentPresentation?: () => boolean
 ): Promise<void> {
   const stopped = (status: number, body: Record<string, unknown>) =>
     complete({ kind: "stopped", status, body });
@@ -458,7 +467,7 @@ async function runConfigureEnvironmentService(
         respond: stopped
       });
     const finalize = async (
-      input: Record<string, unknown>
+      input: SetupFailureInput
     ): Promise<"failed" | "stopped"> => {
       if (!(await stopBoundary("before-setup-failure-cleanup")))
         return "stopped";
@@ -519,6 +528,7 @@ async function runConfigureEnvironmentService(
         operation,
         selectedExecutor,
         instanceId,
+        isCurrentPresentation,
         provider,
         steps,
         stopBoundary,
@@ -542,7 +552,13 @@ async function runConfigureEnvironmentService(
       }
     });
   } catch (e) {
-    if (finalizationStarted) throw e;
+    if (finalizationStarted || isSetupExecutionInterrupted(e)) throw e;
+    if (
+      dependencies.isShuttingDown() &&
+      e instanceof ProviderMutationRecoveryError &&
+      e.code === "provider-mutation-recovery-persistence-failed"
+    )
+      throw e;
     // Reconciliation still owns this operation and it is not terminal. A stop
     // recorded now is honored by the reconciling pass at its own boundary;
     // ending the operation here would strand the journal entry unreconciled.

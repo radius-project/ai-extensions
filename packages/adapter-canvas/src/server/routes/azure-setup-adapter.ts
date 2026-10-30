@@ -2,6 +2,7 @@ import type {
   AzureApplicationPorts,
   AzureCredentialPorts
 } from "@radius-project/core";
+import { assertSetupExecutionActive } from "@radius-project/core";
 import type {
   AzureAutoSetupApplicationInput,
   AzureAutoSetupCredentialInput,
@@ -29,7 +30,11 @@ function execution(
       workflow.operation.state === "cancelled" ? "stopped"
       : workflow.operation.inputRequired ? "input-required"
       : "failed",
-    recovery: createAzureRecoveryPort(workflow.operation, persist),
+    recovery: createAzureRecoveryPort(
+      workflow.operation,
+      persist,
+      workflow.isStopped
+    ),
     ...createAzureSetupPresentation(workflow)
   };
 }
@@ -42,6 +47,7 @@ export function createAzureApplicationPorts(
   const { operations } = dependencies;
   return {
     ...execution(workflow, () => operations.persist(), dependencies.sleep),
+    assertActive: () => assertSetupExecutionActive(workflow.isStopped),
     get environment() {
       return operation.environment;
     },
@@ -99,7 +105,11 @@ export function createAzureCredentialPorts(
       dependencies.ensureServicePrincipal(
         clientId,
         workflow.runAz,
-        { operation, persist: operations.persist },
+        {
+          operation,
+          persist: operations.persist,
+          isStopped: workflow.isStopped
+        },
         beforeCreate,
         dependencies.sleep
       ),

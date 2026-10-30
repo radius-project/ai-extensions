@@ -3,7 +3,11 @@ import {
   GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError
 } from "./setup-github-environment.js";
-import { ProviderMutationRecoveryError } from "./setup-recovery-error.js";
+import {
+  assertSetupExecutionActive,
+  isSetupExecutionInterrupted,
+  ProviderMutationRecoveryError
+} from "./setup-recovery-error.js";
 import { createWorkflowFileCommitter } from "./setup-workflow-committer.js";
 import { publishSetupWorkflowFiles } from "./setup-workflow-publication.js";
 import {
@@ -37,6 +41,7 @@ export async function configureSetupEnvironment(
     try {
       return { completed: true, value: await mutate() };
     } catch (error) {
+      if (isSetupExecutionInterrupted(error)) throw error;
       if (
         error instanceof ProviderMutationRecoveryError &&
         error.code === "provider-mutation-outcome-unknown"
@@ -75,6 +80,7 @@ export async function configureSetupEnvironment(
       () => ports.stopBoundary("before-github-environment-create")
     );
   } catch (error) {
+    if (isSetupExecutionInterrupted(error)) throw error;
     if (error instanceof GitHubEnvironmentEnsureCancelled)
       return { kind: "stopped" };
     if (
@@ -96,13 +102,23 @@ export async function configureSetupEnvironment(
   envName = ensuredEnvironment.name;
   ports.setCanonicalEnvironment(envName);
 
-  const { runGh, setEnvironmentVariable, runGhWorkflow } =
-    ports.bindEnvironment({
-      targetRepo,
-      envName,
-      environmentProviderId: ensuredEnvironment.providerId,
-      journalVariables: provider === "azure"
-    });
+  const {
+    runGh,
+    setEnvironmentVariable: writeEnvironmentVariable,
+    runGhWorkflow
+  } = ports.bindEnvironment({
+    targetRepo,
+    envName,
+    environmentProviderId: ensuredEnvironment.providerId,
+    journalVariables: provider === "azure"
+  });
+  const setEnvironmentVariable = async (
+    name: string,
+    value: string | undefined
+  ) => {
+    assertSetupExecutionActive(ports.isExecutionStopped);
+    return writeEnvironmentVariable(name, value);
+  };
   ports.recordEnvironment({
     state: ensuredEnvironment.state,
     repo: targetRepo,
@@ -198,7 +214,9 @@ export async function configureSetupEnvironment(
         ports.bootstrapStatePackage({
           targetRepository: targetRepo,
           registry: stateRegistry,
-          credentials: packageCredentials
+          credentials: packageCredentials,
+          assertActive: () =>
+            assertSetupExecutionActive(ports.isExecutionStopped)
         })
     );
     if (!statePackageAttempt.completed) return { kind: "stopped" };
@@ -654,6 +672,7 @@ export async function configureSetupEnvironment(
     fetchFile: (repo, path, branch) =>
       ports.fetchFileFromRepo(repo, path, branch)
   });
+  assertSetupExecutionActive(ports.isExecutionStopped);
   if (verifyPlan.pullRequestUrl) pullRequestUrl = verifyPlan.pullRequestUrl;
   if (verifyPlan.trigger === "none") {
     verifySkipReason = { kind: "merge", reason: verifyPlan.skipReason };
@@ -675,6 +694,7 @@ export async function configureSetupEnvironment(
     dispatchedAt = automaticStartedAt;
     ports.report({ kind: "verification-discovering", ref: verificationRef });
     const automatic = await ports.discoverAutomaticVerificationRun({
+      isStopped: ports.isExecutionStopped,
       identity: {
         repo: targetRepo,
         workflow: ports.verifyWorkflowFile,
@@ -698,6 +718,7 @@ export async function configureSetupEnvironment(
       stopBoundary: ports.stopBoundary,
       sleep: (milliseconds) => ports.sleep(milliseconds)
     });
+    assertSetupExecutionActive(ports.isExecutionStopped);
     if (automatic.state === "cancelled") return { kind: "stopped" };
     if (automatic.state === "manual_required") {
       ports.terminalizeManualRequired(automatic.guidance);
@@ -753,6 +774,7 @@ export async function configureSetupEnvironment(
       operationMarker,
       allowRegistrationRetry: true,
       ports: {
+        isStopped: ports.isExecutionStopped,
         runGh: (args) => runGh(args),
         sendDispatch: () =>
           runGhWorkflow(
@@ -798,6 +820,7 @@ export async function configureSetupEnvironment(
         sleep: (milliseconds) => ports.sleep(milliseconds)
       }
     });
+    assertSetupExecutionActive(ports.isExecutionStopped);
     if (dispatch.state === "cancelled") return { kind: "stopped" };
     if (dispatch.state === "baseline_failed") {
       return {
