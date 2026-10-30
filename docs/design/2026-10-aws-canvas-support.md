@@ -154,7 +154,7 @@ The trust policy has one statement for the account's GitHub identity provider, l
 | New, which GitHub reports uses the ID form | One, `repo:owner@<ownerId>/repo@<repoId>:environment:<env>`                  | GitHub sends only this form                                                                                                                                    |
 | Older                                      | Two, the name-based `repo:owner/repo:environment:<env>` and the ID-based one | GitHub moves a repository to the ID-based form when it's renamed or transferred. Trusting only the name-based form would break every AWS deploy after a rename |
 
-**Two setups at once.** Setup, delete, rollback, and **Repair** each take a lock on the deploy identity before they read its trust policy. Setup holds it until **Configure environment** has written the GitHub environment, so a delete or rollback that checks which environments use a cluster always sees an environment that's being set up. The lock is an IAM policy named `radius-lock-<role>`: AWS refuses to create a policy whose name already exists, so only one holder can create it, and deleting it releases the lock. It lives in AWS, so every repository that uses the role shares it, even when the role was picked. A second setup waits for the lock.
+**Two setups at once.** Setup, delete, rollback, and **Repair** each take a lock on the deploy identity before they read its trust policy. Setup holds it until **Configure environment** has written the GitHub environment, so a delete or rollback that checks which environments use a cluster always sees an environment that's being set up. The lock is an IAM policy named `radius-lock-<role>`: AWS refuses to create a policy whose name already exists, so only one holder can create it, and deleting it releases the lock. It lives in AWS, so every repository that uses the role shares it, even when the role was picked. Taking and releasing it needs `iam:CreatePolicy`, `iam:GetPolicy`, and `iam:DeletePolicy` on `arn:aws:iam::<account>:policy/radius-lock-*`. A second setup waits for the lock.
 
 **A lock that isn't released.** A setup that crashes leaves its lock behind. Radius never takes over a lock on its own, because a setup that only paused could resume after the takeover and overwrite the new holder's changes. After 10 minutes, the waiting setup shows who holds the lock and since when, and offers **Remove lock**, which the developer uses after confirming the other setup has stopped.
 
@@ -194,7 +194,7 @@ When either limit is reached, setup stops at that step, naming the limit and quo
 
 ### Access to the EKS cluster
 
-Setup adds an access entry for the deploy identity on the selected cluster, with AWS's `AmazonEKSClusterAdminPolicy`. Setup tags the access entry it creates, so delete can tell it from one someone else made.
+Setup adds an access entry for the deploy identity on the selected cluster, with AWS's `AmazonEKSClusterAdminPolicy`. Setup tags the access entry it creates with `radius-managed=true`, which needs `eks:TagResource`, so delete can tell it from one someone else made.
 
 Setup grants cluster access while running as the developer, so the deploy workflow never needs the EKS access entry actions above, and no longer creates the access entry on every run. A new access entry is retried for up to a minute, because a new role takes time to spread through IAM.
 
