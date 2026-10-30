@@ -207,7 +207,7 @@ We should add a workflow that uses `actions/labeler` to apply `risk:low`, `risk:
 
 We should propose a section of sensitive paths in the synced `CODEOWNERS` template in `radius-project/.github`, so a code owner must approve any high-tier change.
 
-A ruleset sets one approval count for the whole branch, and `CODEOWNERS` requires only one code-owner approval, so neither can demand two approvals for some paths and one for others. To enforce two approvals on the high tier, we should add a required status check that passes only when a `risk:high` pull request has two human approvals of its current commit, not counting Copilot.
+A ruleset sets one approval count for the whole branch, and `CODEOWNERS` requires only one code-owner approval, so neither can demand two approvals for some paths and one for others. To enforce two approvals on the high tier, we should add a required status check that passes only when a pull request that changes a high-tier path has two human approvals of its current commit, not counting Copilot. The check should read the changed files itself rather than the `risk:high` label, because anyone with triage access can change a label.
 
 #### Step 4.4: Point human reviewers at the riskiest changes
 
@@ -247,6 +247,58 @@ Copilot code review reads instructions and skills from the pull request's head b
 
 These guards stop a tampered review from approving a pull request, but not from shaping what Copilot says. A fork that rewrites the instructions can still get a review that calls a risky change safe, and that comment can sway the human who reviews it. We should have the Step 4.2 labeler add a `review-instructions-changed` label and a comment whenever a pull request touches the instruction, skill, prompt, or `AGENTS.md` paths, telling the human reviewer to set Copilot's review aside and read the change themselves.
 
+### Error handling
+
+We need every new check to fail closed. When something goes wrong, the pull request should fall back to needing a human, never to merging with less review.
+
+- **Copilot doesn't review.** The review can fail to run because the author has no Copilot license, has run out of AI credits, or GitHub has an outage. Then there's no Copilot approval, and the ruleset's required approval must come from a human.
+- **The labeler fails or doesn't run.** Labels only inform reviewers. The Step 4.3 high-tier check and the Step 4.5 trusted-author check must work out the tier from the changed files themselves, so a missing or wrong label can't lower the bar.
+- **A team-membership lookup fails.** If the GitHub API returns an error, rate-limits the check, or the token can't read the team, the trusted-author check must fail rather than pass, and its output must say why.
+- **A required check is skipped.** GitHub counts a skipped required check as passed (Step 3.2). Each new check must run on every pull request, with no job-level `if:` that could skip it, and make its decision inside its steps.
+
+## Test plan
+
+We need evidence for two separate questions. The Step 4.5 trial measures whether Copilot's reviews are right. It says nothing about whether our checks enforce the rules, so we also need acceptance tests for the checks themselves. Both must pass before Copilot approvals count toward merge.
+
+Each phase gets one verification:
+
+- **Phase 1.** Open a pull request after Step 1.2 and confirm that Copilot's review applied the `radius-code-review` skill and ended with the summary comment.
+- **Phase 2.** Push to an open pull request and confirm that Copilot reviews the new commit without being asked.
+- **Phase 3.** On a scratch branch, break each required check in turn (a failing test, a lint error, a vulnerable dependency, a seeded CodeQL alert) and confirm the pull request can't merge.
+- **Phase 4.** Run the acceptance cases below on a scratch repository with a copy of the `main` ruleset and the same Copilot settings, before we change anything in ai-extensions.
+
+In each case, "blocked" means GitHub won't allow the merge.
+
+| # | Scenario | Setup | Expected result |
+| --- | --- | --- | --- |
+| 1 | Mixed tiers | A trusted author changes `docs/setup.md` and `.github/workflows/build.yml`, and Copilot approves. | Blocked until the high tier's human approvals are in. Copilot's approval doesn't count, because the workflow file matches no glob. |
+| 2 | Stale human approval | A human approves, then the author pushes another commit. | Blocked. The ruleset dismisses stale approvals on push, and the Step 4.3 check counts only approvals of the current commit. |
+| 3 | Dismissed Copilot approval | Copilot approves a low-tier change, then the author pushes again. | Blocked until Copilot approves the new commit or a human does. |
+| 4 | A push raises the tier | A low-tier pull request gets a new commit that touches `packages/core/src/workflows/`. | The checks rerun on the new commit and require the high tier's approvals. |
+| 5 | Label tampering | Someone removes `risk:high` or adds `risk:low` by hand. | No change. The checks ignore labels. |
+| 6 | Untrusted author | An outside contributor's docs-only pull request gets a Copilot approval. | Blocked until a human approves. |
+| 7 | Instruction change | A pull request edits `.github/instructions/code-review.instructions.md` along with a docs file. | Copilot's approval doesn't count, and the labeler adds `review-instructions-changed` and its comment. |
+| 8 | Team lookup fails | The trusted-author check runs with a token that can't read team membership. | The check fails, so the pull request is blocked. |
+| 9 | Agent of unknown origin | An agent opens a low-tier pull request, and the check can't confirm which team member started it. | Treated as untrusted: blocked until a human approves. |
+
+## Security
+
+This proposal lets some changes merge without a human, so its main risk is a pull request that earns an approval it shouldn't.
+
+- **Tampered review instructions.** Copilot reads instructions and skills from the pull request's head branch, so a fork can rewrite them. Step 4.6 keeps those paths out of the approval globs, requires a maintainer to approve changes to them, and flags them for the human reviewer.
+- **The labeler's trigger.** On a fork pull request, the `pull_request` trigger gets a read-only token, so the labeler needs `pull_request_target`. That trigger runs with a write token in our repository, so the labeling job must never check out or run the pull request's code, and should request only `pull-requests: write`.
+- **The token for team lookups.** The default `GITHUB_TOKEN` can't read organization team membership, so the trusted-author check needs a GitHub App token with organization `members: read`. That token belongs in a job that runs no pull request code.
+- **Wider merge rights.** Copilot approvals count only for low-tier paths, only for trusted authors, and only after the trial and the acceptance cases pass. Every other change keeps a human approval.
+- **Copilot Memory.** A wrong fact in memory would steer later reviews without anyone seeing it, so Step 1.5 asks who can audit what it stores.
+
+## Open questions
+
+- Does a Copilot approval satisfy the ruleset's code-owner review rule? (Step 4.5)
+- Can an instruction make Copilot code review load a skill on every review? (Step 1.2)
+- When a pull request has a file outside the globs, does Copilot still submit an approval that doesn't count, or none at all? (Step 4.5)
+- If we adopt a merge queue, do the new required checks need a `merge_group` trigger? (Step 3.2)
+- Who can see and correct what Copilot Memory stores? (Step 1.5)
+
 ## Alternatives considered
 
 ### Require a fixed `build-gate` instead of the individual build jobs
@@ -264,3 +316,7 @@ Disadvantages:
 - Adding the plugin build jobs to `needs` would let one broken plugin block every plugin's release. `publish.yml` deliberately keeps plugins independent of each other.
 
 We chose to require the jobs directly because it leaves the release path untouched. If ruleset upkeep becomes a burden, we can add a separate `pr-gate` job for merges and leave `build-gate` for releases.
+
+## Design review notes
+
+To be recorded before this doc merges.
