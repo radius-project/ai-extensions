@@ -1,5 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { libraryReleasePlan } from "../../../../scripts/library-release.mjs";
@@ -252,6 +255,188 @@ describe("npm tarball publication", () => {
   ])("propagates publication and verification errors", (results, message) => {
     const { run } = runner(results);
     expect(() => publishLibrary(release, bytes, path, run)).toThrow(message);
+  });
+});
+
+describe("npm publish command startup", () => {
+  function candidate() {
+    const root = fixture();
+    const scripts = join(root, "scripts");
+    const bin = join(root, "bin");
+    const directory = join(root, "qualified candidate");
+    mkdirSync(scripts);
+    mkdirSync(bin);
+    mkdirSync(join(directory, "packages"), { recursive: true });
+    for (const name of [
+      "publish-libraries.mjs",
+      "library-release.mjs",
+      "libraries.mjs",
+      "plugins.mjs",
+      "module-entry.mjs"
+    ]) {
+      copyFileSync(join(repository, "scripts", name), join(scripts, name));
+    }
+    library(root, "a-renderer", {
+      dependencies: { "@radius-project/z-core": "workspace:*" }
+    });
+    library(root, "z-core");
+    const plan = libraryReleasePlan(root);
+    writeFileSync(join(directory, "release-plan.json"), JSON.stringify(plan));
+    for (const release of plan) {
+      writeFileSync(
+        join(directory, "packages", release.tarball),
+        `qualified bytes for ${release.name}`
+      );
+    }
+    // A native executable also works with shell-free spawnSync on Windows.
+    copyFileSync(
+      process.execPath,
+      join(bin, process.platform === "win32" ? "npm.exe" : "npm")
+    );
+    const fake = join(bin, "fake-npm.mjs");
+    writeFileSync(
+      fake,
+      `import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+if (["npm", "npm.exe"].includes(basename(process.execPath))) {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const args = process.argv.slice(1);
+  args[0] = basename(args[0]);
+  appendFileSync(join(root, "npm-calls.jsonl"), JSON.stringify(args) + "\\n");
+  const statePath = join(root, "npm-state.json");
+  const state = existsSync(statePath) ?
+    JSON.parse(readFileSync(statePath, "utf8")) : {};
+  const plan = JSON.parse(readFileSync(
+    join(root, "qualified candidate", "release-plan.json"), "utf8"
+  ));
+  if (args[0] === "view") {
+    assert.deepEqual(args.slice(2), [
+      "dist.integrity", "--json", "--registry", "https://registry.npmjs.org/"
+    ]);
+    assert.ok(plan.some((release) =>
+      args[1] === release.name + "@" + release.version
+    ));
+    console.log(JSON.stringify(state[args[1]] ?? { error: { code: "E404" } }));
+    process.exit(state[args[1]] ? 0 : 1);
+  }
+  assert.equal(args[0], "publish");
+  assert.deepEqual(args.slice(2), [
+    "--access", "public", "--provenance", "--ignore-scripts",
+    "--registry", "https://registry.npmjs.org/"
+  ]);
+  const release = plan.find((release) => basename(args[1]) === release.tarball);
+  assert.ok(release);
+  state[release.name + "@" + release.version] =
+    "sha512-" + createHash("sha512").update(readFileSync(args[1])).digest("base64");
+  writeFileSync(statePath, JSON.stringify(state));
+  process.exit(0);
+}
+`
+    );
+    return {
+      root,
+      directory,
+      plan,
+      run() {
+        return spawnSync(
+          process.execPath,
+          [join(scripts, "publish-libraries.mjs"), directory],
+          {
+            cwd: root,
+            encoding: "utf8",
+            timeout: 10_000,
+            env: {
+              ...(process.platform === "win32" ?
+                { SystemRoot: process.env.SystemRoot }
+              : {}),
+              PATH: bin,
+              NODE_OPTIONS: `--import=${pathToFileURL(fake).href}`
+            }
+          }
+        );
+      },
+      calls() {
+        const path = join(root, "npm-calls.jsonl");
+        return existsSync(path) ?
+            readFileSync(path, "utf8").trim().split("\n").map(JSON.parse)
+          : [];
+      }
+    };
+  }
+
+  it("rejects a plan that differs from source before running npm", () => {
+    const context = candidate();
+    context.plan[0].version = "9.9.9";
+    writeFileSync(
+      join(context.directory, "release-plan.json"),
+      JSON.stringify(context.plan)
+    );
+    const result = context.run();
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "The qualified candidate does not match the checked-out release source."
+    );
+    expect(context.calls()).toEqual([]);
+  });
+
+  it("rejects a missing first tarball before running npm", () => {
+    const context = candidate();
+    const path = join(context.directory, "packages", context.plan[0].tarball);
+    rmSync(path);
+    const result = context.run();
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("ENOENT");
+    expect(result.stderr).toContain(context.plan[0].tarball);
+    expect(context.calls()).toEqual([]);
+  });
+
+  it("publishes and verifies dependencies before consumers", () => {
+    const context = candidate();
+    const result = context.run();
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(context.plan.map(({ name }) => name)).toEqual([
+      "@radius-project/z-core",
+      "@radius-project/a-renderer"
+    ]);
+    expect(context.calls()).toEqual(
+      context.plan.flatMap((release) => {
+        const query = [
+          "view",
+          `${release.name}@${release.version}`,
+          "dist.integrity",
+          "--json",
+          "--registry",
+          "https://registry.npmjs.org/"
+        ];
+        return [
+          query,
+          [
+            "publish",
+            join(context.directory, "packages", release.tarball),
+            "--access",
+            "public",
+            "--provenance",
+            "--ignore-scripts",
+            "--registry",
+            "https://registry.npmjs.org/"
+          ],
+          query
+        ];
+      })
+    );
+    for (const release of context.plan) {
+      expect(result.stdout).toContain(
+        `Verified ${release.name}@${release.version} on npm.`
+      );
+    }
   });
 });
 
