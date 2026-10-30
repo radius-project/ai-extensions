@@ -1,0 +1,4 @@
+source:
+  repo: https://github.com/radius-project/samples
+  commit: f10b1a2b891157967b51a9e9b4aedbc40c9271c5
+  path: samples/azure-search-api/src

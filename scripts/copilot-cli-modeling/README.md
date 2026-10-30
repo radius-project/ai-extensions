@@ -6,9 +6,9 @@ The [Copilot CLI Modeling](../../.github/workflows/copilot-cli-modeling.yml) wor
 
 ## How it works
 
-1. The workflow builds the plugin and installs the pinned Copilot CLI version from npm.
+1. The workflow builds the selected plugin commit once, or uses the package from a published tag. Each parallel case job downloads the same plugin and installs the pinned Copilot CLI version from npm. The test runner always comes from the workflow's commit.
 2. `run-modeling.mjs` makes a new checkout of the case's app at its pinned commit. It deletes the case's excluded paths, and it stops if the app already has `.radius/app.bicep`.
-3. It copies the plugin from `.artifacts/radius` into a local plugin marketplace and installs the plugin from there.
+3. It copies the selected plugin into a local plugin marketplace and installs the plugin from there.
 4. It runs `copilot --prompt` in the app's directory, with the settings in the next section.
 5. It waits up to 30 minutes for the CLI to exit. Then it copies the evidence to the output directory.
 6. It reads the session events. The run passes only if all of these are true:
@@ -56,16 +56,20 @@ The harness does not retry a session. A session that ends without `.radius/app.b
 
 ## Cases
 
-Each directory in `cases` is one case. Its `case.yaml` pins a public app repository at a commit, with an optional `path` for a sparse checkout and an optional `exclude` list of paths to delete before the session starts. The two cases are small apps, so the daily run stays short. To add a case, add its directory. Then add an entry with the directory name and a model to the workflow's `matrix.include` list.
+Each directory in `cases` is one case. Its `case.yaml` pins a public app repository at a commit, with an optional `path` for a sparse checkout and an optional `exclude` list of paths to delete before the session starts. The two cases are small apps, so the daily run stays short. To add a daily case, add its directory and an entry to the workflow's default matrix in the `Select cases` step.
+
+For a manual full-dataset run, set `case-set` to `evaluation` and select a `model`. The workflow runs every case under `evaluation-cases` in parallel. That directory contains only copied `case.yaml` manifests. The workflow has no access to the private dataset repository or its golden `app.bicep` files. Use separate dispatches for each model and plugin version to compare them with the same runner, CLI, case set, and reasoning effort.
 
 Expected models are not in this repository. This repository is public, and the agent must not see the answers.
 
 ## Workflow inputs
 
-| Input              | Default  | Use                                                                                            |
-|--------------------|----------|------------------------------------------------------------------------------------------------|
-| `model`            | Blank    | A model ID for every case. Leave it blank to use each case's model from the workflow's matrix. |
-| `reasoning-effort` | `medium` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, for every case.                 |
+| Input               | Default  | Use                                                                                                       |
+|---------------------|----------|-----------------------------------------------------------------------------------------------------------|
+| `model`             | Blank    | A model ID for every case. Leave it blank to use each case's model from the workflow's matrix.            |
+| `reasoning-effort`  | `medium` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, for every case.                            |
+| `ai-extensions-ref` | Blank    | Plugin branch, commit, or published tag such as `radius@0.2.3`. Blank builds the workflow's commit.       |
+| `case-set`          | `daily`  | `daily` uses the two scheduled cases. `evaluation` uses all copied evaluation cases and requires `model`. |
 
 Scheduled runs have no inputs, so they use each case's model and `medium`.
 
@@ -80,6 +84,7 @@ An organization owner must keep the Copilot policy "Allow use of Copilot CLI bil
 Each case uploads the `copilot-cli-modeling-<case>` artifact with these files:
 
 - `summary.json` and `summary.md`: the result, the case, the prompt, the CLI version, the requested model and reasoning effort, the models used, skills, tool calls, model calls, tokens, model API time, session duration, and total duration. The workflow also adds `summary.md` to the job summary.
+- `comparison.json`: the plugin and runner commits, the case set, the model, and the reasoning effort.
 - `session-events.jsonl`: the agent session's events.
 - `logs/`: the CLI output and the Copilot runtime logs.
 - `radius/`: if the agent wrote `.radius/app.bicep`, the regular files in the `.radius` directory. The run skips symbolic links.

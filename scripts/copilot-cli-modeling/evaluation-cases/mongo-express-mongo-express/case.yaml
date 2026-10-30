@@ -1,0 +1,3 @@
+source:
+  repo: https://github.com/mongo-express/mongo-express
+  commit: 486c162ec8bdbc8b8c1c61b36b53dee71fdf7034

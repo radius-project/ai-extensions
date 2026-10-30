@@ -1,0 +1,3 @@
+source:
+  repo: https://github.com/dockersamples/spring-petclinic-docker
+  commit: eb05d95d9d2e9de6e58d87fe53199e967465892b

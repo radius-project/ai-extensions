@@ -1,0 +1,3 @@
+source:
+  repo: https://github.com/langfuse/langfuse
+  commit: 71c840e0e9cc945df9c250bdf182f99497584d3a # v4.64.0

@@ -1,0 +1,3 @@
+source:
+  repo: https://github.com/GoogleCloudPlatform/microservices-demo
+  commit: 38e7348eb289eb5b87c0c6e8cb19ced0449dc389

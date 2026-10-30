@@ -1,0 +1,3 @@
+source:
+  repo: https://github.com/huginn/huginn
+  commit: 27c5a7569fe1d363b79e217de0c6a0ac9f93e84e # v2026.10.14

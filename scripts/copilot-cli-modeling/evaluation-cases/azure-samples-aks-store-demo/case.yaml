@@ -1,0 +1,3 @@
+source:
+  repo: https://github.com/Azure-Samples/aks-store-demo
+  commit: 3c3ba3bd999d0b2d78eece1adac84b712b7d9c4f

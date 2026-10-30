@@ -1,0 +1,10 @@
+source:
+  repo: https://github.com/radius-project/samples
+  commit: a4d31468ed3e99b378e76005fe8d1ee6367c0583
+  path: samples/demo
+  exclude:
+    - .rad
+    - app.bicep
+    - app-postgresql.bicep
+    - app-redis.bicep
+    - README.md # describes a Radius model of the app

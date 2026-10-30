@@ -1,0 +1,3 @@
+source:
+  repo: https://github.com/BerriAI/litellm
+  commit: 0519dbf25b290dd3a646bf40dc93d40ae36901aa

@@ -1,10 +1,11 @@
 # yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
 ---
 name: Copilot CLI Modeling
+run-name: Modeling ${{ inputs.model || 'scheduled models' }} with ${{ inputs.ai-extensions-ref || github.sha }}
 
-# Runs Copilot CLI with the Radius plugin built from this checkout. The CLI
-# uses the version and the settings of the GitHub Copilot app. For each case
-# in scripts/copilot-cli-modeling/cases, the run sends the dataset prompt and
+# Runs Copilot CLI with a built or published Radius plugin. The CLI uses the
+# version and the settings of the GitHub Copilot app. Each case sends the
+# dataset prompt and
 # passes when the agent loads the radius-app-bicep skill and the skill
 # publishes .radius/app.bicep. See scripts/copilot-cli-modeling/README.md.
 #
@@ -35,6 +36,17 @@ on:
           - xhigh
           - max
         default: medium
+      ai-extensions-ref:
+        description: Plugin branch, commit, or published tag, such as radius@0.2.3. Blank uses this workflow's commit.
+        type: string
+        default: ""
+      case-set:
+        description: The two daily cases, or all evaluation cases copied into this checkout. Evaluation requires model.
+        type: choice
+        options:
+          - daily
+          - evaluation
+        default: daily
 
 permissions: {}
 
@@ -44,8 +56,136 @@ env:
   REASONING_EFFORT: ${{ inputs.reasoning-effort || 'medium' }}
 
 jobs:
+  prepare:
+    name: Prepare plugin and cases
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'radius-project/ai-extensions'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.cases.outputs.matrix }}
+      cases-directory: ${{ steps.cases.outputs.directory }}
+      plugin-sha: ${{ steps.plugin.outputs.sha }}
+    steps:
+      - name: Checkout the test runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select cases
+        id: cases
+        env:
+          MODEL: ${{ inputs.model }}
+          CASE_SET: ${{ inputs.case-set || 'daily' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$MODEL" && ! "$MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]; then
+            echo "::error::model must be a model ID, such as gpt-6.1-sol."
+            exit 1
+          fi
+          if [[ "$CASE_SET" == daily ]]; then
+            directory=scripts/copilot-cli-modeling/cases
+            matrix='{"include":[{"case":"mongo-express-mongo-express","model":"gpt-6.1-sol"},{"case":"sosedoff-pgweb","model":"gpt-6-astra"}]}'
+          elif [[ "$CASE_SET" == evaluation ]]; then
+            if [[ -z "$MODEL" ]]; then
+              echo "::error::Set model when selecting the evaluation case set."
+              exit 1
+            fi
+            directory=scripts/copilot-cli-modeling/evaluation-cases
+            matrix="$(find "$directory" -mindepth 2 -maxdepth 2 -type f -name case.yaml \
+              | sort | jq -Rsc '{include: [split("\n")[] | select(length > 0) | {case: (split("/")[-2])}]}')"
+            jq -e '.include | length > 0 and all(.[]; .case | test("^[a-z0-9][a-z0-9-]*$"))' <<< "$matrix"
+          else
+            echo "::error::Unknown case set."
+            exit 1
+          fi
+          {
+            printf 'directory=%s\n' "$directory"
+            printf 'matrix=%s\n' "$matrix"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the selected plugin
+        if: inputs.ai-extensions-ref != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: radius-project/ai-extensions
+          ref: ${{ inputs.ai-extensions-ref }}
+          path: under-test
+          persist-credentials: false
+
+      - name: Identify plugin layout
+        id: plugin
+        env:
+          PLUGIN_REF: ${{ inputs.ai-extensions-ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir=.
+          if [[ -n "$PLUGIN_REF" ]]; then
+            source_dir=under-test
+          fi
+          {
+            printf 'source=%s\n' "$source_dir"
+            printf 'sha=%s\n' "$(git -C "$source_dir" rev-parse HEAD)"
+            if [[ -f "$source_dir/package.json" ]]; then
+              printf 'packaged=false\npath=%s/.artifacts/radius\n' "$source_dir"
+            elif [[ -f "$source_dir/plugins/radius/plugin.json" ]]; then
+              printf 'packaged=true\npath=%s/plugins/radius\n' "$source_dir"
+            else
+              echo "::error::The selected ref contains neither plugin source nor a published Radius package." >&2
+              exit 1
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install pnpm
+        if: steps.plugin.outputs.packaged == 'false'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ${{ steps.plugin.outputs.source }}/package.json
+
+      - name: Setup Node.js
+        if: steps.plugin.outputs.packaged == 'false'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ steps.plugin.outputs.source }}/.node-version
+          package-manager-cache: false
+
+      - name: Install dependencies
+        if: steps.plugin.outputs.packaged == 'false'
+        working-directory: ${{ steps.plugin.outputs.source }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the Radius plugin
+        if: steps.plugin.outputs.packaged == 'false'
+        working-directory: ${{ steps.plugin.outputs.source }}
+        run: pnpm build
+
+      - name: Package the selected plugin
+        env:
+          PLUGIN_DIR: ${{ steps.plugin.outputs.path }}
+          PLUGIN_SHA: ${{ steps.plugin.outputs.sha }}
+          CASE_SET: ${{ inputs.case-set || 'daily' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.name == "radius"' "$PLUGIN_DIR/plugin.json"
+          tar -czf "$RUNNER_TEMP/radius-plugin.tgz" -C "$PLUGIN_DIR" .
+          printf 'Plugin commit: %s\n\nCase set: %s\n' \
+            "$PLUGIN_SHA" "$CASE_SET" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the selected plugin
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: radius-plugin
+          path: ${{ runner.temp }}/radius-plugin.tgz
+          if-no-files-found: error
+          retention-days: 14
+
   model:
     name: Model ${{ matrix.case }} with ${{ inputs.model || matrix.model }}
+    needs: prepare
     # Scheduled workflows keep running in forks that enable Actions. Those
     # runs would use the fork owner's Copilot requests.
     if: github.event_name == 'workflow_dispatch' || github.repository == 'radius-project/ai-extensions'
@@ -65,32 +205,12 @@ jobs:
     strategy:
       # Each case is its own result. One failure must not cancel the other.
       fail-fast: false
-      matrix:
-        # Directories under scripts/copilot-cli-modeling/cases, each with the
-        # model that scheduled runs use. Two small apps keep the daily run
-        # short.
-        include:
-          - case: mongo-express-mongo-express
-            model: gpt-6.1-sol
-          - case: sosedoff-pgweb
-            model: gpt-6-astra
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Check the model input
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! "$MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]; then
-            echo "::error::model must be a model ID, such as gpt-6.1-sol."
-            exit 1
-          fi
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -100,11 +220,18 @@ jobs:
           # permission, and other workflows restore the same cache.
           package-manager-cache: false
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Download the selected plugin
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: radius-plugin
+          path: ${{ runner.temp }}/plugin-artifact
 
-      - name: Build the Radius plugin
-        run: pnpm build
+      - name: Extract the selected plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/radius-plugin"
+          tar -xzf "$RUNNER_TEMP/plugin-artifact/radius-plugin.tgz" -C "$RUNNER_TEMP/radius-plugin"
 
       - name: Install Copilot CLI
         # npm retries failed downloads. A stalled registry fails here, not at
@@ -127,15 +254,32 @@ jobs:
         env:
           COPILOT_GITHUB_TOKEN: ${{ github.token }}
           CASE: ${{ matrix.case }}
+          CASES_DIRECTORY: ${{ needs.prepare.outputs.cases-directory }}
         shell: bash
         run: |
           set -euo pipefail
           node scripts/copilot-cli-modeling/run-modeling.mjs \
-            --case "scripts/copilot-cli-modeling/cases/$CASE/case.yaml" \
+            --case "$CASES_DIRECTORY/$CASE/case.yaml" \
+            --plugin-dir "$RUNNER_TEMP/radius-plugin" \
             --work-dir "$RUNNER_TEMP/copilot-cli-work" \
             --output-dir "$RUNNER_TEMP/copilot-cli-output" \
             --model "$MODEL" \
             --reasoning-effort "$REASONING_EFFORT"
+
+      - name: Record comparison inputs
+        if: always()
+        env:
+          PLUGIN_SHA: ${{ needs.prepare.outputs.plugin-sha }}
+          CASE_SET: ${{ inputs.case-set || 'daily' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/copilot-cli-output"
+          jq -n --arg pluginCommit "$PLUGIN_SHA" --arg caseSet "$CASE_SET" \
+            --arg runnerCommit "$GITHUB_SHA" --arg model "$MODEL" \
+            --arg reasoningEffort "$REASONING_EFFORT" \
+            '{pluginCommit: $pluginCommit, caseSet: $caseSet, runnerCommit: $runnerCommit, model: $model, reasoningEffort: $reasoningEffort}' \
+            > "$RUNNER_TEMP/copilot-cli-output/comparison.json"
 
       - name: Upload the run output
         if: always()

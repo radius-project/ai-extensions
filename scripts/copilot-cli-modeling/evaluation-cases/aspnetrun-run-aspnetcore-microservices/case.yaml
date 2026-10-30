@@ -1,0 +1,3 @@
+source:
+  repo: https://github.com/aspnetrun/run-aspnetcore-microservices
+  commit: e3549abf009c71e8c2550f292f3a8edf110550a1
