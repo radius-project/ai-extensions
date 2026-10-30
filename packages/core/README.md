@@ -1,5 +1,11 @@
 # Radius Canvas architecture
 
+## Public npm graph API
+
+The `@radius-project/core` npm package exports only the browser-safe `@radius-project/core/graph` and `@radius-project/core/domain` subpaths, with compiled ESM and TypeScript declarations. The root barrel and the modeling, platform, remediation, and workflow modules are workspace-only APIs. See the [React graph library](../graph-react/README.md) for a consumer example and the [npm release guide](../../docs/eng/RELEASING.md#releasing-npm-graph-libraries) for publication.
+
+## Workspace architecture
+
 Radius Canvas is the application-modeling and deployment product for the GitHub Copilot app. This document describes how the code is laid out after the modularization refactor (see [`docs/design/radius-extension-modularization.md`](../../docs/design/radius-extension-modularization.md)) and gives step-by-step guides for the three changes contributors make most often: **adding a compute platform**, **adding a canvas action/tool**, and **adding a whole new UI adapter**.
 
 ## Layout

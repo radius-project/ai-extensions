@@ -5,6 +5,7 @@ const repositoryRoot = new URL("../../../../../", import.meta.url);
 const {
   extractRecipeDefinition,
   parseAzureRecipePackPin,
+  parseResourceTypeCommit,
   validateAzureRecipePack
 } = await import(
   new URL(
@@ -51,6 +52,70 @@ function replaceAzureRecipePackPin(
 ): string {
   return defaults.replace(azureRecipePackPin, replacement(azureRecipePackPin));
 }
+
+describe("parseResourceTypeCommit", () => {
+  const pin = "b".repeat(40);
+  const namespace = `  - name: Radius.Messaging
+    repo: github.com/radius-project/resource-types-contrib
+    ref: ${pin}`;
+
+  it("selects the resource namespace rather than the pack or another namespace", () => {
+    const catalog = defaults.replace(
+      "recipePacks:",
+      `${namespace}\nrecipePacks:`
+    );
+    expect(parseResourceTypeCommit(catalog, "Radius.Messaging/rabbitMQ")).toBe(
+      pin
+    );
+    expect(
+      parseResourceTypeCommit(catalog, "Radius.Data/postgreSqlDatabases")
+    ).toBe(resourceTypesContribCommit);
+    expect(parseAzureRecipePackPin(catalog).commit).toBe(
+      resourceTypesContribCommit
+    );
+    expect(
+      parseResourceTypeCommit(
+        catalog.replaceAll("\n", "\r\n"),
+        "Radius.Messaging/rabbitMQ"
+      )
+    ).toBe(pin);
+  });
+
+  it("accepts indentationless sequences and the last entry at end of file", () => {
+    expect(
+      parseResourceTypeCommit(
+        `resourceTypes:\n${namespace
+          .split("\n")
+          .map((line) => line.slice(2))
+          .join("\n")}`,
+        "Radius.Messaging/rabbitMQ"
+      )
+    ).toBe(pin);
+  });
+
+  it.each([
+    ["missing section", "recipePacks:\n" + namespace],
+    ["missing namespace", defaults],
+    ["duplicate namespace", `resourceTypes:\n${namespace}\n${namespace}`],
+    [
+      "missing ref",
+      `resourceTypes:\n${namespace.replace(`    ref: ${pin}`, "")}`
+    ],
+    ["short ref", `resourceTypes:\n${namespace.replace(pin, "abc")}`],
+    [
+      "uppercase ref",
+      `resourceTypes:\n${namespace.replace(pin, pin.toUpperCase())}`
+    ],
+    ["duplicate ref", `resourceTypes:\n${namespace}\n    ref: ${pin}`]
+  ])(
+    "rejects %s instead of falling back to the pack commit",
+    (_name, catalog) => {
+      expect(() =>
+        parseResourceTypeCommit(catalog, "Radius.Messaging/rabbitMQ")
+      ).toThrow();
+    }
+  );
+});
 
 describe("parseAzureRecipePackPin", () => {
   it("returns the exact immutable Azure Recipe-pack source", () => {
