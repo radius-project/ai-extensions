@@ -285,6 +285,28 @@ if find "${TEST_ROOT}/tmp" -mindepth 1 -print -quit | grep -q .; then
     fail "verifier leaked its temporary checkout or catalog"
 fi
 
+# A workflow set with no Git recipe consumer is valid, but one that calls the
+# Git helper in a form the parser cannot read is not.
+mkdir -p "${TEST_ROOT}/no-git" "${TEST_ROOT}/unparsed-git"
+grep -v 'radius_contrib_resource_git_source' "${TEST_ROOT}/extension/workflow.yml" \
+    >"${TEST_ROOT}/no-git/workflow.yml"
+# shellcheck disable=SC2016 # The literal "${resource_type}" is the fixture.
+sed 's|radius_contrib_resource_git_source Radius.Test/widgets|radius_contrib_resource_git_source "${resource_type}"|' \
+    "${TEST_ROOT}/extension/workflow.yml" >"${TEST_ROOT}/unparsed-git/workflow.yml"
+PATH="${TEST_ROOT}/bin:${PATH}" \
+    CATALOG_REF="${REF}" \
+    CATALOG_HELPER="${HELPER_PATH}" \
+    EXTENSION_DIR="${TEST_ROOT}/no-git" \
+    bash "${VERIFIER}" >/dev/null ||
+    fail "verifier rejected workflows with no Git recipe consumer"
+if PATH="${TEST_ROOT}/bin:${PATH}" \
+    CATALOG_REF="${REF}" \
+    CATALOG_HELPER="${HELPER_PATH}" \
+    EXTENSION_DIR="${TEST_ROOT}/unparsed-git" \
+    bash "${VERIFIER}" >/dev/null 2>&1; then
+    fail "verifier accepted a Git recipe consumer it could not parse"
+fi
+
 # Without an explicit CATALOG_REF the verifier fetches the catalog at the
 # immutable commit of the release the control plane pins.
 write_pin_fixture v1.2.3 v1.2.3 ""

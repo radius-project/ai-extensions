@@ -6,13 +6,16 @@ import {
   deriveConcreteResource,
   normalizeRecipeSource,
   recipePackPathForProvider,
-  recipePackContentPath
+  recipePackContentPath,
+  AWS_EKS_RECIPE_PACK,
+  AWS_EKS_RECIPE_PACK_URL
 } from "./recipe-pack.js";
 
 // Read a committed recipe-pack snapshot from ./testdata. These are verbatim
 // copies of the packs in radius-project/resource-types-contrib@main
 // (recipe-packs/azure-aks/azure-aks.bicep and
-// recipe-packs/kubernetes/default.bicep). They let the parser be
+// recipe-packs/kubernetes/default.bicep), plus the aws-eks pack at the commit
+// AWS_EKS_RECIPE_PACK pins. They let the parser be
 // exercised against the real pack structure without any network I/O (hermetic).
 // To refresh: re-download each file's raw contents over the pinned ref and
 // overwrite it here, then update the expected tables below if entries changed.
@@ -56,6 +59,14 @@ describe("normalizeRecipeSource", () => {
         "mcr.microsoft.com/bicep/avm/res/sql/server@sha256:abc123"
       )
     ).toBe("avm/res/sql/server");
+  });
+
+  it("anchors an aws-eks recipe on its namespace", () => {
+    expect(
+      normalizeRecipeSource(
+        "ghcr.io/radius-project/aws-eks-recipes/mysqldatabases:latest"
+      )
+    ).toBe("aws-eks-recipes/mysqldatabases");
   });
 
   it("returns an empty string for an empty source", () => {
@@ -128,10 +139,13 @@ describe("recipePackPathForProvider", () => {
     );
   });
 
-  it("selects the kubernetes default pack for aws and kubernetes", () => {
+  it("selects the aws-eks pack for aws", () => {
     expect(recipePackPathForProvider("aws")).toBe(
-      "recipe-packs/kubernetes/default.bicep"
+      "recipe-packs/aws-eks/aws-eks.bicep"
     );
+  });
+
+  it("selects the kubernetes default pack for kubernetes", () => {
     expect(recipePackPathForProvider("kubernetes")).toBe(
       "recipe-packs/kubernetes/default.bicep"
     );
@@ -146,6 +160,16 @@ describe("recipePackPathForProvider", () => {
   it("builds a contents API path pinned to the main ref", () => {
     expect(recipePackContentPath("azure")).toBe(
       "/repos/radius-project/resource-types-contrib/contents/recipe-packs/azure-aks/azure-aks.bicep?ref=main"
+    );
+  });
+
+  it("reads the aws-eks pack at its pinned commit", () => {
+    expect(AWS_EKS_RECIPE_PACK.ref).toMatch(/^[0-9a-f]{40}$/);
+    expect(recipePackContentPath("aws")).toBe(
+      `/repos/radius-project/resource-types-contrib/contents/recipe-packs/aws-eks/aws-eks.bicep?ref=${AWS_EKS_RECIPE_PACK.ref}`
+    );
+    expect(AWS_EKS_RECIPE_PACK_URL).toBe(
+      `https://raw.githubusercontent.com/radius-project/resource-types-contrib/${AWS_EKS_RECIPE_PACK.ref}/recipe-packs/aws-eks/aws-eks.bicep`
     );
   });
 });
@@ -375,11 +399,25 @@ describe("committed recipe-pack snapshots", () => {
     "Radius.Messaging/rabbitMQ": "apps/Deployment"
   };
 
+  const AWS_EXPECTED: Record<string, string> = {
+    "Radius.Data/mySqlDatabases": "AWS.RDS/DBInstance",
+    "Radius.Compute/containers": "AWS.EKS/Cluster",
+    "Radius.Compute/persistentVolumes": "core/PersistentVolumeClaim",
+    "Radius.Security/secrets": "core/Secret",
+    "Radius.Compute/routes": "gateway.networking.k8s.io/HTTPRoute",
+    "Radius.Compute/containerImages": "batch/Job"
+  };
+
   it.each([
     {
       provider: "azure",
       fixture: "azure-aks.bicep",
       expected: AZURE_EXPECTED
+    },
+    {
+      provider: "aws",
+      fixture: "aws-eks.bicep",
+      expected: AWS_EXPECTED
     },
     {
       provider: "kubernetes",

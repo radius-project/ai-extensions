@@ -112,3 +112,76 @@ radius_contrib_recipe_pack_url() {
     printf 'https://raw.githubusercontent.com/%s/%s/recipe-packs/%s/%s' \
         "${repo_path}" "${ref}" "${pack}" "${file}"
 }
+
+# Rewrites every kube recipe in a recipe pack from its mutable `latest` alias to
+# the namespace commit that defaults.yaml validated, then fails if any `latest`
+# kube recipe remains. Each recipe entry is keyed by its Radius resource type,
+# e.g. 'Radius.Messaging/rabbitMQ': { kind: 'bicep' source: '...rabbitmq:latest' },
+# so the recipes come from the pack itself rather than a hardcoded list. The label
+# names the provider pack in messages.
+radius_contrib_pin_kube_recipes() {
+    local pack_file="$1" label="$2" pairs resource_type artifact pinned_source mutable_source pinned_file offenders grep_status
+
+    [[ -f "${pack_file}" ]] || {
+        echo "ERROR: recipe pack file '${pack_file}' does not exist." >&2
+        return 1
+    }
+
+    # awk remembers the most recent resource-type key and emits it alongside each
+    # kube-recipes '*:latest' source it then encounters. The quote is passed via
+    # -v to keep the program single-quote free, and only 2-arg match with
+    # RSTART/RLENGTH is used so it runs under mawk on the runner.
+    pairs="$(awk -v q="'" '
+        {
+            if (match($0, q "Radius\\.[^" q "]*" q)) {
+                rt = substr($0, RSTART + 1, RLENGTH - 2)
+            }
+            else if (match($0, /kube-recipes\/[a-z0-9._-]+:latest/)) {
+                s = substr($0, RSTART, RLENGTH)
+                sub(/^kube-recipes\//, "", s)
+                sub(/:latest$/, "", s)
+                if (rt != "") { print rt, s }
+            }
+        }
+    ' "${pack_file}")" || {
+        echo "ERROR: failed to read kube recipes from the ${label} recipe pack." >&2
+        return 1
+    }
+
+    while read -r resource_type artifact; do
+        [[ -n "${resource_type}" ]] || continue
+        pinned_source="$(radius_contrib_kube_recipe_source "${resource_type}" "${artifact}")" || return 1
+        mutable_source="${pinned_source%:*}:latest"
+        if grep -Fq "source: '${pinned_source}'" "${pack_file}"; then
+            continue
+        fi
+        if ! grep -Fq "source: '${mutable_source}'" "${pack_file}"; then
+            echo "WARNING: the ${label} recipe pack has no ${resource_type} Recipe; continuing without it." >&2
+            continue
+        fi
+        # Rewrite without `sed -i`, whose syntax differs between GNU and BSD sed.
+        pinned_file="$(sed "s|${mutable_source}|${pinned_source}|g" "${pack_file}")" || return 1
+        printf '%s\n' "${pinned_file}" >"${pack_file}" || return 1
+        if ! grep -Fq "source: '${pinned_source}'" "${pack_file}"; then
+            echo "ERROR: expected ${artifact} source was not pinned in the ${label} recipe pack." >&2
+            return 1
+        fi
+    done <<<"${pairs}"
+
+    # grep exits 1 when there are no matches, which is the success case here.
+    # A real grep error (exit status greater than 1) still fails.
+    offenders="$(grep -oE 'ghcr\.io/radius-project/kube-recipes/[a-z0-9._-]+:latest' "${pack_file}")" || {
+        grep_status=$?
+        if ((grep_status > 1)); then
+            echo "ERROR: failed to scan ${pack_file} for unpinned kube recipes." >&2
+            return "${grep_status}"
+        fi
+    }
+    offenders="$(printf '%s' "${offenders}" | sort -u)"
+    if [[ -n "${offenders}" ]]; then
+        echo "ERROR: unpinned kube recipes remain in the ${label} recipe pack:" >&2
+        echo "${offenders}" >&2
+        echo "Each must be keyed by its 'Radius.<namespace>/<type>' resource type in the pack, with that namespace pinned in deploy/manifest/defaults.yaml, so its commit can be resolved." >&2
+        return 1
+    fi
+}

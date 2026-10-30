@@ -113,7 +113,29 @@ describe(".github/extension release assets", () => {
     expect(installStep.env.RADIUS_RELEASE_OVERRIDE).toBe(
       "${{ inputs.release-override }}"
     );
+    // Edge is opt-in so an Azure environment's override cannot select it.
+    expect(action.inputs["allow-edge"]).toMatchObject({
+      required: false,
+      default: "false"
+    });
+    expect(installStep.env.RADIUS_ALLOW_EDGE).toBe("${{ inputs.allow-edge }}");
     expect(installStep.env.RADIUS_INSTALL_REF).toMatch(/^v\d+\.\d+\.\d+$/u);
+    // The shared default stays the release the rest of the extension pins. Only
+    // the AWS workflows pass their own edge default.
+    const release = JSON.parse(
+      readFileSync(
+        join(
+          REPO_ROOT,
+          "packages",
+          "adapter-shared",
+          "src",
+          "radius-release.json"
+        ),
+        "utf8"
+      )
+    );
+    expect(installStep.env.RADIUS_INSTALL_REF).toBe(release.tag);
+    expect(installStep.env.RADIUS_INSTALL_COMMIT).toBe(release.commit);
   });
 
   it("passes the selected environment's release override to every control-plane action", () => {
@@ -142,8 +164,16 @@ describe(".github/extension release assets", () => {
     ]);
     for (const { file, job, step } of callers) {
       expect(job.environment, file).toBe("${{ inputs.environment }}");
+      // AWS workflows fall back to the AWS-only edge default the extension
+      // fills in; Azure workflows use the shared release default.
       expect(step.with?.["release-override"], file).toBe(
-        "${{ vars.RADIUS_RELEASE_OVERRIDE }}"
+        file.includes("aws") ?
+          "${{ vars.RADIUS_RELEASE_OVERRIDE || '{{AWS_RADIUS_RELEASE_OVERRIDE}}' }}"
+        : "${{ vars.RADIUS_RELEASE_OVERRIDE }}"
+      );
+      // Only AWS workflows may install edge; Azure leaves the input unset.
+      expect(step.with?.["allow-edge"], file).toBe(
+        file.includes("aws") ? "true" : undefined
       );
     }
   });
