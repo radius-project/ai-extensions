@@ -14,6 +14,9 @@ import { createGitHubAccountCoordinator } from "../../../src/server/services/git
 import { bootstrapRadiusExtension } from "../../../src/runtime/bootstrap.js";
 import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { createEnvironmentAccountContext } from "../../../src/runtime/environment-account-context.js";
+import { createEnvironmentTools } from "../../../src/runtime/environment-tools.js";
+import { createDeploymentAccountResolver } from "../../../src/runtime/deployment-account.js";
+import { createGitHubAccountReadinessService } from "../../../src/server/services/github-account-readiness.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import { configureEnvironmentFixture } from "../../support/server/configure-environment.js";
 import { createConfigureEnvironmentService } from "../../../src/server/services/configure-environment.js";
@@ -1091,43 +1094,40 @@ describe("real server and fake SDK runtime ownership", () => {
     }
   );
 
-  it.each(
-    [
+  it.each([
+    ...[
       "azure",
       "environment",
       "RADIUS_MANAGED",
       "RADIUS_STATE_BACKEND",
       "AZURE_TENANT_ID"
-    ]
-      .flatMap((stage) =>
-        ["issued", "prepared"].map((boundary) => [stage, boundary])
-      )
-      .concat(
-        ["azure-owner", "azure-tags"].flatMap((stage) =>
-          ["issued", "prepared", "delay", "inner-delay"].map((boundary) => [
-            stage,
-            boundary
-          ])
+    ].flatMap((stage) =>
+      ["issued", "prepared"].flatMap((boundary) =>
+        ["service", "tool"].map(
+          (entry) => [stage, boundary, entry, "shutdown"] as const
         )
       )
-      .concat(
-        ["ghcr-head", "ghcr-post", "ghcr-put", "ghcr-manifest"].map((stage) => [
-          stage,
-          "issued"
-        ])
+    ),
+    ...["ghcr-head", "ghcr-post", "ghcr-put", "ghcr-manifest"].map(
+      (stage) => [stage, "issued", "service", "shutdown"] as const
+    ),
+    ...["azure", "environment"].flatMap((stage) =>
+      ["throw", "timeout"].map(
+        (boundary) => [stage, boundary, "service", "shutdown"] as const
       )
-      .concat([
-        ["azure-principal", "inner-delay"],
-        ["environment", "inner-delay"]
-      ])
-      .concat(
-        ["azure", "environment"].flatMap((stage) =>
-          ["throw", "timeout"].map((boundary) => [stage, boundary])
-        )
+    ),
+    ...["azure-owner", "azure-tags"].flatMap((stage) =>
+      ["issued", "prepared", "delay", "inner-delay"].map(
+        (boundary) => [stage, boundary, "service", "shutdown"] as const
       )
-  )(
-    "retains the %s %s journal and account through shutdown",
-    async (stage, boundary) => {
+    ),
+    ["azure-principal", "inner-delay", "service", "shutdown"],
+    ["environment", "inner-delay", "service", "shutdown"],
+    ["azure", "issued", "tool", "stop"],
+    ["RADIUS_MANAGED", "issued", "tool", "stop"]
+  ] as const)(
+    "retains the %s %s journal and account via %s during %s",
+    async (stage, boundary, entry, interruption) => {
       const owner = createEnvironmentExecutionOwner();
       const entered = deferred();
       const writeGate = deferred();
@@ -1391,6 +1391,16 @@ describe("real server and fake SDK runtime ownership", () => {
         switchKeyringAccount: switchAccount,
         resetIdentityCache: () => {}
       });
+      const readiness = createGitHubAccountReadinessService(coordinator, {
+        ownerKey: "runtime",
+        ports: {
+          probePackageAccess: async () => ({
+            ok: true,
+            detail: "Fixture package access is available."
+          })
+        }
+      });
+      const checkReadiness = vi.spyOn(readiness, "check");
       const accountContext = createEnvironmentAccountContext(
         "runtime",
         coordinator
@@ -1399,7 +1409,7 @@ describe("real server and fake SDK runtime ownership", () => {
         executionOwner: owner,
         accountContext
       });
-      const op = createOperation({
+      let op = createOperation({
         operationId: "shutdown-write",
         repo: "fixture/app",
         environment: "dev",
@@ -1426,13 +1436,44 @@ describe("real server and fake SDK runtime ownership", () => {
           subscriptionId: "11111111-1111-4111-8111-111111111111"
         }
       };
-      operations.put(op);
+      if (entry === "service") operations.put(op);
       const fake = createFakeDependencies();
       const extension = await bootstrapRadiusExtension(
         {
           ...fake.deps,
           ...runtime,
-          executionOwner: owner
+          executionOwner: owner,
+          environment: createEnvironmentTools({
+            ...runtime.environmentServices,
+            owner,
+            session: fake.deps.session,
+            account: createDeploymentAccountResolver({
+              readIdentity: async () => ({
+                accounts: [
+                  {
+                    login: executor.login,
+                    active: true,
+                    hasWorkflow: true,
+                    hasPackages: true,
+                    switchable: true,
+                    acting: false
+                  }
+                ]
+              }),
+              readiness,
+              createExecutor: coordinator.createReadOnlyExecutor,
+              redactDiagnostic: (value) => value
+            }),
+            workspace: async () => ({
+              repo: "fixture/app",
+              branch: "feature/setup"
+            }),
+            validateBranch: async () => {},
+            redact: (value) => value,
+            reportError: (error) => {
+              throw error;
+            }
+          })
         },
         {
           createCanvas: (declaration) => declaration,
@@ -1481,7 +1522,32 @@ describe("real server and fake SDK runtime ownership", () => {
       try {
         if (azureRetry || environmentDelay)
           vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-        runtime.setupExecution.scheduleEnvironmentOperation(op);
+        if (entry === "service")
+          runtime.setupExecution.scheduleEnvironmentOperation(op);
+        else {
+          const tool = extension.tools.find(
+            ({ name }) => name === "radius_setup_environment"
+          );
+          if (!tool) throw new Error("Missing registered setup tool");
+          const result = JSON.parse(
+            String(
+              await tool.handler({
+                repo: "fixture/app",
+                environment: "dev",
+                provider: "azure",
+                tenantId: "33333333-3333-4333-8333-333333333333",
+                subscriptionId: "11111111-1111-4111-8111-111111111111",
+                resourceGroup: "fixture-group",
+                cluster: "fixture-cluster",
+                ...(stage !== "azure" ?
+                  { clientId: appId }
+                : { createNew: true })
+              })
+            )
+          );
+          expect(result).toMatchObject({ kind: "accepted" });
+          op = operations.get(result.operation.operationId);
+        }
         completed = new Promise<void>((resolve) => {
           const stop = owner.onEnvironmentTasksSettled(undefined, () => {
             stop();
@@ -1513,8 +1579,36 @@ describe("real server and fake SDK runtime ownership", () => {
         const unresolvedBeforeShutdown =
           innerDelay ? structuredClone(op.providerRecovery) : undefined;
         if (innerDelay) expect(innerReads).toBe(1);
-        await extension.shutdown();
-        expect(switchAccount).not.toHaveBeenCalled();
+        if (interruption === "shutdown") {
+          await extension.shutdown();
+          expect(switchAccount).not.toHaveBeenCalled();
+        } else {
+          const tool = extension.tools.find(
+            ({ name }) => name === "radius_environment_control"
+          );
+          if (!tool) throw new Error("Missing registered control tool");
+          const checksBeforeStop = checkReadiness.mock.calls.length;
+          expect(checksBeforeStop).toBeGreaterThan(0);
+          vi.useFakeTimers();
+          const stopping = tool.handler({
+            operationId: op.operationId,
+            repo: op.repo,
+            environment: op.environment,
+            action: "stop"
+          });
+          await vi.advanceTimersByTimeAsync(3000);
+          expect(JSON.parse(String(await stopping))).toMatchObject({
+            kind: "accepted",
+            code: "operation-stop-pending",
+            operation: { operationId: op.operationId }
+          });
+          vi.useRealTimers();
+          expect(checkReadiness).toHaveBeenCalledTimes(checksBeforeStop);
+          expect(op.control.stop.requestedAt).toBeTruthy();
+          expect(snapshots.at(-1)?.control.stop.requestedAt).toBeTruthy();
+          expect(acknowledged).toBe(false);
+          expect(switchAccount).not.toHaveBeenCalled();
+        }
         expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         const callsAtShutdown = {
           gh: run.mock.calls.length,
@@ -1529,7 +1623,12 @@ describe("real server and fake SDK runtime ownership", () => {
           expect(accountContext.getExecutor(op.operationId)).toBe(executor);
         persistGate.resolve();
         await completed;
-        expect(op.endedAt).toBeNull();
+        if (interruption === "shutdown") {
+          expect(op.endedAt).toBeNull();
+        } else {
+          expect(op.state).toBe("cancelled");
+          expect(op.endedAt).not.toBeNull();
+        }
         expect(op.failure).toBeNull();
         expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
         expect(accountContext.getExecutor(op.operationId)).toBeUndefined();

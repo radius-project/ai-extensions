@@ -19,6 +19,8 @@ import {
   recordAzureApp,
   requireInput,
   finish,
+  pauseForProviderRestart,
+  onOperationTerminal,
   operations,
   OPERATION_SCHEMA_VERSION,
   setVerificationWorkflowState,
@@ -34,6 +36,7 @@ import {
 } from "../../../src/operation-store.js";
 
 afterEach(async () => {
+  onOperationTerminal(null);
   vi.restoreAllMocks();
   operations.clear();
   await configureOperationStore(disabledOperationStore());
@@ -48,6 +51,122 @@ function deferred() {
 }
 
 describe("production environment owner HTTP binding", () => {
+  it.each(
+    ["shutdown", "changed-run"].flatMap((change) =>
+      ["stop", "cancel-workflow"].flatMap((action) =>
+        (action === "stop" ? [false, true] : [false]).map((reject) => ({
+          change,
+          action,
+          reject
+        }))
+      )
+    )
+  )(
+    "refuses $action over HTTP after $change during status read (reject=$reject)",
+    async ({ change, action, reject }) => {
+      const entered = deferred();
+      const gate = deferred();
+      const owner = createEnvironmentExecutionOwner();
+      const run = vi.fn(async (args: string[]) => {
+        if (args[0] !== "run") throw new Error("Unexpected cancellation POST");
+        entered.resolve();
+        await gate.promise;
+        if (reject) throw new Error("late network failure");
+        return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+      });
+      const executor = successfulSelectedGhExecutor({
+        login: "saved-account",
+        run
+      });
+      const coordinator = createGitHubAccountCoordinator({
+        createExecutor: async () => executor,
+        getActiveKeyringLogin: async () => executor.login,
+        switchKeyringAccount: async () => {
+          throw new Error("Unexpected account switch");
+        },
+        resetIdentityCache() {}
+      });
+      const runtime = createTestCanvasServerRuntime({
+        executionOwner: owner,
+        accountContext: createEnvironmentAccountContext(
+          "http-cancellation",
+          coordinator
+        )
+      });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      op.context.githubLogin = executor.login;
+      op.verification = { runId: "42", workflowState: "active" };
+      if (action === "stop") {
+        op.resumeRequest = {
+          environment: {
+            repo: op.repo,
+            environment: op.environment,
+            provider: "azure"
+          }
+        };
+        op.currentStage = STAGE_VERIFY;
+        pauseForProviderRestart(op);
+      } else finish(op, "cancelled");
+      operations.put(op);
+      let pending: Promise<Response> | undefined;
+      try {
+        const entry = await runtime.getOrCreateServer("cancel", "environment");
+        const persist = vi
+          .spyOn(operations, "persist")
+          .mockResolvedValue(undefined);
+        const announce = vi.fn();
+        onOperationTerminal(announce);
+        pending = fetch(
+          `${entry.baseUrl}/api/operations/${op.operationId}/${action}`,
+          {
+            method: "POST",
+            headers: {
+              origin: entry.baseUrl,
+              "sec-fetch-site": "same-origin",
+              "x-radius-mutation-nonce": String(
+                entry.state.browserMutationNonce
+              )
+            }
+          }
+        );
+        await entered.promise;
+        if (change === "shutdown") owner.shutdown();
+        else op.verification = { runId: "43", workflowState: "active" };
+        gate.resolve();
+        const response = await pending;
+        expect(response.status).toBe(change === "shutdown" ? 503 : 409);
+        expect(response.headers.get("content-type")).toContain(
+          "application/json"
+        );
+        expect(response.headers.get("cache-control")).toContain("no-store");
+        expect(await response.json()).toMatchObject({
+          code:
+            change === "shutdown" ?
+              "operation-shutting-down"
+            : "operation-context-changed"
+        });
+        expect(run).toHaveBeenCalledTimes(1);
+        if (action === "stop") {
+          expect(op.state).toBe("cancelled");
+          expect(persist).toHaveBeenCalledTimes(1);
+          expect(announce).not.toHaveBeenCalled();
+        }
+        expect(op.verification).toEqual({
+          runId: change === "shutdown" ? "42" : "43",
+          workflowState: "active"
+        });
+      } finally {
+        gate.resolve();
+        await pending;
+        await runtime.stopServer("cancel", true);
+      }
+    }
+  );
+
   it.each(["timeout", "confirmed"] as const)(
     "refuses a fresh HTTP retry after shutdown and restored %s dispatch",
     async (acknowledgement) => {
@@ -219,6 +338,69 @@ describe("production environment owner HTTP binding", () => {
       }
     }
   );
+
+  it("projects the latest saved operation without repository context through the production status route", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const unavailable = async (): Promise<never> => {
+      throw new Error("Unexpected account lookup");
+    };
+    const runtime = createTestCanvasServerRuntime({
+      executionOwner: owner,
+      accountContext: createEnvironmentAccountContext("latest-status", {
+        createReadOnlyExecutor: unavailable,
+        withSelectedAccount: unavailable
+      })
+    });
+    const entry = await runtime.getOrCreateServer(
+      "latest-status",
+      "environment"
+    );
+    try {
+      const empty = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(empty.status).toBe(200);
+      expect(await empty.json()).toEqual({ operation: null });
+      const op = createOperation({
+        repo: "fixture/app",
+        environment: "dev",
+        provider: "azure"
+      });
+      finish(op, "failed");
+      op.request = { private: "never-return-this" };
+      operations.put(op);
+      const response = await fetch(`${entry.baseUrl}/api/operations`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const result = await response.json();
+      expect(result).toMatchObject({
+        operation: {
+          operationId: op.operationId,
+          repo: op.repo,
+          environment: op.environment,
+          state: "failed"
+        }
+      });
+      expect(JSON.stringify(result)).not.toContain("never-return-this");
+      const beforeExport = Date.now();
+      const diagnostic = await fetch(
+        `${entry.baseUrl}/api/operations/${op.operationId}/diagnostics`
+      );
+      expect(diagnostic.status).toBe(200);
+      expect(diagnostic.headers.get("content-disposition")).toContain(
+        "attachment;"
+      );
+      expect(diagnostic.headers.get("cache-control")).toBe("no-store");
+      const exported = await diagnostic.json();
+      expect(Date.parse(exported.generatedAt)).toBeGreaterThanOrEqual(
+        beforeExport
+      );
+      expect(Date.parse(exported.generatedAt)).toBeLessThanOrEqual(Date.now());
+      expect(JSON.stringify(exported)).not.toContain("never-return-this");
+      expect(owner.hasActiveEnvironmentTasks(undefined)).toBe(false);
+    } finally {
+      owner.shutdown();
+      await runtime.stopServer("latest-status", true);
+    }
+  });
 
   it("keeps an HTTP-admitted rollback recoverable when shutdown wins account acquisition", async () => {
     let release = () => {};

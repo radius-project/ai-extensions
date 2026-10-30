@@ -873,12 +873,13 @@ describe("environments — bypass-verification", () => {
   // Deps that carry a bypass all the way through to the marker write: a
   // Radius-managed env whose run is a terminal permissions failure.
   const passingDeps = (over: Partial<EnvironmentsDependencies> = {}) => {
+    const operation = bypassOp();
     const scope = createWorkflowObservationScope(() => {
       throw new Error("Unexpected artifact reader");
     });
     return deps({
       readInstanceEntry: () => ({ observation: scope }),
-      getOperation: () => bypassOp(),
+      getOperation: () => operation,
       getSelectedGitHubExecutor: () => scriptedExecutor().executor,
       hasCompleteVerificationIdentity: () => true,
       getRunDetail: () =>
@@ -1175,7 +1176,7 @@ describe("environments — bypass-verification", () => {
     expect(recording.status).toBe(200);
     expect(run).toHaveBeenCalledWith(
       expect.arrayContaining(["variable", "set", "--body", "555"]),
-      { timeout: 20000 }
+      { timeout: 20000, beforeExecute: expect.any(Function) }
     );
   });
 
@@ -1531,7 +1532,7 @@ describe("environments — bypass-verification", () => {
         "--repo",
         "o/r"
       ],
-      { timeout: 20000 }
+      { timeout: 20000, beforeExecute: expect.any(Function) }
     );
     expect(envListCacheDelete).toHaveBeenCalledWith("o/r");
     expect(recording.status).toBe(200);
@@ -3952,16 +3953,17 @@ describe("environments — real loopback", () => {
       const fetchRunLog = vi.fn<EnvironmentsDependencies["fetchRunLog"]>(() =>
         Promise.resolve("Error from server (Forbidden): cannot list resource")
       );
+      const operation = {
+        repo: "octo/app",
+        environment: "dev",
+        context: { githubLogin: "octocat" },
+        verification: { runId: "555" }
+      };
       const container = createControlledEnvironmentServer(
         {
           readInstanceEntry: (id) => container.instances.get(id),
           envListCacheDelete,
-          getOperation: () => ({
-            repo: "octo/app",
-            environment: "dev",
-            context: { githubLogin: "octocat" },
-            verification: { runId: "555" }
-          }),
+          getOperation: () => operation,
           getSelectedGitHubExecutor: () =>
             successfulSelectedGhExecutor({ run }),
           hasCompleteVerificationIdentity: () => true,
@@ -4037,7 +4039,7 @@ describe("environments — real loopback", () => {
             "--repo",
             "octo/app"
           ],
-          { timeout: 20000 }
+          { timeout: 20000, beforeExecute: expect.any(Function) }
         );
         expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
       } finally {

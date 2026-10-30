@@ -101,6 +101,10 @@ export interface CommandOptions extends CliOptions {
   stdin?: string;
 }
 
+export interface SelectedGhCommandOptions extends CommandOptions {
+  beforeExecute?(): void;
+}
+
 export interface SelectedGhCommandResult {
   code: string | number;
   stdout: string;
@@ -117,12 +121,12 @@ export interface SelectedGhExecutor {
   readonly scopes: readonly string[];
   run(
     args: string[],
-    options?: CommandOptions
+    options?: SelectedGhCommandOptions
   ): Promise<SelectedGhCommandResult>;
   runOrThrow(
     args: string[],
     message: string,
-    options?: CommandOptions
+    options?: SelectedGhCommandOptions
   ): Promise<SelectedGhCommandResult>;
   verifyIdentity(): Promise<void>;
   packageCredentials(): GhPackageCredentials;
@@ -944,16 +948,18 @@ export async function createSelectedGhExecutor(
   };
   const run = async (
     args: string[],
-    options: CommandOptions = {}
+    options: SelectedGhCommandOptions = {}
   ): Promise<SelectedGhCommandResult> => {
     await verifyIdentity();
-    return await runRaw(args, options);
+    const { beforeExecute, ...commandOptions } = options;
+    beforeExecute?.();
+    return await runRaw(args, commandOptions);
   };
 
   const runOrThrow = async (
     args: string[],
     message: string,
-    options: CommandOptions = {}
+    options: SelectedGhCommandOptions = {}
   ): Promise<SelectedGhCommandResult> => {
     const result = await run(args, options);
     if (result.code !== 0) {

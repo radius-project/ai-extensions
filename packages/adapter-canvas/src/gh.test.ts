@@ -1365,6 +1365,196 @@ describe("GitHub CLI version compatibility", () => {
 });
 
 describe("selected GitHub executor", { concurrent: false }, () => {
+  it.each([
+    "shutdown",
+    "target",
+    "identity-error",
+    "issued-success",
+    "issued-error",
+    "active"
+  ] as const)(
+    "binds bypass to the real executor's final identity fence: %s",
+    async (boundary) => {
+      const gh = await loadGh("linux", {
+        token: "fixture-injected-value",
+        withToken: STATUS.tokenWithWorkflow,
+        apiLogin: "tokuser"
+      });
+      const real = await gh.createSelectedGhExecutor("tokuser");
+      const { verificationBypass } =
+        await import("./server/services/verification-bypass.js");
+      const { createWorkflowObservationScope } =
+        await import("./server/services/workflow-observation-scope.js");
+      const scope = createWorkflowObservationScope(() => {
+        throw new Error("Unexpected artifact read");
+      });
+      // Status evidence uses the read port; the final mutation uses the real executor.
+      const executor = {
+        ...real,
+        run: (
+          args: string[],
+          options?: import("./gh.js").SelectedGhCommandOptions
+        ) =>
+          args[0] === "variable" ?
+            real.run(args, options)
+          : Promise.resolve({ code: 0, stdout: "RADIUS_MANAGED", stderr: "" })
+      };
+      const op = {
+        repo: "fixture/app",
+        environment: "dev",
+        context: { githubLogin: "tokuser" },
+        verification: { runId: "42" }
+      };
+      let entered = () => {};
+      const identityEntered = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let releaseIdentity = () => {};
+      let releaseWrite = () => {};
+      let issued = () => {};
+      const writeIssued = new Promise<void>((resolve) => {
+        issued = resolve;
+      });
+      childProcess.execFile.mockReset();
+      childProcess.execFile.mockImplementation(
+        (_file, args, options, callback) => {
+          if (args.join(" ") === "api user --jq .login") {
+            entered();
+            releaseIdentity = () =>
+              callback(
+                boundary === "identity-error" ?
+                  new Error("identity unavailable")
+                : null,
+                "tokuser",
+                ""
+              );
+          } else {
+            expect(args).toEqual([
+              "variable",
+              "set",
+              "RADIUS_VERIFICATION_BYPASSED",
+              "--body",
+              "42",
+              "--env",
+              "dev",
+              "--repo",
+              "fixture/app"
+            ]);
+            expect(options).not.toHaveProperty("beforeExecute");
+            issued();
+            releaseWrite = () =>
+              callback(
+                boundary === "issued-error" ? new Error("write denied") : null,
+                "",
+                boundary === "issued-error" ? "write denied" : ""
+              );
+          }
+          return { stdin: { end() {} } };
+        }
+      );
+      const invalidate = vi.fn();
+      try {
+        const pending = verificationBypass(
+          {
+            data: {
+              operationId: "op",
+              repo: op.repo,
+              environment: op.environment,
+              runId: "42"
+            },
+            scope,
+            isCurrent: () => true
+          },
+          {
+            getOperation: () => op,
+            hasCompleteVerificationIdentity: () => true,
+            getSelectedGitHubExecutor: () => executor,
+            getRunDetail: async () => ({
+              status: "completed",
+              conclusion: "failure",
+              steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
+            }),
+            fetchRunLog: async () =>
+              "Error from server (Forbidden): cannot list resource",
+            extractGitHubActionsStepLog: () => "",
+            explainOidcEnterpriseClaim: () => "",
+            explainNoSubscriptions: () => "",
+            envListCacheDelete: invalidate,
+            errorMessage: (error) =>
+              error instanceof Error ? error.message : String(error)
+          }
+        );
+        await identityEntered;
+        if (boundary === "shutdown" || boundary === "identity-error")
+          scope.stop();
+        if (boundary === "target") op.verification.runId = "43";
+        releaseIdentity();
+        const preissue = ["shutdown", "target", "identity-error"].includes(
+          boundary
+        );
+        if (!preissue) {
+          await writeIssued;
+          if (boundary.startsWith("issued")) scope.stop();
+          releaseWrite();
+        }
+        expect(await pending).toMatchObject({
+          status:
+            preissue ? 503
+            : boundary === "issued-error" ? 500
+            : 200
+        });
+        expect(childProcess.execFile).toHaveBeenCalledTimes(preissue ? 1 : 2);
+        expect(invalidate).toHaveBeenCalledTimes(
+          !preissue && boundary !== "issued-error" ? 1 : 0
+        );
+      } finally {
+        releaseIdentity();
+        releaseWrite();
+        scope.stop();
+      }
+    }
+  );
+
+  it.each([false, true])(
+    "checks command authority after held identity verification (stale=%s)",
+    async (stale) => {
+      const gh = await loadGh("linux", {
+        token: "selected-injected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        apiLogin: "tokuser",
+        commandResult: { stdout: "{}" }
+      });
+      const executor = await gh.createSelectedGhExecutor("tokuser");
+      childProcess.execFile.mockClear();
+      let completeIdentity = () => {};
+      childProcess.execFile.mockImplementationOnce(
+        (_file, args, _options, callback) => {
+          expect(args).toEqual(["api", "user", "--jq", ".login"]);
+          completeIdentity = () => callback(null, "tokuser", "");
+          return { stdin: { end() {} } };
+        }
+      );
+      const beforeExecute = vi.fn(() => {
+        if (stale) throw new Error("Authorization expired");
+      });
+      const pending = executor.run(
+        ["api", "--method", "POST", "repos/fixture/app/actions/runs/42/cancel"],
+        { beforeExecute }
+      );
+      expect(beforeExecute).not.toHaveBeenCalled();
+      expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+      completeIdentity();
+      if (stale) await expect(pending).rejects.toThrow("Authorization expired");
+      else await expect(pending).resolves.toMatchObject({ code: 0 });
+      expect(beforeExecute).toHaveBeenCalledOnce();
+      expect(childProcess.execFile).toHaveBeenCalledTimes(stale ? 1 : 2);
+      if (!stale)
+        expect(childProcess.execFile.mock.calls[1][2]).not.toHaveProperty(
+          "beforeExecute"
+        );
+    }
+  );
+
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();

@@ -312,6 +312,17 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       summarizeDeployStatus,
       describeDeployStarted
     },
+    environment: {
+      start: vi.fn(async () => {
+        throw new Error("Environment setup was not scripted.");
+      }),
+      status: vi.fn(async () => {
+        throw new Error("Environment status was not scripted.");
+      }),
+      control: vi.fn(async () => {
+        throw new Error("Environment control was not scripted.");
+      })
+    },
     sourceRefs: {
       getSourceRefResources,
       prepareSourceRefResources,

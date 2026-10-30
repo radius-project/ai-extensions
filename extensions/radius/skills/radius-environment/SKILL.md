@@ -18,7 +18,7 @@ Create a GitHub Environment configured with the cloud credentials and private GH
 
 ## Flow
 
-The canvas drives a short wizard per provider: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the user's stored GitHub CLI credential, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification. Setup is verify-only: successful verification never deploys an application. Deployment requires a separate explicit action.
+The environment tools and Canvas wizard share one operation owner: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the selected GitHub account, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification. Setup is verify-only: successful verification never deploys an application. Deployment requires a separate explicit action.
 
 ### AWS
 
@@ -32,7 +32,27 @@ The canvas drives a short wizard per provider: collect the environment's cloud s
 
 ## How to invoke
 
-When the user asks to create or set up a Radius environment, **open the canvas straight to the environment wizard**:
+Use `radius_setup_environment` to start setup without opening a panel. Supply `repo`, `environment`, `provider`, and the provider's required fields. Azure requires `tenantId`, `subscriptionId`, `resourceGroup` and `cluster`; an optional `clientId` uses an existing credential identity, otherwise the existing application selection/creation flow applies. AWS requires `roleArn`, `accountId`, `region` and `cluster`; optional subnet IDs remain a comma-separated string. Namespace defaults to `default`. An omitted branch means the current worktree branch only for the session repository; another repository requires an explicit branch.
+
+The advertised SDK schemas are flat objects for provider compatibility, but accepted inputs remain conditional: do not mix Azure-only and AWS-only fields. Only `resume` accepts and requires `interactionId`, `provider`, `checkpoint` and `answer`; other controls reject those fields. The handler enforces these stricter rules even if the host only validates common required fields.
+
+Setup trims leading and trailing whitespace from the environment name before admission. Poll `radius_environment_status` with the returned `operationId`, `repo` and canonical `environment`; for example, setup input `" dev "` returns `"dev"`. Status and control require that exact saved target rather than accepting a padded alias. `accepted` means the operation was admitted, not that verification succeeded. Status is read-only except for recording observed progress: it never deploys, redispatches, repairs or authorizes cleanup. Treat `unknown`, `expired`, `refused` and `unavailable` as explicit limitations, not permission to retry mutations.
+
+Use `radius_environment_control` only for an action returned as eligible. `continue`, `verify`, `retry-setup`, `retry-cleanup`, `cancel-workflow`, `rollback`, `exit`, `abandon` and `bypass-verification` use the saved operation and its account. `stop` is a local, operation-bound safety request: it does not require fresh GitHub readiness or available credentials, so it can be admitted while setup holds the account lease. It remains subject to target, eligibility, currentness and durable-persistence checks. Stop is cooperative: an already-started write may settle before execution stops at its safe boundary; cancelling the exact saved workflow is a separate command. Rollback only removes proven-owned setup artifacts, not an arbitrary existing environment. Tool bypass requires a positively classified permissions failure.
+
+For a supported Azure input prompt, pass `action: "resume"`, the current `interactionId`, `provider: "azure"`, `checkpoint`, and the typed `answer`. A service-management-reference answer contains its prompt `code` and `serviceManagementReference`. An application-selection answer contains its prompt `code` and either `createNew: true`, or `createNew: false` with `appId`. A replaced or consumed prompt cannot be reused.
+
+For `pull-request-merge` guidance, `interaction.pullRequestUrl` is optional and identifies the validated saved setup pull request. Present that link when supplied; do not invent a link or treat its informational interaction ID as permission to resume. Missing or invalid saved URLs do not authorize verification dispatch. Runtime shutdown stops further verification reconciliation but cannot cancel a request already sent; an uncertain dispatch remains recorded for recovery, not an instruction to dispatch again.
+
+An `app-selection-required` interaction includes `appSelection.candidates` with validated `appId` values, redacted display names of at most 200 characters, and valid UTC `createdDateTime` values when available. Names may be identical: present IDs and creation dates to distinguish applications. At most 20 candidates are returned; `appSelection.truncated` signals omitted candidates or shortened names. A valid saved `defaultAppId` remains in the returned list. This list is guidance, not an authorization allowlist: the existing explicit `appId` and create-new paths still apply and the service checks live ownership. Empty guidance does not authorize creating an identity automatically.
+
+An input prompt can be temporarily unsupported while its execution task settles. Poll status again and use the latest supported handle; eligibility changes replace the handle, and an earlier unsupported handle cannot resume the operation. For `verification-retry-pull-request-open`, follow the `pull-request-merge` guidance and merge the recorded setup PR through the normal review process before requesting verification again. This refusal dispatches no verification workflow.
+
+Only a supported `setup-input` interaction ID is a runtime-held answer handle. IDs on unsupported account-selection, reauthorization, confirmation or other manual requirements are informational: satisfy the requirement through the trusted host or external flow, then invoke the tool again. Those IDs are never consent tokens and cannot be used to resume a setup prompt.
+
+**Do not supply credentials, account proofs, panel selection handles or a `confirmed` boolean.** Multiple eligible GitHub accounts require a trusted host choice. Cleanup, abandonment, workflow cancellation and verification bypass require trusted host confirmation where applicable. Login/consent requirements still need the external authentication flow and subsequent service evidence; a dialog is not proof that authentication succeeded. If the result contains `interaction_required` or an unsupported interaction, follow its manual guidance. Do not automatically open a panel, switch accounts, assume consent or silently substitute another account.
+
+If the user prefers the visual wizard, open Canvas explicitly:
 
 ```javascript
 open_canvas({
@@ -52,7 +72,7 @@ open_canvas({
 })
 ```
 
-The popup lands directly on the create-environment form for the chosen provider. No navigation needed.
+The panel lands directly on the create-environment form. Closing it detaches the view without cancelling shared setup work.
 
 > **Canvas not opening?** If the Radius panel does not appear even though this skill and the Radius plugin are installed, reload extensions (or restart the app) and try again.
 
@@ -116,5 +136,5 @@ After the canvas reports success, the new env appears in the **Envs ▾** dropdo
 
 ## Related files
 
-- `extension.mjs` — the Canvas wizard starts operation-owned direct setup services, verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`. Use the wizard rather than calling private setup endpoints.
+- `extension.mjs` — the registered environment tools and Canvas use operation-owned direct services, verification workflow generation (`generateVerifyWorkflow`), and environment variable writes via `gh variable set ... --env`. Use the tools or wizard rather than calling private setup endpoints.
 - The verification workflow templates are the canonical `verify-aws.yml` / `verify-azure.yml` (both named `Radius - Verify Credentials`) hosted in `radius-project/ai-extensions` at `.github/extension/`. The released extension fetches the matching provider template at the full source commit baked into its build, fills the `verify-ghcr-push` action reference with that same immutable SHA, commits it into the target user repo at `.github/workflows/verify-<provider>.yml`, then dispatches it. A fetch failure is a hard error; no generated verification workflow follows a mutable release ref.
