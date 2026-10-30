@@ -207,7 +207,7 @@ We should add a workflow that uses `actions/labeler` to apply `risk:low`, `risk:
 
 We should propose a section of sensitive paths in the synced `CODEOWNERS` template in `radius-project/.github`, so a code owner must approve any high-tier change.
 
-A ruleset sets one approval count for the whole branch, and `CODEOWNERS` requires only one code-owner approval, so neither can demand two approvals for some paths and one for others. To enforce two approvals on the high tier, we should add a required status check that passes only when a pull request that changes a high-tier path has two human approvals of its current commit, not counting Copilot. The check should read the changed files itself rather than the `risk:high` label, because anyone with triage access can change a label.
+The `main` ruleset already requires one approval of the latest push, and the approval globs (Step 4.5) keep Copilot's approval from counting when any high-tier file changes, so that approval must come from a human. Nothing that enforces merge reads the `risk:high` label, because anyone with triage access can change a label.
 
 #### Step 4.4: Point human reviewers at the riskiest changes
 
@@ -252,7 +252,7 @@ These guards stop a tampered review from approving a pull request, but not from 
 We need every new check to fail closed. When something goes wrong, the pull request should fall back to needing a human, never to merging with less review.
 
 - **Copilot doesn't review.** The review can fail to run because the author has no Copilot license, has run out of AI credits, or GitHub has an outage. Then there's no Copilot approval, and the ruleset's required approval must come from a human.
-- **The labeler fails or doesn't run.** Labels only inform reviewers. The Step 4.3 high-tier check and the Step 4.5 trusted-author check must work out the tier from the changed files themselves, so a missing or wrong label can't lower the bar.
+- **The labeler fails or doesn't run.** Labels only inform reviewers. The approval globs and the Step 4.5 trusted-author check work from the changed files and the author, never from labels, so a missing or wrong label can't lower the bar.
 - **A team-membership lookup fails.** If the GitHub API returns an error, rate-limits the check, or the token can't read the team, the trusted-author check must fail rather than pass, and its output must say why.
 - **A required check is skipped.** GitHub counts a skipped required check as passed (Step 3.2). Each new check must run on every pull request, with no job-level `if:` that could skip it, and make its decision inside its steps.
 
@@ -271,10 +271,10 @@ In each case, "blocked" means GitHub won't allow the merge.
 
 | # | Scenario | Setup | Expected result |
 | --- | --- | --- | --- |
-| 1 | Mixed tiers | A trusted author changes `docs/setup.md` and `.github/workflows/build.yml`, and Copilot approves. | Blocked until the high tier's human approvals are in. Copilot's approval doesn't count, because the workflow file matches no glob. |
-| 2 | Stale human approval | A human approves, then the author pushes another commit. | Blocked. The ruleset dismisses stale approvals on push, and the Step 4.3 check counts only approvals of the current commit. |
+| 1 | Mixed tiers | A trusted author changes `docs/setup.md` and `.github/workflows/build.yml`, and Copilot approves. | Blocked until a human approves. Copilot's approval doesn't count, because the workflow file matches no glob. |
+| 2 | Stale human approval | A human approves, then the author pushes another commit. | Blocked until a human approves the new commit. The ruleset dismisses stale approvals on push and requires approval of the latest push. |
 | 3 | Dismissed Copilot approval | Copilot approves a low-tier change, then the author pushes again. | Blocked until Copilot approves the new commit or a human does. |
-| 4 | A push raises the tier | A low-tier pull request gets a new commit that touches `packages/core/src/workflows/`. | The checks rerun on the new commit and require the high tier's approvals. |
+| 4 | A push raises the tier | A low-tier pull request gets a new commit that touches `packages/core/src/workflows/`. | Copilot's approval no longer counts, so the new commit needs a human approval. |
 | 5 | Label tampering | Someone removes `risk:high` or adds `risk:low` by hand. | No change. The checks ignore labels. |
 | 6 | Untrusted author | An outside contributor's docs-only pull request gets a Copilot approval. | Blocked until a human approves. |
 | 7 | Instruction change | A pull request edits `.github/instructions/code-review.instructions.md` along with a docs file. | Copilot's approval doesn't count, and the labeler adds `review-instructions-changed` and its comment. |
