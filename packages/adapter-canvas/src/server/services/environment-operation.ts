@@ -119,6 +119,7 @@ export interface EnvironmentOperationWorkflowDependencies {
   ): Promise<
     | { ok: true; roleArn: string; subjects: readonly string[] }
     | { ok: false; status: number; error: string; code: string }
+    | { ok: false; stopped: true }
   >;
   instanceId: string;
   now(): number;
@@ -347,6 +348,7 @@ export function createSetupCoordinatorPorts(
         request,
         executor
       );
+      if ("stopped" in result) return { kind: "stopped" };
       return result.ok ?
           {
             kind: "completed",

@@ -78,8 +78,11 @@ interface Operation {
 
 function harness(
   aws: Record<string, AwsCommandResult>,
-  github: Record<string, GitHubJsonResponse> = defaultSubject
+  github: Record<string, GitHubJsonResponse> = defaultSubject,
+  // The customer pauses while this AWS command, or the last GitHub read, runs.
+  pauseDuring?: string
 ) {
+  let stopRequested = false;
   const awsCalls: string[][] = [];
   const githubCalls: Array<{
     path: string;
@@ -89,16 +92,22 @@ function harness(
   const access = createAwsEnvironmentAccess<Operation>({
     async runAws(args) {
       awsCalls.push(args);
-      const result = aws[args.slice(0, 2).join(" ")];
+      const command = args.slice(0, 2).join(" ");
+      const result = aws[command];
       if (!result) throw new Error(`unexpected aws ${args.join(" ")}`);
+      if (command === pauseDuring) stopRequested = true;
       return result;
     },
     async runGitHubJson(path, executor) {
       githubCalls.push({ path, executor });
       const response = github[path];
       if (!response) throw new Error(`unexpected GitHub read ${path}`);
+      if (pauseDuring === "github" && path.endsWith("/customization/sub")) {
+        stopRequested = true;
+      }
       return response;
     },
+    isStopRequested: () => stopRequested,
     async sleep(milliseconds) {
       events.push(["sleep", milliseconds]);
     },
@@ -239,7 +248,7 @@ describe("AWS environment access setup", () => {
       status: 400,
       code: "oidc-subject-unresolved"
     });
-    expect(result.ok === false && result.error).toContain(
+    expect("error" in result && result.error).toContain(
       'Could not read repository "octo/shop"'
     );
     expect(h.awsCalls).toEqual([]);
@@ -255,7 +264,7 @@ describe("AWS environment access setup", () => {
     const result = await h.access.setup(operation, input, EXECUTOR);
 
     expect(result).toMatchObject({ ok: false, status: 400 });
-    expect(result.ok === false && result.error).toMatch(
+    expect("error" in result && result.error).toMatch(
       / Nothing was created in AWS\.$/
     );
     expect(h.events.at(-1)).toEqual(["persist"]);
@@ -271,10 +280,91 @@ describe("AWS environment access setup", () => {
     const result = await h.access.setup(operation, input, EXECUTOR);
 
     expect(result.ok).toBe(false);
-    expect(result.ok === false && result.error).toContain(
+    expect("error" in result && result.error).toContain(
       `Created before setup stopped: the GitHub identity provider in account ${ACCOUNT}, IAM role ${ROLE}. Remove them in the AWS console if you will not retry.`
     );
     expect(h.events.some(([kind]) => kind === "setContext")).toBe(false);
+  });
+});
+
+describe("pausing AWS environment access setup", () => {
+  const WRITES = [
+    "iam create-open-id-connect-provider",
+    "iam create-role",
+    "iam put-role-policy",
+    "eks create-access-entry",
+    "eks associate-access-policy"
+  ];
+  const writesRun = (h: ReturnType<typeof harness>) =>
+    h.awsCalls
+      .map((args) => args.slice(0, 2).join(" "))
+      .filter((command) => WRITES.includes(command));
+  const steps = (h: ReturnType<typeof harness>) =>
+    h.events.filter(([kind]) => kind === "step").map(([, , text]) => text);
+
+  it.each([
+    ["while GitHub reports the subjects", "github"],
+    ["during a preflight read", "eks describe-cluster"],
+    [
+      "during the last read before the first write",
+      "iam list-open-id-connect-providers"
+    ]
+  ])("stops with nothing written in AWS when paused %s", async (_label, at) => {
+    const h = harness(happyPath, defaultSubject, at);
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toEqual({ ok: false, stopped: true });
+    expect(writesRun(h)).toEqual([]);
+    expect(steps(h).at(-1)).toBe(
+      "⏸️ Paused before any AWS change. Nothing was created in AWS."
+    );
+    expect(h.events.at(-1)).toEqual(["persist"]);
+    expect(h.events.some(([kind]) => kind === "setContext")).toBe(false);
+  });
+
+  it("finishes the write in flight, records it, and runs no later write", async () => {
+    const h = harness(
+      happyPath,
+      defaultSubject,
+      "iam create-open-id-connect-provider"
+    );
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toEqual({ ok: false, stopped: true });
+    expect(writesRun(h)).toEqual(["iam create-open-id-connect-provider"]);
+    expect(steps(h).at(-1)).toBe(
+      `⏸️ Paused before the next AWS change. Created before the pause: the GitHub identity provider in account ${ACCOUNT}.`
+    );
+    expect(h.events.at(-1)).toEqual(["persist"]);
+    expect(h.events.some(([kind]) => kind === "setContext")).toBe(false);
+  });
+
+  it("records the role when the pause arrives during the last write", async () => {
+    const h = harness(happyPath, defaultSubject, "eks associate-access-policy");
+
+    const result = await h.access.setup(operation, input, EXECUTOR);
+
+    expect(result).toEqual({ ok: false, stopped: true });
+    expect(writesRun(h)).toEqual(WRITES);
+    expect(h.events).toContainEqual([
+      "setContext",
+      "op-1",
+      { awsRoleArn: ROLE_ARN, awsTrustSubjects: [DEV, DEV_ID] }
+    ]);
+    expect(steps(h).at(-1)).toBe(
+      `⏸️ Paused after AWS setup finished. ${ROLE_ARN} is ready for this environment.`
+    );
+    expect(h.events.at(-1)).toEqual(["persist"]);
+  });
+
+  it("runs every write when no pause is requested", async () => {
+    const h = harness(happyPath);
+    expect(await h.access.setup(operation, input, EXECUTOR)).toMatchObject({
+      ok: true
+    });
+    expect(writesRun(h)).toEqual(WRITES);
   });
 });
 

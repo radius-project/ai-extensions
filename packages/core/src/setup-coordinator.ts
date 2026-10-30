@@ -26,7 +26,10 @@ export type SetupCoordinatorStageResult =
 
 export type SetupCoordinatorAwsResult =
   | { kind: "completed"; roleArn: string; trustSubjects: readonly string[] }
-  | { kind: "failed"; error: unknown };
+  | { kind: "failed"; error: unknown }
+  // A pause arrived during AWS setup, which recorded what it changed and ran
+  // nothing after the pause.
+  | { kind: "stopped" };
 
 export type SetupCoordinatorFailure =
   | { kind: "repository-access" | "package-access" }
@@ -256,6 +259,23 @@ export async function runSetupCoordinator(
       environment: ensured.name,
       reused: ensured.state === "reused"
     });
+    if (aws.kind === "stopped") {
+      // The pause is still requested, so this boundary stops the operation.
+      // Should it not, finish as a failure rather than configure the
+      // environment without a deploy identity.
+      if (await ports.stopBoundary("after-aws-deploy-identity")) {
+        await ports.finalizeFailure({
+          kind: "aws-authorization",
+          error: {
+            status: 409,
+            message:
+              "AWS setup stopped for a pause before the deploy identity was ready.",
+            code: "aws-setup-interrupted"
+          }
+        });
+      }
+      return { shouldMonitor: false };
+    }
     if (aws.kind === "failed") {
       if (!(await ports.stopBoundary("before-setup-failure-cleanup"))) {
         return { shouldMonitor: false };
