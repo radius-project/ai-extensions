@@ -287,7 +287,19 @@ import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { probeDeleteConflict } from "./server/services/delete-conflict.js";
-import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
+import {
+  createOperationsStatusRoutes,
+  type OperationActionDependencies
+} from "./server/routes/operations-status.js";
+import {
+  createOperationResumeService,
+  type OperationResumeService
+} from "./server/services/operation-resume.js";
+import {
+  createOperationsControlService,
+  type OperationControlService,
+  type OperationsControlDependencies
+} from "./server/services/operation-control.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
 import {
@@ -439,6 +451,13 @@ import {
   verificationTrackingDeadline
 } from "./server/services/verification-retry.js";
 import { runVerificationRetry as runSelectedVerificationRetry } from "./server/services/verification-retry-runner.js";
+import { monitorSetupVerification } from "@radius-project/core";
+import {
+  createVerificationStatusService,
+  type VerificationStatusInput,
+  type VerificationStatusResult,
+  type VerificationStatusDependencies
+} from "./server/services/verification-status.js";
 import type { CanvasServerEntry } from "./server/types.js";
 import type { CanvasServerDependencyOverrides } from "./server/dependencies.js";
 import type { EnvironmentExecutionOwner } from "./runtime/environment-execution-owner.js";
@@ -4203,6 +4222,10 @@ export function createInstanceRequestCoordinator(
     executionOwner: EnvironmentExecutionOwner;
     accountContext: EnvironmentAccountContext;
     setupServices: SetupServices;
+    verificationStatus(
+      input: VerificationStatusInput
+    ): Promise<VerificationStatusResult>;
+    operationControl: OperationControlService;
     servers: ReadonlyMap<string, CanvasServerEntry>;
     environmentOperationRunner?: EnvironmentOperationRunner;
   }
@@ -4211,6 +4234,12 @@ export function createInstanceRequestCoordinator(
     dependencies;
   if (!accountContext)
     throw new Error("Missing request coordinator dependency: accountContext");
+  if (typeof dependencies.verificationStatus !== "function")
+    throw new Error(
+      "Missing request coordinator dependency: verificationStatus"
+    );
+  if (typeof dependencies.operationControl !== "function")
+    throw new Error("Missing request coordinator dependency: operationControl");
   for (const name of ["authorizeAzure", "configureEnvironment"] as const) {
     if (typeof setupServices?.[name] !== "function") {
       throw new Error(
@@ -4318,11 +4347,31 @@ export function createInstanceRequestCoordinator(
 
   function scheduleAutomaticRecoveryRollback(operationId: string): void {
     if (!attachment.claimAutomaticRollback(operationId)) return;
+    const operation = operations.get(operationId);
+    const repo = operation?.repo;
+    const environment = operation?.environment;
     queueMicrotask(() => {
-      void postInternal(
-        `/api/operations/${encodeURIComponent(operationId)}/rollback`,
-        {}
-      )
+      void dependencies
+        .operationControl({
+          operationId,
+          instanceId,
+          command: "rollback",
+          isCurrent: () =>
+            Boolean(operation) &&
+            operations.get(operationId) === operation &&
+            operation.operationId === operationId &&
+            operation.repo === repo &&
+            operation.environment === environment
+        })
+        .then((result) => {
+          if (result.status < 200 || result.status >= 300) {
+            throw new Error(
+              typeof result.body.error === "string" ?
+                result.body.error
+              : `Operation control failed with status ${result.status}.`
+            );
+          }
+        })
         .catch((error) => {
           operations.report?.({
             scope: "provider-recovery-auto-rollback",
@@ -4336,88 +4385,64 @@ export function createInstanceRequestCoordinator(
     });
   }
 
-  async function postInternal(pathname: string, data: unknown): Promise<any> {
-    const response = await fetch(`${resolveBaseUrl()}${pathname}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Radius-Server-Owned": serverOwnedToken
-      },
-      body: JSON.stringify(data)
-    });
-    const result: any = await response.json();
-    if (!response.ok && !result?.inputRequired) {
-      throw new Error(
-        result?.error || `Request failed with HTTP ${response.status}.`
-      );
-    }
-    return result;
-  }
-
   async function monitorVerification(operationId: string): Promise<void> {
     const initialOperation = operations.get(operationId);
     const deadline = verificationTrackingDeadline(
       initialOperation || { operationId },
       Date.now
     );
-    let delayMs = 5000;
-    while (Date.now() < deadline) {
-      const op = operations.get(operationId);
-      if (!op || op.endedAt || op.currentStage !== STAGE_VERIFY) return;
-      // Each polling observation is a safe boundary: nothing is being written.
-      if (shouldStop(op)) {
+    await monitorSetupVerification(deadline, {
+      current: () => {
+        const op = operations.get(operationId);
+        return op ?
+            {
+              active: !op.endedAt && op.currentStage === STAGE_VERIFY,
+              stopRequested: shouldStop(op)
+            }
+          : undefined;
+      },
+      observe: async () => {
+        const op = operations.get(operationId);
+        const outcome = await dependencies.verificationStatus({
+          repo: op?.repo || "",
+          environment: op?.environment,
+          operationId
+        });
+        if (outcome.status < 200 || outcome.status >= 300) {
+          throw new Error(
+            outcome.body.error ||
+              `Verification status failed with HTTP ${outcome.status}.`
+          );
+        }
+        return outcome.body;
+      },
+      stop: async () => {
+        const op = operations.get(operationId);
+        if (!op) return;
         stopAtBoundary(op, "verification-observation", { announce: false });
         const saved = await saveOperation(op);
         if (saved) announceOperationTerminal(op);
-        return;
-      }
-      const params = new URLSearchParams({
-        repo: op.repo,
-        environment: op.environment,
-        operationId
-      });
-      const response = await fetch(
-        `${resolveBaseUrl()}/api/verify-status?${params.toString()}`,
-        { headers: { "X-Radius-Server-Owned": serverOwnedToken } }
-      );
-      const result: any = await response.json();
-      if (!response.ok) {
-        throw new Error(
-          result?.error ||
-            `Verification status failed with HTTP ${response.status}.`
-        );
-      }
-      if (result?.state === "success" || result?.state === "failed") return;
-      if (result?.terminal || result?.state === "expired") {
-        const current = operations
-          .all()
-          .find((candidate: any) => candidate.operationId === operationId);
-        if (current && !current.endedAt) {
-          finish(current, "failed_partial", {
-            failure: {
-              code: "verification-tracking-expired",
-              stage: current.currentStage,
-              stepSeq: null,
-              message:
-                result?.error ||
-                "Credential verification is no longer being tracked.",
-              classification: "user-fixable",
-              evidence: null
-            }
-          });
-          await saveOperation(current);
-        }
-        return;
-      }
-      const jitterMs = Math.floor(Math.random() * 1000);
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(delayMs, 15_000) + jitterMs)
-      );
-      delayMs = Math.min(Math.ceil(delayMs * 1.5), 15_000);
-    }
-    throw new Error(
-      "Credential verification did not complete within 45 minutes."
-    );
+      },
+      expire: async (message) => {
+        const op = operations.get(operationId);
+        if (!op || op.endedAt) return;
+        finish(op, "failed_partial", {
+          failure: {
+            code: "verification-tracking-expired",
+            stage: op.currentStage,
+            stepSeq: null,
+            message,
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await saveOperation(op);
+      },
+      now: Date.now,
+      sleep: (milliseconds) =>
+        new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      jitter: () => Math.floor(Math.random() * 1000)
+    });
   }
 
   async function monitorVerificationAsSelectedAccount(
@@ -5325,61 +5350,66 @@ export function createInstanceRequestCoordinator(
   }
 
   function startRecoveredTasks(): void {
-    for (const op of operations.all()) {
-      // Resume a delete operation that was mid-flight when the process
-      // restarted. The runner is resume-safe (each stage re-runs only while
-      // pending/running), so re-scheduling converges. Delete operations never
-      // enter input_required, so there is no prompt state to skip here.
-      if (
-        op.kind === "delete" &&
-        !op.endedAt &&
-        !attachment.hasTask(op.operationId)
-      ) {
-        scheduleServerOwnedTask(op.operationId, () =>
-          runEnvironmentOperation(op.operationId)
-        );
-        continue;
-      }
-      if (
-        op.endedAt &&
-        op.providerRecovery?.state === "rollback_pending" &&
-        !providerRecoveryManualGuidance(op)
-      ) {
-        scheduleAutomaticRecoveryRollback(op.operationId);
-        continue;
-      }
-      if (
-        op.recoveryState === "provider_reconciliation_pending" &&
-        !op.endedAt
-      ) {
-        scheduleRecoveredProviderMutation(op);
-        continue;
-      }
-      if (
-        (op.recoveryState !== "verification_pending" &&
-          op.recoveryState !== "verification_acquisition_pending") ||
-        op.currentStage !== STAGE_VERIFY ||
-        op.endedAt ||
-        !executionOwner.claimVerificationMonitor(op.operationId)
-      )
-        continue;
-      scheduleServerOwnedTask(op.operationId, async () => {
-        try {
-          if (op.recoveryState === "verification_acquisition_pending") {
-            await runVerificationRetry(
-              op.operationId,
-              String(op.verification?.retryCommandId || "")
-            );
-          } else {
-            await monitorVerificationAsSelectedAccount(op, (executor) =>
-              resolveRecoveredVerificationRun(op, executor)
-            );
-          }
-        } finally {
-          executionOwner.releaseVerificationMonitor(op.operationId);
-        }
-      });
+    for (const op of operations.all()) startRecoveredTask(op.operationId);
+  }
+
+  function startRecoveredTask(operationId: string): void {
+    if (executionOwner.isShuttingDown(instanceId) || !attachment.isCurrent())
+      return;
+    const op = operations.get(operationId);
+    if (!op) return;
+    if (executionOwner.deferAdmissionRecovery(operationId, startRecoveredTask))
+      return;
+    // Resume a delete operation that was mid-flight when the process
+    // restarted. The runner is resume-safe (each stage re-runs only while
+    // pending/running), so re-scheduling converges. Delete operations never
+    // enter input_required, so there is no prompt state to skip here.
+    if (
+      op.kind === "delete" &&
+      !op.endedAt &&
+      !attachment.hasTask(op.operationId)
+    ) {
+      scheduleServerOwnedTask(op.operationId, () =>
+        runEnvironmentOperation(op.operationId)
+      );
+      return;
     }
+    if (
+      op.endedAt &&
+      op.providerRecovery?.state === "rollback_pending" &&
+      !providerRecoveryManualGuidance(op)
+    ) {
+      scheduleAutomaticRecoveryRollback(op.operationId);
+      return;
+    }
+    if (op.recoveryState === "provider_reconciliation_pending" && !op.endedAt) {
+      scheduleRecoveredProviderMutation(op);
+      return;
+    }
+    if (
+      (op.recoveryState !== "verification_pending" &&
+        op.recoveryState !== "verification_acquisition_pending") ||
+      op.currentStage !== STAGE_VERIFY ||
+      op.endedAt ||
+      !executionOwner.claimVerificationMonitor(op.operationId)
+    )
+      return;
+    scheduleServerOwnedTask(op.operationId, async () => {
+      try {
+        if (op.recoveryState === "verification_acquisition_pending") {
+          await runVerificationRetry(
+            op.operationId,
+            String(op.verification?.retryCommandId || "")
+          );
+        } else {
+          await monitorVerificationAsSelectedAccount(op, (executor) =>
+            resolveRecoveredVerificationRun(op, executor)
+          );
+        }
+      } finally {
+        executionOwner.releaseVerificationMonitor(op.operationId);
+      }
+    });
   }
 
   /**
@@ -5722,10 +5752,13 @@ export function createProductionCanvasServerRuntime(
   // an instance that is gone reports a miss instead of silently dropping accepted
   // work. Every route that schedules resolves its runner through here.
   function resolveInstanceRunner(
-    instanceId: string,
+    instanceId: string | undefined,
     operationId: string
   ): ReturnType<typeof createInstanceRequestCoordinator> | null {
-    const coordinator = instanceRequestCoordinators.get(instanceId);
+    const coordinator =
+      instanceId === undefined ? undefined : (
+        instanceRequestCoordinators.get(instanceId)
+      );
     if (!coordinator) {
       console.error(
         `[radius operations] Missing request coordinator for instance ${instanceId}; cannot schedule operation ${operationId}.`
@@ -5736,7 +5769,7 @@ export function createProductionCanvasServerRuntime(
   }
 
   function scheduleEnvironmentOperationForInstance(
-    instanceId: string,
+    instanceId: string | undefined,
     operation: { operationId: string }
   ): boolean {
     const coordinator = resolveInstanceRunner(
@@ -5747,6 +5780,53 @@ export function createProductionCanvasServerRuntime(
     coordinator.scheduleEnvironmentOperation(operation);
     return true;
   }
+
+  const operationActionDependencies: OperationActionDependencies = {
+    claimAdmission: executionOwner.claimAdmission,
+    getOperation: (operationId) => operations.get(operationId),
+    canResumeInput,
+    resumeAfterInput,
+    requireInput,
+    finish,
+    isTerminalState,
+    canDismissOperation,
+    dismissOperation,
+    persistOperations: () => operations.persist(),
+    toClientView,
+    scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
+    errorMessage,
+    inputRequiredState: INPUT_REQUIRED_STATE
+  };
+  const sharedOperationResume = createOperationResumeService(
+    operationActionDependencies
+  );
+  const operationResume: OperationResumeService = (
+    input,
+    readInput,
+    publish
+  ) => {
+    const original =
+      input.instanceId === undefined ?
+        undefined
+      : instanceRequestCoordinators.get(input.instanceId);
+    return sharedOperationResume(
+      {
+        ...input,
+        isCurrent: () =>
+          original !== undefined &&
+          input.instanceId !== undefined &&
+          instanceRequestCoordinators.get(input.instanceId) === original &&
+          (input.isCurrent?.() ?? true),
+        schedule: (operation) => {
+          if (!original) return false;
+          original.scheduleEnvironmentOperation(operation);
+          return true;
+        }
+      },
+      readInput,
+      publish
+    );
+  };
 
   // Composition root for the migrated `operations-status` family. Reads, creates,
   // and resumable actions each receive only the registry, mutation, persistence,
@@ -5776,27 +5856,16 @@ export function createProductionCanvasServerRuntime(
       scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
       errorMessage
     },
-    {
-      getOperation: (operationId) => operations.get(operationId),
-      canResumeInput,
-      resumeAfterInput,
-      requireInput,
-      finish,
-      isTerminalState,
-      canDismissOperation,
-      dismissOperation,
-      persistOperations: () => operations.persist(),
-      toClientView,
-      scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
-      errorMessage,
-      inputRequiredState: INPUT_REQUIRED_STATE
-    }
+    operationActionDependencies,
+    operationResume
   );
 
-  const operationsControlRoutes = createOperationsControlRoutes({
+  const operationsControlDependencies: OperationsControlDependencies = {
+    claimAdmission: executionOwner.claimAdmission,
     get: (operationId) => operations.get(operationId),
     acquireForRetry: (op) => operations.acquireForRetry(op),
     persistOperations: () => operations.persist(),
+    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
     checkPullRequestMerge: (op, pullRequestUrl) =>
       checkSetupPullRequestMergeForOperation(op, pullRequestUrl, {
         createExecutor: (login) =>
@@ -5856,7 +5925,32 @@ export function createProductionCanvasServerRuntime(
     invalidateEnvironmentListing: (repo) => {
       envListCache.invalidate(repo);
     }
-  });
+  };
+  const sharedOperationControl = createOperationsControlService(
+    operationsControlDependencies
+  );
+  const operationControl: OperationControlService = (input, publish) => {
+    const original =
+      input.instanceId === undefined ?
+        undefined
+      : instanceRequestCoordinators.get(input.instanceId);
+    return sharedOperationControl(
+      {
+        ...input,
+        isCurrent: () =>
+          (input.instanceId === undefined ||
+            (original !== undefined &&
+              instanceRequestCoordinators.get(input.instanceId) ===
+                original)) &&
+          (input.isCurrent?.() ?? true)
+      },
+      publish
+    );
+  };
+  const operationsControlRoutes = createOperationsControlRoutes(
+    operationsControlDependencies,
+    operationControl
+  );
 
   // Composition root for the migrated `repositories` family. Three seams: the
   // subprocess runner, a reader for the live instance state the branch cache is
@@ -6223,9 +6317,35 @@ export function createProductionCanvasServerRuntime(
   // `errorMessage`, `VERIFY_WORKFLOW_FILE`, and `STAGE_VERIFY` stay defined here
   // and are injected rather than moved, so the route module spawns nothing and
   // reads no module-level mutable state.
-  const environmentsRoutes = createEnvironmentsRoutes({
+  const verificationStatusDependencies: VerificationStatusDependencies = {
+    getOperation: (operationId) => operations.get(operationId),
+    getSelectedGitHubExecutor: (operationId) =>
+      accountContext.getExecutor(operationId),
+    isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+    hasCompleteVerificationIdentity,
+    getRunDetail,
+    fetchRunLog,
+    extractErrorLines,
+    extractGitHubActionsStepLog,
+    explainOidcEnterpriseClaim,
+    explainNoSubscriptions,
+    addLegacyStep,
+    isTerminalState,
+    finish,
+    finishSucceeded,
+    persistBestEffort,
+    persistOperations: () => operations.persist(),
+    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
     errorMessage,
-    redactDiagnostic: (value) => redactGhCredentials(value),
+    redactDiagnostic: redactGhCredentials,
+    stageVerify: STAGE_VERIFY
+  };
+  const verificationStatus = createVerificationStatusService(
+    verificationStatusDependencies,
+    () => createWorkflowObservationScope(createDeployStatusReader)
+  );
+  const environmentsRoutes = createEnvironmentsRoutes({
+    ...verificationStatusDependencies,
     repoMatchesWorkspace,
     readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
     runCommand: (command, args, options) => runCommand(command, args, options),
@@ -6276,12 +6396,6 @@ export function createProductionCanvasServerRuntime(
     kickoffWorkflowSync: (repo, managedEnvironments, workingBranch) =>
       kickoffWorkflowSync(repo, managedEnvironments, workingBranch),
     now: () => Date.now(),
-    getOperation: (operationId) => operations.get(operationId),
-    getSelectedGitHubExecutor: (operationId) =>
-      accountContext.getExecutor(operationId),
-    isSelectedGitHubAuthorizationError: (error) =>
-      isSelectedGhAuthorizationError(error),
-    hasCompleteVerificationIdentity,
     findWorkflowRun: (
       repo,
       workflowFile,
@@ -6317,21 +6431,7 @@ export function createProductionCanvasServerRuntime(
         );
       }
     },
-    getRunDetail,
-    fetchRunLog,
-    extractErrorLines: (logText, max) => extractErrorLines(logText, max),
-    extractGitHubActionsStepLog,
-    explainOidcEnterpriseClaim,
-    explainNoSubscriptions,
-    addLegacyStep: (operation, text) => addLegacyStep(operation, text),
-    isTerminalState,
-    finish,
-    finishSucceeded,
-    persistBestEffort,
-    persistOperations: () => operations.persist(),
-    reportOperationDiagnostic: (diagnostic) => operations.report?.(diagnostic),
-    verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
-    stageVerify: STAGE_VERIFY
+    verifyWorkflowFile: VERIFY_WORKFLOW_FILE
   });
 
   // Direct environment setup retains the concrete adapters without an HTTP wrapper.
@@ -6515,6 +6615,26 @@ export function createProductionCanvasServerRuntime(
               executionOwner,
               accountContext,
               setupServices,
+              verificationStatus: (input) => {
+                const observation = instances.get(instanceId)?.observation;
+                if (!observation)
+                  throw new Error(
+                    "Workflow observation instance is unavailable."
+                  );
+                return verificationStatus({ ...input, observation });
+              },
+              operationControl: (input, publish) =>
+                operationControl(
+                  {
+                    ...input,
+                    isCurrent: () =>
+                      instanceRequestCoordinators.get(instanceId)
+                        ?.scheduleCommandTask ===
+                        coordinator.scheduleCommandTask &&
+                      (input.isCurrent?.() ?? true)
+                  },
+                  publish
+                ),
               servers: instances,
               get environmentOperationRunner() {
                 return options.environmentOperationRunner;
@@ -6722,6 +6842,9 @@ export function createProductionCanvasServerRuntime(
 
   return {
     servers: canvasServer.instances,
+    verificationStatus,
+    operationControl,
+    operationResume,
     getOrCreateServer,
     stopServer,
     getLastWebviewActivityAt,

@@ -38,6 +38,125 @@ afterEach(() => {
 });
 
 describe("runtime environment execution ownership", () => {
+  it("notifies a shared recovery callback only for the admission that released", () => {
+    const callbacks: Array<() => void> = [];
+    const owner = createEnvironmentExecutionOwner({
+      deferTask: async () => {},
+      microtask: (callback) => {
+        callbacks.push(callback);
+      },
+      reconciliationTimer: () => {
+        throw new Error("Unexpected timer");
+      }
+    });
+    const first = owner.claimAdmission("first");
+    const second = owner.claimAdmission("second");
+    if (!first || !second) throw new Error("Missing admission");
+    const recover = vi.fn();
+    owner.deferAdmissionRecovery("first", recover);
+    owner.deferAdmissionRecovery("first", recover);
+    owner.deferAdmissionRecovery("second", recover);
+    first.release();
+    expect(callbacks).toHaveLength(1);
+    callbacks[0]();
+    expect(recover).toHaveBeenCalledExactlyOnceWith("first");
+    expect(second.canRestore()).toBe(true);
+    second.release();
+    expect(callbacks).toHaveLength(2);
+    callbacks[1]();
+    expect(recover.mock.calls).toEqual([["first"], ["second"]]);
+  });
+  it("defers recovery until the exact admission releases and fences superseded attachments", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const first = owner.attach("panel");
+    const replacement = owner.attach("panel");
+    expect(first.isCurrent()).toBe(false);
+    expect(replacement.isCurrent()).toBe(true);
+    const claim = owner.claimAdmission("op");
+    if (!claim) throw new Error("Missing admission");
+    expect(claim.canRestore()).toBe(true);
+    expect(owner.claimAdmission("op")).toBeNull();
+    const recovered = deferred();
+    const recover = vi.fn(() => recovered.resolve());
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(true);
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(true);
+    expect(recover).not.toHaveBeenCalled();
+    claim.release();
+    claim.release();
+    await recovered.promise;
+    expect(recover).toHaveBeenCalledExactlyOnceWith("op");
+    expect(claim.canRestore()).toBe(false);
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(false);
+    const next = owner.claimAdmission("op");
+    expect(next).not.toBeNull();
+    claim.release();
+    expect(next?.canRestore()).toBe(true);
+    next?.release();
+  });
+
+  it("releases the provisional claim but keeps recovery blocked after an uncertain durable undo", () => {
+    const owner = createEnvironmentExecutionOwner();
+    const claim = owner.claimAdmission("op");
+    if (!claim) throw new Error("Missing admission");
+    const recover = vi.fn();
+    claim.blockRecovery();
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(true);
+    claim.release();
+    claim.release();
+    expect(claim.canRestore()).toBe(false);
+    expect(owner.claimAdmission("op")).toBeNull();
+    expect(owner.deferAdmissionRecovery("op", recover)).toBe(true);
+    expect(recover).not.toHaveBeenCalled();
+  });
+
+  it.each(["before", "during"] as const)(
+    "cannot restore over a task claimed %s admission",
+    async (when) => {
+      const owner = createEnvironmentExecutionOwner();
+      const attachment = owner.attach("panel");
+      const gate = deferred();
+      if (when === "before")
+        attachment.schedule(
+          "op",
+          task(() => gate.promise)
+        );
+      const claim = owner.claimAdmission("op");
+      if (!claim) throw new Error("Missing admission");
+      if (when === "during")
+        attachment.schedule(
+          "op",
+          task(() => gate.promise)
+        );
+      expect(claim.canRestore()).toBe(false);
+      expect(claim.hadTask).toBe(when === "before");
+      expect(claim.canRestore({ allowPreexistingTask: true })).toBe(
+        when === "before"
+      );
+      gate.resolve();
+      await settled(owner, "panel");
+      expect(claim.canRestore()).toBe(false);
+      claim.release();
+    }
+  );
+  it("does not let narrow pre-existing-task restoration cross a new task registration", async () => {
+    const owner = createEnvironmentExecutionOwner();
+    const attachment = owner.attach("panel");
+    const gate = deferred();
+    attachment.schedule(
+      "op",
+      task(() => gate.promise)
+    );
+    const claim = owner.claimAdmission("op");
+    expect(claim?.canRestore({ allowPreexistingTask: true })).toBe(true);
+    attachment.schedule(
+      "op",
+      task(async () => {})
+    );
+    expect(claim?.canRestore({ allowPreexistingTask: true })).toBe(false);
+    gate.resolve();
+    await settled(owner, "panel");
+    claim?.release();
+  });
   it("constructs without work and isolates runtime claims and shutdown markers", () => {
     const owner = createEnvironmentExecutionOwner();
     const other = createEnvironmentExecutionOwner();

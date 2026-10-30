@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   createOperationsControlRoutes,
@@ -36,6 +37,8 @@ import {
   recordCleanupState,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
+  prepareProviderMutation,
+  settleProviderMutation,
   pauseForProviderRestart,
   requestStop,
   requireInput,
@@ -197,6 +200,10 @@ function dependencies(
     invalidatedListings: []
   };
   const base: OperationsControlDependencies = {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
+    reportOperationDiagnostic: () => {
+      throw new Error("Unexpected operation control diagnostic");
+    },
     get: () => {
       throw new Error("get not stubbed");
     },
@@ -211,6 +218,9 @@ function dependencies(
     inspectVerificationWorkflow: () => Promise.resolve("inactive"),
     cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: ({ kind, instanceId, commandId }) => {
+      if (instanceId === undefined) {
+        throw new Error("HTTP control lost its attachment identity");
+      }
       journal.scheduled.push({ kind, instanceId, commandId });
       return true;
     },
@@ -1086,8 +1096,10 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
 
   it("keeps the terminal record when the scheduling-failure write also fails", async () => {
     const op = retryableSetup();
+    const reportOperationDiagnostic = vi.fn();
     let calls = 0;
     const out = await drive(handleRetryOperation, op, "retry/setup", {
+      reportOperationDiagnostic,
       persistOperations: () => {
         calls += 1;
         return calls === 1 ?
@@ -1100,6 +1112,11 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(out.recording.status).toBe(202);
     expect(op.state).toBe("failed");
     expect(calls).toBe(2);
+    expect(reportOperationDiagnostic).toHaveBeenCalledExactlyOnceWith({
+      operationId: op.operationId,
+      code: "operation-control-recovery-persist-failed",
+      message: "disk gone"
+    });
   });
 
   it("refuses a retry kind it does not implement", async () => {
@@ -1433,6 +1450,25 @@ describe("POST /api/operations/{id}/continue", () => {
 });
 
 describe("POST /api/operations/{id}/rollback", () => {
+  it("refuses downstream deletion when recovered branch removal was not applied", async () => {
+    const op = stoppedSetup();
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_branch.delete",
+      target: "fixture/app\0setup-branch\0original-head"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "not_applied",
+      "The recorded branch remains."
+    );
+    const out = await drive(handleRollbackOperation, op, "rollback");
+    expect(out.payload()).toMatchObject({
+      code: "rollback-provider-outcome-unknown"
+    });
+    expect(out.journal.scheduled).toEqual([]);
+  });
+
   it("accepts a rollback for a stopped attempt and schedules it once", async () => {
     const op = stoppedSetup();
     const out = await drive(handleRollbackOperation, op, "rollback");
@@ -1536,8 +1572,10 @@ describe("POST /api/operations/{id}/rollback", () => {
 
   it("still restores the decision when the follow-up write also fails", async () => {
     const op = stoppedSetup();
+    const reportOperationDiagnostic = vi.fn();
     let allowFirstWrite = true;
     const out = await drive(handleRollbackOperation, op, "rollback", {
+      reportOperationDiagnostic,
       schedule: () => false,
       persistOperations: () => {
         if (allowFirstWrite) {
@@ -1553,6 +1591,11 @@ describe("POST /api/operations/{id}/rollback", () => {
     expect(out.recording.status).toBe(503);
     expect(op.state).toBe("cancelled");
     expect(op.control.attempts.cleanup).toBe(0);
+    expect(reportOperationDiagnostic).toHaveBeenCalledExactlyOnceWith({
+      operationId: op.operationId,
+      code: "operation-control-recovery-persist-failed",
+      message: "store offline"
+    });
   });
 });
 

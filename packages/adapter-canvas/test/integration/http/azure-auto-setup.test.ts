@@ -417,6 +417,7 @@ async function successfulSetup(
         },
         {
           getOperation: () => operation as OperationActionRecord,
+          claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
           canResumeInput,
           resumeAfterInput,
           requireInput,
@@ -1172,3 +1173,4 @@ describe("Azure setup recovery and public operation resume contracts (RF-03)", (
     );
   });
 });
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";

@@ -6089,6 +6089,121 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.waitForURL(/\/\?page=environment$/);
   });
 
+  test("renders bounded redacted verification evidence from the real status service @safety", async ({
+    page,
+    canvas
+  }) => {
+    canvas.setGitHubToken(null);
+    const operationId = await canvas.seedRestartedVerificationFailure();
+    const commands: FakeCliCommand[] = [
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `repos/${REPOSITORY}/actions/runs/39`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout: 'HTTP/2 200\n\n{"status":"completed","conclusion":"failure"}'
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `repos/${REPOSITORY}/actions/runs/39/jobs?per_page=100&page=1`,
+          "--include",
+          "--method",
+          "GET"
+        ],
+        stdout:
+          "HTTP/2 200\n\n" +
+          JSON.stringify({
+            jobs: [
+              {
+                steps: [
+                  {
+                    name: 'Azure Login (OIDC) password="fixture private step"',
+                    conclusion: "failure"
+                  }
+                ]
+              }
+            ]
+          })
+      },
+      {
+        tool: "gh",
+        args: ["run", "view", "39", "--log", "--repo", REPOSITORY],
+        stdout:
+          'Error: password="' +
+          "fixture private log ".repeat(1000) +
+          '"\nError: <b>fixture markup</b>\nError: ' +
+          "z".repeat(6000)
+      }
+    ];
+    await canvas.setScenario({
+      commands: [...commands, ...defaultFakeCliScenario().commands]
+    });
+    const accounts = canvas.accountContext;
+    const executor =
+      await accounts.coordinator.createReadOnlyExecutor("repo-user");
+    accounts.registerExecutor(operationId, executor);
+    let operationReads = 0;
+    await page.route(/\/api\/operations\?repo=/, async (route) => {
+      operationReads++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          operation:
+            operationReads <= 2 ?
+              {
+                operationId,
+                kind: "create",
+                environment: "fixture-environment",
+                provider: "azure",
+                state: "verifying",
+                currentStage: "verify",
+                startedAt: new Date().toISOString(),
+                verification: { dispatchedAt: Date.now(), runId: "39" }
+              }
+            : null
+        })
+      });
+    });
+    try {
+      await page.clock.install();
+      const observation = page.waitForResponse((response) =>
+        response.url().includes("/api/verify-status?")
+      );
+      await gotoCanvas(page, canvas, "environment");
+      const response = await observation;
+      expect(response.status()).toBe(200);
+      const body = await response.json();
+      expect(body.state).toBe("failed");
+      expect(body.error).toHaveLength(4000);
+      expect(body.error).toContain("[REDACTED]");
+      expect(JSON.stringify(body)).not.toContain("fixture private");
+      const activity = page.locator("#env-progress-activity");
+      await expect(activity).toContainText(
+        "Credential verification failed (failure)."
+      );
+      await expect(activity).toContainText("[REDACTED]");
+      await expect(activity).toContainText("<b>fixture markup</b>");
+      await expect(activity.locator("b")).toHaveCount(0);
+      await expect(page.locator("body")).not.toContainText("fixture private");
+      await expect(page.locator("#env-progress-panel")).toHaveClass(
+        /env-progress--failed/
+      );
+      await expect(
+        page.locator("#env-progress-verify-bypass-button")
+      ).toBeHidden();
+      await expectNoWcagViolations(page);
+    } finally {
+      accounts.unregisterExecutor(operationId);
+    }
+  });
+
   for (const category of ["permissions", "generic"] as const) {
     test(`handles ${category} verification failure without granting unsupported bypass @safety`, async ({
       page,

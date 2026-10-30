@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { createDeferred } from "../../support/browser/fakes.js";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { validateBrowserMutationRequest } from "../../../src/server/browser-mutation.js";
@@ -16,6 +18,9 @@ import {
 } from "../../support/server/operation-fixtures.js";
 import {
   acceptCommand,
+  beginRetryAttempt,
+  snapshotRetryState,
+  rollbackRetryAttempt,
   buildDeleteStages,
   buildStages,
   canDismissOperation,
@@ -71,12 +76,19 @@ afterEach(async () => {
 });
 
 interface Harness {
+  diagnostics: Array<{ code: string }>;
+  owner: ReturnType<typeof createEnvironmentExecutionOwner>;
+  setPersist(persist: () => Promise<void>): void;
   records: Map<string, OperationRecord>;
   invalidatedListings: string[];
   persistCalls: string[];
   scheduled: Array<{ kind: string; instanceId: string; commandId: string }>;
-  createScheduled: Array<{ instanceId: string; operationId: string }>;
+  createScheduled: Array<{
+    instanceId: string | undefined;
+    operationId: string;
+  }>;
   registry: ReturnType<typeof createRegistry>;
+  shuttingDown: { value: boolean };
   setPullRequestMergeCheck(
     check: () => Promise<
       | { state: "merged" }
@@ -87,12 +99,16 @@ interface Harness {
 }
 
 function start(): Harness {
+  const diagnostics: Harness["diagnostics"] = [];
+  const owner = createEnvironmentExecutionOwner();
+  let persist = async () => {};
   const records = new Map<string, OperationRecord>();
   const registry = createRegistry();
   const persistCalls: string[] = [];
   const scheduled: Harness["scheduled"] = [];
   const createScheduled: Harness["createScheduled"] = [];
   const invalidatedListings: string[] = [];
+  const shuttingDown = { value: false };
   let pullRequestMergeCheck = (): Promise<
     | { state: "merged" }
     | { state: "open" }
@@ -103,20 +119,28 @@ function start(): Harness {
 
   const persistOperations = () => {
     persistCalls.push("persist");
-    return Promise.resolve();
+    return persist();
   };
 
   const routes = createTestRouteTable({
     ...createOperationsControlRoutes({
+      claimAdmission: owner.claimAdmission,
+      isShuttingDown: () => shuttingDown.value,
       get: (operationId) => records.get(operationId) ?? null,
       acquireForRetry: (operation) => registry.acquireForRetry(operation),
       persistOperations,
+      reportOperationDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+      },
       // Merge-proof eligibility is the route unit suite's to decide; no journey
       // here may reach GitHub for it, so the port refuses rather than answers.
       checkPullRequestMerge: () => pullRequestMergeCheck(),
       inspectVerificationWorkflow: () => Promise.resolve("inactive"),
       cancelVerificationWorkflow: () => Promise.resolve("inactive"),
       schedule: ({ kind, instanceId, commandId }) => {
+        if (instanceId === undefined) {
+          throw new Error("HTTP control lost its attachment identity");
+        }
         scheduled.push({ kind, instanceId, commandId });
         return true;
       },
@@ -178,6 +202,7 @@ function start(): Harness {
         getOperation: (operationId) =>
           (records.get(operationId) ?? null) as OperationActionRecord | null,
         canResumeInput: () => false,
+        claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
         resumeAfterInput: () => {},
         requireInput: () => {},
         finish,
@@ -220,11 +245,17 @@ function start(): Harness {
   });
 
   return {
+    diagnostics,
+    owner,
+    setPersist: (callback) => {
+      persist = callback;
+    },
     records,
     persistCalls,
     scheduled,
     createScheduled,
     registry,
+    shuttingDown,
     invalidatedListings,
     setPullRequestMergeCheck: (check) => {
       pullRequestMergeCheck = check;
@@ -237,6 +268,106 @@ function seed(harness: Harness, op: OperationFixture): OperationFixture {
   harness.registry.put(op);
   return op;
 }
+
+describe("admission race HTTP errors", () => {
+  it.each([false, true])(
+    "frames a final-save account refusal distinctly from failed undo (undo fails=%s)",
+    async (undoFails) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-account");
+      const op = seed(harness, mergeHandoff());
+      op.context = { githubLogin: "original" };
+      harness.setPullRequestMergeCheck(async () => ({ state: "merged" }));
+      const entered = createDeferred<void>();
+      const gate = createDeferred<void>();
+      let saves = 0;
+      harness.setPersist(async () => {
+        if (++saves === 2) {
+          entered.resolve();
+          await gate.promise;
+        } else if (saves === 3 && undoFails) throw new Error("undo offline");
+      });
+      const pending = post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/retry/verification`
+      );
+      await entered.promise;
+      op.context = { githubLogin: "replacement" };
+      gate.resolve();
+      const response = await pending;
+      expect(response.status).toBe(undoFails ? 500 : 409);
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const body = await response.json();
+      expect(body.code).toBe(
+        undoFails ?
+          "operation-control-recovery-persist-failed"
+        : "operation-context-changed"
+      );
+      expect(body.error).not.toContain("Try again");
+      expect(op.context).toEqual({ githubLogin: "replacement" });
+      expect(harness.scheduled).toEqual([]);
+      expect(harness.diagnostics).toEqual(
+        undoFails ?
+          [
+            expect.objectContaining({
+              code: "operation-control-recovery-persist-failed"
+            })
+          ]
+        : []
+      );
+      expect(saves).toBe(3);
+    }
+  );
+
+  it("returns duplicate 202 before transient busy and allows a fresh retry after the old task settles", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-busy");
+    const op = seed(harness, stoppedSetup());
+    const gate = createDeferred<void>();
+    const settled = createDeferred<void>();
+    harness.owner.attach("panel-busy").schedule(op.operationId, {
+      run: () => gate.promise,
+      failed: async () => {
+        throw new Error("Unexpected task failure");
+      },
+      settling: () => {},
+      settled: () => settled.resolve()
+    });
+    try {
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/continue`
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        code: "operation-task-busy"
+      });
+      expect(harness.persistCalls).toEqual([]);
+      const before = snapshotRetryState(op);
+      beginRetryAttempt(op, "setup");
+      acceptCommand(op, {
+        kind: "continue_setup",
+        attempt: 2,
+        target: "setup"
+      });
+      const duplicate = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/continue`
+      );
+      expect(duplicate.status).toBe(202);
+      expect(await duplicate.json()).toMatchObject({ duplicate: true });
+      rollbackRetryAttempt(op, before);
+    } finally {
+      gate.resolve();
+      await settled.promise;
+    }
+    expect(
+      (await post(entry.baseUrl, `/api/operations/${op.operationId}/continue`))
+        .status
+    ).toBe(202);
+  });
+});
 
 function post(
   baseUrl: string,
@@ -378,6 +509,29 @@ describe("operation controls real-loopback HIT", () => {
       expect(op).toEqual(before);
     }
   );
+  it("refuses a control during shutdown without accepting or changing the operation", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const operation = seed(harness, stoppedSetup());
+    const before = structuredClone(operation);
+    harness.shuttingDown.value = true;
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${operation.operationId}/continue`
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({
+      code: "operation-shutting-down",
+      operationId: operation.operationId
+    });
+    expect(operation).toEqual(before);
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.persistCalls).toEqual([]);
+  });
 
   it("returns the blocking cleanup operation and lets it reacquire the lock", async () => {
     const harness = start();
@@ -614,6 +768,40 @@ describe("operation controls real-loopback HIT", () => {
     expect(harness.persistCalls).toEqual(["persist"]);
     expect(harness.scheduled).toEqual([]);
   });
+
+  it.each(["account", "record"] as const)(
+    "refuses stale %s merge proof through the retained verification retry route",
+    async (change) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+      const op = seed(harness, mergeHandoff());
+      op.context = { githubLogin: "alice" };
+      harness.setPullRequestMergeCheck(async () => {
+        if (change === "account") op.context = { githubLogin: "bob" };
+        else harness.records.set(op.operationId, structuredClone(op));
+        return { state: "merged" };
+      });
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/retry/verification`
+      );
+      expect(response.status).toBe(409);
+      expect(response.headers.get("Content-Type")).toBe("application/json");
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(await response.json()).toMatchObject({
+        code:
+          change === "account" ? "operation-active" : (
+            "operation-context-changed"
+          ),
+        operationId: op.operationId
+      });
+      expect(harness.persistCalls).toEqual(
+        change === "account" ? ["persist"] : ["persist", "persist"]
+      );
+      expect(harness.scheduled).toEqual([]);
+      expect(op.control.commands).toEqual([]);
+    }
+  );
 
   it("refuses a control request that cannot prove it came from the panel", async () => {
     const harness = start();

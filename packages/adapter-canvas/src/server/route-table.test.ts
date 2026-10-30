@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createEnvironmentExecutionOwner } from "../runtime/environment-execution-owner.js";
 import { remediationView } from "@radius-project/core";
 import {
   assertRouteTable,
@@ -75,6 +76,7 @@ const productionHandlers = {
     },
     {
       getOperation: () => undefined,
+      claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
       canResumeInput: () => false,
       resumeAfterInput: () => {},
       requireInput: () => {},
@@ -93,6 +95,10 @@ const productionHandlers = {
   // asserts table shape and ownership, and the control behavior is covered by
   // routes/operations-control.test.ts and the HTTP integration suite.
   ...createOperationsControlRoutes({
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
+    reportOperationDiagnostic: () => {
+      throw new Error("Unexpected operation diagnostic in route table test");
+    },
     get: () => null,
     acquireForRetry: () => ({ ok: true }),
     persistOperations: () => Promise.resolve(),

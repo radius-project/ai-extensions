@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { createEnvironmentExecutionOwner } from "../../runtime/environment-execution-owner.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
@@ -193,6 +194,7 @@ function actionDependencies(
   overrides: Partial<OperationActionDependencies> = {}
 ): OperationActionDependencies {
   return {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
     getOperation: () => {
       throw new Error("getOperation not stubbed");
     },
@@ -258,7 +260,7 @@ interface HappyPathCapture {
   built: unknown[];
   started: OperationRecord[];
   persistCalls: number;
-  scheduled: Array<{ instanceId: string; op: OperationRecord }>;
+  scheduled: Array<{ instanceId: string | undefined; op: OperationRecord }>;
   finished: unknown[];
 }
 
@@ -1714,6 +1716,7 @@ describe("operation resume and abandon actions", () => {
 
   it("turns a malformed resume body into an empty object before the 409 check", async () => {
     const seen: unknown[] = [];
+    const operation = actionRecord({ operationId: "op/action" });
     const recording = await runAction(
       "/api/operations/op%2Faction/resume/app-selection-required",
       "{not json",
@@ -1721,7 +1724,7 @@ describe("operation resume and abandon actions", () => {
       actionDependencies({
         getOperation: (operationId) => {
           expect(operationId).toBe("op/action");
-          return actionRecord({ operationId });
+          return operation;
         },
         canResumeInput: (_operation, input) => {
           seen.push(input);
@@ -2021,7 +2024,9 @@ describe("operation resume and abandon actions", () => {
         },
         persistOperations: () => {
           order.push("persist");
-          return Promise.reject(new Error("disk unavailable"));
+          return order.length === 2 ?
+              Promise.reject(new Error("disk unavailable"))
+            : Promise.resolve();
         },
         requireInput: (restored, input) => {
           order.push("restore");
@@ -2031,7 +2036,7 @@ describe("operation resume and abandon actions", () => {
         errorMessage: (error) => (error as Error).message
       })
     );
-    expect(order).toEqual(["resume", "persist", "restore"]);
+    expect(order).toEqual(["resume", "persist", "persist"]);
     expect(operation.request).toEqual(requestBefore);
     expect(operation.resumeRequest).toBeUndefined();
     expect(operation.inputRequired).toEqual(originalInput);

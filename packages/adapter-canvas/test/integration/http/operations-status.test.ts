@@ -1,14 +1,18 @@
-import { createServer } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { createServer, request } from "node:http";
+import { createEnvironmentExecutionOwner } from "../../../src/runtime/environment-execution-owner.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { validateBrowserMutationRequest } from "../../../src/server/browser-mutation.js";
 import type { CanvasRequestContext } from "../../../src/server/request-context.js";
 import {
   createOperationsStatusRoutes,
+  type OperationActionDependencies,
   type OperationActionRecord
 } from "../../../src/server/routes/operations-status.js";
+import { createOperationResumeService } from "../../../src/server/services/operation-resume.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
+import { createDeferred } from "../../support/browser/fakes.js";
 import {
   buildDeleteStages,
   buildStages,
@@ -41,14 +45,18 @@ afterEach(async () => {
 });
 
 interface Harness {
+  attachment: { generation: number };
   records: Map<string, OperationActionRecord>;
   setLatest(record: unknown): void;
   latestCalls: string[];
   running: Map<string, { operationId: string }>;
   persistError: { value: Error | null };
   persistCalls: string[];
+  persistWait: { value: Promise<void> | null };
+  operationReads: string[];
   scheduled: Array<{ instanceId: string; operationId: string }>;
   scheduleAccepted: { value: boolean };
+  shuttingDown: { value: boolean };
   startConflict: {
     value: {
       ok: false;
@@ -126,6 +134,7 @@ const DIAGNOSTIC_OPERATION: OperationActionRecord = {
 };
 
 function start(strictBrowserMutations = false): Harness {
+  const attachment = { generation: 1 };
   const records = new Map<string, OperationActionRecord>([
     ["op-running", RUNNING],
     [SUCCESSFUL_OPERATION.operationId, SUCCESSFUL_OPERATION],
@@ -148,14 +157,16 @@ function start(strictBrowserMutations = false): Harness {
   const running = new Map<string, { operationId: string }>();
   const persistError: { value: Error | null } = { value: null };
   const persistCalls: string[] = [];
+  const persistWait: Harness["persistWait"] = { value: null };
+  const operationReads: string[] = [];
   const scheduled: Array<{ instanceId: string; operationId: string }> = [];
   const scheduleAccepted = { value: true };
+  const shuttingDown = { value: false };
   const startConflict: Harness["startConflict"] = { value: null };
-  const persistOperations = (): Promise<void> => {
+  const persistOperations = async (): Promise<void> => {
     persistCalls.push("persist");
-    return persistError.value ?
-        Promise.reject(persistError.value)
-      : Promise.resolve();
+    if (persistWait.value) await persistWait.value;
+    if (persistError.value) throw persistError.value;
   };
   const scheduleEnvironmentOperation = (
     instanceId: string,
@@ -172,6 +183,30 @@ function start(strictBrowserMutations = false): Harness {
       baseUrl: `http://${context.request.headers.host || ""}`,
       nonce: "browser-nonce"
     });
+  const actionDependencies: OperationActionDependencies = {
+    claimAdmission: createEnvironmentExecutionOwner().claimAdmission,
+    getOperation: (operationId) => {
+      operationReads.push(operationId);
+      return records.get(operationId);
+    },
+    canResumeInput,
+    resumeAfterInput,
+    requireInput,
+    finish,
+    isTerminalState,
+    canDismissOperation,
+    dismissOperation,
+    persistOperations,
+    toClientView,
+    scheduleEnvironmentOperation,
+    errorMessage: (error) =>
+      error instanceof Error ? error.message : String(error),
+    inputRequiredState: INPUT_REQUIRED_STATE
+  };
+  const resume = createOperationResumeService({
+    ...actionDependencies,
+    isShuttingDown: () => shuttingDown.value
+  });
 
   const routes = createTestRouteTable(
     createOperationsStatusRoutes(
@@ -224,21 +259,14 @@ function start(strictBrowserMutations = false): Harness {
         errorMessage: (error) =>
           error instanceof Error ? error.message : String(error)
       },
-      {
-        getOperation: (operationId) => records.get(operationId),
-        canResumeInput,
-        resumeAfterInput,
-        requireInput,
-        finish,
-        isTerminalState,
-        canDismissOperation,
-        dismissOperation,
-        persistOperations,
-        toClientView,
-        scheduleEnvironmentOperation,
-        errorMessage: (error) =>
-          error instanceof Error ? error.message : String(error),
-        inputRequiredState: INPUT_REQUIRED_STATE
+      actionDependencies,
+      (input, readInput, publish) => {
+        const generation = attachment.generation;
+        return resume(
+          { ...input, isCurrent: () => attachment.generation === generation },
+          readInput,
+          publish
+        );
       }
     )
   );
@@ -265,13 +293,17 @@ function start(strictBrowserMutations = false): Harness {
   });
 
   return {
+    attachment,
     records,
     latestCalls,
     running,
     persistError,
     persistCalls,
+    persistWait,
+    operationReads,
     scheduled,
     scheduleAccepted,
+    shuttingDown,
     startConflict,
     setLatest(record) {
       latest = record;
@@ -602,6 +634,191 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
       code: "operation-registration-persist-failed"
     });
     expect(harness.scheduled).toEqual([]);
+  });
+
+  describe.each(["input", "persist", "persist-rejection"] as const)(
+    "resume identity during HTTP %s",
+    (phase) => {
+      it.each([
+        "attachment",
+        "removed",
+        "replaced",
+        "id",
+        "repository",
+        "environment"
+      ] as const)(
+        "returns 409 for a %s operation without scheduling or changing the new target",
+        async (change) => {
+          const harness = start(true);
+          const entry = await container!.getOrCreate("panel-a");
+          const operation: OperationActionRecord = createOperation({
+            provider: "azure",
+            repo: "octo/resume",
+            environment: "dev",
+            stages: buildStages()
+          });
+          operation.request = { azure: {} };
+          requireInput(operation, {
+            code: "app-selection-required",
+            checkpoint: "saved-input"
+          });
+          const id = operation.operationId;
+          harness.records.set(id, operation);
+          const held = createDeferred<void>();
+          if (phase !== "input") harness.persistWait.value = held.promise;
+          if (phase === "persist-rejection") {
+            harness.persistError.value = new Error("store offline");
+          }
+          const body = JSON.stringify({
+            checkpoint: "saved-input",
+            repo: operation.repo,
+            environment: operation.environment,
+            provider: operation.provider,
+            appId: "chosen-app"
+          });
+          const response = createDeferred<{
+            status: number | undefined;
+            contentType: string | undefined;
+            body: unknown;
+          }>();
+          const outgoing = request(
+            `${entry.baseUrl}/api/operations/${id}/resume/app-selection-required`,
+            {
+              method: "POST",
+              headers: {
+                Origin: entry.baseUrl,
+                "Sec-Fetch-Site": "same-origin",
+                "X-Radius-Mutation-Nonce": "browser-nonce",
+                "Content-Length": Buffer.byteLength(body)
+              }
+            },
+            (incoming) => {
+              incoming.setEncoding("utf8");
+              let text = "";
+              incoming.on("data", (chunk: string) => {
+                text += chunk;
+              });
+              incoming.on("error", response.reject);
+              incoming.on("end", () => {
+                try {
+                  response.resolve({
+                    status: incoming.statusCode,
+                    contentType: incoming.headers["content-type"],
+                    body: JSON.parse(text)
+                  });
+                } catch (error) {
+                  response.reject(error);
+                }
+              });
+            }
+          );
+          outgoing.on("error", response.reject);
+          try {
+            outgoing.write(body.slice(0, 1));
+            if (phase !== "input") outgoing.end(body.slice(1));
+            await vi.waitFor(() => {
+              expect(harness.operationReads).toContain(id);
+              expect(harness.persistCalls).toHaveLength(
+                phase === "input" ? 0 : 1
+              );
+            });
+            const promptBefore =
+              phase === "input" ?
+                structuredClone(operation.inputRequired)
+              : null;
+            if (change === "attachment") harness.attachment.generation++;
+            else if (change === "removed") harness.records.delete(id);
+            else if (change === "replaced") {
+              harness.records.set(id, structuredClone(operation));
+            } else if (change === "id")
+              operation.operationId = "replacement-id";
+            else if (change === "repository") operation.repo = "other/repo";
+            else operation.environment = "production";
+            const originalBefore = structuredClone(operation);
+            const currentBefore = structuredClone(harness.records.get(id));
+            if (phase === "input") outgoing.end(body.slice(1));
+            held.resolve();
+            expect(await response.promise).toMatchObject({
+              status:
+                change === "attachment" && phase === "persist-rejection" ?
+                  500
+                : 409,
+              contentType: "application/json",
+              body: {
+                code:
+                  change === "attachment" && phase === "persist-rejection" ?
+                    "operation-resume-recovery-persist-failed"
+                  : "operation-resume-mismatch",
+                operationId: id
+              }
+            });
+            if (change === "attachment") {
+              expect(operation.state).toBe("input_required");
+              expect(operation.inputRequired).toMatchObject({
+                code: "app-selection-required",
+                checkpoint: "saved-input"
+              });
+              expect(operation.request?.azure).toEqual({});
+              if (phase === "input")
+                expect(operation.inputRequired).toEqual(promptBefore);
+            } else {
+              expect(operation).toEqual(originalBefore);
+              expect(harness.records.get(id)).toEqual(currentBefore);
+            }
+            expect(harness.scheduled).toEqual([]);
+            expect(harness.persistCalls).toHaveLength(
+              phase === "input" ? 0
+              : change === "attachment" ? 2
+              : 1
+            );
+          } finally {
+            held.resolve();
+            outgoing.destroy();
+          }
+        }
+      );
+    }
+  );
+
+  it("returns a shutdown refusal instead of accepting a resume", async () => {
+    const harness = start(true);
+    const entry = await container!.getOrCreate("panel-a");
+    const operation = createOperation({
+      provider: "azure",
+      repo: "octo/app",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    requireInput(operation, {
+      code: "service-management-reference-required",
+      checkpoint: "azure-service-management-reference",
+      message: "Enter the Service Management Reference."
+    });
+    harness.records.set(operation.operationId, operation);
+    harness.shuttingDown.value = true;
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/${operation.operationId}/resume/service-management-reference-required`,
+      {
+        method: "POST",
+        headers: {
+          Origin: entry.baseUrl,
+          "Sec-Fetch-Site": "same-origin",
+          "X-Radius-Mutation-Nonce": "browser-nonce"
+        },
+        body: "{}"
+      }
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    expect(await response.json()).toMatchObject({
+      code: "operation-shutting-down",
+      operationId: operation.operationId
+    });
+    expect(operation.state).toBe(INPUT_REQUIRED_STATE);
+    expect(harness.scheduled).toEqual([]);
+    expect(harness.persistCalls).toEqual([]);
   });
 
   it("resumes, abandons, and dismisses through typed templates", async () => {
