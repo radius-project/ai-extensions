@@ -163,7 +163,7 @@ We need failing builds and vulnerable dependencies to block merge. Today the Dep
 
 We should add these as required status checks in the `main` ruleset, using the check name each job reports:
 
-- `dependency-review` (from [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml))
+- `dependency-review / dependency-review` (from [`dependency-review.yml`](https://github.com/radius-project/ai-extensions/blob/main/.github/workflows/dependency-review.yml))
 - `Static checks`
 - `Windows process integration`
 - `Canvas Chromium (shard 1)` and `Canvas Chromium (shard 2)`
