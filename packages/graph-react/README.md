@@ -8,6 +8,12 @@ This implementation is an isolated candidate, **not a qualified dashboard replac
 
 Install the graph package, `@radius-project/core`, and matching React/ReactDOM peers in the host. Import the stylesheet once. Keep graph and options references stable between unrelated host renders; replace the graph object when its data changes.
 
+```bash
+npm install @radius-project/graph-react @radius-project/core react react-dom
+```
+
+Public npm packages contain compiled ESM, TypeScript declarations, and CSS. React and ReactDOM are peers; use matching supported versions in the host. The `presentation` subpath is workspace-only and is not exported by the npm package. See [npm releases](../../docs/eng/RELEASING.md#releasing-npm-graph-libraries) for the release checks and one-time trusted-publisher setup.
+
 ```tsx
 import { RadiusGraph } from "@radius-project/graph-react";
 import "@radius-project/graph-react/styles.css";
